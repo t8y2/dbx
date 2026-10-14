@@ -335,7 +335,9 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
                 return err("unsupported");
             }
             let dedup_order_by = dedup_projection_count_without_order_by(&options.original_sql);
-            ok(add_standard_limit(&statement, options.database_type, safe_limit, safe_offset, dedup_order_by))
+            add_standard_limit(&statement, options.database_type, safe_limit, safe_offset, dedup_order_by)
+                .map(ok)
+                .unwrap_or_else(|| err("unsupported"))
         }
     }
 }
@@ -468,18 +470,29 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
 
     // Oracle expands `SELECT *` over a derived table by name, so a projection
     // with duplicate labels fails with ORA-00918 no matter how ORDER BY refers
-    // to the column. Sort the original statement by position instead.
-    let oracle_has_duplicate_labels = options.database_type == Some(DatabaseType::Oracle)
-        && options
-            .result_columns
-            .iter()
-            .enumerate()
-            .any(|(index, column)| options.result_columns[..index].iter().any(|candidate| candidate == column));
-    if oracle_has_duplicate_labels
+    // to the column. MySQL rejects such a derived table outright (error 1060),
+    // and compares column names case-insensitively. Sort the original
+    // statement by position instead.
+    let has_duplicate_labels = |same_label: fn(&str, &str) -> bool| {
+        options.result_columns.iter().enumerate().any(|(index, column)| {
+            options.result_columns[..index].iter().any(|candidate| same_label(candidate, column))
+        })
+    };
+    let derived_table_rejects_duplicate_labels = match options.database_type {
+        Some(DatabaseType::Oracle) => has_duplicate_labels(|left, right| left == right),
+        Some(DatabaseType::Mysql) => has_duplicate_labels(str::eq_ignore_ascii_case),
+        _ => false,
+    };
+    if derived_table_rejects_duplicate_labels
         || (options.database_type == Some(DatabaseType::OceanbaseOracle)
             && !rownum_wrapper_projection_is_safe(statement))
     {
-        let Ok(statements) = Parser::parse_sql(&GenericDialect {}, statement) else {
+        let parsed = if options.database_type == Some(DatabaseType::Mysql) {
+            Parser::parse_sql(&MySqlDialect {}, statement)
+        } else {
+            Parser::parse_sql(&GenericDialect {}, statement)
+        };
+        let Ok(statements) = parsed else {
             return err("unsupported");
         };
         let [Statement::Query(query)] = statements.as_slice() else {
@@ -501,9 +514,12 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         if order_by_index.is_none() && query.order_by.is_some() {
             return err("unsupported");
         }
-        return ok(append_sql_suffix(
-            statement[..order_by_index.unwrap_or(statement.len())].trim_end(),
-            &format!("ORDER BY {} {};", options.column_index + 1, options.direction.as_sql()),
+        return ok(format!(
+            "{execution_hint}{}",
+            append_sql_suffix(
+                statement[..order_by_index.unwrap_or(statement.len())].trim_end(),
+                &format!("ORDER BY {} {};", options.column_index + 1, options.direction.as_sql()),
+            )
         ));
     }
 
@@ -2130,17 +2146,25 @@ fn add_standard_limit(
     limit: usize,
     offset: usize,
     dedup_order_by: Option<Vec<usize>>,
-) -> String {
+) -> Option<String> {
     let order_sql = dedup_order_by.as_deref().map_or(String::new(), format_positional_order_by);
 
     if has_top_level_limit(statement) {
+        // MySQL rejects a derived table whose columns share a name (error 1060),
+        // which `SELECT t.id, t.*` produces. Page through the user's own LIMIT
+        // instead of wrapping it.
+        let rewrite_limit_in_place =
+            database_type == Some(DatabaseType::Mysql) && !mysql_projection_has_unique_names(statement);
         if !order_sql.is_empty() {
+            if rewrite_limit_in_place {
+                return rewrite_mysql_top_level_limit(statement, limit, offset, &order_sql);
+            }
             // For dedup queries (DISTINCT / GROUP BY) without user ORDER BY,
             // wrap the query to guarantee deterministic LIMIT/OFFSET pagination.
             // The inner query preserves DISTINCT semantics; the outer query
             // adds ORDER BY on positional columns to ensure consistent row
             // ordering across pages in distributed databases like Doris.
-            return add_outer_standard_limit(statement, database_type, limit, offset, &order_sql);
+            return Some(add_outer_standard_limit(statement, database_type, limit, offset, &order_sql));
         }
         // A user/top-level LIMIT can still be wider than the selected grid page size.
         // Wrap it so the first page respects the UI page limit while preserving the user's cap.
@@ -2149,16 +2173,64 @@ fn add_standard_limit(
                 .or_else(|| ast_top_level_limit(statement).flatten())
                 .is_some_and(|row_count| row_count > limit)
         {
-            return add_outer_standard_limit(statement, database_type, limit, offset, "");
+            if rewrite_limit_in_place {
+                return rewrite_mysql_top_level_limit(statement, limit, offset, "");
+            }
+            return Some(add_outer_standard_limit(statement, database_type, limit, offset, ""));
         }
-        return format!("{statement};");
+        return Some(format!("{statement};"));
     }
     let offset_sql = if offset > 0 { format!(" OFFSET {offset}") } else { String::new() };
     let limit_sql = format!("{order_sql} LIMIT {limit}{offset_sql}");
     if database_type == Some(DatabaseType::ClickHouse) {
-        return add_clickhouse_limit(statement, &limit_sql);
+        return Some(add_clickhouse_limit(statement, &limit_sql));
     }
-    append_or_insert_before_locking(statement, &limit_sql)
+    Some(append_or_insert_before_locking(statement, &limit_sql))
+}
+
+fn mysql_projection_has_unique_names(statement: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, statement) else {
+        return true;
+    };
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return true;
+    };
+    mysql_derived_table_set_projection_safety(query.body.as_ref()) == MysqlDerivedProjectionSafety::Safe
+}
+
+/// Narrows a literal top-level `LIMIT n`, `LIMIT n OFFSET m`, or `LIMIT m, n`
+/// to the requested page. Returns `None` for any other form, so the caller
+/// runs the statement without server-side pagination.
+fn rewrite_mysql_top_level_limit(statement: &str, limit: usize, offset: usize, order_sql: &str) -> Option<String> {
+    let tokens = top_level_sql_tokens(statement);
+    let mut limit_tokens = tokens.iter().filter(|token| token.text == "LIMIT");
+    let limit_token = limit_tokens.next()?;
+    if limit_tokens.next().is_some() {
+        return None;
+    }
+    let mut cursor = skip_sql_whitespace(statement, limit_token.start + limit_token.text.len());
+    let first = parse_usize_literal(statement, &mut cursor)?;
+    cursor = skip_sql_whitespace(statement, cursor);
+    let (row_count, user_offset) = if statement[cursor..].starts_with(',') {
+        cursor = skip_sql_whitespace(statement, cursor + 1);
+        (parse_usize_literal(statement, &mut cursor)?, first)
+    } else if let Some(after_offset) = skip_sql_keyword(statement, cursor, "OFFSET") {
+        cursor = skip_sql_whitespace(statement, after_offset);
+        (first, parse_usize_literal(statement, &mut cursor)?)
+    } else {
+        (first, 0)
+    };
+    let rest_start = skip_sql_whitespace(statement, cursor);
+    if rest_start < statement.len() && locking_clause_index(&tokens) != Some(rest_start) {
+        return None;
+    }
+
+    let page_limit = limit.min(row_count.saturating_sub(offset));
+    let page_offset = user_offset.checked_add(offset)?;
+    let before = statement[..limit_token.start].trim_end();
+    let rest = &statement[rest_start..];
+    let separator = if rest.is_empty() { "" } else { " " };
+    Some(append_sql_suffix(before, &format!("{order_sql} LIMIT {page_limit} OFFSET {page_offset}{separator}{rest};")))
 }
 
 fn add_outer_standard_limit(
@@ -4973,6 +5045,67 @@ WHERE u.id = picked.id;
     }
 
     #[test]
+    fn mysql_pagination_rewrites_wide_limit_in_place_for_duplicate_projection() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT t.id, t.* FROM dbx_eval_t t ORDER BY t.id DESC LIMIT 500".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT t.id, t.* FROM dbx_eval_t t ORDER BY t.id DESC LIMIT 100 OFFSET 0;");
+    }
+
+    #[test]
+    fn mysql_pagination_rewrites_comma_limit_in_place_for_later_pages() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id LIMIT 20, 250".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 100,
+            offset: 200,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id LIMIT 50 OFFSET 220;");
+    }
+
+    #[test]
+    fn mysql_pagination_rewrites_limit_offset_in_place_before_locking_clause() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT t.id, t.* FROM t LIMIT 500 OFFSET 10 FOR UPDATE".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 100,
+            offset: 100,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT t.id, t.* FROM t LIMIT 100 OFFSET 110 FOR UPDATE;");
+    }
+
+    #[test]
+    fn mysql_pagination_rewrites_dedup_limit_in_place_with_positional_order() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT DISTINCT t.id, t.* FROM t LIMIT 500".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT DISTINCT t.id, t.* FROM t ORDER BY 1, 2 LIMIT 100 OFFSET 0;");
+    }
+
+    #[test]
+    fn mysql_pagination_declines_non_literal_limit_for_duplicate_projection() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT t.id, t.* FROM t LIMIT ?".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 100,
+            offset: 100,
+        });
+
+        assert!(!result.ok);
+        assert_eq!(result.reason.as_deref(), Some("unsupported"));
+    }
+
+    #[test]
     fn standard_pagination_wraps_existing_limit_for_later_pages() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT id FROM users LIMIT 20;".to_string(),
@@ -6609,6 +6742,53 @@ WHERE u.id = picked.id;
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT * FROM dbx_eval_t) t ORDER BY \"C2\" ASC;");
+    }
+
+    #[test]
+    fn mysql_sort_with_duplicate_labels_does_not_wrap_the_query() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "/*+ MAX_EXECUTION_TIME(1000) */ SELECT t.id, t.* FROM dbx_eval_t t ORDER BY t.id;"
+                .to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            result_columns: vec!["id".to_string(), "id".to_string(), "name".to_string(), "qty".to_string()],
+            column_index: 2,
+            column: "name".to_string(),
+            direction: QuerySortDirection::Desc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "/*+ MAX_EXECUTION_TIME(1000) */ SELECT t.id, t.* FROM dbx_eval_t t ORDER BY 3 DESC;"
+        );
+    }
+
+    #[test]
+    fn mysql_sort_treats_labels_differing_only_in_case_as_duplicates() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT a.ID, b.id FROM a JOIN b ON b.a_id = a.id".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            result_columns: vec!["ID".to_string(), "id".to_string()],
+            column_index: 1,
+            column: "id".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT a.ID, b.id FROM a JOIN b ON b.a_id = a.id ORDER BY 2 ASC;");
+    }
+
+    #[test]
+    fn mysql_sort_with_duplicate_labels_rejects_limit() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT t.id, t.* FROM dbx_eval_t t LIMIT 500".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            result_columns: vec!["id".to_string(), "id".to_string(), "name".to_string()],
+            column_index: 2,
+            column: "name".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert!(!result.ok);
+        assert_eq!(result.reason.as_deref(), Some("unsupported"));
     }
 
     #[test]

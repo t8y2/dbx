@@ -12,6 +12,7 @@ vi.mock("@/components/grid/DataGrid.vue", () => ({ default: { render: () => h("d
 import ContentArea from "../ContentArea.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { createInlineQueryResultPortal, INLINE_QUERY_RESULT_PORTAL, type InlineQueryResultPortal } from "@/lib/editor/inlineQueryResultPortal";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -20,7 +21,7 @@ afterEach(() => {
   window.localStorage?.clear();
 });
 
-async function mountContentAreaWithRuns(options: { results: QueryResult[]; resultRuns?: NonNullable<QueryTab["resultRuns"]>; activeResultRunId?: string }) {
+async function mountContentAreaWithRuns(options: { results: QueryResult[]; resultRuns?: NonNullable<QueryTab["resultRuns"]>; activeResultRunId?: string; inlineResult?: boolean; historyOnly?: boolean; closeInlineResult?: () => void; portal?: InlineQueryResultPortal }) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const connection = { id: "mysql-1", name: "MySQL", db_type: "mysql" as const, host: "localhost", port: 3306, username: "root", password: "" };
@@ -57,6 +58,9 @@ async function mountContentAreaWithRuns(options: { results: QueryResult[]; resul
           selectedSql: "",
           cursorPos: 0,
           resultOnly: true,
+          inlineResult: options.inlineResult,
+          historyOnly: options.historyOnly,
+          closeInlineResult: options.closeInlineResult,
           blockDangerousRedisCommands: false,
           "onUpdate:activeOutputView": (_tabId: string, view: string) => {
             state.view = view as typeof state.view;
@@ -65,6 +69,7 @@ async function mountContentAreaWithRuns(options: { results: QueryResult[]; resul
     }),
   );
   app.use(pinia);
+  if (options.portal) app.provide(INLINE_QUERY_RESULT_PORTAL, options.portal);
   app.use(
     createI18n({
       legacy: false,
@@ -105,6 +110,43 @@ describe("ContentArea result run tabs layout and middle-click close", () => {
     affected_rows: 1,
     execution_time_ms: 3,
   };
+  it("closes an inline result with a Run using its local callback and keeps its label at the start", async () => {
+    const close = vi.fn();
+    const { host } = await mountContentAreaWithRuns({
+      results: [singleResult],
+      resultRuns: [{ id: "run-1", title: "Run 1", sequence: 1, sql: "SELECT 1", createdAt: 1, result: singleResult, results: [singleResult] }],
+      activeResultRunId: "run-1",
+      inlineResult: true,
+      closeInlineResult: close,
+    });
+    const store = useQueryStore();
+    const deleteResult = vi.spyOn(store, "closeQueryResult");
+    const navigator = host.querySelector("[data-result-set-tabs-region]")!;
+    expect(navigator.previousElementSibling?.classList.contains("flex-1")).toBe(false);
+    host.querySelector<HTMLButtonElement>('[aria-label="tabs.closeResult"]')!.click();
+    await nextTick();
+    expect(close).toHaveBeenCalledTimes(1);
+    host.querySelector<HTMLButtonElement>('[aria-label="editor.hideResultsPane"]')!.click();
+    await nextTick();
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(deleteResult).not.toHaveBeenCalled();
+  });
+  it("reopens a dismissed result when its Run is explicitly selected in compact history", async () => {
+    const portal = createInlineQueryResultPortal();
+    const { host, tab } = await mountContentAreaWithRuns({
+      results: [singleResult],
+      resultRuns: [{ id: "run-1", title: "Run 1", sequence: 1, sql: "SELECT 1", createdAt: 1, result: singleResult, results: [singleResult] }],
+      activeResultRunId: "run-1",
+      historyOnly: true,
+      portal,
+    });
+    portal.dismiss(tab.id, tab.result!);
+    host.querySelector<HTMLButtonElement>("[data-result-run-tab]")!.click();
+    await nextTick();
+    await nextTick();
+    await vi.waitFor(() => expect(portal.isDismissed(tab.id, tab.result!)).toBe(false));
+    expect(tab.result?.rows).toEqual([[1]]);
+  });
 
   it("hides ResultSetNavigator when resultRuns exist and active run has a single result set", async () => {
     const { host } = await mountContentAreaWithRuns({

@@ -7887,6 +7887,8 @@ export default withEnglishFallback({
     executeAllOnBlankLineDescription: "현재 구문 실행 모드에서 커서 위치에 구문이 없으면 모든 SQL을 실행합니다. 기본적으로 비활성화됩니다.",
     showExecutionTargetPicker: "실행 대상 선택기 표시",
     showExecutionTargetPickerDescription: "활성화하면 선택 없이 실행할 때 현재 구문과 전체 SQL 중에서 선택할 수 있습니다.",
+    inlineQueryResults: "SQL 아래에 쿼리 결과 표시",
+    inlineQueryResultsDescription: "각 SQL 문 아래에 쿼리 결과를 표시합니다. 다시 실행하면 해당 문장의 표만 갱신하고 다른 결과는 유지합니다.",
     showStatementRunButtons: "왼쪽 실행 버튼 표시",
     showStatementRunButtonsDescription: "SQL 편집기 여백에 구문별 실행 버튼을 표시합니다. 비활성화해도 키보드 단축키와 컨텍스트 메뉴 실행은 계속 작동합니다.",
     locateCursorOnGutterExecute: "여백 실행 시 커서를 구문 시작으로 이동",

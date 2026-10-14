@@ -967,6 +967,7 @@ export interface EditorSettings {
   queryTimeoutInheritConnectionIds: string[];
   timeoutInheritanceMigrationVersion: number;
   showExecutionTargetPicker: boolean;
+  inlineQueryResults: boolean;
   showStatementRunButtons: boolean;
   locateCursorOnGutterExecute: boolean;
   showLineNumbers: boolean;
@@ -1331,6 +1332,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   queryTimeoutInheritConnectionIds: [],
   timeoutInheritanceMigrationVersion: 2,
   showExecutionTargetPicker: false,
+  inlineQueryResults: false,
   showStatementRunButtons: true,
   locateCursorOnGutterExecute: true,
   showLineNumbers: true,
@@ -1982,6 +1984,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
           ? 1
           : 0,
     showExecutionTargetPicker: settings.showExecutionTargetPicker ?? DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker,
+    inlineQueryResults: settings.inlineQueryResults === true,
     showStatementRunButtons: typeof settings.showStatementRunButtons === "boolean" ? settings.showStatementRunButtons : DEFAULT_EDITOR_SETTINGS.showStatementRunButtons,
     locateCursorOnGutterExecute: typeof settings.locateCursorOnGutterExecute === "boolean" ? settings.locateCursorOnGutterExecute : DEFAULT_EDITOR_SETTINGS.locateCursorOnGutterExecute,
     showLineNumbers: typeof settings.showLineNumbers === "boolean" ? settings.showLineNumbers : DEFAULT_EDITOR_SETTINGS.showLineNumbers,
@@ -2864,6 +2867,7 @@ export const useSettingsStore = defineStore("settings", () => {
     }
     if (partial.timeoutInheritanceMigrationVersion !== undefined) editorSettings.value.timeoutInheritanceMigrationVersion = Math.max(0, Math.floor(partial.timeoutInheritanceMigrationVersion));
     if (partial.showExecutionTargetPicker !== undefined) editorSettings.value.showExecutionTargetPicker = partial.showExecutionTargetPicker;
+    if (partial.inlineQueryResults !== undefined) editorSettings.value.inlineQueryResults = partial.inlineQueryResults === true;
     if (partial.showStatementRunButtons !== undefined) editorSettings.value.showStatementRunButtons = partial.showStatementRunButtons === true;
     if (partial.locateCursorOnGutterExecute !== undefined) editorSettings.value.locateCursorOnGutterExecute = partial.locateCursorOnGutterExecute === true;
     if (partial.showLineNumbers !== undefined) editorSettings.value.showLineNumbers = partial.showLineNumbers === true;

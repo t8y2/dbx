@@ -1,3 +1,4 @@
+import { inlineResultStateKeys } from "@/lib/editor/inlineQueryResultState";
 import { hasShortDataGridSqlPage } from "@/lib/dataGrid/dataGridPagination";
 import { createQueryRequestTiming } from "@/lib/queryRequestTiming";
 import { mergeQueryMessages, queryResultMessages } from "@/lib/query/queryResultMessages";
@@ -25,6 +26,7 @@ import type {
   ObjectSource,
   ObjectSourceKind,
   QueryResult,
+  QueryResultRun,
   QueryResultSourceColumnRef,
   QueryTab,
   TableInfoTab,
@@ -1126,6 +1128,28 @@ export function applyAutoCommitTransactionReport(tab: QueryTab, results: QueryRe
 }
 
 export const useQueryStore = defineStore("query", () => {
+  let inlineResultConsumers = 0;
+  function retainInlineQueryResults() {
+    inlineResultConsumers++;
+    let released = false;
+    return () => {
+      if (!released) {
+        released = true;
+        inlineResultConsumers--;
+      }
+    };
+  }
+  function pruneInlineResultRuns(id: string, keepIds: Set<string>) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab?.resultRuns || tab.isExecuting) return;
+    const removed = tab.resultRuns.filter((run) => run.inlineRetained && !run.pinned && run.id !== tab.activeResultRunId && !keepIds.has(run.id));
+    if (!removed.length) return;
+    for (const run of removed) {
+      void closeResultRunSession(tab, run);
+      if (run.resultCacheKey) void deleteTabResultSnapshot(run.resultCacheKey);
+    }
+    tab.resultRuns = tab.resultRuns.filter((run) => !removed.includes(run));
+  }
   const redisMonitors = new Map<string, () => void>();
   const t = getI18nT();
   const settingsStore = useSettingsStore();
@@ -2049,6 +2073,7 @@ export const useQueryStore = defineStore("query", () => {
     if (options.isCurrent && !options.isCurrent()) return false;
     if (!run?.result && !run?.results?.length) return false;
     projectResultRun(tab, run);
+    if (tab.result) inlineRunAccess.set(run.result ?? tab.result, ++inlineAccessClock);
     if (options.evictInactive !== false) evictInactiveResultRunPayloads(tab);
     return true;
   }
@@ -2059,6 +2084,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab?.resultRuns || runIndex < 0) return undefined;
 
     const run = { ...tab.resultRuns[runIndex]!, pinned: tab.resultRuns[runIndex]!.pinned ? undefined : true };
+    if (run.pinned) run.inlineRetained = undefined;
     tab.resultRuns[runIndex] = run;
     void persistResultRun(tab, run);
     return run.pinned === true;
@@ -2289,18 +2315,71 @@ export const useQueryStore = defineStore("query", () => {
     );
   }
 
+  // inlineRetained marks disposable history, not whether a grid uses its rows.
+  // Autosaved and pinned runs also supply inline grids and share the LRU budget;
+  // evict their payloads to disk without removing their history entries.
+  const inlineRunAccess = new WeakMap<QueryResult, number>();
+  let inlineAccessClock = 0;
+  function retainedInlineRunIds(tab: QueryTab): Set<string> {
+    if (!inlineResultConsumers || !useSettingsStore().editorSettings.inlineQueryResults || tab.mode !== "query") return new Set();
+    const candidates = (tab.resultRuns ?? []).filter((run) => resultRunHasPayload(run) && run.id !== tab.activeResultRunId);
+    candidates.sort((a, b) => (inlineRunAccess.get(a.result!) ?? a.sequence) - (inlineRunAccess.get(b.result!) ?? b.sequence));
+    const rows = (run: QueryResultRun) => (run.results ?? (run.result ? [run.result] : [])).reduce((sum, result) => sum + result.rows.length, 0);
+    let totalRows = candidates.reduce((sum, run) => sum + rows(run), 0);
+    while (candidates.length > 8 || totalRows > 20000) {
+      const removed = candidates.shift()!;
+      totalRows -= rows(removed);
+    }
+    return new Set(candidates.map((run) => run.id));
+  }
+  function enforceInlineResultBudget(tab: QueryTab) {
+    const retained = retainedInlineRunIds(tab);
+    for (const run of tab.resultRuns ?? []) {
+      if (!run.inlineRetained || run.pinned || run.id === tab.activeResultRunId || retained.has(run.id)) continue;
+      void closeResultRunSession(tab, run);
+      if (run.resultCacheKey) void deleteTabResultSnapshot(run.resultCacheKey);
+      if (run.result) inlineRunAccess.delete(run.result);
+      tab.resultRuns = tab.resultRuns?.filter((item) => item.id !== run.id);
+    }
+    return retained;
+  }
+  function activateInlineQueryResult(id: string, result: QueryResult, index: number, runId: string | undefined, state: Partial<QueryTab>) {
+    const tab = findExecutionTab(id);
+    if (!tab || tab.isExecuting) return false;
+    const run = runId ? tab.resultRuns?.find((run) => run.id === runId) : undefined;
+    if (runId && (!run || !(run.results ?? (run.result ? [run.result] : [])).includes(result))) return false;
+    if (run && tab.activeResultRunId !== run.id) void setActiveResultRun(id, run.id, { evictInactive: false });
+    setActiveResultIndex(id, index);
+    if (tab.result !== result) return false;
+    // Restore only the shared per-result contract; never assign arbitrary tab fields.
+    for (const key of inlineResultStateKeys) Object.assign(tab, { [key]: state[key] });
+    inlineRunAccess.set(result, ++inlineAccessClock);
+    evictInactiveResultRunPayloads(tab);
+    return true;
+  }
+
   function evictInactiveResultRunPayloads(tab: QueryTab) {
+    const retained = enforceInlineResultBudget(tab);
     const activeRunId = tab.activeResultRunId;
     if (!activeRunId || !tab.resultRuns?.length) return;
 
     for (const run of tab.resultRuns) {
       if (run.id === activeRunId || !resultRunHasPayload(run)) continue;
+      if (retained.has(run.id)) {
+        // Other statement grids still render this payload. Release its cursor
+        // as usual, but keep the rows until its statement is executed again.
+        void closeResultRunSession(tab, run);
+        continue;
+      }
       const runId = run.id;
       void closeResultRunSession(tab, run)
         .then(() => persistResultRun(tab, run))
         .then((cached) => {
           const currentRun = tab.resultRuns?.find((item) => item.id === runId);
           if (!cached || !currentRun || currentRun.id === tab.activeResultRunId || !resultRunHasPayload(currentRun)) return;
+          // Persistence may finish after an execution, activation, or setting
+          // change. Recheck ownership before mutating shared QueryResult rows.
+          if (retainedInlineRunIds(tab).has(currentRun.id)) return;
           if (tab.result === currentRun.result || (currentRun.results && tab.results === currentRun.results)) return;
           clearResultRunPayload(currentRun, { evicted: true });
         });
@@ -2308,6 +2387,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   type ResultRunCaptureOptions = {
+    inlineRetained?: boolean;
     reuseResultCacheKey?: boolean;
     title?: string;
     multiDbExecution?: MultiDbResultRunExecution;
@@ -2320,6 +2400,7 @@ export const useQueryStore = defineStore("query", () => {
     // 批次级来源：非活动批次的 payload 会被回收，结果标签命名需要独立保存来源
     const primaryResult = tab.results?.[0] ?? tab.result;
     const run: NonNullable<QueryTab["resultRuns"]>[number] = {
+      inlineRetained: options.inlineRetained,
       id: uuid(),
       title: options.title ?? `Run ${sequence}`,
       customTitle: !!options.title,
@@ -2373,6 +2454,7 @@ export const useQueryStore = defineStore("query", () => {
       multiDbExecution: options.multiDbExecution,
     };
     if (options.persist !== false) void persistResultRun(tab, run);
+    inlineRunAccess.set(run.result!, ++inlineAccessClock);
     tab.resultRuns = [...(tab.resultRuns ?? []), run];
     tab.activeResultRunId = run.id;
     if (options.reuseResultCacheKey === false) {
@@ -2426,6 +2508,13 @@ export const useQueryStore = defineStore("query", () => {
 
   function setResultAutoSave(tab: QueryTab, enabled: boolean) {
     tab.resultAutoSave = enabled;
+    if (enabled) {
+      for (const run of tab.resultRuns ?? []) {
+        if (!run.inlineRetained) continue;
+        run.inlineRetained = undefined;
+        void persistResultRun(tab, run);
+      }
+    }
     if (enabled && !tab.isExecuting && tab.result && !tab.activeResultRunId) {
       captureDisplayedResultRun(tab, tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql);
     }
@@ -7289,7 +7378,17 @@ export const useQueryStore = defineStore("query", () => {
     // decision after clearing the displayed payload, which caused the result
     // toolbar and grid to briefly disappear before the next Run was added.
     const captureAutoSavedResultRun = tab.mode === "query" && tab.resultAutoSave === true && (!!tab.activeResultRunId || !!tab.result);
-    let captureResultRun = openInNewResultTab || captureAutoSavedResultRun;
+    const captureInlineResultRun =
+      inlineResultConsumers > 0 &&
+      settingsStore.editorSettings.inlineQueryResults === true &&
+      tab.mode === "query" &&
+      !options?.pagination &&
+      !options?.replaceActiveResultInGroup &&
+      !options?.retainDisplayedResult &&
+      (!options?.publicationOrigin || options.publicationOrigin === "execute") &&
+      !options?.batchResume;
+    const inlineCaptureOptions: ResultRunCaptureOptions = captureInlineResultRun && !openInNewResultTab && !tab.resultAutoSave ? { inlineRetained: true, persist: false } : {};
+    let captureResultRun = openInNewResultTab || captureAutoSavedResultRun || captureInlineResultRun;
     let resultRunToRestore: string | undefined;
     let reuseResultRun = false;
     if (!captureResultRun && tab.mode === "query" && !tab.resultAutoSave && tab.activeResultRunId) {
@@ -7346,7 +7445,7 @@ export const useQueryStore = defineStore("query", () => {
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     const batchResume = options?.batchResume;
     const continueOnBatchError = batchResume?.continueOnError ?? settingsStore.editorSettings.continueOnErrorOnBatch;
-    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || captureAutoSavedResultRun || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
+    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || captureAutoSavedResultRun || captureInlineResultRun || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
     const updateActiveResultRun = !!tab.activeResultRunId && preserveResultDuringExecution;
     tab.isExecuting = true;
     tab.executingResultRunId = !captureResultRun && updateActiveResultRun ? tab.activeResultRunId : null;
@@ -7366,7 +7465,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     if (captureResultRun && tab.result && !tab.activeResultRunId) {
-      captureDisplayedResultRun(tab, previousDisplayedSql);
+      captureDisplayedResultRun(tab, previousDisplayedSql, Date.now(), inlineCaptureOptions);
     }
     if (captureResultRun && tab.activeResultRunId) {
       pendingResultRunRestores.set(executionId, tab.activeResultRunId);
@@ -7546,7 +7645,7 @@ export const useQueryStore = defineStore("query", () => {
               current.mongoEditTarget = undefined;
               if (!producedResult) {
                 publishResultGeneration(current, "execute");
-                syncDisplayedResultRun(current, "MONITOR", captureResultRun);
+                syncDisplayedResultRun(current, "MONITOR", captureResultRun, inlineCaptureOptions);
               }
               producedResult = true;
               touchResult(current);
@@ -7616,7 +7715,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql, captureResultRun);
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql, captureResultRun, inlineCaptureOptions);
           // Reflect db switches from SELECT N in the tab so the toolbar dropdown, tab title and
           // sidebar stay in sync with the command's effective db.
           if (!usesExternalExecutionTarget && current.database !== String(currentDb)) {
@@ -8085,7 +8184,7 @@ export const useQueryStore = defineStore("query", () => {
           current.resultClientSessionId = undefined;
           current.resultTotalRowCount = mongoFindPageState?.totalIsExact ? mongoFindPageState.total : undefined;
           current.resultTotalRowCountLoading = false;
-          syncDisplayedResultRun(current, current.resultBaseSql ?? options?.resultBaseSql ?? sql, captureResultRun);
+          syncDisplayedResultRun(current, current.resultBaseSql ?? options?.resultBaseSql ?? sql, captureResultRun, inlineCaptureOptions);
           if (!usesExternalExecutionTarget && current.database !== currentDatabase) current.database = currentDatabase;
         }
         return producedResult;
@@ -8148,7 +8247,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = undefined;
-          syncDisplayedResultRun(current, current.resultBaseSql, captureResultRun);
+          syncDisplayedResultRun(current, current.resultBaseSql, captureResultRun, inlineCaptureOptions);
         }
         return producedResult;
       }
@@ -8217,7 +8316,7 @@ export const useQueryStore = defineStore("query", () => {
               current.results[activeResultIndex]!.has_more = false;
             }
             touchResult(current);
-            syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
+            syncDisplayedResultRun(current, queryBaseSql, captureResultRun, inlineCaptureOptions);
           }
           queryExecutionLog("info", "append-result:pagination-unsupported", { traceId, elapsed: elapsed() });
           return false;
@@ -8707,7 +8806,7 @@ export const useQueryStore = defineStore("query", () => {
           totalRowCountResolved = true;
         }
         touchResult(current);
-        syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
+        syncDisplayedResultRun(current, queryBaseSql, captureResultRun, inlineCaptureOptions);
         if (!options?.appendResult && !resultLimitReached && !totalRowCountResolved && (current.mode === "query" || current.mode === "data") && current.result) {
           countQueryTotalRowsInBackground({
             tabId: id,
@@ -8838,7 +8937,7 @@ export const useQueryStore = defineStore("query", () => {
         publishResultGeneration(current, "execute");
         // When a pinned result requires a new run, errors must use that same
         // run instead of being replaced by the retained pinned result below.
-        syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
+        syncDisplayedResultRun(current, queryBaseSql, captureResultRun, inlineCaptureOptions);
       }
     } finally {
       unsubscribeQueryMessages?.();
@@ -10364,6 +10463,9 @@ export const useQueryStore = defineStore("query", () => {
     invalidateResultEstimateForPayload,
     toggleResultAutoSave,
     setActiveResultRun,
+    activateInlineQueryResult,
+    retainInlineQueryResults,
+    pruneInlineResultRuns,
     toggleResultRunPinned,
     renameResultRun,
     unpinAllResultRuns,

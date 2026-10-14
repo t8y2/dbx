@@ -135,6 +135,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "editor-default-transaction-mode", category: "editor", titleKey: "settings.defaultTransactionMode", descriptionKey: "settings.defaultTransactionModeDescription", targetId: "editor" },
   { id: "editor-execute-all-on-blank-line", category: "editor", titleKey: "settings.executeAllOnBlankLine", descriptionKey: "settings.executeAllOnBlankLineDescription", targetId: "editor" },
   { id: "editor-execution-target", category: "editor", titleKey: "settings.showExecutionTargetPicker", descriptionKey: "settings.showExecutionTargetPickerDescription", targetId: "editor" },
+  { id: "editor-inline-results", category: "editor", titleKey: "settings.inlineQueryResults", descriptionKey: "settings.inlineQueryResultsDescription", targetId: "editor" },
   { id: "editor-run-buttons", category: "editor", titleKey: "settings.showStatementRunButtons", descriptionKey: "settings.showStatementRunButtonsDescription", targetId: "editor" },
   { id: "editor-locate-cursor-on-gutter-execute", category: "editor", titleKey: "settings.locateCursorOnGutterExecute", descriptionKey: "settings.locateCursorOnGutterExecuteDescription", targetId: "editor" },
   { id: "editor-line-numbers", category: "editor", titleKey: "settings.showLineNumbers", descriptionKey: "settings.showLineNumbersDescription", targetId: "editor" },

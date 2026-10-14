@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { computed, inject, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { inlineQueryResultEntries } from "@/lib/editor/inlineQueryResultEntries";
+import { INLINE_QUERY_RESULT_PORTAL, type InlineQueryResultPortal } from "@/lib/editor/inlineQueryResultPortal";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
@@ -270,6 +272,11 @@ const props = defineProps<
     editorOnly?: boolean;
     /** Render only the shared query result pane (used by QueryResultSurface). */
     resultOnly?: boolean;
+    inlineResult?: boolean;
+    /** Reuse the original Run controls without mounting a duplicate grid. */
+    historyOnly?: boolean;
+    activateResult?: () => void;
+    closeInlineResult?: () => void;
     /** Whether the query editor should request focus on mount. */
     autoFocus?: boolean;
   }
@@ -279,6 +286,12 @@ const emit = defineEmits<ContentAreaSurfaceEmits>();
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
+const inlineResultPortal = inject<InlineQueryResultPortal | null>(INLINE_QUERY_RESULT_PORTAL, null);
+const editorInlineResults = computed(() => (settingsStore.editorSettings.inlineQueryResults ? inlineQueryResultEntries(props.activeTab, inlineResultPortal?.anchors.get(props.activeTab.id)).map((entry) => entry.result) : []));
+function withResultContext<T>(action: () => T): T {
+  props.activateResult?.();
+  return action();
+}
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
 /** Clear a consumed editor reveal request so a later normal tab re-visit doesn't re-jump. */
@@ -531,7 +544,9 @@ const includeResultSourceDatabase = computed(() => settingsStore.editorSettings.
 const resultTabNamingMode = computed(() => settingsStore.editorSettings.resultTabNamingMode);
 const preferResultTabComments = computed(() => settingsStore.editorSettings.resultTabPreferComments);
 const visibleResultItems = computed(() =>
-  tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }),
+  tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }).filter(
+    (item) => !props.inlineResult || item.result === props.activeTab.result,
+  ),
 );
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results, { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }));
 const allResultExportSheets = computed(() =>
@@ -645,6 +660,7 @@ function sortQueryGrid(column: string, columnIndex: number, direction: "asc" | "
 }
 
 async function fetchGridResultForExport(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, probeRowLimit = false, tabId = props.activeTab.id) {
+  props.activateResult?.();
   const isNeo4j = activeEffectiveDatabaseType.value === "neo4j";
   const result = await queryStore.fetchTabResultForExport(tabId, onProgress, probeRowLimit);
   if (!result || !isNeo4j) return result;
@@ -734,8 +750,8 @@ const resultRunRenameOpen = ref(false);
 const resultRunRenameId = ref<string | null>(null);
 const resultRunRenameTitle = ref("");
 const activeResultIsLoading = computed(() => !props.activeTab.redisMonitorActive && isActiveResultLoading(props.activeTab));
-const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
-const showResultRunSelector = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
+const showResultRunTabs = computed(() => !props.inlineResult && resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
+const showResultRunSelector = computed(() => !props.inlineResult && resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
 const canCloseQueryResult = computed(() => props.activeTab.mode === "query" && !props.activeTab.isExecuting && !props.activeTab.activeResultRunId && (!!props.activeTab.result || !!props.activeTab.results?.length || props.activeTab.resultEvicted === true));
 
 function updateResultTabsAfterRender() {
@@ -1001,7 +1017,9 @@ function toggleResultsPane(): boolean {
  * keep the local collapse behavior.
  */
 function handleHideResultsPane() {
-  if (props.resultOnly) {
+  if (props.inlineResult) {
+    props.closeInlineResult?.();
+  } else if (props.resultOnly) {
     emit("toggleResultsPane");
   } else {
     resultsPaneOpen.value = false;
@@ -1648,6 +1666,7 @@ async function selectResultRun(runId: string) {
     toast(t("tabs.missingResultRun"), 4000);
     return false;
   }
+  if (props.historyOnly && props.activeTab.result) inlineResultPortal?.reopen(props.activeTab.id, props.activeTab.result);
   emit("update:activeOutputView", props.activeTab.id, "result");
   return true;
 }
@@ -2018,6 +2037,7 @@ defineExpose({
               :keyword-case-request-mode="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.mode : undefined"
               :execution-error="activeQueryError"
               :execution-error-sql="activeTab.lastExecutedSql"
+              :inline-query-results="editorInlineResults"
               :execution-error-result="activeQueryError ? activeTab.result : undefined"
               :result-columns="activeTab.result?.columns"
               :result-source-statement="activeTab.result?.sourceStatement"
@@ -2093,7 +2113,15 @@ defineExpose({
               >
                 <Pin class="h-3.5 w-3.5" :class="{ 'fill-current': resultAutoSave }" />
               </Button>
-              <Button v-if="canCloseQueryResult" variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('tabs.closeResult')" :aria-label="t('tabs.closeResult')" @click="closeCurrentQueryResult">
+              <Button
+                v-if="inlineResult || canCloseQueryResult"
+                variant="ghost"
+                size="icon"
+                class="h-6 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground"
+                :title="t('tabs.closeResult')"
+                :aria-label="t('tabs.closeResult')"
+                @click="inlineResult ? closeInlineResult?.() : closeCurrentQueryResult()"
+              >
                 <X class="h-3.5 w-3.5" />
               </Button>
               <template v-if="resultRuns.length > 0 || visibleResultItems.length > 0">
@@ -2170,10 +2198,10 @@ defineExpose({
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
-                <div v-else-if="resultRuns.length > 0" class="min-w-0 flex-1" />
-                <span v-if="resultRuns.length > 0 && visibleResultItems.length > 1" class="mx-1 h-4 w-px shrink-0 bg-border" />
+                <div v-else-if="!inlineResult && resultRuns.length > 0" class="min-w-0 flex-1" />
+                <span v-if="!historyOnly && !inlineResult && resultRuns.length > 0 && visibleResultItems.length > 1" class="mx-1 h-4 w-px shrink-0 bg-border" />
                 <ResultSetNavigator
-                  v-if="resultRuns.length > 0 ? visibleResultItems.length > 1 : visibleResultItems.length > 0"
+                  v-if="!historyOnly && (inlineResult || resultRuns.length === 0 ? visibleResultItems.length > 0 : visibleResultItems.length > 1)"
                   :key="`${activeTab.id}:${activeTab.activeResultRunId ?? 'current'}`"
                   :items="visibleResultItems"
                   :busy="resultBatchBusy"
@@ -2181,14 +2209,14 @@ defineExpose({
                   :active-index="activeTab.activeResultIndex ?? 0"
                   :active="activeOutputView === 'result'"
                   :display-mode="resultRunDisplayMode"
-                  :has-sibling-run-tabs="resultRuns.length > 0"
+                  :has-sibling-run-tabs="!inlineResult && resultRuns.length > 0"
                   @select="selectResultItem"
                   @copy-sql="copySelectedResultSql"
                   @copy-query-sql="copySelectedResultQueries"
                   @export-xlsx="exportSelectedResultSheets"
                 />
               </template>
-              <div class="ml-auto flex shrink-0 items-center gap-1">
+              <div v-if="!historyOnly" class="ml-auto flex shrink-0 items-center gap-1">
                 <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
                   <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" />
                   <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
@@ -2495,365 +2523,373 @@ defineExpose({
               </div>
             </div>
 
-            <!-- Keep this height in sync with the embedded result toolbar. -->
-            <div v-if="hasQueryOutput && showStandaloneResultToolbar" ref="standaloneResultToolbarRef" class="flex h-8 shrink-0 items-center border-b bg-muted/20">
-              <QueryResultViewSwitcher
-                :active-view="activeOutputView"
-                :can-show-result="canShowResultOutput"
-                :can-show-summary="hasExecutionSummary"
-                :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
-                :can-show-graph="canShowGraphOutput"
-                :can-show-messages="canShowMessagesOutput"
-                :can-show-redis-console="canShowRedisConsoleOutput"
-                :result-mode="redisResultViewMode"
-                :message-count="resultMessageCount"
-                :compact="standaloneResultToolbarCompact"
-                @select-view="emit('update:activeOutputView', activeTab.id, $event)"
-                @select-result-mode="setRedisResultViewMode"
-              />
-              <QueryResultToolbarActions
-                class="ml-auto"
-                :active-view="activeOutputView"
-                :can-show-explain="canShowExplainOutput"
-                :can-show-profile="canShowProfile"
-                :can-export-archive="canExportResultArchive"
-                :archive-exporting="resultArchiveExporting"
-                :compact="standaloneResultToolbarCompact"
-                :has-result="!!activeTab.result"
-                @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
-                @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
-                @export-archive="exportResultArchive"
-                @open-result-view="openPluginResultView"
-              />
-            </div>
-
-            <div v-if="activeTab.redisMonitorActive" class="flex shrink-0 items-center justify-between border-b px-3 py-1 text-xs text-muted-foreground">
-              <span>{{ t("redis.monitorListening") }}</span>
-              <Button variant="ghost" size="sm" :disabled="activeTab.isCancelling" @click="emit('cancel', activeTab.id)">{{ t("redis.monitorStop") }}</Button>
-            </div>
-
-            <ExplainPlanViewer
-              v-if="activeOutputView === 'explain'"
-              class="flex-1 min-h-0"
-              :plan="activeTab.explainPlan"
-              :error="activeTab.explainError"
-              :loading="activeTab.isExplaining"
-              :source-sql="activeTab.lastExplainedSql"
-              :explain-sql="activeTab.explainSql"
-              :table-result="activeTab.explainTableResult"
-              :table-error="activeTab.explainTableError"
-              :default-view="settingsStore.editorSettings.defaultExplainView"
-            />
-
-            <ElasticsearchProfilePanel v-else-if="activeOutputView === 'profile' && canShowProfile" class="flex-1 min-h-0" :body="activeElasticsearchProfileBody ?? ''" />
-
-            <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result && !activeElasticsearchJsonResponse" class="flex-1 min-h-0" :result="activeTab.result" />
-            <GraphResultView
-              v-else-if="activeOutputView === 'graph' && activeTab.result?.graph_data"
-              :key="graphViewKey"
-              :graph="activeTab.result.graph_data"
-              :rows="activeTab.result.rows"
-              :columns="activeTab.result.columns"
-              :read-only="connectionIsEffectivelyReadOnly(activeResultConnection)"
-              :save-property="saveGraphProperty"
-              :expand-node="expandGraphNode"
-            />
-
-            <div v-else-if="activeOutputView === 'summary'" class="flex flex-1 min-h-0 min-w-0 overflow-auto bg-background">
-              <div v-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
-                <Loader2 v-if="activeTab.isExecuting" class="mr-2 h-4 w-4 animate-spin" />
-                <template v-if="activeTab.isExecuting">{{ t("executionSummary.executing") }}</template>
-                <template v-else>{{ t("executionSummary.empty") }}</template>
+            <template v-if="!historyOnly">
+              <!-- Keep this height in sync with the embedded result toolbar. -->
+              <div v-if="hasQueryOutput && showStandaloneResultToolbar" ref="standaloneResultToolbarRef" class="flex h-8 shrink-0 items-center border-b bg-muted/20">
+                <QueryResultViewSwitcher
+                  :active-view="activeOutputView"
+                  :can-show-result="canShowResultOutput"
+                  :can-show-summary="hasExecutionSummary"
+                  :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                  :can-show-graph="canShowGraphOutput"
+                  :can-show-messages="canShowMessagesOutput"
+                  :can-show-redis-console="canShowRedisConsoleOutput"
+                  :result-mode="redisResultViewMode"
+                  :message-count="resultMessageCount"
+                  :compact="standaloneResultToolbarCompact"
+                  @select-view="emit('update:activeOutputView', activeTab.id, $event)"
+                  @select-result-mode="setRedisResultViewMode"
+                />
+                <QueryResultToolbarActions
+                  class="ml-auto"
+                  :active-view="activeOutputView"
+                  :can-show-explain="canShowExplainOutput"
+                  :can-show-profile="canShowProfile"
+                  :can-export-archive="canExportResultArchive"
+                  :archive-exporting="resultArchiveExporting"
+                  :compact="standaloneResultToolbarCompact"
+                  :has-result="!!activeTab.result"
+                  @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
+                  @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
+                  @export-archive="exportResultArchive"
+                  @open-result-view="openPluginResultView"
+                />
               </div>
-              <div v-else class="flex min-h-full min-w-[46rem] flex-col">
-                <div v-if="batchExecutionProgress" class="z-10 shrink-0 border-b bg-background/95 px-3 py-2 backdrop-blur">
-                  <div class="mb-1.5 flex items-center gap-3 text-xs">
-                    <span class="font-medium">{{ activeTab.isExecuting ? t("executionSummary.executing") : t("executionSummary.finished") }}</span>
-                    <span class="tabular-nums text-muted-foreground">{{ batchExecutionProgress.completed }} / {{ batchExecutionProgress.total }}</span>
-                    <span class="ml-auto tabular-nums text-muted-foreground">{{ batchExecutionPercent }}%</span>
-                  </div>
-                  <div class="h-1.5 overflow-hidden rounded-full bg-muted">
-                    <div class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${batchExecutionPercent}%` }" />
-                  </div>
+
+              <div v-if="activeTab.redisMonitorActive" class="flex shrink-0 items-center justify-between border-b px-3 py-1 text-xs text-muted-foreground">
+                <span>{{ t("redis.monitorListening") }}</span>
+                <Button variant="ghost" size="sm" :disabled="activeTab.isCancelling" @click="emit('cancel', activeTab.id)">{{ t("redis.monitorStop") }}</Button>
+              </div>
+
+              <ExplainPlanViewer
+                v-if="activeOutputView === 'explain'"
+                class="flex-1 min-h-0"
+                :plan="activeTab.explainPlan"
+                :error="activeTab.explainError"
+                :loading="activeTab.isExplaining"
+                :source-sql="activeTab.lastExplainedSql"
+                :explain-sql="activeTab.explainSql"
+                :table-result="activeTab.explainTableResult"
+                :table-error="activeTab.explainTableError"
+                :default-view="settingsStore.editorSettings.defaultExplainView"
+              />
+
+              <ElasticsearchProfilePanel v-else-if="activeOutputView === 'profile' && canShowProfile" class="flex-1 min-h-0" :body="activeElasticsearchProfileBody ?? ''" />
+
+              <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result && !activeElasticsearchJsonResponse" class="flex-1 min-h-0" :result="activeTab.result" />
+              <GraphResultView
+                v-else-if="activeOutputView === 'graph' && activeTab.result?.graph_data"
+                :key="graphViewKey"
+                :graph="activeTab.result.graph_data"
+                :rows="activeTab.result.rows"
+                :columns="activeTab.result.columns"
+                :read-only="connectionIsEffectivelyReadOnly(activeResultConnection)"
+                :save-property="saveGraphProperty"
+                :expand-node="expandGraphNode"
+              />
+
+              <div v-else-if="activeOutputView === 'summary'" class="flex flex-1 min-h-0 min-w-0 overflow-auto bg-background">
+                <div v-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
+                  <Loader2 v-if="activeTab.isExecuting" class="mr-2 h-4 w-4 animate-spin" />
+                  <template v-if="activeTab.isExecuting">{{ t("executionSummary.executing") }}</template>
+                  <template v-else>{{ t("executionSummary.empty") }}</template>
                 </div>
-                <div v-if="batchRecovery" class="flex shrink-0 items-center gap-3 border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                  <CircleAlert class="h-4 w-4 shrink-0" />
-                  <span class="min-w-0 flex-1 truncate">
-                    {{ t("executionSummary.recoveryPrompt", { statement: batchRecovery.failedStatementIndex + 1, count: batchRecovery.remainingStatementCount }) }}
-                  </span>
-                  <div class="flex shrink-0 items-center gap-1">
-                    <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="dismissBatchRecovery">
-                      <CircleStop class="h-3.5 w-3.5" />
-                      {{ t("executionSummary.stop") }}
-                    </Button>
-                    <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('retry')">
-                      <RotateCcw class="h-3.5 w-3.5" />
-                      {{ t("executionSummary.retry") }}
-                    </Button>
-                    <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('skip')">
-                      <SkipForward class="h-3.5 w-3.5" />
-                      {{ t("executionSummary.skipAndContinue") }}
-                    </Button>
-                    <LightTooltip :text="t('executionSummary.skipAllHint')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                      <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('skip-all')">
-                        <ListX class="h-3.5 w-3.5" />
-                        {{ t("executionSummary.skipAll") }}
+                <div v-else class="flex min-h-full min-w-[46rem] flex-col">
+                  <div v-if="batchExecutionProgress" class="z-10 shrink-0 border-b bg-background/95 px-3 py-2 backdrop-blur">
+                    <div class="mb-1.5 flex items-center gap-3 text-xs">
+                      <span class="font-medium">{{ activeTab.isExecuting ? t("executionSummary.executing") : t("executionSummary.finished") }}</span>
+                      <span class="tabular-nums text-muted-foreground">{{ batchExecutionProgress.completed }} / {{ batchExecutionProgress.total }}</span>
+                      <span class="ml-auto tabular-nums text-muted-foreground">{{ batchExecutionPercent }}%</span>
+                    </div>
+                    <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+                      <div class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${batchExecutionPercent}%` }" />
+                    </div>
+                  </div>
+                  <div v-if="batchRecovery" class="flex shrink-0 items-center gap-3 border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    <CircleAlert class="h-4 w-4 shrink-0" />
+                    <span class="min-w-0 flex-1 truncate">
+                      {{ t("executionSummary.recoveryPrompt", { statement: batchRecovery.failedStatementIndex + 1, count: batchRecovery.remainingStatementCount }) }}
+                    </span>
+                    <div class="flex shrink-0 items-center gap-1">
+                      <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="dismissBatchRecovery">
+                        <CircleStop class="h-3.5 w-3.5" />
+                        {{ t("executionSummary.stop") }}
                       </Button>
-                    </LightTooltip>
+                      <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('retry')">
+                        <RotateCcw class="h-3.5 w-3.5" />
+                        {{ t("executionSummary.retry") }}
+                      </Button>
+                      <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('skip')">
+                        <SkipForward class="h-3.5 w-3.5" />
+                        {{ t("executionSummary.skipAndContinue") }}
+                      </Button>
+                      <LightTooltip :text="t('executionSummary.skipAllHint')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                        <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('skip-all')">
+                          <ListX class="h-3.5 w-3.5" />
+                          {{ t("executionSummary.skipAll") }}
+                        </Button>
+                      </LightTooltip>
+                    </div>
                   </div>
+                  <div class="grid shrink-0 grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
+                    <div>{{ t("executionSummary.statement") }}</div>
+                    <div>{{ t("executionSummary.sql") }}</div>
+                    <div>{{ t("executionSummary.status") }}</div>
+                    <div class="text-right">{{ t("executionSummary.rows") }}</div>
+                    <div class="text-right">{{ t("executionSummary.time") }}</div>
+                  </div>
+                  <DynamicScroller v-slot="{ item, index, active }" class="min-h-0 flex-1 border-b" :items="summaryItems" :min-item-size="37" :buffer="600" :skip-hover="true" key-field="statementIndex">
+                    <DynamicScrollerItem :item="item" :active="active" :data-index="index" :size-dependencies="[item.error]">
+                      <div class="relative grid w-full grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] items-center border-b px-3 py-2 text-left text-xs last:border-b-0">
+                        <button
+                          type="button"
+                          class="absolute inset-0 z-0 cursor-pointer text-left transition-colors hover:bg-muted/35 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
+                          :title="item.error || item.sql"
+                          :aria-label="item.error || item.sql || t('executionSummary.noSql')"
+                          @click="previewExecutionSummaryItem(item)"
+                          @dblclick="locateExecutionSummaryError(item)"
+                          @keydown.enter.prevent="focusExecutionSummaryItem(item)"
+                        />
+                        <div class="pointer-events-none relative z-[1] font-mono text-muted-foreground">#{{ item.statementIndex + 1 }}</div>
+                        <div class="relative z-[1] min-w-0 cursor-pointer" @click="previewExecutionSummaryItem(item)" @dblclick="locateExecutionSummaryError(item)">
+                          <div class="truncate font-mono text-[11px] text-foreground">{{ item.sql || t("executionSummary.noSql") }}</div>
+                          <div v-if="item.error" class="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] text-destructive">
+                            <span v-if="item.errorPosition" class="shrink-0 rounded border border-destructive/30 bg-destructive/5 px-1 tabular-nums">{{ t("executionSummary.lineColumn", { line: item.errorPosition.line, column: item.errorPosition.column }) }}</span>
+                            <span data-native-clipboard class="min-w-0 flex-1 cursor-text select-text truncate" :title="item.error" @mousedown.stop @click.stop @dblclick.stop>{{ item.error }}</span>
+                            <LightTooltip v-if="item.errorPosition" :text="t('editor.locateError', { line: item.errorPosition.line, column: item.errorPosition.column })" side="bottom" :delay="0" :close-delay="0" nowrap>
+                              <button
+                                type="button"
+                                class="pointer-events-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-destructive/70 hover:bg-destructive/10 hover:text-destructive"
+                                :aria-label="t('editor.locateError', { line: item.errorPosition.line, column: item.errorPosition.column })"
+                                @mousedown.stop
+                                @click.stop="locateExecutionSummaryError(item)"
+                              >
+                                <LocateFixed class="h-3 w-3" />
+                              </button>
+                            </LightTooltip>
+                            <LightTooltip :text="t('grid.copy')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                              <button
+                                type="button"
+                                class="pointer-events-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-destructive/70 hover:bg-destructive/10 hover:text-destructive"
+                                :aria-label="t('grid.copy')"
+                                @mousedown.stop
+                                @click.stop="copyExecutionSummaryError(item.error)"
+                              >
+                                <Copy class="h-3 w-3" />
+                              </button>
+                            </LightTooltip>
+                          </div>
+                        </div>
+                        <div class="pointer-events-none relative z-[1]">
+                          <span
+                            class="inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[10px]"
+                            :class="{
+                              'border-primary/35 bg-primary/10 text-primary': item.status === 'running',
+                              'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300': item.status === 'success',
+                              'border-destructive/40 bg-destructive/10 text-destructive': item.status === 'error',
+                              'border-border bg-muted/40 text-muted-foreground': item.status === 'pending' || item.status === 'skipped',
+                              'border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300': item.status === 'cancelled',
+                            }"
+                          >
+                            <Loader2 v-if="item.status === 'running'" class="h-3 w-3 animate-spin" />
+                            <Check v-else-if="item.status === 'success'" class="h-3 w-3" />
+                            <X v-else-if="item.status === 'error'" class="h-3 w-3" />
+                            <SquareDashed v-else class="h-3 w-3" />
+                            {{ t(`executionSummary.statuses.${item.status}`) }}
+                          </span>
+                        </div>
+                        <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.rowCount.toLocaleString() }}</div>
+                        <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
+                      </div>
+                    </DynamicScrollerItem>
+                  </DynamicScroller>
+                  <div class="shrink-0 px-3 py-2 text-[11px] text-muted-foreground">{{ t("executionSummary.navigationHint") }}</div>
                 </div>
-                <div class="grid shrink-0 grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
-                  <div>{{ t("executionSummary.statement") }}</div>
-                  <div>{{ t("executionSummary.sql") }}</div>
-                  <div>{{ t("executionSummary.status") }}</div>
-                  <div class="text-right">{{ t("executionSummary.rows") }}</div>
-                  <div class="text-right">{{ t("executionSummary.time") }}</div>
-                </div>
-                <DynamicScroller v-slot="{ item, index, active }" class="min-h-0 flex-1 border-b" :items="summaryItems" :min-item-size="37" :buffer="600" :skip-hover="true" key-field="statementIndex">
-                  <DynamicScrollerItem :item="item" :active="active" :data-index="index" :size-dependencies="[item.error]">
-                    <div class="relative grid w-full grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] items-center border-b px-3 py-2 text-left text-xs last:border-b-0">
+              </div>
+
+              <RedisQueryConsoleOutput v-else-if="activeOutputView === 'result' && redisResultViewMode === 'console' && canShowRedisConsoleOutput" :result="activeTab.result" :results="activeTab.results" :loading="activeTab.isExecuting" />
+
+              <QueryMessagesView v-else-if="activeOutputView === 'messages'" class="flex-1 min-h-0" :messages="resultMessages" />
+
+              <template v-else>
+                <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
+                <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
+                <DataGrid
+                  v-else-if="activeTab.result && hasTabularResult"
+                  ref="dataGridRef"
+                  :key="activeResultGridInstanceKey"
+                  :cache-key="activeResultGridCacheKey"
+                  :column-width-cache-key="activeResultGridColumnWidthCacheKey"
+                  :pending-state-key="activeResultGridInstanceKey"
+                  :view-generation="activeTab.resultViewGeneration"
+                  class="flex-1 min-h-0"
+                  :result="activeGridResult!"
+                  :sort-column="hasNeo4jNodes ? activeGridSort?.column : activeTab.resultSortColumn"
+                  :sort-column-index="hasNeo4jNodes ? activeGridSort?.columnIndex : activeTab.resultSortColumnIndex"
+                  :sort-direction="hasNeo4jNodes ? activeGridSort?.direction : activeTab.resultSortDirection"
+                  :sort-mode="hasNeo4jNodes ? 'local' : activeTab.resultSortMode"
+                  :database-sort-enabled="!hasNeo4jNodes"
+                  :initial-order-by-input="activeTab.orderByInput"
+                  :sql="activeResultSql"
+                  :export-sql="activeResultExportSql"
+                  :page-sql="activeTab.resultPageSql"
+                  :loading="activeResultIsLoading"
+                  :editable="!hasNeo4jNodes && (!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler)"
+                  :source-columns="hasNeo4jNodes ? undefined : activeTab.querySourceColumns"
+                  :joined-write-targets="hasNeo4jNodes ? undefined : activeTab.queryWriteTargets"
+                  :query-multi-source="(activeTab.queryWriteTargets?.length ?? 0) > 1"
+                  :has-unique-query-insert-target="!!activeTab.tableMeta && activeTab.queryAnalysis?.multiSource !== true && (activeTab.queryAnalysis?.sources?.length ?? 1) === 1 && (activeTab.queryWriteTargets?.length ?? 1) <= 1"
+                  :readonly-column-indexes="hasNeo4jNodes ? undefined : groupedQueryReadonlyColumnIndexes(activeTab)"
+                  :result-column-comments="hasNeo4jNodes ? undefined : activeTab.resultColumnComments"
+                  :query-display-source-columns="hasNeo4jNodes ? undefined : activeTab.queryDisplaySourceColumns"
+                  :custom-save-handler="mongoQueryResultSaveHandler"
+                  :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
+                  :query-editability-reason="activeTab.queryEditabilityReason"
+                  :manual-transaction-session-id="activeTab.txnSessionId"
+                  :ensure-manual-transaction-session="activeTab.autoCommit === false ? () => queryStore.ensureManualTransactionSession(activeTab.id, activeResultDatabase, activeResultSchema) : undefined"
+                  :on-manual-transaction-mutation="() => queryStore.markManualTransactionDirty(activeTab.id)"
+                  :allow-insert-rows="activeTab.queryAnalysis?.allowInsert ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
+                  :allow-delete-rows="activeTab.queryAnalysis?.allowDelete ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
+                  context="results"
+                  :reveal-column-request="activeTab.gridRevealColumnRequest"
+                  :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
+                  :database-type="activeEffectiveDatabaseType"
+                  :connection-id="activeResultConnectionId"
+                  :database="activeResultDatabase"
+                  :schema="activeResultSchema"
+                  :table-meta="hasNeo4jNodes ? undefined : activeTab.tableMeta"
+                  :table-info-tab="activeTab.tableInfoTab"
+                  :page-offset="activeTab.resultPageOffset"
+                  :page-limit="activeTab.resultPageLimit"
+                  :executed-page-offset="activeTab.resultExecutedPageOffset"
+                  :executed-page-limit="activeTab.resultExecutedPageLimit"
+                  :count-sql="activeTab.resultCountSql"
+                  :count-total-rows="activeTab.resultCountSql ? () => withResultContext(() => queryStore.countTabResultRows(activeTab.id)) : undefined"
+                  :total-row-count="activeTab.resultTotalRowCount"
+                  :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
+                  :total-row-count-loading="activeTab.resultTotalRowCountLoading"
+                  :page-jump-progress="activeTab.resultPageJumpProgress"
+                  :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
+                  :full-export-result="fetchGridResultForExport"
+                  :transfer-query-result="openQueryResultTransfer"
+                  :query-result-export-request="
+                    hasNeo4jNodes
+                      ? undefined
+                      : (options: {
+                          exportId: string;
+                          filePath: string;
+                          format: 'csv' | 'xlsx' | 'json' | 'txt' | 'sql';
+                          includeSqlSheet?: boolean;
+                          exportTableName?: string;
+                          exportSchema?: string;
+                          exportColumnTypes?: Array<string | null | undefined>;
+                          exportColumnExtras?: Array<string | null | undefined>;
+                          insertMode?: SqlInsertMode;
+                        }) => withResultContext(() => queryStore.buildQueryResultExportRequest(activeTab.id, options))
+                  "
+                  :all-export-results="allResultExportSheets"
+                  :export-file-base-name="activeQueryResultExportBaseName"
+                  :show-cancel="shouldShowCancelAction(activeTab)"
+                  :cancelling="activeTab.isCancelling"
+                  :cancel-disabled="!canCancelQueryExecution(activeTab)"
+                  @cancel="emit('cancel', activeTab.id)"
+                  @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
+                  @local-column-filters-change="(filters: Record<string, string[]>) => withResultContext(() => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters))"
+                  @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', activeTab.id, sql, searchText, whereInput, orderBy, limit, offset, intent)"
+                  @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy, appendResult)"
+                  @sort="sortQueryGrid"
+                  @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
+                >
+                  <template #result-toolbar-leading="{ compact }">
+                    <QueryResultViewSwitcher
+                      :active-view="activeOutputView"
+                      :can-show-result="canShowResultOutput"
+                      :can-show-summary="hasExecutionSummary"
+                      :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                      :can-show-graph="canShowGraphOutput"
+                      :can-show-messages="canShowMessagesOutput"
+                      :can-show-redis-console="canShowRedisConsoleOutput"
+                      :result-mode="redisResultViewMode"
+                      :message-count="resultMessageCount"
+                      :compact="compact"
+                      @select-view="emit('update:activeOutputView', activeTab.id, $event)"
+                      @select-result-mode="setRedisResultViewMode"
+                    />
+                    <template v-if="activeElasticsearchRawBody">
+                      <div class="mx-1 h-4 w-px bg-border" />
                       <button
                         type="button"
-                        class="absolute inset-0 z-0 cursor-pointer text-left transition-colors hover:bg-muted/35 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
-                        :title="item.error || item.sql"
-                        :aria-label="item.error || item.sql || t('executionSummary.noSql')"
-                        @click="previewExecutionSummaryItem(item)"
-                        @dblclick="locateExecutionSummaryError(item)"
-                        @keydown.enter.prevent="focusExecutionSummaryItem(item)"
-                      />
-                      <div class="pointer-events-none relative z-[1] font-mono text-muted-foreground">#{{ item.statementIndex + 1 }}</div>
-                      <div class="relative z-[1] min-w-0 cursor-pointer" @click="previewExecutionSummaryItem(item)" @dblclick="locateExecutionSummaryError(item)">
-                        <div class="truncate font-mono text-[11px] text-foreground">{{ item.sql || t("executionSummary.noSql") }}</div>
-                        <div v-if="item.error" class="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] text-destructive">
-                          <span v-if="item.errorPosition" class="shrink-0 rounded border border-destructive/30 bg-destructive/5 px-1 tabular-nums">{{ t("executionSummary.lineColumn", { line: item.errorPosition.line, column: item.errorPosition.column }) }}</span>
-                          <span data-native-clipboard class="min-w-0 flex-1 cursor-text select-text truncate" :title="item.error" @mousedown.stop @click.stop @dblclick.stop>{{ item.error }}</span>
-                          <LightTooltip v-if="item.errorPosition" :text="t('editor.locateError', { line: item.errorPosition.line, column: item.errorPosition.column })" side="bottom" :delay="0" :close-delay="0" nowrap>
-                            <button
-                              type="button"
-                              class="pointer-events-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-destructive/70 hover:bg-destructive/10 hover:text-destructive"
-                              :aria-label="t('editor.locateError', { line: item.errorPosition.line, column: item.errorPosition.column })"
-                              @mousedown.stop
-                              @click.stop="locateExecutionSummaryError(item)"
-                            >
-                              <LocateFixed class="h-3 w-3" />
-                            </button>
-                          </LightTooltip>
-                          <LightTooltip :text="t('grid.copy')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                            <button type="button" class="pointer-events-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-destructive/70 hover:bg-destructive/10 hover:text-destructive" :aria-label="t('grid.copy')" @mousedown.stop @click.stop="copyExecutionSummaryError(item.error)">
-                              <Copy class="h-3 w-3" />
-                            </button>
-                          </LightTooltip>
-                        </div>
-                      </div>
-                      <div class="pointer-events-none relative z-[1]">
-                        <span
-                          class="inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[10px]"
-                          :class="{
-                            'border-primary/35 bg-primary/10 text-primary': item.status === 'running',
-                            'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300': item.status === 'success',
-                            'border-destructive/40 bg-destructive/10 text-destructive': item.status === 'error',
-                            'border-border bg-muted/40 text-muted-foreground': item.status === 'pending' || item.status === 'skipped',
-                            'border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300': item.status === 'cancelled',
-                          }"
-                        >
-                          <Loader2 v-if="item.status === 'running'" class="h-3 w-3 animate-spin" />
-                          <Check v-else-if="item.status === 'success'" class="h-3 w-3" />
-                          <X v-else-if="item.status === 'error'" class="h-3 w-3" />
-                          <SquareDashed v-else class="h-3 w-3" />
-                          {{ t(`executionSummary.statuses.${item.status}`) }}
-                        </span>
-                      </div>
-                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.rowCount.toLocaleString() }}</div>
-                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
-                    </div>
-                  </DynamicScrollerItem>
-                </DynamicScroller>
-                <div class="shrink-0 px-3 py-2 text-[11px] text-muted-foreground">{{ t("executionSummary.navigationHint") }}</div>
-              </div>
-            </div>
-
-            <RedisQueryConsoleOutput v-else-if="activeOutputView === 'result' && redisResultViewMode === 'console' && canShowRedisConsoleOutput" :result="activeTab.result" :results="activeTab.results" :loading="activeTab.isExecuting" />
-
-            <QueryMessagesView v-else-if="activeOutputView === 'messages'" class="flex-1 min-h-0" :messages="resultMessages" />
-
-            <template v-else>
-              <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
-              <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
-              <DataGrid
-                v-else-if="activeTab.result && hasTabularResult"
-                ref="dataGridRef"
-                :key="activeResultGridInstanceKey"
-                :cache-key="activeResultGridCacheKey"
-                :column-width-cache-key="activeResultGridColumnWidthCacheKey"
-                :pending-state-key="activeResultGridInstanceKey"
-                :view-generation="activeTab.resultViewGeneration"
-                class="flex-1 min-h-0"
-                :result="activeGridResult!"
-                :sort-column="hasNeo4jNodes ? activeGridSort?.column : activeTab.resultSortColumn"
-                :sort-column-index="hasNeo4jNodes ? activeGridSort?.columnIndex : activeTab.resultSortColumnIndex"
-                :sort-direction="hasNeo4jNodes ? activeGridSort?.direction : activeTab.resultSortDirection"
-                :sort-mode="hasNeo4jNodes ? 'local' : activeTab.resultSortMode"
-                :database-sort-enabled="!hasNeo4jNodes"
-                :initial-order-by-input="activeTab.orderByInput"
-                :sql="activeResultSql"
-                :export-sql="activeResultExportSql"
-                :page-sql="activeTab.resultPageSql"
-                :loading="activeResultIsLoading"
-                :editable="!hasNeo4jNodes && (!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler)"
-                :source-columns="hasNeo4jNodes ? undefined : activeTab.querySourceColumns"
-                :joined-write-targets="hasNeo4jNodes ? undefined : activeTab.queryWriteTargets"
-                :query-multi-source="(activeTab.queryWriteTargets?.length ?? 0) > 1"
-                :has-unique-query-insert-target="!!activeTab.tableMeta && activeTab.queryAnalysis?.multiSource !== true && (activeTab.queryAnalysis?.sources?.length ?? 1) === 1 && (activeTab.queryWriteTargets?.length ?? 1) <= 1"
-                :readonly-column-indexes="hasNeo4jNodes ? undefined : groupedQueryReadonlyColumnIndexes(activeTab)"
-                :result-column-comments="hasNeo4jNodes ? undefined : activeTab.resultColumnComments"
-                :query-display-source-columns="hasNeo4jNodes ? undefined : activeTab.queryDisplaySourceColumns"
-                :custom-save-handler="mongoQueryResultSaveHandler"
-                :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
-                :query-editability-reason="activeTab.queryEditabilityReason"
-                :manual-transaction-session-id="activeTab.txnSessionId"
-                :ensure-manual-transaction-session="activeTab.autoCommit === false ? () => queryStore.ensureManualTransactionSession(activeTab.id, activeResultDatabase, activeResultSchema) : undefined"
-                :on-manual-transaction-mutation="() => queryStore.markManualTransactionDirty(activeTab.id)"
-                :allow-insert-rows="activeTab.queryAnalysis?.allowInsert ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
-                :allow-delete-rows="activeTab.queryAnalysis?.allowDelete ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
-                context="results"
-                :reveal-column-request="activeTab.gridRevealColumnRequest"
-                :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
-                :database-type="activeEffectiveDatabaseType"
-                :connection-id="activeResultConnectionId"
-                :database="activeResultDatabase"
-                :schema="activeResultSchema"
-                :table-meta="hasNeo4jNodes ? undefined : activeTab.tableMeta"
-                :table-info-tab="activeTab.tableInfoTab"
-                :page-offset="activeTab.resultPageOffset"
-                :page-limit="activeTab.resultPageLimit"
-                :executed-page-offset="activeTab.resultExecutedPageOffset"
-                :executed-page-limit="activeTab.resultExecutedPageLimit"
-                :count-sql="activeTab.resultCountSql"
-                :count-total-rows="activeTab.resultCountSql ? () => queryStore.countTabResultRows(activeTab.id) : undefined"
-                :total-row-count="activeTab.resultTotalRowCount"
-                :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
-                :total-row-count-loading="activeTab.resultTotalRowCountLoading"
-                :page-jump-progress="activeTab.resultPageJumpProgress"
-                :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
-                :full-export-result="fetchGridResultForExport"
-                :transfer-query-result="openQueryResultTransfer"
-                :query-result-export-request="
-                  hasNeo4jNodes
-                    ? undefined
-                    : (options: {
-                        exportId: string;
-                        filePath: string;
-                        format: 'csv' | 'xlsx' | 'json' | 'txt' | 'sql';
-                        includeSqlSheet?: boolean;
-                        exportTableName?: string;
-                        exportSchema?: string;
-                        exportColumnTypes?: Array<string | null | undefined>;
-                        exportColumnExtras?: Array<string | null | undefined>;
-                        insertMode?: SqlInsertMode;
-                      }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)
-                "
-                :all-export-results="allResultExportSheets"
-                :export-file-base-name="activeQueryResultExportBaseName"
-                :show-cancel="shouldShowCancelAction(activeTab)"
-                :cancelling="activeTab.isCancelling"
-                :cancel-disabled="!canCancelQueryExecution(activeTab)"
-                @cancel="emit('cancel', activeTab.id)"
-                @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
-                @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
-                @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', activeTab.id, sql, searchText, whereInput, orderBy, limit, offset, intent)"
-                @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy, appendResult)"
-                @sort="sortQueryGrid"
-                @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
-              >
-                <template #result-toolbar-leading="{ compact }">
-                  <QueryResultViewSwitcher
-                    :active-view="activeOutputView"
-                    :can-show-result="canShowResultOutput"
-                    :can-show-summary="hasExecutionSummary"
-                    :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
-                    :can-show-graph="canShowGraphOutput"
-                    :can-show-messages="canShowMessagesOutput"
-                    :can-show-redis-console="canShowRedisConsoleOutput"
-                    :result-mode="redisResultViewMode"
-                    :message-count="resultMessageCount"
-                    :compact="compact"
-                    @select-view="emit('update:activeOutputView', activeTab.id, $event)"
-                    @select-result-mode="setRedisResultViewMode"
-                  />
-                  <template v-if="activeElasticsearchRawBody">
-                    <div class="mx-1 h-4 w-px bg-border" />
-                    <button
-                      type="button"
-                      class="inline-flex h-5 shrink-0 items-center rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
-                      :class="showElasticsearchRawJson ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                      :aria-pressed="showElasticsearchRawJson"
-                      @click="showElasticsearchRawJson = !showElasticsearchRawJson"
-                    >
-                      {{ showElasticsearchRawJson ? t("tabs.tableData") : t("redis.jsonView") }}
-                    </button>
+                        class="inline-flex h-5 shrink-0 items-center rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
+                        :class="showElasticsearchRawJson ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                        :aria-pressed="showElasticsearchRawJson"
+                        @click="showElasticsearchRawJson = !showElasticsearchRawJson"
+                      >
+                        {{ showElasticsearchRawJson ? t("tabs.tableData") : t("redis.jsonView") }}
+                      </button>
+                    </template>
+                    <template v-else-if="canShowProfile">
+                      <div class="mx-1 h-4 w-px bg-border" />
+                      <button
+                        type="button"
+                        class="inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
+                        :class="activeOutputView === 'profile' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                        :aria-pressed="activeOutputView === 'profile'"
+                        @click="emit('update:activeOutputView', activeTab.id, activeOutputView === 'profile' ? 'result' : 'profile')"
+                      >
+                        <Gauge class="h-3.5 w-3.5" />
+                        {{ t("profile.title") }}
+                      </button>
+                    </template>
                   </template>
-                  <template v-else-if="canShowProfile">
-                    <div class="mx-1 h-4 w-px bg-border" />
-                    <button
-                      type="button"
-                      class="inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
-                      :class="activeOutputView === 'profile' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                      :aria-pressed="activeOutputView === 'profile'"
-                      @click="emit('update:activeOutputView', activeTab.id, activeOutputView === 'profile' ? 'result' : 'profile')"
-                    >
-                      <Gauge class="h-3.5 w-3.5" />
-                      {{ t("profile.title") }}
-                    </button>
+                  <template #result-toolbar-actions="{ compact }">
+                    <QueryResultToolbarActions
+                      :active-view="activeOutputView"
+                      :can-show-explain="canShowExplainOutput"
+                      :can-show-profile="canShowProfile"
+                      :can-export-archive="canExportResultArchive"
+                      :archive-exporting="resultArchiveExporting"
+                      :compact="compact"
+                      :has-result="!!activeTab.result"
+                      @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
+                      @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
+                      @export-archive="exportResultArchive"
+                      @open-result-view="openPluginResultView"
+                    />
                   </template>
-                </template>
-                <template #result-toolbar-actions="{ compact }">
-                  <QueryResultToolbarActions
-                    :active-view="activeOutputView"
-                    :can-show-explain="canShowExplainOutput"
-                    :can-show-profile="canShowProfile"
-                    :can-export-archive="canExportResultArchive"
-                    :archive-exporting="resultArchiveExporting"
-                    :compact="compact"
-                    :has-result="!!activeTab.result"
-                    @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
-                    @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
-                    @export-archive="exportResultArchive"
-                    @open-result-view="openPluginResultView"
-                  />
-                </template>
-                <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
-                  <QueryErrorActions
-                    :error-message="String(errorMessage)"
-                    :backend-error="activeTab.result.error"
-                    :connection-id="activeResultConnectionId"
-                    :error-position="activeResultErrorPosition"
-                    @locate-error="locateActiveResultError"
-                    @change-connection-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
-                    @change-query-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
-                    @fix-with-ai="(message) => emit('fixWithAi', activeTab.id, message)"
-                  />
-                </template>
-              </DataGrid>
-              <QueryLoadingState
-                v-else-if="!activeTab.result && activeTab.isExecuting"
-                class="flex-1 min-h-0"
-                :label-key="queryExecutionLabelKey(activeTab)"
-                :elapsed-seconds="queryRunningElapsedSeconds"
-                show-cancel
-                :cancel-disabled="!canCancelQueryExecution(activeTab)"
-                :cancelling="activeTab.isCancelling"
-                @cancel="emit('cancel', activeTab.id)"
-              />
-              <div v-else-if="activeTab.resultEvicted && activeTab.resultCacheState === 'missing'" class="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-                <div>{{ t("grid.cachedResultUnavailable") }}</div>
-                <Button v-if="(activeTab.lastExecutedSql ?? activeTab.sql)?.trim()" variant="secondary" size="sm" @click="queryStore.reloadEvictedTab(activeTab.id, { reexecuteOnMissing: true })">
-                  {{ t("grid.reexecuteQuery") }}
-                </Button>
-              </div>
-              <div v-else-if="!activeTab.result" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-muted-foreground text-sm">
-                <div>{{ t("editor.pressToExecute", { mod: shortcutModifier }) }}</div>
-                <div>{{ t("editor.pressToSaveSql", { mod: shortcutModifier }) }}</div>
-              </div>
+                  <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
+                    <QueryErrorActions
+                      :error-message="String(errorMessage)"
+                      :backend-error="activeTab.result.error"
+                      :connection-id="activeResultConnectionId"
+                      :error-position="activeResultErrorPosition"
+                      @locate-error="locateActiveResultError"
+                      @change-connection-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
+                      @change-query-timeout="activeResultConnectionId && emit('openConnectionSettings', activeResultConnectionId, 'advanced')"
+                      @fix-with-ai="(message) => emit('fixWithAi', activeTab.id, message)"
+                    />
+                  </template>
+                </DataGrid>
+                <QueryLoadingState
+                  v-else-if="!activeTab.result && activeTab.isExecuting"
+                  class="flex-1 min-h-0"
+                  :label-key="queryExecutionLabelKey(activeTab)"
+                  :elapsed-seconds="queryRunningElapsedSeconds"
+                  show-cancel
+                  :cancel-disabled="!canCancelQueryExecution(activeTab)"
+                  :cancelling="activeTab.isCancelling"
+                  @cancel="emit('cancel', activeTab.id)"
+                />
+                <div v-else-if="activeTab.resultEvicted && activeTab.resultCacheState === 'missing'" class="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+                  <div>{{ t("grid.cachedResultUnavailable") }}</div>
+                  <Button v-if="(activeTab.lastExecutedSql ?? activeTab.sql)?.trim()" variant="secondary" size="sm" @click="queryStore.reloadEvictedTab(activeTab.id, { reexecuteOnMissing: true })">
+                    {{ t("grid.reexecuteQuery") }}
+                  </Button>
+                </div>
+                <div v-else-if="!activeTab.result" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-muted-foreground text-sm">
+                  <div>{{ t("editor.pressToExecute", { mod: shortcutModifier }) }}</div>
+                  <div>{{ t("editor.pressToSaveSql", { mod: shortcutModifier }) }}</div>
+                </div>
+              </template>
             </template>
           </div>
         </Pane>

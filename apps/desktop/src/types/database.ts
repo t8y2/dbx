@@ -1481,6 +1481,8 @@ export interface QueryResultSourceColumnRef {
 }
 
 export interface QueryResultRun {
+  /** Temporary execution context kept for results displayed inside the editor. */
+  inlineRetained?: boolean;
   id: string;
   title: string;
   sequence: number;

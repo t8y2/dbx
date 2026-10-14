@@ -7339,6 +7339,8 @@ export default withEnglishFallback({
     executeAllOnBlankLineDescription: "在「執行游標所在語句」模式下，游標沒有對應語句時執行全部 SQL。預設關閉。",
     showExecutionTargetPicker: "顯示執行目標選擇器",
     showExecutionTargetPickerDescription: "啟用後，無選取執行時可在目前語句與全部 SQL 之間臨時選擇。",
+    inlineQueryResults: "查詢結果在編輯器中顯示",
+    inlineQueryResultsDescription: "開啟後在對應 SQL 下方顯示查詢結果。重新執行只更新目前語句的表格，保留其他語句的結果。",
     showStatementRunButtons: "顯示左側執行按鈕",
     showStatementRunButtonsDescription: "在 SQL 編輯器左側顯示按語句執行的快捷按鈕。關閉後仍可透過快捷鍵和右鍵選單執行。",
     locateCursorOnGutterExecute: "左側執行後游標定位到語句首部",

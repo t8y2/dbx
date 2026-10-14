@@ -9010,6 +9010,8 @@ export default {
     executeAllOnBlankLineDescription: "In current-statement mode, execute all SQL when there is no statement at the cursor. Disabled by default.",
     showExecutionTargetPicker: "Show execution target picker",
     showExecutionTargetPickerDescription: "When enabled, running without a selection lets you choose between the current statement and all SQL.",
+    inlineQueryResults: "Show query results below SQL",
+    inlineQueryResultsDescription: "Show query results below their SQL statements. Rerunning a statement updates only its grid and preserves other statement results.",
     showStatementRunButtons: "Show left-side run buttons",
     showStatementRunButtonsDescription: "Show per-statement run buttons in the SQL editor gutter. Keyboard shortcuts and context menu execution still work when disabled.",
     locateCursorOnGutterExecute: "Move cursor to statement start on gutter run",

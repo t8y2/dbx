@@ -6,7 +6,7 @@ import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryResultSurfa
 
 defineOptions({ inheritAttrs: false });
 
-const props = defineProps<ContentAreaSurfaceProps>();
+const props = defineProps<ContentAreaSurfaceProps & { inlineResult?: boolean; historyOnly?: boolean; activateResult?: () => void; closeInlineResult?: () => void }>();
 const emit = defineEmits<ContentAreaSurfaceEmits>();
 
 const attrs = useAttrs();
@@ -39,7 +39,7 @@ defineExpose<QueryResultSurfaceHandle>({
 </script>
 
 <template>
-  <div class="min-h-0 overflow-hidden" :class="resultClass">
-    <ContentArea ref="contentAreaRef" v-bind="bindings" result-only class="h-full" />
+  <div class="min-h-0 overflow-hidden" :class="resultClass" :data-inline-result-history="historyOnly ? '' : undefined">
+    <ContentArea ref="contentAreaRef" v-bind="bindings" :inline-result="inlineResult" :history-only="historyOnly" :activate-result="activateResult" :close-inline-result="closeInlineResult" result-only class="h-full min-w-0" />
   </div>
 </template>

@@ -9350,6 +9350,8 @@ export default withEnglishFallback({
     executeAllOnBlankLineDescription: "В режиме выполнения текущего оператора выполнять весь SQL, когда под курсором нет оператора. По умолчанию отключено.",
     showExecutionTargetPicker: "Показывать выбор цели выполнения",
     showExecutionTargetPickerDescription: "Если включено, при запуске без выделения можно выбрать между текущим оператором и всем SQL.",
+    inlineQueryResults: "Показывать результаты под SQL",
+    inlineQueryResultsDescription: "Показывает результаты под соответствующими SQL-запросами. Повторное выполнение обновляет только таблицу текущего запроса, сохраняя остальные результаты.",
     showStatementRunButtons: "Показывать кнопки запуска слева",
     showStatementRunButtonsDescription: "Показывать кнопки запуска для каждого оператора на полосе SQL-редактора. Горячие клавиши и выполнение из контекстного меню работают и при отключении.",
     locateCursorOnGutterExecute: "Перемещать курсор в начало оператора при запуске с полосы",

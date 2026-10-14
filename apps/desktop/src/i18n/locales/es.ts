@@ -8231,6 +8231,8 @@ export default withEnglishFallback({
     executeAllOnBlankLineDescription: "En el modo de sentencia actual, ejecuta todo el SQL cuando no hay una sentencia en el cursor. Desactivado de forma predeterminada.",
     showExecutionTargetPicker: "Mostrar selector de objetivo",
     showExecutionTargetPickerDescription: "Al activarlo, ejecutar sin selección permite elegir entre la sentencia actual y todo el SQL.",
+    inlineQueryResults: "Mostrar resultados debajo del SQL",
+    inlineQueryResultsDescription: "Muestra los resultados debajo de sus sentencias SQL. Al ejecutar una sentencia de nuevo, solo se actualiza su tabla y se conservan los demás resultados.",
     showStatementRunButtons: "Mostrar botones de ejecución laterales",
     showStatementRunButtonsDescription: "Muestra botones para ejecutar cada sentencia en el margen del editor SQL. Los atajos de teclado y el menú contextual seguirán funcionando al desactivarlo.",
     locateCursorOnGutterExecute: "Mover el cursor al inicio de la sentencia al ejecutar desde el margen",

@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createApp, nextTick } from "vue";
+import { createApp, nextTick, inject } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +14,12 @@ vi.mock("splitpanes", () => ({
     template: `<div class="pane-stub"><slot /></div>`,
   },
 }));
+vi.mock("@/lib/backend/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/backend/api")>()),
+  analyzeEditableQueryEditability: vi.fn().mockResolvedValue({ editable: false, reason: "no-table" }),
+}));
 
+const inlinePortals = vi.hoisted(() => [] as import("@/lib/editor/inlineQueryResultPortal").InlineQueryResultPortal[]);
 const editorPreviewCalls = vi.hoisted(() => [] as Array<{ tabId: string; range: unknown }>);
 const editorFocusCalls = vi.hoisted(() => [] as Array<{ tabId: string; range: unknown }>);
 const groupHandleModRCalls = vi.hoisted(() => [] as Element[]);
@@ -28,6 +33,11 @@ const groupExecutionCalls = vi.hoisted(() => ({ capture: [] as string[], request
 vi.mock("@/components/layout/EditorGroup.vue", () => ({
   default: {
     name: "EditorGroupStub",
+    setup() {
+      const portal = inject<import("@/lib/editor/inlineQueryResultPortal").InlineQueryResultPortal>("dbx-inline-query-result-portal");
+      if (portal) inlinePortals.push(portal);
+      return {};
+    },
     props: ["groupId", "tabIds", "activeTabId", "contentSuppressed"],
     emits: ["execute"],
     methods: {
@@ -79,7 +89,7 @@ vi.mock("@/components/layout/EditorToolbar.vue", () => ({
 vi.mock("@/components/layout/QueryResultSurface.vue", () => ({
   default: {
     name: "QueryResultSurfaceStub",
-    props: ["activeTab"],
+    props: ["activeTab", "historyOnly", "closeInlineResult"],
     emits: ["previewStatement", "focusStatement"],
     methods: {
       handleModRTarget(target: Element) {
@@ -91,13 +101,13 @@ vi.mock("@/components/layout/QueryResultSurface.vue", () => ({
         return true;
       },
     },
-    template: `<div data-test="result-surface">{{ activeTab?.id }}<button data-test="emit-preview" @click="$emit('previewStatement', 'tab-a', { from: 0, to: 8 })">preview</button><button data-test="emit-focus" @click="$emit('focusStatement', 'tab-a', { from: 0, to: 8 })">focus</button></div>`,
+    template: `<div :data-inline-result-history="historyOnly ? '' : undefined" :data-test="historyOnly ? 'result-history' : 'result-surface'" :data-result-value="activeTab?.result?.rows[0]?.[0]" :data-executing="activeTab?.isExecuting" :data-live-messages="activeTab?.liveQueryMessages?.length ?? 0" :data-sort-column="activeTab?.resultSortColumn" :data-grid-revision="activeTab?.resultGridRevision">{{ activeTab?.id }}<button v-if="closeInlineResult" data-test="close-inline" @click="closeInlineResult()">close</button><button data-test="emit-preview" @click="$emit('previewStatement', 'tab-a', { from: 0, to: 8 })">preview</button><button data-test="emit-focus" @click="$emit('focusStatement', 'tab-a', { from: 0, to: 8 })">focus</button></div>`,
   },
 }));
 
 import SqlEditorWorkspace from "../SqlEditorWorkspace.vue";
 import { useQueryStore } from "@/stores/queryStore";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { DEFAULT_EDITOR_SETTINGS, useSettingsStore } from "@/stores/settingsStore";
 import type { QueryTab } from "@/types/database";
 
 function tab(id: string): QueryTab {
@@ -109,7 +119,7 @@ function tab(id: string): QueryTab {
     sql: "SELECT 1",
     mode: "query",
     isExecuting: false,
-    result: { columns: ["id"], rows: [], affected_rows: 0, execution_time_ms: 1 },
+    result: { columns: ["id"], rows: [], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1", sourceFrom: 0, sourceTo: 8 },
   };
 }
 
@@ -127,8 +137,9 @@ describe("SqlEditorWorkspace mount contract", () => {
   let pinia: ReturnType<typeof createPinia>;
   let i18n: ReturnType<typeof createI18n>;
 
-  function mountOutputWorkspace(tabs: QueryTab[]) {
+  function mountOutputWorkspace(tabs: QueryTab[], inline = false) {
     const store = useQueryStore();
+    useSettingsStore().editorSettings.inlineQueryResults = inline;
     store.tabs = tabs;
     store.activeTabId = tabs[0]!.id;
     store.groups = [{ id: "g1", tabIds: tabs.map((item) => item.id), activeTabId: tabs[0]!.id }];
@@ -160,9 +171,206 @@ describe("SqlEditorWorkspace mount contract", () => {
     };
   }
 
+  it("defaults to the bottom workflow and supports opting in and out without hiding history", async () => {
+    expect(DEFAULT_EDITOR_SETTINGS.inlineQueryResults).toBe(false);
+    const workspace = mountOutputWorkspace([tab("optional")], true);
+    try {
+      const settings = useSettingsStore();
+      settings.editorSettings.inlineQueryResults = false;
+      const target = document.createElement("div");
+      workspace.host.append(target);
+      inlinePortals[0]!.mount("optional", workspace.store.tabs[0]!.result!, target);
+      await nextTick();
+      expect(target.children).toHaveLength(0);
+      expect(workspace.host.querySelector('[data-test="result-surface"]')).not.toBeNull();
+      settings.editorSettings.inlineQueryResults = true;
+      await nextTick();
+      expect(target.querySelector('[data-test="result-surface"]')).not.toBeNull();
+      expect(workspace.host.querySelectorAll('[data-test="result-surface"]')).toHaveLength(1);
+      expect(workspace.host.querySelector('[data-test="result-history"]')).not.toBeNull();
+      workspace.vm.toggleResultsPane();
+      await nextTick();
+      expect(target.querySelector('[data-test="result-surface"]')).not.toBeNull();
+      workspace.vm.toggleResultsPane();
+      await nextTick();
+      settings.editorSettings.inlineQueryResults = false;
+      await nextTick();
+      expect(target.children).toHaveLength(0);
+      expect(workspace.host.querySelectorAll('[data-test="result-surface"]')).toHaveLength(1);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("renders original result surfaces into separate hosts while keeping bottom history", async () => {
+    const workspace = mountOutputWorkspace([tab("inline-one")], true);
+    try {
+      await nextTick();
+      const original = workspace.host.querySelector("[data-inline-result-history]");
+      expect(original).not.toBeNull();
+      const target = document.createElement("div");
+      workspace.host.append(target);
+      inlinePortals[0]!.mount("inline-one", workspace.store.tabs[0]!.result!, target);
+      await nextTick();
+      expect(target.querySelector('[data-test="result-surface"]')).not.toBeNull();
+      expect(workspace.host.querySelectorAll("[data-shared-result-surface]")).toHaveLength(1);
+      expect(workspace.host.querySelector("[data-inline-result-history]")).not.toBeNull();
+      inlinePortals[0]!.unmount("inline-one", workspace.store.tabs[0]!.result!, target);
+      await nextTick();
+      expect(target.children).toHaveLength(0);
+      expect(workspace.host.querySelector("[data-inline-result-history]")).not.toBeNull();
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("shows two results at once and routes interactions to their own result state", async () => {
+    const queryTab = tab("inline-two");
+    queryTab.sql = "SELECT 1;\nSELECT 2;";
+    const first = { columns: ["one"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1;", sourceFrom: 0, sourceTo: 9 };
+    const second = { columns: ["two"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 2;", sourceFrom: 10, sourceTo: 19 };
+    queryTab.results = [first, second];
+    queryTab.result = first;
+    queryTab.activeResultIndex = 0;
+    queryTab.resultSortColumn = "one";
+    queryTab.resultGridRevision = "first-grid";
+    const workspace = mountOutputWorkspace([queryTab], true);
+    try {
+      const tab = workspace.store.tabs[0]!;
+      const firstHost = document.createElement("div");
+      const secondHost = document.createElement("div");
+      workspace.host.append(firstHost, secondHost);
+      inlinePortals[0]!.mount(tab.id, tab.results![0]!, firstHost);
+      inlinePortals[0]!.mount(tab.id, tab.results![1]!, secondHost);
+      await nextTick();
+      expect(workspace.host.querySelectorAll('[data-test="result-surface"]')).toHaveLength(2);
+      expect(firstHost.querySelector('[data-test="result-surface"]')?.getAttribute("data-result-value")).toBe("1");
+      expect(secondHost.querySelector('[data-test="result-surface"]')?.getAttribute("data-result-value")).toBe("2");
+      tab.isExecuting = true;
+      tab.liveQueryMessages = [{ severity: "NOTICE", message: "another statement" }];
+      await nextTick();
+      for (const host of [firstHost, secondHost]) {
+        expect(host.querySelector('[data-test="result-surface"]')?.getAttribute("data-executing")).toBe("false");
+        expect(host.querySelector('[data-test="result-surface"]')?.getAttribute("data-live-messages")).toBe("0");
+      }
+      tab.isExecuting = false;
+      tab.liveQueryMessages = undefined;
+      await nextTick();
+      secondHost.querySelector("[data-shared-result-surface]")!.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      await nextTick();
+      expect(tab.activeResultIndex).toBe(1);
+      expect(tab.resultSortColumn).toBeUndefined();
+      tab.resultSortColumn = "two";
+      tab.resultGridRevision = "second-grid";
+      await nextTick();
+      firstHost.querySelector("[data-shared-result-surface]")!.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      await nextTick();
+      expect(tab.activeResultIndex).toBe(0);
+      expect(tab.resultSortColumn).toBe("one");
+      expect(tab.resultGridRevision).toBe("first-grid");
+      expect(secondHost.querySelector('[data-test="result-surface"]')?.getAttribute("data-grid-revision")).toBe("second-grid");
+      expect(secondHost.querySelector('[data-test="result-surface"]')?.getAttribute("data-sort-column")).toBe("two");
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("keeps only Run history for offscreen inline blocks and falls back when no block can display the result", async () => {
+    const workspace = mountOutputWorkspace([tab("offscreen")], true);
+    try {
+      inlinePortals[0]!.sync("offscreen", [workspace.store.tabs[0]!.result!]);
+      await nextTick();
+      expect(workspace.host.querySelector("[data-shared-result-surface]")).toBeNull();
+      expect(workspace.host.querySelector("[data-inline-result-history]")).not.toBeNull();
+      inlinePortals[0]!.sync("offscreen", []);
+      await nextTick();
+      expect(workspace.host.querySelector("[data-shared-result-surface]")).not.toBeNull();
+    } finally {
+      workspace.cleanup();
+    }
+  });
+  it("dismisses individual grids without deleting sibling results, Run history or opening a bottom grid", async () => {
+    const queryTab = tab("dismiss");
+    queryTab.sql = "SELECT 1;\nSELECT 2;";
+    const first = { ...queryTab.result!, rows: [[1]], sourceStatement: "SELECT 1;", sourceTo: 9 };
+    const second = { ...first, rows: [[2]], sourceStatement: "SELECT 2;", sourceFrom: 10, sourceTo: 19 };
+    queryTab.resultRuns = [{ id: "batch", title: "", sequence: 1, createdAt: 1, sql: queryTab.sql, result: second, results: [first, second], activeResultIndex: 1, inlineRetained: true }];
+    queryTab.result = second;
+    queryTab.results = [first, second];
+    queryTab.activeResultRunId = "batch";
+    queryTab.activeResultIndex = 1;
+    const workspace = mountOutputWorkspace([queryTab], true);
+    try {
+      const tab = workspace.store.tabs[0]!;
+      const portal = inlinePortals[0]!;
+      const firstHost = document.createElement("div");
+      const secondHost = document.createElement("div");
+      workspace.host.append(firstHost, secondHost);
+      portal.mount(tab.id, tab.results![0]!, firstHost);
+      portal.mount(tab.id, tab.results![1]!, secondHost);
+      await nextTick();
+      firstHost.querySelector<HTMLButtonElement>('[data-test="close-inline"]')!.click();
+      await nextTick();
+      expect(firstHost.children).toHaveLength(0);
+      expect(secondHost.querySelector('[data-test="result-surface"]')).not.toBeNull();
+      secondHost.querySelector<HTMLButtonElement>('[data-test="close-inline"]')!.click();
+      portal.sync(tab.id, []);
+      await nextTick();
+      expect(workspace.host.querySelectorAll('[data-test="result-surface"]')).toHaveLength(0);
+      expect(workspace.host.querySelector('[data-test="result-history"]')).not.toBeNull();
+      expect(tab.resultRuns).toHaveLength(1);
+      expect(tab.results?.map((result) => result.rows)).toEqual([[[1]], [[2]]]);
+      portal.reopen(tab.id, tab.results![0]!);
+      await nextTick();
+      expect(firstHost.querySelector('[data-test="result-surface"]')).not.toBeNull();
+      expect(secondHost.children).toHaveLength(0);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("keeps separate executions visible while activating either result's original context", async () => {
+    const queryTab = tab("separate");
+    queryTab.sql = "SELECT 1;\nSELECT 2;";
+    const first = { columns: ["one"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1;", sourceFrom: 0, sourceTo: 9 };
+    const second = { ...first, rows: [[2]], sourceStatement: "SELECT 2;", sourceFrom: 10, sourceTo: 19 };
+    queryTab.resultRuns = [
+      { id: "run-one", title: "", sequence: 1, createdAt: 1, sql: "SELECT 1;", resultBaseSql: "SELECT 1;", result: first, results: [first], inlineRetained: true },
+      { id: "run-two", title: "", sequence: 2, createdAt: 2, sql: "SELECT 2;", resultBaseSql: "SELECT 2;", result: second, results: [second], inlineRetained: true },
+    ];
+    queryTab.activeResultRunId = "run-two";
+    queryTab.result = second;
+    queryTab.results = [second];
+    const workspace = mountOutputWorkspace([queryTab], true);
+    try {
+      const tab = workspace.store.tabs[0]!;
+      const firstHost = document.createElement("div");
+      const secondHost = document.createElement("div");
+      workspace.host.append(firstHost, secondHost);
+      inlinePortals[0]!.mount(tab.id, tab.resultRuns![0]!.result!, firstHost);
+      inlinePortals[0]!.mount(tab.id, tab.resultRuns![1]!.result!, secondHost);
+      await nextTick();
+      expect(workspace.host.querySelectorAll('[data-test="result-surface"]')).toHaveLength(2);
+      firstHost.querySelector("[data-shared-result-surface]")!.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      await nextTick();
+      expect(tab.activeResultRunId).toBe("run-one");
+      expect(tab.resultBaseSql).toBe("SELECT 1;");
+      expect(workspace.host.querySelectorAll('[data-test="result-surface"]')).toHaveLength(2);
+      expect(secondHost.querySelector('[data-test="result-surface"]')?.getAttribute("data-result-value")).toBe("2");
+      secondHost.querySelector("[data-shared-result-surface]")!.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      await nextTick();
+      expect(tab.activeResultRunId).toBe("run-two");
+      expect(tab.resultBaseSql).toBe("SELECT 2;");
+      expect(tab.resultAutoSave).not.toBe(true);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   beforeEach(() => {
     document.body.innerHTML = "";
     localStorage.removeItem("dbx-shared-results-pane-size");
+    inlinePortals.length = 0;
     editorPreviewCalls.length = 0;
     editorFocusCalls.length = 0;
     groupHandleModRCalls.length = 0;

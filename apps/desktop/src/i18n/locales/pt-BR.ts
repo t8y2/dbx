@@ -7996,6 +7996,8 @@ export default withEnglishFallback({
     executeAllOnBlankLineDescription: "No modo de instrução atual, executa todo o SQL quando não há instrução no cursor. Desativado por padrão.",
     showExecutionTargetPicker: "Mostrar seletor de destino",
     showExecutionTargetPickerDescription: "Quando ativado, executar sem seleção permite escolher entre a instrução atual e todo o SQL.",
+    inlineQueryResults: "Mostrar resultados abaixo do SQL",
+    inlineQueryResultsDescription: "Mostra os resultados abaixo das instruções SQL. Executar uma instrução novamente atualiza apenas sua tabela e preserva os demais resultados.",
     showStatementRunButtons: "Mostrar botões de execução laterais",
     showStatementRunButtonsDescription: "Mostra botões para executar cada instrução na margem do editor SQL. Atalhos de teclado e execução pelo menu de contexto continuam funcionando quando desativado.",
     locateCursorOnGutterExecute: "Mover cursor para o início da instrução ao executar pela margem",

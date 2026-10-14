@@ -7997,6 +7997,8 @@ export default withEnglishFallback({
     executeAllOnBlankLineDescription: "In modalità istruzione corrente, esegue tutto l'SQL quando non è presente un'istruzione al cursore. Disattivato per impostazione predefinita.",
     showExecutionTargetPicker: "Mostra selettore destinazione",
     showExecutionTargetPickerDescription: "Se attivo, l'esecuzione senza selezione permette di scegliere tra istruzione corrente e tutto l'SQL.",
+    inlineQueryResults: "Mostra risultati sotto SQL",
+    inlineQueryResultsDescription: "Mostra i risultati sotto le istruzioni SQL. Rieseguire una istruzione aggiorna solo la sua tabella e mantiene gli altri risultati.",
     showStatementRunButtons: "Mostra pulsanti di esecuzione laterali",
     showStatementRunButtonsDescription: "Mostra nel margine dell'editor SQL i pulsanti per eseguire ogni istruzione. Scorciatoie da tastiera e menu contestuale continuano a funzionare quando disattivati.",
     locateCursorOnGutterExecute: "Sposta il cursore all'inizio dell'istruzione all'esecuzione dal margine",

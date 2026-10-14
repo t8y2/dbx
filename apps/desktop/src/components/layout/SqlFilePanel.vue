@@ -168,16 +168,6 @@ async function addFolder(folderPath: string) {
   return loadFolderEntries(folderPath);
 }
 
-function findFileEntry(entries: SqlFileEntry[], path: string, ancestors: string[] = []): { entry: SqlFileEntry; ancestors: string[] } | undefined {
-  for (const entry of entries) {
-    if (!entry.is_dir && normalizeExternalSqlPath(entry.path) === path) return { entry, ancestors };
-    if (entry.is_dir) {
-      const found = findFileEntry(entry.children, path, [...ancestors, entry.path]);
-      if (found) return found;
-    }
-  }
-}
-
 async function locateCurrentFile() {
   const path = currentFilePath.value;
   if (!path || locatingFile.value) return;
@@ -192,32 +182,20 @@ async function locateCurrentFile() {
   locatingFile.value = true;
   try {
     const normalizedPath = normalizeExternalSqlPath(path);
-    let folder = folders.value.find((folder) => findFileEntry(folder.entries, normalizedPath));
-    if (!folder) {
-      folder = folders.value.find((folder) => normalizedPath.startsWith(`${normalizeExternalSqlPath(folder.path).replace(/\/$/, "")}/`));
-      if (folder) {
-        if (await loadFolderEntries(folder.path)) return;
-      } else {
-        const slashedPath = path.replace(/\\/g, "/");
-        const parentPath = slashedPath.slice(0, slashedPath.lastIndexOf("/") + 1);
-        if (!parentPath) return;
-        if (await addFolder(parentPath)) return;
-        folder = folders.value.find((folder) => folder.path === parentPath);
-      }
+    const folder = folders.value.find((folder) => normalizedPath.startsWith(`${normalizeExternalSqlPath(folder.path).replace(/\/$/, "")}/`));
+    if (folder) {
+      if (await loadFolderEntries(folder.path)) return;
+    } else {
+      const slashedPath = path.replace(/\\/g, "/");
+      const parentPath = slashedPath.slice(0, slashedPath.lastIndexOf("/") + 1);
+      if (!parentPath) return;
+      if (await addFolder(parentPath)) return;
     }
-    const found = folder && findFileEntry(folder.entries, normalizedPath);
-    if (!folder || !found) {
+    if (!activeFileTarget.value) {
       toast(t("sqlFileTree.activeFileNotFound"), 5000);
       return;
     }
-    folder.collapsed = false;
-    folder.expanded = new Set([...folder.expanded, ...found.ancestors]);
-    selectedPaths.value = new Set();
-    activePath.value = found.entry.path;
-    await nextTick();
-    selectionAnchorIndex.value = visibleItems.value.findIndex((item) => item.type === "file" && item.id === found.entry.path);
-    const row = Array.from(fileTree.value?.querySelectorAll<HTMLElement>("[data-sql-file-path]") ?? []).find((row) => row.dataset.sqlFilePath === found.entry.path);
-    row?.scrollIntoView({ block: "center", inline: "nearest" });
+    await locateActiveFile();
   } finally {
     locatingFile.value = false;
   }

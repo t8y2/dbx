@@ -20,11 +20,11 @@ function item(path = "/sql/first.sql", line = 2, column = 8): QuickOpenItem {
 }
 
 const mounted: Array<{ app: App; host: HTMLElement }> = [];
-function mountPreview(selected = item()) {
+function mountPreview(selected = item(), events: { onNavigate?: (direction: -1 | 1) => void; onOpen?: () => void; onClose?: () => void } = {}) {
   const props = reactive({ item: selected });
   const host = document.createElement("div");
   document.body.appendChild(host);
-  const app = createApp({ render: () => h(QuickOpenFilePreview, props) });
+  const app = createApp({ render: () => h(QuickOpenFilePreview, { ...props, ...events }) });
   app.mount(host);
   mounted.push({ app, host });
   return { props, host, app };
@@ -55,6 +55,46 @@ afterEach(() => {
 });
 
 describe("quick-open file preview", () => {
+  it.each([
+    ["Escape", "close", undefined],
+    ["Enter", "open", undefined],
+    ["ArrowUp", "navigate", -1],
+    ["ArrowDown", "navigate", 1],
+  ] as const)("forwards %s from the focused editor to the search dialog", async (key, event, direction) => {
+    const onNavigate = vi.fn();
+    const onOpen = vi.fn();
+    const onClose = vi.fn();
+    const { host } = mountPreview(item(), { onNavigate, onOpen, onClose });
+    await settle();
+    const view = editor(host);
+    view.focus();
+    const keyboardEvent = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    view.contentDOM.dispatchEvent(keyboardEvent);
+    expect(keyboardEvent.defaultPrevented).toBe(true);
+    if (event === "navigate") expect(onNavigate).toHaveBeenCalledWith(direction);
+    else expect(event === "open" ? onOpen : onClose).toHaveBeenCalledOnce();
+    expect(view.state.doc.toString()).toBe("-- heading\nSELECT needle;\nSELECT 2;");
+  });
+
+  it("keeps shifted arrow selection available for copying preview text", async () => {
+    const onNavigate = vi.fn();
+    const { host } = mountPreview(item(), { onNavigate });
+    await settle();
+    const view = editor(host);
+    view.focus();
+    view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", shiftKey: true, bubbles: true, cancelable: true }));
+    expect(view.state.selection.main.empty).toBe(false);
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it.each(["😀 prefix ", "😀🧪 前缀 "])("maps character columns to UTF-16 after %s", async (prefix) => {
+    mocks.read.mockResolvedValue(`${prefix}needle`);
+    const { host } = mountPreview(item(undefined, 1, [...prefix].length + 1));
+    await settle();
+    expect(editor(host).state.selection.main.head).toBe(prefix.length);
+    expect(host.querySelector(".cm-preview-match")?.textContent).toBe("needle");
+  });
+
   it("reads the full file, shows the selected hit, and keeps the editor read-only", async () => {
     const { host } = mountPreview();
     expect(host.textContent).toContain("common.loading");

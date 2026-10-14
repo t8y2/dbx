@@ -79,9 +79,9 @@ afterEach(() => {
 });
 
 describe("content search preview navigation", () => {
-  it("previews clicked and hovered results while keeping the dialog open", async () => {
+  it("previews hovered results while keeping the dialog open", async () => {
     const { rows } = await mountSearch();
-    rows[1]!.click();
+    rows[1]!.dispatchEvent(new MouseEvent("mouseenter"));
     await vi.waitFor(() => expect(mocks.read).toHaveBeenLastCalledWith("/sql/second.sql", 32 * 1024 * 1024));
     expect(mocks.select).not.toHaveBeenCalled();
     expect(mocks.updateOpen).not.toHaveBeenCalled();
@@ -102,12 +102,44 @@ describe("content search preview navigation", () => {
     expect(mocks.updateOpen).toHaveBeenCalledWith(false);
   });
 
-  it("opens a result with a double click and hides preview when changing modes", async () => {
-    const { rows, props } = await mountSearch();
-    rows[1]!.dispatchEvent(new MouseEvent("dblclick"));
-    expect(mocks.select).toHaveBeenCalledWith(expect.objectContaining({ filePath: "/sql/second.sql" }));
+  it("hides preview when changing modes", async () => {
+    const { props } = await mountSearch();
     props.initialContentMode = false;
     await nextTick();
     expect(host.querySelector(".cm-editor")).toBeNull();
+  });
+
+  it("preserves single-click opening a search result", async () => {
+    const { rows } = await mountSearch();
+    rows[1]!.click();
+    expect(mocks.select).toHaveBeenCalledOnce();
+    expect(mocks.select).toHaveBeenCalledWith(expect.objectContaining({ filePath: "/sql/second.sql" }));
+    expect(mocks.updateOpen).toHaveBeenCalledWith(false);
+  });
+
+  it("navigates from preview focus, returns focus to search, and opens with Enter", async () => {
+    const { input, rows } = await mountSearch();
+    const preview = host.querySelector<HTMLElement>(".cm-content")!;
+    preview.focus();
+    preview.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(rows[1]!.dataset.selected).toBe("true");
+    expect(document.activeElement).toBe(input);
+    await vi.waitFor(() => expect(mocks.read).toHaveBeenLastCalledWith("/sql/second.sql", 32 * 1024 * 1024));
+    await vi.waitFor(() => expect(host.querySelector(".cm-content")).not.toBeNull());
+    const nextPreview = host.querySelector<HTMLElement>(".cm-content")!;
+    nextPreview.focus();
+    nextPreview.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    expect(mocks.select).toHaveBeenCalledWith(expect.objectContaining({ filePath: "/sql/second.sql" }));
+    expect(mocks.updateOpen).toHaveBeenCalledWith(false);
+  });
+
+  it("closes with Escape while the preview has focus", async () => {
+    await mountSearch();
+    const preview = host.querySelector<HTMLElement>(".cm-content")!;
+    preview.focus();
+    preview.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect(mocks.select).not.toHaveBeenCalled();
+    expect(mocks.updateOpen).toHaveBeenCalledWith(false);
   });
 });

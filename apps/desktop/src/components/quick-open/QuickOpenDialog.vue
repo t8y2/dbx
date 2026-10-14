@@ -136,6 +136,16 @@ function handleKeyDown(e: KeyboardEvent): void {
   }
 }
 
+function handlePreviewNavigate(direction: -1 | 1): void {
+  if (direction === 1) selectNext();
+  else selectPrevious();
+  inputRef.value?.$el.focus();
+}
+
+function openPreviewMatch(): void {
+  if (contentSelectedItem.value) handleSelect(contentSelectedItem.value);
+}
+
 function handleSelect(item: QuickOpenItem): void {
   // Plugin commands execute inside this component: they are NOT dispatched to App.vue object navigation (that chain
   // connectionId-based connection/expand logic is meaningless for command entries); execution errors surface via the existing toast.
@@ -355,15 +365,7 @@ watch(selectedIndex, async () => {
                   <span class="text-xs text-muted-foreground whitespace-nowrap">{{ row.count }}</span>
                 </div>
                 <!-- Match line -->
-                <div
-                  v-else
-                  class="px-4 py-1.5 cursor-pointer"
-                  :data-selected="row.flatIndex === selectedIndex"
-                  :class="[row.flatIndex === selectedIndex ? 'bg-accent' : 'hover:bg-muted']"
-                  @click="selectedIndex = row.flatIndex"
-                  @dblclick="handleSelect(row.item!)"
-                  @mouseenter="selectedIndex = row.flatIndex"
-                >
+                <div v-else class="px-4 py-1.5 cursor-pointer" :data-selected="row.flatIndex === selectedIndex" :class="[row.flatIndex === selectedIndex ? 'bg-accent' : 'hover:bg-muted']" @click="handleSelect(row.item!)" @mouseenter="selectedIndex = row.flatIndex">
                   <!-- Filename-only match (no content hit): show highlighted file name -->
                   <div v-if="row.item!.line === 0" class="flex items-center gap-2 min-w-0">
                     <FileText class="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -423,7 +425,7 @@ watch(selectedIndex, async () => {
           </div>
         </div>
 
-        <QuickOpenFilePreview v-if="contentMode && !contentSearching && contentSelectedItem" :item="contentSelectedItem" class="h-[min(32vh,280px)] shrink-0" />
+        <QuickOpenFilePreview v-if="contentMode && !contentSearching && contentSelectedItem" :item="contentSelectedItem" class="h-[min(32vh,280px)] shrink-0" @navigate="handlePreviewNavigate" @open="openPreviewMatch" @close="dialogOpen = false" />
 
         <!-- Footer -->
         <div class="shrink-0 flex flex-wrap justify-between gap-2 px-4 py-2 border-t text-xs text-muted-foreground">

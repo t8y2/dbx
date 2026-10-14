@@ -117,15 +117,17 @@ describe("SQL file panel current file location", () => {
     expect(mocks.read).not.toHaveBeenCalled();
   });
 
-  it("matches Windows separators and opens the parent directory when it is not in the tree", async () => {
+  it.each(["C:/outside/current.sql", "C:\\outside\\current.sql"])("matches Windows scan path %s and locates on the first click", async (scanPath) => {
     mocks.query.tabs[0].externalSqlPath = "C:\\outside\\current.sql";
-    mocks.list.mockResolvedValue([entry("C:/outside/current.sql")]);
+    mocks.list.mockResolvedValue([entry(scanPath)]);
     const host = await mount([]);
     await locate(host);
 
     expect(mocks.list).toHaveBeenCalledWith("C:/outside/", DEFAULT_SQL_FILE_FILTER, true);
     expect(getSqlFileFolderPaths()).toEqual(["C:/outside/"]);
-    expect(fileRow(host, "C:/outside/current.sql")?.getAttribute("aria-current")).toBe("true");
+    const row = fileRow(host, scanPath)!;
+    expect(row.getAttribute("aria-current")).toBe("true");
+    expect(scroll.mock.contexts.at(-1)).toBe(row);
   });
 
   it("refreshes a known folder to locate a newly added file without adding another root", async () => {
@@ -136,6 +138,7 @@ describe("SQL file panel current file location", () => {
     expect(mocks.list).toHaveBeenCalledTimes(2);
     expect(getSqlFileFolderPaths()).toEqual(["C:/repo"]);
     expect(fileRow(host)?.getAttribute("aria-current")).toBe("true");
+    expect(scroll.mock.contexts.at(-1)).toBe(fileRow(host));
   });
 
   it("keeps the file filter and reports hidden or missing files", async () => {

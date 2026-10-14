@@ -12,6 +12,7 @@ import { useTheme } from "@/composables/useTheme";
 import type { QuickOpenItem } from "@/composables/useQuickOpen";
 
 const props = defineProps<{ item: QuickOpenItem }>();
+const emit = defineEmits<{ navigate: [direction: -1 | 1]; open: []; close: [] }>();
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
 const { isDark, themePalette } = useTheme();
@@ -63,7 +64,14 @@ function revealMatch(): void {
     return;
   }
   const line = view.state.doc.line(Math.min(lineNumber, view.state.doc.lines));
-  const start = line.from + Math.max(0, Math.min((props.item.column ?? 1) - 1, line.length));
+  // The backend counts Unicode characters; CodeMirror positions use UTF-16.
+  let remainingCharacters = Math.max(0, (props.item.column ?? 1) - 1);
+  let columnOffset = 0;
+  for (const character of line.text) {
+    if (remainingCharacters-- <= 0) break;
+    columnOffset += character.length;
+  }
+  const start = line.from + columnOffset;
   const end = Math.min(start + (props.item.matchText?.length ?? 0), line.to);
   const decorations = [Decoration.line({ class: "cm-preview-match-line" }).range(line.from)];
   if (end > start) decorations.push(Decoration.mark({ class: "cm-preview-match" }).range(start, end));
@@ -89,7 +97,7 @@ watch(
           EditorView.contentAttributes.of({ tabindex: "0", "aria-label": props.item.filePath || fileName.value }),
           lineNumbers(),
           drawSelection(),
-          keymap.of(defaultKeymap),
+          keymap.of([{ key: "Escape", run: () => (emit("close"), true) }, { key: "Enter", run: () => (emit("open"), true) }, { key: "ArrowUp", run: () => (emit("navigate", -1), true) }, { key: "ArrowDown", run: () => (emit("navigate", 1), true) }, ...defaultKeymap]),
           /\.sql$/i.test(props.item.filePath || "") ? sql() : [],
           theme.of([]),
           font.of(editorFontTheme(EditorView, settingsStore.editorSettings.fontSize, settingsStore.editorSettings.fontFamily, { fixedHeight: true, scrollable: true })),

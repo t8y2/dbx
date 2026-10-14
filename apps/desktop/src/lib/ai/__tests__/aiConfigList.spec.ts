@@ -142,4 +142,20 @@ describe("CC-SWITCH imports", () => {
     expect(prepared.map((config) => config.name)).toEqual(["Codex Gateway", "Claude Gateway"]);
     expect(prepareImportedAiConfigs(prepared, profiles)).toEqual([]);
   });
+
+  it("collapses exact duplicates inside a single import batch", () => {
+    const config = {
+      id: "first",
+      name: "Gateway",
+      provider: "openai-compatible" as const,
+      apiKey: "secret",
+      authMethod: "bearer" as const,
+      endpoint: "https://gateway.example",
+      model: "gpt-test",
+      apiStyle: "responses" as const,
+    };
+    const duplicate = { ...config, id: "second" };
+
+    expect(prepareImportedAiConfigs([], [config, duplicate])).toEqual([{ ...config, name: "Gateway", isDefault: false }]);
+  });
 });

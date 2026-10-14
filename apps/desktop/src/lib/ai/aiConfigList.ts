@@ -39,6 +39,8 @@ export function prepareImportedAiConfigs(existing: AiConfigItem[], imported: AiC
       name = `${originalName} (CC-SWITCH${suffix > 1 ? ` ${suffix}` : ""})`;
     }
     usedNames.add(name.toLocaleLowerCase());
+    // Count the prepared entry so an exact duplicate later in the same batch is skipped.
+    existingImportCounts.set(key, (existingImportCounts.get(key) ?? 0) + 1);
     prepared.push({ ...config, name, isDefault: false });
   }
 

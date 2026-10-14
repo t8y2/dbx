@@ -2,7 +2,7 @@
 
 Verified on macOS 26.3 with the local DBX Web build on 2026-10-14.
 
-The new setting is under **Settings → Data → Redis**. It defaults to 64 KiB and
+The new setting is under **Redis connection → Advanced settings**. It is stored globally and applies to every Redis connection. It defaults to 64 KiB and
 accepts 1–65536 KiB. The selected value is passed to the Redis String/Bitmap
 preview request; complete downloads still use the raw-value endpoint.
 

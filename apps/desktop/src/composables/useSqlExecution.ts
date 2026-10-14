@@ -277,6 +277,11 @@ export function useSqlExecution(deps: {
     deps.onDeferredExecutionSettled?.(outcome);
   }
 
+  /** A resumed confirmation must settle its AI request even when execution throws. */
+  function reportDeferredExecutionFailure(error: unknown, tabId: string) {
+    reportDeferredExecution({ status: "started", ok: false, errorMessage: translateBackendError(t, error), tabId });
+  }
+
   async function tryExecute(sqlOverride?: SqlExecutionOverride, options: SqlExecutionOptions = {}): Promise<SqlExecutionOutcome> {
     const context = captureExecutionContext(options.tabId);
     if (!context) {
@@ -954,7 +959,11 @@ export function useSqlExecution(deps: {
       reportDeferredExecution(notStarted("cancelled", tab.id));
       return;
     }
-    reportDeferredExecution(await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, tabId: tab.id }));
+    try {
+      reportDeferredExecution(await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, tabId: tab.id }));
+    } catch (error) {
+      reportDeferredExecutionFailure(error, tab.id);
+    }
   }
 
   async function onSqlParametersConfirm(sql: string) {
@@ -982,7 +991,11 @@ export function useSqlExecution(deps: {
       reportDeferredExecution(notStarted("no-tab", tabId));
       return;
     }
-    reportDeferredExecution(await continueExecute(context, sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, tabId: context.tabId }));
+    try {
+      reportDeferredExecution(await continueExecute(context, sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, tabId: context.tabId }));
+    } catch (error) {
+      reportDeferredExecutionFailure(error, context.tabId);
+    }
   }
 
   watch(showSqlParameterDialog, (open) => {

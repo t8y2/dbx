@@ -8123,6 +8123,38 @@ impl Storage {
         .await
     }
 
+    /// Clear the protection password of a connection group inside the persisted
+    /// sidebar layout. Returns Ok(false) when no layout or no group with this id
+    /// exists; Ok(true) when the group was found (its passwordHash is cleared if
+    /// present, so the call is idempotent).
+    pub async fn clear_connection_group_password(&self, group_id: &str) -> Result<bool, String> {
+        let group_id = group_id.to_string();
+        self.with_conn(move |conn| {
+            let existing: Option<String> = conn
+                .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let Some(json) = existing else { return Ok(false) };
+            let mut layout: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            let Some(groups) = layout.get_mut("groups").and_then(|groups| groups.as_array_mut()) else {
+                return Ok(false);
+            };
+            let Some(group) =
+                groups.iter_mut().find(|group| group.get("id").and_then(|id| id.as_str()) == Some(group_id.as_str()))
+            else {
+                return Ok(false);
+            };
+            if let Some(object) = group.as_object_mut() {
+                object.insert("passwordHash".to_string(), serde_json::Value::Null);
+            }
+            let updated = serde_json::to_string(&layout).map_err(|e| e.to_string())?;
+            conn.execute("UPDATE sidebar_layout SET layout_json = ?1 WHERE id = 1", [updated])
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        })
+        .await
+    }
+
     pub async fn save_saved_sql_file(&self, file: &SavedSqlFile) -> Result<(), String> {
         let file = file.clone();
         self.with_conn(move |conn| {
@@ -15323,5 +15355,77 @@ mod tests {
         assert_eq!(detail.transfer.unwrap().selected_object_count, Some(0));
         assert!(reopened.delete_task_run(&run.run_id).await.unwrap());
         assert!(reopened.get_task_run_detail(&run.run_id).await.unwrap().is_none());
+    }
+
+    fn sample_saved_folder(id: &str, password_hash: Option<String>) -> SavedSqlFolder {
+        SavedSqlFolder {
+            id: id.to_string(),
+            connection_id: "conn-1".to_string(),
+            parent_folder_id: None,
+            name: format!("Folder {id}"),
+            order_index: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            password_hash,
+            password_set_by: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_saved_sql_folder_password_removes_hash_and_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        storage
+            .save_saved_sql_folder(&sample_saved_folder(
+                "folder-1",
+                Some("pbkdf2-sha256$600000$c2FsdA==$aGFzaA==".to_string()),
+            ))
+            .await
+            .unwrap();
+
+        storage.clear_saved_sql_folder_password("folder-1").await.unwrap();
+        let cleared = storage.get_saved_sql_folder("folder-1").await.unwrap().expect("folder must survive clearing");
+        assert!(cleared.password_hash.is_none());
+        assert!(cleared.password_set_by.is_none());
+
+        // Clearing again is a harmless no-op and unknown ids change nothing.
+        storage.clear_saved_sql_folder_password("folder-1").await.unwrap();
+        storage.clear_saved_sql_folder_password("missing").await.unwrap();
+        assert!(storage.get_saved_sql_folder("folder-1").await.unwrap().is_some());
+        assert!(storage.get_saved_sql_folder("missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_connection_group_password_clears_only_the_target_group() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let layout = serde_json::json!({
+            "groups": [
+                { "id": "group-locked", "name": "Locked", "collapsed": false, "passwordHash": "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==" },
+                { "id": "group-open", "name": "Open", "collapsed": false },
+            ],
+            "order": [],
+        });
+        storage.save_sidebar_layout(&layout).await.unwrap();
+
+        assert!(storage.clear_connection_group_password("group-locked").await.unwrap());
+
+        let updated = storage.load_sidebar_layout().await.unwrap().expect("layout must persist");
+        let groups = updated["groups"].as_array().expect("groups must remain an array");
+        let locked = groups.iter().find(|group| group["id"] == "group-locked").expect("locked group must remain");
+        let open = groups.iter().find(|group| group["id"] == "group-open").expect("open group must remain");
+        assert_eq!(locked["passwordHash"], serde_json::Value::Null);
+        assert!(open.get("passwordHash").is_none());
+
+        // Unknown groups report Ok(false); a second clear of the same group is Ok(true).
+        assert!(!storage.clear_connection_group_password("group-unknown").await.unwrap());
+        assert!(storage.clear_connection_group_password("group-locked").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn clear_connection_group_password_without_layout_returns_false() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        assert!(!storage.clear_connection_group_password("group-1").await.unwrap());
     }
 }

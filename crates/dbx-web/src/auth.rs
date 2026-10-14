@@ -228,6 +228,25 @@ pub async fn change_password(
     Ok((StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response())
 }
 
+/// Verify the application's login (access) password for sensitive,
+/// session-gated operations such as clearing group/folder protection
+/// passwords. Fails with CONFLICT when no access password is configured —
+/// there is nothing to verify against in that state.
+pub(crate) async fn verify_login_password(state: &WebState, password: &str) -> Result<(), StatusCode> {
+    let hash_guard = state.password_hash.read().await;
+    let hash_str = match hash_guard.as_deref() {
+        Some(h) => h.to_string(),
+        None => return Err(StatusCode::CONFLICT),
+    };
+    drop(hash_guard);
+
+    let parsed_hash = PasswordHash::new(&hash_str).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_err() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
+}
+
 pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Response {
     if let Some(token) = extract_session_token(&req) {
         state.sessions.write().await.remove(&token);

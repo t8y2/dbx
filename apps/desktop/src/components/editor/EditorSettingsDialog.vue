@@ -5471,6 +5471,75 @@ async function changePassword() {
   }
 }
 
+// ---------- Clear protection passwords (web only) ----------
+// Recovery path for forgotten group/folder protection passwords (#11907):
+// clearing always requires the application's login password. Only the web
+// client has a login password to verify against, so this section lives
+// exclusively in the security tab of the web build.
+
+interface ProtectedItem {
+  id: string;
+  name: string;
+  targetType: "group" | "folder";
+}
+
+const showClearPasswordConfirm = ref(false);
+const clearPasswordInput = ref("");
+const clearPasswordError = ref("");
+const clearPasswordNotice = ref("");
+const clearPasswordSubmitting = ref(false);
+const clearPasswordTarget = ref<ProtectedItem | null>(null);
+
+const protectedItems = computed<ProtectedItem[]>(() => {
+  const groups = (connectionStore.sidebarLayout.groups ?? []).filter((group) => !!group.passwordHash).map((group) => ({ id: group.id, name: group.name, targetType: "group" as const }));
+  const folders = (savedSqlStore.allFolders ?? []).filter((folder) => !!folder.passwordHash).map((folder) => ({ id: folder.id, name: folder.name, targetType: "folder" as const }));
+  return [...groups, ...folders];
+});
+
+function openClearPasswordDialog(item: ProtectedItem) {
+  clearPasswordTarget.value = item;
+  clearPasswordInput.value = "";
+  clearPasswordError.value = "";
+  clearPasswordNotice.value = "";
+  showClearPasswordConfirm.value = true;
+}
+
+async function confirmClearPassword() {
+  const target = clearPasswordTarget.value;
+  if (!target || clearPasswordSubmitting.value) return;
+  clearPasswordSubmitting.value = true;
+  clearPasswordError.value = "";
+  try {
+    const url = target.targetType === "folder" ? apiUrl(`/api/saved-sql/folders/${encodeURIComponent(target.id)}/clear-password`) : apiUrl(`/api/layout/sidebar/groups/${encodeURIComponent(target.id)}/clear-password`);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ loginPassword: clearPasswordInput.value }),
+    });
+    if (res.ok) {
+      if (target.targetType === "folder") {
+        await savedSqlStore.setSavedSqlFolderPassword(target.id, null);
+      } else {
+        connectionStore.setConnectionGroupPassword(target.id, null);
+      }
+      showClearPasswordConfirm.value = false;
+      clearPasswordTarget.value = null;
+      clearPasswordInput.value = "";
+      clearPasswordNotice.value = t("auth.clearProtectionPasswordSuccess");
+    } else if (res.status === 401) {
+      clearPasswordError.value = t("auth.oldPasswordWrong");
+    } else if (res.status === 409) {
+      clearPasswordError.value = t("auth.clearProtectionPasswordNoLoginPassword");
+    } else {
+      clearPasswordError.value = t("auth.clearProtectionPasswordFailed");
+    }
+  } catch {
+    clearPasswordError.value = t("auth.connectFailed");
+  } finally {
+    clearPasswordSubmitting.value = false;
+  }
+}
+
 // ---------- AI Settings ----------
 
 // Global Custom Instructions
@@ -12189,6 +12258,28 @@ LIMIT 100;</pre>
                   </Button>
                 </div>
               </div>
+
+              <div class="border-t border-border/60 pt-5 space-y-3">
+                <Label class="text-base">{{ t("auth.clearProtectionPasswords") }}</Label>
+                <p class="text-sm text-muted-foreground">
+                  {{ t("auth.clearProtectionPasswordsDescription") }}
+                </p>
+                <div v-if="protectedItems.length > 0" class="space-y-2">
+                  <div v-for="item in protectedItems" :key="`${item.targetType}:${item.id}`" class="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
+                    <div class="min-w-0">
+                      <p class="truncate text-sm">{{ item.name }}</p>
+                      <p class="text-xs text-muted-foreground">
+                        {{ item.targetType === "group" ? t("auth.connectionGroupLabel") : t("auth.savedSqlFolderLabel") }}
+                      </p>
+                    </div>
+                    <Button variant="outline" size="sm" class="shrink-0" @click="openClearPasswordDialog(item)">
+                      {{ t("auth.clearPassword") }}
+                    </Button>
+                  </div>
+                </div>
+                <p v-else class="text-sm text-muted-foreground">{{ t("auth.noProtectedItems") }}</p>
+                <p v-if="clearPasswordNotice" class="text-xs text-green-500">{{ clearPasswordNotice }}</p>
+              </div>
             </section>
 
             <section v-else-if="activeSettingsTab === 'tunnels'" data-settings-search-id="tunnels" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('tunnels')]">
@@ -12676,6 +12767,30 @@ LIMIT 100;</pre>
         <DialogFooter>
           <Button variant="outline" @click="sqlShortcutDialogOpen = false">{{ t("settings.cancel") }}</Button>
           <Button @click="saveSqlShortcut">{{ t("settings.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- Clear protection password confirmation — requires the application's
+         login password so a forgotten group/folder password stays recoverable
+         instead of locking the item forever (#11907). -->
+    <Dialog v-model:open="showClearPasswordConfirm">
+      <DialogContent class="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("auth.clearProtectionPasswordConfirm") }}</DialogTitle>
+        </DialogHeader>
+        <div class="space-y-3 py-2">
+          <p class="text-sm text-muted-foreground">
+            {{ t("auth.clearProtectionPasswordConfirmDescription", { name: clearPasswordTarget?.name ?? "" }) }}
+          </p>
+          <PasswordInput v-model="clearPasswordInput" :placeholder="t('auth.enterPassword')" inputClass="h-9" autocomplete="off" @keyup.enter="confirmClearPassword" />
+          <p v-if="clearPasswordError" class="text-xs text-destructive">{{ clearPasswordError }}</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="showClearPasswordConfirm = false">{{ t("settings.cancel") }}</Button>
+          <Button :disabled="clearPasswordSubmitting || !clearPasswordInput" @click="confirmClearPassword">
+            {{ t("auth.confirmClearPassword") }}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

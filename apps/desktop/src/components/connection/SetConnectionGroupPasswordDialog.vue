@@ -38,7 +38,7 @@ import { KeyRound } from "@lucide/vue";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { showSetGroupPasswordDialog, setGroupPasswordValue, setGroupPasswordRemove, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { hashConnectionGroupPassword } from "@/lib/sidebar/connectionGroupPassword";
+import { hashProtectionPassword } from "@/lib/sidebar/protectionPassword";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -80,7 +80,7 @@ async function handleSubmit() {
 
   saving.value = true;
   try {
-    const hash = password.value ? await hashConnectionGroupPassword(password.value) : null;
+    const hash = password.value ? await hashProtectionPassword(password.value) : null;
     await connectionStore.setConnectionGroupPassword(node.id, hash);
     showSetGroupPasswordDialog.value = false;
     setGroupPasswordValue.value = "";

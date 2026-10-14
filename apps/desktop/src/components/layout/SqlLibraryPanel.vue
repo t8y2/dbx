@@ -51,7 +51,8 @@ import * as api from "@/lib/backend/api";
 import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { useSavedSqlStore, type SavedSqlFileSortMode, type SavedSqlFolderSortMode } from "@/stores/savedSqlStore";
 import { useSavedSqlFolderPasswordPromptStore } from "@/stores/savedSqlFolderPasswordPromptStore";
-import { verifyConnectionGroupPassword } from "@/lib/sidebar/connectionGroupPassword";
+import { isProtectionPasswordFeatureActive, verifyProtectionPassword } from "@/lib/sidebar/protectionPassword";
+import { folderOrAncestorHasPassword } from "@/lib/sidebar/savedSqlFolderSearch";
 import SetSavedSqlFolderPasswordDialog from "@/components/connection/SetSavedSqlFolderPasswordDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -357,15 +358,31 @@ async function openSqlStorageDirectory() {
   }
 }
 
+function folderSearchVisible(folder: SavedSqlFolder): boolean {
+  // Locked branches are excluded from search results — even while unlocked in
+  // this session — so folder names and SQL snippets cannot leak that way.
+  // Desktop has no protection passwords, so nothing is ever excluded there.
+  if (!isProtectionPasswordFeatureActive()) return true;
+  return !folderOrAncestorHasPassword(folder, savedSqlStore.allFolders);
+}
+
+function fileSearchVisible(file: SavedSqlFile): boolean {
+  if (!file.folderId) return true;
+  const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === file.folderId);
+  return !folder || folderSearchVisible(folder);
+}
+
 function fileMatchesQuery(file: SavedSqlFile) {
   const q = searchQuery.value;
   if (!q) return true;
+  if (!fileSearchVisible(file)) return false;
   return [file.name, file.database, file.schema, file.sql, getConnectionLabel(file.connectionId)].filter(Boolean).some((value) => String(value).toLowerCase().includes(q));
 }
 
 function folderMatchesQuery(folder: SavedSqlFolder) {
   const q = searchQuery.value;
   if (!q) return true;
+  if (!folderSearchVisible(folder)) return false;
   if (folder.name.toLowerCase().includes(q)) return true;
   return savedSqlStore.filesInFolder(folder.id).some((file) => fileMatchesQuery(file));
 }
@@ -391,7 +408,14 @@ function filesInFolder(folderId: string) {
 }
 
 function folderFileCount(folderId: string) {
-  return savedSqlFolderBranchFileCount(folderId, savedSqlStore.allFolders, filesInFolder);
+  const visibleFilesInFolder = (id: string): readonly SavedSqlFile[] => {
+    if (searchQuery.value) {
+      const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === id);
+      if (folder && !folderSearchVisible(folder)) return [];
+    }
+    return filesInFolder(id);
+  };
+  return savedSqlFolderBranchFileCount(folderId, savedSqlStore.allFolders, visibleFilesInFolder);
 }
 
 function allFilesInFolderBranch(folderId: string): SavedSqlFile[] {
@@ -474,7 +498,7 @@ function toggleFolder(folderId: string) {
   }
   // Password check: if folder is locked and not unlocked, prompt for password
   const folder = savedSqlStore.allFolders.find((f) => f.id === folderId);
-  if (folder?.passwordHash && !savedSqlStore.isSavedSqlFolderUnlocked(folderId)) {
+  if (folder && isFolderPasswordLockable(folder)) {
     void promptSavedSqlFolderUnlock(folder);
     return;
   }
@@ -487,10 +511,12 @@ function toggleFolder(folderId: string) {
 const folderPasswordPromptStore = useSavedSqlFolderPasswordPromptStore();
 
 async function promptSavedSqlFolderUnlock(folder: SavedSqlFolder): Promise<boolean> {
+  // Desktop never gates folder access — protection passwords are web-only.
+  if (!isProtectionPasswordFeatureActive()) return true;
   const unlocked = await folderPasswordPromptStore.requestPassword({
     folderId: folder.id,
     folderName: folder.name,
-    verify: (password) => verifyConnectionGroupPassword(password, folder.passwordHash!),
+    verify: (password) => verifyProtectionPassword(password, folder.passwordHash!, (upgradedHash) => savedSqlStore.setSavedSqlFolderPassword(folder.id, upgradedHash)),
   });
   if (unlocked) {
     savedSqlStore.unlockSavedSqlFolder(folder.id);
@@ -529,10 +555,13 @@ function handleFolderPasswordChanged(hadPassword: boolean, removed: boolean) {
 }
 
 function isFolderPasswordLockable(folder: SavedSqlFolder): boolean {
+  // Protection passwords are web-only; desktop folders are never locked.
+  if (!isProtectionPasswordFeatureActive()) return false;
   return !!folder.passwordHash && !savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
 }
 
 function isFolderPasswordUnlocked(folder: SavedSqlFolder): boolean {
+  if (!isProtectionPasswordFeatureActive()) return false;
   return !!folder.passwordHash && savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
 }
 
@@ -1459,7 +1488,8 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     { label: "", separator: true },
     { label: t("savedSql.renameFolder"), action: () => startRenameFolder(target), icon: Pencil, disabled: folderLocked },
     // Locked folders cannot have password changed or removed — unlock first.
-    ...(isFolderPasswordLockable(target) ? [] : [{ label: target.passwordHash ? t("savedSql.changePassword") : t("savedSql.setPassword"), action: () => openSetFolderPasswordDialog(target), icon: KeyRound }]),
+    // Desktop has no protection-password feature, so the entry is hidden entirely.
+    ...(isFolderPasswordLockable(target) || !isProtectionPasswordFeatureActive() ? [] : [{ label: target.passwordHash ? t("savedSql.changePassword") : t("savedSql.setPassword"), action: () => openSetFolderPasswordDialog(target), icon: KeyRound }]),
     ...(isFolderPasswordLockable(target) ? [{ label: t("savedSql.unlockFolder"), action: () => void promptSavedSqlFolderUnlock(target), icon: LockOpen }] : isFolderPasswordUnlocked(target) ? [{ label: t("savedSql.lockFolder"), action: () => lockFolderFromMenu(target), icon: Lock }] : []),
     { label: "", separator: true },
     // Locked folders cannot be deleted — unlock first.

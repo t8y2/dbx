@@ -10708,6 +10708,17 @@ export const useConnectionStore = defineStore("connection", () => {
         groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? nextGroup : g)),
       });
     },
+    // Re-persist a group's protection hash without touching unlock/collapse
+    // state. Used when lazily migrating a legacy verifier to the salted PBKDF2
+    // format right after a successful unlock.
+    persistConnectionGroupPasswordHash(groupId: string, passwordHash: string) {
+      const group = sidebarLayout.value.groups.find((g) => g.id === groupId);
+      if (!group) return;
+      updateLayoutAndRebuild({
+        ...sidebarLayout.value,
+        groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? { ...g, passwordHash } : g)),
+      });
+    },
     renameConnectionGroup(groupId: string, name: string) {
       updateLayoutAndRebuild(renameGroupOp(sidebarLayout.value, groupId, name));
     },

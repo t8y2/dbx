@@ -92,6 +92,7 @@ import { connectionBearingGroupIdsUnder, connectionIdsUnderGroup } from "@/lib/s
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { isLoginUserSchemaNode } from "@/lib/sidebar/loginUserNode";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { isProtectionPasswordFeatureActive } from "@/lib/sidebar/protectionPassword";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
@@ -234,6 +235,8 @@ const isDisabledTrigger = computed(() => activeNode.value.type === "trigger" && 
 
 const isLockedConnectionGroup = computed(() => {
   if (props.node.type !== "connection-group") return false;
+  // Protection passwords are web-only; desktop never shows the lock badge.
+  if (!isProtectionPasswordFeatureActive()) return false;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === props.node.id);
   return !!group?.passwordHash && !connectionStore.isConnectionGroupUnlocked(props.node.id);
 });

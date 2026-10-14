@@ -78,6 +78,7 @@ import {
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { promptConnectionGroupUnlock } from "@/lib/sidebar/connectionGroupPassword";
+import { isProtectionPasswordFeatureActive } from "@/lib/sidebar/protectionPassword";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { getTableMutationHistoryStoreOrNull, recordTableMutationHistory } from "@/lib/history/tableMutationHistory";
 import { useQueryStore } from "@/stores/queryStore";
@@ -6280,7 +6281,8 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       disabled: connectionGroupPasswordLockable(),
     });
     // Locked groups cannot have password changed or removed — unlock first.
-    if (!connectionGroupPasswordLockable()) {
+    // Desktop has no protection-password feature, so the entry is hidden.
+    if (isProtectionPasswordFeatureActive() && !connectionGroupPasswordLockable()) {
       items.push({
         label: connectionGroupPasswordMenuLabel(),
         action: openSetGroupPasswordDialog,
@@ -6333,6 +6335,8 @@ function openSetGroupPasswordDialog() {
 function connectionGroupPasswordLockable(): boolean {
   const node = activeNode.value;
   if (node?.type !== "connection-group") return false;
+  // Protection passwords are web-only; desktop groups are never locked.
+  if (!isProtectionPasswordFeatureActive()) return false;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
   return !!group?.passwordHash && !connectionStore.isConnectionGroupUnlocked(node.id);
 }
@@ -6340,6 +6344,7 @@ function connectionGroupPasswordLockable(): boolean {
 function connectionGroupPasswordUnlocked(): boolean {
   const node = activeNode.value;
   if (node?.type !== "connection-group") return false;
+  if (!isProtectionPasswordFeatureActive()) return false;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
   return !!group?.passwordHash && connectionStore.isConnectionGroupUnlocked(node.id);
 }

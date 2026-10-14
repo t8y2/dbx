@@ -36,7 +36,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Button } from "@/components/ui/button";
 import { KeyRound } from "@lucide/vue";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
-import { hashConnectionGroupPassword } from "@/lib/sidebar/connectionGroupPassword";
+import { hashProtectionPassword } from "@/lib/sidebar/protectionPassword";
 import type { SavedSqlFolder } from "@/types/database";
 
 const props = defineProps<{
@@ -74,7 +74,7 @@ async function handleSubmit() {
   if (!hasPassword.value && !password.value) return; // nothing to set or remove
   saving.value = true;
   try {
-    const hash = password.value ? await hashConnectionGroupPassword(password.value) : null;
+    const hash = password.value ? await hashProtectionPassword(password.value) : null;
     await props.setPassword(folder.id, hash);
     const hadPassword = hasPassword.value;
     emit("update:open", false);

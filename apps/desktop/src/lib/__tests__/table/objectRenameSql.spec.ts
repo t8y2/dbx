@@ -29,6 +29,15 @@ describe("OceanBase Oracle object rename", () => {
   });
 });
 
+describe("SAP HANA object rename", () => {
+  it("offers table rename without enabling other object renames", () => {
+    expect(supportsObjectRename("saphana", "TABLE")).toBe(true);
+    expect(supportsObjectRename("saphana", "VIEW")).toBe(false);
+    expect(supportsObjectRename("saphana", "PROCEDURE")).toBe(false);
+    expect(supportsObjectRename("saphana", "FUNCTION")).toBe(false);
+  });
+});
+
 describe("database rename", () => {
   it("chooses a maintenance database outside the rename target", () => {
     expect(databaseRenameMaintenanceDatabase("admin", "application")).toBe("admin");

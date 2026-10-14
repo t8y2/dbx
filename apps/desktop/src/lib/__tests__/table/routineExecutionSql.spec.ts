@@ -161,6 +161,143 @@ describe("SQL Server routine execution SQL", () => {
   });
 });
 
+describe("Oracle routine execution SQL", () => {
+  it("declares OUT variables, passes them to the call, and prints them", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "oracle",
+      schema: "APP",
+      routineName: "GET_NAME",
+      parameters: [
+        { name: "P_ID", dataType: "NUMBER", mode: "IN", ordinal: 1, value: "1" },
+        { name: "P_NAME", dataType: "VARCHAR2", mode: "OUT", ordinal: 2, value: "ignored" },
+      ],
+    });
+
+    expect(sql).toBe(["DECLARE", "  dbx_output_2 VARCHAR2(32767);", "BEGIN", '  "APP"."GET_NAME"(1, dbx_output_2);', "  DBMS_OUTPUT.PUT_LINE('P_NAME = ' || SUBSTR(dbx_output_2, 1, 4000));", "END;"].join("\n"));
+  });
+
+  it("initializes IN OUT variables from the entered value", () => {
+    const parameters = routineParametersFromResult(queryResult(["name", "data_type", "mode", "ordinal", "has_default"], [["P_COUNTER", "NUMBER", "IN/OUT", 1, "N"]]), "oracle");
+
+    expect(
+      buildProcedureExecutionSqlFromValues({
+        databaseType: "oracle",
+        schema: "APP",
+        routineName: "BUMP",
+        parameters: parameters.map((parameter) => ({ ...parameter, value: "5" })),
+      }),
+    ).toBe(["DECLARE", "  dbx_output_1 NUMBER := 5;", "BEGIN", '  "APP"."BUMP"(dbx_output_1);', "  DBMS_OUTPUT.PUT_LINE('P_COUNTER = ' || dbx_output_1);", "END;"].join("\n"));
+  });
+
+  it("binds several OUT parameters of different types", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "oracle",
+      schema: "APP",
+      routineName: "MULTI",
+      parameters: [
+        { name: "P_ID", dataType: "NUMBER", mode: "IN", ordinal: 1, value: "3" },
+        { name: "O_NUM", dataType: "NUMBER", mode: "OUT", ordinal: 2, value: "" },
+        { name: "O_TEXT", dataType: "VARCHAR2", mode: "OUT", ordinal: 3, value: "" },
+        { name: "O_DATE", dataType: "DATE", mode: "OUT", ordinal: 4, value: "" },
+      ],
+    });
+
+    expect(sql).toBe(
+      [
+        "DECLARE",
+        "  dbx_output_2 NUMBER;",
+        "  dbx_output_3 VARCHAR2(32767);",
+        "  dbx_output_4 DATE;",
+        "BEGIN",
+        '  "APP"."MULTI"(3, dbx_output_2, dbx_output_3, dbx_output_4);',
+        "  DBMS_OUTPUT.PUT_LINE('O_NUM = ' || dbx_output_2);",
+        "  DBMS_OUTPUT.PUT_LINE('O_TEXT = ' || SUBSTR(dbx_output_3, 1, 4000));",
+        "  DBMS_OUTPUT.PUT_LINE('O_DATE = ' || dbx_output_4);",
+        "END;",
+      ].join("\n"),
+    );
+  });
+
+  it("switches to named arguments when an omitted default precedes an OUT parameter", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "oracle",
+      schema: "APP",
+      routineName: "WITH_DEFAULT",
+      parameters: [
+        { name: "P_ID", dataType: "NUMBER", mode: "IN", ordinal: 1, value: "1" },
+        { name: "P_FLAG", dataType: "VARCHAR2", mode: "IN", ordinal: 2, value: "", hasDefault: true, useDefault: true },
+        { name: "O_MSG", dataType: "VARCHAR2", mode: "OUT", ordinal: 3, value: "" },
+      ],
+    });
+
+    expect(sql).toContain('  "APP"."WITH_DEFAULT"("P_ID" => 1, "O_MSG" => dbx_output_3);');
+  });
+
+  it("sizes unconstrained types and skips values that cannot be printed", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "oracle",
+      schema: "APP",
+      routineName: "TYPES",
+      parameters: [
+        { name: "O_CHAR", dataType: "CHAR", mode: "OUT", ordinal: 1, value: "" },
+        { name: "O_NCHAR", dataType: "NCHAR", mode: "OUT", ordinal: 2, value: "" },
+        { name: "O_NVC", dataType: "NVARCHAR2", mode: "OUT", ordinal: 3, value: "" },
+        { name: "O_RAW", dataType: "RAW", mode: "OUT", ordinal: 4, value: "" },
+        { name: "O_CUR", dataType: "REF CURSOR", mode: "OUT", ordinal: 5, value: "" },
+        { name: "O_BOOL", dataType: "PL/SQL BOOLEAN", mode: "OUT", ordinal: 6, value: "" },
+        { name: "O_BLOB", dataType: "BLOB", mode: "OUT", ordinal: 7, value: "" },
+        { name: "O_TS", dataType: "TIMESTAMP WITH TIME ZONE", mode: "OUT", ordinal: 8, value: "" },
+      ],
+    });
+
+    expect(sql).toBe(
+      [
+        "DECLARE",
+        "  dbx_output_1 CHAR(2000);",
+        "  dbx_output_2 NCHAR(1000);",
+        "  dbx_output_3 NVARCHAR2(10922);",
+        "  dbx_output_4 RAW(32767);",
+        "  dbx_output_5 SYS_REFCURSOR;",
+        "  dbx_output_6 BOOLEAN;",
+        "  dbx_output_7 BLOB;",
+        "  dbx_output_8 TIMESTAMP WITH TIME ZONE;",
+        "BEGIN",
+        '  "APP"."TYPES"(dbx_output_1, dbx_output_2, dbx_output_3, dbx_output_4, dbx_output_5, dbx_output_6, dbx_output_7, dbx_output_8);',
+        "  DBMS_OUTPUT.PUT_LINE('O_CHAR = ' || SUBSTR(dbx_output_1, 1, 4000));",
+        "  DBMS_OUTPUT.PUT_LINE('O_NCHAR = ' || SUBSTR(dbx_output_2, 1, 4000));",
+        "  DBMS_OUTPUT.PUT_LINE('O_NVC = ' || SUBSTR(dbx_output_3, 1, 4000));",
+        "  DBMS_OUTPUT.PUT_LINE('O_TS = ' || dbx_output_8);",
+        "END;",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps input-only procedure calls unchanged", () => {
+    expect(
+      buildProcedureExecutionSqlFromValues({
+        databaseType: "oracle",
+        schema: "APP",
+        routineName: "SAVE_VALUE",
+        parameters: [
+          { name: "P_ID", dataType: "NUMBER", mode: "IN", ordinal: 1, value: "1" },
+          { name: "P_NAME", dataType: "VARCHAR2", mode: "IN", ordinal: 2, value: "O'Reilly" },
+        ],
+      }),
+    ).toBe("BEGIN\n  \"APP\".\"SAVE_VALUE\"(1, 'O''Reilly');\nEND;");
+  });
+
+  it("uses the same output bindings for OceanBase Oracle mode", () => {
+    const sql = buildProcedureExecutionSqlFromValues({
+      databaseType: "oceanbase-oracle",
+      schema: "APP",
+      routineName: "GET_NAME",
+      parameters: [{ name: "P_NAME", dataType: "VARCHAR2", mode: "OUT", ordinal: 1, value: "" }],
+    });
+
+    expect(sql).toContain('  "APP"."GET_NAME"(dbx_output_1);');
+  });
+});
+
 describe("XuguDB routine parameter metadata", () => {
   it("parses modes, nested types, defaults, comments, and quoted identifiers", () => {
     const metadata = xuguRoutineMetadataFromDefinition(`

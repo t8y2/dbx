@@ -17,6 +17,10 @@ if (!floatingLayerRule) {
   throw new Error("globals.css is missing the floating layer z-index rule");
 }
 
+// The sr-only close label the dialog primitives render through vue-i18n;
+// dialogLayers() strips it from the extracted layer labels.
+const enMessages = { common: { close: "Close" } };
+
 afterEach(() => {
   for (const { unmount, host } of mountedApps.splice(0)) {
     unmount();
@@ -119,7 +123,7 @@ function mountSiblingDialogs(content: Component = DialogContent) {
       },
     }),
   );
-  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  app.use(createI18n({ legacy: false, locale: "en", messages: { en: enMessages }, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
   return state;
@@ -198,7 +202,7 @@ describe("dialog layer order", () => {
         },
       }),
     );
-    app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+    app.use(createI18n({ legacy: false, locale: "en", messages: { en: enMessages }, missingWarn: false, fallbackWarn: false }));
     app.mount(host);
     mountedApps.push({ unmount: () => app.unmount(), host });
     await flush();
@@ -262,7 +266,7 @@ describe("dialog layer order", () => {
         },
       }),
     );
-    app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+    app.use(createI18n({ legacy: false, locale: "en", messages: { en: enMessages }, missingWarn: false, fallbackWarn: false }));
     app.mount(host);
     mountedApps.push({ unmount: () => app.unmount(), host });
     await flush();
@@ -307,7 +311,7 @@ describe("dialog layer order", () => {
         },
       }),
     );
-    app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+    app.use(createI18n({ legacy: false, locale: "en", messages: { en: enMessages }, missingWarn: false, fallbackWarn: false }));
     app.mount(host);
     mountedApps.push({ unmount: () => app.unmount(), host });
     await flush();
@@ -350,7 +354,7 @@ describe("non-modal floating dialogs", () => {
         ],
       }),
     );
-    app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} } }));
+    app.use(createI18n({ legacy: false, locale: "en", messages: { en: enMessages } }));
     app.mount(host);
     mountedApps.push({ unmount: () => app.unmount(), host });
     await flush();

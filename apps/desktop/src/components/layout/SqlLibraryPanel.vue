@@ -52,7 +52,7 @@ import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { useSavedSqlStore, type SavedSqlFileSortMode, type SavedSqlFolderSortMode } from "@/stores/savedSqlStore";
 import { useSavedSqlFolderPasswordPromptStore } from "@/stores/savedSqlFolderPasswordPromptStore";
 import { isProtectionPasswordFeatureActive, verifyProtectionPassword } from "@/lib/sidebar/protectionPassword";
-import { fileOrAncestorHasPassword, folderOrAncestorHasPassword, nearestLockedFolder } from "@/lib/sidebar/savedSqlFolderSearch";
+import { nearestLockedFolder } from "@/lib/sidebar/savedSqlFolderSearch";
 import SetSavedSqlFolderPasswordDialog from "@/components/connection/SetSavedSqlFolderPasswordDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -359,17 +359,19 @@ async function openSqlStorageDirectory() {
 }
 
 function folderSearchVisible(folder: SavedSqlFolder): boolean {
-  // Locked branches are excluded from search results — even while unlocked in
-  // this session — so folder names and SQL snippets cannot leak that way.
-  // Desktop has no protection passwords, so nothing is ever excluded there.
+  // Search follows the same session semantics as browsing: a folder that is
+  // still locked (password set and not unlocked yet) hides its branch from
+  // results, while an in-session unlock makes it searchable again. Desktop
+  // has no protection passwords, so nothing is ever excluded there.
   if (!isProtectionPasswordFeatureActive()) return true;
-  return !folderOrAncestorHasPassword(folder, savedSqlStore.allFolders);
+  return !nearestLockedFolder(folder.id, savedSqlStore.allFolders, isFolderPasswordLockable);
 }
 
 function fileSearchVisible(file: SavedSqlFile): boolean {
-  // Desktop has no protection passwords, so nothing is ever excluded there.
+  // Same session semantics as folderSearchVisible: files of an unlocked (or
+  // unprotected) branch stay searchable; only still-locked branches are hidden.
   if (!isProtectionPasswordFeatureActive()) return true;
-  return !fileOrAncestorHasPassword(file, savedSqlStore.allFolders);
+  return !lockedAncestorForFile(file);
 }
 
 function fileMatchesQuery(file: SavedSqlFile) {
@@ -1847,6 +1849,9 @@ function showDropInside(targetId: string) {
                   <LightTooltip v-if="!isRenamingFolder(item.item.id) && isFolderPasswordLockable(item.item)" :text="t('savedSql.lockedTooltip')" side="left" :delay="0" :close-delay="0" nowrap>
                     <Lock class="h-3 w-3 shrink-0 text-muted-foreground" />
                   </LightTooltip>
+                  <LightTooltip v-if="!isRenamingFolder(item.item.id) && isFolderPasswordUnlocked(item.item)" :text="t('savedSql.unlockedTooltip')" side="left" :delay="0" :close-delay="0" nowrap>
+                    <LockOpen class="h-3 w-3 shrink-0 text-muted-foreground" />
+                  </LightTooltip>
                   <LightTooltip v-if="!isRenamingFolder(item.item.id)" :text="t('savedSql.newSubfolder')" side="left" :delay="0" :close-delay="0" nowrap>
                     <button
                       type="button"
@@ -1940,6 +1945,9 @@ function showDropInside(targetId: string) {
                   </span>
                   <LightTooltip v-if="!isRenamingFolder(row.folder.id) && isFolderPasswordLockable(row.folder)" :text="t('savedSql.lockedTooltip')" side="left" :delay="0" :close-delay="0" nowrap>
                     <Lock class="h-3 w-3 shrink-0 text-muted-foreground" />
+                  </LightTooltip>
+                  <LightTooltip v-if="!isRenamingFolder(row.folder.id) && isFolderPasswordUnlocked(row.folder)" :text="t('savedSql.unlockedTooltip')" side="left" :delay="0" :close-delay="0" nowrap>
+                    <LockOpen class="h-3 w-3 shrink-0 text-muted-foreground" />
                   </LightTooltip>
                   <LightTooltip v-if="!isRenamingFolder(row.folder.id)" :text="t('savedSql.newSubfolder')" side="left" :delay="0" :close-delay="0" nowrap>
                     <button

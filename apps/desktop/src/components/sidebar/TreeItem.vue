@@ -40,6 +40,7 @@ import {
   Ban,
   RefreshCw,
   LockKeyhole,
+  LockKeyholeOpen,
 } from "@lucide/vue";
 import OracleDatabaseLinksDialog from "@/components/objects/OracleDatabaseLinksDialog.vue";
 const showDatabaseLinks = ref(false);
@@ -239,6 +240,15 @@ const isLockedConnectionGroup = computed(() => {
   if (!isProtectionPasswordFeatureActive()) return false;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === props.node.id);
   return !!group?.passwordHash && !connectionStore.isConnectionGroupUnlocked(props.node.id);
+});
+
+// Session semantics: a protected group unlocked in this session keeps an
+// open-lock badge so it stays distinguishable from unprotected groups.
+const isUnlockedConnectionGroup = computed(() => {
+  if (props.node.type !== "connection-group") return false;
+  if (!isProtectionPasswordFeatureActive()) return false;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === props.node.id);
+  return !!group?.passwordHash && connectionStore.isConnectionGroupUnlocked(props.node.id);
 });
 
 const showProductionBadge = computed(() => {
@@ -1733,6 +1743,7 @@ function onKeydown(event: KeyboardEvent) {
               >{{ visibleLabel(node) }}</span
             >
             <LockKeyhole v-if="isLockedConnectionGroup" class="h-3 w-3 shrink-0 text-muted-foreground" :title="t('connectionGroup.lockedTooltip')" aria-hidden="true" />
+            <LockKeyholeOpen v-else-if="isUnlockedConnectionGroup" class="h-3 w-3 shrink-0 text-muted-foreground" :title="t('connectionGroup.unlockedTooltip')" aria-hidden="true" />
             <span
               v-if="node.type === 'column' && node.meta"
               class="shrink-0 rounded px-1 text-[10px] leading-4"

@@ -887,6 +887,7 @@ export default withEnglishFallback({
     passwordChanged: "パスワードを変更しました",
     passwordRemoved: "パスワードを削除しました",
     lockedTooltip: "このフォルダーは暗号化されています。クリックして展開するときにパスワードの入力が必要です",
+    unlockedTooltip: "このフォルダーはロック解除されています。アプリの再起動後に再度パスワードの入力が必要です",
   },
   sqlLibrary: {
     title: "SQLライブラリ",
@@ -3343,6 +3344,7 @@ export default withEnglishFallback({
     setPassword: "パスワードを設定",
     changePassword: "パスワードを変更",
     lockedTooltip: "このグループは暗号化されています。クリックして展開するときにパスワードの入力が必要です",
+    unlockedTooltip: "このグループはロック解除されています。アプリの再起動後に再度パスワードの入力が必要です",
   },
   databaseSearch: {
     title: "データベース検索",

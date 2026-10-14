@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Vue from "vue";
+import { createI18n } from "vue-i18n";
 import { compileTemplate } from "vue/compiler-sfc";
 import { AlertTriangle, Check, Loader2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -53,6 +54,7 @@ describe.each(owners)("$name SQL preview layout", (owner) => {
       render: new Function("Vue", compiled.code)(Vue),
     });
     mountedApps.push(app);
+    app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
     app.mount(document.body.appendChild(document.createElement("div")));
     await Vue.nextTick();
     const dialog = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!;

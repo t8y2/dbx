@@ -867,6 +867,7 @@ export default withEnglishFallback({
     passwordChanged: "Пароль изменён",
     passwordRemoved: "Пароль удалён",
     lockedTooltip: "Эта папка зашифрована. При нажатии для развёртывания потребуется ввести пароль.",
+    unlockedTooltip: "Эта папка разблокирована. После перезапуска приложения потребуется снова ввести пароль.",
   },
   sqlLibrary: {
     title: "Библиотека SQL",
@@ -3420,6 +3421,7 @@ export default withEnglishFallback({
     setPassword: "Установить пароль",
     changePassword: "Изменить пароль",
     lockedTooltip: "Эта группа зашифрована. При нажатии для развёртывания потребуется ввести пароль.",
+    unlockedTooltip: "Эта группа разблокирована. После перезапуска приложения потребуется снова ввести пароль.",
   },
   databaseSearch: {
     title: "Поиск по базе данных",

@@ -891,6 +891,7 @@ export default withEnglishFallback({
     passwordChanged: "密碼已修改",
     passwordRemoved: "密碼已移除",
     lockedTooltip: "此資料夾已加密，點擊展開時需要輸入密碼",
+    unlockedTooltip: "此資料夾已解鎖，重新啟動應用程式後需重新輸入密碼",
   },
   sqlLibrary: {
     title: "SQL 庫",
@@ -3323,6 +3324,7 @@ export default withEnglishFallback({
     setPassword: "設定密碼",
     changePassword: "修改密碼",
     lockedTooltip: "此群組已加密，點擊展開時需要輸入密碼",
+    unlockedTooltip: "此群組已解鎖，重新啟動應用程式後需重新輸入密碼",
   },
   databaseSearch: {
     title: "搜尋資料庫",

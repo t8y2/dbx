@@ -63,6 +63,12 @@ export function resolveSidebarObjectSearchFilter(nodes: readonly TreeNode[], tar
 
 export interface SidebarTreeSearchMatcherOptions extends SidebarSearchMatcherOptions {
   resolveLabel?: (node: TreeNode) => string;
+  /**
+   * Connection groups locked for the current session (password set and not
+   * yet unlocked). Their contents never enter the search projection, so
+   * locked connections cannot surface through search.
+   */
+  lockedGroupIds?: ReadonlySet<string>;
 }
 
 export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarTreeSearchMatcherOptions | ((node: TreeNode) => string)): TreeNode[] {
@@ -72,7 +78,7 @@ export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds
   const matcherOptions = typeof options === "function" ? undefined : options;
   const matchLabel = query ? createSidebarLabelMatcher(query, matcherOptions) : undefined;
   if (!matchLabel && searchableNodeTypes === undefined) return nodes;
-  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query);
+  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, typeof options === "function" ? undefined : options?.lockedGroupIds);
 }
 
 export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: readonly TreeNode[]): TreeNode[] {
@@ -363,7 +369,7 @@ function preservedSearchChildren(node: TreeNode, collapsedIds: ReadonlySet<strin
   return node.children.filter((child) => !hiddenSearchNodeTypes.has(child.type)).map((child) => applySearchCollapsedState(child, collapsedIds));
 }
 
-function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, resolveLabel?: (node: TreeNode) => string, query?: string): TreeNode[] {
+function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, resolveLabel?: (node: TreeNode) => string, query?: string, lockedGroupIds?: ReadonlySet<string>): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
   for (const node of nodes) {
@@ -396,13 +402,19 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
     // A type-matched table keeps its loaded detail groups after the text query
     // is cleared instead of being rebuilt with an empty filtered child list.
     const preservesTypeMatchedTable = !matchLabel && !!selfMatch && node.type === "table";
+    // A locked connection group only matches by its own label: its contents
+    // stay out of the projection until the group is unlocked for this session,
+    // so no descendant can make the group (or a locked connection) surface.
+    const lockedGroup = node.type === "connection-group" && !!lockedGroupIds?.has(node.id);
     // Connection utility entries are synthetic navigation actions, not schema
     // search results. Keep real loaded descendants for connection-name matches,
     // but do not let those actions make a disconnected result look expanded.
-    const filteredChildren = preservesSubtree ? preservedSearchChildren(node, collapsedIds) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query) : undefined;
+    const filteredChildren = lockedGroup ? undefined : preservesSubtree ? preservedSearchChildren(node, collapsedIds) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, lockedGroupIds) : undefined;
 
     if (selfMatch || (filteredChildren && filteredChildren.length > 0)) {
-      if (!node.children || preservesTypeMatchedTable) {
+      if (lockedGroup) {
+        filteredNodes.push({ node: { ...node, children: [], isExpanded: false }, score: selfMatch?.score ?? 0 });
+      } else if (!node.children || preservesTypeMatchedTable) {
         filteredNodes.push({ node, score: selfMatch?.score ?? 0 });
       } else {
         const children = filteredChildren ?? [];

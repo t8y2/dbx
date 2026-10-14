@@ -19,7 +19,7 @@
             <Button type="button" variant="outline">{{ t("connectionGroup.passwordPromptCancel") }}</Button>
           </DialogClose>
           <Button type="submit" :disabled="verifying || !password">
-            {{ verifying ? t("connectionGroup.processing") : t("connectionGroup.passwordPromptSubmit") }}
+            {{ verifying ? t("common.processing") : t("connectionGroup.passwordPromptSubmit") }}
           </Button>
         </DialogFooter>
       </form>

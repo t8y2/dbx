@@ -1014,6 +1014,7 @@ export default withEnglishFallback({
     passwordChanged: "เปลี่ยนรหัสผ่านแล้ว",
     passwordRemoved: "ลบรหัสผ่านแล้ว",
     lockedTooltip: "โฟลเดอร์นี้ถูกเข้ารหัสแล้ว เมื่อคลิกเพื่อขยายจะต้องป้อนรหัสผ่าน",
+    unlockedTooltip: "โฟลเดอร์นี้ถูกปลดล็อกแล้ว ต้องป้อนรหัสผ่านอีกครั้งหลังรีสตาร์ทแอป",
   },
   sqlLibrary: {
     title: "ไลบรารี SQL",
@@ -3653,6 +3654,7 @@ export default withEnglishFallback({
     setPassword: "ตั้งรหัสผ่าน",
     changePassword: "เปลี่ยนรหัสผ่าน",
     lockedTooltip: "กลุ่มนี้ถูกเข้ารหัสแล้ว เมื่อคลิกเพื่อขยายจะต้องป้อนรหัสผ่าน",
+    unlockedTooltip: "กลุ่มนี้ถูกปลดล็อกแล้ว ต้องป้อนรหัสผ่านอีกครั้งหลังรีสตาร์ทแอป",
   },
   databaseSearch: {
     title: "ค้นหาฐานข้อมูล",

@@ -38,6 +38,8 @@ function mountFixture() {
       legacy: false,
       locale: "zh-CN",
       messages: { "zh-CN": {} },
+      missingWarn: false,
+      fallbackWarn: false,
     }),
   );
   app.mount(container);

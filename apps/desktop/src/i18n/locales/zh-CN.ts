@@ -995,6 +995,7 @@ export default withEnglishFallback({
     passwordChanged: "密码已修改",
     passwordRemoved: "密码已移除",
     lockedTooltip: "此文件夹已锁定，点击展开时需要输入密码",
+    unlockedTooltip: "此文件夹已解锁，重启应用后需重新输入密码",
   },
   sqlLibrary: {
     title: "SQL 库",
@@ -3653,6 +3654,7 @@ export default withEnglishFallback({
     setPassword: "设置密码",
     changePassword: "修改密码",
     lockedTooltip: "此分组已锁定，点击展开时需要输入密码",
+    unlockedTooltip: "此分组已解锁，重启应用后需重新输入密码",
   },
   databaseSearch: {
     title: "在数据库中查找",

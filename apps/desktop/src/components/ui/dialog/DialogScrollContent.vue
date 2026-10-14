@@ -2,6 +2,7 @@
 import type { DialogContentEmits, DialogContentProps } from "reka-ui";
 
 import { type HTMLAttributes } from "vue";
+import { useI18n } from "vue-i18n";
 import { reactiveOmit } from "@vueuse/core";
 import { XIcon } from "@lucide/vue";
 import { DialogClose, DialogContent, DialogDescription, DialogPortal, VisuallyHidden, useForwardPropsEmits } from "reka-ui";
@@ -23,6 +24,7 @@ const delegatedProps = reactiveOmit(props, "class", "showOverlay", "showCloseBut
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
 
+const { t } = useI18n();
 const { layerStyle } = useDialogLayerOrder();
 </script>
 
@@ -56,7 +58,7 @@ const { layerStyle } = useDialogLayerOrder();
 
         <DialogClose v-if="props.showCloseButton" class="absolute top-4 right-4 rounded-md p-0.5 transition-colors hover:bg-secondary">
           <XIcon class="w-4 h-4" />
-          <span class="sr-only">Close</span>
+          <span class="sr-only">{{ t("common.close") }}</span>
         </DialogClose>
       </DialogContent>
     </div>

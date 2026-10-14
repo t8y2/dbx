@@ -1059,6 +1059,7 @@ export default {
     passwordChanged: "Password changed",
     passwordRemoved: "Password removed",
     lockedTooltip: "This folder is locked. Enter password to expand.",
+    unlockedTooltip: "This folder is unlocked. The password is required again after restart.",
   },
   sqlLibrary: {
     title: "SQL Library",
@@ -3721,6 +3722,7 @@ export default {
     setPassword: "Set Password",
     changePassword: "Change Password",
     lockedTooltip: "This group is locked. Enter password to expand.",
+    unlockedTooltip: "This group is unlocked. The password is required again after restart.",
   },
   databaseSearch: {
     title: "Search Database",

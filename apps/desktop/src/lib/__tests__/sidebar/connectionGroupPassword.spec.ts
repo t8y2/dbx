@@ -112,4 +112,24 @@ describe("connectionGroupPassword access helpers", () => {
     await expect(pending).resolves.toBe(false);
     expect(store.isConnectionGroupUnlocked("project")).toBe(false);
   });
+
+  it("lists ids of locked groups and drops them after an in-session unlock", async () => {
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.sidebarLayout = layoutWithGroup({ passwordHash: PROTECTION_HASH });
+    const { lockedConnectionGroupIds } = await import("@/lib/sidebar/connectionGroupPassword");
+
+    expect([...lockedConnectionGroupIds()]).toEqual(["project"]);
+    store.unlockConnectionGroup("project");
+    expect([...lockedConnectionGroupIds()]).toEqual([]);
+  });
+
+  it("reports no locked ids for unprotected groups", async () => {
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.sidebarLayout = layoutWithGroup();
+    const { lockedConnectionGroupIds } = await import("@/lib/sidebar/connectionGroupPassword");
+
+    expect([...lockedConnectionGroupIds()]).toEqual([]);
+  });
 });

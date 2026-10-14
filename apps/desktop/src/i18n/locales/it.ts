@@ -886,6 +886,7 @@ export default withEnglishFallback({
     passwordChanged: "Password modificata",
     passwordRemoved: "Password rimossa",
     lockedTooltip: "Questa cartella è crittografata; per espanderla è necessario inserire la password",
+    unlockedTooltip: "Questa cartella è sbloccata; dopo il riavvio dell'applicazione sarà necessario inserire di nuovo la password.",
   },
   sqlLibrary: {
     title: "Libreria SQL",
@@ -3319,6 +3320,7 @@ export default withEnglishFallback({
     setPassword: "Imposta password",
     changePassword: "Modifica password",
     lockedTooltip: "Questo gruppo è crittografato; per espanderlo è necessario inserire la password",
+    unlockedTooltip: "Questo gruppo è sbloccato; dopo il riavvio dell'applicazione sarà necessario inserire di nuovo la password.",
   },
   databaseSearch: {
     title: "Cerca nel Database",

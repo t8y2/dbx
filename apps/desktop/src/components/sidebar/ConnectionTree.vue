@@ -38,6 +38,7 @@ import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { lockedConnectionGroupIds } from "@/lib/sidebar/connectionGroupPassword";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionDisconnectTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { formatSidebarTableCopyText } from "@/lib/sidebar/sidebarTableNameCopy";
 import { pruneTreeSelectionToVisibleNodeIds } from "@/lib/sidebar/sidebarTreeSelection";
@@ -813,6 +814,11 @@ watch(
   },
 );
 
+// Search keeps the contents of groups still locked for this session out of
+// the projection (see filterSidebarTree); unlocking a group in the session
+// makes its connections searchable again.
+const lockedGroupIds = computed(() => lockedConnectionGroupIds());
+
 const filteredNodes = computed(() => {
   let nodes = displayedTreeNodes.value;
   if (showConnectedConnectionsOnly.value) {
@@ -826,6 +832,7 @@ const filteredNodes = computed(() => {
   nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, {
     regexMode: regexMode.value,
     resolveLabel: (node) => (node.type === "nacos-access-control" ? t("nacos.accessControlSidebarLabel") : node.label),
+    lockedGroupIds: lockedGroupIds.value,
   });
   if (q && !regexMode.value) {
     nodes = filterSidebarSearchRootsByConnectionState(nodes, store.connectedIds);

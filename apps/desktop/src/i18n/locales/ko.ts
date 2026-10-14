@@ -888,6 +888,7 @@ export default withEnglishFallback({
     passwordChanged: "비밀번호가 변경되었습니다",
     passwordRemoved: "비밀번호가 제거되었습니다",
     lockedTooltip: "이 폴더는 암호화되어 있습니다. 펼치려면 비밀번호를 입력해야 합니다.",
+    unlockedTooltip: "이 폴더는 잠금 해제되어 있습니다. 앱을 다시 시작하면 비밀번호를 다시 입력해야 합니다.",
   },
   sqlLibrary: {
     title: "SQL 라이브러리",
@@ -3269,6 +3270,7 @@ export default withEnglishFallback({
     setPassword: "비밀번호 설정",
     changePassword: "비밀번호 변경",
     lockedTooltip: "이 그룹은 암호화되어 있습니다. 펼치려면 비밀번호를 입력해야 합니다.",
+    unlockedTooltip: "이 그룹은 잠금 해제되어 있습니다. 앱을 다시 시작하면 비밀번호를 다시 입력해야 합니다.",
   },
   databaseSearch: {
     title: "데이터베이스 검색",

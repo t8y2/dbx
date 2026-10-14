@@ -52,6 +52,23 @@ export function filterConnectionsOutsideLockedGroups<T extends { id: string }>(c
 }
 
 /**
+ * Ids of the connection groups that still gate their contents in this
+ * session: password set and not yet unlocked. The sidebar search projection
+ * skips the contents of these groups so locked connections never surface (or
+ * expand) through search until the group is unlocked, matching the lock badge
+ * on the group row and the expand prompt.
+ */
+export function lockedConnectionGroupIds(): ReadonlySet<string> {
+  if (!isProtectionPasswordFeatureActive()) return new Set<string>();
+  const connectionStore = useConnectionStore();
+  const locked = new Set<string>();
+  for (const group of connectionStore.sidebarLayout.groups) {
+    if (group.passwordHash && !connectionStore.isConnectionGroupUnlocked(group.id)) locked.add(group.id);
+  }
+  return locked;
+}
+
+/**
  * Password gate for opening a connection straight from a quick-start list.
  * Prompts for the group password when the connection sits in a locked group
  * and returns whether the caller may proceed.

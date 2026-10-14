@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, ref, type App, type Component } from "vue";
+import { createI18n } from "vue-i18n";
 import { afterEach, describe, expect, it } from "vitest";
 import { Dialog, DialogContent, DialogScrollContent } from "@/components/ui/dialog";
 import { Popover, PopoverContent } from "@/components/ui/popover";
@@ -15,6 +16,7 @@ afterEach(() => {
 
 function mount(component: Component) {
   const app = createApp(component);
+  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
   mountedApps.push(app);
   app.mount(document.createElement("div"));
   return app;

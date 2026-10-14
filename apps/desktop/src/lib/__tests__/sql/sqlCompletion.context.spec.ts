@@ -533,7 +533,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           detail: "sequence in APP",
           apply: "ORDER_SEQ",
         }),
@@ -552,7 +552,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           detail: "sequence in APP",
           apply: "APP.ORDER_SEQ",
         }),
@@ -574,7 +574,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           apply: "ORDER_SEQ",
         }),
       ]),
@@ -690,7 +690,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           detail: "sequence in APP",
           apply: "ORDER_SEQ",
         }),
@@ -709,7 +709,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           detail: "sequence in APP",
           apply: "APP.ORDER_SEQ",
         }),
@@ -731,7 +731,7 @@ describe("PostgreSQL sequence literal completion", () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: "ORDER_SEQ",
-          type: "variable",
+          type: "sequence",
           apply: "ORDER_SEQ",
         }),
       ]),

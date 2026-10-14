@@ -1526,7 +1526,7 @@ export type SqlCompletionClosingQuote = '"' | "'" | "`" | "]";
 export interface SqlCompletionItem {
   label: string;
   filterText?: string;
-  type: "keyword" | "table" | "column" | "snippet" | "function" | "schema" | "variable" | "text";
+  type: "keyword" | "table" | "column" | "snippet" | "function" | "schema" | "variable" | "sequence" | "text";
   detail?: string;
   info?: string | ((completion: Completion) => CompletionInfo | Promise<CompletionInfo>);
   apply?: string;
@@ -2069,7 +2069,7 @@ export function buildPostgresSequenceLiteralCompletionItems(context: PostgresSeq
       return {
         label: object.name,
         filterText: context.nameQuoted ? identifier.slice(0, -1) : escapePostgresSequenceLiteralIdentifier(object.name),
-        type: "variable" as const,
+        type: "sequence" as const,
         detail: object.schema ? `sequence in ${object.schema}` : "sequence",
         info: object.comment?.trim() || undefined,
         apply: identifier,
@@ -4852,7 +4852,7 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
       const baseDedupeKey = object.applyName || (isOracleCompletionDatabase(databaseType) && object.schema) ? applyName : undefined;
       return {
         label: object.name,
-        type: object.type === "sequence" ? ("variable" as const) : ("function" as const),
+        type: object.type === "sequence" ? ("sequence" as const) : ("function" as const),
         detail,
         info: buildRoutineInfo(object),
         apply: object.type === "trigger" || object.type === "package" || object.type === "sequence" || (databaseType === "oceanbase-oracle" && object.signature == null) ? applyName : buildRoutineApply(applyName, object.signature, includeParams),
@@ -6609,7 +6609,9 @@ function dedupeAndSort(items: SqlCompletionItem[]): SqlCompletionItem[] {
 }
 
 function compareCompletionItems(left: SqlCompletionItem, right: SqlCompletionItem): number {
-  if ((left.type === "variable") !== (right.type === "variable")) return left.type === "variable" ? -1 : 1;
+  const leftSurfacesFirst = left.type === "variable" || left.type === "sequence";
+  const rightSurfacesFirst = right.type === "variable" || right.type === "sequence";
+  if (leftSurfacesFirst !== rightSurfacesFirst) return leftSurfacesFirst ? -1 : 1;
   if (!left.exactMatch !== !right.exactMatch) return left.exactMatch ? -1 : 1;
   const leftBonus = getHistoryBoost(left.label, left.type);
   const rightBonus = getHistoryBoost(right.label, right.type);
@@ -6625,6 +6627,8 @@ function getTypePriorityBoost(type: SqlCompletionItem["type"]): number {
     case "schema":
       return 120;
     case "variable":
+      return 220;
+    case "sequence":
       return 220;
     case "text":
       return 220;

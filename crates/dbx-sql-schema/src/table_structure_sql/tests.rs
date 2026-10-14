@@ -98,7 +98,7 @@ fn saphana_table_structure_uses_add_drop_and_alter_syntax() {
     renamed.data_type = "NVARCHAR(100)".to_string();
     renamed.original = Some(ColumnInfo {
         name: "name".to_string(),
-        data_type: "VARCHAR(255)".to_string(),
+        data_type: "varchar(255)".to_string(),
         is_nullable: true,
         ..Default::default()
     });
@@ -116,6 +116,24 @@ fn saphana_table_structure_uses_add_drop_and_alter_syntax() {
             "ALTER TABLE \"APP\".\"users\" ALTER (\"display_name\" NVARCHAR(100));",
         ]
     );
+
+    let mut commented = column("name");
+    commented.comment = "用户名称".to_string();
+    commented.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        comment: Some(String::new()),
+        ..Default::default()
+    });
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::SapHana,
+        Some("APP"),
+        "users",
+        vec![commented],
+    ));
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec!["COMMENT ON COLUMN \"APP\".\"users\".\"name\" IS '用户名称';"]);
 }
 
 #[test]

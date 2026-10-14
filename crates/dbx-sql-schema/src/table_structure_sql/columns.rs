@@ -267,6 +267,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             && !has_column_extra_change(dialect, column)
             && !has_position_change
             && !clears_orphaned_auto_increment
+            && (dialect != StructureDialect::SapHana || clean(&column.comment) == original_comment(column))
         {
             continue;
         }
@@ -741,7 +742,11 @@ pub(super) fn build_add_column_sql(
     if supports_comments
         && matches!(
             dialect,
-            StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar
+            StructureDialect::Postgres
+                | StructureDialect::Oracle
+                | StructureDialect::Dameng
+                | StructureDialect::Oscar
+                | StructureDialect::SapHana
         )
         && !clean(&column.comment).is_empty()
     {

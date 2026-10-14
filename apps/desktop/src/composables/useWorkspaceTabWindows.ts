@@ -8,7 +8,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { resolveWindowContext } from "@/lib/app/windowContext";
 import { acquireUpdateBarrier, assertUpdateSafe, beginUpdateSensitiveOperation } from "@/lib/app/updatePreparation";
 import { uuid } from "@/lib/common/utils";
-import { acceptWorkspaceTransfer, isWorkspaceTabWindowLabel, lockWorkspaceTransferInput, reportWorkspaceStartupError, waitForWorkspaceTransfer, type TransferStatus, type WorkspaceTabHandoff, type WorkspaceTransferInfo } from "@/lib/tabs/workspaceTabTransfer";
+import { acceptWorkspaceTransfer, isWorkspaceTabWindowLabel, lockWorkspaceTransferInput, reportWorkspaceStartupError, reportWorkspaceStartupReady, waitForWorkspaceTransfer, type TransferStatus, type WorkspaceTabHandoff, type WorkspaceTransferInfo } from "@/lib/tabs/workspaceTabTransfer";
 import { showTabDragPreviewWebview, hideTabDragPreviewWebview } from "@/lib/tabs/tabWindowPreviewHost";
 import type { TabDragAppearance } from "@/lib/tabs/tabDragAppearance";
 import type { QueryTab } from "@/types/database";
@@ -104,21 +104,7 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
   }
 
   async function windowAt(point: Point): Promise<string | undefined> {
-    const { getAllWebviewWindows } = await import("@tauri-apps/api/webviewWindow");
-    const candidates = await Promise.all(
-      (await getAllWebviewWindows())
-        .filter((window) => isWorkspaceTabWindowLabel(window.label))
-        .map(async (window) => {
-          try {
-            const [position, size, visible, minimized, focused] = await Promise.all([window.outerPosition(), window.outerSize(), window.isVisible(), window.isMinimized(), window.isFocused()]);
-            if (!visible || minimized || point.x < position.x || point.y < position.y || point.x >= position.x + size.width || point.y >= position.y + size.height) return null;
-            return { label: window.label, focused };
-          } catch {
-            return null;
-          }
-        }),
-    );
-    return candidates.filter((item): item is { label: string; focused: boolean } => !!item).sort((a, b) => Number(b.focused) - Number(a.focused))[0]?.label;
+    return (await invoke<string | null>("workspace_window_at", { point })) ?? undefined;
   }
 
   async function requestDropTarget(target: string, point: Point): Promise<DropTarget | null> {
@@ -209,6 +195,10 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
       if (!committed) throw new Error("Tab transfer was cancelled or the target did not become ready");
       queryStore.removeTabAfterDetachedReady(tab.id);
       await queryStore.flushPendingPersist();
+      // Once the source has observed the committed terminal state, the backend
+      // can discard this record instead of letting completed transfers consume
+      // the pending-transfer capacity until the expiry sweep.
+      await transferCommand<TransferStatus>("ack", id).catch(() => undefined);
     } catch (error) {
       if (id && !committed) {
         // 取消与提交若发生竞争，以后端终态为准，不能凭超时复制出第二份标签。
@@ -216,6 +206,7 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
         if (status === "committed") {
           queryStore.removeTabAfterDetachedReady(tab.id);
           await queryStore.flushPendingPersist().catch(errorToast);
+          await transferCommand<TransferStatus>("ack", id).catch(() => undefined);
         }
       }
       errorToast(error);
@@ -257,6 +248,8 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
         },
       });
       if (accepted) {
+        // 目标已持久化并提交，源窗口可能在预览页下次轮询前清理交接记录。
+        reportWorkspaceStartupReady(id);
         const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
         await getCurrentWebviewWindow().show();
         await getCurrentWebviewWindow().setFocus();

@@ -1975,6 +1975,8 @@ export interface QueryTab {
   id: string;
   /** Stable creation time used when tabs are displayed in creation order. */
   createdAt?: number;
+  /** Monotonic SQL/document revision used to arbitrate duplicate recovery snapshots. */
+  sqlUpdatedAt?: number;
   title: string;
   customTitle?: boolean;
   /**

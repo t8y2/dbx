@@ -2,7 +2,7 @@
 import { createApp, nextTick } from "vue";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import WorkspaceWindowStartup from "../WorkspaceWindowStartup.vue";
-import { reportWorkspaceStartupError } from "@/lib/tabs/workspaceTabTransfer";
+import { reportWorkspaceStartupError, WORKSPACE_STARTUP_READY_EVENT } from "@/lib/tabs/workspaceTabTransfer";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
@@ -83,5 +83,21 @@ describe("workspace startup preview", () => {
     await flushPromises();
     expect(host.querySelector("[data-workspace-startup]")).toBeNull();
     expect(mocks.invoke).not.toHaveBeenCalledWith("close_workspace_startup");
+  });
+
+  it("shows the committed workspace if the source acknowledges before inspection returns", async () => {
+    let rejectInspection!: (error: Error) => void;
+    mocks.invoke.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectInspection = reject;
+    }));
+    mount();
+    await flushPromises();
+
+    window.dispatchEvent(new Event(WORKSPACE_STARTUP_READY_EVENT));
+    await flushPromises();
+    rejectInspection(new Error("Tab transfer expired or unavailable"));
+    await flushPromises();
+
+    expect(host.querySelector("[data-workspace-startup]")).toBeNull();
   });
 });

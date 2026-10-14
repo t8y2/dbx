@@ -7,7 +7,7 @@ use std::{
 use dbx_core::storage::{
     AppAppearanceSettings, AppAppearanceSettingsPatch, DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState,
 };
-use tauri::{AppHandle, Manager, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 use super::connection::AppState;
 use crate::{
@@ -229,6 +229,18 @@ pub async fn load_editor_settings(state: State<'_, Arc<AppState>>) -> Result<Opt
 #[tauri::command]
 pub async fn save_editor_settings(state: State<'_, Arc<AppState>>, settings: serde_json::Value) -> Result<(), String> {
     state.storage.save_editor_settings(&settings).await
+}
+
+#[tauri::command]
+pub async fn patch_editor_settings(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, Arc<AppState>>,
+    patch: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let merged = state.storage.merge_editor_settings_patch(&patch).await?;
+    let _ = app.emit("dbx:editor-settings-patch", serde_json::json!({ "source": window.label(), "patch": patch }));
+    Ok(merged)
 }
 
 const GLOBAL_SEARCH_SETTINGS_FILE: &str = "global-search-settings.json";

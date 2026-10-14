@@ -110,6 +110,11 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.sql === restored.originalSql).toBe(false);
   });
 
+  it("preserves SQL revision timestamps across recovery snapshots", () => {
+    const [restored] = roundTrip([queryTab({ sql: "SELECT 2", originalSql: "", sqlUpdatedAt: 123 })]);
+    expect(restored.sqlUpdatedAt).toBe(123);
+  });
+
   it("restores an empty new query tab as clean", () => {
     const [restored] = roundTrip([queryTab({ sql: "", originalSql: "" })]);
     expect(restored.sql).toBe("");

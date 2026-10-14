@@ -9,10 +9,16 @@ export interface WorkspaceTransferInfo {
   title?: string;
 }
 export const WORKSPACE_STARTUP_ERROR_EVENT = "dbx:workspace-startup-error";
+export const WORKSPACE_STARTUP_READY_EVENT = "dbx:workspace-startup-ready";
 
 export function reportWorkspaceStartupError(error: unknown) {
   if (!new URLSearchParams(window.location.search).has("dbxWorkspaceTransfer")) return;
   window.dispatchEvent(new CustomEvent(WORKSPACE_STARTUP_ERROR_EVENT, { detail: error instanceof Error ? error.message : String(error) }));
+}
+
+export function reportWorkspaceStartupReady(id: string) {
+  if (new URLSearchParams(window.location.search).get("dbxWorkspaceTransfer") !== id) return;
+  window.dispatchEvent(new Event(WORKSPACE_STARTUP_READY_EVENT));
 }
 export interface WorkspaceTabHandoff extends DetachedTabHandoff {
   dropCursorPhysical?: { x: number; y: number };

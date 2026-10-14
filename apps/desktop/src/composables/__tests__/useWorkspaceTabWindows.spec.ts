@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   eventListen: vi.fn(),
   dropHit: null as { groupId: string; index?: number; tabId?: string } | null,
   cursor: { x: 950, y: 300 },
+  windowAtLabel: "dbx-tab-child" as string | null,
   show: vi.fn(),
   focus: vi.fn(),
   release: vi.fn(),
@@ -116,6 +117,7 @@ describe("useWorkspaceTabWindows", () => {
     mocks.listeners.clear();
     mocks.dropHit = null;
     mocks.cursor = { x: 950, y: 300 };
+    mocks.windowAtLabel = "dbx-tab-child";
     mocks.eventListen.mockImplementation(async (name: string, handler: (message: { payload: any }) => void) => {
       mocks.listeners.set(name, handler);
       return () => mocks.listeners.delete(name);
@@ -129,7 +131,8 @@ describe("useWorkspaceTabWindows", () => {
     mocks.persist.mockImplementation(async () => {
       mocks.calls.push("persist");
     });
-    mocks.invoke.mockImplementation(async (_command: string, args: { operation?: string }) => {
+    mocks.invoke.mockImplementation(async (command: string, args: { operation?: string; point?: { x: number; y: number } }) => {
+      if (command === "workspace_window_at") return mocks.windowAtLabel;
       if (args.operation === "read") return { schemaVersion: 1, tabId: "incoming", tab: { id: "incoming" }, runtime: {} };
       if (args.operation === "status" || args.operation === "commit") {
         mocks.calls.push("committed");
@@ -165,6 +168,16 @@ describe("useWorkspaceTabWindows", () => {
     expect(service.targets.value.map((target) => target.label)).toEqual(["dbx-tab-child"]);
   });
 
+  it("leaves the upstream detach path enabled when the multi-window preview is off", async () => {
+    mocks.settings.editorSettings.crossWindowTabDragPreviewEnabled = false;
+    const service = await mount();
+    const tab = { id: "source", title: "SQL" };
+
+    expect(service.enabled.value).toBe(false);
+    expect(service.startNativeDrag(tab as any, { clientX: 0, clientY: 0 } as PointerEvent, {} as any)).toBe(false);
+    expect(mocks.invoke).not.toHaveBeenCalledWith("start_tab_drag_preview", expect.anything());
+  });
+
   it("removes the source only after the target committed", async () => {
     const service = await mount();
     const tab = { id: "source", title: "SQL" };
@@ -174,6 +187,7 @@ describe("useWorkspaceTabWindows", () => {
     expect(mocks.tabs).toHaveLength(0);
     expect(mocks.release).toHaveBeenCalledOnce();
     expect(mocks.invoke).not.toHaveBeenCalledWith("complete_app_close", expect.anything());
+    expect(mocks.invoke).toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "ack", id: "transfer-1" }));
   });
 
   it("keeps the source after target cancellation", async () => {
@@ -214,6 +228,7 @@ describe("useWorkspaceTabWindows", () => {
     const tab = { id: "source", title: "SQL" };
     mocks.tabs.push(tab);
     mocks.cursor = { x: 600, y: 300 };
+    mocks.windowAtLabel = "main";
     expect(service.finishPointerDrag(tab as any, { clientX: 600, clientY: 300 } as PointerEvent)).toBe(true);
     await vi.waitFor(() => expect(mocks.create).toHaveBeenCalledWith("dbx-tab-transfer-1", expect.objectContaining({ visible: true })));
     expect(mocks.invoke).toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "offer", target: "dbx-tab-transfer-1" }));
@@ -242,6 +257,32 @@ describe("useWorkspaceTabWindows", () => {
     await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("workspaceDropTargetUnavailable"), 7000));
     expect(mocks.create).not.toHaveBeenCalled();
     expect(mocks.invoke).not.toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "offer" }));
+    expect(mocks.tabs).toEqual([tab]);
+  });
+
+  it("uses the native topmost-window hit test instead of guessing from focus", async () => {
+    const service = await mount();
+    const tab = { id: "source", title: "SQL" };
+    mocks.tabs.push(tab);
+    mocks.windowAtLabel = "dbx-tab-child";
+    mocks.dropHit = { groupId: "main", index: 0 };
+
+    expect(service.finishPointerDrag(tab as any, { clientX: -1, clientY: 300 } as PointerEvent)).toBe(true);
+    await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("workspace_window_at", { point: mocks.cursor }));
+    await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "offer", target: "dbx-tab-child" })));
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("preserves the source when native window hit testing fails", async () => {
+    const service = await mount();
+    const tab = { id: "source", title: "SQL" };
+    mocks.tabs.push(tab);
+    mocks.invoke.mockRejectedValueOnce(new Error("native hit test failed"));
+
+    expect(service.finishPointerDrag(tab as any, { clientX: -1, clientY: 300 } as PointerEvent)).toBe(true);
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("native hit test failed"), 7000));
+    expect(mocks.invoke).not.toHaveBeenCalledWith("workspace_tab_transfer", expect.objectContaining({ operation: "offer" }));
+    expect(mocks.create).not.toHaveBeenCalled();
     expect(mocks.tabs).toEqual([tab]);
   });
 
@@ -287,6 +328,21 @@ describe("useWorkspaceTabWindows", () => {
     expect(mocks.tabs[0]?.id).toBe("incoming");
   });
 
+  it("signals the startup preview after the initial workspace transfer commits", async () => {
+    const ready = vi.fn();
+    const eventName = "dbx:workspace-startup-ready";
+    window.history.replaceState(null, "", "/?dbxWorkspace=transfer-1&dbxWorkspaceTransfer=transfer-1");
+    window.addEventListener(eventName, ready);
+    try {
+      mocks.context = { kind: "workspace", windowLabel: "dbx-tab-transfer-1" };
+      await mount();
+      mocks.listeners.get("dbx:workspace-tab-transfer")!({ payload: { id: "transfer-1", target: "dbx-tab-transfer-1" } });
+      await vi.waitFor(() => expect(ready).toHaveBeenCalledOnce());
+    } finally {
+      window.removeEventListener(eventName, ready);
+    }
+  });
+
   it("ignores transfer events targeting another window", async () => {
     await mount();
     mocks.listeners.get("dbx:workspace-tab-transfer")!({ payload: { id: "transfer-1", target: "dbx-tab-other" } });
@@ -320,5 +376,23 @@ describe("useWorkspaceTabWindows", () => {
     expect(mocks.unlock).not.toHaveBeenCalled();
     mocks.listeners.get("dbx:workspace-close-release")!({ payload: { id: "quit-1" } });
     expect(mocks.unlock).toHaveBeenCalledOnce();
+  });
+
+  it("rejects main quit when a child window has an active task", async () => {
+    mocks.context = { kind: "workspace", windowLabel: "dbx-tab-child" };
+    assertCloseSafe.mockImplementationOnce(() => {
+      throw new Error("active child task");
+    });
+    await mount();
+
+    mocks.listeners.get("dbx:workspace-close-prepare")!({ payload: { id: "quit-2", targets: ["dbx-tab-child"] } });
+
+    await vi.waitFor(() => expect(mocks.emitTo).toHaveBeenCalledWith("main", "dbx:workspace-close-ready", {
+      id: "quit-2",
+      label: "dbx-tab-child",
+      error: "Error: active child task",
+    }));
+    expect(mocks.persist).not.toHaveBeenCalled();
+    expect(mocks.unlock).not.toHaveBeenCalled();
   });
 });

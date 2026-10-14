@@ -1346,6 +1346,7 @@ export const useQueryStore = defineStore("query", () => {
    */
   function registerOpenTab(tab: QueryTab, options: { activate?: boolean; insertAfterTabId?: string } = {}): string {
     assertUpdateAllowsInteraction();
+    if (typeof tab.sqlUpdatedAt !== "number" || !Number.isFinite(tab.sqlUpdatedAt)) tab.sqlUpdatedAt = Date.now();
     initializeResultAutoSave(tab);
     const anchorIndex = options.insertAfterTabId ? tabs.value.findIndex((item) => item.id === options.insertAfterTabId) : -1;
     if (anchorIndex >= 0) {
@@ -2625,6 +2626,7 @@ export const useQueryStore = defineStore("query", () => {
       database: t.database,
       schema: t.schema,
       sql: t.sql,
+      sqlUpdatedAt: t.sqlUpdatedAt,
       editorViewport: t.editorViewport,
       editorSelection: t.editorSelection,
       savedSqlId: t.savedSqlId,
@@ -2807,6 +2809,7 @@ export const useQueryStore = defineStore("query", () => {
         restoredTab.title = restoredTab.customTitle ? restoredTab.title : file.name;
         restoredTab.sql = file.sql;
         restoredTab.originalSql = file.sql;
+        touchTabSqlRevision(restoredTab);
       }
     }
     Object.assign(restoredTab, normalizeDetachedTabRuntime(handoff.runtime));
@@ -4191,12 +4194,20 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function markTabClean(tab: QueryTab | undefined) {
-    if (tab) tab.originalSql = tab.sql;
+    if (tab && tab.originalSql !== tab.sql) {
+      tab.originalSql = tab.sql;
+      touchTabSqlRevision(tab);
+    }
+  }
+
+  function touchTabSqlRevision(tab: QueryTab) {
+    tab.sqlUpdatedAt = Math.max(Date.now(), (tab.sqlUpdatedAt ?? 0) + 1);
   }
 
   function applyExternalSqlFileSnapshot(id: string, sql: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab?.externalSqlPath) return;
+    if (tab.sql !== sql || tab.originalSql !== sql) touchTabSqlRevision(tab);
     tab.sql = sql;
     tab.originalSql = sql;
     tab.externalSqlFileVersion = version;
@@ -4207,6 +4218,7 @@ export const useQueryStore = defineStore("query", () => {
   function markExternalSqlFileSaved(id: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab?.externalSqlPath) return;
+    if (tab.originalSql !== tab.sql) touchTabSqlRevision(tab);
     tab.originalSql = tab.sql;
     tab.externalSqlFileVersion = version;
     tab.externalSqlIgnoredFileVersion = undefined;
@@ -4303,13 +4315,16 @@ export const useQueryStore = defineStore("query", () => {
     }
     if (tab.mode !== "query") return false;
     if (tab.originalSql !== undefined) {
+      if (tab.sql !== tab.originalSql) touchTabSqlRevision(tab);
       tab.sql = tab.originalSql;
       return true;
     }
     if (tab.savedSqlId) {
+      if (tab.sql !== "") touchTabSqlRevision(tab);
       tab.sql = "";
       return true;
     }
+    if (tab.sql !== "" || tab.originalSql !== "") touchTabSqlRevision(tab);
     tab.sql = "";
     tab.originalSql = "";
     return true;
@@ -5188,6 +5203,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateSql(id: string, sql: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
+      if (tab.sql !== sql) touchTabSqlRevision(tab);
       tab.sql = sql;
       queueSavedSqlEditorPositionPersist(tab);
     }
@@ -5649,6 +5665,7 @@ export const useQueryStore = defineStore("query", () => {
       if (!existing.sql && file.sql && existing.originalSql === undefined) {
         existing.sql = file.sql;
         existing.originalSql = file.sql;
+        touchTabSqlRevision(existing);
         const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
         existing.editorSelection = restored.selection;
         existing.editorViewport = restored.viewport;
@@ -5697,6 +5714,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.title = tab.customTitle ? tab.title : file.name;
       tab.sql = file.sql;
       tab.originalSql = file.sql;
+      touchTabSqlRevision(tab);
       const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
       tab.editorSelection = restored.selection;
       tab.editorViewport = restored.viewport;

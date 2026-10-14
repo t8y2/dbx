@@ -780,4 +780,27 @@ describe("EditorGroupTabBar special page navigation", () => {
     app.unmount();
     host.remove();
   });
+
+  it("keeps the upstream open-in-new-window action when the multi-window preview is disabled", async () => {
+    const detach = vi.fn();
+    const { app, host, settings, store, tabId } = mountSpecialBar({
+      canDetachTabs: true,
+      "onDetach-tab": detach,
+    });
+    settings.editorSettings.crossWindowTabDragPreviewEnabled = false;
+    await settle();
+
+    const tab = host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"]`)!;
+    tab.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const menu = document.body.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+    const openInNewWindow = Array.from(menu.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Open in new window"));
+    expect(openInNewWindow).toBeDefined();
+    openInNewWindow!.click();
+    await settle();
+    expect(detach).toHaveBeenCalledWith(store.tabs.find((candidate) => candidate.id === tabId));
+
+    app.unmount();
+    host.remove();
+  });
 });

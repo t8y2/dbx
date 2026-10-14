@@ -9,6 +9,7 @@ import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FON
 import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
 import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { type ColumnFormatterConfig, type CustomColumnFormatterConfig, normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern } from "@/lib/dataGrid/columnFormatter";
@@ -2214,6 +2215,37 @@ function editorSettingsPatchSnapshot(settings: Partial<EditorSettings>): Partial
   return JSON.parse(JSON.stringify(settings)) as Partial<EditorSettings>;
 }
 
+function diffEditorSettingsValue(current: unknown, previous: unknown): unknown | undefined {
+  if (JSON.stringify(current) === JSON.stringify(previous)) return undefined;
+  if (current && previous && typeof current === "object" && typeof previous === "object" && !Array.isArray(current) && !Array.isArray(previous)) {
+    const currentRecord = current as Record<string, unknown>;
+    const previousRecord = previous as Record<string, unknown>;
+    const patch: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(currentRecord)) {
+      const diff = diffEditorSettingsValue(value, previousRecord[key]);
+      if (diff !== undefined) patch[key] = diff;
+    }
+    for (const key of Object.keys(previousRecord)) {
+      if (!(key in currentRecord)) patch[key] = null;
+    }
+    return Object.keys(patch).length ? patch : undefined;
+  }
+  return current;
+}
+
+function diffEditorSettings(current: EditorSettings, previous: EditorSettings): Partial<EditorSettings> {
+  return (diffEditorSettingsValue(current, previous) as Partial<EditorSettings> | undefined) ?? {};
+}
+
+function mergeEditorSettingsValues(current: unknown, patch: unknown): unknown {
+  if (!current || typeof current !== "object" || Array.isArray(current) || !patch || typeof patch !== "object" || Array.isArray(patch)) return patch;
+  const merged = { ...(current as Record<string, unknown>) };
+  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
+    merged[key] = key in merged ? mergeEditorSettingsValues(merged[key], value) : value;
+  }
+  return merged;
+}
+
 /** Keep only well-formed, non-empty template id lists keyed by db_type. */
 function normalizeTemplateIdsByDbType(value?: Record<string, string[]>): Record<string, string[]> {
   if (!value) return {};
@@ -2266,6 +2298,8 @@ export const useSettingsStore = defineStore("settings", () => {
   let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+  let persistedEditorSettingsSnapshot = editorSettingsSnapshot(editorSettings.value);
+  let editorSettingsSyncPromise: Promise<void> | null = null;
   let persistedAlwaysOnTopToolbarVisibility = editorSettings.value.toolbarItems.alwaysOnTop;
 
   function syncAlwaysOnTopToolbarVisibility(visible: boolean) {
@@ -2299,22 +2333,47 @@ export const useSettingsStore = defineStore("settings", () => {
     return queuedOperation;
   }
 
-  async function persistCurrentEditorSettings(): Promise<void> {
+  async function persistCurrentEditorSettings(patch = diffEditorSettings(editorSettings.value, persistedEditorSettingsSnapshot)): Promise<void> {
+    if (!Object.keys(patch).length) return;
+    const patchSnapshot = editorSettingsPatchSnapshot(patch);
     const snapshot = editorSettingsSnapshot(editorSettings.value);
-    await api.saveEditorSettings(snapshot);
-    const visible = snapshot.toolbarItems.alwaysOnTop;
+    const saved = isTauriRuntime() ? await api.saveEditorSettings(snapshot, patchSnapshot) : (await api.saveEditorSettings(snapshot), undefined);
+    persistedEditorSettingsSnapshot = saved && typeof saved === "object" && !Array.isArray(saved) ? normalizeEditorSettings(saved as Partial<EditorSettings>) : normalizeEditorSettings(mergeEditorSettingsValues(persistedEditorSettingsSnapshot, patchSnapshot) as Partial<EditorSettings>);
+    const visible = persistedEditorSettingsSnapshot.toolbarItems.alwaysOnTop;
     if (visible !== persistedAlwaysOnTopToolbarVisibility) {
       persistedAlwaysOnTopToolbarVisibility = visible;
       await emitAlwaysOnTopToolbarVisibilityChanged(visible);
     }
   }
 
-  function enqueueEditorSettingsSave(): Promise<void> {
-    return enqueueEditorSettingsOperation(persistCurrentEditorSettings);
+  function enqueueEditorSettingsSave(patch?: Partial<EditorSettings>): Promise<void> {
+    const snapshot = patch ? editorSettingsPatchSnapshot(patch) : undefined;
+    return enqueueEditorSettingsOperation(() => persistCurrentEditorSettings(snapshot));
   }
 
-  function saveEditorSettings() {
-    void enqueueEditorSettingsSave().catch(() => {});
+  function saveEditorSettings(patch?: Partial<EditorSettings>) {
+    void enqueueEditorSettingsSave(patch).catch(() => {});
+  }
+
+  async function setupEditorSettingsSync(): Promise<void> {
+    if (!isTauriRuntime()) return;
+    if (!editorSettingsSyncPromise) {
+      editorSettingsSyncPromise = (async () => {
+        const [{ listen }, { getCurrentWebviewWindow }] = await Promise.all([import("@tauri-apps/api/event"), import("@tauri-apps/api/webviewWindow")]);
+        const sourceLabel = getCurrentWebviewWindow().label;
+        await listen<{ source: string; patch: unknown }>("dbx:editor-settings-patch", ({ payload }) => {
+          if (payload.source === sourceLabel || !payload.patch || typeof payload.patch !== "object" || Array.isArray(payload.patch)) return;
+          const localPatch = diffEditorSettings(editorSettings.value, persistedEditorSettingsSnapshot);
+          const remote = normalizeEditorSettings(mergeEditorSettingsValues(persistedEditorSettingsSnapshot, payload.patch) as Partial<EditorSettings>);
+          persistedEditorSettingsSnapshot = editorSettingsSnapshot(remote);
+          editorSettings.value = normalizeEditorSettings(mergeEditorSettingsValues(remote, localPatch) as Partial<EditorSettings>);
+          persistedAlwaysOnTopToolbarVisibility = remote.toolbarItems.alwaysOnTop;
+        });
+      })().catch(() => {
+        editorSettingsSyncPromise = null;
+      });
+    }
+    await editorSettingsSyncPromise;
   }
 
   function markEditorSettingsPatch(partial: Partial<EditorSettings>): number {
@@ -2349,6 +2408,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (isEditorSettingsLoaded.value) return;
     if (!initEditorSettingsPromise) {
       initEditorSettingsPromise = (async () => {
+        void setupEditorSettingsSync();
         // A read failure is not the same as an empty settings record. Keeping the
         // store unloaded prevents startup migrations from persisting defaults over
         // settings that are temporarily unavailable.
@@ -2356,11 +2416,15 @@ export const useSettingsStore = defineStore("settings", () => {
         if (saved && typeof saved === "object" && !Array.isArray(saved)) {
           const savedSettings = saved as Partial<EditorSettings>;
           const normalized = normalizeEditorSettings(savedSettings);
+          persistedEditorSettingsSnapshot = editorSettingsSnapshot(normalized);
+          const migrationPatch: Partial<EditorSettings> = {};
           const needsSidebarBrowseObjectsMigration = typeof savedSettings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion !== "number" || savedSettings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion < SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
           if (needsSidebarBrowseObjectsMigration) {
             // Before this migration, a false value still preserved double-click browsing.
             normalized.sidebarBrowseObjectsOnDatabaseActivation = true;
             normalized.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion = SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
+            migrationPatch.sidebarBrowseObjectsOnDatabaseActivation = normalized.sidebarBrowseObjectsOnDatabaseActivation;
+            migrationPatch.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion = normalized.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion;
           }
           editorSettings.value = normalized;
           persistedAlwaysOnTopToolbarVisibility = normalized.toolbarItems.alwaysOnTop;
@@ -2379,9 +2443,23 @@ export const useSettingsStore = defineStore("settings", () => {
           const needsDataGridExtractorOptionsMigration =
             (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === true);
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
+          if (savedUpdateDownloadSource === "atomgit") migrationPatch.updateDownloadSource = normalized.updateDownloadSource;
+          if (needsExecuteModeDefaultMigration) {
+            migrationPatch.executeMode = normalized.executeMode;
+            migrationPatch.executeModeDefaultVersion = normalized.executeModeDefaultVersion;
+          }
+          if (needsWelcomePageDefaultMigration) {
+            migrationPatch.welcomePageMode = normalized.welcomePageMode;
+            migrationPatch.welcomePageModeDefaultVersion = normalized.welcomePageModeDefaultVersion;
+          }
+          if (needsTabNavigationShortcutMigration) migrationPatch.shortcuts = normalized.shortcuts;
+          if (needsDataGridExtractorOptionsMigration) {
+            migrationPatch.dataGridExtractorOptions = normalized.dataGridExtractorOptions;
+            migrationPatch.dataGridExtractorOptionsMigrationVersion = normalized.dataGridExtractorOptionsMigrationVersion;
+          }
           if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
-            await enqueueEditorSettingsSave().catch(() => {});
+            await enqueueEditorSettingsSave(migrationPatch).catch(() => {});
           }
           completeEditorSettingsInitialization();
           return;
@@ -3010,8 +3088,11 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {
-    const patch = migrateLegacyFilterEditorExpansionPatch(partial);
-    applyEditorSettingsPatch(patch);
+    const before = editorSettingsSnapshot(editorSettings.value);
+    const requestedPatch = migrateLegacyFilterEditorExpansionPatch(partial);
+    applyEditorSettingsPatch(requestedPatch);
+    const patch = diffEditorSettings(editorSettings.value, before);
+    if (!Object.keys(patch).length) return;
     markEditorSettingsPatch(patch);
     if (!isEditorSettingsLoaded.value) {
       pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(patch));
@@ -3034,11 +3115,12 @@ export const useSettingsStore = defineStore("settings", () => {
     return enqueueEditorSettingsAtomicMutation(async () => {
       await initEditorSettings();
       const previous = editorSettingsSnapshot(editorSettings.value);
-      const patch = migrateLegacyFilterEditorExpansionPatch(partial);
-      applyEditorSettingsPatch(patch);
+      const requestedPatch = migrateLegacyFilterEditorExpansionPatch(partial);
+      applyEditorSettingsPatch(requestedPatch);
+      const patch = diffEditorSettings(editorSettings.value, previous);
       const revision = markEditorSettingsPatch(patch);
       try {
-        await persistCurrentEditorSettings();
+        await persistCurrentEditorSettings(patch);
       } catch (error) {
         const restored = editorSettingsSnapshot(editorSettings.value) as unknown as Record<string, unknown>;
         const previousSettings = previous as unknown as Record<string, unknown>;

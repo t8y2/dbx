@@ -164,6 +164,35 @@ describe("useSqlExecution", () => {
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
   });
 
+  it("syncs the full editor document before executing a new query so it remains dirty", async () => {
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("conn-1", "app", "SQL", "query");
+    const tab = queryStore.tabs.find((candidate) => candidate.id === tabId)!;
+    const initialSqlRevision = tab.sqlUpdatedAt ?? 0;
+    const fullSql = "SELECT 1;\nSELECT 2;";
+    const selectedSql = "SELECT 1;";
+    const activeTab = computed(() => tab);
+    const activeConnection = computed(() => connection("postgres"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockResolvedValue(true);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({ activeTab, activeConnection, executableSql: computed(() => tab.sql), activeOutputView });
+
+    await execution.tryExecute({
+      fullSql,
+      selectedSql,
+      cursorPos: selectedSql.length,
+      selectionFrom: 0,
+      selectionTo: selectedSql.length,
+    });
+
+    expect(tab.sql).toBe(fullSql);
+    expect(tab.sqlUpdatedAt).toBeGreaterThan(initialSqlRevision);
+    expect(queryStore.isTabDirty(tab)).toBe(true);
+    expect(executeCurrentSql).toHaveBeenCalledWith(selectedSql, { sourceOffset: 0, tabId });
+  });
+
   it("invalidates object metadata after successful connection-level DDL", async () => {
     const sql = "CREATE DATABASE app_db";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab(), sql });

@@ -2,12 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 use super::connection::AppState;
+use super::workspace_tab_recovery::merge_recovered_tabs;
+use super::workspace_window_hit_test::{topmost_workspace_window_at, WindowHitBox};
 
 const TRANSFER_LIFETIME: Duration = Duration::from_secs(30);
+const MAX_PENDING_TRANSFERS: usize = 32;
 
 pub(crate) fn is_workspace_window(label: &str) -> bool {
     label.starts_with("dbx-tab-") && !label.starts_with("dbx-tab-drag-preview")
@@ -15,6 +19,69 @@ pub(crate) fn is_workspace_window(label: &str) -> bool {
 
 fn is_tab_window(label: &str) -> bool {
     label == "main" || is_workspace_window(label)
+}
+
+#[derive(Deserialize)]
+pub struct WorkspaceWindowPoint {
+    x: i32,
+    y: i32,
+}
+
+#[tauri::command]
+pub fn workspace_window_at(app: AppHandle, point: WorkspaceWindowPoint) -> Result<Option<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ptr::null_mut;
+        use windows_sys::Win32::Foundation::RECT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetTopWindow, GetWindow, GetWindowRect, IsIconic, IsWindowVisible, GW_HWNDNEXT,
+        };
+
+        let mut workspace_labels = HashMap::new();
+        for (label, window) in app.webview_windows().into_iter().filter(|(label, _)| is_tab_window(label)) {
+            let handle =
+                window.hwnd().map_err(|error| format!("Failed to inspect workspace window {label}: {error}"))?;
+            workspace_labels.insert(handle.0 as isize, label);
+        }
+        let preview_handle = app
+            .get_webview_window("dbx-tab-drag-preview")
+            .map(|window| {
+                window
+                    .hwnd()
+                    .map(|handle| handle.0 as isize)
+                    .map_err(|error| format!("Failed to inspect tab drag preview: {error}"))
+            })
+            .transpose()?;
+        let mut windows_in_z_order = Vec::new();
+        let mut handle = unsafe { GetTopWindow(null_mut()) };
+        while !handle.is_null() {
+            let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            if unsafe { IsWindowVisible(handle) } != 0 && unsafe { GetWindowRect(handle, &mut rect) } != 0 {
+                windows_in_z_order.push(WindowHitBox {
+                    handle: handle as isize,
+                    visible: true,
+                    minimized: unsafe { IsIconic(handle) } != 0,
+                    left: rect.left,
+                    top: rect.top,
+                    right: rect.right,
+                    bottom: rect.bottom,
+                });
+            }
+            handle = unsafe { GetWindow(handle, GW_HWNDNEXT) };
+        }
+        return Ok(topmost_workspace_window_at(
+            (point.x, point.y),
+            &windows_in_z_order,
+            &workspace_labels,
+            preview_handle,
+        ));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, point);
+        Ok(None)
+    }
 }
 
 struct Transfer {
@@ -34,6 +101,25 @@ impl Transfer {
         }
         self.status
     }
+}
+
+fn can_offer_transfer(transfers: &HashMap<String, Transfer>, id: &str) -> bool {
+    !transfers.contains_key(id)
+        && transfers.values().filter(|transfer| transfer.status == "pending").count() < MAX_PENDING_TRANSFERS
+}
+
+fn acknowledge_committed_transfer(
+    transfers: &mut HashMap<String, Transfer>,
+    id: &str,
+    caller: &str,
+) -> Result<&'static str, String> {
+    let transfer = transfers.get(id).ok_or_else(|| "Tab transfer expired or unavailable".to_string())?;
+    if caller != transfer.source || transfer.status != "committed" {
+        return Err("Only the source can acknowledge a committed tab transfer".into());
+    }
+    let status = transfer.status;
+    transfers.remove(id);
+    Ok(status)
 }
 
 #[derive(Default)]
@@ -61,7 +147,7 @@ pub fn workspace_tab_transfer(
     let mut transfers = state.transfers.lock().map_err(|_| "Tab transfer state unavailable")?;
     transfers.retain(|_, transfer| transfer.started.elapsed() < TRANSFER_LIFETIME * 4);
     if operation == "offer" {
-        if transfers.contains_key(&id) || transfers.len() >= 32 {
+        if !can_offer_transfer(&transfers, &id) {
             return Err("Tab transfer already exists or too many transfers are pending".into());
         }
         let target =
@@ -84,6 +170,9 @@ pub fn workspace_tab_transfer(
             },
         );
         return Ok(json!("pending"));
+    }
+    if operation == "ack" {
+        return Ok(json!(acknowledge_committed_transfer(&mut transfers, &id, caller)?));
     }
     let transfer = transfers.get_mut(&id).ok_or("Tab transfer expired or unavailable")?;
     if caller != transfer.source && caller != transfer.target {
@@ -231,29 +320,6 @@ pub(crate) async fn protected_result_cache_keys(app: &AppHandle, state: &AppStat
     Ok(keys)
 }
 
-fn merge_recovered_tabs(main: &mut Value, child: &Value) {
-    let Some(child_tabs) = child.get("tabs").and_then(Value::as_array) else {
-        return;
-    };
-    if !main.is_object() {
-        *main = json!({ "tabs": [], "activeTabId": null });
-    }
-    if !main.get("tabs").is_some_and(Value::is_array) {
-        main["tabs"] = json!([]);
-    }
-    let tabs = main["tabs"].as_array_mut().unwrap();
-    for tab in child_tabs {
-        let Some(id) = tab.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Some(index) = tabs.iter().position(|item| item.get("id").and_then(Value::as_str) == Some(id)) {
-            tabs[index] = tab.clone();
-        } else {
-            tabs.push(tab.clone());
-        }
-    }
-}
-
 pub(crate) async fn load_window_tabs(
     app: &AppHandle,
     window: &Window,
@@ -335,6 +401,33 @@ mod tests {
     }
 
     #[test]
+    fn recent_terminal_transfers_do_not_consume_pending_transfer_capacity() {
+        let mut transfers = HashMap::new();
+        for index in 0..MAX_PENDING_TRANSFERS {
+            let mut transfer = pending();
+            transfer.status = "committed";
+            transfers.insert(format!("committed-{index}"), transfer);
+        }
+
+        assert!(can_offer_transfer(&transfers, "next"));
+        transfers.insert("pending".into(), pending());
+        assert!(!can_offer_transfer(&transfers, "next"));
+        assert!(!can_offer_transfer(&transfers, "pending"));
+    }
+
+    #[test]
+    fn only_source_can_acknowledge_and_remove_a_committed_transfer() {
+        let mut transfer = pending();
+        transfer.status = "committed";
+        let mut transfers = HashMap::from([("done".to_string(), transfer)]);
+
+        assert!(acknowledge_committed_transfer(&mut transfers, "done", "dbx-tab-test").is_err());
+        assert!(transfers.contains_key("done"));
+        assert_eq!(acknowledge_committed_transfer(&mut transfers, "done", "main").unwrap(), "committed");
+        assert!(!transfers.contains_key("done"));
+    }
+
+    #[test]
     fn loading_window_can_cancel_before_frontend_listeners_exist() {
         let state = WorkspaceTabsState::default();
         state.transfers.lock().unwrap().insert("test".into(), pending());
@@ -369,15 +462,6 @@ mod tests {
         for label in ["main", "dbx-tab-drag-preview", "plugin-floating-example", "detached-tab-example"] {
             assert!(!is_workspace_window(label));
         }
-    }
-
-    #[test]
-    fn recovery_preserves_main_layout_and_deduplicates_tabs() {
-        let mut main = json!({ "tabs": [{"id":"a", "sql":"old"}], "groups": [{"id":"main"}] });
-        merge_recovered_tabs(&mut main, &json!({"tabs":[{"id":"a","sql":"new"},{"id":"b"}]}));
-        assert_eq!(main["tabs"].as_array().unwrap().len(), 2);
-        assert_eq!(main["tabs"][0]["sql"], "new");
-        assert_eq!(main["groups"][0]["id"], "main");
     }
 
     #[test]

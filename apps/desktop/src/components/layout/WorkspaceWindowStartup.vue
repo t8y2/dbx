@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { X, LoaderCircle, FileCode2 } from "@lucide/vue";
-import { WORKSPACE_STARTUP_ERROR_EVENT, type WorkspaceTransferInfo } from "@/lib/tabs/workspaceTabTransfer";
+import { WORKSPACE_STARTUP_ERROR_EVENT, WORKSPACE_STARTUP_READY_EVENT, type WorkspaceTransferInfo } from "@/lib/tabs/workspaceTabTransfer";
 
 defineProps<{ localeReady?: Promise<void> }>();
 const StartupGate = defineAsyncComponent(() => import("@/StartupGate.vue"));
@@ -22,7 +22,7 @@ let unlisten: (() => void) | undefined;
 async function inspect() {
   try {
     const info = await invoke<WorkspaceTransferInfo>("workspace_tab_transfer", { operation: "inspect", id });
-    if (disposed) return;
+    if (disposed || ready.value) return;
     title.value = info.title ?? "";
     if (info.status === "committed") {
       ready.value = true;
@@ -33,7 +33,7 @@ async function inspect() {
       return;
     }
   } catch (cause) {
-    if (!disposed) error.value ||= String(cause);
+    if (!disposed && !ready.value) error.value ||= String(cause);
     return;
   }
   if (!disposed) timer = setTimeout(() => void inspect(), 250);
@@ -48,6 +48,12 @@ function fail(cause: unknown) {
     .catch(() => {});
 }
 const onStartupError = (event: Event) => fail((event as CustomEvent).detail);
+const onStartupReady = () => {
+  if (disposed) return;
+  clearTimeout(timer);
+  ready.value = true;
+  error.value = "";
+};
 onErrorCaptured((cause) => {
   fail(cause);
   return false;
@@ -80,6 +86,7 @@ async function retry() {
 
 // 先安装错误监听，再让 StartupGate 启动完整工作区。
 window.addEventListener(WORKSPACE_STARTUP_ERROR_EVENT, onStartupError);
+window.addEventListener(WORKSPACE_STARTUP_READY_EVENT, onStartupReady);
 onMounted(() => {
   void inspect();
   void getCurrentWebviewWindow()
@@ -100,6 +107,7 @@ onUnmounted(() => {
   clearTimeout(retryTimer);
   unlisten?.();
   window.removeEventListener(WORKSPACE_STARTUP_ERROR_EVENT, onStartupError);
+  window.removeEventListener(WORKSPACE_STARTUP_READY_EVENT, onStartupReady);
 });
 </script>
 

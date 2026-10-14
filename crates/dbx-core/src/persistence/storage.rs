@@ -5526,6 +5526,37 @@ impl Storage {
         self.save_app_state_value(APP_STATE_EDITOR_SETTINGS_KEY, settings).await
     }
 
+    /// Atomically merge an editor-settings patch so separate windows cannot overwrite unrelated changes.
+    pub async fn merge_editor_settings_patch(&self, patch: &serde_json::Value) -> Result<serde_json::Value, String> {
+        if !patch.is_object() {
+            return Err("Editor settings patch must be a JSON object".to_string());
+        }
+        let patch = patch.clone();
+        self.with_conn(move |conn| {
+            let transaction =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let current = transaction
+                .query_row("SELECT value_json FROM app_state WHERE key = ?1", [APP_STATE_EDITOR_SETTINGS_KEY], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            let merged = merge_json_values(current, patch);
+            let value_json = serde_json::to_string(&merged).map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO app_state (key, value_json) VALUES (?1, ?2)",
+                    params![APP_STATE_EDITOR_SETTINGS_KEY, value_json],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction.commit().map_err(|error| error.to_string())?;
+            Ok(merged)
+        })
+        .await
+    }
+
     pub async fn load_editor_settings(&self) -> Result<Option<serde_json::Value>, String> {
         self.load_app_state_value(APP_STATE_EDITOR_SETTINGS_KEY).await
     }
@@ -9127,6 +9158,22 @@ fn merge_json_object_fields(
     serde_json::Value::Object(merged)
 }
 
+fn merge_json_values(current: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
+    match (current, patch) {
+        (serde_json::Value::Object(mut current), serde_json::Value::Object(patch)) => {
+            for (key, patch_value) in patch {
+                let merged = current
+                    .remove(&key)
+                    .map(|value| merge_json_values(value, patch_value.clone()))
+                    .unwrap_or(patch_value);
+                current.insert(key, merged);
+            }
+            serde_json::Value::Object(current)
+        }
+        (_, patch) => patch,
+    }
+}
+
 fn apply_desktop_settings_in_tx(
     tx: &Transaction<'_>,
     settings: &DesktopSettings,
@@ -11797,6 +11844,34 @@ mod tests {
         let storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
         assert!(storage.load_desktop_settings().await.unwrap().debug_logging_enabled);
         assert_eq!(storage.load_editor_settings().await.unwrap().unwrap()["snippets"][0]["body"], "SELECT 42");
+    }
+
+    #[tokio::test]
+    async fn merge_editor_settings_patch_preserves_unmodified_fields_and_nested_values() {
+        let data_dir = temp_data_dir("merge-editor-settings-patch");
+        let storage = crate::persistence::test_storage::open(&data_dir.join("dbx.db")).await.unwrap();
+        storage
+            .save_editor_settings(&serde_json::json!({
+                "theme": "dark",
+                "showLineNumbers": true,
+                "toolbarItems": { "execute": true, "format": true }
+            }))
+            .await
+            .unwrap();
+
+        let merged = storage
+            .merge_editor_settings_patch(&serde_json::json!({
+                "showLineNumbers": false,
+                "toolbarItems": { "format": false }
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(merged["theme"], "dark");
+        assert_eq!(merged["showLineNumbers"], false);
+        assert_eq!(merged["toolbarItems"]["execute"], true);
+        assert_eq!(merged["toolbarItems"]["format"], false);
+        assert_eq!(storage.load_editor_settings().await.unwrap().unwrap(), merged);
     }
 
     #[tokio::test]

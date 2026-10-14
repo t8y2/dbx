@@ -77,4 +77,6 @@ pub mod window_controls;
 pub mod xlsx_export;
 pub mod zookeeper_cmd;
 pub mod workspace_tabs;
+mod workspace_tab_recovery;
+mod workspace_window_hit_test;
 pub mod tab_drag_preview;

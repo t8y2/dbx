@@ -1927,6 +1927,9 @@ describe("settingsStore persisted settings initialization", () => {
 describe("settingsStore editor settings persistence", () => {
   beforeEach(() => {
     vi.resetModules();
+    vi.doUnmock("@/lib/backend/tauriRuntime");
+    vi.doUnmock("@tauri-apps/api/event");
+    vi.doUnmock("@tauri-apps/api/webviewWindow");
     setActivePinia(createPinia());
   });
 
@@ -2007,6 +2010,52 @@ describe("settingsStore editor settings persistence", () => {
     await restartedStore.initEditorSettings();
 
     expect(restartedStore.editorSettings.ignoredUpdateVersion).toBe("0.5.70");
+  });
+
+  it("merges editor-setting patches from separate window stores without replacing unrelated values", async () => {
+    let persistedSettings: Record<string, unknown> = JSON.parse(JSON.stringify(DEFAULT_EDITOR_SETTINGS));
+    let activeWindowLabel = "main";
+    const settingsListeners: Array<{ label: string; handler: (event: { payload: { source: string; patch: unknown } }) => void }> = [];
+    const merge = (base: any, patch: any): any => {
+      if (!base || typeof base !== "object" || Array.isArray(base) || !patch || typeof patch !== "object" || Array.isArray(patch)) return patch;
+      const result = { ...base };
+      for (const [key, value] of Object.entries(patch)) result[key] = key in result ? merge(result[key], value) : value;
+      return result;
+    };
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>, patch?: Record<string, unknown>) => {
+      persistedSettings = patch ? merge(persistedSettings, patch) : JSON.parse(JSON.stringify(settings));
+      if (patch) for (const listener of settingsListeners) listener.handler({ payload: { source: activeWindowLabel, patch } });
+      return JSON.parse(JSON.stringify(persistedSettings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@tauri-apps/api/event", () => ({
+      listen: vi.fn(async (_event: string, handler: (event: { payload: { source: string; patch: unknown } }) => void) => {
+        settingsListeners.push({ label: activeWindowLabel, handler });
+        return () => {};
+      }),
+    }));
+    vi.doMock("@tauri-apps/api/webviewWindow", () => ({ getCurrentWebviewWindow: () => ({ label: activeWindowLabel }) }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const firstWindow = useSettingsStore();
+    await firstWindow.initEditorSettings();
+    setActivePinia(createPinia());
+    activeWindowLabel = "dbx-tab-child";
+    const secondWindow = useSettingsStore();
+    await secondWindow.initEditorSettings();
+    await vi.waitFor(() => expect(settingsListeners).toHaveLength(2));
+
+    activeWindowLabel = "main";
+    await firstWindow.updateEditorSettingsAndPersist({ theme: "xcode-dark" });
+    expect(secondWindow.editorSettings.theme).toBe("xcode-dark");
+    activeWindowLabel = "dbx-tab-child";
+    await secondWindow.updateEditorSettingsAndPersist({ showLineNumbers: false });
+
+    expect(persistedSettings).toMatchObject({ theme: "xcode-dark", showLineNumbers: false });
+    expect(saveEditorSettings).toHaveBeenNthCalledWith(1, expect.any(Object), { theme: "xcode-dark" });
+    expect(saveEditorSettings).toHaveBeenNthCalledWith(2, expect.any(Object), { showLineNumbers: false });
   });
 
   it("serializes overlapping saves so an older snapshot cannot finish last", async () => {

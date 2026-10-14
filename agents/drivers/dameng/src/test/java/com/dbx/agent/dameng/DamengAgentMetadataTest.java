@@ -1160,6 +1160,37 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void fallsBackToTriggerCatalogWhenDbmsMetadataPermissionDenied() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                String sql = (String) args[0];
+                sqls.add(sql);
+                if (sql.contains("DBMS_METADATA.GET_DDL")) {
+                    return failingMetadataStatement(new SQLException("权限不足", "28000", -5669));
+                }
+                if (sql.contains("ALL_TRIGGERS")) {
+                    return metadataStatement(List.of(List.of("BEGIN NULL; END;")));
+                }
+            }
+            if ("close".equals(method.getName())) {
+                return null;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        }));
+
+        ObjectSource source = agent.getObjectSource("APP", "TRG_AUDIT", "TRIGGER");
+
+        Assertions.assertTrue(source.getSource().contains("BEGIN NULL; END;"), source.getSource());
+        Assertions.assertTrue(source.getSource().contains("系统字典视图"), source.getSource());
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("ALL_TRIGGERS")), String.join("\n", sqls));
+    }
+
+    @Test
     void tableDdlFallsBackToViewAndMaterializedViewCatalogDefinitions() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {

@@ -2,11 +2,29 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, resolveDataGridCopyPreference, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 describe("data-grid extractor options", () => {
-  it("keeps database qualification for legacy options and persists explicit opt-out", () => {
-    expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(true);
-    const configured = normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: false } });
-    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured))).sql.includeDatabaseName).toBe(false);
-    expect(normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: "false" } }).sql.includeDatabaseName).toBe(true);
+  it("preserves native SQL defaults and normalizes portable INSERT options", () => {
+    for (const legacy of [undefined, {}, { sql: {} }, { sql: { insertMode: "row-by-row" } }]) {
+      expect(normalizeDataGridExtractorOptions(legacy).sql).toMatchObject({ quoteIdentifiers: true, temporalFormat: "native" });
+    }
+    const configured = normalizeDataGridExtractorOptions({ sql: { quoteIdentifiers: false, temporalFormat: "string" } });
+    expect(configured.sql).toMatchObject({ quoteIdentifiers: false, temporalFormat: "string" });
+    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured)))).toEqual(configured);
+    expect(normalizeDataGridExtractorOptions({ sql: { quoteIdentifiers: "false", temporalFormat: "custom" } }).sql).toMatchObject({ quoteIdentifiers: true, temporalFormat: "native" });
+  });
+
+  it("migrates the legacy primary-key flag and normalizes the explicit mode", () => {
+    expect(normalizeDataGridExtractorOptions({}).sql.primaryKeyMode).toBe("include");
+    expect(normalizeDataGridExtractorOptions({ sql: { excludePrimaryKeysFromInsert: true } }).sql.primaryKeyMode).toBe("exclude-generated");
+    expect(normalizeDataGridExtractorOptions({ sql: { primaryKeyMode: "exclude-all" } }).sql.primaryKeyMode).toBe("exclude-all");
+  });
+
+  it("defaults to dropping database qualification and keeps an explicit opt-in", () => {
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql.includeDatabaseName).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(false);
+    const configured = normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: true } });
+    expect(configured.sql.includeDatabaseName).toBe(true);
+    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured))).sql.includeDatabaseName).toBe(true);
+    expect(normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: "true" } }).sql.includeDatabaseName).toBe(false);
   });
 
   it("defaults DSV NULL output to an empty spreadsheet field", () => {
@@ -17,9 +35,11 @@ describe("data-grid extractor options", () => {
   it("resolves smart copy to raw for one cell and TSV otherwise", () => {
     expect(normalizeDataGridCopyPreference(undefined)).toBe("smart");
     expect(normalizeDataGridCopyPreference("smart")).toBe("smart");
+    expect(normalizeDataGridCopyPreference("raw")).toBe("raw");
     expect(resolveDataGridCopyPreference("smart", 1)).toBe("raw");
     expect(resolveDataGridCopyPreference("smart", 2)).toBe("tsv");
     expect(resolveDataGridCopyPreference("csv", 1)).toBe("csv");
+    expect(resolveDataGridCopyPreference("raw", 3)).toBe("raw");
   });
 
   it("normalizes persisted values without sharing the default object", () => {
@@ -34,6 +54,13 @@ describe("data-grid extractor options", () => {
     expect(normalizeDataGridExtractorOptions({ json: {} }).json.camelCaseFieldNames).toBe(false);
     expect(normalizeDataGridExtractorOptions({ json: { camelCaseFieldNames: true } }).json.camelCaseFieldNames).toBe(true);
     expect(normalizeDataGridExtractorOptions({ json: { camelCaseFieldNames: "true" } }).json.camelCaseFieldNames).toBe(false);
+  });
+
+  it("keeps values-only JSON arrays explicit and disabled by default", () => {
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.json.valuesOnly).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ json: {} }).json.valuesOnly).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ json: { valuesOnly: true } }).json.valuesOnly).toBe(true);
+    expect(normalizeDataGridExtractorOptions({ json: { valuesOnly: "true" } }).json.valuesOnly).toBe(false);
   });
 
   it("rejects overlapping effective row and column separators", () => {

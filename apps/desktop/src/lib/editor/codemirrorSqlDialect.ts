@@ -4,6 +4,10 @@ import { driverProfileSqlBuiltinTerms } from "@/lib/database/driverProfileExtens
 
 export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "clickhouse" | "soql";
 
+export function supportsQueryEditorSqlLanguage(databaseType?: DatabaseType): boolean {
+  return databaseType !== "qdrant";
+}
+
 type CodeMirrorSqlLanguageModule = Pick<typeof import("@codemirror/lang-sql"), "Cassandra" | "MSSQL" | "MySQL" | "PLSQL" | "PostgreSQL" | "SQLite" | "SQLDialect" | "StandardSQL">;
 
 const MYSQL_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase"]);

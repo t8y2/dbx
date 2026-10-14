@@ -75,6 +75,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         })
     }
 
+    /// The wire dialect negotiated in LOGINACK.
+    pub fn tds_version(&self) -> crate::FeatureLevel {
+        self.connection.context().version()
+    }
+
     /// Executes SQL statements in the SQL Server, returning the number rows
     /// affected. Useful for `INSERT`, `UPDATE` and `DELETE` statements. The
     /// `query` can define the parameter placement by annotating them with
@@ -238,7 +243,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     {
         self.connection.flush_stream().await?;
 
-        let req = BatchRequest::new(query, self.connection.context().transaction_descriptor());
+        let req = BatchRequest::new(query, self.connection.context().transaction_descriptor())
+            .with_tds_version(self.connection.context().version());
 
         let id = self.connection.context_mut().next_packet_id();
         self.connection.send(PacketHeader::batch(id), req).await?;
@@ -306,7 +312,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         // retrieve column metadata from server
         let query = format!("SELECT TOP 0 * FROM {}", table);
 
-        let req = BatchRequest::new(query, self.connection.context().transaction_descriptor());
+        let req = BatchRequest::new(query, self.connection.context().transaction_descriptor())
+            .with_tds_version(self.connection.context().version());
 
         let id = self.connection.context_mut().next_packet_id();
         self.connection.send(PacketHeader::batch(id), req).await?;
@@ -336,7 +343,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         let col_data = columns.iter().map(|c| format!("{}", c)).join(", ");
         let query = format!("INSERT BULK {} ({})", table, col_data);
 
-        let req = BatchRequest::new(query, self.connection.context().transaction_descriptor());
+        let req = BatchRequest::new(query, self.connection.context().transaction_descriptor())
+            .with_tds_version(self.connection.context().version());
         let id = self.connection.context_mut().next_packet_id();
 
         self.connection.send(PacketHeader::batch(id), req).await?;
@@ -345,6 +353,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         ts.flush_done().await?;
 
         BulkLoadRequest::new(&mut self.connection, columns)
+    }
+
+    /// Send an ATTENTION signal without reading or reusing an interrupted response.
+    /// This only acknowledges transmission, not rollback. The caller must discard
+    /// this connection after interrupting its token stream and bound this operation.
+    pub async fn send_attention(&mut self) -> crate::Result<()> {
+        let id = self.connection.context_mut().next_packet_id();
+        self.connection.write_to_wire(PacketHeader::attention(id), bytes::BytesMut::new()).await?;
+        self.connection.flush_sink().await
     }
 
     /// Closes this database connection explicitly.
@@ -383,7 +400,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
                 param_str.push(',')
             }
             param_str.push_str(&format!("@P{} ", i + 1));
-            param_str.push_str(&param.type_name());
+            param_str.push_str(&param.type_name_for_version(self.connection.context().version()));
 
             rpc_params.push(RpcParam {
                 name: Cow::Owned(format!("@P{}", i + 1)),
@@ -400,7 +417,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
             proc_id,
             rpc_params,
             self.connection.context().transaction_descriptor(),
-        );
+        ).with_tds_version(self.connection.context().version());
 
         let id = self.connection.context_mut().next_packet_id();
         self.connection.send(PacketHeader::rpc(id), req).await?;

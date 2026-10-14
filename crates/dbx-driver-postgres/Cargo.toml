@@ -12,6 +12,7 @@ dbx-types = { path = "../dbx-types", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1"
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
+encoding_rs = "0.8"
 futures = "0.3"
 log = "0.4"
 openssl = { version = "0.10", features = ["vendored"] }

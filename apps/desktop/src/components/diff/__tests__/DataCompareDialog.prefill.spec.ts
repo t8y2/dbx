@@ -130,6 +130,7 @@ function completedSession(): DataCompareSession {
         sourceTruncated: false,
         targetTruncated: false,
         rowBudget: 100_000,
+        syncEligible: true,
         databaseType: "oracle",
         diff: {
           added: [

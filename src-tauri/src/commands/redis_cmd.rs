@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::redis_driver::{
-    classify_command, parse_command_argv, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
+    classify_command, parse_command_argv, RedisBlob, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
     RedisDatabaseInfo, RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage,
     RedisStreamPendingPage, RedisValue,
 };
@@ -85,6 +85,16 @@ pub async fn redis_get_value(
     key_raw: String,
 ) -> Result<RedisValue, String> {
     dbx_core::redis_ops::redis_get_value_in_db_core(&state, &connection_id, db, &key_raw).await
+}
+
+#[tauri::command]
+pub async fn redis_get_raw_value(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+) -> Result<RedisBlob, String> {
+    dbx_core::redis_ops::redis_get_raw_value_in_db_core(&state, &connection_id, db, &key_raw).await
 }
 
 #[tauri::command]
@@ -278,9 +288,11 @@ pub async fn redis_list_push(
     key_raw: String,
     value: String,
     ttl: Option<i64>,
+    side: Option<String>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "LPUSH").await?;
-    dbx_core::redis_ops::redis_list_push_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl).await
+    let side = dbx_core::redis_ops::ListPushSide::from_str_lossy(side.as_deref());
+    dbx_core::redis_ops::redis_list_push_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl, side).await
 }
 
 #[tauri::command]

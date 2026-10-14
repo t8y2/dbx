@@ -9,6 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
+import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
+import type { ProductionBadgeScope } from "@/types/database";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -71,9 +73,10 @@ import {
 } from "@/lib/plugins/frontendPlugin";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { isWindows } from "@/lib/backend/platform";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { hasXuguConnectionDatabase } from "@/lib/connection/xuguDatabase";
-import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
+import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_CONNECT_TIMEOUT_SECS, MAX_IDLE_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS, supportsIdleTimeout } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
 import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
 import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseConnectionDeepLinkUpdate, parseServiceConnectionUrl, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
@@ -87,6 +90,7 @@ import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedV
 import { mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
+import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { DAMENG_BUILTIN_DRIVER_PROFILE, DAMENG_CUSTOM_DRIVER_PROFILE, DAMENG_DEFAULT_JDBC_DRIVER_CLASS, damengCustomJdbcUrl, damengDriverModeForConfig, defaultDamengJdbcUrl, type DamengDriverMode } from "@/lib/database/damengDriverOptions";
 import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
@@ -141,6 +145,7 @@ import {
   Pipette,
   Plus,
   RefreshCw,
+  Save,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -423,6 +428,8 @@ const defaultForm = (): ConnectionForm => ({
   client_cert_path: "",
   client_key_path: "",
   sysdba: false,
+  oracle_oci_nls_lang: "",
+  oracle_oci_tns_admin: "",
   oracle_connection_type: "service_name",
   connection_string: undefined,
   jdbc_driver_class: undefined,
@@ -437,6 +444,7 @@ const defaultForm = (): ConnectionForm => ({
   redis_key_separator: ":",
   redis_scan_page_size: REDIS_SCAN_PAGE_SIZE_DEFAULT,
   redis_key_templates: [],
+  redis_key_filter: "",
   etcd_endpoints: "",
   gbase_server: "",
   informix_server: "",
@@ -445,9 +453,11 @@ const defaultForm = (): ConnectionForm => ({
   docs_notes_path: undefined,
   read_only: false,
   show_system_schemas: false,
+  show_database_links: true,
   sidebar_auto_load_all_tables: false,
   is_production: false,
   production_databases: [],
+  production_badge_scope: "database",
   visible_databases: undefined,
   save_password: true,
 });
@@ -505,6 +515,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     ssh_agent_sock_path: "",
     auth_method: "password",
     allow_exec_channel_proxy: false,
+    proxy_command: "",
   };
 }
 
@@ -525,6 +536,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
     auth_method: hop.auth_method || inferSshAuthMethod(hop),
     allow_exec_channel_proxy: !!hop.allow_exec_channel_proxy,
+    proxy_command: hop.proxy_command || "",
     profile_id: hop.profile_id || undefined,
   };
 }
@@ -808,6 +820,8 @@ const appliedConnectionUrlInput = ref("");
 const meilisearchHostInput = ref("");
 const appliedMeilisearchHostInput = ref("");
 const oracleTnsAdminPath = ref("");
+/** 每次进入 OCI 模式只提醒一次 Instant Client 目录，避免反复点“测试”时刷屏。 */
+const oracleOciClientPathReminded = ref(false);
 const oceanbaseSubMode = ref<"mysql" | "oracle">("mysql");
 const h2ConnectionMode = ref<H2ConnectionMode>("file");
 const dremioConnectionMode = ref<DremioConnectionMode>("legacy");
@@ -3106,6 +3120,8 @@ watch(
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
         keepalive_interval_secs: config.keepalive_interval_secs ?? 30,
         sysdba: config.sysdba || isOracleSysUser(config),
+        oracle_oci_nls_lang: config.oracle_oci_nls_lang || "",
+        oracle_oci_tns_admin: config.oracle_oci_tns_admin || "",
         oracle_connection_type: config.oracle_connection_type || "service_name",
         connection_string: config.connection_string,
         jdbc_driver_class: config.db_type === "sundb" ? sundbJdbcDriverClass(config) : config.jdbc_driver_class,
@@ -3120,6 +3136,7 @@ watch(
         redis_key_separator: config.redis_key_separator ?? ":",
         redis_scan_page_size: config.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT,
         redis_key_templates: normalizeRedisKeyTemplates(config.redis_key_templates),
+        redis_key_filter: config.redis_key_filter ?? "",
         redis_key_grouping: config.redis_key_grouping,
         etcd_endpoints: config.etcd_endpoints || "",
         gbase_server: config.gbase_server || "",
@@ -3130,9 +3147,11 @@ watch(
         docs_notes_path: config.docs_notes_path,
         read_only: config.read_only || false,
         show_system_schemas: config.show_system_schemas || false,
+        show_database_links: config.show_database_links !== false,
         sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
+        production_badge_scope: sidebarProductionBadgeScope(config),
         visible_databases: config.visible_databases,
         visible_schemas: config.visible_schemas,
         save_password: config.save_password !== false,
@@ -3464,6 +3483,156 @@ function switchH2DriverProfile(profile: "h2" | "h2-v1" | "h2-v2" | "h2-v3" | "h2
   resetTestState();
 }
 
+/**
+ * Oracle driver mode: thin (go-ora agent, default) or OCI (thick driver,
+ * requires a globally configured Oracle Instant Client). The oci.dll path
+ * lives in the global settings on purpose — one configuration is shared by
+ * every OCI connection, and new OCI connections backfill it automatically.
+ */
+// OCI（thick）驱动目前只发布 Windows x64 产物：非 Windows 平台不显示模式切换，
+// 避免用户选到无法安装的驱动。已保存的 OCI 连接仍按原样打开（连接时会得到
+// 明确的“驱动未安装”错误），并把 Thin 按钮留在原地便于切回。
+const oracleOciDriverSelectable = isWindows();
+
+function switchOracleDriverMode(mode: "thin" | "oci") {
+  form.value.driver_profile = mode === "oci" ? "oci" : "oracle";
+  oracleOciClientPathReminded.value = false;
+  resetTestState();
+}
+
+function persistOracleOciClientPath() {
+  void settingsStore.updateEditorSettings({
+    oracleOciClientPath: settingsStore.editorSettings.oracleOciClientPath,
+  });
+}
+
+/**
+ * NLS_LANG is a per-connection override: an empty value follows the global
+ * default, a filled value makes this connection own a dedicated agent process
+ * (the variable is process-scoped for OCI). The dropdown lists the common
+ * client character sets; the save button promotes the current value to the
+ * global default for reuse.
+ */
+const OCI_NLS_LANG_FOLLOW_GLOBAL = "__follow_global__";
+const ORACLE_NLS_LANG_OPTIONS = [
+  "AMERICAN_AMERICA.AL32UTF8",
+  "AMERICAN_AMERICA.UTF8",
+  "AMERICAN_AMERICA.WE8ISO8859P1",
+  "AMERICAN_AMERICA.ZHS16GBK",
+  "SIMPLIFIED CHINESE_CHINA.AL32UTF8",
+  "SIMPLIFIED CHINESE_CHINA.ZHS16GBK",
+  "TRADITIONAL CHINESE_TAIWAN.AL32UTF8",
+  "TRADITIONAL CHINESE_TAIWAN.ZHT16MSWIN950",
+  "JAPANESE_JAPAN.AL32UTF8",
+  "JAPANESE_JAPAN.JA16SJIS",
+  "KOREAN_KOREA.AL32UTF8",
+  "KOREAN_KOREA.KO16MSWIN949",
+] as const;
+
+const oracleOciNlsLangSelection = computed(() => (form.value.oracle_oci_nls_lang?.trim() ? form.value.oracle_oci_nls_lang.trim() : OCI_NLS_LANG_FOLLOW_GLOBAL));
+
+/** A stored value that predates the preset list must stay selectable. */
+const oracleOciNlsLangCustomValue = computed(() => {
+  const value = form.value.oracle_oci_nls_lang?.trim();
+  if (!value) return null;
+  return (ORACLE_NLS_LANG_OPTIONS as readonly string[]).includes(value) ? null : value;
+});
+
+const oracleOciNlsLangPlaceholder = computed(() => {
+  const globalValue = settingsStore.editorSettings.oracleOciNlsLang?.trim();
+  return globalValue ? t("connection.oracleOciNlsLangPlaceholderGlobal", { value: globalValue }) : t("connection.oracleOciNlsLangPlaceholder");
+});
+
+/** Names the global default in effect, so promoting a value becomes visible in place. */
+const oracleOciNlsLangFollowGlobalLabel = computed(() => {
+  const globalValue = settingsStore.editorSettings.oracleOciNlsLang?.trim();
+  return globalValue ? t("connection.oracleOciNlsLangFollowGlobalValue", { value: globalValue }) : t("connection.oracleOciNlsLangFollowGlobal");
+});
+
+function onOciNlsLangSelected(value: unknown) {
+  const selected = typeof value === "string" ? value : "";
+  form.value.oracle_oci_nls_lang = selected === OCI_NLS_LANG_FOLLOW_GLOBAL ? "" : selected;
+  resetTestState();
+}
+
+async function saveOciNlsLangAsGlobalDefault() {
+  const value = form.value.oracle_oci_nls_lang?.trim();
+  if (!value) {
+    toast(t("connection.oracleOciNlsLangSaveGlobalEmpty"), 3000);
+    return;
+  }
+  try {
+    await settingsStore.updateEditorSettingsAndPersist({ oracleOciNlsLang: value });
+    toast(t("connection.oracleOciNlsLangSavedGlobal", { value }), 3000);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
+}
+
+/**
+ * 连接级 TNS_ADMIN（tnsnames.ora / sqlnet.ora / 钱包目录）：留空跟随全局默认，
+ * 填写后本连接使用自己的目录——ADB 钱包、sqlnet.ora 网络选项因此不依赖
+ * TNS 连接方式。目录同样是进程级的，随 agent 启动注入。
+ */
+const oracleOciTnsAdminPlaceholder = computed(() => {
+  const globalValue = settingsStore.editorSettings.oracleOciTnsAdmin?.trim();
+  return globalValue ? t("connection.oracleOciTnsAdminPlaceholderGlobal", { value: globalValue }) : t("connection.oracleTnsAdminPlaceholder");
+});
+
+async function saveOciTnsAdminAsGlobalDefault() {
+  const value = form.value.oracle_oci_tns_admin?.trim();
+  if (!value) {
+    toast(t("connection.oracleOciTnsAdminSaveGlobalEmpty"), 3000);
+    return;
+  }
+  try {
+    await settingsStore.updateEditorSettingsAndPersist({ oracleOciTnsAdmin: value });
+    toast(t("connection.oracleOciTnsAdminSavedGlobal", { value }), 3000);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
+}
+
+async function browseOciTnsAdminDirectory() {
+  if (!isTauriRuntime()) {
+    toast(t("connection.oraclePathPickerDesktopOnly"));
+    return;
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    title: t("connection.oracleTnsAdminBrowse"),
+    directory: true,
+    multiple: false,
+  });
+  if (typeof selected === "string") {
+    form.value.oracle_oci_tns_admin = selected;
+    resetTestState();
+  }
+}
+
+/**
+ * Prompts for the Oracle Instant Client directory. The desktop shell is the
+ * only runtime that can resolve a local path, so the picker explains itself
+ * on the web build instead of silently doing nothing.
+ */
+async function browseOciClientDirectory() {
+  if (!isTauriRuntime()) {
+    toast(t("connection.oraclePathPickerDesktopOnly"));
+    return;
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    title: t("connection.oracleOciPathBrowse"),
+    directory: true,
+    multiple: false,
+  });
+  if (typeof selected === "string") {
+    settingsStore.editorSettings.oracleOciClientPath = selected;
+    persistOracleOciClientPath();
+    resetTestState();
+  }
+}
+
 const damengDriverMode = computed(() => damengDriverModeForConfig(form.value));
 const isDamengCustomDriver = computed(() => form.value.db_type === "dameng" && damengDriverMode.value === "custom");
 
@@ -3693,6 +3862,7 @@ const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" |
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
+const supportsIdleTimeoutSetting = computed(() => supportsIdleTimeout(form.value.db_type));
 const supportsDoltSystemTables = computed(() => isDoltDriverProfile(form.value.driver_profile));
 const showDoltSystemTables = computed({
   get: () => doltSystemTablesVisible(form.value),
@@ -3787,6 +3957,31 @@ const postgresClientKeyPath = computed({
   get: () => getUrlParam(form.value.url_params, "sslkey"),
   set: (value: string) => {
     form.value.url_params = setUrlParam(form.value.url_params, "sslkey", value);
+  },
+});
+// Firebird 的 Java 驱动（Jaybird）默认按 JVM 编码（UTF-8）解码 CHARACTER SET NONE
+// 字段，历史数据若以 GBK 等编码存放就会显示为乱码。这里把连接字符集映射到 JDBC URL 的
+// charSet 参数（复用通用 URL 参数通道），交给用户按数据实际编码选择。
+const FIREBIRD_CHARSET_OPTIONS = ["UTF8", "GBK", "GB18030", "BIG5", "ISO8859_1", "Cp1252"];
+const firebirdCharsetItems = computed(() => {
+  const current = getUrlParam(form.value.url_params, "charSet");
+  return current && !FIREBIRD_CHARSET_OPTIONS.includes(current) ? [current, ...FIREBIRD_CHARSET_OPTIONS] : FIREBIRD_CHARSET_OPTIONS;
+});
+const firebirdCharset = computed({
+  get: () => getUrlParam(form.value.url_params, "charSet") || "default",
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "charSet", value === "default" ? "" : value);
+  },
+});
+const FIREBIRD_DATA_CHARSET_OPTIONS = ["GBK", "GB18030", "BIG5"];
+const firebirdDataCharsetItems = computed(() => {
+  const current = getUrlParam(form.value.url_params, "dataCharset");
+  return current && !FIREBIRD_DATA_CHARSET_OPTIONS.includes(current) ? [current, ...FIREBIRD_DATA_CHARSET_OPTIONS] : FIREBIRD_DATA_CHARSET_OPTIONS;
+});
+const firebirdDataCharset = computed({
+  get: () => getUrlParam(form.value.url_params, "dataCharset") || "default",
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "dataCharset", value === "default" ? "" : value);
   },
 });
 const redisTlsInsecure = computed({
@@ -4732,6 +4927,11 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     // service, SID, and descriptor JDBC strings exactly as before.
     config.connection_string = undefined;
   }
+  if (config.db_type === "oracle" && config.driver_profile === "oci" && !settingsStore.editorSettings.oracleOciClientPath?.trim() && !oracleOciClientPathReminded.value) {
+    // 非阻断提醒：没有配置 Instant Client 目录时，agent 进程只能依赖系统 PATH 里已有的 oci.dll。
+    oracleOciClientPathReminded.value = true;
+    toast(t("connection.oracleOciClientPathMissing"), 5000);
+  }
   normalizeConnectionTimeouts(config, editGlobalConnectTimeoutSecs.value, editGlobalQueryTimeoutSecs.value);
   if (config.db_type === "manticoresearch") {
     config.url_params = "";
@@ -4961,9 +5161,25 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   if (config.db_type !== "oracle") {
     config.sysdba = undefined;
     config.oracle_connection_type = undefined;
+    config.oracle_oci_nls_lang = undefined;
+    config.oracle_oci_tns_admin = undefined;
   } else {
     config.sysdba = !!config.sysdba || isOracleSysUser(config);
     config.oracle_connection_type = config.oracle_connection_type || "service_name";
+    // Driver mode is encoded as the driver profile so the agent router picks
+    // the OCI (thick) agent; everything else stays on the thin agent.
+    if (config.driver_profile === "oci") {
+      config.driver_label = "Oracle (OCI)";
+      config.oracle_oci_nls_lang = config.oracle_oci_nls_lang?.trim() || undefined;
+      config.oracle_oci_tns_admin = config.oracle_oci_tns_admin?.trim() || undefined;
+    } else {
+      // Only default when empty: saved legacy profiles (oracle-legacy,
+      // oracle-10g) must survive edits untouched.
+      if (!config.driver_profile) config.driver_profile = "oracle";
+      config.driver_label = "Oracle";
+      config.oracle_oci_nls_lang = undefined;
+      config.oracle_oci_tns_admin = undefined;
+    }
   }
   if (config.db_type !== "redis") {
     config.redis_connection_mode = undefined;
@@ -4977,6 +5193,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.redis_scan_page_size = undefined;
     config.redis_database_aliases = undefined;
     config.redis_key_templates = undefined;
+    config.redis_key_filter = undefined;
     config.redis_key_grouping = undefined;
   } else if (config.redis_connection_mode === "sentinel") {
     config.redis_sentinel_master = config.redis_sentinel_master?.trim() || "";
@@ -5011,6 +5228,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   }
   if (config.db_type === "redis") {
     config.redis_key_separator = config.redis_key_separator?.trim() ?? ":";
+    config.redis_key_filter = config.redis_key_filter?.trim() || undefined;
     const scanSize = Number(config.redis_scan_page_size);
     config.redis_scan_page_size = Number.isFinite(scanSize) && scanSize >= REDIS_SCAN_PAGE_SIZE_MIN && scanSize <= REDIS_SCAN_PAGE_SIZE_MAX ? Math.round(scanSize) : REDIS_SCAN_PAGE_SIZE_DEFAULT;
     {
@@ -5201,6 +5419,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.visible_databases = Array.isArray(config.visible_databases) && config.visible_databases.length > 0 ? config.visible_databases : undefined;
   }
   if (!config.show_system_schemas) config.show_system_schemas = undefined;
+  if (config.show_database_links !== false) config.show_database_links = undefined;
   if (!config.sidebar_auto_load_all_tables) config.sidebar_auto_load_all_tables = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
@@ -6390,6 +6609,15 @@ function clampConnectTimeoutInput(event: Event, target: "global" | "connection")
   else form.value.connect_timeout_secs = MAX_CONNECT_TIMEOUT_SECS;
 }
 
+function clampIdleTimeoutInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (input.value === "") return;
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value <= MAX_IDLE_TIMEOUT_SECS) return;
+  input.value = String(MAX_IDLE_TIMEOUT_SECS);
+  form.value.idle_timeout_secs = MAX_IDLE_TIMEOUT_SECS;
+}
+
 async function persistGlobalTimeoutDrafts() {
   const nextConnect = normalizeGlobalConnectTimeoutSecs(editGlobalConnectTimeoutSecs.value);
   const nextQuery = normalizeGlobalQueryTimeoutSecs(editGlobalQueryTimeoutSecs.value);
@@ -6653,12 +6881,17 @@ async function browseHiveKerberosFile(target: "krb5" | "jaas") {
 }
 
 async function browseOracleTnsNamesFile() {
-  if (!isTauriRuntime()) return;
+  // TNS_ADMIN is a directory; accept a folder pick. Desktop-only, so the web
+  // build gets an explanation instead of a silent no-op.
+  if (!isTauriRuntime()) {
+    toast(t("connection.oraclePathPickerDesktopOnly"));
+    return;
+  }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({
     title: t("connection.oracleTnsAdminBrowse"),
+    directory: true,
     multiple: false,
-    filters: [{ name: "Oracle TNS names", extensions: ["ora"] }],
   });
   if (typeof selected === "string") {
     oracleTnsAdminPath.value = normalizeOracleTnsAdminPath(selected);
@@ -7914,6 +8147,13 @@ function openExternalUrl(url: string) {
                       <Input v-model="form.redis_key_separator" class="col-span-3 h-8 text-xs" placeholder=":" />
                     </div>
                     <div class="grid grid-cols-4 items-start gap-4">
+                      <Label for="redis-key-filter" :class="connectionLabelTopClass">{{ t("connection.redisKeyFilter") }}</Label>
+                      <div class="col-span-3 space-y-1">
+                        <Input id="redis-key-filter" v-model="form.redis_key_filter" class="h-8 text-xs" placeholder="order:*" spellcheck="false" />
+                        <p class="text-xs text-muted-foreground">{{ t("connection.redisKeyFilterHint") }}</p>
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelTopClass">{{ t("connection.redisKeyTemplates") }}</Label>
                       <div class="col-span-3 space-y-1">
                         <textarea
@@ -8952,11 +9192,99 @@ function openExternalUrl(url: string) {
                       <SpannerConnectionFields v-model:database="form.database" @change="resetTestState" />
                     </template>
 
+                    <div v-if="form.db_type === 'oracle' && (oracleOciDriverSelectable || form.driver_profile === 'oci')" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.oracleDriverMode") }}</Label>
+                      <div class="col-span-3 flex gap-2">
+                        <Button size="sm" :variant="form.driver_profile !== 'oci' ? 'default' : 'outline'" @click="switchOracleDriverMode('thin')"> Thin </Button>
+                        <Button v-if="oracleOciDriverSelectable" size="sm" :variant="form.driver_profile === 'oci' ? 'default' : 'outline'" @click="switchOracleDriverMode('oci')"> OCI </Button>
+                      </div>
+                    </div>
+
+                    <template v-if="form.db_type === 'oracle' && form.driver_profile === 'oci'">
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">oci.dll</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="settingsStore.editorSettings.oracleOciClientPath" class="flex-1 font-mono" :placeholder="t('connection.oracleOciPathPlaceholder')" @change="persistOracleOciClientPath" />
+                          <Tooltip>
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseOciClientDirectory">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.oracleOciPathBrowse") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <span />
+                        <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleOciPathHint") }}</p>
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">NLS_LANG</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Select :model-value="oracleOciNlsLangSelection" @update:model-value="onOciNlsLangSelected">
+                            <SelectTrigger class="flex-1 font-mono" aria-label="NLS_LANG">
+                              <SelectValue :placeholder="oracleOciNlsLangPlaceholder" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem :value="OCI_NLS_LANG_FOLLOW_GLOBAL">
+                                {{ oracleOciNlsLangFollowGlobalLabel }}
+                              </SelectItem>
+                              <SelectItem v-for="option in ORACLE_NLS_LANG_OPTIONS" :key="option" :value="option">
+                                {{ option }}
+                              </SelectItem>
+                              <SelectItem v-if="oracleOciNlsLangCustomValue" :value="oracleOciNlsLangCustomValue">
+                                {{ oracleOciNlsLangCustomValue }}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <Tooltip>
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :aria-label="t('connection.oracleOciNlsLangSaveGlobal')" @click="saveOciNlsLangAsGlobalDefault">
+                                <Save class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.oracleOciNlsLangSaveGlobal") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <span />
+                        <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleOciNlsLangHint") }}</p>
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">TNS_ADMIN</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="form.oracle_oci_tns_admin" class="flex-1 font-mono" :placeholder="oracleOciTnsAdminPlaceholder" @change="resetTestState" />
+                          <Tooltip>
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :aria-label="t('connection.oracleTnsAdminBrowse')" @click="browseOciTnsAdminDirectory">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.oracleTnsAdminBrowse") }}</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :aria-label="t('connection.oracleOciTnsAdminSaveGlobal')" @click="saveOciTnsAdminAsGlobalDefault">
+                                <Save class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.oracleOciTnsAdminSaveGlobal") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <span />
+                        <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleOciTnsAdminHint") }}</p>
+                      </div>
+                    </template>
+
                     <div v-if="form.db_type === 'oracle' && form.oracle_connection_type === 'tns'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">TNS_ADMIN</Label>
                       <div class="col-span-3 flex items-center gap-1">
                         <Input v-model="oracleTnsAdminPath" class="flex-1" :placeholder="t('connection.oracleTnsAdminPlaceholder')" />
-                        <Tooltip v-if="isDesktop">
+                        <Tooltip>
                           <TooltipTrigger as-child>
                             <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseOracleTnsNamesFile">
                               <FolderOpen class="h-4 w-4" />
@@ -9091,6 +9419,38 @@ function openExternalUrl(url: string) {
                       </label>
                     </div>
 
+                    <div v-if="form.db_type === 'firebird'" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelTopClass">{{ t("connection.firebirdCharset") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <Select v-model="firebirdCharset">
+                          <SelectTrigger class="h-9">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="default">{{ t("common.default") }}</SelectItem>
+                            <SelectItem v-for="charset in firebirdCharsetItems" :key="charset" :value="charset">{{ charset }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">
+                          {{ t("connection.firebirdCharsetHint") }}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div v-if="form.db_type === 'firebird'" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelTopClass">{{ t("connection.firebirdDataCharset") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <Select v-model="firebirdDataCharset">
+                          <SelectTrigger class="h-9"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="default">{{ t("common.default") }}</SelectItem>
+                            <SelectItem v-for="charset in firebirdDataCharsetItems" :key="charset" :value="charset">{{ charset }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.firebirdDataCharsetHint") }}</p>
+                      </div>
+                    </div>
+
                     <div v-if="supportsGenericUrlParams" class="connection-url-params-row grid grid-cols-4 items-start gap-4" :class="{ 'connection-url-params-row--compact': !showGenericUrlParamsHint, 'connection-url-params-row--with-hint': showGenericUrlParamsHint }">
                       <Label :class="[connectionLabelClass, 'connection-url-params-label']">{{ t("connection.urlParams") }}</Label>
                       <div class="col-span-3 space-y-1.5">
@@ -9117,7 +9477,9 @@ function openExternalUrl(url: string) {
                                               ? 'localdatacenter=dc1'
                                               : form.db_type === 'transwarp'
                                                 ? 'fetchSize=500;auth=noSasl'
-                                                : 'sslmode=prefer'
+                                                : form.db_type === 'firebird'
+                                                  ? 'charSet=GBK'
+                                                  : 'sslmode=prefer'
                           "
                         />
                         <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">
@@ -9945,9 +10307,12 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </div>
-                <div v-show="form.db_type === 'mongodb'" class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.idleTimeout") }}</Label>
-                  <Input v-model.number="form.idle_timeout_secs" type="number" min="0" max="600" step="1" class="col-span-3" />
+                <div v-show="supportsIdleTimeoutSetting" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.idleTimeout") }}</Label>
+                  <div class="col-span-3 space-y-1">
+                    <Input v-model.number="form.idle_timeout_secs" type="number" min="0" :max="MAX_IDLE_TIMEOUT_SECS" step="1" @input="clampIdleTimeoutInput($event)" />
+                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.idleTimeoutHint") }}</p>
+                  </div>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.keepaliveInterval") }}</Label>
@@ -9964,7 +10329,9 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.readOnly") }}</Label>
+                  <Label :class="connectionLabelSmallClass">
+                    <span class="inline-flex items-center gap-1">{{ t("connection.readOnly") }} <HelpTooltip :label="t('connection.readOnlyExplanation')" /></span>
+                  </Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.read_only" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
@@ -9975,6 +10342,13 @@ function openExternalUrl(url: string) {
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
+                  </label>
+                </div>
+                <div v-if="supportsOracleDatabaseLinks(form.db_type)" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.showDatabaseLinks") }}</Label>
+                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" v-model="form.show_database_links" class="mr-0" />
+                    <span class="text-xs text-muted-foreground">{{ t("connection.showDatabaseLinksHint") }}</span>
                   </label>
                 </div>
                 <div v-if="supportsAutomaticTableLoading" class="grid grid-cols-4 items-start gap-4">
@@ -10000,7 +10374,7 @@ function openExternalUrl(url: string) {
                 </div>
                 <div v-if="!isPluginConnection" class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
                   <Label :class="[connectionLabelSmallClass, 'pt-0.5 text-red-700 dark:text-red-300']">
-                    <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD</span>
+                    <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD <HelpTooltip :label="t('production.explanation')" trigger-class="text-red-700/70 dark:text-red-300/70" /></span>
                   </Label>
                   <div class="col-span-3 grid gap-2">
                     <div class="flex items-center justify-between gap-3">
@@ -10027,6 +10401,19 @@ function openExternalUrl(url: string) {
                           <ListFilter v-else class="mr-1.5 h-4 w-4" />
                           {{ t(productionScopePickerLabelKey) }}
                         </Button>
+                      </div>
+                      <div class="grid gap-1.5 pt-1">
+                        <Label for="production-badge-scope" class="text-xs font-medium">{{ t("production.badgeScope") }}</Label>
+                        <Select :model-value="form.production_badge_scope || 'database'" @update:model-value="form.production_badge_scope = $event as ProductionBadgeScope">
+                          <SelectTrigger id="production-badge-scope" class="h-8" :aria-label="t('production.badgeScope')"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="connection">{{ t("production.badgeScopeConnection") }}</SelectItem>
+                            <SelectItem value="database">{{ t("production.badgeScopeDatabase") }}</SelectItem>
+                            <SelectItem value="table">{{ t("production.badgeScopeTable") }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t(`production.badgeScopeHint${form.production_badge_scope === "connection" ? "Connection" : form.production_badge_scope === "table" ? "Table" : "Database"}`) }}</p>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("production.badgeScopeSafetyHint") }}</p>
                       </div>
                     </template>
                   </div>
@@ -10241,6 +10628,13 @@ function openExternalUrl(url: string) {
                         <span class="text-xs text-muted-foreground">{{ t("connection.sshAllowExecChannelProxy") }}</span>
                       </label>
                     </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshProxyCommand") }}</Label>
+                      <div class="col-span-3 space-y-1">
+                        <Input v-model="selectedSshLayer.proxy_command" :placeholder="t('connection.sshProxyCommandPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                        <p class="text-xs text-muted-foreground">{{ t("connection.sshProxyCommandHint") }}</p>
+                      </div>
+                    </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshConnectTimeout") }}</Label>
                       <Input v-model.number="selectedSshLayer.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" :disabled="selectedSshLayer.enabled === false" />
@@ -10276,15 +10670,15 @@ function openExternalUrl(url: string) {
                   <template v-else-if="selectedHttpTunnelLayer && !selectedLayerProfileId">
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelUrl") }}</Label>
-                      <Input v-model="selectedHttpTunnelLayer.url" class="col-span-3" placeholder="https://dbx.example.com/dbx_tunnel.php" :disabled="selectedHttpTunnelLayer.enabled === false" />
+                      <Input v-model="selectedHttpTunnelLayer!.url" class="col-span-3" placeholder="https://dbx.example.com/dbx_tunnel.php" :disabled="selectedHttpTunnelLayer!.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelToken") }}</Label>
-                      <PasswordInput v-model="selectedHttpTunnelLayer.token" class="col-span-3" :placeholder="t('connection.httpTunnelTokenPlaceholder')" :disabled="selectedHttpTunnelLayer.enabled === false" />
+                      <PasswordInput v-model="selectedHttpTunnelLayer!.token" class="col-span-3" :placeholder="t('connection.httpTunnelTokenPlaceholder')" :disabled="selectedHttpTunnelLayer!.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.httpTunnelConnectTimeout") }}</Label>
-                      <Input v-model.number="selectedHttpTunnelLayer.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" :disabled="selectedHttpTunnelLayer.enabled === false" />
+                      <Input v-model.number="selectedHttpTunnelLayer!.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" :disabled="selectedHttpTunnelLayer!.enabled === false" />
                     </div>
                   </template>
                 </template>

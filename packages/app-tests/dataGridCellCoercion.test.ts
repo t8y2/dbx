@@ -210,3 +210,16 @@ test("MySQL binary BLOB editor keeps non-text bytes in hex", () => {
   assert.equal(dataGridCellEditorText({ value: oldValue, databaseType: "mysql", columnInfo }), oldValue);
   assert.equal(coerceDataGridCellValue({ value: oldValue, oldValue, databaseType: "mysql", columnInfo }), oldValue);
 });
+
+test("Oracle and OceanBase-Oracle text BLOB editor decodes UTF-8 and writes edited bytes as hex", () => {
+  const oldValue = "0x2332303035383035";
+  const columnInfo = { data_type: "blob" };
+
+  for (const databaseType of ["oracle", "oceanbase-oracle"] as const) {
+    assert.equal(dataGridCellEditorText({ value: oldValue, databaseType, columnInfo }), "#2005805");
+    assert.strictEqual(coerceDataGridCellValue({ value: "#2005805", oldValue, databaseType, columnInfo }), oldValue);
+    assert.equal(coerceDataGridCellValue({ value: "新表达式", oldValue, databaseType, columnInfo }), "0xe696b0e8a1a8e8bebee5bc8f");
+    assert.equal(coerceDataGridCellValue({ value: "", oldValue, databaseType, columnInfo }), "0x");
+  }
+});
+

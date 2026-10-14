@@ -62,6 +62,6 @@ configure(jdbcAgentProjects) {
 configure(agentProjects.findAll { pooledJdbcProjects.contains(it.name) }) {
     dependencies {
         implementation 'com.zaxxer:HikariCP:7.0.2'
-        runtimeOnly 'org.slf4j:slf4j-nop:2.0.17'
+        runtimeOnly 'org.slf4j:slf4j-nop:2.0.20'
     }
 }

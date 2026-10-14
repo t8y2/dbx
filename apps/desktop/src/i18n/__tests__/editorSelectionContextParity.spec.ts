@@ -12,8 +12,8 @@ function localeSource(name: string): string {
   return readFileSync(new URL(`../locales/${name}.ts`, import.meta.url), "utf8");
 }
 
-// Source of truth: `supportedLocales` in ../index.ts (11 entries, `ru` included).
-const LOCALES = ["en", "zh-CN", "zh-TW", "ja", "ko", "es", "it", "pt-BR", "ru", "az", "tr"] as const;
+// Source of truth: `supportedLocales` in ../index.ts (12 entries, `ru` included).
+const LOCALES = ["en", "zh-CN", "zh-TW", "ja", "ko", "es", "it", "pt-BR", "ru", "az", "tr", "id"] as const;
 
 function declaredString(source: string, key: string): string | undefined {
   return source.match(new RegExp(String.raw`^\s*${key}:\s*"((?:[^"\\]|\\.)*)",\s*$`, "m"))?.[1];

@@ -99,6 +99,22 @@ describe("queryStore default transaction mode", () => {
     expect(store.tabs.find((item) => item.id === tabId)!.autoCommit).toBe(false);
   });
 
+  it("creates a GaussDB query tab in manual transaction mode when configured", async () => {
+    editorSettings.defaultTransactionMode = "manual";
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "gaussdb-1",
+      name: "GaussDB",
+      db_type: "gaussdb",
+      database: "postgres",
+    });
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("gaussdb-1", "postgres", "Query", "query", "public");
+
+    expect(store.tabs.find((item) => item.id === tabId)!.autoCommit).toBe(false);
+  });
+
   it("creates a query tab in auto-commit mode by default", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

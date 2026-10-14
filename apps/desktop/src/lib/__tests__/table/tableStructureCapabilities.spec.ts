@@ -102,7 +102,16 @@ describe("tableStructureCapabilities", () => {
       addPrimaryKey: true,
       alterPrimaryKey: false,
     });
-    for (const databaseType of ["oceanbase-oracle", "iris"] as const) {
+    expect(getTableStructureCapabilities("sqlserver", "sqlserver")).toMatchObject({
+      addPrimaryKey: true,
+      alterPrimaryKey: true,
+    });
+    expect(getTableStructureCapabilities("oceanbase-oracle", "oceanbase-oracle")).toMatchObject({
+      addPrimaryKey: true,
+      alterPrimaryKey: false,
+      foreignKey: false,
+    });
+    for (const databaseType of ["yashandb", "xugu", "iris"] as const) {
       expect(getTableStructureCapabilities(databaseType, databaseType)).toMatchObject({
         addPrimaryKey: false,
         alterPrimaryKey: false,

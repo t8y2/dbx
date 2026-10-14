@@ -143,6 +143,7 @@ const localizedAllLabels: Array<[Locale, string]> = [
   ["az", "Hamısı"],
   ["en", "All"],
   ["es", "Todas"],
+  ["id", "Semua"],
   ["it", "Tutti"],
   ["ja", "すべて"],
   ["ko", "전체"],

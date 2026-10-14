@@ -57,6 +57,11 @@ final class AgentRpcError extends RuntimeException {
         );
     }
 
+    static AgentRpcError rollbackConfirmedSql(SQLException error) {
+        return new AgentRpcError(message(error), "sql", false, "keep", "execute", "unknown",
+            safeSqlState(error.getSQLState()), error.getErrorCode(), safeClassName(error), error);
+    }
+
     static AgentRpcError backpressure(String stage, Throwable cause) {
         return new AgentRpcError(
             "Agent request capacity is temporarily exhausted",

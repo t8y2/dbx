@@ -41,7 +41,7 @@ pub async fn unsubscribe(client: &Arc<MqttClient>, topic: &str) -> Result<(), St
 }
 
 /// 发布消息
-pub async fn publish(client: &Arc<MqttClient>, request: &MqttPublishRequest) -> Result<(), String> {
+pub async fn publish(client: &Arc<MqttClient>, request: &MqttPublishRequest) -> Result<MqttMessage, String> {
     client.publish(request).await
 }
 
@@ -68,4 +68,9 @@ pub async fn get_messages(
 pub async fn clear_messages(client: &Arc<MqttClient>) -> Result<(), String> {
     client.clear_messages().await;
     Ok(())
+}
+
+/// Remove one message from the live MQTT console buffer.
+pub async fn delete_message(client: &Arc<MqttClient>, message: &MqttMessage) {
+    client.delete_message(message).await;
 }

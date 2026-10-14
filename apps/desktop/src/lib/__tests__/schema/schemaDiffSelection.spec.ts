@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { convertToSchemaDiffObjects, normalizeSchemaDiffDependencyGraph, schemaDiffObjectSelectionState, selectSchemaDiffInput, selectSchemaDiffInputForObject, setSchemaDiffObjectSelected, type SchemaDiffPreparation } from "../../schema/schemaDiff";
+import { convertToSchemaDiffObjects, normalizeSchemaDiffDependencyGraph, schemaDiffObjectSelectionState, selectSchemaDiffInput, selectSchemaDiffInputForObject, setSchemaDiffObjectSelected, setSchemaDiffObjectSelectedWithDependencies, type SchemaDiffPreparation } from "../../schema/schemaDiff";
 
 function createPreparation(): SchemaDiffPreparation {
   return {
@@ -50,6 +50,68 @@ function createDuplicateForeignKeyPreparation(): SchemaDiffPreparation {
 }
 
 describe("schema diff SQL selection projections", () => {
+  it("keeps every composite foreign key column in the selection dependency closure", () => {
+    const result = createPreparation();
+    result.diffs[0]!.foreignKeys = [
+      {
+        type: "added",
+        name: "fk_pair",
+        source: {
+          name: "fk_pair",
+          column: "a_col, a_other_col",
+          ref_table: "parent",
+          ref_column: "id, code",
+          column_pairs: [
+            ["a_col", "id"],
+            ["a_other_col", "code"],
+          ],
+        },
+      },
+    ];
+    const objects = convertToSchemaDiffObjects(result.diffs);
+    const foreignKey = objects[0]!.children!.find((child) => child.objectKind === "foreignKey")!;
+    for (const column of ["a_col", "a_other_col"]) {
+      setSchemaDiffObjectSelectedWithDependencies(objects, result, `col-table_a-${column}`, false);
+      expect(foreignKey.selected).toBe(false);
+      setSchemaDiffObjectSelectedWithDependencies(objects, result, foreignKey.id, true);
+      expect(objects[0]!.children!.filter((child) => child.objectKind === "column").every((child) => child.selected)).toBe(true);
+      expect(selectSchemaDiffInput(result, objects).diffs[0]!.foreignKeys![0]!.source!.column_pairs).toEqual([
+        ["a_col", "id"],
+        ["a_other_col", "code"],
+      ]);
+    }
+  });
+
+  it("selects a composite foreign key drop before removing either local column", () => {
+    const result = createPreparation();
+    result.diffs[0]!.columns!.forEach((column) => {
+      column.type = "removed";
+    });
+    result.diffs[0]!.foreignKeys = [
+      {
+        type: "removed",
+        name: "fk_pair",
+        target: {
+          name: "fk_pair",
+          column: "a_col, a_other_col",
+          ref_table: "parent",
+          ref_column: "id, code",
+          column_pairs: [
+            ["a_col", "id"],
+            ["a_other_col", "code"],
+          ],
+        },
+      },
+    ];
+    const objects = convertToSchemaDiffObjects(result.diffs);
+    const foreignKey = objects[0]!.children!.find((child) => child.objectKind === "foreignKey")!;
+    for (const column of ["a_col", "a_other_col"]) {
+      setSchemaDiffObjectSelected(objects, foreignKey.id, false);
+      setSchemaDiffObjectSelectedWithDependencies(objects, result, `col-table_a-${column}`, true);
+      expect(foreignKey.selected).toBe(true);
+    }
+  });
+
   it("keeps the focused table SQL separate from the full selected SQL", () => {
     const result = createPreparation();
     const objects = convertToSchemaDiffObjects(result.diffs);

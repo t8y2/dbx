@@ -50,16 +50,16 @@ test("load-all selects the last loaded row only after a valid append completes",
   // ES guard and the large-shot confirmation, so extract both bodies.
   const loadAllFn = source.match(/function loadAllRowsAndGoToLast\(\) \{[\s\S]*?\nfunction confirmLoadAllRows\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(loadAllFn, /gridSurfaceBusy\.value \|\| infiniteScrollLoading\.value/);
-  assert.match(loadAllFn, /dataGridLoadAllSegment/);
+  assert.match(loadAllFn, /const segment = nextLoadAllSegment\(\)/);
   assert.match(loadAllFn, /if \(!segment\) \{[\s\S]*?selectAndRevealLastLoadedRow\(\);[\s\S]*?return;/);
   assert.match(loadAllFn, /resolvedDatabaseType\.value === "elasticsearch" \|\| resolvedDatabaseType\.value === "easysearch"/);
   assert.match(loadAllFn, /LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD/);
   assert.match(loadAllFn, /infiniteScrollLoadAllPending = true/);
-  assert.match(loadAllFn, /emit\("paginate", segment\.offset, segment\.limit, currentWhereInput\(\), currentOrderBy\(\), true\)/);
+  assert.match(loadAllFn, /emit\("paginate", segment\.offset, segment\.limit, currentWhereInput\(\), effectiveOrderBy\(\), true\)/);
   assert.match(source, /\(\) => \[props\.loading, props\.result\.rows\.length, props\.result\.appended_from_row_count\] as const[\s\S]*?\{ flush: "post" \}/);
   assert.match(source, /props\.result\.appended_from_row_count !== requestedOffset[\s\S]*?return;[\s\S]*?if \(shouldSelectLastRow\) selectAndRevealLastLoadedRow\(\)/);
   assert.match(source, /function selectAndRevealLastLoadedRow\(\)[\s\S]*?selectRow\(rowIndex\)[\s\S]*?remainingFrames = 12[\s\S]*?scrollCanvasRowIntoView\(rowIndex, "end"\)[\s\S]*?scrollDomRowIntoView\(rowIndex, "end"\)[\s\S]*?requestAnimationFrame\(revealWhenReady\)/);
-  assert.match(source, /\(\) => \[props\.countSql \?\? ""[\s\S]*?manualTotalRowCount\.value = undefined/);
+  // Count invalidation is verified by mounted-grid tests in DataGridTotalRowCountRefresh.spec.ts.
   assert.match(source, /if \(infiniteScrollLoadAllPending\) \{[\s\S]*?infiniteScrollLoadAllPending = false;[\s\S]*?selectAndRevealLastLoadedRow\(\)/);
   assert.match(source, /dataGridInfiniteScrollAppendCompletion\(previousResult, result,[\s\S]*?loadAllRowsActive\.value = false/);
   assert.match(querySurfacesSource, /paginate: \[tabId: string, offset: number, limit: number, whereInput\?: string, orderBy\?: string, appendResult\?: boolean\]/);

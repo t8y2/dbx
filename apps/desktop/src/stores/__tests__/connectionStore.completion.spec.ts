@@ -132,6 +132,18 @@ function damengConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function db2Connection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "db2-1",
+    name: "DB2",
+    db_type: "db2",
+    port: 50000,
+    username: "DBX_TEST",
+    database: "",
+  } as ConnectionConfig;
+}
+
 function dorisConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -165,6 +177,16 @@ function deferred<T>() {
 }
 
 describe("connectionStore completion assistant", () => {
+  it.each([["routine", "sequence"], ["function", "sequence"], ["sequence"]] as const)("preserves requested OceanBase sequence candidates for %j", async (...objectKinds) => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({ candidates: [{ name: "ORDER_SEQ", kind: "sequence", schema: "APP" }], incomplete: false, fallback_used: false });
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn(), completionAssistantSearch }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+    expect(await store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "ORDER", 20, "APP", undefined, false, "APP", [...objectKinds])).toEqual([expect.objectContaining({ name: "ORDER_SEQ", type: "sequence", schema: "APP" })]);
+  });
   beforeEach(() => {
     vi.resetModules();
     vi.unstubAllGlobals();
@@ -772,6 +794,21 @@ describe("connectionStore completion assistant", () => {
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
   });
 
+  it("passes OceanBase synonym lookup context separately and isolates selected schemas", async () => {
+    const getColumns = vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: false }]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ getColumns, checkConnectionHealth: vi.fn().mockResolvedValue(undefined) }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+    await store.listCompletionColumns("oceanbase-oracle-1", "OBORCL", "Alias", undefined, { currentSchema: "MixedOwner" });
+    expect(getColumns).toHaveBeenLastCalledWith("oceanbase-oracle-1", "OBORCL", "", "Alias", undefined, undefined, "MixedOwner");
+    await store.listCompletionColumns("oceanbase-oracle-1", "OBORCL", "Alias", undefined, { currentSchema: "OtherOwner" });
+    expect(getColumns).toHaveBeenLastCalledWith("oceanbase-oracle-1", "OBORCL", "", "Alias", undefined, undefined, "OtherOwner");
+    expect(getColumns).toHaveBeenCalledTimes(2);
+  });
+
   it("lets a JDBC connection to Oracle resolve CURRENT_SCHEMA for unqualified column completion, same as the native Oracle driver", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [],
@@ -924,6 +961,33 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns).toHaveBeenCalledWith("dameng-1", "", "dbx_test", "tb_user", undefined, undefined);
     expect(first).toEqual([expect.objectContaining({ name: "ID", table: "tb_user", schema: "dbx_test" })]);
     expect(cached).toEqual(first);
+  });
+
+  it("uses the DB2 login schema for unqualified column completion", async () => {
+    // DB2's CURRENT SCHEMA starts as the authorization ID of the session user, so an
+    // unqualified reference resolves against the login schema — the same convention
+    // as Dameng (see the test above). Without the fallback `listCompletionColumns`
+    // takes its schema-required early return and never asks for the columns at all,
+    // so a tab that has no schema selected gets an empty candidate list.
+    const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("assistant unavailable"));
+    const getColumns = vi.fn().mockResolvedValue([{ name: "PMNUM", data_type: "VARCHAR", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [db2Connection()];
+    store.connectedIds.add("db2-1");
+
+    const first = await store.listCompletionColumns("db2-1", "", "pm");
+
+    expect(getColumns).toHaveBeenCalledWith("db2-1", "", "DBX_TEST", "pm", undefined, undefined);
+    expect(first).toEqual([expect.objectContaining({ name: "PMNUM", table: "pm", schema: "DBX_TEST" })]);
   });
 
   it("rejects assistant columns returned for a different MySQL parent table", async () => {
@@ -1239,6 +1303,57 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["users", "orders", "users"]);
   });
 
+  it("caches Mongo completion indexes and invalidates them via invalidateCompletionTableCache and invalidateCompletionCache", async () => {
+    const mongoListIndexSpecs = vi.fn().mockResolvedValue([
+      {
+        name: "email_1",
+        keys: [{ field: "email", direction: "1" }],
+        is_unique: true,
+        is_primary: false,
+        is_sparse: false,
+        expire_after_seconds: null,
+        partial_filter_expression: null,
+        background: false,
+        bucket_size: null,
+        hidden: false,
+        properties_complete: true,
+        extra_options: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      mongoListIndexSpecs,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [
+      {
+        ...postgresConnection(),
+        id: "mongo-1",
+        name: "MongoDB",
+        db_type: "mongodb",
+      },
+    ];
+    store.connectedIds.add("mongo-1");
+
+    const first = await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(first).toEqual([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    const second = await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(second).toEqual([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(1);
+
+    expect(store.invalidateCompletionTableCache("mongo-1", "app", "users")).toBeGreaterThan(0);
+    await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(2);
+
+    store.invalidateCompletionCache("mongo-1", "app");
+    await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(3);
+  });
+
   it("does not let an invalidated column request overwrite fresh metadata", async () => {
     const staleColumns = deferred<unknown[]>();
     const freshColumns = deferred<unknown[]>();
@@ -1510,6 +1625,101 @@ describe("connectionStore completion assistant", () => {
     expect(columns).toEqual([expect.objectContaining({ name: "EXPLICIT_ID", schema: "REPORTING" })]);
   });
 
+  it("filters OceanBase routines on the server and preserves case-distinct names", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [
+        { name: "CALC", kind: "procedure", schema: "APP", data_type: "PROCEDURE" },
+        { name: "Calc", kind: "function", schema: "APP", data_type: "FUNCTION" },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const listCompletionObjects = vi.fn();
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn(), completionAssistantSearch, listCompletionObjects }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+    const objects = await store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "CA", 20, "APP");
+    expect(objects.map((object) => object.name)).toEqual(["CALC", "Calc"]);
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ mask: "CA", parent_schema: "APP", max_results: 20, object_kinds: ["routine"] }));
+    expect(listCompletionObjects).not.toHaveBeenCalled();
+    expect((await store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "Ca", 20, "APP", undefined, false, "APP", ["function"], true)).map((object) => object.name)).toEqual(["Calc"]);
+  });
+
+  it("retains OceanBase legacy-agent fallback without treating an empty search as unsupported", async () => {
+    const completionAssistantSearch = vi.fn().mockRejectedValueOnce(new Error("OceanBase agent does not support filtered routine completion")).mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false });
+    const listCompletionObjects = vi.fn().mockResolvedValue([{ name: "P", object_type: "PROCEDURE", schema: "APP" }]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn(), completionAssistantSearch, listCompletionObjects }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+    expect((await store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "P", 20, "APP")).map((object) => object.name)).toEqual(["P"]);
+    expect(await store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "ZZ", 20, "APP")).toEqual([]);
+    expect(listCompletionObjects).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves OceanBase package overload identities and isolates quoted package caches", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { parent_name: string; parent_schema: string }) => ({
+      candidates: [1, 2].map((id) => ({ name: "RUN", kind: "procedure", schema: request.parent_schema, parent_schema: request.parent_schema, parent_name: request.parent_name, routine_id: `${request.parent_name}:${id}`, signature: id === 1 ? "" : null })),
+      incomplete: false,
+      fallback_used: false,
+    }));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn(), completionAssistantSearch }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+    const upper = await store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "R", 20, "APP", "PKG");
+    const mixed = await store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "R", 20, "APP", "Pkg");
+    expect(upper.map((object) => [object.routineId, object.signature])).toEqual([
+      ["PKG:1", ""],
+      ["PKG:2", undefined],
+    ]);
+    expect(mixed.map((object) => object.routineId)).toEqual(["Pkg:1", "Pkg:2"]);
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(await store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "R", 20, "APP", "PKG")).toEqual(upper);
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not turn an OceanBase package query failure into standalone routines", async () => {
+    const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("package dictionary permission denied"));
+    const listCompletionObjects = vi.fn();
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn(), completionAssistantSearch, listCompletionObjects }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+    await expect(store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "R", 20, "APP", "PKG")).rejects.toThrow("package dictionary permission denied");
+    expect(listCompletionObjects).not.toHaveBeenCalled();
+  });
+
+  it("does not restore invalidated OceanBase routine results or their local index", async () => {
+    const stale = deferred<{ candidates: Array<{ name: string; kind: string; schema: string }>; incomplete: boolean; fallback_used: boolean }>();
+    const completionAssistantSearch = vi
+      .fn()
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValue({ candidates: [{ name: "P_NEW", kind: "procedure", schema: "APP" }], incomplete: false, fallback_used: false });
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn(), completionAssistantSearch }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+    const pending = store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "P", 20, "APP");
+    await vi.waitFor(() => expect(completionAssistantSearch).toHaveBeenCalledTimes(1));
+    store.invalidateCompletionTableCache("oceanbase-oracle-1", "OBORCL", "P_OLD", "APP");
+    await store.listCompletionObjects("oceanbase-oracle-1", "OBORCL", "P", 20, "APP");
+    stale.resolve({ candidates: [{ name: "P_OLD", kind: "procedure", schema: "APP" }], incomplete: false, fallback_used: false });
+    expect((await pending).map((object) => object.name)).toEqual(["P_NEW"]);
+    expect(store.lookupLocalCompletionObjects("oceanbase-oracle-1", "OBORCL", "P", 20, "APP").map((object) => object.name)).toEqual(["P_NEW"]);
+  });
+
   it("maps Oracle package members without scanning every schema", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [{ name: "CALCULATE_BONUS", kind: "function", schema: "HR", parent_schema: "HR", parent_name: "PAYROLL", data_type: "FUNCTION" }],
@@ -1533,6 +1743,51 @@ describe("connectionStore completion assistant", () => {
 
     expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ object_kinds: ["routine"], mask: "CALC", schema: "APP", parent_schema: "HR", parent_name: "PAYROLL", global_search: false }));
     expect(objects).toEqual([expect.objectContaining({ name: "CALCULATE_BONUS", schema: "HR", type: "function", parentSchema: "HR", parentName: "PAYROLL", dataType: undefined, applyName: "HR.CALCULATE_BONUS", boost: 0 })]);
+  });
+
+  it("maps Oracle sequence objects from completion assistant", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "ORDER_SEQ", kind: "sequence", schema: "HR", data_type: "SEQUENCE" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listObjects: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    const objects = await store.listCompletionObjects("oracle-1", "ORCL", "ORDER", 20, "HR", undefined, false, "APP", ["routine", "sequence"]);
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ object_kinds: ["routine", "sequence"], mask: "ORDER", schema: "APP" }));
+    expect(objects).toEqual([expect.objectContaining({ name: "ORDER_SEQ", schema: "HR", type: "sequence", dataType: undefined, applyName: "HR.ORDER_SEQ" })]);
+  });
+
+  it("maps Oracle sequence objects from listObjects in fallback path", async () => {
+    const listCompletionObjects = vi.fn().mockResolvedValue([{ name: "ORDER_SEQ", object_type: "SEQUENCE", schema: "HR" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch: vi.fn().mockRejectedValue(new Error("assistant disabled")),
+      listCompletionObjects,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    const objects = await store.listCompletionObjects("oracle-1", "ORCL", "ORDER", 20, "HR", undefined, false, "APP", ["routine", "sequence"]);
+
+    expect(objects).toEqual([expect.objectContaining({ name: "ORDER_SEQ", schema: "HR", type: "sequence" })]);
   });
 
   it("loads PostgreSQL routines by prefix and preserves return metadata", async () => {
@@ -1638,9 +1893,9 @@ describe("connectionStore completion assistant", () => {
   });
 
   it.each([
-    ["empty", vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false })],
-    ["permission error", vi.fn().mockRejectedValue(new Error("permission denied for sequence"))],
-  ])("returns an empty sequence fallback for %s metadata", async (_caseName, completionAssistantSearch) => {
+    ["empty", vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false }), false],
+    ["permission error", vi.fn().mockRejectedValue(new Error("permission denied for sequence")), true],
+  ])("returns an empty sequence fallback for %s metadata", async (_caseName, completionAssistantSearch, expectMetadataCall) => {
     const listCompletionObjects = vi.fn().mockResolvedValue([{ name: "not_a_sequence", object_type: "FUNCTION" }]);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
@@ -1648,6 +1903,7 @@ describe("connectionStore completion assistant", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       completionAssistantSearch,
       listCompletionObjects,
+      listSchemas: vi.fn().mockResolvedValue(["public"]),
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
@@ -1656,7 +1912,11 @@ describe("connectionStore completion assistant", () => {
     store.connectedIds.add("pg-1");
 
     await expect(store.listCompletionObjects("pg-1", "app", "missing", 20, undefined, undefined, false, undefined, ["sequence"])).resolves.toEqual([]);
-    expect(listCompletionObjects).not.toHaveBeenCalled();
+    // The sequence-only error fallback loads schema-level objects (filtered to
+    // sequences), so the metadata call goes through on permission errors; the
+    // empty-metadata case returns [] without touching the metadata API.
+    if (expectMetadataCall) expect(listCompletionObjects).toHaveBeenCalled();
+    else expect(listCompletionObjects).not.toHaveBeenCalled();
   });
 
   it("searches the server-reported SQL Server default schema without treating the username as a schema", async () => {

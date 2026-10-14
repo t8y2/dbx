@@ -4,7 +4,14 @@ import json
 from pathlib import Path
 
 
-NATIVE_DRIVERS = ("cassandra", "hive", "argo", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "duckdb", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2", "sqlite-worker")
+# Every module that publishes platform-native agent binaries, keyed by its
+# artifact name. `oracle-oci` is built from the same `oracle-go` module as
+# `oracle` with the `oci` build tag, so it needs its own entry here: the release
+# job stages it as `dbx-agent-oracle-oci-<platform>`, and only a versioned name
+# is picked up by the registry generator. Platforms it does not publish are
+# skipped by `rename_artifact`, which keeps Windows-only drivers like
+# `oracle-oci` working without special casing.
+NATIVE_DRIVERS = ("cassandra", "hive", "argo", "oracle", "oracle-oci", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "duckdb", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2", "sqlite-worker")
 PLATFORMS = (
     "macos-aarch64",
     "macos-x64",

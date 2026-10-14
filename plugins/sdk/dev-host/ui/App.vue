@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Plus, Upload, Plug, Unplug, Pencil, Trash2, X, RefreshCw, Sun, Moon, Terminal, Settings2, Languages } from "lucide-vue-next";
-import { hostMessage } from "./messages.js";
+import { hostMessage, pluginInitMessage } from "./messages.js";
 import DebugPanel from "./DebugPanel.vue";
 import PluginIcon from "./PluginIcon.vue";
 import { localizeManifest, translate } from "./i18n.js";
@@ -105,7 +105,7 @@ const themes = () => ({
         "--color-destructive": "#f3625f",
         "--color-destructive-foreground": "#18181b",
         "--font-sans": '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
-        "--font-mono": "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
+        "--font-mono": "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', \"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", monospace",
         "--radius-md": "6px",
         "--radius-lg": "8px",
       }
@@ -124,7 +124,7 @@ const themes = () => ({
         "--color-destructive": "#e7000b",
         "--color-destructive-foreground": "#ffffff",
         "--font-sans": '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
-        "--font-mono": "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
+        "--font-mono": "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', \"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", monospace",
         "--radius-md": "6px",
         "--radius-lg": "8px",
       },
@@ -134,7 +134,7 @@ function post(frame, message) {
   windows.get(frame.id)?.contentWindow?.postMessage(snapshot, "*");
 }
 function init(frame) {
-  post(frame, { type: "init", context: JSON.parse(JSON.stringify(frame.context)), locale: locale.value, theme: themes(), permissions: manifest.value.permissions || [] });
+  post(frame, pluginInitMessage(frame, locale.value, themes(), manifest.value.permissions || []));
 }
 function theme() {
   dark.value = !dark.value;

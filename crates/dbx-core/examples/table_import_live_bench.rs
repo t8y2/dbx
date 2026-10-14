@@ -151,6 +151,8 @@ fn env_required(name: &str) -> Result<String, String> {
 fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConfig, String> {
     let database_name = env_required("DBX_BENCH_DATABASE")?;
     Ok(ConnectionConfig {
+        oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
@@ -174,6 +176,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         visible_schemas: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         attached_databases: Vec::new(),
         init_script: None,
         color: None,
@@ -200,6 +203,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
         redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
@@ -216,6 +220,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         read_only: false,
         is_production: false,
         production_databases: Vec::new(),
+        production_badge_scope: None,
         database_info: None,
     })
 }
@@ -269,6 +274,8 @@ fn write_xlsx(path: &Path, row_count: usize, column_count: usize, text_bytes: us
         column_comments: Vec::new(),
         rows: (0..row_count).map(|row_index| row(row_index, column_count, text_bytes)).collect(),
         numeric_column_right_align: false,
+        auto_filter: None,
+        header_comment_rows: false,
     })?;
     fs::write(path, workbook).map_err(|error| error.to_string())
 }

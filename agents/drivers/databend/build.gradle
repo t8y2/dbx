@@ -1,5 +1,5 @@
 dependencies {
-    implementation 'com.databend:databend-jdbc:0.4.6'
+    implementation 'com.databend:databend-jdbc:0.4.8'
 }
 
 tasks.named('shadowJar') {

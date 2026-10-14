@@ -144,11 +144,21 @@ export interface IndexDiff {
   changes?: string[];
 }
 
+export interface SchemaForeignKeyInfo extends ForeignKeyInfo {
+  /** Ordered local/reference pairs; scalar fields remain display labels. */
+  column_pairs?: [string, string][];
+}
+
+function foreignKeyColumns(foreignKey?: SchemaForeignKeyInfo): string[] {
+  if (!foreignKey) return [];
+  return foreignKey.column_pairs?.length ? foreignKey.column_pairs.map(([column]) => column) : [foreignKey.column];
+}
+
 export interface ForeignKeyDiff {
   type: "added" | "removed" | "modified";
   name: string;
-  source?: ForeignKeyInfo;
-  target?: ForeignKeyInfo;
+  source?: SchemaForeignKeyInfo;
+  target?: SchemaForeignKeyInfo;
   changes?: string[];
 }
 
@@ -366,6 +376,13 @@ export interface GenerateSchemaSyncPlanOptions {
   sourceDialect?: string;
   fieldMappings?: FieldMappingEntry[];
   enableRollback?: boolean;
+  /**
+   * Bracket the generated forward and rollback scripts with MySQL's
+   * `SET FOREIGN_KEY_CHECKS = 0` / `= 1` pair so a deploy can drop and recreate
+   * foreign-key-related objects in any order. The backend applies it for MySQL
+   * targets only and returns every other engine's script unchanged.
+   */
+  ignoreForeignKeyChecks?: boolean;
 }
 
 const MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "sundb", "databend", "gbase"]);
@@ -1198,7 +1215,7 @@ export function setSchemaDiffObjectSelectedWithDependencies(objects: SchemaDiffO
           if (indexObject) apply(indexObject.id, true);
         }
         for (const [index, foreignKey] of (tableDiff.foreignKeys ?? []).entries()) {
-          if (!["removed", "modified"].includes(foreignKey.type) || foreignKey.target?.column !== columnDiff.name) continue;
+          if (!["removed", "modified"].includes(foreignKey.type) || !foreignKeyColumns(foreignKey.target).includes(columnDiff.name)) continue;
           const foreignKeyObject = child("foreignKey", tableDiff.foreignKeys, index);
           if (foreignKeyObject) apply(foreignKeyObject.id, true);
         }
@@ -1217,7 +1234,7 @@ export function setSchemaDiffObjectSelectedWithDependencies(objects: SchemaDiffO
           if (indexObject) apply(indexObject.id, false);
         }
         for (const [index, foreignKey] of (tableDiff.foreignKeys ?? []).entries()) {
-          if (!["added", "modified"].includes(foreignKey.type) || foreignKey.source?.column !== columnDiff.name) continue;
+          if (!["added", "modified"].includes(foreignKey.type) || !foreignKeyColumns(foreignKey.source).includes(columnDiff.name)) continue;
           const foreignKeyObject = child("foreignKey", tableDiff.foreignKeys, index);
           if (foreignKeyObject) apply(foreignKeyObject.id, false);
         }
@@ -1235,7 +1252,7 @@ export function setSchemaDiffObjectSelectedWithDependencies(objects: SchemaDiffO
     if (value && object.objectKind === "foreignKey") {
       const foreignKeyIndex = findDiffChildIndex("foreignKey", tableObject.name, tableDiff.foreignKeys, object.id);
       const foreignKey = foreignKeyIndex < 0 ? undefined : tableDiff.foreignKeys?.[foreignKeyIndex];
-      if (foreignKey?.source?.column) applyColumn(foreignKey.source.column, true);
+      for (const column of foreignKeyColumns(foreignKey?.source)) applyColumn(column, true);
     }
   };
 

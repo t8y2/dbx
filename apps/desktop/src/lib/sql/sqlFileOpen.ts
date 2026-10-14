@@ -2,6 +2,38 @@ export function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path.trim());
 }
 
+export function isScriptFilePath(path: string): boolean {
+  return /\.(sql|js)$/i.test(path.trim());
+}
+
+export interface QueryEditorFileDialogFilter {
+  name: string;
+  extensions: string[];
+}
+
+export function queryEditorOpenFileFilters(databaseType?: string): QueryEditorFileDialogFilter[] {
+  if (databaseType === "mongodb") {
+    return [
+      { name: "MongoDB Script", extensions: ["js"] },
+      { name: "SQL", extensions: ["sql"] },
+      { name: "All Files", extensions: ["*"] },
+    ];
+  }
+  return [{ name: "SQL", extensions: ["sql"] }];
+}
+
+export function queryEditorOpenFileAccept(databaseType?: string): string {
+  return databaseType === "mongodb" ? ".js,.sql" : ".sql";
+}
+
+export function defaultSavedQueryFileName(title: string, databaseType?: string): string {
+  const defaultExt = databaseType === "mongodb" ? "js" : "sql";
+  const trimmed = title.trim() || "query";
+  const normalized = trimmed.replace(/\s+/g, "_");
+  const extSuffix = `.${defaultExt}`;
+  return normalized.toLowerCase().endsWith(extSuffix) ? normalized : `${normalized}${extSuffix}`;
+}
+
 export function sqlFileTitleFromPath(path: string): string {
   const normalized = normalizeExternalSqlPath(path);
   const name = normalized.split("/").filter(Boolean).pop();
@@ -14,6 +46,16 @@ export function normalizeExternalSqlPath(path: string): string {
     .replace(/\\/g, "/")
     .replace(/\/{2,}/g, "/");
   return normalized.length > 1 ? normalized.replace(/\/$/, "") : normalized;
+}
+
+export function relocateExternalSqlPathWithinFolder(path: string, previousFolderPath: string, nextFolderPath: string): string | null {
+  const normalizedPath = normalizeExternalSqlPath(path);
+  const previous = normalizeExternalSqlPath(previousFolderPath);
+  const next = normalizeExternalSqlPath(nextFolderPath);
+  if (!normalizedPath || !previous || !next || (normalizedPath !== previous && !normalizedPath.startsWith(`${previous}/`))) return null;
+  const nextPrefix = nextFolderPath.trim().replace(/[\\/]+$/, "");
+  if (!nextPrefix) return null;
+  return `${nextPrefix}${normalizedPath.slice(previous.length)}`;
 }
 
 export function externalSqlFileDisplayTitles(paths: string[]): string[] {

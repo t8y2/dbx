@@ -58,6 +58,7 @@ export interface TabResultSnapshot {
 
 interface ColumnarQueryResult {
   columns: string[];
+  neo4j_node_cells?: QueryResult["neo4j_node_cells"];
   spatial_columns?: QueryResult["spatial_columns"];
   spatial_values?: QueryResult["spatial_values"];
   large_value_cells?: QueryResult["large_value_cells"];
@@ -81,6 +82,7 @@ interface ColumnarQueryResult {
   truncated?: boolean;
   has_more?: boolean;
   sourceLabel?: string;
+  sourceLabelKind?: QueryResult["sourceLabelKind"];
   sourceQualifier?: string;
   sourceName?: string;
   sourceStatement?: string;
@@ -354,6 +356,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
   if (!result) return undefined;
   return {
     columns: [...result.columns],
+    neo4j_node_cells: result.neo4j_node_cells ? clonePlain(result.neo4j_node_cells) : undefined,
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
@@ -377,6 +380,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     session_id: undefined,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
+    sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
     sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
@@ -418,6 +422,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
   }
   const metadata = removeUndefinedFields({
     columns: [...result.columns],
+    neo4j_node_cells: result.neo4j_node_cells ? clonePlain(result.neo4j_node_cells) : undefined,
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
@@ -440,6 +445,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     truncated: result.truncated,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
+    sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
     sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
@@ -454,6 +460,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
   const rows = Array.from({ length: result.rowCount }, (_, rowIndex) => result.columnValues.map((values) => values[rowIndex] ?? null));
   return {
     columns: [...result.columns],
+    neo4j_node_cells: result.neo4j_node_cells ? clonePlain(result.neo4j_node_cells) : undefined,
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
@@ -477,6 +484,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     session_id: undefined,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
+    sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
     sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,

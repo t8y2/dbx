@@ -9,7 +9,7 @@ import { useQueryEditorCompletion } from "../useQueryEditorCompletion";
 import { useQueryEditorCompletionMetadata } from "../useQueryEditorCompletionMetadata";
 import type { QueryEditorProps } from "../queryEditorTypes";
 import type { RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
-import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import type { SqlCompletionColumn, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { analyzeSqlCompletion, type SqlCompletionAnalysisResult } from "@/lib/sql/sqlCompletionAnalysis";
 
 vi.mock("@/stores/connectionStore", () => ({ COMPLETION_METADATA_CONCURRENCY: 4 }));
@@ -32,7 +32,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetadata?: (metadata: ReturnType<typeof useQueryEditorCompletionMetadata>) => void) {
+function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetadata?: (metadata: ReturnType<typeof useQueryEditorCompletionMetadata>) => void, semanticCompletionEnabled = false) {
   const props = reactive<QueryEditorProps>({ modelValue: "SEL", databaseType: "mysql", dialect: "mysql", connectionId: "connection", database: "demo", ...overrides });
   const parent = document.createElement("div");
   document.body.append(parent);
@@ -41,31 +41,32 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
   const store = {
     getConfig: vi.fn(() => undefined),
     lookupLocalCompletionTables: vi.fn((): SqlCompletionTable[] => []),
-    lookupLocalCompletionColumns: vi.fn(() => []),
+    lookupLocalCompletionColumns: vi.fn((): SqlCompletionColumn[] => []),
     lookupLocalCompletionColumnsByPrefix: vi.fn(() => []),
-    lookupLocalCompletionObjects: vi.fn(() => []),
-    lookupLocalCompletionDatabases: vi.fn(() => []),
-    lookupLocalCompletionSchemas: vi.fn(() => []),
+    lookupLocalCompletionObjects: vi.fn((): SqlCompletionObject[] => []),
+    lookupLocalCompletionDatabases: vi.fn((): string[] => []),
+    lookupLocalCompletionSchemas: vi.fn((): string[] => []),
     lookupLocalCompletionForeignKeys: vi.fn(() => []),
     listCompletionTables: vi.fn(async (): Promise<SqlCompletionTable[]> => []),
-    listCompletionObjects: vi.fn(async () => []),
-    listCompletionColumns: vi.fn(async () => []),
-    listCompletionSchemas: vi.fn(async () => []),
-    listCompletionDatabases: vi.fn(async () => []),
+    listCompletionObjects: vi.fn(async (): Promise<SqlCompletionObject[]> => []),
+    listCompletionColumns: vi.fn(async (): Promise<SqlCompletionColumn[]> => []),
+    listCompletionSchemas: vi.fn(async (): Promise<string[]> => []),
+    listCompletionDatabases: vi.fn(async (): Promise<string[]> => []),
     refreshCompletionTables: vi.fn(async () => []),
-    refreshCompletionColumns: vi.fn(async () => []),
+    refreshCompletionColumns: vi.fn(async (): Promise<SqlCompletionColumn[]> => []),
     refreshCompletionSchemas: vi.fn(async () => []),
     refreshCompletionDatabases: vi.fn(async () => []),
     listRedisCompletionCommandDocs: vi.fn(async () => commands),
     listRedisCompletionKeys: vi.fn(async () => ["user:1"]),
     listMongoCompletionCollections: vi.fn(async () => ["users"]),
     listMongoCompletionFields: vi.fn(async () => []),
+    listMongoCompletionIndexes: vi.fn(async () => []),
     listElasticsearchCompletionIndices: vi.fn(async () => ["users"]),
     listElasticsearchCompletionFields: vi.fn(async () => []),
   };
   const connectionStore = store as unknown as Options["connectionStore"];
   const settings = reactive({ editorSettings: { completionTriggerMode: "positional", snippets: [], sqlFormatter: { keywordCase: "upper", functionCase: "upper" }, autoAliasTables: false, tableCompletionSchemaQualification: "collision", generateSqlQuoteIdentifiers: false } });
-  const metadata = useQueryEditorCompletionMetadata({ props, view, connectionStore, sqlBehaviorDialect: () => props.dialect, remoteLatencyBudgetMs: 40, maxCompletionTables: 100, onDemandMinPrefix: 2, semanticCompletionEnabled: false });
+  const metadata = useQueryEditorCompletionMetadata({ props, view, connectionStore, sqlBehaviorDialect: () => props.dialect, remoteLatencyBudgetMs: 40, maxCompletionTables: 100, onDemandMinPrefix: 2, semanticCompletionEnabled });
   configureMetadata?.(metadata);
   const startCompletion = vi.fn(() => true);
   const runtime: Options["runtime"] = { codeMirrorStartCompletion: startCompletion, codeMirrorInsertCompletionText: insertCompletionText, codeMirrorSnippetCompletion: snippetCompletion, codeMirrorCompletionStatus: () => null, imeCompositionActive: false };
@@ -91,7 +92,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     triggerDeferDelayMs: 25,
     maxCompletionTables: 100,
     onDemandTableLimit: 100,
-    semanticCompletionEnabled: false,
+    semanticCompletionEnabled,
   });
   cleanups.push(() => {
     completion.clearDeferredCompletionTrigger();
@@ -102,6 +103,264 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
   const provide = (explicit = true) => completion.provideSqlCompletions(new CompletionContext(currentView.state, currentView.state.selection.main.head, explicit));
   return { props, currentView, view, store, settings, runtime, completion, provide, startCompletion };
 }
+
+describe.each([false, true])("OceanBase standalone routine completion (semantic=%s)", (semanticCompletionEnabled) => {
+  beforeEach(() => vi.useRealTimers());
+
+  it("resolves an unselected package schema remotely without using another owner's cached members", async () => {
+    const { provide, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", modelValue: "CALL PKG.R" }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionObjects.mockReturnValue([{ name: "RUN_OTHER", schema: "OTHER", parentSchema: "OTHER", parentName: "PKG", type: "procedure", signature: "P NUMBER" }]);
+    store.listCompletionObjects.mockImplementation(async (...args: unknown[]) => (args[5] === "PKG" ? [{ name: "RUN_APP", schema: "APP", parentSchema: "APP", parentName: "PKG", type: "procedure", signature: "P DATE" }] : []));
+    const local = await provide(false);
+    expect(local?.options.some((option) => option.label === "RUN_OTHER") ?? false).toBe(false);
+    const remote = await provide();
+    expect(remote?.options.some((option) => option.label === "RUN_APP")).toBe(true);
+    expect(remote?.options.some((option) => option.label === "RUN_OTHER")).toBe(false);
+  });
+
+  it("loads a quoted owner exactly and inserts a case-sensitive routine identifier", async () => {
+    const sql = 'CALL "Mixed.Owner".';
+    const { provide, store, currentView, settings } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: sql }, undefined, semanticCompletionEnabled);
+    settings.editorSettings.generateSqlQuoteIdentifiers = true;
+    store.listCompletionObjects.mockResolvedValue([{ name: "Do.Work", schema: "Mixed.Owner", type: "procedure", signature: "" }]);
+    const result = await provide();
+    expect(store.listCompletionObjects).toHaveBeenCalledWith("connection", "OB", "", 100, "Mixed.Owner", undefined, false, "APP", expect.any(Array), false);
+    const option = result!.options.find((candidate) => candidate.label === "Do.Work")!;
+    expect(option).toBeDefined();
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe('CALL "Mixed.Owner"."Do.Work"()');
+  });
+
+  it.each([
+    ["CALL pkg.", "APP", "PKG", 'CALL pkg."Do.Work"()'],
+    ['CALL "Mixed.Owner"."Mixed.Package".', "Mixed.Owner", "Mixed.Package", 'CALL "Mixed.Owner"."Mixed.Package"."Do.Work"()'],
+  ])("loads package members for %s and inserts only the member", async (sql, owner, packageName, expected) => {
+    const { provide, store, currentView, settings } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: sql }, undefined, semanticCompletionEnabled);
+    settings.editorSettings.generateSqlQuoteIdentifiers = true;
+    store.listCompletionObjects.mockImplementation(async (...args: unknown[]) => (args[5] === packageName ? [{ name: "Do.Work", schema: owner, parentSchema: owner, parentName: packageName, type: "procedure", signature: "", routineId: "101:1" }] : []));
+    const result = await provide();
+    expect(store.listCompletionObjects).toHaveBeenCalledWith("connection", "OB", "", 100, owner, packageName, false, "APP", expect.any(Array), false);
+    const option = result!.options.find((candidate) => candidate.label === "Do.Work")!;
+    expect(option).toBeDefined();
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(expected);
+  });
+
+  it("keeps unknown overloads separate and does not invent empty argument lists", async () => {
+    const { provide, store, currentView } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: "CALL APP.PKG." }, undefined, semanticCompletionEnabled);
+    store.listCompletionObjects.mockResolvedValue([1, 2].map((id) => ({ name: "RUN", schema: "APP", parentSchema: "APP", parentName: "PKG", type: "procedure", routineId: `101:${id}` })));
+    const result = await provide();
+    const options = result!.options.filter((candidate) => candidate.label === "RUN");
+    expect(options).toHaveLength(2);
+    const option = options[0]!;
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe("CALL APP.PKG.RUN");
+  });
+
+  it("drops a routine response when the request is invalidated", async () => {
+    const { provide, store, completion } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: "CALL P" }, undefined, semanticCompletionEnabled);
+    let resolve!: (objects: SqlCompletionObject[]) => void;
+    store.listCompletionObjects.mockReturnValue(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const pending = provide();
+    await vi.waitFor(() => expect(store.listCompletionObjects).toHaveBeenCalled());
+    completion.invalidateRequests();
+    resolve([{ name: "P_OLD", schema: "APP", type: "procedure" }]);
+    const result = await pending;
+    expect(result?.options.some((option) => option.label === "P_OLD") ?? false).toBe(false);
+  });
+});
+
+describe("OceanBase INSERT completion", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  it.each([
+    ["Alias", undefined],
+    ["APP.Alias", "APP"],
+    ['"Alias"', undefined],
+    ['"MixedOwner"."Alias"', "MixedOwner"],
+  ])("resolves %s with the selected schema kept as context", async (source, explicitSchema) => {
+    const { provide, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP", modelValue: `INSERT INTO ${source} (` });
+    store.listCompletionColumns.mockImplementation(async (...args: unknown[]) => (args[3] === explicitSchema ? [{ name: "ID", table: "Alias", schema: explicitSchema }] : []));
+    expect((await provide())?.options.map((option) => option.label)).toContain("ID");
+    expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", explicitSchema, expect.objectContaining({ currentSchema: "APP" }), undefined);
+    if (source.startsWith('"')) expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", explicitSchema, expect.objectContaining({ tableQuoted: true }), undefined);
+  });
+
+  it("keeps synchronous INSERT lookup and background refresh unqualified", async () => {
+    const { provide, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP", modelValue: "INSERT INTO Alias (" });
+    store.lookupLocalCompletionColumns.mockImplementation((...args: unknown[]) => (args[3] === undefined ? [{ name: "ID", table: "Alias" }] : []));
+    store.refreshCompletionColumns.mockResolvedValue([{ name: "ID", table: "Alias" }]);
+    expect((await provide(false))?.options.map((option) => option.label)).toContain("ID");
+    expect(store.lookupLocalCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", undefined, undefined, expect.objectContaining({ currentSchema: "APP" }));
+    expect(store.refreshCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", undefined, expect.objectContaining({ currentSchema: "APP" }), undefined);
+  });
+});
+
+describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (semanticCompletionEnabled) => {
+  beforeEach(() => vi.useRealTimers());
+
+  function snowflakeHarness(sql: string, schema: string | undefined = "PUBLIC") {
+    const harness = createHarness({ databaseType: "snowflake", dialect: "sql", database: "DEFAULT_DB", schema, modelValue: sql }, undefined, semanticCompletionEnabled);
+    const catalogs: Record<string, Record<string, string[]>> = {
+      DEFAULT_DB: { PUBLIC: ["DEFAULT_TABLE"] },
+      OTHER_DB: { PUBLIC: ["OTHER_TABLE"] },
+      ADVENTUREWORKS2025: { PUBLIC: ["DIMCUSTOMER"] },
+      Other_Db: { PUBLIC: ["QUOTED_TABLE"] },
+      "My.DB": { "Sales Area": ["Dim.Customer"], 'A"B': ["ESCAPED_TABLE"] },
+    };
+    const databases = Object.keys(catalogs);
+    harness.store.listCompletionDatabases.mockResolvedValue(databases);
+    harness.store.listCompletionSchemas.mockImplementation(async (...args: unknown[]) => Object.keys(catalogs[String(args[1])] ?? {}));
+    harness.store.listCompletionTables.mockImplementation(async (...args: unknown[]) => (catalogs[String(args[1])]?.[String(args[4])] ?? []).map((name) => ({ name, schema: String(args[4]) })));
+    return { ...harness, catalogs };
+  }
+
+  it.each(["DEFAULT_DB", "OTHER_DB", "ADVENTUREWORKS2025", "Adventureworks2025"])("lists schemas for explicit database %s with no selected schema", async (database) => {
+    const { provide, store, props } = snowflakeHarness(`SELECT * FROM ${database}.`);
+    props.schema = undefined;
+    const result = await provide();
+    expect(result?.options.map((option) => option.label)).toContain("PUBLIC");
+    expect(store.listCompletionSchemas).toHaveBeenCalledWith("connection", database.toUpperCase());
+    expect(result?.options.map((option) => option.label)).toEqual(["PUBLIC"]);
+  });
+
+  it.each([
+    ['"Other_Db"', "Other_Db", ["PUBLIC"]],
+    ['"My.DB"', "My.DB", ['A"B', "Sales Area"]],
+  ] as const)("keeps the exact quoted database %s when listing schemas", async (qualifier, database, schemas) => {
+    const { provide, store } = snowflakeHarness(`SELECT * FROM ${qualifier}.`);
+    expect((await provide())?.options.map((option) => option.label).sort()).toEqual(schemas);
+    expect(store.listCompletionSchemas).toHaveBeenCalledWith("connection", database);
+  });
+
+  it.each([
+    ["DEFAULT_DB.PUBLIC", "DEFAULT_DB", "PUBLIC", "DEFAULT_TABLE"],
+    ["other_db.public", "OTHER_DB", "PUBLIC", "OTHER_TABLE"],
+    ["Adventureworks2025.Public", "ADVENTUREWORKS2025", "PUBLIC", "DIMCUSTOMER"],
+    ['"Other_Db".PUBLIC', "Other_Db", "PUBLIC", "QUOTED_TABLE"],
+    ['"My.DB"."Sales Area"', "My.DB", "Sales Area", "Dim.Customer"],
+    ['"My.DB"."A""B"', "My.DB", 'A"B', "ESCAPED_TABLE"],
+  ])("loads only tables in %s and preserves the typed prefix", async (qualifier, database, schema, table) => {
+    const sql = `SELECT * FROM ${qualifier}.`;
+    const { provide, store, currentView, settings } = snowflakeHarness(sql);
+    settings.editorSettings.tableCompletionSchemaQualification = "always";
+    settings.editorSettings.generateSqlQuoteIdentifiers = true;
+    const result = await provide();
+    expect(store.listCompletionTables.mock.calls.map((args) => (args as unknown[]).slice(0, 5))).toContainEqual(["connection", database, "", 100, schema]);
+    expect(result?.options.map((option) => option.label)).toEqual([table]);
+    const option = result!.options[0]!;
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`${sql}${table.includes(".") ? `"${table}"` : table}`);
+  });
+
+  it.each(["collision", "always", "never"])("preserves %s schema qualification for default tables", async (setting) => {
+    const { provide, settings, currentView } = snowflakeHarness("SELECT * FROM ");
+    settings.editorSettings.tableCompletionSchemaQualification = setting;
+    const result = (await provide())!;
+    const table = result.options.find((option) => option.label === "DEFAULT_TABLE")!;
+    if (typeof table.apply === "function") table.apply(currentView, table, result.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, table.apply ?? table.label, result.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`SELECT * FROM ${setting === "always" ? "PUBLIC.DEFAULT_TABLE" : "DEFAULT_TABLE"}`);
+  });
+
+  it("prefers a known schema over a same-name database after uppercase folding", async () => {
+    const { catalogs, provide, store } = snowflakeHarness("SELECT * FROM other_db.");
+    catalogs.DEFAULT_DB!.OTHER_DB = ["SCHEMA_TABLE"];
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["SCHEMA_TABLE"]);
+    expect(store.listCompletionSchemas).not.toHaveBeenCalledWith("connection", "OTHER_DB");
+  });
+
+  it.each(['"other_db".', '"other_db".PUBLIC.', "MISSING_DB.", '"OTHER_DB"."public".'])("does not substitute case-distinct or unknown namespaces for %s", async (qualifier) => {
+    const { provide } = snowflakeHarness(`SELECT * FROM ${qualifier}`);
+    expect((await provide())?.options ?? []).toEqual([]);
+  });
+
+  it.each(["empty", "denied"])("does not invent tables when explicit schema metadata is %s", async (failure) => {
+    const { provide, store } = snowflakeHarness("SELECT * FROM OTHER_DB.PUBLIC.");
+    if (failure === "empty") store.listCompletionTables.mockResolvedValue([]);
+    else store.listCompletionTables.mockRejectedValue(new Error("permission denied"));
+    expect((await provide())?.options ?? []).toEqual([]);
+  });
+
+  it("offers accessible database names alongside the default schema and tables", async () => {
+    const { provide } = snowflakeHarness("SELECT * FROM ");
+    expect((await provide())?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["DEFAULT_DB", "OTHER_DB", "PUBLIC", "DEFAULT_TABLE"]));
+  });
+
+  it("keeps cached table metadata separate when moving between databases", async () => {
+    const { provide, currentView, props } = snowflakeHarness("SELECT * FROM OTHER_DB.PUBLIC.");
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["OTHER_TABLE"]);
+    const sql = "SELECT * FROM DEFAULT_DB.PUBLIC.";
+    props.modelValue = sql;
+    currentView.dispatch({ changes: { from: 0, to: currentView.state.doc.length, insert: sql }, selection: { anchor: sql.length } });
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["DEFAULT_TABLE"]);
+    const quotedSql = 'SELECT * FROM "Other_Db".PUBLIC.';
+    props.modelValue = quotedSql;
+    currentView.dispatch({ changes: { from: 0, to: currentView.state.doc.length, insert: quotedSql }, selection: { anchor: quotedSql.length } });
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["QUOTED_TABLE"]);
+  });
+
+  it.each([false, true])("preserves the quote-identifiers preference (%s) for mixed-case table insertion", async (quoteIdentifiers) => {
+    const { catalogs, provide, currentView, settings } = snowflakeHarness("SELECT * FROM ");
+    catalogs.DEFAULT_DB!.PUBLIC = ["DimCustomer"];
+    settings.editorSettings.generateSqlQuoteIdentifiers = quoteIdentifiers;
+    settings.editorSettings.tableCompletionSchemaQualification = "always";
+    const result = (await provide())!;
+    const table = result.options.find((option) => option.label === "DimCustomer")!;
+    if (typeof table.apply === "function") table.apply(currentView, table, result.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, table.apply ?? table.label, result.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`SELECT * FROM PUBLIC.${quoteIdentifiers ? '"DimCustomer"' : "DimCustomer"}`);
+  });
+
+  it.each(["collision", "always", "never"])("preserves %s behavior when table names collide across schemas", async (setting) => {
+    const { provide, store, currentView, settings } = snowflakeHarness("SELECT * FROM ");
+    store.listCompletionTables.mockResolvedValue([
+      { name: "SHARED", schema: "PUBLIC" },
+      { name: "SHARED", schema: "SALES" },
+    ]);
+    settings.editorSettings.tableCompletionSchemaQualification = setting;
+    const result = (await provide())!;
+    const table = result.options.find((option) => option.label === "SHARED")!;
+    if (typeof table.apply === "function") table.apply(currentView, table, result.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, table.apply ?? table.label, result.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`SELECT * FROM ${setting === "never" ? "SHARED" : "PUBLIC.SHARED"}`);
+  });
+
+  it.each([
+    ["other_db.public.other_table", "OTHER_DB", "PUBLIC", "OTHER_TABLE"],
+    ['"Other_Db".PUBLIC.QUOTED_TABLE', "Other_Db", "PUBLIC", "QUOTED_TABLE"],
+    ['"My.DB"."Sales Area"."Dim.Customer"', "My.DB", "Sales Area", "Dim.Customer"],
+  ])("loads columns from the explicit reference %s", async (reference, database, schema, table) => {
+    const { provide, store } = snowflakeHarness(`SELECT * FROM ${reference} t WHERE t.`);
+    store.listCompletionColumns.mockImplementation(async (...args: unknown[]) => (args[1] === database && args[2] === table && args[3] === schema ? [{ name: "ID", table, schema, dataType: "NUMBER" }] : []));
+    const result = await provide();
+    expect(store.listCompletionColumns.mock.calls.map((args) => (args as unknown[]).slice(0, 4))).toContainEqual(["connection", database, table, schema]);
+    expect(result?.options.map((option) => option.label)).toContain("ID");
+  });
+
+  it.each(["empty", "denied"])("does not invent schemas when metadata is %s", async (failure) => {
+    const { provide, store } = snowflakeHarness("SELECT * FROM OTHER_DB.");
+    if (failure === "empty") store.listCompletionSchemas.mockResolvedValue([]);
+    else store.listCompletionSchemas.mockRejectedValue(new Error("permission denied"));
+    expect((await provide())?.options ?? []).toEqual([]);
+  });
+
+  it("uses locally cached database and schema metadata", async () => {
+    const { provide, store } = snowflakeHarness("SELECT * FROM Other_Db.");
+    store.lookupLocalCompletionDatabases.mockReturnValue(["OTHER_DB"]);
+    store.lookupLocalCompletionSchemas.mockImplementation((...args: unknown[]) => (args[1] === "OTHER_DB" ? ["PUBLIC"] : []));
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["PUBLIC"]);
+    expect(store.refreshCompletionSchemas).toHaveBeenCalledWith("connection", "OTHER_DB");
+  });
+});
 
 describe("QueryEditor completion provider ownership", () => {
   it.each(["cursor", "document", "view", "composition", "mode"])("rejects asynchronous analysis after a %s change", async (change) => {
@@ -275,6 +534,21 @@ describe("QueryEditor completion provider ownership", () => {
     expect(await accept("db.users.find({ na })", 18)).toEqual({ doc: "db.users.find({ name:  })", cursor: 22 });
   });
 
+  it("completes MongoDB index names in dropIndex and replaces closing quote", async () => {
+    const doc = 'db.users.dropIndex("")';
+    const cursor = doc.indexOf('""') + 1;
+    const { store, provide, currentView } = createHarness({ databaseType: "mongodb", modelValue: doc });
+    store.listMongoCompletionIndexes.mockResolvedValue([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    currentView.dispatch({ selection: { anchor: cursor } });
+    const result = await provide();
+    expect(store.listMongoCompletionIndexes).toHaveBeenCalledWith("connection", "demo", "users");
+    const option = result?.options.find((candidate) => candidate.displayLabel === "email_1" || candidate.label === "email_1");
+    expect(option).toBeDefined();
+    expect(option?.detail).toBe("{ email: 1 }");
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, cursor);
+    expect(currentView.state.doc.toString()).toBe('db.users.dropIndex("email_1")');
+  });
+
   it.each(["redis", "mongodb", "mysql"] as const)("does not query %s metadata without a connection", async (databaseType) => {
     const { store, provide } = createHarness({ databaseType, connectionId: undefined });
     expect(await provide()).toBeNull();
@@ -282,4 +556,60 @@ describe("QueryEditor completion provider ownership", () => {
     expect(store.listMongoCompletionCollections).not.toHaveBeenCalled();
     expect(store.listRedisCompletionCommandDocs).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [
+      "multi-table join with where clause",
+      `select SUM(heating_area)
+from hd_self_managed_vacant v
+  inner join hd_self_managed_vacant_task t on v.self_task_id = t.id
+where v.hi_status = 1
+  and v.\`year\` = '2026-2027'
+  and v.status = 3
+
+sf`,
+    ],
+    [
+      "select query with limit",
+      `select * from users limit 10
+
+sf`,
+    ],
+    [
+      "select query with where clause and trailing comment",
+      `select * from users where id = 1
+-- check users
+sf`,
+    ],
+  ])("suggests custom snippets immediately when preceding SQL lacks semicolon (%s) (issue #11886)", async (_name, doc) => {
+    const { settings, provide, store } = createHarness({ databaseType: "mysql", modelValue: doc });
+    settings.editorSettings.snippets = [{ id: "custom-sf", label: "select * from $table", prefix: "sf", body: "select * from ${1:table_name};" }];
+    // When typing (explicit: false), snippets should pop up immediately without waiting for async column fetching
+    const result = await provide(false);
+    expect(result).not.toBeNull();
+    expect(result?.options.some((opt) => opt.type === "snippet" && (opt.displayLabel === "select * from $table" || opt.label.includes("select * from $table")))).toBe(true);
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("does not let a local snippet hit suppress the async column fetch on on-demand-only metadata databases", async () => {
+    // trino uses on-demand-only column metadata: the async fetch is never re-triggered
+    // from the metadata cache, so the snippet short-circuit must not skip it. The prefix
+    // sits in a column-resolution context (after WHERE) and also matches the snippet,
+    // with the preceding statement left without a semicolon (issue #11886 shape).
+    // This suite defaults to fake timers (the debounce never fires); switch to real
+    // timers just for this case so the debounced async flow actually runs.
+    vi.useRealTimers();
+    try {
+      const { settings, provide, store } = createHarness({ databaseType: "trino", dialect: "trino", modelValue: "select * from users limit 10\n\nselect * from users where sf" });
+      settings.editorSettings.snippets = [{ id: "custom-sf", label: "select * from $table", prefix: "sf", body: "select * from ${1:table_name};" }];
+      // With the guard, the typed call falls through to the debounced async flow (30ms),
+      // which must request columns for the referenced table instead of settling on the
+      // synchronous snippet-only localResult.
+      await provide(false);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(store.listCompletionColumns).toHaveBeenCalled();
+    } finally {
+      vi.useFakeTimers();
+    }
+  }, 8000);
 });

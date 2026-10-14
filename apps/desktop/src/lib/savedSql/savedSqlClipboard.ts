@@ -13,7 +13,7 @@ export function savedSqlClipboardFileIds(nodes: readonly TreeNode[]): string[] {
 }
 
 export function savedSqlPasteTargetForNode(node: Pick<TreeNode, "type" | "connectionId" | "catalog" | "database" | "schema">): SavedSqlPasteTarget | null {
-  if (node.type !== "database" && node.type !== "saved-sql-root" && node.type !== "saved-sql-file") return null;
+  if (node.type !== "database" && node.type !== "saved-sql-root" && node.type !== "saved-sql-file" && node.type !== "saved-sql-folder") return null;
   if (!node.connectionId || node.database === undefined) return null;
   return {
     connectionId: node.connectionId,

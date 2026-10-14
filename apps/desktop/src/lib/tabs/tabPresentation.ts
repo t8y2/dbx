@@ -13,6 +13,7 @@ import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { SqlErrorPosition } from "@/lib/backend/errorUtils";
 import { queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, QueryResult, QueryResultRun, QueryTab } from "@/types/database";
+import type { ResultTabNamingMode } from "@/stores/settingsStore";
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
 export type OutputView = "result" | "summary" | "explain" | "chart";
@@ -114,13 +115,34 @@ export function isEventObjectBrowserTab(tab: QueryTab): boolean {
 }
 
 /**
+ * Longest custom suffix accepted by the tab suffix editor.
+ *
+ * The suffix keeps its full width until the whole title area is used up: the
+ * title shortens first, and only then does the suffix itself end in an ellipsis.
+ * 8 characters fit completely in every `tabMaxWidth` preset from 240px up, even
+ * with pin and read-only controls; the narrowest presets may ellipsize it, and the
+ * tab tooltip always shows the full text.
+ */
+export const TAB_TITLE_SUFFIX_MAX_LENGTH = 8;
+
+/** A tab label split so the suffix can be rendered without being truncated. */
+export interface TabTitleParts {
+  base: string;
+  suffix: string;
+}
+
+export function joinTabTitleParts(parts: TabTitleParts): string {
+  return parts.suffix ? `${parts.base} ${parts.suffix}` : parts.base;
+}
+
+/**
  * Display titles for a whole tab list.
  *
  * Tabs whose plain title collides (most obviously several query tabs on the
  * same connection and database, which all render `connection@database`) get a
  * 1-based numeric suffix so the strip stays readable. The first tab keeps no
  * suffix when its title is unique, so single-tab windows look exactly as
- * before.
+ * before. A tab with a user-chosen `titleSuffix` shows that instead of a number.
  *
  * 编号不在这里计算，而是由 `syncTabTitleNumbers` 一次性写进标签（见该函数）：渲染
  * 函数只看标签上已有的编号，这样关闭一个重名标签不会让后面的标签被重新编号
@@ -128,11 +150,45 @@ export function isEventObjectBrowserTab(tab: QueryTab): boolean {
  */
 export function tabDisplayTitles(tabs: QueryTab[], t: Translate): Map<string, string> {
   const titles = new Map<string, string>();
-  for (const tab of tabs) {
-    const title = tabDisplayTitle(tab, t);
-    titles.set(tab.id, tabTitleNumber(tab, title) !== undefined ? `${title} ${tabTitleNumber(tab, title)}` : title);
-  }
+  for (const [id, parts] of tabDisplayTitleParts(tabs, t)) titles.set(id, joinTabTitleParts(parts));
   return titles;
+}
+
+/**
+ * Same labels as `tabDisplayTitles`, split into the title and its suffix so the
+ * tab strip can truncate the title while always showing the suffix in full.
+ */
+export function tabDisplayTitleParts(tabs: QueryTab[], t: Translate): Map<string, TabTitleParts> {
+  const parts = new Map<string, TabTitleParts>();
+  for (const tab of tabs) {
+    const base = tabDisplayTitle(tab, t);
+    parts.set(tab.id, { base, suffix: tabTitleSuffix(tab, base) });
+  }
+  return parts;
+}
+
+function customTitleSuffix(tab: QueryTab): string | undefined {
+  return tab.titleSuffix?.trim() || undefined;
+}
+
+/** The suffix a tab currently shows: its custom one, else its automatic number. */
+function tabTitleSuffix(tab: QueryTab, title: string): string {
+  const custom = customTitleSuffix(tab);
+  if (custom) return custom;
+  const number = tabTitleNumber(tab, title);
+  return number !== undefined ? String(number) : "";
+}
+
+/**
+ * Finds another open tab that would show exactly the same label as `target`
+ * once `suffix` is applied to it — same title and same suffix, whether the other
+ * tab's suffix is custom or an automatic number.
+ */
+export function findTabWithSameTitleSuffix(tabs: QueryTab[], target: QueryTab, suffix: string, t: Translate): QueryTab | undefined {
+  const wanted = suffix.trim();
+  if (!wanted) return undefined;
+  const base = tabDisplayTitle(target, t);
+  return tabs.find((tab) => tab.id !== target.id && tabDisplayTitle(tab, t) === base && tabTitleSuffix(tab, base) === wanted);
 }
 
 function tabTitleNumber(tab: QueryTab, title: string): number | undefined {
@@ -152,14 +208,32 @@ function tabTitleNumber(tab: QueryTab, title: string): number | undefined {
  * stays unsuffixed, which keeps single-tab windows unchanged, while a tab that
  * carries a number keeps it until it is closed.
  *
+ * Tabs with a custom `titleSuffix` are skipped: they show that suffix instead of a
+ * number and do not count towards the numbered group.
+ *
  * Callers own the tab list, so this runs from the store whenever the list or
  * any contributing title changes — never from a render/computed path.
  */
 export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
   const groups = new Map<string, QueryTab[]>();
+  // Custom suffixes already shown under each title, so a freshly minted number
+  // never lands on a label another tab has claimed (e.g. a custom suffix "2").
+  const customSuffixes = new Map<string, Set<string>>();
   for (const tab of tabs) {
     if (isPreviewTab(tab)) continue;
     const title = tabDisplayTitle(tab, t);
+    const custom = customTitleSuffix(tab);
+    if (custom) {
+      // A custom suffix replaces the number, so the tab leaves the numbering
+      // pool. Dropping its old number means clearing the suffix later mints a
+      // fresh one instead of resurrecting a stale value.
+      tab.titleNumber = undefined;
+      tab.titleNumberKey = undefined;
+      const used = customSuffixes.get(title);
+      if (used) used.add(custom);
+      else customSuffixes.set(title, new Set([custom]));
+      continue;
+    }
     const group = groups.get(title);
     if (group) group.push(tab);
     else groups.set(title, [tab]);
@@ -181,6 +255,7 @@ export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
     let next = numbered.reduce((highest, tab) => Math.max(highest, tab.titleNumber ?? 0), 0) + 1;
     for (const tab of group) {
       if (tabTitleNumber(tab, title) !== undefined) continue;
+      while (customSuffixes.get(title)?.has(String(next))) next += 1;
       tab.titleNumber = next;
       tab.titleNumberKey = title;
       next += 1;
@@ -198,14 +273,24 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
     if (compact) return tab.tableMeta.tableName;
-    const suffix = tab.tableMeta.schema && tab.tableMeta.schema !== tab.database ? `@${database}.${tab.tableMeta.schema}` : `@${database}`;
+    const schema = tab.tableMeta.schema || tab.schema;
+    const suffix = schema && schema !== tab.database ? `@${database}.${schema}` : `@${database}`;
     return `${tab.tableMeta.tableName}${suffix}`;
   }
   if (tab.mode === "query") {
     const title = queryTitle(tab);
     if (title) return title;
     if (compact) return connectionDisplayName(tab.connectionId);
-    return `${connectionDisplayName(tab.connectionId)}@${database}`;
+    const hasDatabase = Boolean(tab.database?.trim());
+    const schema = tab.schema?.trim();
+    let scope = database;
+    if (schema && schema !== tab.database) {
+      scope = hasDatabase ? `${database}.${schema}` : schema;
+    }
+    if (tab.catalog?.trim()) {
+      scope = `${tab.catalog.trim()}.${scope}`;
+    }
+    return `${connectionDisplayName(tab.connectionId)}@${scope}`;
   }
   if (tab.mode === "mongo" && tab.sql) {
     if (compact) return tab.sql;
@@ -286,6 +371,11 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return t("tabs.users");
     return `${t("tabs.users")}@${connectionDisplayName(tab.connectionId)}`;
   }
+  if (tab.mode === "database-search") {
+    const scope = tab.schema ? `${database}.${tab.schema}` : database;
+    if (compact) return t("databaseSearch.title");
+    return `${t("databaseSearch.title")}@${scope}`;
+  }
   return tab.title;
 }
 
@@ -301,9 +391,16 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
     ...(groupName ? [{ label: t("tabs.tooltipGroup"), value: groupName }] : []),
     ...(showDatabase ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, database, t) }] : []),
   ];
+  const schema = tab.schema?.trim() || (tab.mode === "objects" ? tab.objectBrowser?.schema?.trim() : tab.tableMeta?.schema?.trim());
+  if (schema && (tab.mode === "objects" || schema !== database)) {
+    lines.push({ label: t("tabs.tooltipSchema"), value: schema });
+  }
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });
   }
+  // The suffix can be ellipsized in a narrow tab, so the tooltip is where its full text lives.
+  const customSuffix = customTitleSuffix(tab);
+  if (customSuffix) lines.unshift({ label: t("tabs.tooltipSuffix"), value: customSuffix });
   if (tab.mode === "query" && tab.externalSqlPath) {
     lines.push({ label: t("tabs.tooltipFilePath"), value: tab.externalSqlPath });
     if (tab.externalSqlFileMissing) lines.push({ label: t("tabs.tooltipFileStatus"), value: t("tabs.externalFileMissing") });
@@ -330,14 +427,26 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   if (tab.mode === "hbase" && tab.sql) {
     lines.push({ label: t("tabs.tooltipTable"), value: tab.sql });
   }
-  if (tab.mode === "objects" && tab.objectBrowser?.schema) {
-    lines.push({ label: t("tabs.tooltipSchema"), value: tab.objectBrowser.schema });
-  }
   return lines;
 }
 
-export function queryResultStatementLabel(result: Pick<QueryResult, "sourceLabel">): string | undefined {
-  return result.sourceLabel;
+type ResultSourceFields = Pick<QueryResult, "sourceLabel" | "sourceLabelKind" | "sourceQualifier" | "sourceName">;
+type ResultNamingOptions = { includeSourceDatabase?: boolean; namingMode?: ResultTabNamingMode; preferComments?: boolean };
+
+function resultSourceLabel(result: ResultSourceFields, includeSourceDatabase: boolean): string | undefined {
+  if (result.sourceName) {
+    if (!includeSourceDatabase) return result.sourceName;
+    return result.sourceQualifier ? `${result.sourceQualifier}.${result.sourceName}` : result.sourceName;
+  }
+  return result.sourceLabelKind === "comment" ? undefined : result.sourceLabel;
+}
+
+function resultNamingLabel(result: ResultSourceFields, options: ResultNamingOptions): string | undefined {
+  if (options.namingMode === "ordinal") return undefined;
+  const commentLabel = result.sourceLabelKind === "comment" ? result.sourceLabel : undefined;
+  if (options.namingMode === "comment") return commentLabel;
+  if (options.preferComments !== false && commentLabel) return commentLabel;
+  return resultSourceLabel(result, options.includeSourceDatabase !== false);
 }
 
 export function middleEllipsis(value: string, maxLength = 24): string {
@@ -475,19 +584,13 @@ export function queryResultExecutionSql(tab: Pick<QueryTab, "result" | "resultBa
   return tab.resultSortedSql || resultSqlForGrid(tab);
 }
 
-export function tabularResultItems(results: QueryResult[] | undefined, options: { includeSourceDatabase?: boolean } = {}): { result: QueryResult; index: number; n: number; label?: string; displayLabel?: string; labelTruncated: boolean; title?: string }[] {
+export function tabularResultItems(results: QueryResult[] | undefined, options: ResultNamingOptions = {}): { result: QueryResult; index: number; n: number; label?: string; displayLabel?: string; labelTruncated: boolean; title?: string }[] {
   if (!results) return [];
   return results
     .map((result, index) => ({ result, index }))
     .filter((item) => item.result.columns.length > 0 && item.result.server_message !== true)
     .map((item, ordinal) => {
-      const label = queryResultStatementLabel(item.result);
-      const { sourceName, sourceQualifier } = item.result;
-      // 只有在标签确实由“库名.对象名”拼成时才启用短名称，避免覆盖 `-- name: xxx` 之类的自定义名称
-      const qualifiedLabel = sourceName ? (sourceQualifier ? `${sourceQualifier}.${sourceName}` : sourceName) : undefined;
-      // 关闭“结果集名称包含数据库名”时，页签与结果列表只展示对象名；
-      // 完整名称（含库名）仍保留在 title，供悬浮提示与搜索使用。
-      const displaySource = options.includeSourceDatabase === false && sourceName && qualifiedLabel === label ? sourceName : label;
+      const displaySource = resultNamingLabel(item.result, options);
       const displayLabel = displaySource ? middleEllipsis(displaySource) : undefined;
       return {
         ...item,
@@ -508,31 +611,33 @@ export function activeResultRun(tab: Pick<QueryTab, "resultRuns" | "activeResult
  * 执行批次默认显示名：取该批次主结果的来源（库名.表名 / 表名）。
  * 连表查询同样取 FROM 之后的第一个物理表，与结果集页签的来源解析保持一致。
  */
-function resultRunSourceLabel(run: QueryResultRun, includeSourceDatabase: boolean, fallback: { database?: string; databaseType?: DatabaseType }): string | undefined {
+function resultRunSourceLabel(run: QueryResultRun, options: ResultNamingOptions, fallback: { database?: string; databaseType?: DatabaseType }): string | undefined {
+  const includeSourceDatabase = options.includeSourceDatabase !== false;
+  const namingMode = options.namingMode ?? "source";
+  if (namingMode === "ordinal") return undefined;
   // 优先用批次自带的来源：非活动批次的结果 payload 会被回收，payload 里的来源会丢失
-  const own = includeSourceDatabase ? run.sourceLabel || run.sourceName : run.sourceName || run.sourceLabel;
+  const own = run.sourceLabelKind === "comment" ? (namingMode === "comment" || options.preferComments !== false ? run.sourceLabel : undefined) : namingMode === "comment" ? undefined : includeSourceDatabase ? run.sourceLabel || run.sourceName : run.sourceName || run.sourceLabel;
   if (own) return own;
   const candidates = run.result ? [run.result, ...(run.results ?? [])] : (run.results ?? []);
   for (const result of candidates) {
     if (!result) continue;
     // 批次级来源缺失时回退到结果本身；关闭“结果集名称包含数据库名”时优先用对象名
-    const label = includeSourceDatabase ? result.sourceLabel || result.sourceName : result.sourceName || result.sourceLabel;
+    const label = resultNamingLabel(result, options);
     if (label) return label;
   }
   // 历史批次（功能上线前创建的）没有来源信息：用批次 SQL 重新解析，连表查询同样取第一个物理表
-  if (run.sql && fallback.databaseType) {
+  if (namingMode === "source" && run.sql && fallback.databaseType) {
     const parts = queryResultSourceNameParts(run.sql, { database: fallback.database, databaseType: fallback.databaseType });
     if (parts) return includeSourceDatabase ? (parts.qualifier ? `${parts.qualifier}.${parts.name}` : parts.name) : parts.name;
   }
   return undefined;
 }
 
-export function resultRunItems(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">, options: { includeSourceDatabase?: boolean; database?: string; databaseType?: DatabaseType } = {}): { id: string; title: string; sequence: number; active: boolean; pinned: boolean; sourceLabel?: string }[] {
-  const includeSourceDatabase = options.includeSourceDatabase !== false;
+export function resultRunItems(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">, options: ResultNamingOptions & { database?: string; databaseType?: DatabaseType } = {}): { id: string; title: string; sequence: number; active: boolean; pinned: boolean; sourceLabel?: string }[] {
   const fallback = { database: options.database, databaseType: options.databaseType };
   const seenBySource = new Map<string, number>();
   return (tab.resultRuns ?? []).map((run) => {
-    const source = resultRunSourceLabel(run, includeSourceDatabase, fallback);
+    const source = resultRunSourceLabel(run, options, fallback);
     let sourceLabel = source;
     if (source) {
       // 同一张表被查询多次时用序号后缀区分页签（users、users (2)…）
@@ -665,6 +770,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
   if (tab.mode === "dolt-version-control") return t("doltVersionControl.title");
+  if (tab.mode === "database-search") return t("databaseSearch.title");
   return tab.mode;
 }
 

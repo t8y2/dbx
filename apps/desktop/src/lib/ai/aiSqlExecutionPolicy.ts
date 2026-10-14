@@ -1,4 +1,4 @@
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
 import { classifySqlStatementRisk, splitSqlStatementsForSafety, sqlSafetyText } from "@/lib/sql/sqlRisk";
 
@@ -18,12 +18,12 @@ const NON_PRODUCTION_RE = /\b(local|localhost|dev|develop|development|test|testi
 const LOCAL_HOST_RE = /^(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|::1)$/i;
 const NEGATIVE_EXECUTION_RE = /(不要|别|不用|禁止|只生成|仅生成|只写|仅写).{0,12}(执行|运行|跑)|do\s+not\s+execute|don't\s+execute|dont\s+execute|without\s+executing|only\s+(generate|write|return)/i;
 
-export function stripAiSqlComments(sql: string): string {
-  return sqlSafetyText(sql);
+export function stripAiSqlComments(sql: string, dialect?: DatabaseType | string): string {
+  return sqlSafetyText(sql, dialect);
 }
 
-function sqlStatements(sql: string): string[] {
-  return splitSqlStatementsForSafety(sql);
+function sqlStatements(sql: string, connection?: ConnectionConfig): string[] {
+  return splitSqlStatementsForSafety(sql, connection?.db_type);
 }
 
 function classifyStatement(statement: string, connection?: ConnectionConfig): AiSqlExecutionCategory {
@@ -60,7 +60,7 @@ export function classifyConnectionEnvironment(connection?: ConnectionConfig, dat
 
 export function classifyAiSqlExecution(sql: string, connection?: ConnectionConfig, database?: string): AiSqlExecutionDecision {
   const environment = classifyConnectionEnvironment(connection, database);
-  const statements = sqlStatements(sql);
+  const statements = sqlStatements(sql, connection);
   const reasons: string[] = [];
 
   if (!statements.length) {

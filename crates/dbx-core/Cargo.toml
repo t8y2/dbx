@@ -10,6 +10,10 @@ default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system
 duckdb-sidecar = ["dbx-sql/duckdb-sidecar", "dbx-drivers/duckdb-sidecar"]
 dynamodb = ["dbx-drivers/dynamodb"]
 mq-admin = ["dep:rumqttc", "dbx-types/mq-admin", "dbx-drivers/mq-admin"]
+# SQL Server native TDS ATTENTION on interrupt (SQL Server 2000 batch abort).
+# Requires the vendored tiberius patched in by the root workspace; standalone
+# agent driver workspaces build dbx-core without it. Desktop enables this.
+sqlserver-native-attention = ["dbx-drivers/sqlserver-native-attention"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl", "dbx-drivers/sqlite-sqlcipher"]
 sqlite-multiple-ciphers = ["dbx-drivers/sqlite-multiple-ciphers"]
 # Keeps bundled SQLite for consumers that enable no other sqlite source
@@ -51,7 +55,7 @@ webpki-roots = "0.26"
 rusqlite = { version = "0.32", default-features = false, features = ["load_extension", "backup", "functions", "column_decltype"] }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = { version = "0.62.0", features = ["visitor"] }
-redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
+redis = { version = "1.7.1", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }

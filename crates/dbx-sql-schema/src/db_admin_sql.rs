@@ -652,7 +652,7 @@ fn supports_vacuum_table(database_type: Option<DatabaseType>) -> bool {
     )
 }
 
-pub fn build_mysql_auto_increment_sql(options: MysqlAutoIncrementSqlOptions) -> Result<String, String> {
+pub(crate) fn validate_mysql_auto_increment_options(options: &MysqlAutoIncrementSqlOptions) -> Result<(), String> {
     let profile = options.driver_profile.as_deref().map(str::trim).unwrap_or_default();
     if options.database_type != Some(DatabaseType::Mysql)
         || (!profile.is_empty() && !profile.eq_ignore_ascii_case("mysql"))
@@ -668,6 +668,13 @@ pub fn build_mysql_auto_increment_sql(options: MysqlAutoIncrementSqlOptions) -> 
     {
         return Err("AUTO_INCREMENT must be a decimal integer from 1 to 18446744073709551615.".to_string());
     }
+
+    Ok(())
+}
+
+pub fn build_mysql_auto_increment_sql(options: MysqlAutoIncrementSqlOptions) -> Result<String, String> {
+    validate_mysql_auto_increment_options(&options)?;
+    let value = &options.value;
 
     let table = if options.schema.as_deref().is_some_and(|schema| !schema.is_empty()) {
         format!(
@@ -797,7 +804,13 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
     let structure_sql = if matches!(
         options.database_type,
-        Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
+                | DatabaseType::SapHana
+        )
     ) {
         format!("CREATE TABLE {target} LIKE {source};")
     } else if options.database_type == Some(DatabaseType::Questdb) {
@@ -841,6 +854,30 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         }));
     }
 
+    // SELECT INTO does not copy MS_Description extended properties. The
+    // target is newly created, so add each supplied comment without updating
+    // or deleting any pre-existing object's properties.
+    if options.database_type == Some(DatabaseType::SqlServer) {
+        if let Some(comment) = options.table_comment.as_deref().filter(|comment| !comment.trim().is_empty()) {
+            comment_sql.push(sqlserver_clone_comment_sql(
+                options.schema.as_deref(),
+                &options.target_name,
+                None,
+                comment,
+            ));
+        }
+        for column in &options.column_comments {
+            if !column.comment.trim().is_empty() {
+                comment_sql.push(sqlserver_clone_comment_sql(
+                    options.schema.as_deref(),
+                    &options.target_name,
+                    Some(&column.name),
+                    &column.comment,
+                ));
+            }
+        }
+    }
+
     // `SELECT ... INTO` copies the IDENTITY property but not constraints, so the cloned table
     // would silently lose its primary key (t8y2/dbx#8931). Recreate it from the source metadata.
     let mut constraint_sql = Vec::new();
@@ -866,6 +903,19 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         return structure_sql;
     }
     format!("{};\n{};", structure_sql.trim_end_matches(';'), trailing_sql.join(";\n"))
+}
+
+fn sqlserver_clone_comment_sql(schema: Option<&str>, table: &str, column: Option<&str>, comment: &str) -> String {
+    let schema = schema.filter(|value| !value.trim().is_empty()).unwrap_or("dbo").replace('\'', "''");
+    let table = table.replace('\'', "''");
+    let comment = comment.replace('\'', "''");
+    let mut sql = format!(
+        "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'{comment}', @level0type=N'SCHEMA', @level0name=N'{schema}', @level1type=N'TABLE', @level1name=N'{table}'"
+    );
+    if let Some(column) = column {
+        sql.push_str(&format!(", @level2type=N'COLUMN', @level2name=N'{}'", column.replace('\'', "''")));
+    }
+    sql
 }
 
 pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
@@ -935,6 +985,9 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if matches!(database_type, DatabaseType::Transwarp | DatabaseType::StarRocks) {
         return object_type == DatabaseObjectType::Table;
     }
+    if database_type == DatabaseType::SapHana {
+        return object_type == DatabaseObjectType::Table;
+    }
     if matches!(object_type, DatabaseObjectType::Procedure | DatabaseObjectType::Function) {
         return false;
     }
@@ -983,6 +1036,14 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
             "ALTER TABLE {} RENAME {};",
             qualified_name(database_type, options.schema.as_deref(), &options.old_name),
             quote_rename_identifier(database_type, &options.new_name)
+        ));
+    }
+
+    if database_type == Some(DatabaseType::SapHana) {
+        return Ok(format!(
+            "RENAME TABLE {} TO {};",
+            qualified_name(database_type, options.schema.as_deref(), &options.old_name),
+            qualified_name(database_type, options.schema.as_deref(), &options.new_name)
         ));
     }
 
@@ -2353,6 +2414,57 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_clone_preserves_unicode_comments_with_quoted_object_names() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("业务]".to_string()),
+            source_name: "source".to_string(),
+            target_name: "副本]".to_string(),
+            table_comment: Some("  表 O'Brien;\n注释  ".to_string()),
+            column_comments: vec![
+                DuplicateTableColumnComment {
+                    name: "value' field]".to_string(),
+                    comment: "  字段 O'Brien  ".to_string(),
+                },
+                DuplicateTableColumnComment { name: "empty".to_string(), comment: " \t\n ".to_string() },
+            ],
+            primary_key_columns: vec!["id".to_string()],
+            primary_key_constraint_name: Some("PK_copy".to_string()),
+            identifier_quote: None,
+        });
+        let statements = crate::sql::split_sql_statements_for_database(&sql, DatabaseType::SqlServer);
+        assert_eq!(statements.len(), 4);
+        assert_eq!(statements[0], "SELECT TOP 0 * INTO [业务]]].[副本]]] FROM [业务]]].[source]");
+        assert!(statements[1].contains("PRIMARY KEY ([id])"));
+        assert!(statements[2].contains("@value=N'  表 O''Brien;\n注释  '"));
+        assert!(statements[2].contains("@level0name=N'业务]'"));
+        assert!(statements[2].contains("@level1name=N'副本]'"));
+        assert!(statements[3].contains("@level2name=N'value'' field]'"));
+        assert!(statements[3].contains("@value=N'  字段 O''Brien  '"));
+        assert!(statements[2..].iter().all(|statement| statement.starts_with("EXEC sys.sp_addextendedproperty")));
+    }
+
+    #[test]
+    fn sqlserver_clone_column_only_comments_use_default_schema() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: None,
+            source_name: "source".to_string(),
+            target_name: "copy".to_string(),
+            table_comment: None,
+            column_comments: vec![DuplicateTableColumnComment {
+                name: "id".to_string(), comment: "编号".to_string()
+            }],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: None,
+        });
+        assert_eq!(crate::sql::split_sql_statements_for_database(&sql, DatabaseType::SqlServer).len(), 2);
+        assert!(sql.contains("@level0name=N'dbo'"));
+        assert!(sql.contains("@level2name=N'id'"));
+    }
+
+    #[test]
     fn duplicate_table_structure_vastbase_preserves_table_and_column_comments() {
         let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
             database_type: Some(DatabaseType::Vastbase),
@@ -2475,6 +2587,24 @@ mod tests {
                 "{database_type:?}"
             );
         }
+    }
+
+    #[test]
+    fn duplicate_table_structure_saphana_uses_like_instead_of_ctas() {
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::SapHana),
+                schema: Some("APP".to_string()),
+                source_name: "orders".to_string(),
+                target_name: "orders_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+                primary_key_columns: vec![],
+                primary_key_constraint_name: None,
+                identifier_quote: None,
+            }),
+            "CREATE TABLE \"APP\".\"orders_copy\" LIKE \"APP\".\"orders\";"
+        );
     }
 
     #[test]
@@ -3012,10 +3142,13 @@ mod tests {
                 table_comment: None,
                 original_table_comment: None,
                 mysql_engine: None,
+                mysql_auto_increment_value: None,
                 transwarp_create: None,
                 partitioned: false,
+                foreign_table: false,
                 is_gaussdb_m_mode: false,
                 table_collation: None,
+                primary_key_name: None,
             });
         assert_eq!(create.warnings, Vec::<String>::new());
         assert_eq!(
@@ -3078,6 +3211,22 @@ mod tests {
             })
             .is_err());
         }
+    }
+
+    #[test]
+    fn builds_saphana_table_rename_sql() {
+        let options = RenameObjectSqlOptions {
+            database_type: Some(DatabaseType::SapHana),
+            object_type: DatabaseObjectType::Table,
+            schema: Some("APP".to_string()),
+            old_name: "orders".to_string(),
+            new_name: "orders_copy".to_string(),
+        };
+        assert!(supports_object_rename(options.database_type, options.object_type));
+        assert_eq!(
+            build_rename_object_sql(options).unwrap(),
+            "RENAME TABLE \"APP\".\"orders\" TO \"APP\".\"orders_copy\";"
+        );
     }
 
     #[test]

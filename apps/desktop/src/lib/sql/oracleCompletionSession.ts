@@ -10,5 +10,6 @@ export function usesOracleCurrentSchemaCompletion(databaseType?: DatabaseType, s
 }
 
 export function usesOracleSessionCompletionColumns(options: { databaseType?: DatabaseType; selectedSchema?: string; referenceSchema?: string | null; clientSessionId?: string }): boolean {
-  return usesOracleCurrentSchemaCompletion(options.databaseType, options.referenceSchema || options.selectedSchema) && !!options.clientSessionId;
+  const schema = options.databaseType === "oceanbase-oracle" ? options.referenceSchema : options.referenceSchema || options.selectedSchema;
+  return usesOracleCurrentSchemaCompletion(options.databaseType, schema) && !!options.clientSessionId;
 }

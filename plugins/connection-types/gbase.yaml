@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 450
 dbType: gbase
+compareModes: [schema, data]
+transferObjectFamily: mysql
 rustVariant: Gbase
 label: 南大通用 GBase 8a
 dialect: GBase

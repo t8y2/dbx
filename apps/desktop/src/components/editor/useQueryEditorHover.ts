@@ -213,6 +213,7 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
         const hoverQualifiedName = [hoverScope.catalog, hoverDatabase, hoverSchema, table.name].filter(Boolean).join(".");
         const objectMetadataRequest = {
           connectionId: props.connectionId,
+          queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
           database: hoverDatabase,
           schema: hoverSchema,
           tableName: table.name,

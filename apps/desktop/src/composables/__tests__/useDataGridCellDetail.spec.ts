@@ -11,16 +11,24 @@ const mocks = vi.hoisted(() => ({
   getValue: vi.fn(() => ""),
   openSearch: vi.fn(),
   focus: vi.fn(),
+  createdOptions: [] as Array<Record<string, any>>,
   onChange: undefined as undefined | ((value: string) => void),
   onSaveShortcut: undefined as undefined | ((event: KeyboardEvent) => boolean),
   fontFamily: undefined as undefined | (() => string),
+  lineWrapping: undefined as undefined | (() => boolean),
+  lineNumbers: undefined as undefined | boolean,
+  folding: undefined as undefined | boolean,
 }));
 
 vi.mock("@/composables/useCellDetailEditor", () => ({
-  useCellDetailEditor: (options: { onChange?: (value: string) => void; onSaveShortcut?: (event: KeyboardEvent) => boolean; fontFamily: () => string }) => {
+  useCellDetailEditor: (options: Record<string, any>) => {
+    mocks.createdOptions.push(options);
     mocks.onChange = options.onChange;
     mocks.onSaveShortcut = options.onSaveShortcut;
     mocks.fontFamily = options.fontFamily;
+    mocks.lineWrapping = options.lineWrapping;
+    mocks.lineNumbers = options.lineNumbers;
+    mocks.folding = options.folding;
     return {
       create: mocks.create,
       destroy: mocks.destroy,
@@ -33,7 +41,7 @@ vi.mock("@/composables/useCellDetailEditor", () => ({
 }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false), themePalette: ref({}) }) }));
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { theme: "default", fontSize: 13, fontFamily: "monospace", tableFontFamily: "'Grid Font', sans-serif" } }),
+  useSettingsStore: () => ({ editorSettings: { theme: "default", fontSize: 13, fontFamily: "monospace", tableFontFamily: "'Grid Font', sans-serif", wordWrap: true } }),
 }));
 vi.mock("@/lib/dataGrid/geometryPreview", () => ({ renderWktOnCanvas: vi.fn() }));
 
@@ -62,9 +70,13 @@ function detail(): DataGridCellDetail {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.createdOptions = [];
   mocks.onChange = undefined;
   mocks.onSaveShortcut = undefined;
   mocks.fontFamily = undefined;
+  mocks.lineWrapping = undefined;
+  mocks.lineNumbers = undefined;
+  mocks.folding = undefined;
   mocks.getValue.mockReturnValue("");
 });
 
@@ -79,6 +91,9 @@ describe("useDataGridCellDetail", () => {
 
     expect(mocks.focus).toHaveBeenCalledOnce();
     expect(mocks.fontFamily?.()).toBe("'Grid Font', sans-serif");
+    expect(mocks.lineWrapping?.()).toBe(true);
+    expect(mocks.folding).toBe(true);
+    expect(mocks.lineNumbers).toBe(true);
 
     composable.detailsEditorContainer.value = undefined;
     await nextTick();
@@ -191,6 +206,29 @@ describe("useDataGridCellDetail", () => {
 
     composable.detailsEditorContainer.value = undefined;
     await nextTick();
+    scope.stop();
+  });
+
+  it("enables code folding and line numbers for the side JSON preview editor (#10431)", async () => {
+    const scope = effectScope();
+    const cellDetail = detail();
+    cellDetail.formattedJson = '{\n  "name": "dbx"\n}';
+    const composable = scope.run(() => useDataGridCellDetail({ detail: ref(cellDetail), editValue: ref(""), onCancel: vi.fn() }))!;
+
+    composable.sideJsonPreviewContainer.value = document.createElement("div");
+    await nextTick();
+    await Promise.resolve();
+
+    expect(mocks.create).toHaveBeenCalledOnce();
+    expect(mocks.create).toHaveBeenCalledWith(composable.sideJsonPreviewContainer.value, '{\n  "name": "dbx"\n}', "json");
+    expect(mocks.createdOptions[0]?.folding).toBe(true);
+    expect(mocks.createdOptions[0]?.lineNumbers).toBe(true);
+    expect(mocks.createdOptions[0]?.language).toBe("json");
+    expect(mocks.createdOptions[0]?.readOnly).toBe(true);
+
+    composable.sideJsonPreviewContainer.value = undefined;
+    await nextTick();
+    expect(mocks.destroy).toHaveBeenCalledOnce();
     scope.stop();
   });
 });

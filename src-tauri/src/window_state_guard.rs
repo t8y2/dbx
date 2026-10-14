@@ -1,3 +1,5 @@
+use serde::Deserialize;
+use std::fs;
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
@@ -15,6 +17,19 @@ pub(crate) struct PhysicalMonitorRect {
     pub(crate) y: i32,
     pub(crate) width: u32,
     pub(crate) height: u32,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+struct PersistedWindowState {
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    prev_x: i32,
+    prev_y: i32,
+    maximized: bool,
+    decorated: bool,
+    fullscreen: bool,
 }
 
 pub(crate) fn corrected_window_rect(
@@ -38,8 +53,100 @@ pub(crate) fn enforce_main_window_bounds<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+pub(crate) fn restore_main_window_state<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Some(state) = load_main_window_state(app) else {
+        return;
+    };
+
+    let saved_rect = persisted_window_rect(state);
+    let monitors = window
+        .available_monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|monitor| PhysicalMonitorRect {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        })
+        .collect::<Vec<_>>();
+    let fallback_monitor =
+        window.current_monitor().ok().flatten().or_else(|| window.primary_monitor().ok().flatten()).map(|monitor| {
+            PhysicalMonitorRect {
+                x: monitor.position().x,
+                y: monitor.position().y,
+                width: monitor.size().width,
+                height: monitor.size().height,
+            }
+        });
+    let monitor = matching_monitor(saved_rect, &monitors).or(fallback_monitor);
+    let restored_rect = monitor.and_then(|monitor| corrected_window_rect(saved_rect, monitor)).unwrap_or(saved_rect);
+
+    let _ = window.set_decorations(state.decorated);
+    let restored = window
+        .set_size(PhysicalSize::new(restored_rect.width, restored_rect.height))
+        .and_then(|_| window.set_position(PhysicalPosition::new(restored_rect.x, restored_rect.y)))
+        .is_ok();
+
+    if restored && restored_rect != saved_rect {
+        let _ = app.save_window_state(persisted_main_window_state_flags());
+    }
+    if state.maximized {
+        let _ = window.maximize();
+    }
+    if state.fullscreen {
+        let _ = window.set_fullscreen(true);
+    }
+}
+
 pub(crate) fn persisted_main_window_state_flags() -> StateFlags {
     StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED | StateFlags::DECORATIONS | StateFlags::FULLSCREEN
+}
+
+fn load_main_window_state<R: Runtime>(app: &AppHandle<R>) -> Option<PersistedWindowState> {
+    let path = app.path().app_config_dir().ok()?.join(app.filename());
+    let states: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    serde_json::from_value(states.get("main")?.clone()).ok()
+}
+
+fn persisted_window_rect(state: PersistedWindowState) -> PhysicalWindowRect {
+    let (x, y) = if state.maximized { (state.prev_x, state.prev_y) } else { (state.x, state.y) };
+    PhysicalWindowRect { x, y, width: state.width, height: state.height }
+}
+
+fn matching_monitor(window: PhysicalWindowRect, monitors: &[PhysicalMonitorRect]) -> Option<PhysicalMonitorRect> {
+    monitors
+        .iter()
+        .copied()
+        .find(|monitor| monitor_contains_point(*monitor, window.x, window.y))
+        .or_else(|| monitors.iter().copied().find(|monitor| rects_intersect(window, *monitor)))
+}
+
+fn monitor_contains_point(monitor: PhysicalMonitorRect, x: i32, y: i32) -> bool {
+    let x = i64::from(x);
+    let y = i64::from(y);
+    let left = i64::from(monitor.x);
+    let top = i64::from(monitor.y);
+    x >= left && x < left + i64::from(monitor.width) && y >= top && y < top + i64::from(monitor.height)
+}
+
+fn rects_intersect(window: PhysicalWindowRect, monitor: PhysicalMonitorRect) -> bool {
+    let window_left = i64::from(window.x);
+    let window_top = i64::from(window.y);
+    let window_right = window_left + i64::from(window.width);
+    let window_bottom = window_top + i64::from(window.height);
+    let monitor_left = i64::from(monitor.x);
+    let monitor_top = i64::from(monitor.y);
+    let monitor_right = monitor_left + i64::from(monitor.width);
+    let monitor_bottom = monitor_top + i64::from(monitor.height);
+
+    window_left < monitor_right
+        && window_right > monitor_left
+        && window_top < monitor_bottom
+        && window_bottom > monitor_top
 }
 
 fn enforce_window_bounds<R: Runtime>(window: &WebviewWindow<R>) -> bool {
@@ -97,7 +204,10 @@ fn centered_axis_position(window_start: i32, window_length: u32, monitor_start: 
 
 #[cfg(test)]
 mod tests {
-    use super::{corrected_window_rect, PhysicalMonitorRect, PhysicalWindowRect};
+    use super::{
+        corrected_window_rect, matching_monitor, persisted_window_rect, PersistedWindowState, PhysicalMonitorRect,
+        PhysicalWindowRect,
+    };
     use tauri_plugin_window_state::StateFlags;
 
     #[test]
@@ -137,5 +247,38 @@ mod tests {
         );
 
         assert_eq!(corrected, Some(PhysicalWindowRect { x: 0, y: 0, width: 1440, height: 900 }));
+    }
+
+    #[test]
+    fn repairs_oversized_maximized_window_and_restores_maximized_state() {
+        let saved = PersistedWindowState {
+            width: 7120,
+            height: 2082,
+            x: 0,
+            y: 88,
+            prev_x: 0,
+            prev_y: 176,
+            maximized: true,
+            decorated: true,
+            fullscreen: false,
+        };
+        let saved_rect = persisted_window_rect(saved);
+        let monitor = PhysicalMonitorRect { x: 0, y: 0, width: 3600, height: 2338 };
+
+        assert_eq!(
+            corrected_window_rect(saved_rect, monitor),
+            Some(PhysicalWindowRect { x: 0, y: 176, width: 3600, height: 2082 })
+        );
+    }
+
+    #[test]
+    fn chooses_monitor_containing_saved_window_origin() {
+        let window = PhysicalWindowRect { x: -900, y: -1200, width: 2560, height: 1600 };
+        let monitors = [
+            PhysicalMonitorRect { x: 0, y: 0, width: 3600, height: 2338 },
+            PhysicalMonitorRect { x: -1007, y: -1440, width: 3440, height: 1440 },
+        ];
+
+        assert_eq!(matching_monitor(window, &monitors), Some(monitors[1]));
     }
 }

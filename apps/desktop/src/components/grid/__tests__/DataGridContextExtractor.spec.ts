@@ -4,7 +4,8 @@ import { createApp, defineComponent, h, markRaw, nextTick, shallowRef, type App,
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import type { QueryResult } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
+import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const mocks = vi.hoisted(() => ({
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(async ({ whereInput }: { whereInput?: string }) => `SELECT payload FROM events${whereInput ? ` WHERE ${whereInput}` : ""}`),
   executeMulti: vi.fn(),
   cancelQuery: vi.fn(),
+  extractDataGridSelection: vi.fn(),
   copyToClipboard: vi.fn(),
   toast: vi.fn(),
 }));
@@ -21,6 +23,7 @@ vi.mock("@/lib/backend/api", () => ({
   buildTableSelectSql: mocks.buildTableSelectSql,
   executeMulti: mocks.executeMulti,
   cancelQuery: mocks.cancelQuery,
+  extractDataGridSelection: mocks.extractDataGridSelection,
 }));
 
 vi.mock("@/composables/useToast", () => ({
@@ -135,7 +138,7 @@ function pasteGridCell(host: HTMLElement, value: string) {
   gridRoot.dispatchEvent(paste);
 }
 
-function mountGrid(initialResult = largeValueResult(), onReload?: () => void) {
+function mountGrid(initialResult = largeValueResult(), onReload?: () => void, databaseType: DatabaseType = "mysql", tableMeta?: DataGridTableMeta) {
   const result = shallowRef(markRaw(initialResult));
   const onExecuteSql = vi.fn().mockResolvedValue(undefined);
   const pinia = createPinia();
@@ -155,12 +158,12 @@ function mountGrid(initialResult = largeValueResult(), onReload?: () => void) {
             default: () =>
               h(DataGrid, {
                 result: result.value,
-                databaseType: "mysql",
+                databaseType,
                 connectionId: "connection-1",
                 database: "dbx",
                 context: "table-data",
                 editable: true,
-                tableMeta: {
+                tableMeta: tableMeta ?? {
                   tableName: "events",
                   columns: [
                     { name: "id", data_type: "int" },
@@ -261,6 +264,24 @@ afterEach(() => {
 });
 
 describe("DataGrid context menu target lifecycle", () => {
+  it("offers original text for a single column spanning multiple rows", async () => {
+    const lines = ["CREATE view v_Test as", "\tselect 'quoted' as value", '-- "keep quotes"'];
+    mocks.extractDataGridSelection.mockResolvedValueOnce({ text: lines.join("\n"), mimeType: "text/plain", fileExtension: "txt", rowCount: 3, columnCount: 1 });
+    mocks.copyToClipboard.mockResolvedValueOnce(true);
+    const { host } = mountGrid({ columns: ["id", "payload"], rows: lines.map((line, index) => [index + 1, line]), affected_rows: 0, execution_time_ms: 0 });
+    await settle();
+    columnHeader(host, 1).click();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+
+    contextMenuButton("Original Text (Single Column)").click();
+
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith(lines.join("\n")));
+    expect(mocks.extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: lines.map((line) => [line]) }));
+  });
+
   it("does not reuse a closed header target for a later select-all menu", async () => {
     const { host } = mountGrid(hydratedResult(1, "value"));
     await settle();
@@ -328,6 +349,36 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(document.body.textContent).toContain("Grid Snapshot");
   });
 
+  it("formats Oracle date cells to display format in grid snapshot", async () => {
+    const oracleResult: QueryResult = {
+      columns: ["id", "created_at"],
+      column_types: ["number", "DATE"],
+      rows: [[1, "2026-10-09T10:56:57"]],
+      affected_rows: 0,
+      execution_time_ms: 0,
+    };
+    const oracleTableMeta: DataGridTableMeta = {
+      tableName: "events",
+      columns: [
+        { name: "id", data_type: "number" },
+        { name: "created_at", data_type: "DATE" },
+      ],
+      primaryKeys: ["id"],
+    };
+    const { host } = mountGrid(oracleResult, undefined, "oracle", oracleTableMeta);
+    await settle();
+
+    openContextMenu(rowNumber(host));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Screenshot selected rows");
+    contextMenuButton("Screenshot selected rows").click();
+    await settle();
+    expect(document.body.textContent).toContain("Grid Snapshot");
+    expect(document.body.textContent).toContain("2026-10-09 10:56:57");
+    expect(document.body.textContent).not.toContain("2026-10-09T10:56:57");
+  });
+
   it.each(["WHERE", "ORDER BY"] as const)("keeps the native context menu for the %s condition editor", async (placeholder) => {
     const { host } = mountGrid(hydratedResult(1, "value"));
     await settle();
@@ -362,7 +413,7 @@ describe("DataGrid context menu target lifecycle", () => {
     contextMenuButton("Export").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     await settle();
 
-    expect(contextMenuButton("Cell Text").disabled).toBe(false);
+    expect(contextMenuButton("Original Text (Single Column)").disabled).toBe(false);
     expect(contextMenuButton("JSON Array").disabled).toBe(false);
     expect(contextMenuButton("SQL Select").disabled).toBe(false);
   });

@@ -68,6 +68,7 @@ function exportSettings() {
       exportBatchSize: 128,
       exportRowLimit: 500,
       exportRowLimitEnabled: true,
+      generateSqlIncludeDatabaseName: false,
       dataGridExtractorOptions: DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
     },
   };
@@ -605,6 +606,33 @@ describe("useSidebarTreeExportRuntime", () => {
 
     expect(apiMock.startTableExport).toHaveBeenCalledOnce();
     expect(apiMock.startTableExport).toHaveBeenCalledWith(expect.objectContaining({ tableName: "users", filePath: "users.csv" }), expect.any(Function));
+  });
+
+  it("follows the include-database-name setting for SQL INSERT exports", async () => {
+    const activeNode = shallowRef({ id: "table-1", type: "table", label: "events", connectionId: "conn-1", database: "warehouse", schema: "warehouse", children: [] } as TreeNode);
+    const settingsStore = exportSettings();
+    const connectionStore = {
+      ensureConnected: vi.fn(),
+      getConfig: vi.fn(() => ({ db_type: "mysql" })),
+      connectionIdentifierQuote: vi.fn(() => "`"),
+      treeNodes: [],
+      selectedTreeNodeIds: [],
+    };
+    const runtime = useSidebarTreeExportRuntime({
+      activeNode,
+      connectionStore: connectionStore as never,
+      settingsStore: settingsStore as never,
+      acceptedSelectionIds: () => null,
+    });
+
+    // 设置关闭（默认）：INSERT 目标省略库名，恢复脚本不受目标库影响 (#10771)。
+    await runtime.exportData("sql");
+    expect(apiMock.startTableExport).toHaveBeenLastCalledWith(expect.objectContaining({ format: "sql", omitDatabaseQualifier: true }), expect.any(Function));
+
+    // 设置开启：保留限定名。
+    settingsStore.editorSettings.generateSqlIncludeDatabaseName = true;
+    await runtime.exportData("sql");
+    expect(apiMock.startTableExport).toHaveBeenLastCalledWith(expect.objectContaining({ format: "sql", omitDatabaseQualifier: false }), expect.any(Function));
   });
 
   it.each([

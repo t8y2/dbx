@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import az from "../locales/az";
 import en from "../locales/en";
 import es from "../locales/es";
+import id from "../locales/id";
 import it_ from "../locales/it";
 import ja from "../locales/ja";
 import ko from "../locales/ko";
@@ -15,6 +16,7 @@ const locales: Array<[string, Record<string, unknown>]> = [
   ["az", az],
   ["en", en],
   ["es", es],
+  ["id", id],
   ["it", it_],
   ["ja", ja],
   ["ko", ko],
@@ -33,5 +35,7 @@ describe("grid copy extractor saved locale parity", () => {
     const grid = (locale as { grid: Record<string, unknown> }).grid;
     expect(grid.copyExtractorSaved, `${_name}: grid.copyExtractorSaved`).toBeTypeOf("string");
     expect(grid.copyExtractorSaved as string, `${_name}: grid.copyExtractorSaved`).not.toHaveLength(0);
+    expect(grid.copyExtractorRawHint, `${_name}: grid.copyExtractorRawHint`).toBeTypeOf("string");
+    expect(grid.copyExtractorRawHint as string, `${_name}: grid.copyExtractorRawHint`).not.toHaveLength(0);
   });
 });

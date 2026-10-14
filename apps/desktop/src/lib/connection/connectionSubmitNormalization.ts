@@ -1,3 +1,5 @@
+import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
+import { normalizeIdleTimeoutSecs } from "@/lib/connection/timeoutLimits";
 import { isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
@@ -6,13 +8,13 @@ export function normalizeConnectionTimeouts(config: ConnectionConfig, connectTim
   config.connect_timeout_secs = config.connect_timeout_inherit === true ? normalizeGlobalConnectTimeoutSecs(connectTimeoutSecs) : normalizeGlobalConnectTimeoutSecs(config.connect_timeout_secs);
   const queryTimeout = Number(config.query_timeout_secs);
   config.query_timeout_secs = config.query_timeout_inherit === true ? normalizeGlobalQueryTimeoutSecs(queryTimeoutSecs) : normalizeGlobalQueryTimeoutSecs(queryTimeout);
-  const idleTimeout = Number(config.idle_timeout_secs);
-  config.idle_timeout_secs = Number.isFinite(idleTimeout) && idleTimeout >= 0 ? idleTimeout : 60;
+  config.idle_timeout_secs = normalizeIdleTimeoutSecs(config.idle_timeout_secs);
   const keepaliveInterval = Number(config.keepalive_interval_secs);
   config.keepalive_interval_secs = Number.isFinite(keepaliveInterval) && keepaliveInterval >= 0 ? keepaliveInterval : 30;
 }
 
 export function normalizeConnectionScope(config: ConnectionConfig): void {
+  config.production_badge_scope = sidebarProductionBadgeScope(config);
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
   // Persist only an explicit opt-out; absent/true keeps the existing save-password behavior.

@@ -2,10 +2,7 @@ use std::{io, sync::Arc};
 
 use axum::{http::Method, middleware, routing::get, Router};
 use rmcp::transport::{
-    streamable_http_server::{
-        session::{local::LocalSessionManager, SessionManager},
-        tower::StreamableHttpService,
-    },
+    streamable_http_server::{session::never::NeverSessionManager, tower::StreamableHttpService},
     StreamableHttpServerConfig,
 };
 use tokio_util::sync::CancellationToken;
@@ -15,7 +12,8 @@ use crate::{
     diagnostics::health,
     http_auth::{authorize_request, HttpAuth},
     runtime::HttpRuntimeConfig,
-    DbxBackend, DbxMcpServer, McpScope,
+    server::{PendingSalesforceWrites, PluginToolsMode, SALESFORCE_WRITE_CONFIRM_TTL},
+    DbxBackend, DbxMcpServer, McpScope, McpSessionStore,
 };
 
 /// Builds a protected Streamable HTTP MCP router for embedding in an existing
@@ -28,7 +26,17 @@ pub fn streamable_http_router(
     allowed_hosts: Vec<String>,
     web_mode: bool,
 ) -> Result<Router, String> {
-    build_streamable_http_router(backend, path, auth, allowed_hosts, web_mode, None, Default::default())
+    build_streamable_http_router(
+        backend,
+        path,
+        auth,
+        allowed_hosts,
+        web_mode,
+        None,
+        Default::default(),
+        McpSessionStore::new(),
+        PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL),
+    )
 }
 
 fn build_streamable_http_router(
@@ -38,7 +46,9 @@ fn build_streamable_http_router(
     allowed_hosts: Vec<String>,
     web_mode: bool,
     cancellation: Option<CancellationToken>,
-    session_manager: Arc<LocalSessionManager>,
+    session_manager: Arc<NeverSessionManager>,
+    sessions: Arc<McpSessionStore>,
+    pending_salesforce_writes: Arc<PendingSalesforceWrites>,
 ) -> Result<Router, String> {
     auth.set_allowed_hosts(allowed_hosts.clone())?;
     // Web settings update the shared policy without rebuilding the router.
@@ -51,10 +61,35 @@ fn build_streamable_http_router(
     if let Some(cancellation) = cancellation {
         rmcp_config = rmcp_config.with_cancellation_token(cancellation);
     }
+    // The transport keeps no session, for any protocol generation. rmcp would
+    // otherwise hand a client an `Mcp-Session-Id` on `initialize` and answer
+    // `404 Not Found: Session not found` once its idle window dropped that
+    // session, which a client that reconnects after a longer pause reports as
+    // `Streamable HTTP error: Error POSTing to endpoint: Not Found: Session not
+    // found` and never recovers from (see #11640). A client that declares the
+    // version per request is already exempt; this extends the same stateless
+    // treatment to pre-`2026-07-28` clients. DBX's own stateful sessions are
+    // unaffected: they are explicit `dbx_open_session` handles carried in tool
+    // arguments, not transport sessions.
+    rmcp_config = rmcp_config.with_legacy_session_mode(false);
     let server_backend = backend.clone();
     let scope = McpScope::from_env();
-    let service: StreamableHttpService<DbxMcpServer, LocalSessionManager> = StreamableHttpService::new(
-        move || Ok(DbxMcpServer::with_runtime_options(server_backend.clone(), scope.clone(), web_mode)),
+    let plugin_tools_mode = PluginToolsMode::from_env();
+    // Stateless requests, tool-schema discovery, and session restoration each
+    // call the factory again. Session and pending-write state belongs to the
+    // endpoint, not to one instance, so a request can still find the DBX session
+    // an earlier request opened.
+    let service: StreamableHttpService<DbxMcpServer, NeverSessionManager> = StreamableHttpService::new(
+        move || {
+            Ok(DbxMcpServer::with_shared_state(
+                server_backend.clone(),
+                scope.clone(),
+                web_mode,
+                plugin_tools_mode,
+                sessions.clone(),
+                pending_salesforce_writes.clone(),
+            ))
+        },
         session_manager,
         rmcp_config,
     );
@@ -71,7 +106,9 @@ fn build_streamable_http_router(
             .allow_origin(AllowOrigin::predicate(move |origin, _| {
                 origin.to_str().is_ok_and(|origin| cors_auth.origin_is_allowed(origin))
             }))
-            .allow_methods([Method::GET, Method::POST, Method::DELETE])
+            // Every request is served statelessly, so `GET` and `DELETE` are
+            // answered with 405 and must not be advertised to browser clients.
+            .allow_methods([Method::POST])
             .allow_headers(Any),
     ))
 }
@@ -109,15 +146,19 @@ pub async fn serve_streamable_http_on_listener(
     cancellation: CancellationToken,
     listener: tokio::net::TcpListener,
 ) -> io::Result<()> {
-    let session_manager = Arc::new(LocalSessionManager::default());
+    let session_manager = Arc::new(NeverSessionManager::default());
+    let sessions = McpSessionStore::new();
+    let pending_salesforce_writes = PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL);
     let mcp_router = build_streamable_http_router(
-        backend,
+        backend.clone(),
         &config.path,
         config.auth,
         config.allowed_hosts,
         false,
         Some(cancellation.child_token()),
         session_manager.clone(),
+        sessions.clone(),
+        pending_salesforce_writes,
     )
     .map_err(io::Error::other)?;
     let router = Router::new().route("/healthz", get(health)).route("/readyz", get(health)).merge(mcp_router);
@@ -129,19 +170,26 @@ pub async fn serve_streamable_http_on_listener(
             cancellation.cancelled().await;
         })
         .await;
-    close_local_sessions_bounded(&session_manager).await;
+    close_http_sessions_bounded(&backend, &sessions).await;
     result
 }
 
-async fn close_local_sessions_bounded(session_manager: &Arc<LocalSessionManager>) {
-    let session_ids = session_manager.sessions.read().await.keys().cloned().collect::<Vec<_>>();
+/// Roll back the DBX sessions the endpoint still holds.
+///
+/// There are no transport sessions to drain: the endpoint serves every request
+/// statelessly. A DBX session outlives the request that opened it because it
+/// lives on the endpoint-wide store, so shutdown releases it explicitly rather
+/// than leaving it to the idle TTL.
+async fn close_http_sessions_bounded(backend: &Arc<dyn DbxBackend>, sessions: &Arc<McpSessionStore>) {
     let cleanup = async {
-        for session_id in session_ids {
-            let _ = session_manager.close_session(&session_id).await;
+        let leftover = sessions.take_all_active().await;
+        if !leftover.is_empty() {
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::from_env(), false);
+            server.close_backend_sessions_best_effort(leftover).await;
         }
     };
     if tokio::time::timeout(std::time::Duration::from_secs(10), cleanup).await.is_err() {
-        log::warn!("Timed out draining MCP HTTP protocol sessions during shutdown");
+        log::warn!("Timed out draining MCP HTTP sessions during shutdown");
     }
 }
 
@@ -155,19 +203,17 @@ mod tests {
         storage::McpGlobalPolicy,
     };
     use rmcp::{
-        model::CallToolRequestParams,
+        model::{CallToolRequestParams, ProtocolVersion},
         service::ServiceExt,
-        transport::{
-            streamable_http_client::StreamableHttpClientTransportConfig,
-            streamable_http_server::session::local::SessionConfig, StreamableHttpClientTransport,
-        },
+        transport::{streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport},
+        ClientLifecycleMode, ClientServiceExt,
     };
     use serde_json::{json, Value};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
     use crate::{
         backend::DbxBackend,
+        server::{PendingSalesforceWrites, SALESFORCE_WRITE_CONFIRM_TTL},
         transaction::{
             TransactionIo, TransactionIoError, TransactionIoSuccess, TransactionOwner, TransactionOwnerConfig,
         },
@@ -292,6 +338,19 @@ mod tests {
         async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
             Ok(config)
         }
+
+        /// Model the pool release a real backend performs: the rollback itself
+        /// comes from the transaction owner the session carries, and the
+        /// disconnect counter records that the pinned pool was disposed.
+        async fn close_client_session(
+            &self,
+            _connection_id: &str,
+            _database: &str,
+            _client_session_id: &str,
+        ) -> Result<bool, String> {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
         async fn duplicate_connection_for_mcp(
             &self,
             _source_id: &str,
@@ -307,8 +366,7 @@ mod tests {
 
     async fn start_http_test_server(
         backend: Arc<HttpTestBackend>,
-        keep_alive: std::time::Duration,
-    ) -> (String, Arc<LocalSessionManager>, CancellationToken, tokio::task::JoinHandle<()>) {
+    ) -> (String, Arc<McpSessionStore>, CancellationToken, tokio::task::JoinHandle<()>) {
         // A single default provider avoids the "No rustls crypto provider is
         // configured" panic when tests build reqwest clients in workspace
         // builds where multiple rustls crypto features are present; the
@@ -316,32 +374,31 @@ mod tests {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
-        let mut session_config = SessionConfig::default();
-        session_config.keep_alive = Some(keep_alive);
-        let mut local_manager = LocalSessionManager::default();
-        local_manager.session_config = session_config;
-        let manager = Arc::new(local_manager);
         let cancellation = CancellationToken::new();
+        let sessions = McpSessionStore::new();
         let router = build_streamable_http_router(
-            backend,
+            backend.clone(),
             "/mcp",
             HttpAuth::new("http-test-token".to_string(), Vec::<String>::new(), true).unwrap(),
             vec![address.to_string()],
             false,
             Some(cancellation.child_token()),
-            manager.clone(),
+            Arc::new(NeverSessionManager::default()),
+            sessions.clone(),
+            PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL),
         )
         .unwrap();
         let shutdown = cancellation.clone();
-        let shutdown_manager = manager.clone();
+        let shutdown_sessions = sessions.clone();
+        let shutdown_backend: Arc<dyn DbxBackend> = backend;
         let task = tokio::spawn(async move {
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move { shutdown.cancelled().await })
                 .await
                 .unwrap();
-            close_local_sessions_bounded(&shutdown_manager).await;
+            close_http_sessions_bounded(&shutdown_backend, &shutdown_sessions).await;
         });
-        (format!("http://{address}/mcp"), manager, cancellation, task)
+        (format!("http://{address}/mcp"), sessions, cancellation, task)
     }
 
     async fn open_active_transaction(url: &str) -> (rmcp::service::RunningService<rmcp::RoleClient, ()>, String) {
@@ -374,10 +431,14 @@ mod tests {
         (client, session_id)
     }
 
+    /// Wait until the backend connection the session pinned was rolled back and
+    /// disposed. Sessions are reclaimed by an explicit `dbx_close_session`, the
+    /// idle TTL, or server shutdown, so every caller triggers one of those
+    /// first; ending the HTTP transport session deliberately does not.
     async fn wait_for_disposal(backend: &HttpTestBackend) {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
-                if backend.disconnects.load(Ordering::SeqCst) == 1
+                if backend.disconnects.load(Ordering::SeqCst) >= 1
                     && backend.sql.lock().unwrap().iter().any(|sql| sql == "ROLLBACK")
                 {
                     break;
@@ -386,99 +447,51 @@ mod tests {
             }
         })
         .await
-        .expect("HTTP session cleanup must roll back and disconnect the owner");
+        .expect("session cleanup must roll back and disconnect the owner");
     }
 
-    async fn open_and_drop_raw_sse(url: &str, outer_session_id: &str) {
-        let parsed = url::Url::parse(url).unwrap();
-        let host = parsed.host_str().unwrap();
-        let port = parsed.port_or_known_default().unwrap();
-        let mut stream = tokio::net::TcpStream::connect((host, port)).await.unwrap();
-        let path = match parsed.query() {
-            Some(query) => format!("{}?{query}", parsed.path()),
-            None => parsed.path().to_string(),
-        };
-        let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer http-test-token\r\nAccept: text/event-stream\r\nMcp-Session-Id: {outer_session_id}\r\nMcp-Protocol-Version: 2025-06-18\r\nConnection: keep-alive\r\n\r\n"
-        );
-        stream.write_all(request.as_bytes()).await.unwrap();
-
-        let headers = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            let mut response = Vec::new();
-            let mut buffer = [0_u8; 1024];
-            loop {
-                let read = stream.read(&mut buffer).await.unwrap();
-                assert!(read > 0, "raw SSE connection closed before HTTP headers");
-                response.extend_from_slice(&buffer[..read]);
-                if response.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break response;
-                }
-                assert!(response.len() <= 16 * 1024, "raw SSE response headers exceeded 16 KiB");
-            }
-        })
-        .await
-        .expect("raw SSE GET must return HTTP headers");
-        let headers = std::str::from_utf8(&headers).unwrap();
-        assert!(headers.starts_with("HTTP/1.1 200 "), "raw SSE GET did not return HTTP 200: {headers}");
-        assert!(headers.to_ascii_lowercase().contains("content-type: text/event-stream"));
-
-        drop(stream);
-    }
-
-    #[tokio::test]
-    async fn authenticated_http_delete_rolls_back_and_disconnects_inner_owner() {
-        let backend = Arc::new(HttpTestBackend::new());
-        let (url, manager, cancellation, server_task) =
-            start_http_test_server(backend.clone(), std::time::Duration::from_secs(30)).await;
-        let (client, _) = open_active_transaction(&url).await;
-        let outer_session_id = manager.sessions.read().await.keys().next().unwrap().to_string();
-
-        let response = reqwest::Client::new()
-            .delete(&url)
-            .bearer_auth("http-test-token")
-            .header("mcp-session-id", outer_session_id)
-            .send()
+    /// Close the stateful session the client opened by its own id.
+    async fn close_inner_session(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>, session_id: &str) {
+        let closed = client
+            .call_tool(
+                CallToolRequestParams::new("dbx_close_session")
+                    .with_arguments(serde_json::from_value(json!({ "session_id": session_id })).unwrap()),
+            )
             .await
             .unwrap();
-        assert!(response.status().is_success(), "DELETE returned {}", response.status());
-        wait_for_disposal(&backend).await;
-
-        drop(client);
-        cancellation.cancel();
-        server_task.await.unwrap();
+        assert_ne!(closed.is_error, Some(true), "close session failed: {closed:?}");
     }
 
+    /// The endpoint offers no transport session to end, so it does not accept
+    /// the legacy session-management verbs at all. A client that used to send
+    /// `DELETE` now sees `405` with an explicit `Allow`, instead of silently
+    /// having a session closed behind its back.
     #[tokio::test]
-    async fn http_inactivity_expiry_rolls_back_and_disconnects_inner_owner() {
+    async fn transport_session_management_verbs_are_not_accepted() {
         let backend = Arc::new(HttpTestBackend::new());
-        let (url, manager, cancellation, server_task) =
-            start_http_test_server(backend.clone(), std::time::Duration::from_millis(500)).await;
-        let (client, _) = open_active_transaction(&url).await;
-
-        wait_for_disposal(&backend).await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while !manager.sessions.read().await.is_empty() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("expired outer HTTP session must be removed");
-
-        drop(client);
-        cancellation.cancel();
-        server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn transient_http_connections_preserve_one_outer_session() {
-        let backend = Arc::new(HttpTestBackend::new());
-        let (url, manager, cancellation, server_task) =
-            start_http_test_server(backend.clone(), std::time::Duration::from_secs(30)).await;
+        let (url, _sessions, cancellation, server_task) = start_http_test_server(backend.clone()).await;
         let (client, inner_session_id) = open_active_transaction(&url).await;
-        let outer_session_id = manager.sessions.read().await.keys().next().unwrap().to_string();
 
-        open_and_drop_raw_sse(&url, &outer_session_id).await;
+        for method in [reqwest::Method::GET, reqwest::Method::DELETE] {
+            let response = reqwest::Client::new()
+                .request(method.clone(), &url)
+                .bearer_auth("http-test-token")
+                .header("mcp-session-id", "00000000-dead-beef-0000-000000000000")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::METHOD_NOT_ALLOWED,
+                "{method} must be rejected on a stateless endpoint"
+            );
+            let allow =
+                response.headers().get("allow").and_then(|value| value.to_str().ok()).unwrap_or_default().to_string();
+            assert!(allow.contains("POST"), "{method} Allow header was {allow:?}");
+        }
 
+        // The DBX session the agent opened is independent of the transport and
+        // keeps working after those rejected verbs.
         let query = client
             .call_tool(
                 CallToolRequestParams::new("dbx_execute_query").with_arguments(
@@ -495,20 +508,193 @@ mod tests {
             .unwrap();
         assert_ne!(query.is_error, Some(true));
         assert_eq!(query.structured_content.as_ref().unwrap()["transaction_state"], "active");
-        assert_eq!(manager.sessions.read().await.len(), 1);
-        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 0);
-        assert!(!backend.sql.lock().unwrap().iter().any(|sql| sql == "ROLLBACK"));
 
+        close_inner_session(&client, &inner_session_id).await;
+        wait_for_disposal(&backend).await;
+        drop(client);
+        cancellation.cancel();
+        server_task.await.unwrap();
+    }
+
+    /// The endpoint never hands out a session, for any protocol generation, so
+    /// there is no server-side session that a client could later find missing.
+    #[tokio::test]
+    async fn no_protocol_generation_receives_a_session_id() {
+        let backend = Arc::new(HttpTestBackend::new());
+        let (url, _sessions, cancellation, server_task) = start_http_test_server(backend.clone()).await;
+
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "legacy", "version": "0" }
+            }
+        });
         let response = reqwest::Client::new()
-            .delete(&url)
+            .post(&url)
             .bearer_auth("http-test-token")
-            .header("mcp-session-id", outer_session_id)
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize)
             .send()
             .await
             .unwrap();
-        assert!(response.status().is_success());
-        wait_for_disposal(&backend).await;
-        drop(client);
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(!response.headers().contains_key("mcp-session-id"), "a stateless endpoint must not issue a session id");
+
+        // Reusing a stale session id on a later request is ignored rather than
+        // answered with `404 Session not found`.
+        let list_tools = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
+        let response = reqwest::Client::new()
+            .post(&url)
+            .bearer_auth("http-test-token")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", "00000000-dead-beef-0000-000000000000")
+            .json(&list_tools)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::OK,
+            "a stale session id must not turn into 404 Session not found"
+        );
+        let body = response.text().await.unwrap();
+        assert!(body.contains("dbx_list_connections"), "tools/list did not answer: {body}");
+
+        cancellation.cancel();
+        server_task.await.unwrap();
+    }
+
+    /// The same endpoint must serve both protocol generations. They differ only
+    /// in how they hand over the protocol version: a legacy agent runs the
+    /// `initialize` handshake, a modern one carries `2026-07-28` metadata per
+    /// request. Neither gets a transport session.
+    #[tokio::test]
+    async fn http_serves_both_protocol_generations_without_sessions() {
+        let backend = Arc::new(HttpTestBackend::new());
+        let (url, _sessions, cancellation, server_task) = start_http_test_server(backend.clone()).await;
+
+        let legacy = ()
+            .serve(StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(url.clone()).auth_header("http-test-token"),
+            ))
+            .await
+            .expect("legacy initialize client");
+        let legacy_info = legacy.peer_info().expect("legacy initialize info");
+        assert_eq!(legacy_info.protocol_version, ProtocolVersion::V_2025_11_25);
+        let listed = legacy.list_all_tools().await.expect("legacy tools/list");
+        assert!(!listed.is_empty());
+
+        // `Discover` mode never sends `initialize`, so this only succeeds if the
+        // server answers `server/discover` for the modern lifecycle.
+        let modern = ClientServiceExt::serve_with_lifecycle(
+            (),
+            StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(url.clone()).auth_header("http-test-token"),
+            ),
+            ClientLifecycleMode::Discover { preferred_versions: vec![ProtocolVersion::V_2026_07_28] },
+        )
+        .await
+        .expect("modern discover client");
+        let modern_info = modern.peer_info().expect("discover info");
+        assert_eq!(modern_info.protocol_version, ProtocolVersion::V_2026_07_28);
+        let modern_tools = modern.list_all_tools().await.expect("modern tools/list");
+        assert!(!modern_tools.is_empty());
+
+        for (client, is_modern) in [(&legacy, false), (&modern, true)] {
+            for (method, result) in [
+                ("tools/list", serde_json::to_value(client.list_tools(None).await.unwrap()).unwrap()),
+                ("resources/list", serde_json::to_value(client.list_resources(None).await.unwrap()).unwrap()),
+                (
+                    "resources/templates/list",
+                    serde_json::to_value(client.list_resource_templates(None).await.unwrap()).unwrap(),
+                ),
+            ] {
+                if is_modern {
+                    assert_eq!(result["resultType"], "complete", "{method}");
+                    assert_eq!(result["ttlMs"], 0, "{method}");
+                    assert_eq!(result["cacheScope"], "private", "{method}");
+                } else {
+                    for field in ["resultType", "ttlMs", "cacheScope"] {
+                        assert!(result.get(field).is_none(), "legacy {method} unexpectedly includes {field}");
+                    }
+                }
+            }
+        }
+
+        let _ = legacy.cancel().await;
+        let _ = modern.cancel().await;
+        cancellation.cancel();
+        server_task.await.unwrap();
+    }
+
+    /// `2026-07-28` has no protocol-level session, so every request arrives at a
+    /// freshly built `DbxMcpServer`. A session handle minted by one request must
+    /// therefore still resolve in the next one, otherwise transactions silently
+    /// break for modern agents while still working for legacy ones.
+    #[tokio::test]
+    async fn stateless_2026_requests_share_db_session_state() {
+        let backend = Arc::new(HttpTestBackend::new());
+        let (url, _sessions, cancellation, server_task) = start_http_test_server(backend.clone()).await;
+
+        let modern = ClientServiceExt::serve_with_lifecycle(
+            (),
+            StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(url).auth_header("http-test-token"),
+            ),
+            ClientLifecycleMode::Discover { preferred_versions: vec![ProtocolVersion::V_2026_07_28] },
+        )
+        .await
+        .expect("modern discover client");
+
+        let opened = modern
+            .call_tool(
+                CallToolRequestParams::new("dbx_open_session").with_arguments(
+                    serde_json::from_value(json!({
+                        "connection_id": "mysql",
+                        "database": "app",
+                        "enable_transactions": true
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_ne!(opened.is_error, Some(true), "open session failed: {opened:?}");
+        let session_id = opened.structured_content.as_ref().unwrap()["session_id"].as_str().unwrap().to_string();
+
+        let begun = modern
+            .call_tool(
+                CallToolRequestParams::new("dbx_begin_transaction")
+                    .with_arguments(serde_json::from_value(json!({ "session_id": session_id.clone() })).unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_ne!(begun.is_error, Some(true), "begin transaction failed: {begun:?}");
+
+        // A separate HTTP request (and therefore a separate server instance)
+        // must find the session opened two requests ago.
+        let query = modern
+            .call_tool(
+                CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                    serde_json::from_value(json!({
+                        "connection_id": "mysql",
+                        "database": "app",
+                        "session_id": session_id,
+                        "sql": "SELECT 1"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_ne!(query.is_error, Some(true), "query on shared session failed: {query:?}");
+        assert_eq!(query.structured_content.as_ref().unwrap()["transaction_state"], "active");
+
+        let _ = modern.cancel().await;
         cancellation.cancel();
         server_task.await.unwrap();
     }
@@ -516,8 +702,7 @@ mod tests {
     #[tokio::test]
     async fn http_service_shutdown_rolls_back_and_disconnects_inner_owner() {
         let backend = Arc::new(HttpTestBackend::new());
-        let (url, _manager, cancellation, server_task) =
-            start_http_test_server(backend.clone(), std::time::Duration::from_secs(30)).await;
+        let (url, _sessions, cancellation, server_task) = start_http_test_server(backend.clone()).await;
         let (client, _) = open_active_transaction(&url).await;
 
         cancellation.cancel();

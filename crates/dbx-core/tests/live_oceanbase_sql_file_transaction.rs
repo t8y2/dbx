@@ -67,6 +67,7 @@ async fn live_oceanbase_sql_files_commit_rollback_failure_and_cancel() {
             execution_id: "live-manual-file".to_string(), connection_id: "file-writer".to_string(),
             database: database.clone(), schema: None, file_path: String::new(), continue_on_error: false,
             selected_tables: None, part_cooldown_ms: 0, skip_relational_constraints: false, txn_session_id: None,
+            failure_log_enabled: true,
         };
         let first = directory.path().join("first.sql");
         let second = directory.path().join("second.sql");

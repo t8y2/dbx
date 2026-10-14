@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { reactive } from "vue";
 import { JSDOM } from "jsdom";
 import { sandboxDocument } from "../browser-bridge.mjs";
-import { hostMessage } from "../ui/messages.js";
+import { hostMessage, pluginInitMessage } from "../ui/messages.js";
 
 test("bridge delivers host-compatible environment, lifecycle and binary events", async (t) => {
   const dom = new JSDOM(sandboxDocument("<head></head>", "test"), { runScripts: "dangerously" });
@@ -20,7 +20,7 @@ test("bridge delivers host-compatible environment, lifecycle and binary events",
   w.dbxPlugin.onBinary((value) => {
     binary = value;
   });
-  send({ type: "init", context: { value: 1 } });
+  send({ type: "init", contributionId: "example.main", context: { value: 1 } });
   await w.dbxPlugin.ready;
   assert.equal(initialized, 1);
   w.dbxPlugin.onInit(() => initialized++);
@@ -34,7 +34,45 @@ test("bridge delivers host-compatible environment, lifecycle and binary events",
   assert.deepEqual([...binary.data], [0, 255]);
   assert.equal(binary.channel, "bytes");
   assert.equal(events.length, 5);
+  assert.equal(events[0].detail.contributionId, "example.main");
   assert.equal(events[1].detail.value, 2);
+});
+
+test("dev-host exposes the contribution identity after ready when init was delivered before consumption", async (t) => {
+  const dom = new JSDOM(sandboxDocument("<html><head></head><body></body></html>", "generation"), { runScripts: "dangerously" });
+  t.after(() => dom.window.close());
+  const w = dom.window;
+  const frame = { contributionId: "example.generation", context: {} };
+  const init = hostMessage("generation", pluginInitMessage(frame, "zh-CN", { appearance: "light" }, []));
+
+  w.dispatchEvent(new w.MessageEvent("message", { source: w, data: init }));
+  await w.dbxPlugin.ready;
+
+  assert.equal(w.dbxPlugin.contributionId, "example.generation");
+  assert.deepEqual(w.dbxPlugin.context, {});
+  let lateContext;
+  w.dbxPlugin.onInit((context) => (lateContext = context));
+  assert.deepEqual(lateContext, {});
+});
+
+test("dev-host exposes contribution identity independently of table context before onInit", async (t) => {
+  const dom = new JSDOM(sandboxDocument("<html><head></head><body></body></html>", "generation"), { runScripts: "dangerously" });
+  t.after(() => dom.window.close());
+  const w = dom.window;
+  const context = { connectionId: "connection-1", database: "app", schema: "public", table: "orders" };
+  const frame = { contributionId: "example.generation", context };
+  const init = hostMessage("generation", pluginInitMessage(frame, "zh-CN", { appearance: "light" }, []));
+  let observed;
+  w.dbxPlugin.onInit((value) => {
+    observed = { context: value, contributionId: w.dbxPlugin.contributionId };
+  });
+
+  w.dispatchEvent(new w.MessageEvent("message", { source: w, data: init }));
+  await w.dbxPlugin.ready;
+
+  assert.deepEqual(observed, { context, contributionId: "example.generation" });
+  assert.deepEqual(w.dbxPlugin.context, context);
+  assert.equal(w.dbxPlugin.contributionId, "example.generation");
 });
 
 test("host messages snapshot nested reactive context and permissions before postMessage", () => {

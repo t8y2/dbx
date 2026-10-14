@@ -56,7 +56,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import type { ColumnInfo, ConnectionConfig, CustomTypeTreeMemberMeta, DatabaseType, TreeNode, TriggerInfo } from "@/types/database";
-import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, isSidebarCommentSupportedType, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import {
   clearActiveTableReferencePayload,
   createColumnReferencePayload,
@@ -93,9 +93,10 @@ import { isLoginUserSchemaNode } from "@/lib/sidebar/loginUserNode";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
+import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
-import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { showSidebarRowProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
@@ -202,6 +203,8 @@ const props = defineProps<{
   pendingRename?: boolean;
   highlighted?: boolean;
   commentLabelWidth?: number;
+  /** This row is rendered as the fixed database/schema context. */
+  isStickyContext?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -229,9 +232,8 @@ const activeNode = shallowRef<TreeNode>(props.node);
 const isDisabledTrigger = computed(() => activeNode.value.type === "trigger" && (activeNode.value.meta as TriggerInfo | undefined)?.enabled === false);
 
 const showProductionBadge = computed(() => {
-  const connectionId = activeNode.value.connectionId;
-  const context = productionContextForDatabase(connectionId ? connectionStore.getConfig(connectionId) : undefined, activeNode.value.database);
-  return context.active && ["connection", "database", "redis-db", "mongo-db"].includes(activeNode.value.type);
+  const node = activeNode.value;
+  return showSidebarRowProductionBadge(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined, props.isStickyContext);
 });
 
 function currentDatabaseType(): DatabaseType | undefined {
@@ -401,6 +403,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "group-functions":
       return { icon: Braces, colorClass: "text-amber-500" };
+    case "group-internal-functions":
+      return { icon: Braces, colorClass: "text-emerald-500" };
+    case "group-udf-functions":
+      return { icon: Braces, colorClass: "text-orange-500" };
     case "group-sequences":
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "group-synonyms":
@@ -411,6 +417,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-types":
       return { icon: Braces, colorClass: "text-violet-500" };
+    case "group-database-indexes":
+      return { icon: Key, colorClass: "text-amber-400" };
     case "group-partitions":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "group-extensions":
@@ -474,7 +482,7 @@ function visibleLabel(node: TreeNode): string {
 }
 
 function hasActiveObjectNameFilter(node: TreeNode): boolean {
-  if (!supportsSidebarObjectNameFilter(node) || !node.connectionId || !node.database) return false;
+  if (!supportsSidebarObjectNameFilter(node) || !node.connectionId || !hasTreeNodeDatabaseContext(node)) return false;
   const filter = connectionStore.tableNameFilterForScope({
     connectionId: node.connectionId,
     database: node.database,
@@ -639,7 +647,7 @@ const detailTooltip = computed(() => {
   }
   const column = node.type === "column" ? (node.meta as ColumnInfo | undefined) : undefined;
   const comment = column && "comment" in column ? column.comment : node.comment;
-  if ((!comment && !column) || (node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column")) return null;
+  if ((!comment && !column) || !isSidebarCommentSupportedType(node.type)) return null;
   const rows: DetailTooltipRow[] = [
     { label: t("connection.name"), value: visibleLabel(node) },
     ...(column ? [{ label: t("structureEditor.nullable"), value: t(column.is_nullable ? "structureEditor.nullable" : "structureEditor.notNull") }] : []),
@@ -945,6 +953,8 @@ function hasTrailingMetadata(): boolean {
 
 const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.value.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll, hasTrailingMetadata()));
 
+const isCompactSidebar = computed(() => settingsStore.editorSettings.sidebarDensity === "compact");
+
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
 
 const labelWidthClass = computed(() => {
@@ -1018,7 +1028,7 @@ const rowStyle = computed(() => {
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
   return {
     paddingLeft: paddingLeft.value,
-    paddingRight: trailingComment.value ? "12px" : undefined,
+    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
     "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.2 : 0.16),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
@@ -1200,7 +1210,7 @@ function pinnedSortKey(): string {
 }
 
 function canDragPinnedOrder(): boolean {
-  return isPinned.value && !isNodeDefaultDatabase.value && !props.reorderDisabled;
+  return isPinned.value && !(isNodeDefaultDatabase.value && settingsStore.editorSettings.sidebarPinDefaultDatabase) && !props.reorderDisabled;
 }
 
 const {
@@ -1583,7 +1593,17 @@ function onKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <div v-if="node.type === 'table-search-control'" data-sidebar-table-search-control class="tree-table-search-control flex h-7 items-center gap-1.5 py-0.5 pr-2" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown="onTableSearchControlKeydown">
+  <div
+    v-if="node.type === 'table-search-control'"
+    data-sidebar-table-search-control
+    class="tree-table-search-control flex items-center gap-1.5 pr-2"
+    :class="isCompactSidebar ? 'h-6 py-0' : 'h-7 py-0.5'"
+    :style="tableSearchStyle"
+    @click.stop
+    @dblclick.stop
+    @mousedown.stop
+    @keydown="onTableSearchControlKeydown"
+  >
     <div class="relative min-w-0 flex-1">
       <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
       <Input
@@ -1591,7 +1611,8 @@ function onKeydown(event: KeyboardEvent) {
         autocapitalize="off"
         autocorrect="off"
         spellcheck="false"
-        class="h-6 w-full rounded border pl-7 pr-6 text-xs shadow-none focus-visible:ring-1"
+        class="w-full rounded border pl-7 pr-6 text-xs shadow-none focus-visible:ring-1"
+        :class="isCompactSidebar ? 'h-5' : 'h-6'"
         :style="{ backgroundColor: 'var(--tree-table-search-input-bg)', borderColor: 'var(--tree-table-search-border)' }"
         :placeholder="t(node.label)"
         :aria-label="t(node.label)"
@@ -1616,9 +1637,10 @@ function onKeydown(event: KeyboardEvent) {
     <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
-        class="group flex cursor-default items-center gap-2 min-h-7 py-1 px-2 relative outline-none"
+        class="group flex cursor-default items-center gap-2 px-2 relative outline-none"
         style="contain: layout style"
         :class="[
+          isCompactSidebar ? 'min-h-6 py-0.5' : 'min-h-7 py-1',
           rowWidthClass,
           {
             'group/sidebar-row': true,
@@ -1737,6 +1759,8 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-materialized-views' ||
                   node.type === 'group-procedures' ||
                   node.type === 'group-functions' ||
+                  node.type === 'group-internal-functions' ||
+                  node.type === 'group-udf-functions' ||
                   node.type === 'group-columns' ||
                   node.type === 'group-indexes' ||
                   node.type === 'group-fkeys' ||

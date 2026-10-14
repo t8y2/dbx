@@ -10,6 +10,7 @@ export const UNIVERSAL_PLUGIN_TARGET = "universal";
 export interface MarketplacePluginListing {
   key: string;
   repository: PluginRepository;
+  repositoryHomepage?: string;
   plugin: PluginMarketplacePlugin;
   name: string;
   description: string;
@@ -48,6 +49,7 @@ export function buildMarketplacePluginListings(results: readonly PluginRepositor
         return {
           key: `${result.repository.id}:${plugin.id}`,
           repository: result.repository,
+          repositoryHomepage: result.catalog?.repository.homepage?.trim() || undefined,
           plugin,
           name: localized.name,
           description: localized.description,

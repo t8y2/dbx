@@ -1,8 +1,9 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import { getSqlCompletionContext, isOracleSystemValueName } from "@/lib/sql/sqlCompletion";
+import { getSqlCompletionContext, isOraclePseudoColumnName, isOracleSystemValueName, matchesOceanBaseCompletionCacheKey } from "@/lib/sql/sqlCompletion";
+import { tokenizeSqlSemantic, tokenIsIdentifier } from "@/lib/sql/semantic/tokens";
 import { executableStatementRanges, keepsOracleStyleBlockTogether, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { DBX_TDENGINE_TBNAME_COLUMN, isTdengineStableTableType } from "@/lib/table/tableEditing";
-import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
+import type { DatabaseType, SqlColumnReference, SqlGroupByViolation, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 export interface SqlSemanticDiagnostic {
   span: SqlTextSpan;
@@ -17,6 +18,7 @@ export interface SqlSemanticDiagnosticSchema {
   loadedColumnTables?: Set<string>;
   sql?: string;
   databaseType?: DatabaseType;
+  currentSchema?: string;
 }
 
 export interface SqlSemanticDiagnosticVisibleRange {
@@ -265,7 +267,7 @@ function sqlServerStatementNeedsBatchContext(sql: string): boolean {
 
 export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, schema: SqlSemanticDiagnosticSchema): SqlSemanticDiagnostic[] {
   const diagnostics: SqlSemanticDiagnostic[] = [];
-  const tables = analysis.tables.filter((table) => table.name.trim());
+  const tables = analysis.tables.filter((table) => table.name.trim()).map((table) => (schema.databaseType === "oceanbase-oracle" && schema.sql ? oceanBaseDiagnosticTableReference(table, schema.sql) : table));
   const knownTables = new Map<string, SqlTableReference>();
   const scopesById = scopesByIdMap(analysis.scopes);
   let tdengineStableTables: Set<string> | undefined;
@@ -287,12 +289,12 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   for (const column of analysis.columns) {
-    if (isUnquotedOracleSystemValueReference(column, schema)) continue;
+    if (isUnquotedOracleBuiltinReference(column, schema)) continue;
     const table = resolveColumnTable(column, tables, knownTables, schema.sql, scopesById);
     if (!table) continue;
     if (schema.missingTables?.has(tableReferenceKey(table))) continue;
 
-    const columns = columnsForTable(table, schema.columnsByTable, schema.loadedColumnTables);
+    const columns = columnsForTable(table, schema.columnsByTable, schema.loadedColumnTables, schema.currentSchema);
     if (!columns) continue;
 
     const columnNames = new Set(columns.map((item) => normalizeName(item.name)));
@@ -318,7 +320,24 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
     });
   }
 
+  for (const violation of analysis.group_by_violations ?? []) {
+    diagnostics.push(buildSqlGroupByViolationDiagnostic(violation, schema.sql, schema.databaseType));
+  }
+
   return diagnostics;
+}
+
+function buildSqlGroupByViolationDiagnostic(violation: SqlGroupByViolation, sql?: string, databaseType?: DatabaseType): SqlSemanticDiagnostic {
+  const displayName = violation.qualifier ? `${violation.qualifier}.${violation.column}` : violation.column;
+  return {
+    span: trimSqlTextSpanWhitespace(sql, violation.span),
+    message: `Column ${displayName} must appear in the GROUP BY clause or be used in an aggregate function`,
+    // PostgreSQL additionally accepts columns functionally dependent on the
+    // GROUP BY key (e.g. projecting other columns of the primary-key table),
+    // which the analyzer cannot see from column metadata alone; keep the hint
+    // there, but as a warning instead of an error.
+    severity: databaseType === "postgres" ? "warning" : "error",
+  };
 }
 
 function tdengineStableTableKeys(tables: readonly SqlCompletionTable[]): Set<string> {
@@ -335,8 +354,8 @@ function completionTableReferenceKey(table: Pick<SqlCompletionTable, "name" | "d
   return normalizeName(table.name);
 }
 
-function isUnquotedOracleSystemValueReference(column: SqlColumnReference, schema: SqlSemanticDiagnosticSchema): boolean {
-  if (column.qualifier || !isOracleSystemValueName(column.name, schema.databaseType)) return false;
+function isUnquotedOracleBuiltinReference(column: SqlColumnReference, schema: SqlSemanticDiagnosticSchema): boolean {
+  if (column.qualifier || !(isOracleSystemValueName(column.name, schema.databaseType) || isOraclePseudoColumnName(column.name, schema.databaseType))) return false;
   if (!schema.sql) return false;
 
   const range = sqlTextSpanToOffsetRange(schema.sql, column.span);
@@ -352,9 +371,18 @@ export function isSqlVirtualTableReference(table: { name: string; schema?: strin
 function isVisibleProjectionAlias(sql: string, span: SqlTextSpan, name: string, databaseType?: DatabaseType): boolean {
   const range = sqlTextSpanToOffsetRange(sql, span);
   if (!range) return false;
-  const context = getSqlCompletionContext(sql, range.to, { databaseType });
-  if (!context.prioritizeSelectAliases) return false;
-  return context.selectAliases.some((alias) => normalizeName(alias) === normalizeName(name));
+  // If the identifier is at the end of a statement terminated by ';' or punctuation,
+  // evaluating completion strictly at range.to can place the cursor on or past the
+  // semicolon, causing getSqlCompletionContext to treat it as an empty subsequent
+  // statement. Testing at range.from (and range.to as fallback) ensures we evaluate
+  // inside the clause (GROUP BY / ORDER BY / HAVING) containing this alias reference.
+  for (const cursor of [range.from, range.to]) {
+    const context = getSqlCompletionContext(sql, cursor, { databaseType });
+    if (context.prioritizeSelectAliases && context.selectAliases.some((alias) => normalizeName(alias) === normalizeName(name))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function trimSqlTextSpanWhitespace(sql: string | undefined, span: SqlTextSpan): SqlTextSpan {
@@ -575,7 +603,13 @@ function statementIndexAt(sql: string, offset: number): number {
   return statementIndex;
 }
 
-function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, SqlCompletionColumn[]>, loadedColumnTables?: Set<string>): SqlCompletionColumn[] | null {
+export function oceanBaseDiagnosticTableReference(table: SqlTableReference, sql: string) {
+  const range = sqlTextSpanToOffsetRange(sql, table.span);
+  const identifiers = range ? tokenizeSqlSemantic(sql.slice(range.from, range.to), "oracle").filter(tokenIsIdentifier) : [];
+  return { ...table, nameQuoted: !!identifiers[table.schema ? 1 : 0]?.quote, schemaQuoted: !!table.schema && !!identifiers[0]?.quote };
+}
+
+function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, SqlCompletionColumn[]>, loadedColumnTables?: Set<string>, currentSchema?: string): SqlCompletionColumn[] | null {
   const inlineColumns = (table as SqlTableReference & { columns?: string[] }).columns;
   if (inlineColumns && inlineColumns.length > 0) {
     return inlineColumns.map((name) => ({
@@ -584,6 +618,8 @@ function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, S
       schema: table.schema ?? undefined,
     }));
   }
+  const scopedColumns = [...columnsByTable].filter(([key]) => matchesOceanBaseCompletionCacheKey(key, table, currentSchema));
+  if (scopedColumns.length > 0) return scopedColumns.length === 1 ? scopedColumns[0]![1] : null;
   const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name, ...keysWithTableName(columnsByTable, table.name)];
   for (const key of keys) {
     const normalizedKey = normalizeName(key);

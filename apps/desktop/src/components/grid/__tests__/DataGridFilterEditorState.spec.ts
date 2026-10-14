@@ -13,6 +13,7 @@ const backendMocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(async ({ tableName, whereInput }: { tableName: string; whereInput?: string }) => `SELECT * FROM ${tableName}${whereInput ? ` WHERE ${whereInput}` : ""}`),
   loadEditorSettings: vi.fn().mockResolvedValue({}),
   saveEditorSettings: vi.fn().mockResolvedValue(undefined),
+  buildDataGridContextFilterCondition: vi.fn(async ({ columnName, value }: { columnName: string; value: unknown }) => `\`${columnName}\` = ${String(value)}`),
 }));
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
@@ -20,6 +21,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   return {
     ...actual,
     buildTableSelectSql: backendMocks.buildTableSelectSql,
+    buildDataGridContextFilterCondition: backendMocks.buildDataGridContextFilterCondition,
     loadEditorSettings: backendMocks.loadEditorSettings,
     saveEditorSettings: backendMocks.saveEditorSettings,
   };
@@ -76,6 +78,16 @@ function panelSelector(view: DataGridFilterEditorView): string {
 function filterToggle(host: HTMLElement): HTMLButtonElement {
   const toggle = host.querySelector<HTMLButtonElement>('button[aria-label="Filter"][aria-expanded]');
   if (!toggle) throw new Error("Filter editor toggle not found");
+  return toggle;
+}
+
+function sortPanelSelector(view: DataGridFilterEditorView): string {
+  return view === "conditions" ? "[data-grid-sort-workbench]" : "[data-grid-text-sort-workbench]";
+}
+
+function sortToggle(host: HTMLElement): HTMLButtonElement {
+  const toggle = host.querySelector<HTMLButtonElement>('button[aria-label="Sort"][aria-expanded]');
+  if (!toggle) throw new Error("Sort editor toggle not found");
   return toggle;
 }
 
@@ -141,11 +153,33 @@ async function settle() {
   await nextTick();
 }
 
+function contextMenuButton(label: string): HTMLButtonElement {
+  const button = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((candidate) => candidate.textContent?.trim() === label);
+  if (!button) throw new Error(`Context menu item not found: ${label}`);
+  return button;
+}
+
+async function openCellCustomFilter(host: HTMLElement) {
+  // Canvas rendering has no per-cell DOM, so switch to the DOM grid before
+  // driving the cell context menu.
+  useSettingsStore().updateEditorSettings({ dataGridRenderMode: "dom" });
+  await settle();
+  const cell = host.querySelector<HTMLElement>('[data-row-index="0"] [data-visible-col-index="0"]');
+  if (!cell) throw new Error("Grid cell not found");
+  cell.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 12 }));
+  await settle();
+  contextMenuButton("Filter").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+  await settle();
+  contextMenuButton("Custom Filter").click();
+  await settle();
+}
+
 afterEach(() => {
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
     host.remove();
   }
+  document.querySelectorAll("[data-dbx-context-menu]").forEach((menu) => menu.remove());
   clearDataGridStructuredFilterStates();
 });
 
@@ -182,6 +216,40 @@ describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state"
     filterToggle(host).click();
     await settle();
     expect(host.querySelector(panelSelector(view))).not.toBeNull();
+  });
+
+  it("opens the matching sort workbench and keeps it mutually exclusive with the filter workbench", async () => {
+    const { host } = mountGrid(view, true);
+    await settle();
+
+    expect(host.querySelector(panelSelector(view))).not.toBeNull();
+    expect(host.querySelector(sortPanelSelector(view))).toBeNull();
+
+    sortToggle(host).click();
+    await settle();
+    expect(host.querySelector(panelSelector(view))).toBeNull();
+    expect(host.querySelector(sortPanelSelector(view))).not.toBeNull();
+    expect(sortToggle(host).getAttribute("aria-expanded")).toBe("true");
+
+    filterToggle(host).click();
+    await settle();
+    expect(host.querySelector(sortPanelSelector(view))).toBeNull();
+    expect(host.querySelector(panelSelector(view))).not.toBeNull();
+  });
+});
+
+describe("DataGrid custom filter menu", () => {
+  it.each(["quick", "conditions", "text"] as const)("opens the rule builder seeded from the right-clicked cell in %s view", async (view) => {
+    const { host } = mountGrid(view, false);
+    await settle();
+
+    await openCellCustomFilter(host);
+
+    expect(host.querySelector("[data-grid-filter-workbench]")).not.toBeNull();
+    const valueEditor = [...host.querySelectorAll<HTMLInputElement>("[data-filter-value-editor]")].find((input) => input.value === "1");
+    expect(valueEditor, "seeded value editor").toBeDefined();
+    await vi.waitFor(() => expect(document.activeElement).toBe(valueEditor));
+    await vi.waitFor(() => expect(host.querySelector("[data-grid-filter-workbench]")?.textContent).toContain("`id` = 1"));
   });
 });
 

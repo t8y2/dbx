@@ -35,26 +35,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 const CANARY_SPEC = "apps/desktop/src/lib/ai/richContent/__tests__/aiHtmlPreviewCanary.spec.ts";
-const HEADLESS_ARGS = [
-  "--headless=new",
-  "--disable-gpu",
-  "--no-first-run",
-  "--no-default-browser-check",
-];
+const HEADLESS_ARGS = ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check"];
 
-const BROWSER_CANDIDATES = process.platform === "win32"
-  ? [
-      "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
-      "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
-      "C:/Program Files/Google/Chrome/Application/chrome.exe",
-      "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-    ]
-  : process.platform === "darwin"
-    ? [
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      ]
-    : ["msedge", "google-chrome", "chromium", "chromium-browser"];
+const BROWSER_CANDIDATES =
+  process.platform === "win32"
+    ? ["C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"]
+    : process.platform === "darwin"
+      ? ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+      : ["msedge", "google-chrome", "chromium", "chromium-browser"];
 
 function browserCandidates() {
   const override = process.env.AI_HTML_CANARY_BROWSER;
@@ -116,14 +104,7 @@ function extractWrappedPayload(harness) {
 function runHeadless(browser, filePath, userDataDir, netlogPath) {
   const fileUrl = pathToFileURL(filePath).href;
   const dumpPath = `${netlogPath}.dom.html`;
-  const args = [
-    ...HEADLESS_ARGS,
-    `--user-data-dir=${userDataDir}`,
-    `--log-net-log=${netlogPath}`,
-    "--virtual-time-budget=8000",
-    "--dump-dom",
-    fileUrl,
-  ];
+  const args = [...HEADLESS_ARGS, `--user-data-dir=${userDataDir}`, `--log-net-log=${netlogPath}`, "--virtual-time-budget=8000", "--dump-dom", fileUrl];
   let dom = "";
   try {
     dom = execFileSync(browser, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });

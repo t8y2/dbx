@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createFlatTreeIndex, flatTreeRowsChanged, flattenTree, mutateFlatTreeExpansion, replaceFlatTreeChildren, type FlatTreeNode } from "@/composables/useFlatTree";
+import { createFlatTreeIndex, flatTreeRowsChanged, flattenTree, getSidebarTreeRowHeight, mutateFlatTreeExpansion, replaceFlatTreeChildren, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_ROW_HEIGHT_COMPACT, SIDEBAR_TREE_ROW_HEIGHT_DEFAULT, type FlatTreeNode } from "@/composables/useFlatTree";
 import type { TreeNode, TreeNodeType } from "@/types/database";
 
 function item(id: string, type: TreeNodeType, depth: number, children?: TreeNode[]): FlatTreeNode {
@@ -192,5 +192,20 @@ describe("flat-tree render identities", () => {
       { id: "connection:app", type: "database", poolType: "database" },
     ]);
     expect(new Set(flattened.map((entry) => entry.renderKey))).toHaveLength(flattened.length);
+  });
+});
+
+describe("getSidebarTreeRowHeight", () => {
+  it("returns default row height (28px) when unset or default", () => {
+    expect(SIDEBAR_TREE_ROW_HEIGHT).toBe(28);
+    expect(SIDEBAR_TREE_ROW_HEIGHT_DEFAULT).toBe(28);
+    expect(getSidebarTreeRowHeight()).toBe(28);
+    expect(getSidebarTreeRowHeight("default")).toBe(28);
+    expect(getSidebarTreeRowHeight("unknown" as any)).toBe(28);
+  });
+
+  it("returns compact row height (24px) when density is compact", () => {
+    expect(SIDEBAR_TREE_ROW_HEIGHT_COMPACT).toBe(24);
+    expect(getSidebarTreeRowHeight("compact")).toBe(24);
   });
 });

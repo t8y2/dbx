@@ -7,6 +7,9 @@ import { DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuS
 import { Input } from "@/components/ui/input";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
+import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
@@ -18,6 +21,7 @@ import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import { copyToClipboard } from "@/lib/common/clipboard";
 
@@ -62,6 +66,7 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
+const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, sidebarMenuPreferences } = useSidebarMenuPresentation();
 const searchInput = ref<InstanceType<typeof Input>>();
 const search = ref(restoredUiState.search ?? "");
 const rows = ref<DatabaseRow[]>([]);
@@ -123,37 +128,43 @@ const visibleRows = computed(() => {
 });
 
 function openDatabase(database: string) {
-  const tabId = queryStore.openObjectBrowser(props.connection.id, database);
+  const target = objectBrowserTargetForNamespaceRow(props.connection, database);
+  const tabId = queryStore.openObjectBrowser(props.connection.id, target.database, target.schema);
   void nextTick(() => requestObjectBrowserSearchFocus(tabId));
 }
 
 function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
-  const node: TreeNode = { id: `${props.connection.id}:${row.name}`, label: row.name, type: "database", connectionId: props.connection.id, database: row.name };
+  const target = objectBrowserTargetForNamespaceRow(props.connection, row.name);
+  const node: TreeNode = { id: `${props.connection.id}:${row.name}`, label: row.name, type: "database", connectionId: props.connection.id, database: target.database, schema: target.schema };
   const runtimeItems = sidebarRuntimeHost.value?.buildContextMenu(node);
-  if (runtimeItems?.length) return removeUnsupportedDatabaseItems(runtimeItems);
+  if (runtimeItems?.length) return presentMenu(removeUnsupportedDatabaseItems(runtimeItems), "database");
   const isDefault = props.connection.database === row.name;
-  return [
-    { label: t("contextMenu.viewData"), action: () => openDatabase(row.name), icon: Database },
-    {
-      label: t("contextMenu.viewDdl"),
-      action: () => {
-        const dbType = props.connection.db_type;
-        const sql = dbType === "mysql" ? `SHOW CREATE DATABASE \`${row.name.replaceAll("`", "``")}\`;` : `-- ${row.name}\n-- Database DDL is not available for this driver.`;
-        queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", undefined, sql, undefined, { forceNew: true });
+  return presentMenu(
+    [
+      { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openDatabase(row.name), icon: Database },
+      {
+        sidebarActionId: "contextMenu.viewDdl",
+        label: t("contextMenu.viewDdl"),
+        action: () => {
+          const dbType = props.connection.db_type;
+          const sql = dbType === "mysql" ? `SHOW CREATE DATABASE \`${row.name.replaceAll("`", "``")}\`;` : `-- ${row.name}\n-- Database DDL is not available for this driver.`;
+          queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", undefined, sql, undefined, { forceNew: true });
+        },
+        icon: Copy,
       },
-      icon: Copy,
-    },
-    { label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.newQuery")}`, "query", undefined, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
-    { label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
-    { label: "", separator: true },
-    {
-      label: isDefault ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"),
-      action: () => (isDefault ? connectionStore.clearDefaultDatabase(props.connection.id) : connectionStore.setDefaultDatabase(props.connection.id, row.name)),
-      icon: Database,
-    },
-    { label: "", separator: true },
-    { label: t("contextMenu.refreshTab"), action: () => refresh(), icon: RefreshCw },
-  ];
+      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.newQuery")}`, "query", undefined, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
+      { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
+      { label: "", separator: true },
+      {
+        label: isDefault ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"),
+        action: () => (isDefault ? connectionStore.clearDefaultDatabase(props.connection.id) : connectionStore.setDefaultDatabase(props.connection.id, row.name)),
+        icon: Database,
+      },
+      { label: "", separator: true },
+      { sidebarActionId: "contextMenu.refreshTab", label: t("contextMenu.refreshTab"), action: () => refresh(), icon: RefreshCw },
+    ],
+    "database",
+  );
 }
 
 function removeUnsupportedDatabaseItems(items: ContextMenuItem[]): ContextMenuItem[] {
@@ -161,12 +172,13 @@ function removeUnsupportedDatabaseItems(items: ContextMenuItem[]): ContextMenuIt
   // visible-schemas item emits "open-visible-schemas" which only the sidebar
   // tree handles. The database browser wires neither, so do not expose menu
   // items that would otherwise be a silent no-op here.
-  return items.flatMap((item) => {
-    if (item.label.startsWith(t("contextMenu.addToAi")) || item.label === t("visibleSchemas.title") || item.variant === "destructive") return [];
+  const supported = items.flatMap((item) => {
+    if (item.label.startsWith(t("contextMenu.addToAi")) || item.label === t("visibleSchemas.title")) return [];
     if (!item.children) return [item];
     const children = removeUnsupportedDatabaseItems(item.children);
     return children.length ? [{ ...item, children }] : [];
   });
+  return supported.filter((item, index) => !item.separator || (index > 0 && index < supported.length - 1 && !supported[index - 1]?.separator));
 }
 
 function openDatabaseFromSidebar(node: TreeNode) {
@@ -342,6 +354,10 @@ watch(
   { immediate: true },
 );
 
+useDatabaseBrowserMutation(({ connectionId }) => {
+  if (connectionId === props.connection.id) void refresh();
+});
+
 onBeforeUnmount(() => stopColumnResize?.());
 
 defineExpose({ focusSearch, refresh });
@@ -485,7 +501,8 @@ defineExpose({ focusSearch, refresh });
         </div>
       </div>
     </div>
-    <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
+    <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
+    <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-danger-dialog="openSidebarDangerDialog" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
     <SidebarTreeItemDialogs v-if="sidebarDialogController" :controller="sidebarDialogController" @closed="sidebarDialogController = null" />
   </section>
 </template>

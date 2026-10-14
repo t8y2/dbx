@@ -17,6 +17,12 @@ describe("generateCellValues", () => {
     expect(generateCellValues("date", 2, { now })).toEqual(["2026-07-16", "2026-07-16"]);
   });
 
+  it("appends three-digit milliseconds when requested", () => {
+    const now = new Date(2026, 6, 16, 9, 8, 7, 123);
+    expect(generateCellValues("datetime-ms", 2, { now })).toEqual(["2026-07-16 09:08:07.123", "2026-07-16 09:08:07.123"]);
+    expect(generateCellValues("datetime-ms", 1, { now: new Date(2026, 6, 16, 9, 8, 7) })).toEqual(["2026-07-16 09:08:07.000"]);
+  });
+
   it("generates one UUID per cell", () => {
     let index = 0;
     expect(generateCellValues("uuid", 3, { uuidFactory: () => `uuid-${++index}` })).toEqual(["uuid-1", "uuid-2", "uuid-3"]);
@@ -76,6 +82,38 @@ describe("generateCellValues", () => {
 
   it("increments values without losing bigint precision", () => {
     expect(generateCellValues("increment", 3, { startValue: 9_007_199_254_740_993n })).toEqual(["9007199254740993", "9007199254740994", "9007199254740995"]);
+  });
+
+  it("pads increment values with leading zeros", () => {
+    expect(generateCellValues("increment", 3, { startValue: 1n, padLength: 4 })).toEqual(["0001", "0002", "0003"]);
+    expect(generateCellValues("increment", 2, { startValue: 99n, padLength: 4 })).toEqual(["0099", "0100"]);
+    expect(generateCellValues("increment", 2, { startValue: 1000n, padLength: 3 })).toEqual(["1000", "1001"]);
+    expect(generateCellValues("increment", 2, { startValue: 1n, padLength: 0 })).toEqual(["1", "2"]);
+    expect(generateCellValues("increment", 2, { startValue: 1n, padLength: -1 })).toEqual(["1", "2"]);
+  });
+
+  it("applies prefix and suffix to increment values", () => {
+    expect(generateCellValues("increment", 2, { startValue: 1n, prefix: "USER_" })).toEqual(["USER_1", "USER_2"]);
+    expect(generateCellValues("increment", 2, { startValue: 1n, suffix: "_TEST" })).toEqual(["1_TEST", "2_TEST"]);
+    expect(
+      generateCellValues("increment", 3, {
+        startValue: 1n,
+        padLength: 4,
+        prefix: "USER_",
+        suffix: "_TEST",
+      }),
+    ).toEqual(["USER_0001_TEST", "USER_0002_TEST", "USER_0003_TEST"]);
+  });
+
+  it("formats negative increment values with padding and affixes", () => {
+    expect(
+      generateCellValues("increment", 4, {
+        startValue: -2n,
+        padLength: 3,
+        prefix: "ID:",
+        suffix: "!",
+      }),
+    ).toEqual(["ID:-002!", "ID:-001!", "ID:000!", "ID:001!"]);
   });
 
   it("keeps snowflake IDs unique and ordered beyond one sequence window", () => {

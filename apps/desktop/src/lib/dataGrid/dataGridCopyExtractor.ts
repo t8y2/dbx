@@ -4,11 +4,12 @@ import type { DataGridCopyInsertMode, DataGridTableMeta } from "@/lib/dataGrid/d
 export const DATA_GRID_COPY_EXTRACTOR_IDS = ["raw", "tsv", "tsv-with-headers", "csv", "csv-with-headers", "pipe-separated", "dsv", "json", "json-lines", "one-row", "sql-in-list", "sql-inserts", "sql-updates", "sql-select", "where-clause", "markdown", "html", "xml", "pretty"] as const;
 
 export type DataGridCopyExtractorId = (typeof DATA_GRID_COPY_EXTRACTOR_IDS)[number];
-export type DataGridCopyPreference = "smart" | Exclude<DataGridCopyExtractorId, "raw">;
+export type DataGridCopyPreference = "smart" | DataGridCopyExtractorId;
 export type DataGridExtractorCategory = "raw" | "delimited" | "json" | "sql" | "document";
 
 export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference[] = [
   "smart",
+  "raw",
   "tsv",
   "tsv-with-headers",
   "csv",
@@ -29,7 +30,9 @@ export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference
 ];
 
 export const DATA_GRID_EXTRACTOR_CONTRACT_VERSION = 1 as const;
-export const DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION = 1 as const;
+// v2：复制/导出 SQL 的「包含数据库名称」改为由提取器自身的勾选框决定，默认关闭（不带库名/模式名），
+// 历史持久化的 `true` 由 settingsStore 的迁移归位到新默认。
+export const DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION = 2 as const;
 
 export const DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS: Record<DataGridCopyExtractorId, { category: DataGridExtractorCategory; separatorBefore?: boolean }> = {
   raw: { category: "raw" },
@@ -81,18 +84,24 @@ export interface DataGridDsvOptions {
   includeRowHeader: boolean;
 }
 
+export type DataGridPrimaryKeyMode = "include" | "exclude-generated" | "exclude-all";
+
 export interface DataGridExtractorOptions {
   dsv: DataGridDsvOptions;
   sql: {
     skipComputedColumns: boolean;
     skipGeneratedColumns: boolean;
     insertMode: DataGridCopyInsertMode;
-    excludePrimaryKeysFromInsert: boolean;
+    primaryKeyMode: DataGridPrimaryKeyMode;
     includeDatabaseName: boolean;
+    quoteIdentifiers: boolean;
+    temporalFormat: "native" | "string";
   };
   json: {
     pretty: boolean;
     camelCaseFieldNames: boolean;
+    /** Bare array of values instead of objects; only honored for single-column selections. */
+    valuesOnly: boolean;
   };
 }
 
@@ -100,6 +109,7 @@ export interface DataGridExtractColumn {
   displayName: string;
   sourceName?: string;
   sourceIndex: number;
+  dataType?: string;
 }
 
 export interface DataGridExtractRequest {
@@ -148,10 +158,12 @@ export const DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS: DataGridExtractorOptions = {
     skipComputedColumns: true,
     skipGeneratedColumns: true,
     insertMode: "merged",
-    excludePrimaryKeysFromInsert: false,
-    includeDatabaseName: true,
+    primaryKeyMode: "include",
+    includeDatabaseName: false,
+    quoteIdentifiers: true,
+    temporalFormat: "native",
   },
-  json: { pretty: true, camelCaseFieldNames: false },
+  json: { pretty: true, camelCaseFieldNames: false, valuesOnly: false },
 };
 
 function unicodeCodePointLength(value: string): number {
@@ -161,7 +173,7 @@ function unicodeCodePointLength(value: string): number {
 export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtractorOptions {
   const source = typeof value === "object" && value !== null ? (value as Partial<DataGridExtractorOptions>) : {};
   const dsv: Partial<DataGridDsvOptions> = typeof source.dsv === "object" && source.dsv !== null ? source.dsv : {};
-  const sql: Partial<DataGridExtractorOptions["sql"]> = typeof source.sql === "object" && source.sql !== null ? source.sql : {};
+  const sql: Record<string, unknown> = typeof source.sql === "object" && source.sql !== null ? (source.sql as Record<string, unknown>) : {};
   const json: Partial<DataGridExtractorOptions["json"]> = typeof source.json === "object" && source.json !== null ? source.json : {};
   const separator = (candidate: unknown, fallback: string) => (typeof candidate === "string" && unicodeCodePointLength(candidate) > 0 && unicodeCodePointLength(candidate) <= 8 ? candidate : fallback);
   const quote = typeof dsv.quote === "string" && unicodeCodePointLength(dsv.quote) === 1 ? dsv.quote : DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.dsv.quote;
@@ -179,12 +191,15 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
       skipComputedColumns: sql.skipComputedColumns !== false,
       skipGeneratedColumns: sql.skipGeneratedColumns !== false,
       insertMode: sql.insertMode === "row-by-row" ? "row-by-row" : "merged",
-      excludePrimaryKeysFromInsert: sql.excludePrimaryKeysFromInsert === true,
-      includeDatabaseName: sql.includeDatabaseName !== false,
+      primaryKeyMode: sql.primaryKeyMode === "exclude-generated" || sql.primaryKeyMode === "exclude-all" || sql.primaryKeyMode === "include" ? sql.primaryKeyMode : sql.excludePrimaryKeysFromInsert === true ? "exclude-generated" : "include",
+      includeDatabaseName: sql.includeDatabaseName === true,
+      quoteIdentifiers: sql.quoteIdentifiers !== false,
+      temporalFormat: sql.temporalFormat === "string" ? "string" : "native",
     },
     json: {
       pretty: json.pretty !== false,
       camelCaseFieldNames: json.camelCaseFieldNames === true,
+      valuesOnly: json.valuesOnly === true,
     },
   };
 }

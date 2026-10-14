@@ -186,6 +186,9 @@ const sqlserverCapabilities = capabilities({
   indexInclude: true,
   indexFilter: true,
   indexComment: true,
+  // T-SQL: ALTER TABLE ... DROP CONSTRAINT <name> / ADD [CONSTRAINT name] PRIMARY KEY (...);
+  // the backend drops the persisted constraint by its index-metadata name (issue #10758).
+  alterPrimaryKey: true,
 });
 
 const oracleCompatibleCapabilities = capabilities({
@@ -206,6 +209,11 @@ const oracleCompatibleCapabilities = capabilities({
 });
 
 const oracleCapabilities = capabilities({
+  ...oracleCompatibleCapabilities,
+  addPrimaryKey: true,
+});
+
+const oceanbaseOracleCapabilities = capabilities({
   ...oracleCompatibleCapabilities,
   addPrimaryKey: true,
 });
@@ -266,6 +274,17 @@ const informixCapabilities = capabilities({
   createIndex: true,
   dropIndex: true,
   rebuildIndex: true,
+});
+
+const sapHanaCapabilities = capabilities({
+  dialect: "oracle",
+  addColumn: true,
+  dropColumn: true,
+  renameColumn: true,
+  alterExistingColumn: true,
+  alterType: true,
+  alterNullability: true,
+  alterDefault: true,
 });
 
 // Inceptor accepts ADD COLUMNS and CHANGE. DROP COLUMN and index/constraint DDL
@@ -365,7 +384,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   sqlserver: sqlserverCapabilities,
   oracle: oracleCapabilities,
   dameng: damengCapabilities,
-  "oceanbase-oracle": oracleCompatibleCapabilities,
+  "oceanbase-oracle": oceanbaseOracleCapabilities,
   iris: irisCapabilities,
   yashandb: oracleCompatibleCapabilities,
   xugu: oracleCompatibleCapabilities,
@@ -373,6 +392,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   access: accessCapabilities,
   clickhouse: clickhouseCapabilities,
   informix: informixCapabilities,
+  saphana: sapHanaCapabilities,
   transwarp: transwarpCapabilities,
   influxdb: influxdbCapabilities,
   manticoresearch: manticoreSearchCapabilities,

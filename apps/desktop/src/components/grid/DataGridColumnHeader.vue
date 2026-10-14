@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { CSSProperties, HTMLAttributes } from "vue";
-import { Copy, KeyRound, Hash } from "@lucide/vue";
+import { Copy, KeyRound, Hash, Highlighter } from "@lucide/vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { columnIndexColorClass, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 
@@ -40,6 +40,9 @@ const props = defineProps<{
   /** 该列当前展示值应用了格式化规则。 */
   formatterActive?: boolean;
   formatterLabel?: string;
+  /** 该列当前启用了重复值或空值高亮。 */
+  highlightActive?: boolean;
+  highlightLabel?: string;
 }>();
 
 function columnIndexText(kind: ColumnIndexKind): string {
@@ -119,6 +122,9 @@ const emit = defineEmits<{
         </template>
       </LightTooltip>
       <span v-if="formatterActive" data-column-formatter-indicator class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm bg-violet-600 text-[10px] font-bold leading-none text-white shadow-sm dark:bg-violet-500" :title="formatterLabel" :aria-label="formatterLabel">F</span>
+      <span v-if="highlightActive" data-column-highlight-indicator class="inline-flex h-4 w-4 shrink-0 items-center justify-center text-amber-500 dark:text-amber-400" :title="highlightLabel" :aria-label="highlightLabel">
+        <Highlighter class="h-3 w-3" />
+      </span>
       <span data-column-header-actions class="contents"><slot name="actions" /></span>
     </span>
     <div data-column-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="emit('resizeStart', $event)" @click.stop.prevent @dblclick.stop="emit('autoFit')" />

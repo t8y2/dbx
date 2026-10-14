@@ -12,6 +12,7 @@ import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.
 
 const connectionStore = {
   treeNodes: [] as TreeNode[],
+  selectedTreeNodeIds: [] as string[],
   sidebarSearchQuery: "",
   activeConnectionId: null as string | null,
   connectedIds: new Set<string>(),
@@ -64,11 +65,22 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast }) }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: vi.fn() }) }));
 vi.mock("@/composables/useSidebarDataOpenRuntime", () => ({ useSidebarDataOpenRuntime: () => ({ openData: vi.fn() }) }));
 vi.mock("@/composables/useDatabaseOptions", () => ({ useDatabaseOptions: () => ({ getDatabaseOptions: vi.fn() }) }));
-vi.mock("@/composables/useSidebarConnectionMutationRuntime", () => ({ useSidebarConnectionMutationRuntime: () => ({}) }));
-vi.mock("@/composables/useSidebarDatabaseSpecificMutationRuntime", () => ({ useSidebarDatabaseSpecificMutationRuntime: () => ({}) }));
+vi.mock("@/composables/useSidebarConnectionMutationRuntime", () => ({ useSidebarConnectionMutationRuntime: () => ({ isPinned: ref(false) }) }));
+vi.mock("@/composables/useSidebarDatabaseSpecificMutationRuntime", () => ({
+  useSidebarDatabaseSpecificMutationRuntime: () => ({
+    canManageMongoIndexes: ref(false),
+    canRenameMongoCollection: ref(false),
+    canCloneMongoCollection: ref(false),
+    canDropMongoCollection: ref(false),
+  }),
+}));
 vi.mock("@/composables/useSidebarTableMutationRuntime", () => ({ useSidebarTableMutationRuntime: () => ({}) }));
 vi.mock("@/composables/useSidebarTreeExportRuntime", () => ({ useSidebarTreeExportRuntime: () => ({}) }));
 vi.mock("@/composables/useSidebarTreeToolRuntime", () => ({ useSidebarTreeToolRuntime: () => ({}) }));
+vi.mock("@/lib/backend/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/backend/api")>();
+  return { ...actual, listPlugins: vi.fn().mockResolvedValue([]) };
+});
 
 const mountedApps: App[] = [];
 
@@ -126,6 +138,60 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     window.removeEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequested);
   });
 
+  it("toggles an expanded database closed on double-click in double-click activation mode", async () => {
+    const database: TreeNode = {
+      id: "mysql:dbx_test",
+      label: "dbx_test",
+      type: "database",
+      connectionId: "mysql",
+      database: "dbx_test",
+      isExpanded: true,
+      children: [],
+    };
+    settingsStore.editorSettings.sidebarActivation = "double";
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowDoubleClick(database, new MouseEvent("dblclick"));
+    await nextTick();
+
+    expect(database.isExpanded).toBe(false);
+  });
+
+  it("does not collapse an expanded database on click in single-click activation mode", async () => {
+    const database: TreeNode = {
+      id: "mysql:dbx_test",
+      label: "dbx_test",
+      type: "database",
+      connectionId: "mysql",
+      database: "dbx_test",
+      isExpanded: true,
+      children: [],
+    };
+    settingsStore.editorSettings.sidebarActivation = "single";
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowClick(database, 1);
+    await nextTick();
+
+    expect(database.isExpanded).toBe(true);
+  });
+
   it("reuses a Mongo collection tab by identity without replacing its state", async () => {
     const collection: TreeNode = {
       id: "mongo:app:orders",
@@ -154,6 +220,46 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(queryStore.createTab).not.toHaveBeenCalled();
     expect(queryStore.updateSql).not.toHaveBeenCalled();
     expect(queryStore.setTableMeta).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("opens the context-menu Mongo collection without changing expansion (%s)", async (isExpanded) => {
+    const collection: TreeNode = { id: "mongo:app:orders", label: "orders", type: "mongo-collection", connectionId: "mongo", database: "app", isExpanded, children: [] };
+    const otherCollection: TreeNode = { ...collection, id: "mongo:app:customers", label: "customers" };
+    connectionStore.getConfig.mockReturnValue({ db_type: "mongodb", name: "connection" });
+    queryStore.tabs = [
+      { id: "other-database", mode: "mongo", connectionId: "mongo", database: "other", tableMeta: { tableName: "orders" } },
+      { id: "other-connection", mode: "mongo", connectionId: "another-mongo", database: "app", tableMeta: { tableName: "orders" } },
+    ];
+    queryStore.createTab.mockReturnValueOnce("orders-tab");
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: otherCollection, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    const action = host.value!.buildContextMenu(collection).find((item) => item.label === i18n.global.t("contextMenu.viewData"))?.action;
+    expect(action).toBeTypeOf("function");
+    await action!();
+
+    expect(queryStore.createTab).toHaveBeenCalledExactlyOnceWith("mongo", "app", "app.orders", "mongo");
+    expect(queryStore.updateSql).toHaveBeenCalledWith("orders-tab", "orders");
+    expect(queryStore.setTableMeta).toHaveBeenCalledWith("orders-tab", expect.objectContaining({ database: "app", tableName: "orders" }));
+    expect(queryStore.switchTab).not.toHaveBeenCalled();
+    expect(collection.isExpanded).toBe(isExpanded);
+
+    // Represent the created tab, including a user-renamed title, on the next invocation.
+    queryStore.tabs.push({ id: "orders-tab", mode: "mongo", connectionId: "mongo", database: "app", title: "My renamed collection", tableMeta: { tableName: "orders" } });
+    queryStore.updateSql.mockClear();
+    queryStore.setTableMeta.mockClear();
+    await action!();
+
+    expect(queryStore.switchTab).toHaveBeenCalledExactlyOnceWith("orders-tab");
+    expect(queryStore.createTab).toHaveBeenCalledOnce();
+    expect(queryStore.updateSql).not.toHaveBeenCalled();
+    expect(queryStore.setTableMeta).not.toHaveBeenCalled();
+    expect(collection.isExpanded).toBe(isExpanded);
   });
 
   it("keeps a searched database browse-and-expand activation current through the complete double-click sequence", async () => {
@@ -804,5 +910,136 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(datafileGroup.isExpanded).toBe(true);
     expect(connectionStore.loadXuguTablespaces).not.toHaveBeenCalled();
     expect(toggled).toHaveBeenCalledWith(datafileGroup, true);
+  });
+
+  it("collapses all child and descendant nodes when a parent node is collapsed", async () => {
+    const columnsGroup: TreeNode = {
+      id: "mysql:db:table:users:group-columns",
+      label: "Columns",
+      type: "group-columns",
+      connectionId: "mysql",
+      database: "db",
+      tableName: "users",
+      isExpanded: true,
+      children: [{ id: "mysql:db:table:users:col:id", label: "id", type: "column", connectionId: "mysql", database: "db", tableName: "users" }],
+    };
+    const tableNode: TreeNode = {
+      id: "mysql:db:table:users",
+      label: "users",
+      type: "table",
+      connectionId: "mysql",
+      database: "db",
+      isExpanded: true,
+      children: [columnsGroup],
+    };
+    const tablesGroup: TreeNode = {
+      id: "mysql:db:group-tables",
+      label: "Tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "db",
+      isExpanded: true,
+      children: [tableNode],
+    };
+    const databaseNode: TreeNode = {
+      id: "mysql:db",
+      label: "db",
+      type: "database",
+      connectionId: "mysql",
+      database: "db",
+      isExpanded: true,
+      children: [tablesGroup],
+    };
+
+    connectionStore.treeNodes = [databaseNode];
+    connectionStore.loadTables.mockImplementation(async () => {
+      databaseNode.isExpanded = true;
+    });
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const toggled = vi.fn((node: TreeNode, expanded: boolean) => {
+      syncSidebarTreeNodeExpansion(connectionStore.treeNodes, node, expanded);
+    });
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: databaseNode, depth: 0, onNodeToggled: toggled }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    // Collapsing databaseNode
+    host.value?.toggleNode(databaseNode);
+    await nextTick();
+
+    expect(databaseNode.isExpanded).toBe(false);
+    expect(tablesGroup.isExpanded).toBe(false);
+    expect(tableNode.isExpanded).toBe(false);
+    expect(columnsGroup.isExpanded).toBe(false);
+    expect(toggled).toHaveBeenCalledWith(databaseNode, false);
+
+    // Re-expanding databaseNode
+    host.value?.toggleNode(databaseNode);
+    await nextTick();
+
+    expect(databaseNode.isExpanded).toBe(true);
+    // Descendants must remain collapsed after parent is re-expanded
+    expect(tablesGroup.isExpanded).toBe(false);
+    expect(tableNode.isExpanded).toBe(false);
+    expect(columnsGroup.isExpanded).toBe(false);
+  });
+
+  it("collapses all child connections and their descendants when a connection-group collapses", async () => {
+    const databaseNode: TreeNode = {
+      id: "mysql:db",
+      label: "db",
+      type: "database",
+      connectionId: "mysql",
+      database: "db",
+      isExpanded: true,
+      children: [],
+    };
+    const connectionNode: TreeNode = {
+      id: "mysql",
+      label: "MySQL",
+      type: "connection",
+      connectionId: "mysql",
+      isExpanded: true,
+      children: [databaseNode],
+    };
+    const groupNode: TreeNode = {
+      id: "group-1",
+      label: "Dev Group",
+      type: "connection-group",
+      isExpanded: true,
+      children: [connectionNode],
+    };
+
+    connectionStore.treeNodes = [groupNode];
+    connectionStore.toggleConnectionGroupCollapsed = vi.fn();
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const toggled = vi.fn((node: TreeNode, expanded: boolean) => {
+      syncSidebarTreeNodeExpansion(connectionStore.treeNodes, node, expanded);
+    });
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: groupNode, depth: 0, onNodeToggled: toggled }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(groupNode);
+    await nextTick();
+
+    expect(groupNode.isExpanded).toBe(false);
+    expect(connectionNode.isExpanded).toBe(false);
+    expect(databaseNode.isExpanded).toBe(false);
   });
 });

@@ -15,7 +15,7 @@ import EditorGroup from "./EditorGroup.vue";
 import QueryResultSurface from "./QueryResultSurface.vue";
 import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEvents";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, StatementRange } from "./querySurfaces";
-import type { QueryTab } from "@/types/database";
+import type { QueryTab, TableInfoTab } from "@/types/database";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 defineOptions({ inheritAttrs: false });
@@ -34,7 +34,6 @@ const props = defineProps<
 >();
 const emit = defineEmits<
   ContentAreaSurfaceEmits & {
-    "locate-tab": [tab: QueryTab];
     "toggle-zen-mode": [];
     "start-resize": [event: PointerEvent];
     "toggle-collapse": [];
@@ -51,6 +50,7 @@ const surfaceProps = computed(() => ({
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
+  keywordCaseRequest: props.keywordCaseRequest,
   selectedSql: props.selectedSql,
   cursorPos: props.cursorPos,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
@@ -75,6 +75,7 @@ defineExpose({
   },
   focusWhere: () => activeEditorGroup()?.focusWhere() ?? false,
   openGoToColumn: () => activeEditorGroup()?.openGoToColumn() ?? false,
+  openTableStructureEditor: (initialTab?: TableInfoTab) => activeEditorGroup()?.openTableStructureEditor?.(initialTab) ?? false,
   refreshData: (target: Element | null = null) => {
     const element = commandTargetElement(target);
     if (element?.closest("[data-shared-result-surface]")) {
@@ -323,7 +324,6 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
           v-bind="editorGroupBindings"
           @focus-group="queryStore.focusGroup($event)"
           @activate-tab="queryStore.activateTabInGroup(group.id, $event)"
-          @locate-tab="emit('locate-tab', $event)"
           @toggle-zen-mode="emit('toggle-zen-mode')"
           @start-resize="emit('start-resize', $event)"
           @toggle-collapse="emit('toggle-collapse')"
@@ -356,7 +356,6 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
                 v-bind="editorGroupBindings"
                 @focus-group="queryStore.focusGroup($event)"
                 @activate-tab="queryStore.activateTabInGroup(group.id, $event)"
-                @locate-tab="emit('locate-tab', $event)"
                 @toggle-zen-mode="emit('toggle-zen-mode')"
                 @start-resize="emit('start-resize', $event)"
                 @toggle-collapse="emit('toggle-collapse')"

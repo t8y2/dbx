@@ -274,6 +274,7 @@ export function resolveSqlCompletionSchemaLookupDatabase(options: {
 }
 
 export function resolveSqlCompletionTableLookupTarget(options: {
+  databaseType?: DatabaseType;
   currentDatabase: string;
   currentSchema?: string;
   supportsDatabaseQualifier: boolean;
@@ -287,7 +288,7 @@ export function resolveSqlCompletionTableLookupTarget(options: {
   if (options.supportsDatabaseSchemaQualifier && completionContext.suggestTables && !completionContext.insertTable && qualifierParts.length >= 2) {
     const databaseQualifier = qualifierParts[qualifierParts.length - 2]!;
     const schema = qualifierParts[qualifierParts.length - 1]!;
-    const database = findExactName(options.knownDatabases, databaseQualifier) ?? databaseQualifier;
+    const database = (options.databaseType === "snowflake" ? findCaseSensitiveName(options.knownDatabases, databaseQualifier) : findExactName(options.knownDatabases, databaseQualifier)) ?? databaseQualifier;
     return {
       database,
       schema,

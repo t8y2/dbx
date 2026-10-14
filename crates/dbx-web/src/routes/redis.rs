@@ -212,6 +212,7 @@ pub struct RedisListRequest {
     pub value: Option<String>,
     pub index: Option<i64>,
     pub ttl: Option<i64>,
+    pub side: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -408,6 +409,17 @@ pub async fn get_value(
     let result = dbx_core::redis_ops::redis_get_value_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
         .await
         .map_err(AppError::from)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn get_raw_value(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisKeyRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result =
+        dbx_core::redis_ops::redis_get_raw_value_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
+            .await
+            .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
@@ -640,6 +652,7 @@ pub async fn list_push(
 ) -> Result<Json<()>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "LPUSH").await?;
     let value = req.value.as_deref().unwrap_or("");
+    let side = dbx_core::redis_ops::ListPushSide::from_str_lossy(req.side.as_deref());
     dbx_core::redis_ops::redis_list_push_in_db_core(
         &state.app,
         &req.connection_id,
@@ -647,6 +660,7 @@ pub async fn list_push(
         &req.key_raw,
         value,
         req.ttl,
+        side,
     )
     .await
     .map_err(AppError::from)?;

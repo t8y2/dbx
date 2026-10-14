@@ -2,6 +2,8 @@ schemaVersion: 1
 order: 516
 
 dbType: transwarp
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Transwarp
 label: 星环Inceptor
 dialect: Transwarp

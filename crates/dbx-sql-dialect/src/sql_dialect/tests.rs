@@ -33,6 +33,12 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Gaussdb), "\"MixedCase\""), "\"MixedCase\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::OpenGauss), "\"MixedCase\""), "\"MixedCase\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Informix), "users_1"), "users_1");
+    // SUNDB folds unquoted names to uppercase, so a simple lowercase name must stay
+    // unquoted; quoting it preserved the case and the statement found no such table (#11986).
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "rs_salest_budget"), "rs_salest_budget");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "YEAR"), "YEAR");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "user name"), "\"user name\"");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Sundb), "user\"name"), "\"user\"\"name\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");
@@ -1021,8 +1027,8 @@ fn builds_postgres_table_data_large_value_previews() {
         schema: Some("public".to_string()),
         table_name: "large_rows".to_string(),
         primary_keys: vec!["id".to_string()],
-        columns: vec!["id".to_string(), "payload".to_string(), "metadata".to_string()],
-        column_types: vec!["integer".to_string(), "text".to_string(), "jsonb".to_string()],
+        columns: vec!["id".to_string(), "payload".to_string(), "metadata".to_string(), "content".to_string()],
+        column_types: vec!["integer".to_string(), "text".to_string(), "jsonb".to_string(), "bytea".to_string()],
         large_value_preview_size: Some(8192),
         limit: Some(100),
         ..Default::default()
@@ -1032,6 +1038,41 @@ fn builds_postgres_table_data_large_value_previews() {
     assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_T_1\""));
     assert!(sql.contains("left(\"metadata\"::text, 8193) AS \"metadata\""));
     assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_K_2\""));
+    assert!(sql.contains("substring(\"content\" from 1 for 8193) AS \"content\""));
+    assert!(sql.contains("'B:8192:' || octet_length(\"content\")::text AS \"__DBX_LARGE_VALUE_BYTES_B_3\""));
+}
+
+#[test]
+fn builds_db2_table_data_large_value_previews_with_bounded_substr() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Db2),
+        schema: Some("DB2INST1".to_string()),
+        table_name: "large_rows".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec!["id".to_string(), "doc".to_string(), "raw_value".to_string()],
+        column_types: vec!["integer".to_string(), "clob".to_string(), "blob".to_string()],
+        large_value_preview_size: Some(4096),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    // DB2 的 SUBSTR 第三参数越界会报 SQL0138N，故用 CASE WHEN LENGTH(..) 把预览长度
+    // 夹在实际长度内：CLOB → 文本预览、BLOB → 二进制预览，都不对短值报错。
+    assert!(
+        sql.contains(
+            "SUBSTR(\"doc\", 1, CASE WHEN LENGTH(\"doc\") >= 4097 THEN 4097 ELSE LENGTH(\"doc\") END) AS \"doc\""
+        ),
+        "clob preview sql: {sql}"
+    );
+    assert!(sql.contains("'T:4096' AS "), "clob marker sql: {sql}");
+    assert!(
+        sql.contains("SUBSTR(\"raw_value\", 1, CASE WHEN LENGTH(\"raw_value\") >= 4097 THEN 4097 ELSE LENGTH(\"raw_value\") END) AS \"raw_value\""),
+        "blob preview sql: {sql}"
+    );
+    assert!(sql.contains("'B:4096' AS "), "blob marker sql: {sql}");
+    // 主键列不做预览，且不得生成裸 SUBSTR(col,1,n)（会越界报错）
+    assert!(!sql.contains("SUBSTR(\"id\""), "pk should not be previewed: {sql}");
+    assert!(!sql.contains("SUBSTR(\"doc\", 1, 4097)"), "must not emit unbounded substr: {sql}");
 }
 
 #[test]
@@ -1105,7 +1146,7 @@ fn preserves_postgres_array_types_in_large_value_previews() {
     assert!(sql.contains("'T:8' AS \"__DBX_LARGE_VALUE_BYTES_K_11\""));
     assert!(sql.contains("'T:8' AS \"__DBX_LARGE_VALUE_BYTES_S_12\""));
     assert!(sql.contains("'V:8' AS \"__DBX_LARGE_VALUE_BYTES_V_13\""));
-    assert!(sql.contains("'B:8' AS \"__DBX_LARGE_VALUE_BYTES_B_14\""));
+    assert!(sql.contains("'B:8:' || octet_length(\"bytea_value\")::text AS \"__DBX_LARGE_VALUE_BYTES_B_14\""));
 }
 
 #[test]
@@ -1734,6 +1775,12 @@ fn postgres_family_table_data_quoting_resolves_folded_identifiers() {
     assert_eq!(quote_gaussdb_jdbc_identifier("mss_check_sales_item", "\""), "mss_check_sales_item");
     assert_eq!(quote_gaussdb_jdbc_identifier("MSS_CHECK_SALES_ITEM", "\""), "\"MSS_CHECK_SALES_ITEM\"");
     assert_eq!(quote_gaussdb_jdbc_identifier("term", "\""), "term");
+    // DBX-owned derived-table aliases travel through this same helper when the
+    // query builders count or paginate: simple-lower, never referenced by the
+    // outer query, so they stay bare instead of becoming `"dbx_count"`, which
+    // GaussDB M mode reads as a string literal (DBX-LEGACY-0001).
+    assert_eq!(quote_gaussdb_jdbc_identifier("dbx_count", "\""), "dbx_count");
+    assert_eq!(quote_gaussdb_jdbc_identifier("dbx_page", "\""), "dbx_page");
 
     assert_eq!(
         table_data_qualified_table_name(

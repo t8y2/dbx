@@ -66,6 +66,30 @@ afterEach(() => {
 });
 
 describe("DangerConfirmDialog SQL preview", () => {
+  it("starts optional details collapsed and keeps the complete SQL available to copy", async () => {
+    const sql = "CREATE TABLE target (id NUMBER);";
+    await mountDialog(sql, { detailsLabel: "View SQL" });
+    const details = document.body.querySelector<HTMLDetailsElement>("details[data-testid='danger-code-container']");
+    expect(details).not.toBeNull();
+    expect(details!.open).toBe(false);
+    expect(details!.querySelector("summary")?.textContent).toBe("View SQL");
+    details!.open = true;
+    details!.querySelector<HTMLButtonElement>('button[title="Copy full text"]')!.click();
+    await nextTick();
+    expect(copyToClipboard).toHaveBeenCalledWith(sql);
+  });
+
+  it("lets a result caller hide Cancel and settle confirmation before closing", async () => {
+    const confirmed = vi.fn();
+    await mountDialog("CREATE TABLE target (id NUMBER);", { showCancel: false, closeOnConfirm: false, confirmLabel: "Close result" }, { onConfirm: confirmed });
+    const buttons = Array.from(document.body.querySelectorAll("button"));
+    expect(buttons.some((button) => button.textContent?.trim() === "Cancel")).toBe(false);
+    buttons.find((button) => button.textContent?.trim() === "Close result")!.click();
+    await nextTick();
+    expect(confirmed).toHaveBeenCalledOnce();
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
   it("wraps SQL by default, including long unbroken identifiers", async () => {
     await mountDialog(`UPDATE ${"very_long_identifier_".repeat(20)} SET value = 1;`);
 
@@ -119,6 +143,21 @@ describe("DangerConfirmDialog SQL preview", () => {
     await nextTick();
 
     expect(copyToClipboard).toHaveBeenCalledWith(sql);
+  });
+
+  it("builds lazy full SQL only when the copy action is used", async () => {
+    const fullSql = "DELETE FROM orders;\nDELETE FROM customers;";
+    const getCopySql = vi.fn(() => fullSql);
+
+    await mountDialog("DELETE FROM orders;", { copySql: getCopySql });
+    expect(getCopySql).not.toHaveBeenCalled();
+
+    const copyButton = Array.from(document.body.querySelectorAll("button")).find((button) => button.title === "Copy full text");
+    copyButton?.click();
+    await nextTick();
+
+    expect(getCopySql).toHaveBeenCalledOnce();
+    expect(copyToClipboard).toHaveBeenCalledWith(fullSql);
   });
 
   it("restores a previously focused CodeMirror editor through EditorView on close", async () => {

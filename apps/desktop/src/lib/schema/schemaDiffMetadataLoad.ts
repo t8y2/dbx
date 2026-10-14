@@ -229,6 +229,7 @@ export interface SchemaDetailLoadContext {
   schema: string;
   dbType: string;
   options: SchemaDiffCompareOptions;
+  signal?: AbortSignal;
   onProgress?: (progress: SchemaDiffMetadataProgress) => void;
 }
 
@@ -244,21 +245,33 @@ function isViewOrMaterializedView(tableType: string): ObjectSourceKind | undefin
 }
 
 export async function loadSchemaDetails(tables: TableInfo[], context: SchemaDetailLoadContext, api: SchemaDiffMetadataApi): Promise<TableSchemaDetail[]> {
+  context.signal?.throwIfAborted();
   const concurrency = schemaDiffMetadataConcurrency(context.dbType, tables.length);
   // Hold the lane from before the first await so a compare starting while this
   // one is between tables shares this lane instead of building a second one.
   const lane = acquireSchemaDiffMetadataLane(context.connectionId, context.database, concurrency);
+  const pending = new Set<Promise<unknown>>();
   const runMetadataQuery = <T>(task: () => Promise<T>): Promise<T> => {
     lane.requests += 1;
-    return lane.run(task).finally(() => {
-      lane.requests -= 1;
-      evictSchemaDiffMetadataLaneIfUnused(lane);
-    });
+    const request = lane
+      .run(() => {
+        // A queued request must recheck after acquiring the shared lane.
+        context.signal?.throwIfAborted();
+        return task();
+      })
+      .finally(() => {
+        lane.requests -= 1;
+        pending.delete(request);
+        evictSchemaDiffMetadataLaneIfUnused(lane);
+      });
+    pending.add(request);
+    return request;
   };
   let completed = 0;
 
   try {
     return await mapWithConcurrency(tables, concurrency, async (table) => {
+      context.signal?.throwIfAborted();
       const objectType = isViewOrMaterializedView(table.table_type);
       const loadPlan = schemaDiffMetadataLoadPlan(isSchemaDiffView(table), context.options);
       const ddlPromise = loadPlan.ddl ? runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)) : Promise.resolve("");
@@ -271,10 +284,13 @@ export async function loadSchemaDetails(tables: TableInfo[], context: SchemaDeta
       ]);
 
       const detail = { name: table.name, columns, indexes, foreignKeys, triggers, ddl };
+      context.signal?.throwIfAborted();
       context.onProgress?.({ current: ++completed, total: tables.length, objectName: table.name });
       return detail;
     });
   } finally {
+    // Cancellable compares must drain siblings before disconnect can close pools.
+    if (context.signal) await Promise.allSettled(pending);
     releaseSchemaDiffMetadataLane(lane);
   }
 }

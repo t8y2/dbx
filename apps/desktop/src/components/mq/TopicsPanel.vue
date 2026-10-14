@@ -18,6 +18,7 @@ import { DEFAULT_ROCKETMQ_TOPIC_TYPE_FILTERS, isProtectedRocketMqTopic, isRocket
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import MqListPagination from "./shared/MqListPagination.vue";
+import { useMqTopicColumnResize } from "@/composables/useMqTopicColumnResize";
 
 const TOPIC_ROW_HEIGHT = 44;
 const RABBITMQ_DEFAULT_PAGE_SIZE = 100;
@@ -148,42 +149,7 @@ const virtualTopicRows = computed<VirtualTopicRow[]>(() =>
   })),
 );
 
-const topicsGridTemplate = computed(() => {
-  const cols: string[] = ["minmax(180px, 1.6fr)"];
-  if (showNamespaceColumn.value) cols.push("minmax(100px, 0.8fr)");
-  if (isRabbitMqCluster.value) {
-    // RabbitMQ queues: type(+state) | features | messages | consumers | rates | actions
-    cols.push("110px", "170px", "90px", "70px", "190px");
-  } else {
-    cols.push("120px");
-  }
-  if (!isRocketMqCluster.value && !isRabbitMqCluster.value) cols.push("140px");
-  // RocketMQ keeps tiled row actions (status/route/consumers/…) — reserve a wider actions column.
-  cols.push(isRocketMqCluster.value ? "minmax(560px, 2.2fr)" : "minmax(150px, 1fr)");
-  return cols.join(" ");
-});
-
-/** Min content width from grid track mins + gaps + padding; enables shared horizontal scroll. */
-const topicsTableMinWidthPx = computed(() => {
-  let min = 180; // name
-  if (showNamespaceColumn.value) min += 100;
-  let colCount = 0;
-  if (isRabbitMqCluster.value) {
-    // type + features + messages + consumers + rates + actions
-    min += 110 + 170 + 90 + 70 + 190 + 150;
-    colCount = 7; // name, type, features, messages, consumers, rates, actions
-  } else {
-    min += 120; // type
-    if (!isRocketMqCluster.value) min += 140; // partitions
-    min += isRocketMqCluster.value ? 560 : 200; // actions
-    // RocketMQ: name + type + actions. Others: + partitions.
-    colCount = isRocketMqCluster.value ? 3 : 4;
-  }
-  if (showNamespaceColumn.value) colCount += 1;
-  min += (colCount - 1) * 8; // column-gap
-  min += 24; // horizontal padding
-  return min;
-});
+const { columns: topicColumns, gridTemplateColumns: topicsGridTemplate, minWidth: topicsTableMinWidthPx, resizingColumn, onResizeStart } = useMqTopicColumnResize(() => props.mqSystemKind, showNamespaceColumn);
 
 const userTopicCount = computed(() => {
   if (isRocketMqCluster.value) {
@@ -666,21 +632,14 @@ onBeforeUnmount(() => {
         <!-- Shared horizontal scroller keeps header/body columns aligned when the grid min-width exceeds the panel. -->
         <div class="topics-table-hscroll" :style="{ '--topics-table-min-width': `${topicsTableMinWidthPx}px` }">
           <div class="topics-table-header" :style="{ gridTemplateColumns: topicsGridTemplate }">
-            <div class="topics-col">{{ t("mqTopics.name") }}</div>
-            <div v-if="showNamespaceColumn" class="topics-col">{{ t("mqAdmin.namespace") }}</div>
-            <div v-if="isRabbitMqCluster" class="topics-col">{{ t("mqTopics.rabbitmqQueueType") }}</div>
-            <div v-else class="topics-col">{{ t("mqTopics.type") }}</div>
-            <div v-if="isRabbitMqCluster" class="topics-col">{{ t("mqTopics.rabbitmqFeatures") }}</div>
-            <div v-if="isRabbitMqCluster" class="topics-col">
-              <button type="button" class="topics-sort-button" data-testid="rabbitmq-message-sort" @click="toggleRabbitMqMessageSort">
-                {{ t("mqTopics.messageCount") }}
+            <div v-for="column in topicColumns" :key="column.key" class="topics-col topics-header-col" :data-column="column.key" :title="column.key === 'rates' ? rabbitMqRatesTitle() : undefined">
+              <button v-if="column.key === 'messages'" type="button" class="topics-sort-button" data-testid="rabbitmq-message-sort" @click="toggleRabbitMqMessageSort">
+                {{ t(column.label) }}
                 <span v-if="rabbitMqMessageSort" aria-hidden="true">{{ rabbitMqMessageSort === "desc" ? "↓" : "↑" }}</span>
               </button>
+              <span v-else>{{ t(column.label) }}</span>
+              <div class="topics-column-resize-handle" :class="{ resizing: resizingColumn === column.key }" data-column-resize-handle :title="t('nacos.resizeColumn')" @mousedown.stop="onResizeStart(column, $event)" @click.stop @dblclick.stop />
             </div>
-            <div v-else-if="!isRocketMqCluster" class="topics-col">{{ t("mqTopics.partitions") }}</div>
-            <div v-if="isRabbitMqCluster" class="topics-col">{{ t("mqTopics.consumers") }}</div>
-            <div v-if="isRabbitMqCluster" class="topics-col" :title="rabbitMqRatesTitle()">{{ t("mqTopics.rabbitmqRates") }}</div>
-            <div class="topics-col">{{ t("mqTopics.actions") }}</div>
           </div>
           <RecycleScroller class="topics-scroller" :items="virtualTopicRows" :item-size="TOPIC_ROW_HEIGHT" :buffer="200" key-field="id">
             <template #default="{ item: row }">
@@ -1101,6 +1060,44 @@ onBeforeUnmount(() => {
   font-weight: 600;
   font-size: 13px;
   color: var(--color-text-secondary);
+}
+
+.topics-header-col {
+  position: relative;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.topics-header-col > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topics-column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 1;
+}
+
+.topics-column-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 3px;
+  width: 2px;
+  background: var(--topics-border);
+}
+
+.topics-column-resize-handle:hover::after,
+.topics-column-resize-handle.resizing::after {
+  background: var(--color-primary);
 }
 
 .topics-sort-button {

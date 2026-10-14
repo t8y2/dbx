@@ -6,6 +6,7 @@ import { BackendErrorException, formatError, normalizeBackendError, sanitizeBack
 import az from "@/i18n/locales/az";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
+import id from "@/i18n/locales/id";
 import it from "@/i18n/locales/it";
 import ja from "@/i18n/locales/ja";
 import ko from "@/i18n/locales/ko";
@@ -20,6 +21,7 @@ const LOCALES = {
   az,
   en,
   es,
+  id,
   it,
   ja,
   ko,
@@ -67,6 +69,12 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     message: "Plugin update blocked by active connections: Production S3, Local storage",
     key: "pluginPlatform.updateBlockedByConnections",
     params: { labels: "Production S3, Local storage" },
+  },
+  {
+    name: "plugin uninstall blocked by saved plugin connections",
+    message: "Cannot uninstall plugin 'com.lwai.todo' while these connections still use it: 待办 Todo, Todo (Copy)",
+    key: "pluginPlatform.uninstallBlockedByConnections",
+    params: { plugin: "com.lwai.todo", labels: "待办 Todo, Todo (Copy)" },
   },
   {
     name: "plugin update waits for active operations",
@@ -212,6 +220,26 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     message: "Please try again in 42s",
     key: "auth.rateLimited",
     params: { seconds: "42" },
+  },
+  {
+    name: "dameng native dump tool missing",
+    message: "[damengToolNotFound] Dameng client tool 'dexp' was not found in 'C:\\dm8\\bin'. Configure the Dameng client bin directory in Settings > Data.",
+    key: "damengDump.errors.toolNotFound",
+  },
+  {
+    name: "dameng native dump on a non-dameng connection",
+    message: "[damengConnectionRequired] Native dexp/dimp dump is only available for Dameng connections.",
+    key: "damengDump.errors.connectionRequired",
+  },
+  {
+    name: "dameng native dump without a stored password",
+    message: "[damengPasswordMissing] The connection has no password available; reconnect and enter the password first.",
+    key: "damengDump.errors.passwordMissing",
+  },
+  {
+    name: "dameng native dump with a userid-breaking credential",
+    message: "[damengUseridInvalid] The connection's password contains '/' or '@', which the dexp/dimp USERID argument cannot encode; the task was not started.",
+    key: "damengDump.errors.useridInvalid",
   },
 ];
 

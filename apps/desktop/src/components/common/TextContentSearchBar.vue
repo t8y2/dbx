@@ -18,15 +18,34 @@ const props = withDefaults(
     matchCount: number;
     showNavigation?: boolean;
     placeholder?: string;
+    showSearchOptions?: boolean;
+    caseSensitive?: boolean;
+    useRegex?: boolean;
+    error?: string;
+    allowReplace?: boolean;
+    replaceText?: string;
+    busy?: boolean;
   }>(),
   {
     showNavigation: true,
     placeholder: undefined,
+    showSearchOptions: false,
+    caseSensitive: false,
+    useRegex: false,
+    error: "",
+    allowReplace: false,
+    replaceText: "",
+    busy: false,
   },
 );
 
 const emit = defineEmits<{
   "update:modelValue": [value: string];
+  "update:caseSensitive": [value: boolean];
+  "update:useRegex": [value: boolean];
+  "update:replaceText": [value: string];
+  replace: [];
+  replaceAll: [];
   activate: [delta: -1 | 1];
   prev: [];
   next: [];
@@ -35,6 +54,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 
+const showReplace = ref(false);
 const inputRef = ref<HTMLInputElement | null>(null);
 /** Drag offset from the default top-right anchor (absolute right/top). */
 const offsetX = ref(0);
@@ -52,6 +72,7 @@ function resolvedPlaceholder() {
 }
 
 function onEnter(event: KeyboardEvent) {
+  if (props.busy) return;
   emit("activate", event.shiftKey ? -1 : 1);
 }
 
@@ -143,12 +164,17 @@ defineExpose({ focusInput, inputEl: inputRef });
         <GripVertical class="pointer-events-none h-4 w-4" />
       </button>
 
-      <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring" data-no-drag @pointerdown.stop>
+      <button v-if="allowReplace" type="button" class="flex h-7 w-5 shrink-0 items-center justify-center rounded hover:bg-accent" :title="t('editor.search.replace')" :aria-label="t('editor.search.replace')" :aria-expanded="showReplace" @pointerdown.stop @click="showReplace = !showReplace">
+        <ChevronDown class="h-4 w-4" :class="{ '-rotate-90': !showReplace }" />
+      </button>
+      <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring" :class="{ 'border-destructive focus-within:border-destructive focus-within:ring-destructive': error }" data-no-drag @pointerdown.stop>
         <input
           ref="inputRef"
           data-text-content-search-input
           data-redis-value-search-input
           :value="modelValue"
+          :aria-invalid="Boolean(error)"
+          :title="error || undefined"
           autocapitalize="off"
           autocomplete="off"
           autocorrect="off"
@@ -162,6 +188,36 @@ defineExpose({ focusInput, inputEl: inputRef });
           @keydown.enter.prevent="onEnter"
           @keydown.escape.prevent.stop="emit('close')"
         />
+        <template v-if="showSearchOptions">
+          <button
+            type="button"
+            class="flex h-6 min-w-7 shrink-0 items-center justify-center rounded px-1.5 text-xs font-medium transition-colors hover:bg-accent hover:text-foreground"
+            :class="caseSensitive ? 'bg-accent text-foreground' : 'text-muted-foreground'"
+            :title="t('editor.search.caseSensitive')"
+            :aria-label="t('editor.search.caseSensitive')"
+            :aria-pressed="caseSensitive"
+            @click="
+              emit('update:caseSensitive', !caseSensitive);
+              focusInput(false);
+            "
+          >
+            Aa
+          </button>
+          <button
+            type="button"
+            class="mr-1 flex h-6 min-w-7 shrink-0 items-center justify-center rounded px-1.5 font-mono text-xs transition-colors hover:bg-accent hover:text-foreground"
+            :class="useRegex ? 'bg-accent text-foreground' : 'text-muted-foreground'"
+            :title="t('editor.search.regex')"
+            :aria-label="t('editor.search.regex')"
+            :aria-pressed="useRegex"
+            @click="
+              emit('update:useRegex', !useRegex);
+              focusInput(false);
+            "
+          >
+            .*
+          </button>
+        </template>
       </div>
 
       <span data-search-drag-chrome class="min-w-[3.4rem] shrink-0 select-none text-center text-xs tabular-nums" :class="modelValue && matchCount === 0 ? 'text-destructive' : 'text-muted-foreground'">
@@ -174,7 +230,7 @@ defineExpose({ focusInput, inputEl: inputRef });
           data-no-drag
           class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           :title="t('editor.search.prevMatch')"
-          :disabled="matchCount === 0"
+          :disabled="busy || matchCount === 0"
           @pointerdown.stop
           @click="emit('prev')"
         >
@@ -185,7 +241,7 @@ defineExpose({ focusInput, inputEl: inputRef });
           data-no-drag
           class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           :title="t('editor.search.nextMatch')"
-          :disabled="matchCount === 0"
+          :disabled="busy || matchCount === 0"
           @pointerdown.stop
           @click="emit('next')"
         >
@@ -197,6 +253,20 @@ defineExpose({ focusInput, inputEl: inputRef });
         <X class="h-4 w-4" />
       </button>
     </div>
+    <div v-if="allowReplace && showReplace" class="flex items-center gap-1 pl-8" data-no-drag @pointerdown.stop>
+      <input
+        :value="replaceText"
+        class="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm outline-none focus:border-ring"
+        :placeholder="t('editor.search.replace')"
+        :aria-label="t('editor.search.replace')"
+        @input="emit('update:replaceText', ($event.target as HTMLInputElement).value)"
+        @keydown.enter.prevent="!busy && !error && matchCount > 0 && emit('replace')"
+        @keydown.escape.prevent.stop="emit('close')"
+      />
+      <button type="button" class="h-7 shrink-0 rounded-md border border-border px-2 text-xs hover:bg-accent disabled:opacity-40" :disabled="busy || Boolean(error) || matchCount === 0" @click="emit('replace')">{{ t("editor.search.replace") }}</button>
+      <button type="button" class="h-7 shrink-0 rounded-md border border-border px-2 text-xs hover:bg-accent disabled:opacity-40" :disabled="busy || Boolean(error) || matchCount === 0" @click="emit('replaceAll')">{{ t("editor.search.replaceAll") }}</button>
+    </div>
+    <p v-if="error" role="alert" class="px-2 text-xs text-destructive">{{ error }}</p>
   </div>
 </template>
 

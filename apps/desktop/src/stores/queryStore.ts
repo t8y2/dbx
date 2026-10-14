@@ -2233,6 +2233,17 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function releaseReplacedResultLargeValues(tab: QueryTab, ...previousResults: Array<QueryResult | undefined>) {
+    const retainedResults = [tab.result, ...(tab.results ?? []), ...(tab.resultRuns ?? []).flatMap((run) => [run.result, ...(run.results ?? [])])];
+    const retainedRefs = new Set(retainedResults.flatMap((result) => resultLargeValueKeys(result)));
+    const discardedResults = previousResults.map((result) => {
+      if (!result) return undefined;
+      const refs = [...(result.large_value_refs ?? []), ...(result.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))];
+      return { ...result, large_value_cells: [], large_value_refs: refs.filter((valueRef) => !retainedRefs.has(resultLargeValueKey(result, valueRef))) };
+    });
+    void releaseResultLargeValues(...discardedResults);
+  }
+
   async function closeResultRunSession(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
     if (!run.resultSessionId) return;
     const target = run.multiDbExecution?.target;
@@ -8036,6 +8047,7 @@ export const useQueryStore = defineStore("query", () => {
           if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
           const activeGroupIndex = current.activeResultIndex;
           const activeGroupResults = current.results;
+          const previousDisplayedResults = [current.result, ...(current.results ?? [])];
           const findPageState = mongoFindPageState;
           const shouldAppendResult = !!findPageState && !!options?.appendResult && !!current.result && allResults.length === 1;
           const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && allResults.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
@@ -8065,6 +8077,9 @@ export const useQueryStore = defineStore("query", () => {
             current.results = undefined;
             current.activeResultIndex = undefined;
             current.result = allResults[0];
+          }
+          if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
+            releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
           }
           publishResultGeneration(current, shouldAppendResult ? "append" : "execute");
           producedResult = current.result !== undefined;
@@ -8585,6 +8600,7 @@ export const useQueryStore = defineStore("query", () => {
         }
         const activeGroupIndex = current.activeResultIndex;
         const activeGroupResults = current.results;
+        const previousDisplayedResults = [current.result, ...(current.results ?? [])];
         const shouldAppendResult = !!options?.appendResult && !!current.result;
         const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && results.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
         const retainedPaginationResult = options?.retainDisplayedResult === true && results.length === 1 && !isQueryExecutionErrorResult(results[0]!) ? results[0] : undefined;
@@ -8629,6 +8645,9 @@ export const useQueryStore = defineStore("query", () => {
           current.results = undefined;
           current.activeResultIndex = undefined;
           current.result = results[0];
+        }
+        if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
+          releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
         }
         // Logical-result identity for the view-snapshot cache. An append extends
         // the same dataset; every other branch above replaces it.

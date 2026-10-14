@@ -1329,6 +1329,7 @@ export default withEnglishFallback({
     searchDatabasePlaceholder: "Cari tipe database",
     searchResults: "Hasil pencarian",
     databaseCategories: "Kategori",
+    databaseCategoryAll: "Semua",
     databaseCategorySql: "Relasional",
     databaseCategoryAnalytics: "Analitik",
     databaseCategoryDomestic: "DB Tiongkok",

@@ -1244,6 +1244,7 @@ export default withEnglishFallback({
     searchDatabasePlaceholder: "Cerca tipi di database",
     searchResults: "Risultati della ricerca",
     databaseCategories: "Categorie",
+    databaseCategoryAll: "Tutti",
     databaseCategorySql: "Relazionali",
     databaseCategoryAnalytics: "Analisi",
     databaseCategoryDomestic: "DB cinesi",

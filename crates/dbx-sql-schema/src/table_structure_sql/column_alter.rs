@@ -98,10 +98,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         return TableStructureSqlResult { statements, warnings };
     };
 
-    if !has_existing_column_attribute_change(&options.column)
-        && !has_column_extra_change(dialect, &options.column)
-        && (dialect != StructureDialect::SapHana || clean(&options.column.comment) == original_comment(&options.column))
-    {
+    if !has_existing_column_attribute_change(&options.column) && !has_column_extra_change(dialect, &options.column) {
         warnings.push("No changes detected for this column.".to_string());
         return TableStructureSqlResult { statements, warnings };
     }

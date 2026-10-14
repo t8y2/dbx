@@ -267,7 +267,6 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             && !has_column_extra_change(dialect, column)
             && !has_position_change
             && !clears_orphaned_auto_increment
-            && (dialect != StructureDialect::SapHana || clean(&column.comment) == original_comment(column))
         {
             continue;
         }

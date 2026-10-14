@@ -134,6 +134,24 @@ fn saphana_table_structure_uses_add_drop_and_alter_syntax() {
     ));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.statements, vec!["COMMENT ON COLUMN \"APP\".\"users\".\"name\" IS '用户名称';"]);
+
+    let mut cleared = column("name");
+    cleared.comment = String::new();
+    cleared.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        comment: Some("用户名称".to_string()),
+        ..Default::default()
+    });
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::SapHana,
+        Some("APP"),
+        "users",
+        vec![cleared],
+    ));
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec!["COMMENT ON COLUMN \"APP\".\"users\".\"name\" IS NULL;"]);
 }
 
 #[test]

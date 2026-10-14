@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { loadVirtualRowIdentifier, removeVirtualRowIdentifier, saveVirtualRowIdentifier, virtualRowIdentifierScopeKey } from "@/lib/table/virtualRowIdentifier";
+import { loadVirtualRowIdentifier, removeVirtualRowIdentifier, saveVirtualRowIdentifier, tableDataVirtualRowIdentifierScope, virtualRowIdentifierScopeKey } from "@/lib/table/virtualRowIdentifier";
 import type { ColumnInfo } from "@/types/database";
 
 const scope = {
@@ -41,6 +41,22 @@ describe("virtualRowIdentifier", () => {
     expect(saveVirtualRowIdentifier(scope, ["ID", "ID"], columns)).toBe(false);
     expect(saveVirtualRowIdentifier(scope, ["MISSING"], columns)).toBe(false);
     expect(loadVirtualRowIdentifier(scope, columns)).toEqual([]);
+  });
+
+  it("saves a MySQL table data tab key under the scope its metadata load reads", () => {
+    const tabScope = { connectionId: "mysql-1", database: "shop", tableName: "orders" };
+    const columns = [column("k1"), column("k2")];
+
+    expect(saveVirtualRowIdentifier(tableDataVirtualRowIdentifierScope({ db_type: "mysql" }, tabScope), ["k1"], columns)).toBe(true);
+
+    // Data tab metadata loads send the MySQL database name as the schema.
+    expect(loadVirtualRowIdentifier({ ...tabScope, schema: "shop" }, columns)).toEqual(["k1"]);
+  });
+
+  it("keeps an explicit schema for schema-aware table data tabs", () => {
+    const tabScope = { connectionId: "pg-1", database: "app", schema: "sales", tableName: "orders" };
+
+    expect(tableDataVirtualRowIdentifierScope({ db_type: "postgres" }, tabScope)).toEqual(tabScope);
   });
 
   it("clears a persisted key", () => {

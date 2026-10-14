@@ -82,6 +82,10 @@ dbx open local users
 | `dbx agent setup`                           | Install or update the bundled official DBX Skill      |
 | `dbx agent status`                          | Inspect the installed DBX Skill                       |
 | `dbx connections list`                      | List DBX connections without printing secrets         |
+| `dbx connections get <id-or-name>` | Inspect safe saved connection settings |
+| `dbx connections add --file <path>` | Add a saved connection from protected JSON |
+| `dbx connections update <id-or-name> --file <path>` | Partially update saved settings |
+| `dbx connections remove <id-or-name> --yes` | Remove a saved connection and its credentials |
 | `dbx schema list <connection>`              | List tables and views                                 |
 | `dbx schema describe <connection> <table>`  | Show table columns                                    |
 | `dbx query <connection> <sql>`              | Execute one SQL statement                             |
@@ -170,3 +174,41 @@ Codex can call the CLI directly from shell tools:
 dbx schema describe local users --json
 dbx context local --tables users,orders | codex exec "Write a retention query"
 ```
+
+## Manage saved connections
+
+These commands edit DBX connection configuration, without connecting to or modifying the database. Local mode requires an initialized DBX encrypted store and access to its existing key; these commands do not provision keys or bypass the data security upgrade. They share Desktop's encrypted storage and also work with `DBX_WEB_URL` when the Web server supports the update endpoint. All commands respect MCP connection/tool scope; mutations are blocked by global MCP read-only mode and scoped AI sessions. Configure access in **DBX Settings → MCP**. `--allow-writes` cannot override that policy for connection management.
+
+```bash
+dbx connections list --json
+dbx connections get <id-or-name> --json
+dbx connections add --file connection.json --json
+dbx connections update <id-or-name> --file changes.json --json
+dbx connections remove <id-or-name> --yes --json
+```
+
+Use a connection ID when names are ambiguous. `list` includes IDs and `read_only`; `get` returns supported settings without passwords, tokens, DSNs, URL parameters, scripts or tunnel/plugin secrets. Output is intentionally not a credential backup.
+
+Create an owner-only JSON file (`chmod 600 connection.json` on Unix; restrict its ACL on Windows) using a secure editor, or pipe JSON from a credential manager with `--file -`. Terminal stdin is rejected to avoid echoing credentials. Do not place passwords in shell command arguments, history, inline JSON, or source-controlled files. The CLI has no password command-line flag. JSON input is limited to 1 MiB; errors never echo invalid input values.
+
+Minimal `connection.json` without credentials:
+
+```json
+{"name":"scratch","db_type":"sqlite","host":"/absolute/path/scratch.db","port":0,"read_only":true}
+```
+
+Add accepts `name`, `db_type`, `host`, optional `port`, `username`, `password`, `database`, `ssl`, `driver_profile`, `read_only`, and `save_password`. Ports default to the database manifest when available; specify `0` for file databases.
+
+Example `changes.json`:
+
+```json
+{"name":"scratch-renamed","read_only":false,"query_timeout_secs":60}
+```
+
+Update accepts `name`, `note`, `host`, `port`, `username`, `password`, `database`, `driver_profile`, `ssl`, `read_only`, `save_password`, `is_production`, `connect_timeout_secs`, `query_timeout_secs`, `idle_timeout_secs`, and `keepalive_interval_secs`. Omitted fields stay unchanged, including every saved credential and driver-specific setting. IDs and database types are immutable. Unsupported fields are rejected.
+
+- `{"password":""}` explicitly clears the saved database password; omission preserves it
+- `{"database":null}` or `{"driver_profile":null}` clears that optional setting; other fields do not accept null
+- `{"save_password":false}` removes the saved database password; switching back to true does not recover it
+- Changing connection settings invalidates cached connections and pinned transactions, so reconnect afterward
+- Removal requires `--yes`, deletes the saved connection and its credentials, and cannot be undone by the CLI. Review the target first. Database files/data are untouched. Keep an authorized DBX backup if recovery is needed

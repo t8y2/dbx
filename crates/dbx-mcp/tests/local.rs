@@ -93,7 +93,7 @@ async fn local_backend_reads_dbx_storage_without_desktop_process() {
 async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
     let directory = tempdir().expect("temporary data directory");
     let db_path = directory.path().join("dbx.db");
-    let storage = Storage::open(&db_path).await.expect("open storage");
+    let storage = dbx_core::persistence::test_storage::open(&db_path).await.expect("open storage");
     storage
         .save_mcp_global_policy(&dbx_core::storage::McpGlobalPolicy {
             read_only: false,
@@ -167,7 +167,13 @@ async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
         .await
         .expect("save sidebar layout");
 
-    let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
+    let state = dbx_core::connection::AppState::new_with_plugin_and_agent_dir_and_app_version(
+        storage.clone(),
+        directory.path().join("plugins"),
+        directory.path().join("agents"),
+        "",
+    );
+    let backend = Arc::new(LocalBackend::from_app_state(Arc::new(state), directory.path().to_path_buf()));
     let policy = backend.load_mcp_global_policy().await.expect("load configured policy");
     assert!(!policy.read_only);
     let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
@@ -255,7 +261,7 @@ async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
     client.cancel().await.expect("close client");
     server_task.abort();
 
-    let reopened = Storage::open(&db_path).await.expect("reopen storage");
+    let reopened = dbx_core::persistence::test_storage::open(&db_path).await.expect("reopen storage");
     let connections = reopened.load_connections().await.expect("reload connections");
     assert_eq!(connections.len(), 4, "failed duplicates must not add connections");
     let copied = connections

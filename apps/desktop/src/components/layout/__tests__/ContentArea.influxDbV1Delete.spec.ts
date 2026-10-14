@@ -9,7 +9,9 @@ import { INFLUXDB_V1_FIELD_COLUMN_EXTRA, INFLUXDB_V1_TAG_COLUMN_EXTRA, INFLUXDB_
 
 const mocks = vi.hoisted(() => ({ executeQuery: vi.fn(), handler: undefined as unknown }));
 
-vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
+// This suite does not exercise result export; keep its lazy dialog dependency isolated.
+vi.mock("@/components/transfer/QueryResultTransferDialog.vue", () => ({ __esModule: true, default: { render: () => null } }));
+vi.mock("@/components/editor/QueryEditor.vue", () => ({ __esModule: true, default: { render: () => null } }));
 vi.mock("@/components/grid/DataGridColumnLayoutPopover.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/lib/backend/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/backend/api")>()), executeQuery: mocks.executeQuery }));
 vi.mock("@/components/grid/DataGrid.vue", () => ({

@@ -5,7 +5,9 @@ import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { QueryResult, QueryTab } from "@/types/database";
 
-vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
+// This suite does not exercise result export; keep its lazy dialog dependency isolated.
+vi.mock("@/components/transfer/QueryResultTransferDialog.vue", () => ({ __esModule: true, default: { render: () => null } }));
+vi.mock("@/components/editor/QueryEditor.vue", () => ({ __esModule: true, default: { render: () => null } }));
 vi.mock("@/components/grid/DataGridColumnLayoutPopover.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/grid/DataGrid.vue", () => ({
   __esModule: true,

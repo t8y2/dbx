@@ -8,9 +8,18 @@ import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, dataGridTypeForeground, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
 import type { CrosshairTarget } from "@/lib/dataGrid/crosshairHighlight";
 import { resolveDataGridRowNumberLabel } from "@/lib/dataGrid/dataGridRowNumber";
+import type { Platform } from "@/lib/backend/platform";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 export const MAX_CANVAS_DATA_GRID_PIXEL_RATIO = 4;
+
+export function resolveCanvasDataGridPixelRatio(options: { devicePixelRatio: number; uiScale: number; platform: Platform }): number {
+  // WebKitGTK reports page zoom in devicePixelRatio. Applying DBX's UI zoom
+  // again oversizes the bitmap (120% becomes 144%), which is then resampled.
+  // Keep the existing zoom compensation for the other desktop WebViews.
+  const ratio = options.devicePixelRatio * (options.platform === "linux" ? 1 : options.uiScale);
+  return Math.min(MAX_CANVAS_DATA_GRID_PIXEL_RATIO, Math.max(1, ratio));
+}
 
 export interface CanvasDevicePixelSize {
   cssWidth: number;
@@ -124,6 +133,7 @@ interface CanvasRenderState {
   tabularFont: string;
   semiboldFont: string;
   italicFont: string;
+  baselineOffsets: ReadonlyMap<string, number | null>;
   theme: DataGridPaintTheme;
   searchFill: string;
   currentSearchFill: string;
@@ -146,8 +156,11 @@ export function resolveCanvasBackingStoreMetrics(options: { width: number; heigh
   const fallbackRatio = Math.min(MAX_CANVAS_DATA_GRID_PIXEL_RATIO, Math.max(1, options.pixelRatio));
   const measured = options.devicePixelSize;
   const measurementMatches = !!measured && Math.abs(measured.cssWidth - width) <= 0.5 && Math.abs(measured.cssHeight - height) <= 0.5 && measured.pixelWidth > 0 && measured.pixelHeight > 0;
-  const fallbackPixelWidth = Math.max(1, Math.ceil(width * fallbackRatio));
-  const fallbackPixelHeight = Math.max(1, Math.ceil(height * fallbackRatio));
+  // Match the nearest physical pixel. WebKitGTK can report 120% as
+  // 1.2000000476837158; ceil would turn an exact 960px surface into 961px
+  // and introduce another bitmap resampling step.
+  const fallbackPixelWidth = Math.max(1, Math.round(width * fallbackRatio));
+  const fallbackPixelHeight = Math.max(1, Math.round(height * fallbackRatio));
   const maxPixelWidth = Math.max(1, Math.ceil(width * MAX_CANVAS_DATA_GRID_PIXEL_RATIO));
   const maxPixelHeight = Math.max(1, Math.ceil(height * MAX_CANVAS_DATA_GRID_PIXEL_RATIO));
   const pixelWidth = measurementMatches ? Math.min(measured.pixelWidth, maxPixelWidth) : fallbackPixelWidth;
@@ -304,7 +317,25 @@ function crispCanvasLine(value: number, dpr: number): number {
   return alignCanvasPixel(value, dpr) + 0.5 / dpr;
 }
 
-function resolveCanvasRenderState(canvas: HTMLCanvasElement, isDark: boolean, styleKey?: string): CanvasRenderState {
+// Snapping the middle anchor does not snap the glyph baseline: WebKit's font
+// metrics can place that baseline between device pixels even at DPR 1. Measure
+// the conversion once per font, then snap the alphabetic baseline when painting.
+function canvasBaselineOffset(ctx: CanvasRenderingContext2D, font: string): number | null {
+  ctx.font = font;
+  ctx.textBaseline = "alphabetic";
+  const alphabeticAscent = ctx.measureText("Mg").actualBoundingBoxAscent;
+  ctx.textBaseline = "middle";
+  const middleAscent = ctx.measureText("Mg").actualBoundingBoxAscent;
+  return Number.isFinite(alphabeticAscent) && Number.isFinite(middleAscent) ? alphabeticAscent - middleAscent : null;
+}
+
+function fillCanvasText(ctx: CanvasRenderingContext2D, text: string, x: number, centerY: number, scaleY: number, baselineOffsets: ReadonlyMap<string, number | null>) {
+  const offset = baselineOffsets.get(ctx.font) ?? null;
+  ctx.textBaseline = offset === null ? "middle" : "alphabetic";
+  ctx.fillText(text, x, alignCanvasPixel(centerY + (offset ?? 0), scaleY));
+}
+
+function resolveCanvasRenderState(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, isDark: boolean, styleKey?: string): CanvasRenderState {
   const canvasStyle = getComputedStyle(canvas);
   const cacheKey = `${styleKey ?? "default"}:${isDark ? "dark" : "light"}:${canvasStyle.fontFamily}:${canvasStyle.fontSize}`;
   const cached = canvasRenderStateCache.get(canvas);
@@ -333,6 +364,13 @@ function resolveCanvasRenderState(canvas: HTMLCanvasElement, isDark: boolean, st
     weight: canvasStyle.fontWeight,
     lineHeight,
   });
+  const baselineOffsets = new Map<string, number | null>();
+  for (const font of [normalFont, tabularFont, semiboldFont, italicFont]) {
+    const offset = canvasBaselineOffset(ctx, font);
+    // Canvas normalizes accepted font shorthands; use the getter's value as the
+    // key so line-height/weight serialization differences do not miss the cache.
+    baselineOffsets.set(ctx.font, offset);
+  }
   const theme = resolveDataGridPaintTheme({
     getVar: (name) => canvasStyle.getPropertyValue(name),
     isDark,
@@ -343,6 +381,7 @@ function resolveCanvasRenderState(canvas: HTMLCanvasElement, isDark: boolean, st
     tabularFont,
     semiboldFont,
     italicFont,
+    baselineOffsets,
     theme,
     searchFill: isDark ? DATA_GRID_DARK_SEARCH_COLORS.match : theme.cellSearch,
     currentSearchFill: isDark ? DATA_GRID_DARK_SEARCH_COLORS.current : theme.cellCurrentSearch,
@@ -431,7 +470,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
 
-  const { normalFont, tabularFont, semiboldFont, italicFont, theme, searchFill, currentSearchFill, currentSearchBorder, duplicateHighlightFill, nullHighlightFill } = resolveCanvasRenderState(canvas, isDark, styleKey);
+  const { normalFont, tabularFont, semiboldFont, italicFont, baselineOffsets, theme, searchFill, currentSearchFill, currentSearchBorder, duplicateHighlightFill, nullHighlightFill } = resolveCanvasRenderState(canvas, ctx, isDark, styleKey);
   const crosshairRowBg = rawCrosshairRowBg?.trim() || theme.cellCrosshairRow;
   const crosshairColBg = rawCrosshairColBg?.trim() || theme.cellCrosshairCol;
 
@@ -533,7 +572,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     ctx.beginPath();
     ctx.rect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.clip();
-    ctx.fillText(
+    fillCanvasText(
+      ctx,
       resolveDataGridRowNumberLabel({
         displayIndex: item.displayIndex,
         sourceIndex: item.sourceIndex,
@@ -543,6 +583,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
       }),
       rowNumberTextX,
       textY,
+      scaleY,
+      baselineOffsets,
     );
     ctx.restore();
     ctx.font = normalFont;
@@ -665,7 +707,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
         const displayText = isEditingThisCell ? "" : gridCellDisplayValue(rawDisplayText, flatteningMultiLineEnabled, showWhitespace && value !== null);
         const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth, isBooleanNullCell ? "left" : isRightAlign ? "right" : "left");
         const anchorX = isBooleanNullCell ? alignCanvasPixel(drawX + colWidth / 2, scaleX) : textAnchorX;
-        ctx.fillText(text, anchorX, textY);
+        fillCanvasText(ctx, text, anchorX, textY, scaleY, baselineOffsets);
         if (item.isDeleted && text) {
           const textWidth = ctx.measureText(text).width;
           const lineStartX = isBooleanNullCell ? anchorX - textWidth / 2 : isRightAlign ? textAnchorX - textWidth : textAnchorX;

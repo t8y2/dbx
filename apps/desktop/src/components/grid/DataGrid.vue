@@ -255,12 +255,13 @@ import {
 import { resolveDataGridWheelScroll } from "@/lib/dataGrid/dataGridWheel";
 import {
   CANVAS_DATA_GRID_ROW_HEIGHT,
-  MAX_CANVAS_DATA_GRID_PIXEL_RATIO,
+  clearFitCanvasTextCache,
   canvasDataGridActionOverlayWidth,
   canvasDataGridActionReservedWidth,
   dataGridSearchMatchKey,
   drawCanvasDataGrid,
   resolveCanvasBackingStoreMetrics,
+  resolveCanvasDataGridPixelRatio,
   resolveCanvasCellTextLayout,
   type CanvasDevicePixelSize,
 } from "@/lib/dataGrid/canvasDataGridRenderer";
@@ -406,7 +407,7 @@ import { mongoCollectionSupportsIndexes, supportsMongoIndexMutations } from "@/l
 import { isProtectedMongoIndex, mongoDropAllIndexesPreview, mongoDropIndexFailureCount, mongoDropIndexPreview } from "@/lib/sidebar/mongoCollectionMutation";
 import { runMongoMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import { dataGridConditionColumnOptions, dataGridConditionIdentifierQuote, dataGridFilterColumns } from "@/lib/dataGrid/dataGridConditionCompletion";
-import { isMacOS } from "@/lib/backend/platform";
+import { getPlatform, isMacOS } from "@/lib/backend/platform";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
@@ -2696,11 +2697,14 @@ if (typeof document !== "undefined" && document.fonts) {
     async ([fontSize, fontFamily]) => {
       const requestId = ++fontLoadRequestId;
       try {
-        await document.fonts.load(`600 ${fontSize}px ${fontFamily}`);
+        await Promise.all([document.fonts.load(`400 ${fontSize}px ${fontFamily}`), document.fonts.load(`600 ${fontSize}px ${fontFamily}`), document.fonts.load(`italic 400 ${fontSize}px ${fontFamily}`)]);
       } catch {
         return;
       }
-      if (requestId === fontLoadRequestId) dataGridFontReadyTick.value++;
+      if (requestId === fontLoadRequestId) {
+        clearFitCanvasTextCache();
+        dataGridFontReadyTick.value++;
+      }
     },
     { immediate: true },
   );
@@ -7669,7 +7673,7 @@ const canvasScrollTop = ref(0);
 const canvasHoverCell = ref<{ rowIndex: number; visibleColIdx: number } | null>(null);
 const canvasDevicePixelRatio = ref(typeof window === "undefined" ? 1 : window.devicePixelRatio || 1);
 const canvasMeasuredDevicePixelSize = ref<CanvasDevicePixelSize | null>(null);
-const canvasBackingPixelRatio = computed(() => Math.min(MAX_CANVAS_DATA_GRID_PIXEL_RATIO, Math.max(1, canvasDevicePixelRatio.value * settingsStore.editorSettings.uiScale)));
+const canvasBackingPixelRatio = computed(() => resolveCanvasDataGridPixelRatio({ devicePixelRatio: canvasDevicePixelRatio.value, uiScale: settingsStore.editorSettings.uiScale, platform: getPlatform() }));
 const useCanvasGridRows = computed(() => dataGridRenderMode.value === "canvas");
 const canvasContentHeight = computed(() => Math.max(1, displayRowCount.value * CANVAS_DATA_GRID_ROW_HEIGHT));
 // Clamp the sticky canvas/overlay to the content width. A viewport-wide sticky surface inflates the
@@ -7691,7 +7695,7 @@ const dataGridTypeColorKey = computed(() => {
 });
 const canvasRenderStyleKey = computed(
   () =>
-    `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${!!saveError.value}:${dataGridTypeColorKey.value}:${dataGridStripedRows.value}:${settingsStore.editorSettings.dataGridZebraRowBg}:${settingsStore.editorSettings.dataGridCrosshairRowBg}:${settingsStore.editorSettings.dataGridCrosshairColBg}`,
+    `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${dataGridFontReadyTick.value}:${!!saveError.value}:${dataGridTypeColorKey.value}:${dataGridStripedRows.value}:${settingsStore.editorSettings.dataGridZebraRowBg}:${settingsStore.editorSettings.dataGridCrosshairRowBg}:${settingsStore.editorSettings.dataGridCrosshairColBg}`,
 );
 const CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER = 1.5;
 const CANVAS_TRACKPAD_DELTA_THRESHOLD = 40;

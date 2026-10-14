@@ -6696,6 +6696,14 @@ export const useQueryStore = defineStore("query", () => {
 
       const target = resolveEditableSourceMetadataTarget(tab, analysis, source, conn, databaseType, executionDatabase);
       const cached = getCachedTableMetadata(target.request);
+      // Dameng dictionary reads can be much slower than the user's SELECT.
+      // Cold metadata only enriches editing: dispatch the original SQL first,
+      // then let analyzeQueryMetadataInBackground populate the shared cache.
+      // Do not start a competing dictionary request before the result arrives.
+      if (databaseType === "dameng" && !cached) {
+        queryExecutionLog("info", "metadata:preflight:deferred", { traceId, table: target.request.tableName, databaseType, elapsed: elapsed() });
+        return unchanged;
+      }
       let loaded = cached ? loadedEditableSourceFromMetadata(target, cached.metadata) : undefined;
       if (!cached && (databaseType === "oracle" || databaseType === "xugu")) {
         // Oracle column discovery can be slow. A star projection over a table

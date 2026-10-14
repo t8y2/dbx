@@ -2970,6 +2970,13 @@ export default withEnglishFallback({
     passphraseTooShort: "Parol ifadəsi ən azı 4 simvoldan ibarət olmalıdır",
     exportEncrypted: "Şifrələyərək ixrac et",
     exportUnencrypted: "Şifrələmədən ixrac et",
+    plaintextDefaultDescription: "Açıq mətn ixracına standart olaraq parollar və digər giriş məlumatları daxil edilmir.",
+    credentialsUnavailable: "Bu server giriş məlumatlarının ixracına icazə vermir.",
+    includeCredentials: "Parolları və digər giriş məlumatlarını daxil et (açıq mətn)",
+    plaintextCredentialsWarning:
+      "Daxil edildikdə verilənlər bazası parollarını, SSH/proksi giriş məlumatlarını, tokenləri və bağlantı sətirlərini bu fayla çıxışı olan hər kəs oxuya bilər. Yalnız etibarlı mühitdə müvəqqəti köçürmə üçün istifadə edin; faylı təhlükəsiz saxlayın və işiniz bitdikdə silin.",
+    exportWithCredentials: "Giriş məlumatları ilə ixrac et",
+    exportWithoutCredentials: "Giriş məlumatları olmadan ixrac et",
     unencryptedWarningTitle: "Şifrələmədən ixrac edilsin?",
     unencryptedWarningDescription:
       "Şifrələnməmiş konfiqurasiya faylında verilənlər bazası parolları, SSH tunelinin giriş məlumatları və digər həssas məlumatlar ola bilər. Fayla çıxışı olan hər kəs bu giriş məlumatlarını oxuya bilər. Bundan yalnız etibarlı mühitdə müvəqqəti köçürmə üçün istifadə edin.",

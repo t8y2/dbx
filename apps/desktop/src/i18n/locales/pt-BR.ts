@@ -3325,6 +3325,13 @@ export default withEnglishFallback({
     passphraseTooShort: "A frase secreta deve ter pelo menos 4 caracteres",
     exportEncrypted: "Exportar criptografado",
     exportUnencrypted: "Exportar sem criptografia",
+    plaintextDefaultDescription: "As exportações em texto simples excluem senhas e outras credenciais por padrão.",
+    credentialsUnavailable: "Este servidor não permite exportar credenciais.",
+    includeCredentials: "Incluir senhas e outras credenciais (texto simples)",
+    plaintextCredentialsWarning:
+      "Se incluídas, as senhas de bancos de dados, credenciais SSH/proxy, tokens e strings de conexão poderão ser lidas por qualquer pessoa com acesso a este arquivo. Use apenas para uma migração temporária em um ambiente confiável; armazene-o com segurança e exclua-o ao terminar.",
+    exportWithCredentials: "Exportar com credenciais",
+    exportWithoutCredentials: "Exportar sem credenciais",
     unencryptedWarningTitle: "Exportar sem criptografia?",
     unencryptedWarningDescription:
       "O arquivo de configuração sem criptografia pode conter senhas de banco de dados, credenciais de SSH Tunnel e outras informações sensíveis. Qualquer pessoa com acesso ao arquivo poderá ler essas credenciais. Use apenas para uma migração temporária em um ambiente confiável.",

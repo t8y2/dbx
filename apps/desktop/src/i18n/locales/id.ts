@@ -3296,6 +3296,12 @@ export default withEnglishFallback({
     passphraseTooShort: "Passphrase harus minimal 4 karakter",
     exportEncrypted: "Ekspor terenkripsi",
     exportUnencrypted: "Ekspor tanpa enkripsi",
+    plaintextDefaultDescription: "Ekspor teks biasa tidak menyertakan kata sandi dan kredensial lain secara default.",
+    credentialsUnavailable: "Server ini tidak mengizinkan ekspor kredensial.",
+    includeCredentials: "Sertakan kata sandi dan kredensial lain (teks biasa)",
+    plaintextCredentialsWarning: "Jika disertakan, kata sandi database, kredensial SSH/proksi, token, dan string koneksi dapat dibaca oleh siapa pun yang memiliki file ini. Gunakan hanya untuk migrasi sementara di lingkungan tepercaya; simpan dengan aman dan hapus setelah selesai.",
+    exportWithCredentials: "Ekspor dengan kredensial",
+    exportWithoutCredentials: "Ekspor tanpa kredensial",
     unencryptedWarningTitle: "Ekspor tanpa enkripsi?",
     unencryptedWarningDescription:
       "File konfigurasi yang tidak dienkripsi dapat berisi kata sandi database, kredensial SSH Tunnel, dan informasi sensitif lainnya. Siapa pun yang dapat mengakses file tersebut dapat membaca kredensial ini. Gunakan ini hanya untuk migrasi sementara di lingkungan tepercaya.",

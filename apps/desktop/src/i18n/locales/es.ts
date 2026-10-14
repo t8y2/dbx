@@ -3473,6 +3473,13 @@ export default withEnglishFallback({
     passphraseTooShort: "La frase de paso debe tener al menos 4 caracteres",
     exportEncrypted: "Exportar cifrado",
     exportUnencrypted: "Exportar sin cifrado",
+    plaintextDefaultDescription: "Las exportaciones en texto sin formato excluyen las contraseñas y otras credenciales de forma predeterminada.",
+    credentialsUnavailable: "Este servidor no permite exportar credenciales.",
+    includeCredentials: "Incluir contraseñas y otras credenciales (texto sin formato)",
+    plaintextCredentialsWarning:
+      "Si se incluyen, cualquier persona que tenga este archivo podrá leer las contraseñas de bases de datos, las credenciales SSH/proxy, los tokens y las cadenas de conexión. Úselo solo para una migración temporal en un entorno de confianza; guárdelo de forma segura y elimínelo al terminar.",
+    exportWithCredentials: "Exportar con credenciales",
+    exportWithoutCredentials: "Exportar sin credenciales",
     unencryptedWarningTitle: "¿Exportar sin cifrado?",
     unencryptedWarningDescription:
       "El archivo de configuración sin cifrar puede contener contraseñas de bases de datos, credenciales de SSH Tunnel y otra información sensible. Cualquiera que acceda al archivo podría leer estas credenciales. Úsalo solo para una migración temporal en un entorno de confianza.",

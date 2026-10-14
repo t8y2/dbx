@@ -1,7 +1,9 @@
 import type { ConnectionConfig, SidebarLayout, TunnelProfile } from "@/types/database";
+import { isSecretConnectionProperty, parseJdbcProperties } from "@/lib/connection/jdbcProperties";
+import { isSavedCredential } from "@/lib/security/passwordViewer";
 import { filterSidebarLayoutByConnectionIds as filterLayoutByConnectionIds, remapSidebarLayoutConnectionIds } from "@/lib/sidebar/sidebarLayout";
 
-export type ConnectionExportProtection = { mode: "encrypted"; passphrase: string } | { mode: "plaintext" };
+export type ConnectionExportProtection = { mode: "encrypted"; passphrase: string } | { mode: "plaintext"; includeCredentials?: boolean };
 
 export interface ConnectionConfigBundle {
   connections: ConnectionConfig[];
@@ -64,7 +66,7 @@ export function snapshotConnectionsForExport(connections: ConnectionConfig[], op
 export function scrubConnectionForPlaintextExport(connection: ConnectionConfig): ConnectionConfig {
   const scrubbed: ConnectionConfig = JSON.parse(JSON.stringify(connection)) as ConnectionConfig;
   scrubbed.password = "";
-  scrubbed.url_params = scrubUrlParams(scrubbed.url_params);
+  scrubbed.url_params = scrubUrlParams(scrubbed.url_params, scrubbed.db_type);
   scrubbed.init_script = undefined;
   scrubbed.connection_string = undefined;
   scrubbed.redis_sentinel_password = "";
@@ -98,6 +100,30 @@ export function scrubTunnelProfileForPlaintextExport(profile: TunnelProfile): Tu
   return scrubbed;
 }
 
+/** Credentials are excluded unless the caller explicitly opts in for this export. */
+export function serializePlaintextConnectionConfigBundle(bundle: ConnectionConfigBundle, includeCredentials = false): string {
+  const exportData =
+    includeCredentials === true
+      ? bundle
+      : {
+          ...bundle,
+          connections: bundle.connections.map(scrubConnectionForPlaintextExport),
+          tunnelProfiles: bundle.tunnelProfiles?.map(scrubTunnelProfileForPlaintextExport),
+        };
+  return JSON.stringify(
+    exportData,
+    (_key, value) => {
+      // Opaque server references are not portable credentials and cannot be exported as such.
+      if (isSavedCredential(value)) {
+        if (includeCredentials === true) throw new Error("credential_export_unavailable");
+        return "";
+      }
+      return value;
+    },
+    2,
+  );
+}
+
 function scrubExternalConfig(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(scrubExternalConfig);
   if (!value || typeof value !== "object") return value;
@@ -114,16 +140,37 @@ function scrubExternalConfig(value: unknown): unknown {
   return output;
 }
 
-function scrubUrlParams(value: string | undefined): string | undefined {
+function isSensitiveUrlParamKey(key: string): boolean {
+  // Credential names are ASCII. Decode valid percent bytes once, as the
+  // backend does, without throwing on malformed escapes or treating '+' as space.
+  const decodedKey = key.replace(/%([0-9a-f]{2})/gi, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
+  const normalized = decodedKey.trim().toLowerCase().replace(/[_-]/g, "");
+  return /password|passphrase|secret|token|apikey|privatekey|clientsecret/.test(normalized);
+}
+
+function scrubUrlParams(value: string | undefined, dbType: ConnectionConfig["db_type"]): string | undefined {
   if (typeof value !== "string") return value;
+  if (dbType === "sqlserver") {
+    const properties = parseJdbcProperties(value, "sqlserver", { separators: ";&", allowBare: true });
+    // An unclosed JDBC brace has no safe boundary; never retain a potentially secret tail.
+    if (!properties) return "";
+    let scrubbed = "";
+    let cursor = 0;
+    for (const { key, hasEquals, start, end } of properties) {
+      const part = value.slice(start, end);
+      const sensitive = isSensitiveUrlParamKey(key) || isSecretConnectionProperty(key.replace(/^\?/, ""));
+      scrubbed += value.slice(cursor, start) + (hasEquals && sensitive ? part.slice(0, part.indexOf("=") + 1) : part);
+      cursor = end;
+    }
+    return scrubbed + value.slice(cursor);
+  }
   return value
     .split("&")
     .map((part) => {
       const separator = part.indexOf("=");
       if (separator < 0) return part;
       const key = part.slice(0, separator);
-      const normalized = key.trim().toLowerCase().replace(/[_-]/g, "");
-      return /password|passphrase|secret|token|apikey|privatekey|clientsecret/.test(normalized) ? key + "=" : part;
+      return isSensitiveUrlParamKey(key) ? key + "=" : part;
     })
     .join("&");
 }

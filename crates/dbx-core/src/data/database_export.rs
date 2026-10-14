@@ -2124,12 +2124,20 @@ fn format_export_table_ddl(ddl: &str, database_type: Option<DatabaseType>, opts:
     format!("{ddl};")
 }
 
-fn split_postgres_export_table_triggers(ddl: &str, database_type: DatabaseType) -> (String, Vec<String>) {
+/// PostgreSQL database export: split the statements that may depend on
+/// schema-wide routines out of a relation's DDL, returning
+/// `(table, indexes, triggers)`.
+///
+/// Routines are written after every table, so an index whose expression or
+/// predicate calls a user-defined function (#12156), or a trigger that calls
+/// its trigger function, can only replay once the routines exist.
+fn split_postgres_export_table_ddl(ddl: &str, database_type: DatabaseType) -> (String, Vec<String>, Vec<String>) {
     if database_type != DatabaseType::Postgres {
-        return (ddl.to_string(), Vec::new());
+        return (ddl.to_string(), Vec::new(), Vec::new());
     }
 
     let mut table_statements = Vec::new();
+    let mut index_statements = Vec::new();
     let mut trigger_statements = Vec::new();
     for range in crate::db::ddl_scan::top_level_statement_ranges(ddl) {
         let statement = ddl[range].trim();
@@ -2145,11 +2153,19 @@ fn split_postgres_export_table_triggers(ddl: &str, database_type: DatabaseType) 
                 || (second.as_deref() == Some("CONSTRAINT") && third.as_deref() == Some("TRIGGER")))
         {
             trigger_statements.push(statement.to_string());
+        } else if (first.as_deref() == Some("CREATE")
+            && (second.as_deref() == Some("INDEX")
+                || (second.as_deref() == Some("UNIQUE") && third.as_deref() == Some("INDEX"))))
+            || (first.as_deref() == Some("COMMENT")
+                && second.as_deref() == Some("ON")
+                && third.as_deref() == Some("INDEX"))
+        {
+            index_statements.push(statement.to_string());
         } else {
             table_statements.push(statement.to_string());
         }
     }
-    (table_statements.join("\n"), trigger_statements)
+    (table_statements.join("\n"), index_statements, trigger_statements)
 }
 
 /// PostgreSQL database export: split inline `FOREIGN KEY` constraints out of a
@@ -4145,6 +4161,7 @@ async fn export_database_sql_core_inner(
 
     let mut object_index: usize = 0;
     let mut total_rows_exported = 0_u64;
+    let mut deferred_postgres_indexes = Vec::new();
     let mut deferred_postgres_triggers = Vec::new();
     // PostgreSQL foreign keys collected from table DDL while writing structure,
     // emitted at the end of the file (see `extract_postgres_deferred_foreign_keys`).
@@ -4473,7 +4490,8 @@ async fn export_database_sql_core_inner(
             }
             match ddl_result {
                 Ok(ddl) => {
-                    let (ddl, triggers) = split_postgres_export_table_triggers(&ddl, db_type);
+                    let (ddl, indexes, triggers) = split_postgres_export_table_ddl(&ddl, db_type);
+                    deferred_postgres_indexes.extend(indexes);
                     deferred_postgres_triggers.extend(triggers);
                     // Defer inline foreign keys so restore never has to satisfy
                     // the dependency graph's order (cycles included).
@@ -4988,11 +5006,14 @@ async fn export_database_sql_core_inner(
         }
     }
 
-    // PostgreSQL trigger definitions reference their trigger functions. The
-    // table DDL builder returns both statements together, while schema-wide
-    // routines are exported below the tables. Keep triggers part of table
-    // structure, but write them only after routines so the resulting script
-    // is executable in file order.
+    // PostgreSQL index expressions and trigger definitions can reference
+    // user-defined functions. The table DDL builder returns them together with
+    // the table, while schema-wide routines are exported below the tables. Keep
+    // them part of table structure, but write them only after routines so the
+    // resulting script is executable in file order.
+    for index in deferred_postgres_indexes {
+        writeln!(file, "{index}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+    }
     for trigger in deferred_postgres_triggers {
         writeln!(file, "{trigger}\n").map_err(|e| format!("Failed to write file: {e}"))?;
     }
@@ -5094,7 +5115,7 @@ mod tests {
         generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, replace_database_export_select_list,
-        sort_export_views_by_dependencies, split_postgres_export_table_triggers, write_database_export_rows,
+        sort_export_views_by_dependencies, split_postgres_export_table_ddl, write_database_export_rows,
         write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
         BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
         DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum, PostgresExportExtension, PostgresExportSequence,
@@ -5588,11 +5609,12 @@ mod tests {
     fn postgres_database_export_defers_table_triggers_without_splitting_function_bodies() {
         let ddl = "CREATE TABLE \"public\".\"work_log\" (\n  \"id\" bigint,\n  \"note\" text DEFAULT ';'::text\n);\n\nCREATE INDEX \"idx_work_log\" ON \"public\".\"work_log\" (\"id\");\n\nCREATE TRIGGER trg_work_log BEFORE INSERT OR UPDATE ON public.work_log FOR EACH ROW EXECUTE FUNCTION fn_work_log_update();";
 
-        let (table_ddl, triggers) = split_postgres_export_table_triggers(ddl, DatabaseType::Postgres);
+        let (table_ddl, indexes, triggers) = split_postgres_export_table_ddl(ddl, DatabaseType::Postgres);
 
         assert!(table_ddl.contains("CREATE TABLE"));
         assert!(table_ddl.contains("DEFAULT ';'::text"));
-        assert!(table_ddl.contains("CREATE INDEX"));
+        assert!(!table_ddl.contains("CREATE INDEX"));
+        assert_eq!(indexes, vec!["CREATE INDEX \"idx_work_log\" ON \"public\".\"work_log\" (\"id\");"]);
         assert!(!table_ddl.contains("CREATE TRIGGER"));
         assert_eq!(triggers.len(), 1);
         assert!(triggers[0].starts_with("CREATE TRIGGER trg_work_log"));
@@ -5602,13 +5624,34 @@ mod tests {
     fn postgres_database_export_defers_constraint_triggers_only_for_postgres() {
         let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" bigint);\nCREATE CONSTRAINT TRIGGER items_check AFTER INSERT ON public.items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION check_items();";
 
-        let (postgres_table, postgres_triggers) = split_postgres_export_table_triggers(ddl, DatabaseType::Postgres);
+        let (postgres_table, _, postgres_triggers) = split_postgres_export_table_ddl(ddl, DatabaseType::Postgres);
         assert!(!postgres_table.contains("CREATE CONSTRAINT TRIGGER"));
         assert_eq!(postgres_triggers.len(), 1);
 
-        let (mysql_ddl, mysql_triggers) = split_postgres_export_table_triggers(ddl, DatabaseType::Mysql);
+        let (mysql_ddl, mysql_indexes, mysql_triggers) = split_postgres_export_table_ddl(ddl, DatabaseType::Mysql);
         assert_eq!(mysql_ddl, ddl);
+        assert!(mysql_indexes.is_empty());
         assert!(mysql_triggers.is_empty());
+    }
+
+    #[test]
+    fn postgres_database_export_defers_indexes_and_their_comments() {
+        let ddl = "CREATE TABLE \"public\".\"tagged_items\" (\n  \"id\" integer NOT NULL,\n  \"labels\" text[] NOT NULL\n);\n\nCOMMENT ON COLUMN \"public\".\"tagged_items\".\"labels\" IS 'index labels';\nCREATE UNIQUE INDEX \"tagged_items_labels_idx\" ON \"public\".\"tagged_items\" USING btree (immutable_array_to_string(labels) ASC NULLS LAST);\nCOMMENT ON INDEX \"public\".\"tagged_items_labels_idx\" IS 'CREATE INDEX; inside a comment';";
+
+        let (table_ddl, indexes, triggers) = split_postgres_export_table_ddl(ddl, DatabaseType::Postgres);
+
+        assert_eq!(
+            table_ddl,
+            "CREATE TABLE \"public\".\"tagged_items\" (\n  \"id\" integer NOT NULL,\n  \"labels\" text[] NOT NULL\n);\nCOMMENT ON COLUMN \"public\".\"tagged_items\".\"labels\" IS 'index labels';"
+        );
+        assert_eq!(
+            indexes,
+            vec![
+                "CREATE UNIQUE INDEX \"tagged_items_labels_idx\" ON \"public\".\"tagged_items\" USING btree (immutable_array_to_string(labels) ASC NULLS LAST);",
+                "COMMENT ON INDEX \"public\".\"tagged_items_labels_idx\" IS 'CREATE INDEX; inside a comment';",
+            ]
+        );
+        assert!(triggers.is_empty());
     }
 
     #[test]

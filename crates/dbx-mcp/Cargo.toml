@@ -24,6 +24,9 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
+jsonwebtoken = "9.3"
+sha2 = "0.10"
 futures = "0.3"
 dbx-core = { path = "../dbx-core", default-features = false }
 dirs = "6"
@@ -49,6 +52,8 @@ url = "2"
 security-framework = { version = "3.7", optional = true }
 
 [dev-dependencies]
+rand = "0.8"
+rsa = "0.9"
 rmcp = { version = "3.5.1", features = ["transport-streamable-http-client-reqwest"] }
 rustls-pemfile = "2.2"
 tempfile = "3"

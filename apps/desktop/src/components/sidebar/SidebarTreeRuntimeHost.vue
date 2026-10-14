@@ -79,6 +79,7 @@ import {
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { promptConnectionGroupUnlock } from "@/lib/sidebar/connectionGroupPassword";
 import { isProtectionPasswordFeatureActive } from "@/lib/sidebar/protectionPassword";
+import { ensureSavedSqlFileAccessible, excludeLockedSavedSqlFiles } from "@/lib/sidebar/savedSqlFolderAccess";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { getTableMutationHistoryStoreOrNull, recordTableMutationHistory } from "@/lib/history/tableMutationHistory";
 import { useQueryStore } from "@/stores/queryStore";
@@ -6014,6 +6015,9 @@ function savedSqlHistoryScopeForNode(node: TreeNode): SavedSqlHistoryScope | nul
 async function openSavedSqlHistoryFile(fileId: string) {
   const file = await savedSqlStore.ensureFileContent(fileId);
   if (!file) return;
+  // The history list never surfaces locked contents, so gate the open action
+  // too in case the file was locked after the menu was built.
+  if (!(await ensureSavedSqlFileAccessible(file))) return;
   const tabId = queryStore.openSavedSql(file);
   connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
   void savedSqlStore.recordFileUsage(file.id);
@@ -6022,7 +6026,7 @@ async function openSavedSqlHistoryFile(fileId: string) {
 function savedSqlHistorySubmenu(): ContextMenuItem | null {
   const scope = savedSqlHistoryScopeForNode(activeNode.value);
   if (!scope) return null;
-  const files = rankSavedSqlHistory(savedSqlStore.allFiles, { ...scope, limit: 10 });
+  const files = rankSavedSqlHistory(excludeLockedSavedSqlFiles(savedSqlStore.allFiles), { ...scope, limit: 10 });
   return {
     sidebarActionId: "contextMenu.sqlHistory",
     label: t("contextMenu.sqlHistory"),

@@ -52,7 +52,7 @@ import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { useSavedSqlStore, type SavedSqlFileSortMode, type SavedSqlFolderSortMode } from "@/stores/savedSqlStore";
 import { useSavedSqlFolderPasswordPromptStore } from "@/stores/savedSqlFolderPasswordPromptStore";
 import { isProtectionPasswordFeatureActive, verifyProtectionPassword } from "@/lib/sidebar/protectionPassword";
-import { folderOrAncestorHasPassword } from "@/lib/sidebar/savedSqlFolderSearch";
+import { fileOrAncestorHasPassword, folderOrAncestorHasPassword, nearestLockedFolder } from "@/lib/sidebar/savedSqlFolderSearch";
 import SetSavedSqlFolderPasswordDialog from "@/components/connection/SetSavedSqlFolderPasswordDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -367,9 +367,9 @@ function folderSearchVisible(folder: SavedSqlFolder): boolean {
 }
 
 function fileSearchVisible(file: SavedSqlFile): boolean {
-  if (!file.folderId) return true;
-  const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === file.folderId);
-  return !folder || folderSearchVisible(folder);
+  // Desktop has no protection passwords, so nothing is ever excluded there.
+  if (!isProtectionPasswordFeatureActive()) return true;
+  return !fileOrAncestorHasPassword(file, savedSqlStore.allFolders);
 }
 
 function fileMatchesQuery(file: SavedSqlFile) {
@@ -403,6 +403,10 @@ function folderBranchMatchesQuery(folder: SavedSqlFolder) {
 
 function filesInFolder(folderId: string) {
   const folder = savedSqlStore.allFolders.find((item) => item.id === folderId);
+  // Searching never surfaces files of a protected branch — a locked folder
+  // whose name matched the query must not fall through the "every file of a
+  // matched folder" shortcut below.
+  if (searchQuery.value && folder && !folderSearchVisible(folder)) return [];
   const includeAllFilesForMatchedFolder = !!folder && !!searchQuery.value && folder.name.toLowerCase().includes(searchQuery.value);
   return savedSqlStore.filesInFolder(folderId).filter((file) => includeAllFilesForMatchedFolder || fileMatchesQuery(file));
 }
@@ -451,7 +455,9 @@ const visibleFiles = computed(() => savedSqlStore.filesWithoutFolder().filter((f
 const itemsByDate = computed(() => {
   const allFolders = savedSqlStore.allFolders.filter((folder) => folderBranchMatchesQuery(folder)).map((folder) => ({ type: "folder" as const, item: folder, updatedAt: folder.updatedAt }));
 
-  const allFiles = [...savedSqlStore.allFolders.flatMap((folder) => filesInFolder(folder.id)), ...visibleFiles.value].map((file) => ({ type: "file" as const, item: file, updatedAt: file.updatedAt }));
+  // The flat list has no collapse state to hide contents, so locked branches
+  // are filtered explicitly; an unlock in this session still reveals them.
+  const allFiles = [...savedSqlStore.allFolders.flatMap((folder) => filesInFolder(folder.id)), ...visibleFiles.value].filter((file) => !lockedAncestorForFile(file)).map((file) => ({ type: "file" as const, item: file, updatedAt: file.updatedAt }));
 
   return [...allFolders, ...allFiles].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 });
@@ -575,14 +581,7 @@ function lockFolderFromMenu(folder: SavedSqlFolder) {
 
 // Walk up the parent chain to find the nearest locked folder containing the file.
 function lockedAncestorForFile(file: SavedSqlFile): SavedSqlFolder | null {
-  let folderId = file.folderId;
-  while (folderId) {
-    const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === folderId);
-    if (!folder) return null;
-    if (isFolderPasswordLockable(folder)) return folder;
-    folderId = folder.parentFolderId;
-  }
-  return null;
+  return nearestLockedFolder(file.folderId, savedSqlStore.allFolders, isFolderPasswordLockable);
 }
 
 function isFolderExpanded(folder: SavedSqlFolder) {
@@ -1845,6 +1844,9 @@ function showDropInside(targetId: string) {
                     {{ item.item.name }}
                     <span class="ml-1 text-muted-foreground">({{ folderFileCount(item.item.id) }})</span>
                   </span>
+                  <LightTooltip v-if="!isRenamingFolder(item.item.id) && isFolderPasswordLockable(item.item)" :text="t('savedSql.lockedTooltip')" side="left" :delay="0" :close-delay="0" nowrap>
+                    <Lock class="h-3 w-3 shrink-0 text-muted-foreground" />
+                  </LightTooltip>
                   <LightTooltip v-if="!isRenamingFolder(item.item.id)" :text="t('savedSql.newSubfolder')" side="left" :delay="0" :close-delay="0" nowrap>
                     <button
                       type="button"

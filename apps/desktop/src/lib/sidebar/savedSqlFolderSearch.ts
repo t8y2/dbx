@@ -1,4 +1,4 @@
-import type { SavedSqlFolder } from "@/types/database";
+import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 
 /**
  * Whether a folder — or any folder above it in the parent chain — carries a
@@ -18,4 +18,34 @@ export function folderOrAncestorHasPassword(folder: SavedSqlFolder, allFolders: 
     current = allFolders.find((candidate) => candidate.id === parentFolderId);
   }
   return false;
+}
+
+/**
+ * Whether a file lives in a protected branch — its folder or any folder above
+ * it carries a protection password. Used by search, so this is a pure property
+ * of the stored data and deliberately ignores session unlocks.
+ */
+export function fileOrAncestorHasPassword(file: Pick<SavedSqlFile, "folderId">, allFolders: readonly SavedSqlFolder[]): boolean {
+  if (!file.folderId) return false;
+  const folder = allFolders.find((candidate) => candidate.id === file.folderId);
+  return !!folder && folderOrAncestorHasPassword(folder, allFolders);
+}
+
+/**
+ * The nearest folder in a file's parent chain that `isFolderLocked` rejects.
+ * Callers decide what "locked" means (e.g. protected and not unlocked in this
+ * session). Each folder in the chain is walked at most once, so cycles cannot
+ * hang the caller.
+ */
+export function nearestLockedFolder(folderId: string | undefined, allFolders: readonly SavedSqlFolder[], isFolderLocked: (folder: SavedSqlFolder) => boolean): SavedSqlFolder | null {
+  const visited = new Set<string>();
+  let currentId = folderId;
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    const folder = allFolders.find((candidate) => candidate.id === currentId);
+    if (!folder) return null;
+    if (isFolderLocked(folder)) return folder;
+    currentId = folder.parentFolderId;
+  }
+  return null;
 }

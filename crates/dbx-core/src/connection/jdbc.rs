@@ -601,7 +601,11 @@ async fn download_jdbc_plugin_zip_with_progress(progress: &impl Fn(AgentProgress
 /// normalization is shared with the agent-driver process matcher
 /// (`agent_service::normalized_process_path`).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn jdbc_process_uses_plugin_dir(executable: Option<&std::path::Path>, command: &[std::ffi::OsString], plugin_dir: &Path) -> bool {
+fn jdbc_process_uses_plugin_dir(
+    executable: Option<&std::path::Path>,
+    command: &[std::ffi::OsString],
+    plugin_dir: &Path,
+) -> bool {
     let normalized_dir = crate::agent_service::normalized_process_path(plugin_dir);
     if let Some(executable) = executable {
         if crate::agent_service::process_path_is_within(

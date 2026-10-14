@@ -197,6 +197,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tableColumnTemplateFields",
     "redisKeyTemplates",
     "redisDatabaseDisplayLimit",
+    "redisValuePreviewLimitKiB",
     "exportBatchSize",
     "preferredExportPath",
     "damengClientBinDir",

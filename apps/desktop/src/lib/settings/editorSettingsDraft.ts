@@ -143,6 +143,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarCopyTableNameIncludeSchema",
   "redisKeyTemplates",
   "redisDatabaseDisplayLimit",
+  "redisValuePreviewLimitKiB",
   "exportBatchSize",
   "preferredExportPath",
   "damengClientBinDir",

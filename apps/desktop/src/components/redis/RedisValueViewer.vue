@@ -72,6 +72,7 @@ import RedisHorizontalScrollbar from "@/components/redis/RedisHorizontalScrollba
 import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/lib/common/safeJsonFormat";
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
+import { redisValuePreviewLimitBytes } from "@/lib/redis/redisValuePreviewLimit";
 import { redisKeyRawToText, redisKeyTextToDisplay, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -88,6 +89,7 @@ const props = defineProps<{
   keyDisplay: string;
   keyRaw: string;
   metadata?: RedisKeyInfo | null;
+  previewLimitKiB?: number;
 }>();
 
 const redisExpiryTransport = {
@@ -119,6 +121,7 @@ const renameKeyError = ref("");
 const renameKeyInitialName = ref("");
 const renameKeyInitialRaw = ref("");
 let loadRequestId = 0;
+let loadedPreviewLimitBytes: number | undefined;
 const streamTab = ref<"entries" | "groups">("entries");
 const streamEntries = ref<RedisStreamEntry[]>([]);
 const streamEntriesCursor = ref<string | undefined>();
@@ -1770,10 +1773,10 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
   const shouldSelectDefaultMember = options.selectDefaultMember ?? true;
   const requestId = ++loadRequestId;
   if (!background) stopCollectionSearch();
-  const loadScope = { connectionId: props.connectionId, db: props.db, keyRaw: props.keyRaw };
+  const loadScope = { connectionId: props.connectionId, db: props.db, keyRaw: props.keyRaw, previewLimitBytes: redisValuePreviewLimitBytes(props.previewLimitKiB) };
   if (!background) loading.value = true;
   try {
-    let loadedValue = await api.redisGetValue(loadScope.connectionId, loadScope.db, loadScope.keyRaw);
+    let loadedValue = await api.redisGetValue(loadScope.connectionId, loadScope.db, loadScope.keyRaw, loadScope.previewLimitBytes);
     if (requestId !== loadRequestId || !redisValueViewerIsActive || (options.shouldApply && !options.shouldApply())) return false;
     if (loadedValue.data.kind === "zset" && zsetSortDir.value === "desc") {
       const sortedPage = await collectionSearchController.readPage({ ...loadScope, kind: "zset", sortDirection: "desc" }, 0, "", () => requestId === loadRequestId && (!options.shouldApply || options.shouldApply()));
@@ -1827,6 +1830,7 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
     searchLoading.value = false;
     resetValueSearch();
     data.value = loadedValue;
+    loadedPreviewLimitBytes = loadScope.previewLimitBytes;
     syncCountdownTtl(loadedValue.ttl);
     if (notifyParent) emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
@@ -2919,6 +2923,14 @@ watch(
   },
 );
 
+watch(
+  () => props.previewLimitKiB,
+  () => {
+    // Apply the new limit immediately, but never replace an edited value.
+    if (redisValueViewerIsActive && !hasUnsavedRedisDraft.value) void load();
+  },
+);
+
 watch(streamTab, (tab) => {
   if (tab === "groups" && redisKind.value === "stream") void loadStreamGroups();
 });
@@ -2961,7 +2973,7 @@ onMounted(() => {
 onActivated(() => {
   redisValueViewerIsActive = true;
   collectionSearchController.setActive(true);
-  if (!data.value && !loading.value) void load();
+  if (!loading.value && (!data.value || (loadedPreviewLimitBytes !== redisValuePreviewLimitBytes(props.previewLimitKiB) && !hasUnsavedRedisDraft.value))) void load();
   startRefreshTimers();
 });
 onDeactivated(() => {

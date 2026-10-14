@@ -9114,6 +9114,8 @@ export default withEnglishFallback({
     redisScanPageSize: "Redis 扫描数量",
     redisScanPageSizeDescription: "浏览 Redis Key 时每次 SCAN 请求的 Key 数量。",
     redisScanPageSizeOption: "{count} 个 Key",
+    redisValuePreviewLimit: "Redis 值预览上限",
+    redisValuePreviewLimitDescription: "String 和 Bitmap 值在编辑器中最多加载的大小。默认 64 KiB，可设置为 1–65536 KiB（64 MiB）。超过上限时可下载完整值；修改后无未保存编辑的详情会自动刷新。",
     redisDatabaseDisplayLimit: "侧边栏数据库列表上限",
     redisDatabaseDisplayLimitDescription: "侧边栏一次最多展示的数据库数量，超出部分可通过“加载更多”查看。",
     redisDatabaseDisplayLimitOption: "{count} 个数据库",

@@ -18,6 +18,12 @@ describe("Redis expiry Tauri API", () => {
     vi.unstubAllGlobals();
   });
 
+  it("forwards the configured Redis value preview byte limit to Tauri", async () => {
+    const { redisGetValue } = await import("@/lib/backend/tauri");
+    await redisGetValue("redis-1", 2, "a2V5", 262144);
+    expect(mocks.invoke).toHaveBeenCalledWith("redis_get_value", { connectionId: "redis-1", db: 2, keyRaw: "a2V5", previewLimitBytes: 262144 });
+  });
+
   it("invokes EXPIREAT with the Unix timestamp", async () => {
     mocks.invoke.mockResolvedValue(undefined);
     const { redisSetExpireAt } = await import("@/lib/backend/tauri");
@@ -90,6 +96,15 @@ describe("Redis expiry HTTP API", () => {
     const [url, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
     return { url, body: JSON.parse(String(init.body)) as Record<string, unknown> };
   }
+
+  it("posts the configured preview byte limit and allows older callers to omit it", async () => {
+    const fetch = stubFetch();
+    const { redisGetValue } = await import("@/lib/backend/http");
+    await redisGetValue("redis-1", 2, "a2V5", 262144);
+    expect(lastCall(fetch)).toEqual({ url: "/api/redis/get-value", body: { connectionId: "redis-1", db: 2, keyRaw: "a2V5", previewLimitBytes: 262144 } });
+    await redisGetValue("redis-1", 2, "a2V5");
+    expect(lastCall(fetch)).toEqual({ url: "/api/redis/get-value", body: { connectionId: "redis-1", db: 2, keyRaw: "a2V5" } });
+  });
 
   it("posts relative TTL, persist, and absolute expiration requests", async () => {
     const fetchMock = stubFetch();

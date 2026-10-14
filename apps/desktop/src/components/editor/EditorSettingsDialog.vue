@@ -233,6 +233,7 @@ import { formatShortcutDisplay, normalizeShortcutSearch } from "@/lib/editor/sho
 import { COLUMN_NAME_COPY_SEPARATOR_LABELS, COLUMN_NAME_COPY_SEPARATOR_OPTIONS, isColumnNameCopySeparator, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
+import { REDIS_VALUE_PREVIEW_LIMIT_KIB_MIN, REDIS_VALUE_PREVIEW_LIMIT_KIB_MAX, REDIS_VALUE_PREVIEW_LIMIT_KIB_OPTIONS } from "@/lib/redis/redisValuePreviewLimit";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { REDIS_DATABASE_DISPLAY_LIMIT_MIN, REDIS_DATABASE_DISPLAY_LIMIT_MAX, REDIS_DATABASE_DISPLAY_LIMIT_OPTIONS } from "@/lib/redis/redisDatabaseAlias";
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
@@ -945,6 +946,7 @@ const editSidebarCopyTableNameSeparator = ref<ColumnNameCopySeparator>(settingsS
 const editSidebarCopyTableNameIncludeSchema = ref(settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema);
 const editRedisKeyTemplates = ref(normalizeRedisKeyTemplates(settingsStore.editorSettings.redisKeyTemplates).join("\n"));
 const editRedisDatabaseDisplayLimit = ref(settingsStore.editorSettings.redisDatabaseDisplayLimit);
+const editRedisValuePreviewLimitKiB = ref(settingsStore.editorSettings.redisValuePreviewLimitKiB);
 const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
 const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTooltips);
@@ -1243,6 +1245,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarCopyTableNameIncludeSchema: editSidebarCopyTableNameIncludeSchema.value,
     redisKeyTemplates: normalizeRedisKeyTemplates(editRedisKeyTemplates.value),
     redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit.value,
+    redisValuePreviewLimitKiB: editRedisValuePreviewLimitKiB.value,
     exportBatchSize: editExportBatchSize.value,
     preferredExportPath: editPreferredExportPath.value,
     damengClientBinDir: editDamengClientBinDir.value,
@@ -1928,6 +1931,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarCopyTableNameIncludeSchema.value = settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema;
   editRedisKeyTemplates.value = normalizeRedisKeyTemplates(settingsStore.editorSettings.redisKeyTemplates).join("\n");
   editRedisDatabaseDisplayLimit.value = settingsStore.editorSettings.redisDatabaseDisplayLimit;
+  editRedisValuePreviewLimitKiB.value = settingsStore.editorSettings.redisValuePreviewLimitKiB;
   editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
   editSidebarShowTooltips.value = settingsStore.editorSettings.sidebarShowTooltips;
@@ -2097,6 +2101,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarCopyTableNameIncludeSchema: editSidebarCopyTableNameIncludeSchema,
   redisKeyTemplates: editRedisKeyTemplates,
   redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit,
+  redisValuePreviewLimitKiB: editRedisValuePreviewLimitKiB,
   exportBatchSize: editExportBatchSize,
   preferredExportPath: editPreferredExportPath,
   damengClientBinDir: editDamengClientBinDir,
@@ -2466,6 +2471,7 @@ async function persistSettings() {
     // result back into the input so an out-of-range draft doesn't keep
     // reporting unsaved changes after a successful apply.
     editRedisDatabaseDisplayLimit.value = settingsStore.editorSettings.redisDatabaseDisplayLimit;
+    editRedisValuePreviewLimitKiB.value = settingsStore.editorSettings.redisValuePreviewLimitKiB;
     editPreferredExportPath.value = settingsStore.editorSettings.preferredExportPath;
     editDamengClientBinDir.value = settingsStore.editorSettings.damengClientBinDir;
     // 同理：落盘口径可能改写键位（跨平台默认键、保留键回退），草稿要跟着回到
@@ -2700,6 +2706,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
     editRedisKeyTemplates.value = normalizeRedisKeyTemplates(DEFAULT_EDITOR_SETTINGS.redisKeyTemplates).join("\n");
     editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
+    editRedisValuePreviewLimitKiB.value = DEFAULT_EDITOR_SETTINGS.redisValuePreviewLimitKiB;
     editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
     editPreferredExportPath.value = DEFAULT_EDITOR_SETTINGS.preferredExportPath;
     editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
@@ -2868,6 +2875,7 @@ function resetAllDefaults() {
   editSidebarCopyTableNameIncludeSchema.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameIncludeSchema;
   editRedisKeyTemplates.value = normalizeRedisKeyTemplates(DEFAULT_EDITOR_SETTINGS.redisKeyTemplates).join("\n");
   editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
+  editRedisValuePreviewLimitKiB.value = DEFAULT_EDITOR_SETTINGS.redisValuePreviewLimitKiB;
   editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
   editPreferredExportPath.value = DEFAULT_EDITOR_SETTINGS.preferredExportPath;
   editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
@@ -9501,6 +9509,24 @@ onUnmounted(() => {
                   <p class="text-xs text-muted-foreground">
                     {{ t("settings.redisKeyTemplatesDescription") }}
                   </p>
+                </div>
+                <div id="redis-value-preview-limit" class="space-y-2">
+                  <Label for="redis-value-preview-limit-input">{{ t("settings.redisValuePreviewLimit") }}</Label>
+                  <div class="flex items-center gap-3">
+                    <Input
+                      id="redis-value-preview-limit-input"
+                      v-model.number="editRedisValuePreviewLimitKiB"
+                      type="number"
+                      list="redis-value-preview-limits"
+                      :min="REDIS_VALUE_PREVIEW_LIMIT_KIB_MIN"
+                      :max="REDIS_VALUE_PREVIEW_LIMIT_KIB_MAX"
+                      step="1"
+                      class="settings-export-number-input h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                    <span class="text-xs text-muted-foreground">KiB</span>
+                    <datalist id="redis-value-preview-limits"><option v-for="size in REDIS_VALUE_PREVIEW_LIMIT_KIB_OPTIONS" :key="size" :value="size" /></datalist>
+                  </div>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.redisValuePreviewLimitDescription") }}</p>
                 </div>
                 <div class="space-y-2">
                   <Label for="redis-database-display-limit-input">{{ t("settings.redisDatabaseDisplayLimit") }}</Label>

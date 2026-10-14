@@ -235,3 +235,31 @@ describe("EditorSettingsDialog row-limit apply blocker", { timeout: 30_000 }, ()
     expect(apply.disabled, "the draft is the saved baseline again").toBe(true);
   });
 });
+
+describe("EditorSettingsDialog Redis value preview limit", { timeout: 30_000 }, () => {
+  it("stages the input and persists the configured KiB value on Apply", async () => {
+    const host = await mountDataTab();
+    const input = host.querySelector<HTMLInputElement>("#redis-value-preview-limit-input")!;
+    expect(input.value).toBe("64");
+    expect(input.min).toBe("1");
+    expect(input.max).toBe("65536");
+    setInputValue(input, "256");
+    await flushAsyncUpdates();
+    expect(hoisted.updateEditorSettings).not.toHaveBeenCalled();
+    button(host, "settings.apply").click();
+    await flushAsyncUpdates();
+    expect(hoisted.updateEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ redisValuePreviewLimitKiB: 256 }));
+    expect(hoisted.persistEditorSettings).toHaveBeenCalled();
+    expect(button(host, "settings.apply").disabled).toBe(true);
+  });
+
+  it("restores the default preview limit in the settings draft", async () => {
+    hoisted.editorSettings.redisValuePreviewLimitKiB = 256;
+    const host = await mountDataTab();
+    expect(host.querySelector<HTMLInputElement>("#redis-value-preview-limit-input")!.value).toBe("256");
+    button(host, "settings.resetDefaults").click();
+    await flushAsyncUpdates();
+    expect(host.querySelector<HTMLInputElement>("#redis-value-preview-limit-input")!.value).toBe("64");
+    expect(hoisted.updateEditorSettings).not.toHaveBeenCalled();
+  });
+});

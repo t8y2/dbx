@@ -7995,6 +7995,8 @@ export default withEnglishFallback({
     redisScanPageSize: "Redis 스캔 개수",
     redisScanPageSizeDescription: "키를 탐색할 때 Redis SCAN 페이지당 요청하는 키 수입니다.",
     redisScanPageSizeOption: "키 {count}개",
+    redisValuePreviewLimit: "Redis 값 미리보기 한도",
+    redisValuePreviewLimitDescription: "편집기에 불러오는 String 및 Bitmap 값의 최대 크기입니다. 기본값: 64 KiB, 범위: 1–65536 KiB(64 MiB). 더 큰 값은 전체를 다운로드할 수 있습니다. 변경하면 저장하지 않은 편집이 없는 열린 상세 정보가 새로 고쳐집니다.",
     redisDatabaseDisplayLimit: "사이드바 데이터베이스 목록 제한",
     redisDatabaseDisplayLimitDescription: '사이드바에 한 번에 표시할 최대 데이터베이스 수입니다. 나머지는 "더 불러오기"로 볼 수 있습니다.',
     redisDatabaseDisplayLimitOption: "데이터베이스 {count}개",

@@ -1,6 +1,7 @@
 use super::dialect::{is_oracle_like, StructureDialect};
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
 use super::util::{clean, format_default_for_sql, normalize_default, quote_ident, quote_string};
+use crate::models::connection::DatabaseType;
 
 /// Drops the `CHARACTER SET` / `COLLATE` inputs of MySQL columns that merely
 /// inherit the table's default collation, so the generated DDL does not spell
@@ -36,8 +37,12 @@ pub(super) fn strip_inherited_mysql_column_charsets(options: &mut TableStructure
     }
 }
 
-pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStructureColumn) -> String {
-    let data_type = column_data_type(dialect, column);
+pub(super) fn column_definition(
+    dialect: StructureDialect,
+    column: &EditableStructureColumn,
+    database_type: Option<DatabaseType>,
+) -> String {
+    let data_type = column_data_type(dialect, column, database_type);
     let mut parts = vec![quote_ident(dialect, &column.name), data_type];
     // QuestDB SQL Syntax: ```ALTER TABLE tableName ADD COLUMN [IF NOT EXISTS] columnName typeDef```
     if dialect == StructureDialect::Questdb {
@@ -331,7 +336,18 @@ pub(super) fn is_dameng_identity_compatible_type(data_type: &str) -> bool {
     }
 }
 
-pub(super) fn column_data_type(dialect: StructureDialect, column: &EditableStructureColumn) -> String {
+pub(super) fn column_data_type(
+    dialect: StructureDialect,
+    column: &EditableStructureColumn,
+    database_type: Option<DatabaseType>,
+) -> String {
+    if matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) {
+        let data_type = column.data_type.trim();
+        let base_type = data_type.split('(').next().unwrap_or(data_type).trim();
+        if base_type.eq_ignore_ascii_case("float") {
+            return data_type.to_string();
+        }
+    }
     if dialect == StructureDialect::ClickHouse {
         return clickhouse_column_type(column);
     }

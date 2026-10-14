@@ -64,7 +64,7 @@ test("object source identity and editability are enforced in queryStore", () => 
 
 test("successful tree table paste consumes only the clipboard used to start it", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
-  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");
+  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTableImpl");
 
   assert.match(confirmPasteTableBody, /const clipboardAtPasteStart = connectionStore\.treeClipboard/);
   assert.match(confirmPasteTableBody, /if \(pasteFailCount === 0\)/);
@@ -74,7 +74,7 @@ test("successful tree table paste consumes only the clipboard used to start it",
 
 test("tree table paste keeps the clipboard when production confirmation is cancelled", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
-  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");
+  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTableImpl");
 
   assert.match(confirmPasteTableBody, /const structureExecuted = await executeTreeNodeSqlWithProductionGuard[\s\S]*?if \(!structureExecuted\) \{[\s\S]*?pasteCancelled = true;[\s\S]*?break;/);
   assert.match(confirmPasteTableBody, /const dataExecuted = await executeTreeNodeSqlWithProductionGuard[\s\S]*?if \(!dataExecuted\) \{[\s\S]*?pasteCancelled = true;[\s\S]*?break;/);
@@ -84,7 +84,7 @@ test("tree table paste keeps the clipboard when production confirmation is cance
 
 test("tree table paste consumes the clipboard even if only the object-list refresh fails", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
-  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");
+  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTableImpl");
 
   assert.match(confirmPasteTableBody, /let pasteFailCount = 0/);
   assert.match(confirmPasteTableBody, /let refreshFailCount = 0/);

@@ -1889,6 +1889,9 @@ export interface TableStructureEditorDraft {
   mysqlTableEngine?: string;
   originalMysqlTableEngine?: string;
   physicalOptions?: import("@/lib/table/tablePhysicalOptions").TablePhysicalOptionsDraft;
+  starrocksLayoutDraft?: import("@/lib/table/starrocksAlterOptions").StarRocksLayoutDraft;
+  starrocksSortColumns?: string[];
+  starrocksPhysicalOptions?: import("@/lib/table/starrocksPhysicalOptions").StarRocksPhysicalOptionsDraft;
   tableOwner?: string;
   originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];

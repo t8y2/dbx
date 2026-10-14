@@ -46,7 +46,6 @@ pub fn allowed_command(command: &str) -> bool {
             | "get_platform"
             | "load_app_appearance_settings"
             | "update_app_appearance_settings"
-            | "set_macos_app_icon_appearance"
             | "set_app_locale"
     )
 }
@@ -69,7 +68,14 @@ mod tests {
     use super::*;
     #[test]
     fn gate_denies_business_commands() {
-        for command in ["load_connections", "webdav_sync_upload", "load_ai_config", "plugin_invoke", "migration_fake"] {
+        for command in [
+            "load_connections",
+            "webdav_sync_upload",
+            "load_ai_config",
+            "plugin_invoke",
+            "migration_fake",
+            "set_macos_app_icon_appearance",
+        ] {
             assert!(!allowed_command(command));
         }
         assert!(allowed_command("migration_start"));

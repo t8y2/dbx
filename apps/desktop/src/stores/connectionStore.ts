@@ -1170,11 +1170,16 @@ export const useConnectionStore = defineStore("connection", () => {
     return bounded;
   }
 
-  function startDisconnectRequest(connectionId: string, metadataDrain?: Promise<void>): Promise<void> {
+  function startDisconnectRequest(connectionId: string, metadataDrain?: Promise<void>, expectedConfigFingerprint?: string): Promise<void> {
     const clientAttempt = activeLocalConnectionAttempts.get(connectionId) ?? successfulLocalConnectionAttempts.get(connectionId);
+    const disconnectIfCurrent = () => {
+      const config = getConfig(connectionId);
+      if (expectedConfigFingerprint && (!config || connectionConfigFingerprint(config) !== expectedConfigFingerprint)) return;
+      return api.disconnectDb(connectionId, clientAttempt);
+    };
     let request: Promise<void>;
     try {
-      request = metadataDrain ? metadataDrain.then(() => api.disconnectDb(connectionId, clientAttempt)) : api.disconnectDb(connectionId, clientAttempt);
+      request = metadataDrain ? metadataDrain.then(disconnectIfCurrent) : Promise.resolve(disconnectIfCurrent());
     } catch (error) {
       request = Promise.reject(error);
     }
@@ -4865,15 +4870,23 @@ export const useConnectionStore = defineStore("connection", () => {
    * 「关闭连接」。系统侧释放（插件页签关闭后回收连接、改密码后的退役、删除连接）必须
    * 传 false，否则后续用户重新打开那个页签时会因为标记而连不上（见 `userClosedConnectionIds`）。
    */
-  async function disconnect(connectionId: string, options: { skipTabHandling?: boolean; markClosedByUser?: boolean } = {}) {
+  async function disconnect(connectionId: string, options: { skipTabHandling?: boolean; markClosedByUser?: boolean; expectedConfigFingerprint?: string } = {}) {
+    const isExpectedConfigCurrent = () => {
+      const config = getConfig(connectionId);
+      return !options.expectedConfigFingerprint || (!!config && connectionConfigFingerprint(config) === options.expectedConfigFingerprint);
+    };
+    if (!isExpectedConfigCurrent()) return;
     const metadataDrain = cancelSchemaDiffTasksForConnection(connectionId, new Error(i18n.global.t("schemaDiff.connectionDisconnected")));
     const stateRevision = bumpConnectionStateRevision(connectionId);
     // 先写标记再清理：清理过程中存活下来的页签（未保存草稿、keep-tabs 模式）一旦被
     // 重新挂载，也不该在这一刻把连接连回来。
     if (options.markClosedByUser !== false) markConnectionClosedByUser(connectionId);
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
-    if (hasSqlServerActivityTraceForConnection(connectionId)) await disposeSqlServerActivityTracesForConnection(connectionId);
-    const disconnectRequest = startDisconnectRequest(connectionId, metadataDrain);
+    if (hasSqlServerActivityTraceForConnection(connectionId)) {
+      await disposeSqlServerActivityTracesForConnection(connectionId);
+      if (!isExpectedConfigCurrent()) return;
+    }
+    const disconnectRequest = startDisconnectRequest(connectionId, metadataDrain, options.expectedConfigFingerprint);
     cancelLocalConnectionAttempt(connectionId);
 
     connectedIds.value.delete(connectionId);
@@ -4903,7 +4916,9 @@ export const useConnectionStore = defineStore("connection", () => {
     invalidateCompletionCache(connectionId);
     invalidateObjectBrowserRowsCache({ connectionId });
     await invalidateSidebarTableSearchIndexesForConnection(connectionId);
+    if (!isExpectedConfigCurrent()) return;
     const { useQueryStore } = await import("@/stores/queryStore");
+    if (!isExpectedConfigCurrent()) return;
     const queryStore = useQueryStore();
     // 断开连接是明确的元数据新鲜度边界：数据标签页保留展示/编辑状态，但
     // 其 tableMeta 不得再被视为 warm cache（issue #6623——reconnect 后重开
@@ -4923,10 +4938,12 @@ export const useConnectionStore = defineStore("connection", () => {
           break;
       }
     }
+    if (!isExpectedConfigCurrent()) return;
     // Tab handling is synchronous in memory, but persistence is debounced. Flush
     // the scoped tab state before disconnect returns so a quick reconnect/restart
     // cannot restore tabs that the selected policy already removed.
     await queryStore.flushPendingPersist().catch(() => undefined);
+    if (!isExpectedConfigCurrent()) return;
     await disconnectRequest;
     if (isCurrentConnectionStateRevision(connectionId, stateRevision)) {
       clearConnectionError(connectionId);
@@ -4946,21 +4963,40 @@ export const useConnectionStore = defineStore("connection", () => {
     await api.forgetSessionCredential(connectionId);
   }
 
-  async function retirePasswordAfterChange(connectionId: string) {
+  async function retirePasswordAfterChange(connectionId: string, expectedConfigFingerprint?: string): Promise<{ status: "retired"; fingerprint: string } | { status: "skipped" }> {
+    const originalConfig = getConfig(connectionId);
+    if (expectedConfigFingerprint && (!originalConfig || connectionConfigFingerprint(originalConfig) !== expectedConfigFingerprint)) return { status: "skipped" };
     passwordChangeReconnectRequired.set(connectionId, "retiring");
     connections.value = connections.value.map((config) => (config.id === connectionId ? { ...config, password: "", save_password: false } : config));
+    const retiredConfigFingerprint = connectionConfigFingerprint(getConfig(connectionId)!);
+    const isRetiredConfigCurrent = () => {
+      const current = getConfig(connectionId);
+      return !expectedConfigFingerprint || (!!current && connectionConfigFingerprint(current) === retiredConfigFingerprint);
+    };
+    const stopRetirementForChangedConfig = () => {
+      if (passwordChangeReconnectRequired.get(connectionId) === "retiring") passwordChangeReconnectRequired.delete(connectionId);
+      return { status: "skipped" as const };
+    };
     // 改密码后的退役是系统侧断开：用户随后会显式重连，写"用户已关闭"标记只会让
     // 页签界面在重连期间多停一档空态。
-    const results = await Promise.allSettled([disconnect(connectionId, { markClosedByUser: false }), persistConnections()]);
+    const results = await Promise.allSettled([disconnect(connectionId, { markClosedByUser: false, expectedConfigFingerprint: retiredConfigFingerprint }), persistConnections()]);
+    if (!isRetiredConfigCurrent()) return stopRetirementForChangedConfig();
     try {
-      if (await api.sessionCredentialStatus(connectionId)) await api.forgetSessionCredential(connectionId);
+      const hasCredential = await api.sessionCredentialStatus(connectionId);
+      if (!isRetiredConfigCurrent()) return stopRetirementForChangedConfig();
+      if (hasCredential) {
+        await api.forgetSessionCredential(connectionId);
+        if (!isRetiredConfigCurrent()) return stopRetirementForChangedConfig();
+      }
       if (results.some((result) => result.status === "rejected")) throw new Error();
       passwordChangeReconnectRequired.set(connectionId, "ready");
       setConnectionError(connectionId, i18n.global.t("userAdmin.passwordChangedReconnect"));
     } catch {
+      if (!isRetiredConfigCurrent()) return stopRetirementForChangedConfig();
       setConnectionError(connectionId, i18n.global.t("userAdmin.passwordChangedCleanupFailed"));
       throw new Error(i18n.global.t("userAdmin.passwordChangedCleanupFailed"));
     }
+    return { status: "retired", fingerprint: retiredConfigFingerprint };
   }
 
   async function closeDatabaseConnection(connectionId: string, database: string) {
@@ -9256,6 +9292,15 @@ export const useConnectionStore = defineStore("connection", () => {
     return deduped;
   }
 
+  function normalizeCompletionIdentifier(name?: string | null): string {
+    if (!name) return "";
+    const trimmed = name.trim();
+    if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("`") && trimmed.endsWith("`")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      return trimmed.slice(1, -1);
+    }
+    return trimmed.toLowerCase();
+  }
+
   async function listCompletionObjects(
     connectionId: string,
     database: string,
@@ -9302,7 +9347,8 @@ export const useConnectionStore = defineStore("connection", () => {
               if (databaseType === "oceanbase-oracle" && parentName) throw error;
               if (databaseType === "oceanbase-oracle" && !/does not support filtered routine completion|unknown method|method not found|not supported/i.test(String(error))) throw error;
               if (objectKinds.length === 1 && objectKinds[0] === "sequence") {
-                loadedObjects = [];
+                const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
+                loadedObjects = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object?.type === "sequence"));
               } else {
                 const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
                 loadedObjects = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
@@ -9328,8 +9374,8 @@ export const useConnectionStore = defineStore("connection", () => {
           if (!objectKinds.includes("sequence")) return false;
         } else if (object.type !== "procedure" && object.type !== "function") return false;
         else if (!objectKinds.includes("routine") && !objectKinds.includes(object.type)) return false;
-        if (schema && !globalSearch && object.schema !== schema) return false;
-        if (parentName && object.parentName !== parentName) return false;
+        if (schema && !globalSearch && (!object.schema || normalizeCompletionIdentifier(object.schema) !== normalizeCompletionIdentifier(schema))) return false;
+        if (parentName && (!object.parentName || normalizeCompletionIdentifier(object.parentName) !== normalizeCompletionIdentifier(parentName))) return false;
         if (caseSensitive) return object.name.includes(filter.trim());
       }
       return !normalizedFilter || fuzzyCompletionObjectMatch(object, normalizedFilter);

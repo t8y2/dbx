@@ -4664,7 +4664,7 @@ test("closing a database flushes only that database's released tabs before resto
   }
 });
 
-test("starting a new query clears the previous result payload immediately", async () => {
+test("keeps the previous result payload visible while a new query is running", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -4708,7 +4708,7 @@ test("starting a new query clears the previous result payload immediately", asyn
 
   try {
     const execution = store.executeTabSql(tabId, "select 1");
-    assert.equal(tab.result, undefined);
+    assert.equal(tab.result?.columns[0], "old");
     assert.equal(tab.results, undefined);
     await execution;
     assert.deepEqual(tab.result?.columns, ["new"]);

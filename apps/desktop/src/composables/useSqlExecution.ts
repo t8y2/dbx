@@ -468,6 +468,13 @@ export function useSqlExecution(deps: {
       if (executionTabStillActive && deps.activeOutputView.value !== "messages") {
         deps.activeOutputView.value = statementCount === 1 ? defaultViewForResult(tab.result) : "summary";
       }
+    } else if (executionTabStillActive && deps.activeOutputView.value === "messages" && ((tab.result?.columns.length ?? 0) > 0 || tab.results?.some((result) => result.columns.length > 0))) {
+      // A notice can arrive before the statement produces its rows, so the live-output watcher
+      // in ContentArea advances to Messages while it cannot yet know that data will follow.
+      // Once the run finishes with a real result set, show the data again; Messages stays one
+      // click away in the view switcher. Message-only runs and SQL Server PRINT batches are
+      // handled by the branches above and keep their existing behavior.
+      deps.activeOutputView.value = "result";
     }
     const elapsed = Date.now() - start;
     const failure = firstQueryExecutionError(tab);

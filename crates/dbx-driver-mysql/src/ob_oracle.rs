@@ -102,8 +102,11 @@ fn list_objects_sql(schema: &str) -> String {
          FROM ALL_PROCEDURES \
          WHERE OWNER = {s} AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') AND PROCEDURE_NAME IS NULL \
          UNION ALL \
+         SELECT SEQUENCE_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, SEQUENCE_OWNER AS OBJECT_SCHEMA, 4 AS SORT_ORDER \
+         FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER = {s} \
+         UNION ALL \
          SELECT OBJECT_NAME, CASE OBJECT_TYPE WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE OBJECT_TYPE END AS OBJECT_TYPE, \
-                OWNER AS OBJECT_SCHEMA, CASE WHEN OBJECT_TYPE = 'PACKAGE' THEN 4 ELSE 5 END AS SORT_ORDER \
+                OWNER AS OBJECT_SCHEMA, CASE WHEN OBJECT_TYPE = 'PACKAGE' THEN 5 ELSE 6 END AS SORT_ORDER \
          FROM ALL_OBJECTS \
          WHERE OWNER = {s} AND OBJECT_TYPE IN ('PACKAGE', 'PACKAGE BODY') \
          ORDER BY SORT_ORDER, OBJECT_NAME",
@@ -349,6 +352,8 @@ mod tests {
         assert!(sql.contains("ALL_PROCEDURES"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
+        assert!(sql.contains("ALL_SEQUENCES"));
+        assert!(sql.contains("'SEQUENCE'"));
         assert!(sql.contains("ALL_OBJECTS"));
         assert!(sql.contains("'PACKAGE'"));
         assert!(sql.contains("'PACKAGE BODY'"));

@@ -37,7 +37,8 @@ pub(super) fn build_table_comment_sql(options: &TableStructureSqlOptions, warnin
         | StructureDialect::Oracle
         | StructureDialect::Dameng
         | StructureDialect::Oscar
-        | StructureDialect::H2 => {
+        | StructureDialect::H2
+        | StructureDialect::SapHana => {
             vec![format!("COMMENT ON TABLE {table} IS {quoted};")]
         }
         StructureDialect::ClickHouse => {

@@ -678,6 +678,46 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(`${cases[0]}\nSELECT 1 FROM dual;`, "oracle"))).toEqual([cases[0], "SELECT 1 FROM dual"]);
   });
 
+  it("keeps Dameng WITH FUNCTION declaration and its main query together (#11275)", () => {
+    const sql = `WITH FUNCTION f RETURN NUMBER IS
+    v_start TIMESTAMP := SYSTIMESTAMP;
+    v_delay_seconds NUMBER := MOD(TO_NUMBER(TO_CHAR(SYSDATE, 'SSSSS')), 10) + 1;
+BEGIN
+    WHILE (SYSTIMESTAMP - v_start) < (v_delay_seconds * INTERVAL '1' SECOND) LOOP
+        NULL;
+    END LOOP;
+    RETURN 1;
+END;
+SELECT f FROM dual;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "dameng"))).toEqual([sql]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "oracle"))).toEqual([sql]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${sql}\nSELECT 2 FROM dual;`, "dameng"))).toEqual([sql, "SELECT 2 FROM dual"]);
+    // The statement after the WITH query keeps splitting at its own terminator.
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${sql}\nSELECT 2 FROM dual;`, "oracle"))).toEqual([sql, "SELECT 2 FROM dual"]);
+    // A plain CTE without PL/SQL declarations is ordinary SQL: the trailing `;` stays a delimiter.
+    expect(rangeSqlTexts(splitSqlStatementRanges("WITH t AS (SELECT 1 FROM dual) SELECT * FROM t;", "dameng"))).toEqual(["WITH t AS (SELECT 1 FROM dual) SELECT * FROM t"]);
+    // Cursor anywhere inside the declaration section targets the whole statement.
+    const range = statementRangeAtCursor(sql, sql.indexOf("SYSTIMESTAMP;"), "dameng");
+    expect(range?.sql).toBe(sql);
+  });
+
+  it("keeps multiple WITH FUNCTION declarations in one statement until the main query (#11275)", () => {
+    const sql = `WITH FUNCTION f1 RETURN NUMBER IS
+BEGIN
+  RETURN 1;
+END;
+FUNCTION f2 RETURN NUMBER IS
+  v NUMBER := 0;
+BEGIN
+  v := 2;
+  RETURN v;
+END;
+SELECT f1 + f2 FROM dual;`;
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "dameng"))).toEqual([sql]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${sql}\nSELECT 3 FROM dual;`, "dameng"))).toEqual([sql, "SELECT 3 FROM dual"]);
+  });
+
   it("keeps ArgoDB PL/SQL procedure bodies together (frontend splitter, mirrors backend argo_split tests)", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
     expect(hasMultipleExecutionTargets(argoProcedureFixture, "argo")).toBe(false);

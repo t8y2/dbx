@@ -1161,6 +1161,8 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         messages_json TEXT NOT NULL DEFAULT '[]',
         queued_input TEXT,
         plugin_context_json TEXT,
+        assistant_mode TEXT,
+        assistant_action TEXT,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
@@ -3243,6 +3245,12 @@ fn ensure_ai_conversations_columns_sync(conn: &Connection) -> Result<(), String>
         // [`backfill_ai_conversation_connections`].
         ("connection_id", "TEXT NOT NULL DEFAULT ''"),
         ("schema_name", "TEXT"),
+        // Per-conversation picker selection (#12075). Plain TEXT and nullable:
+        // a legacy row keeps NULL, which the frontend reads as "no recorded
+        // choice" and resolves through the plugin context and then the settings
+        // default.
+        ("assistant_mode", "TEXT"),
+        ("assistant_action", "TEXT"),
     ];
 
     ensure_table_columns(conn, "ai_conversations", COLUMNS)
@@ -6134,8 +6142,8 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations \
-                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                    title = excluded.title, \
                    connection_name = excluded.connection_name, \
@@ -6145,7 +6153,8 @@ impl Storage {
                    messages_json = excluded.messages_json, \
                    queued_input = excluded.queued_input, \
                    created_at = excluded.created_at, \
-                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json",
+                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json, \
+                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action",
                 params![
                     conv.id,
                     conv.title,
@@ -6157,7 +6166,9 @@ impl Storage {
                     conv.queued_input,
                     conv.created_at,
                     conv.updated_at,
-                    conv.plugin_context.map(|value| value.to_string())
+                    conv.plugin_context.map(|value| value.to_string()),
+                    conv.assistant_mode,
+                    conv.assistant_action
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -6172,7 +6183,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name \
+                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name, assistant_mode, assistant_action \
                      FROM ai_conversations ORDER BY updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
@@ -6193,6 +6204,8 @@ impl Storage {
                         plugin_context: row.get::<_, Option<String>>(8)?.map(|json| serde_json::from_str(&json)).transpose().map_err(map_from_sql_err)?,
                         connection_id: row.get(9)?,
                         schema: row.get(10)?,
+                        assistant_mode: row.get(11)?,
+                        assistant_action: row.get(12)?,
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -6259,8 +6272,8 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations
-                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    connection_name = excluded.connection_name,
@@ -6270,7 +6283,8 @@ impl Storage {
                    messages_json = excluded.messages_json,
                    queued_input = excluded.queued_input,
                    created_at = excluded.created_at,
-                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json",
+                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json,
+                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action",
                 params![
                     conv.id,
                     conv.title,
@@ -6282,7 +6296,9 @@ impl Storage {
                     conv.queued_input,
                     conv.created_at,
                     conv.updated_at,
-                    conv.plugin_context.map(|value| value.to_string())
+                    conv.plugin_context.map(|value| value.to_string()),
+                    conv.assistant_mode,
+                    conv.assistant_action
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -10687,6 +10703,8 @@ mod tests {
                 loaded_skill_ids: None,
             }],
             queued_input: None,
+            assistant_mode: None,
+            assistant_action: None,
             created_at: updated_at.to_string(),
             updated_at: updated_at.to_string(),
         }
@@ -11001,6 +11019,84 @@ mod tests {
         assert_eq!(source.schema.as_deref(), Some("legacy"));
         let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"assistant","content":"old reply"}"#).unwrap();
         assert!(legacy.source_binding.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #12075 / AC14 — a database created before the picker columns existed must
+    /// upgrade in place, and both conversation upsert paths must carry the new
+    /// values. Tests the real migration (`ensure_ai_conversations_columns_sync`),
+    /// not just serde: the columns have to exist before the INSERT can name them.
+    #[tokio::test]
+    async fn ai_conversation_upgrades_legacy_schema_and_roundtrips_picker_selection() {
+        let path = temp_db_path("ai-conversation-picker-selection");
+        // Pre-#12075 schema: none of the later columns exist yet.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_conversations (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', connection_name TEXT NOT NULL DEFAULT '',
+            database TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+        ); INSERT INTO ai_conversations (id, title) VALUES ('legacy', 'SQL conversation');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        // The legacy row loads with no recorded picker selection — the frontend's
+        // R9 fallback (settings default + default action) is what fills the UI.
+        let legacy = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(legacy[0].title, "SQL conversation");
+        assert!(legacy[0].assistant_mode.is_none());
+        assert!(legacy[0].assistant_action.is_none());
+
+        // Path 1: the plain conversation upsert.
+        let mut conversation = ai_conversation("picker-conv", "0001");
+        conversation.assistant_mode = Some("agent".to_string());
+        conversation.assistant_action = Some("auto".to_string());
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "picker-conv").unwrap();
+        assert_eq!(saved.assistant_mode.as_deref(), Some("agent"));
+        // `auto` is the recorded picker entry, not a routed concrete action (R8).
+        assert_eq!(saved.assistant_action.as_deref(), Some("auto"));
+
+        // Path 2: the conversation+run upsert used by background runs.
+        let mut run_conversation = ai_conversation("run-conv", "0002");
+        run_conversation.assistant_mode = Some("ask".to_string());
+        run_conversation.assistant_action = Some("optimize".to_string());
+        let run = ai_run("run-1", "run-conv", AiRunStatus::Running, "0002");
+        storage.save_ai_run_state(&run_conversation, &run).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "run-conv").unwrap();
+        assert_eq!(saved.assistant_mode.as_deref(), Some("ask"));
+        assert_eq!(saved.assistant_action.as_deref(), Some("optimize"));
+        // The legacy row is still there, still without a recorded selection.
+        let legacy = loaded.iter().find(|item| item.id == "legacy").unwrap();
+        assert!(legacy.assistant_mode.is_none());
+        assert!(legacy.assistant_action.is_none());
+
+        // Clearing the picker selection (a future "forget the choice" path) writes
+        // NULL rather than a stale value.
+        conversation.assistant_mode = None;
+        conversation.assistant_action = None;
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "picker-conv").unwrap();
+        assert!(saved.assistant_mode.is_none());
+        assert!(saved.assistant_action.is_none());
+
+        // A record written before the fields existed still deserializes; the JSON
+        // boundary is what the cloud-sync / web transports carry.
+        let legacy_json: AiConversation = serde_json::from_str(r#"{"id":"old","title":"Old","connectionName":"","connectionId":"","database":"","messages":[],"createdAt":"0000","updatedAt":"0000"}"#).unwrap();
+        assert!(legacy_json.assistant_mode.is_none());
+        assert!(legacy_json.assistant_action.is_none());
+        // `None` is skipped entirely, so an old reader sees the record it always saw.
+        let serialized = serde_json::to_value(&legacy_json).unwrap();
+        assert!(serialized.get("assistantMode").is_none());
+        assert!(serialized.get("assistantAction").is_none());
 
         let _ = std::fs::remove_file(path);
     }

@@ -284,6 +284,13 @@ describe("damengDuplicateTableCreateOptions", () => {
 });
 
 describe("buildDuplicateTableStructurePlan", () => {
+  it("refuses OceanBase structure cloning when source column metadata cannot be read", async () => {
+    apiMock.getColumns.mockRejectedValueOnce(new Error("source columns inaccessible"));
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue('CREATE TABLE "APP"."COPY" AS SELECT * FROM "APP"."SOURCE" WHERE 1=0;');
+    await expect(buildDuplicateTableStructurePlan({ connectionId: "ob-clone", database: "APP", databaseType: "oceanbase-oracle", schema: "APP", sourceName: "SOURCE", targetName: "COPY" })).rejects.toThrow("source columns inaccessible");
+    expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
+  });
+
   it("loads Oracle metadata through the list APIs and builds a script", async () => {
     const columns = [{ name: "ID", data_type: "NUMBER", is_nullable: false, column_default: "42", is_primary_key: true }];
     const indexes = [{ name: "IDX_ORDERS_ID", columns: ["ID"], is_unique: false, is_primary: false }];

@@ -507,6 +507,7 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.pasteSidebarSelection, "Mod+V");
   assert.equal(settings.shortcuts.editSidebarConnection, "Mod+E");
   assert.equal(settings.shortcuts.disconnectSidebarConnection, "Shift+Mod+E");
+  assert.equal(settings.shortcuts.editSidebarTableStructure, "F4");
 });
 
 test("keeps saved shortcut overrides", () => {

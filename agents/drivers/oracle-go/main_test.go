@@ -1109,8 +1109,8 @@ func TestListForeignKeysAndTriggersPreserveQuotedCloneTableName(t *testing.T) {
 		{
 			queryContains: "FROM ALL_TRIGGERS",
 			args:          []driver.Value{schema, table},
-			columns:       []string{"TRIGGER_NAME", "TRIGGERING_EVENT", "TRIGGER_TYPE", "DESCRIPTION", "LINE", "TEXT"},
-			rows:          [][]driver.Value{{"ORDERS_copy_TRG1", "INSERT", "BEFORE EACH ROW", nil, nil, nil}},
+			columns:       []string{"TRIGGER_NAME", "TRIGGERING_EVENT", "TRIGGER_TYPE", "DESCRIPTION", "STATUS", "WHEN_CLAUSE", "REFERENCING_NAMES", "LINE", "TEXT"},
+			rows:          [][]driver.Value{{"ORDERS_copy_TRG1", "INSERT", "BEFORE EACH ROW", nil, "DISABLED", nil, nil, nil, nil}},
 		},
 	})
 	s := newServer()
@@ -1129,6 +1129,9 @@ func TestListForeignKeysAndTriggersPreserveQuotedCloneTableName(t *testing.T) {
 	}
 	if len(triggers) != 1 || triggers[0].Name != "ORDERS_copy_TRG1" {
 		t.Fatalf("listTriggers(%q) = %#v, want quoted clone trigger", table, triggers)
+	}
+	if triggers[0].Enabled == nil || *triggers[0].Enabled {
+		t.Fatalf("listTriggers(%q) enabled = %v, want disabled from ALL_TRIGGERS.STATUS", table, triggers[0].Enabled)
 	}
 	if scripted.next != len(scripted.steps) {
 		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
@@ -1311,6 +1314,7 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 	precision := 10
 	scale := 2
 	zeroScale := 0
+	negativeScale := -2
 	byteUnit := "B"
 	charUnit := "C"
 
@@ -1325,6 +1329,17 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 		{name: "national character type ignores unit", column: columnInfo{DataType: "NVARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &charUnit}, want: "NVARCHAR2(64)"},
 		{name: "number scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &scale}, want: "NUMBER(10,2)"},
 		{name: "number zero scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &zeroScale}, want: "NUMBER(10)"},
+		{name: "number star scale", column: columnInfo{DataType: "NUMBER", NumericScale: &scale}, want: "NUMBER(*,2)"},
+		{name: "number star negative scale", column: columnInfo{DataType: "NUMBER", NumericScale: &negativeScale}, want: "NUMBER(*,-2)"},
+		{name: "number star zero scale", column: columnInfo{DataType: "NUMBER", NumericScale: &zeroScale}, want: "NUMBER(*,0)"},
+		{name: "number unknown", column: columnInfo{DataType: "NUMBER"}, want: "NUMBER"},
+		{name: "number negative scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &negativeScale}, want: "NUMBER(10,-2)"},
+		{name: "explicit number parameters", column: columnInfo{DataType: "NUMBER(12,-2)", NumericPrecision: &precision, NumericScale: &scale}, want: "NUMBER(12,-2)"},
+		{name: "explicit float parameters", column: columnInfo{DataType: "FLOAT(63)", NumericPrecision: &precision}, want: "FLOAT(63)"},
+		{name: "float precision", column: columnInfo{DataType: "FLOAT", NumericPrecision: &precision}, want: "FLOAT(10)"},
+		{name: "float unknown", column: columnInfo{DataType: "FLOAT"}, want: "FLOAT"},
+		{name: "binary float fixed precision", column: columnInfo{DataType: "BINARY_FLOAT", NumericPrecision: &precision}, want: "BINARY_FLOAT"},
+		{name: "binary double fixed precision", column: columnInfo{DataType: "BINARY_DOUBLE", NumericPrecision: &precision}, want: "BINARY_DOUBLE"},
 		{name: "timestamp preserves precision", column: columnInfo{DataType: "TIMESTAMP(6)"}, want: "TIMESTAMP(6)"},
 	}
 	for _, tt := range tests {
@@ -2204,6 +2219,11 @@ func TestOracleListTriggersSQLLoadsSourceWithoutLongColumns(t *testing.T) {
 	if !strings.Contains(sqlText, "T.DESCRIPTION") || !strings.Contains(sqlText, "S.TEXT") {
 		t.Fatalf("trigger listing should load the declaration and source text, got: %s", oracleListTriggersSQL)
 	}
+	for _, column := range []string{"T.STATUS", "T.WHEN_CLAUSE", "T.REFERENCING_NAMES"} {
+		if !strings.Contains(sqlText, column) {
+			t.Fatalf("trigger listing should load %s, got: %s", column, oracleListTriggersSQL)
+		}
+	}
 	if strings.Contains(sqlText, "TRIGGER_BODY") {
 		t.Fatalf("trigger listing should avoid Oracle LONG trigger bodies, got: %s", oracleListTriggersSQL)
 	}
@@ -2232,6 +2252,69 @@ func TestOracleTriggerBodyStripsDictionaryDeclaration(t *testing.T) {
 	want := "DECLARE\n  V_EVENT VARCHAR2(10);\nBEGIN\n  V_EVENT := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\nEND;"
 	if body != want {
 		t.Fatalf("trigger body = %q, want %q", body, want)
+	}
+}
+
+func TestListTriggersKeepsDeclarationForUnstructuredTriggers(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS"
+	columns := []string{"TRIGGER_NAME", "TRIGGERING_EVENT", "TRIGGER_TYPE", "DESCRIPTION", "STATUS", "WHEN_CLAUSE", "REFERENCING_NAMES", "LINE", "TEXT"}
+	db, _ := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_TRIGGERS",
+			args:          []driver.Value{schema, table},
+			columns:       columns,
+			rows: [][]driver.Value{
+				{"PLAIN_TRG", "INSERT", "BEFORE EACH ROW", "PLAIN_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n", "ENABLED", nil, "REFERENCING NEW AS NEW OLD AS OLD", int64(1), "TRIGGER PLAIN_TRG\n"},
+				{"PLAIN_TRG", "INSERT", "BEFORE EACH ROW", "PLAIN_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n", "ENABLED", nil, "REFERENCING NEW AS NEW OLD AS OLD", int64(2), "BEFORE INSERT ON ORDERS\n"},
+				{"PLAIN_TRG", "INSERT", "BEFORE EACH ROW", "PLAIN_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n", "ENABLED", nil, "REFERENCING NEW AS NEW OLD AS OLD", int64(3), "FOR EACH ROW\n"},
+				{"PLAIN_TRG", "INSERT", "BEFORE EACH ROW", "PLAIN_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n", "ENABLED", nil, "REFERENCING NEW AS NEW OLD AS OLD", int64(4), "BEGIN NULL; END;\n"},
+				{"WHEN_TRG", "INSERT", "BEFORE EACH ROW", "WHEN_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n", "ENABLED", "NEW.STATUS = 'OPEN'", "REFERENCING NEW AS NEW OLD AS OLD", int64(1), "TRIGGER WHEN_TRG\n"},
+				{"WHEN_TRG", "INSERT", "BEFORE EACH ROW", "WHEN_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n", "ENABLED", "NEW.STATUS = 'OPEN'", "REFERENCING NEW AS NEW OLD AS OLD", int64(2), "BEFORE INSERT ON ORDERS\n"},
+				{"WHEN_TRG", "INSERT", "BEFORE EACH ROW", "WHEN_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n", "ENABLED", "NEW.STATUS = 'OPEN'", "REFERENCING NEW AS NEW OLD AS OLD", int64(3), "FOR EACH ROW\n"},
+				{"WHEN_TRG", "INSERT", "BEFORE EACH ROW", "WHEN_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n", "ENABLED", "NEW.STATUS = 'OPEN'", "REFERENCING NEW AS NEW OLD AS OLD", int64(4), "WHEN (NEW.STATUS = 'OPEN')\n"},
+				{"WHEN_TRG", "INSERT", "BEFORE EACH ROW", "WHEN_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n", "ENABLED", "NEW.STATUS = 'OPEN'", "REFERENCING NEW AS NEW OLD AS OLD", int64(5), "BEGIN NULL; END;\n"},
+			},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	triggers, err := s.listTriggers(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(triggers) != 2 || triggers[0].Statement == nil || triggers[1].Statement == nil {
+		t.Fatalf("listTriggers = %#v, want two triggers with source", triggers)
+	}
+	if got := *triggers[0].Statement; got != "BEGIN NULL; END;" {
+		t.Fatalf("plain trigger statement = %q, want stripped body", got)
+	}
+	if got := *triggers[1].Statement; !strings.HasPrefix(got, "TRIGGER WHEN_TRG\n") || !strings.Contains(got, "WHEN (NEW.STATUS = 'OPEN')") {
+		t.Fatalf("WHEN trigger statement = %q, want full declaration kept", got)
+	}
+	if triggers[0].Enabled == nil || !*triggers[0].Enabled {
+		t.Fatalf("plain trigger enabled = %v, want true", triggers[0].Enabled)
+	}
+}
+
+func TestOracleTriggerIsStructured(t *testing.T) {
+	const description = "AUDIT_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\n"
+	const defaultReferencing = "REFERENCING NEW AS NEW OLD AS OLD"
+	if !oracleTriggerIsStructured(description, "", defaultReferencing) {
+		t.Fatal("plain row trigger should be structured")
+	}
+	if !oracleTriggerIsStructured("AUDIT_TRG\nAFTER INSERT ON ORDERS\n", "", "") {
+		t.Fatal("statement trigger without referencing names should be structured")
+	}
+	if oracleTriggerIsStructured(description, "NEW.ID > 0", defaultReferencing) {
+		t.Fatal("WHEN condition should not be structured")
+	}
+	if oracleTriggerIsStructured(description, "", "REFERENCING NEW AS N OLD AS O") {
+		t.Fatal("custom REFERENCING names should not be structured")
+	}
+	if oracleTriggerIsStructured("AUDIT_TRG\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\nFOLLOWS OTHER_TRG\n", "", defaultReferencing) {
+		t.Fatal("FOLLOWS ordering should not be structured")
 	}
 }
 

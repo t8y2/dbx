@@ -22,6 +22,7 @@ export interface SidebarTreeRuntimeHost {
   openPrimaryVisibleFilter(node: TreeNode): void;
   openDataInNewTab(node: TreeNode): void;
   openDdlForSelection(node: TreeNode, selectedNodeIds: readonly string[]): Promise<boolean>;
+  openStructureEditorForSelection?(node: TreeNode): boolean;
   requestPaste(node: TreeNode): boolean;
   toggleNode(node: TreeNode): void;
 }

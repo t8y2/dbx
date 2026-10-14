@@ -5,17 +5,13 @@ use super::util::{clean, qualified_table, quote_ident, quote_new_ident, quote_st
 use crate::models::connection::DatabaseType;
 
 pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
-    let capabilities;
-    let dialect;
-    if options.is_gaussdb_m_mode {
+    let (capabilities, dialect) = if options.is_gaussdb_m_mode {
         let caps = super::dialect::gaussdb_m_capabilities();
-        capabilities = caps;
-        dialect = StructureDialect::GaussdbM;
+        (caps, StructureDialect::GaussdbM)
     } else {
         let caps = capabilities_for(options.database_type, options.driver_profile.as_deref());
-        capabilities = caps;
-        dialect = caps.dialect;
-    }
+        (caps, caps.dialect)
+    };
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let database_label = database_label(options.database_type);
     let mut statements = Vec::new();

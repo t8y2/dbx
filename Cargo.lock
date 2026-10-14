@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.42"
+version = "0.6.43"
 dependencies = [
  "anyhow",
  "axum",
@@ -2229,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.117"
+version = "0.4.118"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2568,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.117"
+version = "0.4.118"
 dependencies = [
  "async-trait",
  "axum",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.42"
+version = "0.6.43"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

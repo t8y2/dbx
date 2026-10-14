@@ -7,6 +7,7 @@ import {
   shouldBlockCaretBrowsing,
   isConvertNamingStyleShortcut,
   isEditCellShortcut,
+  isEditSidebarTableStructureShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
   isGoToColumnShortcut,
@@ -246,6 +247,19 @@ describe("keyboard shortcut matching", () => {
     expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true }, { editTableStructure: "Shift+Mod+E" }, "Win32")).toBe(false);
     expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true }, { editTableStructure: "" }, "Win32")).toBe(false);
     expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true, isComposing: true }, undefined, "Win32")).toBe(false);
+  });
+
+  it("matches the sidebar edit-table-structure shortcut F4", () => {
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, undefined, "Win32")).toBe(true);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, undefined, "MacIntel")).toBe(true);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4", ctrlKey: true }, undefined, "Win32")).toBe(false);
+  });
+
+  it("honors custom and disabled sidebar edit-table-structure shortcuts", () => {
+    expect(isEditSidebarTableStructureShortcut({ key: "s", ctrlKey: true, altKey: true }, { editSidebarTableStructure: "Mod+Alt+S" }, "Win32")).toBe(true);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, { editSidebarTableStructure: "Mod+Alt+S" }, "Win32")).toBe(false);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4" }, { editSidebarTableStructure: "" }, "Win32")).toBe(false);
+    expect(isEditSidebarTableStructureShortcut({ key: "F4", isComposing: true }, undefined, "Win32")).toBe(false);
   });
 
   it.each([

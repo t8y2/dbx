@@ -1,5 +1,6 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
+import { getStarRocksCapabilities, STARROCKS_DATA_TYPES } from "@/lib/table/starrocksCapabilities";
 
 export interface CopySourceColumnDetails {
   /** Column default as shown in the copy-fields dialog, or null when there is none. */
@@ -165,6 +166,8 @@ function withPostgresArrayTypes(types: readonly string[]): string[] {
 }
 
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
+  // Use complete nested declarations so selecting a complex type produces valid SQL.
+  starrocks: STARROCKS_DATA_TYPES,
   mysql: [
     "tinyint",
     "tinyint unsigned",
@@ -347,6 +350,31 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "boolean",
     "json",
     "vector",
+    "rowid",
+    "urowid",
+    "xmltype",
+    "sdo_geometry",
+  ],
+  "oceanbase-oracle": [
+    "number",
+    "integer",
+    "float",
+    "binary_float",
+    "binary_double",
+    "char",
+    "nchar",
+    "varchar2",
+    "nvarchar2",
+    "clob",
+    "date",
+    "timestamp",
+    "timestamp with time zone",
+    "timestamp with local time zone",
+    "interval year to month",
+    "interval day to second",
+    "raw",
+    "blob",
+    "json",
     "rowid",
     "urowid",
     "xmltype",
@@ -551,7 +579,6 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
 
 const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   doris: "mysql",
-  starrocks: "mysql",
   goldendb: "mysql",
   sundb: "mysql",
   oscar: "oracle",
@@ -567,7 +594,6 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   vastbase: "postgres",
   kingbase: "postgres",
   firebird: "postgres",
-  "oceanbase-oracle": "oracle",
   iris: "oracle",
   yashandb: "oracle",
   rqlite: "sqlite",
@@ -576,9 +602,22 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   access: "h2",
 };
 
-export function getDataTypeOptions(dbType: DatabaseType | undefined): string[] {
+export function getDataTypeOptions(dbType: DatabaseType | undefined, dynamicOptions: readonly string[] = [], productVersion?: string): string[] {
   const key = dbType ? (DATA_TYPE_OPTION_ALIASES[dbType] ?? dbType) : "";
-  return DATA_TYPE_OPTIONS[key] ?? [];
+  const fallback = DATA_TYPE_OPTIONS[key] ?? [];
+  // MySQL-protocol/JDBC metadata may advertise MySQL types for StarRocks.
+  // Keep its editor choices native instead of reintroducing UNSIGNED/TIMESTAMP.
+  if (dbType === "starrocks") return getStarRocksCapabilities(productVersion).dataTypes;
+  if (dynamicOptions.length === 0) return fallback;
+  const seen = new Set<string>();
+  return [...dynamicOptions, ...fallback]
+    .map((type) => type.trim())
+    .filter((type) => {
+      const normalized = type.toLowerCase();
+      if (!type || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
 }
 
 export function isMysqlEnumDataType(dbType: DatabaseType | undefined, dataType: string): boolean {
@@ -1049,6 +1088,15 @@ function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType
 
   const baseType = parsed.baseType.trim().replace(/\s+/g, " ");
   const normalized = baseType.toLowerCase();
+  if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
+    const precision = Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0 ? String(column.numeric_precision) : undefined;
+    if (normalized === "float" && precision) return combineDataTypeForDatabase(databaseType, baseType, precision);
+    if (normalized === "number") {
+      const scale = Number.isInteger(column.numeric_scale) ? String(column.numeric_scale) : undefined;
+      if (scale !== undefined && (precision || column.numeric_precision == null)) return combineDataTypeForDatabase(databaseType, baseType, `${precision ?? "*"},${scale}`);
+      if (precision) return combineDataTypeForDatabase(databaseType, baseType, precision);
+    }
+  }
   if (CHARACTER_LENGTH_METADATA_TYPES.has(normalized) && Number.isInteger(column.character_maximum_length) && Number(column.character_maximum_length) > 0) {
     return combineDataTypeForDatabase(databaseType, baseType, String(column.character_maximum_length));
   }
@@ -1295,13 +1343,23 @@ export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureT
     timing: trigger.timing,
     event: trigger.event,
     statement: trigger.statement ?? "",
+    enabled: trigger.enabled ?? undefined,
     original: trigger,
     markedForDrop: false,
   }));
 }
 
 export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undefined, trigger: EditableStructureTrigger): boolean {
-  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle");
+  if (!trigger.original) return true;
+  if (databaseType === undefined) return false;
+  // The Oracle driver keeps the `TRIGGER ...` declaration when the source has clauses (WHEN,
+  // REFERENCING, FOLLOWS, ...) that the timing/event/body form would drop on CREATE OR REPLACE.
+  return databaseType !== "oracle" || isStructuredOracleTriggerSource(trigger.original.statement);
+}
+
+function isStructuredOracleTriggerSource(statement: string | null | undefined): boolean {
+  const source = statement?.trim() ?? "";
+  return source !== "" && !/^(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?TRIGGER\b/i.test(source);
 }
 
 export function toColumnNames(columns: string[]): string {
@@ -1466,6 +1524,10 @@ function splitPostgresTemporalDataType(raw: string): { baseType: string; params:
 }
 
 function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
+  // Parentheses inside nested types belong to the element/field, not the column.
+  if (dbType === "starrocks" && /^(array|map|struct)\s*</i.test(raw.trim())) {
+    return { baseType: raw.trim(), params: "" };
+  }
   if (dbType === "duckdb") {
     const parsed = splitDuckdbScalarDataType(raw);
     if (parsed) return parsed;
@@ -1729,6 +1791,8 @@ export interface DataTypeDefaultOptions {
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string, options: DataTypeDefaultOptions = {}): string {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "starrocks" && isDataTypeLengthDisabled(_dbType, baseType)) return "";
+  if ((_dbType === "oracle" || _dbType === "oceanbase-oracle") && key === "float") return "";
   if (_dbType === "duckdb" && (key === "float" || isDataTypeLengthDisabled(_dbType, baseType))) return "";
   if (_dbType === "mysql" && options.omitMysqlDeprecatedDefaults && isMysqlDeprecatedDefaultParameterType(key)) return "";
   if (_dbType === "sqlite" || _dbType === "rqlite" || _dbType === "turso") {
@@ -1807,6 +1871,9 @@ function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
 
 export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "starrocks") {
+    return !["tinyint", "smallint", "int", "integer", "bigint", "largeint", "char", "varchar", "binary", "varbinary", "decimal", "decimal32", "decimal64", "decimal128", "decimal256"].includes(key);
+  }
   if (_dbType === "duckdb") {
     return DUCKDB_TYPE_LENGTH_DISABLES.has(key.replace(/\s+/g, " "));
   } else if (_dbType === "questdb") {
@@ -1820,6 +1887,7 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
     // placement; a generic TYPE(length) editor would emit invalid DDL for them.
     return key.endsWith("[]") || key.startsWith("interval ") || XUGU_TYPE_LENGTH_DISABLES.has(key);
   } else if (isOracleLikeStructureType(_dbType)) {
+    if ((_dbType === "oracle" || _dbType === "oceanbase-oracle") && key === "float") return false;
     // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
     return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);
   } else if (_dbType === "sqlserver") {

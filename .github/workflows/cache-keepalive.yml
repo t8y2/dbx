@@ -1,0 +1,175 @@
+name: Cache Keepalive
+
+# The shared Linux target caches (rust-test / packages / fmt-clippy, ~2-3 GB
+# each) are only saved from main runs. When the changes filter skips those
+# jobs for a few days, the entries go idle and GitHub's 10 GB LRU quota
+# evicts them, forcing fully cold builds for every PR (including fork PRs
+# that cannot access the S3 sccache backend). This workflow periodically
+# refreshes the main-saved caches on schedule.
+
+on:
+  schedule:
+    # Every Tuesday 01:30 UTC, ahead of typical PR activity hours.
+    - cron: "30 1 * * 2"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cache-keepalive
+  cancel-in-progress: false
+
+env:
+  RUSTFLAGS: -C debuginfo=line-tables-only
+
+jobs:
+  rust-test-keepalive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
+      CARGO_INCREMENTAL: "0"
+      # Deep async export tests exceed the Rust test harness's default thread stack on Linux.
+      RUST_MIN_STACK: 8388608
+      RUSTC_WRAPPER: sccache
+      # "workspace" matches the full-coverage matrix group used on main pushes.
+      RUST_TEST_GROUP: workspace
+      RUST_FEATURE_MODE: full
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+
+      # Pin mold because runner image updates can change bundled C++ links.
+      # See the ci.yml rust-test note for the pinned upstream build.
+      - name: Install mold linker
+        run: |
+          curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
+            | sudo tar -C /usr/local --strip-components=1 -xz
+          mold --version
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
+      # Mirrors the ci.yml rust-test configuration: S3 when secrets are
+      # available (they are on schedule runs), otherwise no cross-run caching.
+      - name: Configure sccache
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            if [[ -n "$CACHE_BUCKET" ]]; then
+              echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+              echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+              echo "SCCACHE_REGION=${CACHE_REGION}"
+              echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+              echo "SCCACHE_S3_USE_SSL=true"
+              echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+              echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            fi
+            # Keep the server alive through post-compile test/lint phases so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. These jobs are
+            # native Linux builds, so plain CC/CXX select the target compiler.
+            echo "CC=${SCCACHE_PATH} cc"
+            echo "CXX=${SCCACHE_PATH} c++"
+          } >> "$GITHUB_ENV"
+
+      # Same key recipe as ci.yml rust-test so the restored/saved entry is the
+      # one PR jobs look up. save-if is satisfied: scheduled runs are on main.
+      - name: Rust cache
+        env:
+          RUST_FEATURE_MODE: ""
+          RUST_TEST_GROUP: ""
+        uses: swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-complete
+          workspaces: "./ -> target"
+          shared-key: ci-rust-test-v2-x86_64-unknown-linux-gnu
+          # Test linking dominates this job and sccache cannot cache those crate types.
+          cache-workspace-crates: true
+          cache-on-failure: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b # v2.68.13
+        with:
+          tool: cargo-nextest@0.9.137
+
+      # mold -run wraps the whole process tree (see the ci.yml rust-test note).
+      - name: Nextest
+        run: |-
+          mold -run node .github/scripts/ci-rust.mjs test "$RUST_TEST_GROUP" "$RUST_FEATURE_MODE"
+
+      - name: Rust doc tests
+        run: |-
+          mold -run node .github/scripts/ci-rust.mjs doctest "$RUST_TEST_GROUP" "$RUST_FEATURE_MODE"
+
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: ${SCCACHE_PATH} --show-stats
+
+  prune-sccache-entries:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Prune stale sccache GHA cache entries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The Windows jobs only enable the GHA sccache backend when S3
+          # secrets are absent, but release workflows can still accumulate
+          # thousands of small sccache/* entries that crowd the 10 GB quota.
+          # The GHA backend keys on content hash, so entries nobody touched
+          # for a week can be dropped without losing reachable warm caches.
+          cutoff_days=7
+          cutoff=$(date -u -d "-${cutoff_days} days" +%s)
+          page=1
+          ids=()
+          while :; do
+            resp=$(gh api "repos/${GITHUB_REPOSITORY}/actions/caches?key=sccache&per_page=100&page=${page}")
+            count=$(printf '%s' "$resp" | jq '.actions_caches | length')
+            [[ "$count" -eq 0 ]] && break
+            while read -r id accessed; do
+              [[ "$(date -u -d "$accessed" +%s)" -lt "$cutoff" ]] || continue
+              ids+=("$id")
+            done < <(printf '%s' "$resp" | jq -r '.actions_caches[] | "\(.id) \(.last_accessed_at)"')
+            page=$((page + 1))
+          done
+          # Collect first, delete after: removing entries mid-pagination would
+          # shift later pages and skip candidates.
+          pruned=0
+          for id in "${ids[@]}"; do
+            if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/${id}"; then
+              pruned=$((pruned + 1))
+            fi
+          done
+          echo "Pruned ${pruned} sccache cache entries idle for over ${cutoff_days} days."

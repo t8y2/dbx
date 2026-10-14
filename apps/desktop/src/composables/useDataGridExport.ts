@@ -786,7 +786,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const resolvedValue = externalValue === undefined ? value : externalValue;
     if (resolvedValue !== null && resolvedValue !== undefined && options.displayValue) {
       const resolvedSourceIndex = sourceIndex ?? visibleColumnIndexes.value[columnIndex] ?? columnIndex;
-      if (isOracleTemporalColumn(columnIndex, resolvedSourceIndex)) {
+      if (applyFormatters && isOracleTemporalColumn(columnIndex, resolvedSourceIndex)) {
         return options.displayValue(resolvedValue, resolvedSourceIndex);
       }
       if (applyFormatters && shouldApplyColumnFormatter(resolvedSourceIndex)) {
@@ -1064,17 +1064,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const editorSettings = useSettingsStore().editorSettings;
     const originalRows = editorSettings.exportRowLimitEnabled ? original.rows.slice(0, editorSettings.exportRowLimit) : original.rows;
     const items = exportAll
-      ? originalRows.map((row, sourceIndex) => ({ sourceIndex, data: sourceIndexes.map((index) => externalCellValue(row[index], index, index, true, true)) }))
+      ? originalRows.map((row, sourceIndex) => ({ sourceIndex, data: sourceIndexes.map((index) => row[index]) }))
       : rowsToExport(rowIds).map((item) => ({
           sourceIndex: item.sourceIndex,
           isNew: item.isNew,
-          data: externalizeRows([item.data], indexes, true, sourceIndexes)[0]!,
+          data: (indexes ?? columns.value.map((_, index) => index)).map((index) => item.data[index]),
           isDirtyCol: (indexes ?? columns.value.map((_, index) => index)).map((index) => item.isDirtyCol[index] ?? false),
         }));
     const selected = snapshotExportSelection(original, names, sourceIndexes, items);
     if (!selected) return false;
     const types = sourceIndexes.map((index) => original.column_types?.[index] ?? "");
-    selected.rows = applyGlobalDateTimeExportFormat({ columns: names, columnTypes: types, rows: selected.rows as CellValue[][] }, true, sourceIndexes).rows;
     let outputPath = exportFileName(full ? "export" : "export-page", format, { page: !full });
     if (isTauriRuntime()) {
       const path = await promptExportSavePath({ defaultFileName: outputPath, filters: [{ name: FORMAT_META[format]!.label, extensions: [format] }], preferredPath: useSettingsStore().editorSettings.preferredExportPath });
@@ -1116,6 +1115,24 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       },
     );
     try {
+      const formattedCells = selected.cells.filter((cell) => shouldApplyColumnFormatter(sourceIndexes[cell.columnIndex]!));
+      if (formattedCells.length) {
+        selected.rows = await materializeSnapshotResultRows(
+          {
+            ...original,
+            rows: selected.rows as CellValue[][],
+            large_value_cells: formattedCells.map((cell) => ({ ...original.large_value_cells!.find((source) => source.value_ref === cell.valueRef)!, row_index: cell.rowIndex, column_index: cell.columnIndex })),
+          },
+          isCurrent,
+          controller.signal,
+          executionId,
+        );
+        selected.cells = selected.cells.filter((cell) => !formattedCells.includes(cell));
+      }
+      selected.rows = selected.rows.map((row) => row.map((value, columnIndex) => externalCellValue(value as CellValue, exportAll ? sourceIndexes[columnIndex]! : (indexes?.[columnIndex] ?? columnIndex), sourceIndexes[columnIndex], true, !!exportAll)));
+      selected.rows = applyGlobalDateTimeExportFormat({ columns: names, columnTypes: types, rows: selected.rows as CellValue[][] }, true, sourceIndexes).rows;
+      controller.signal.throwIfAborted();
+      if (!isCurrent()) throw new Error("LOB result context changed");
       await waitForLargeValueSnapshot(
         api.exportSnapshotResult({ ...selected, context: { ...selected.context, executionId }, format, quoteMode: useSettingsStore().editorSettings.csvQuoteMode, nullLiteral: csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode) }, outputPath, controller.signal),
         controller.signal,

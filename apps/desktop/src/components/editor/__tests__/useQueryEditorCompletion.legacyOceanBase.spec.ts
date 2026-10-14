@@ -106,3 +106,33 @@ it("does not convert two failed interpretations into successful completion", asy
   api.completionAssistantSearch.mockRejectedValue(new Error("Network connection lost"));
   expect(await createEditor()()).toBeNull();
 });
+
+it("suggests sequence pseudo-columns for schema-qualified OceanBase sequences when package probe reports not visible", async () => {
+  api.completionAssistantSearch.mockImplementation(async (request: CompletionAssistantRequest) => {
+    if (request.parent_name) throw new Error("Package is not visible: APP.ORDER_SEQ");
+    return {
+      candidates: [{ name: "ORDER_SEQ", schema: "APP", kind: "sequence" }],
+      incomplete: false,
+      fallback_used: false,
+    };
+  });
+  const provide = createEditor("SELECT APP.ORDER_SEQ.");
+  const result = await provide();
+  expect(result?.options.some((option) => option.label === "NEXTVAL")).toBe(true);
+  expect(result?.options.some((option) => option.label === "CURRVAL")).toBe(true);
+});
+
+it("suggests sequence pseudo-columns for unqualified sequence in current schema", async () => {
+  api.completionAssistantSearch.mockImplementation(async (request: CompletionAssistantRequest) => {
+    if (request.parent_name) throw new Error("Package is not visible: CURRENT.ORDER_SEQ");
+    return {
+      candidates: [{ name: "ORDER_SEQ", schema: "CURRENT", kind: "sequence" }],
+      incomplete: false,
+      fallback_used: false,
+    };
+  });
+  const provide = createEditor("SELECT ORDER_SEQ.");
+  const result = await provide();
+  expect(result?.options.some((option) => option.label === "NEXTVAL")).toBe(true);
+  expect(result?.options.some((option) => option.label === "CURRVAL")).toBe(true);
+});

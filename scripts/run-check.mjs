@@ -35,7 +35,7 @@ function runTask(task) {
   const command = commandSpec(task);
   const child = spawn(command.program, command.args, {
     cwd: process.cwd(),
-    env: commandEnv(),
+    env: commandEnv(task),
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout = [];
@@ -73,11 +73,17 @@ function commandSpec(task) {
   return { program: "cmd.exe", args: ["/d", "/c", "call", command, ...task.args] };
 }
 
-function commandEnv() {
-  return {
+function commandEnv(task) {
+  const env = {
     ...process.env,
     PATH: [join(process.cwd(), "node_modules", ".bin"), process.env.PATH].filter(Boolean).join(delimiter),
   };
+  // vue-tsc's full application graph exceeds Node's default 4 GiB heap.
+  // Keep this allowance scoped to typechecking and respect explicit limits.
+  if (task.name === "typecheck" && !/--max[-_]old[-_]space[-_]size(?:=|\s)/.test(env.NODE_OPTIONS ?? "")) {
+    env.NODE_OPTIONS = [env.NODE_OPTIONS, "--max-old-space-size=8192"].filter(Boolean).join(" ");
+  }
+  return env;
 }
 
 function outputFailureExcerpt(output) {

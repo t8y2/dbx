@@ -32,8 +32,7 @@ opening the same key again kept the full editable value.
 - The ignored integration test against the local Redis server passed for text,
   UTF-8 Chinese content, and binary data: 64 KiB truncation, 256 KiB complete
   reads, exact-boundary reads, and complete raw downloads all preserved bytes.
-- 298 frontend tests passed, including Redis viewer behavior, settings apply and
-  reset, settings transfer validation, and HTTP/Tauri argument forwarding.
+- 470 frontend tests passed across 23 focused suites, including Redis viewer behavior, settings apply and reset, settings transfer validation, and HTTP/Tauri argument forwarding.
 - Frontend formatting, lint, typecheck, and the Web backend build passed.
 - Invalid preview sizes below 1 KiB and above 64 MiB were rejected before Redis
   I/O.

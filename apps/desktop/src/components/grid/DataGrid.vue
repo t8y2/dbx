@@ -15780,7 +15780,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             :disabled="manualTotalRowCountLoading"
             :aria-busy="manualTotalRowCountLoading ? 'true' : undefined"
             :title="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
-            :aria-label="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
             @click="calculateTotalRowCount"
           >
             {{ t(totalRowCountLabelKey, { count: displayedTotalRowCount }) }}

@@ -2065,7 +2065,6 @@ export default withEnglishFallback({
     copyPartialRowsHintWithTotal: "Mengcopy {loaded} baris yang dimuat (total {total} baris; hasil belum dimuat seluruhnya)",
     copyPartialRowsHint: "Mengcopy {loaded} baris yang dimuat (hasil belum dimuat seluruhnya)",
     totalRowCount: "({count} total)",
-    totalRowCountWithAction: "({button}{count} total)",
     totalRowCountAtLeast: "(minimal {count} total)",
     totalRowCountEstimated: "(~{count})",
     totalRowCountLoading: "(menghitung...)",

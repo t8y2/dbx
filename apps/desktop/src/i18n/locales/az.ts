@@ -1801,7 +1801,6 @@ export default withEnglishFallback({
     copyPartialRowsHintWithTotal: "Yüklənmiş {loaded} sətir kopyalandı (cəmi {total} sətir; nəticə tam yüklənməyib)",
     copyPartialRowsHint: "Yüklənmiş {loaded} sətir kopyalandı (nəticə tam yüklənməyib)",
     totalRowCount: "(cəmi {count})",
-    totalRowCountWithAction: "({button}cəmi {count})",
     totalRowCountAtLeast: "(cəmi ən azı {count})",
     totalRowCountEstimated: "(~{count})",
     totalRowCountLoading: "(sayılır...)",

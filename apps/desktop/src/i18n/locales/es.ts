@@ -2180,7 +2180,6 @@ export default withEnglishFallback({
     copyPartialRowsHintWithTotal: "Se copiaron las {loaded} filas cargadas ({total} filas en total; el resultado no está completamente cargado)",
     copyPartialRowsHint: "Se copiaron las {loaded} filas cargadas (el resultado no está completamente cargado)",
     totalRowCount: "({count} en total)",
-    totalRowCountWithAction: "({button}{count} en total)",
     totalRowCountAtLeast: "(al menos {count} en total)",
     totalRowCountEstimated: "(aprox. {count})",
     totalRowCountLoading: "(contando...)",

@@ -2051,7 +2051,6 @@ export default withEnglishFallback({
     copyPartialRowsHintWithTotal: "已複製已載入的 {loaded} 列（結果集共 {total} 列，尚未載入全部資料）",
     copyPartialRowsHint: "已複製已載入的 {loaded} 列（結果集尚未載入全部資料）",
     totalRowCount: "（總計 {count} 筆）",
-    totalRowCountWithAction: "（{button}總計 {count} 筆）",
     totalRowCountAtLeast: "（至少 {count} 筆）",
     totalRowCountEstimated: "（約 {count} 筆）",
     totalRowCountLoading: "（統計中...）",

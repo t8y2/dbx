@@ -1279,7 +1279,7 @@ const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
 const supportedFilterModeOptions = computed(() => allFilterModeOptions.filter((option) => filterModeIsSupportedForDatabase(option.value, resolvedDatabaseType.value)));
 const filterModeOrderVersion = ref(0);
 const filterModeOptions = computed(() => {
-  filterModeOrderVersion.value;
+  void filterModeOrderVersion.value;
   return orderDataGridFilterModeOptions(resolvedDatabaseType.value, supportedFilterModeOptions.value);
 });
 const filterModeOrderDialogOpen = ref(false);

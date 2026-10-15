@@ -455,16 +455,59 @@ pub async fn find_documents_core(
     cursor: Option<&str>,
     cursor_pagination: bool,
 ) -> Result<DocumentQueryResult, String> {
+    find_documents_core_with_total(
+        state,
+        connection_id,
+        database,
+        collection,
+        skip,
+        limit,
+        filter,
+        projection,
+        sort,
+        collation,
+        cursor,
+        cursor_pagination,
+        true,
+    )
+    .await
+}
+
+/// `include_total: false` lets MongoDB callers skip the total-count query when they can derive
+/// the total from the returned page. Other document stores ignore it.
+#[allow(clippy::too_many_arguments)]
+pub async fn find_documents_core_with_total(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    cursor: Option<&str>,
+    cursor_pagination: bool,
+    include_total: bool,
+) -> Result<DocumentQueryResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => {
             // Document browser responses must retain BSON type metadata so nested filters
             // can round-trip ObjectId, Date, and int64 values through Extended JSON.
-            mongo_driver::find_documents_extended_json(
-                client, database, collection, skip, limit, filter, projection, sort, collation,
-            )
-            .await
+            if include_total {
+                mongo_driver::find_documents_extended_json(
+                    client, database, collection, skip, limit, filter, projection, sort, collation,
+                )
+                .await
+            } else {
+                mongo_driver::find_documents_extended_json_without_total(
+                    client, database, collection, skip, limit, filter, projection, sort, collation,
+                )
+                .await
+            }
         }
         PoolKind::DynamoDb(client) => {
             let client = client.clone();

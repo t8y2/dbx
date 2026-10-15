@@ -1511,6 +1511,46 @@ pub async fn find_documents_extended_json(
     sort: Option<&str>,
     collation: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
+    find_documents_extended_json_with_total(
+        client, database, collection, skip, limit, filter, projection, sort, collation, true,
+    )
+    .await
+}
+
+/// Like [`find_documents_extended_json`], but without the total-count query. Callers that can
+/// derive the total from the returned page (an explicit `.limit()` that fits in one page) use
+/// this to avoid counting every match.
+#[allow(clippy::too_many_arguments)]
+pub async fn find_documents_extended_json_without_total(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    find_documents_extended_json_with_total(
+        client, database, collection, skip, limit, filter, projection, sort, collation, false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn find_documents_extended_json_with_total(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    include_total: bool,
+) -> Result<MongoDocumentResult, String> {
     let col = client.database(database).collection::<Document>(collection);
 
     let filter_doc: Document = match filter {
@@ -1526,14 +1566,16 @@ pub async fn find_documents_extended_json(
     let count_is_exact = !filter_doc.is_empty();
     // Count alongside the find, as in `find_documents_with_total`.
     let total = async {
-        if count_is_exact {
+        if !include_total {
+            None
+        } else if count_is_exact {
             let mut count = col.count_documents(filter_doc.clone());
             if let Some(collation) = collation.clone() {
                 count = count.collation(collation);
             }
-            count.await.map_err(|e| e.to_string())
+            Some(count.await.map_err(|e| e.to_string()))
         } else {
-            estimated_document_count(client, database, collection).await
+            Some(estimated_document_count(client, database, collection).await)
         }
     };
     let page = async {
@@ -1561,7 +1603,10 @@ pub async fn find_documents_extended_json(
     };
     let (total_result, page) = tokio::join!(total, page);
     let (documents, extended_documents) = page?;
-    let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
+    let (total, total_is_exact) = match total_result {
+        Some(total_result) => resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len()),
+        None => (skip.saturating_add(u64::try_from(documents.len()).unwrap_or(u64::MAX)), false),
+    };
 
     Ok(MongoDocumentResult {
         extended_documents: Some(extended_documents),

@@ -34,7 +34,8 @@ describe("normalizeEditorSettings", () => {
   it("defaults tab titles to the compact presentation while preserving an explicit opt-out", () => {
     expect(DEFAULT_EDITOR_SETTINGS.compactTabTitle).toBe(true);
     expect(normalizeEditorSettings({}).compactTabTitle).toBe(true);
-    expect(normalizeEditorSettings({ compactTabTitle: false }).compactTabTitle).toBe(false);
+    expect(normalizeEditorSettings({ compactTabTitle: false }).compactTabTitle).toBe(true);
+    expect(normalizeEditorSettings({ compactTabTitle: false, compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION }).compactTabTitle).toBe(false);
     expect(normalizeEditorSettings({ compactTabTitle: "false" } as any).compactTabTitle).toBe(true);
   });
 

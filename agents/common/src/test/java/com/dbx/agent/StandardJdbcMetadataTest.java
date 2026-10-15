@@ -470,6 +470,80 @@ class StandardJdbcMetadataTest {
     }
 
     @Test
+    void retriesCaseInsensitiveTableMetadataWithTheCanonicalTableName() {
+        JdbcAgentProfile caseInsensitiveProfile = new JdbcAgentProfile(
+            "example.Driver",
+            "jdbc:example://{host}:{port}/{database}",
+            0,
+            false,
+            Collections.emptySet(),
+            Collections.singletonList("TABLE")
+        ) {
+            @Override
+            public boolean getCaseInsensitiveTableMetadata() {
+                return true;
+            }
+        };
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("getTables".equals(name)) {
+                    return rows(row("TABLE_NAME", "ORDERS"));
+                }
+                if ("getPrimaryKeys".equals(name)) {
+                    return "ORDERS".equals(args[2]) ? rows(row("COLUMN_NAME", "ID")) : rows();
+                }
+                if ("getColumns".equals(name)) {
+                    return "ORDERS".equals(args[2]) ? rows(row(
+                        "COLUMN_NAME", "ID",
+                        "TYPE_NAME", "INTEGER",
+                        "NULLABLE", DatabaseMetaData.columnNoNulls,
+                        "COLUMN_SIZE", 10,
+                        "DECIMAL_DIGITS", 0
+                    )) : rows();
+                }
+                if ("getIndexInfo".equals(name)) {
+                    return "ORDERS".equals(args[2]) ? rows(row(
+                        "INDEX_NAME", "PK_ORDERS",
+                        "COLUMN_NAME", "ID",
+                        "ORDINAL_POSITION", (short) 1,
+                        "NON_UNIQUE", false
+                    )) : rows();
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                return "getMetaData".equals(method.getName()) ? meta : defaultValue(method.getReturnType());
+            }
+        });
+
+        List<ColumnInfo> columns = StandardJdbcMetadata.INSTANCE.getColumns(
+            conn,
+            caseInsensitiveProfile,
+            null,
+            "APP",
+            "orders"
+        );
+        List<IndexInfo> indexes = StandardJdbcMetadata.INSTANCE.listIndexes(
+            conn,
+            caseInsensitiveProfile,
+            null,
+            "APP",
+            "orders"
+        );
+
+        assertEquals(1, columns.size());
+        assertEquals("ID", columns.get(0).getName());
+        assertTrue(columns.get(0).getIs_primary_key());
+        assertEquals(1, indexes.size());
+        assertEquals(Collections.singletonList("ID"), indexes.get(0).getColumns());
+    }
+
+    @Test
     void marksPrimaryKeysFromConfiguredCatalogWhenColumnsAlreadyLoaded() {
         Connection conn = catalogPrimaryKeyFallbackConnection(
             "TENANTDB",

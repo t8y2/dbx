@@ -5844,26 +5844,17 @@ async function refreshCcSwitchPluginAvailability() {
   }
 }
 
-function ccSwitchCodexPageResult(result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>) {
-  // CC-SWITCH stores profiles for every app in one database; this importer view mirrors its Codex page.
-  return {
-    configs: result.configs.filter((config) => config.id.startsWith("cc-switch-codex-")),
-    skipped: result.skipped.filter((item) => item.appType === "codex"),
-  };
-}
-
 function setAiImportSourceSummary(source: AiImportSourceKey, result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>) {
   const sourceName = source === "magpie" ? "Magpie" : "CC-SWITCH";
-  const scopedResult = source === "cc-switch" ? ccSwitchCodexPageResult(result) : result;
-  const normalized = normalizeAiImportSourceConfigs(scopedResult.configs, sourceName);
+  const normalized = normalizeAiImportSourceConfigs(result.configs, sourceName);
   const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, normalized, sourceName);
   const importableIds = new Set(prepared.map((config) => config.id));
   const drafts = createAiImportDrafts(normalized, importableIds);
   aiImportSourceSummaries.value[source] = {
     status: "loaded",
-    total: normalized.length + scopedResult.skipped.length,
+    total: normalized.length + result.skipped.length,
     selected: drafts.filter((draft) => draft.selectable && draft.selected).length,
-    skipped: scopedResult.skipped.length,
+    skipped: result.skipped.length,
   };
 }
 
@@ -6514,8 +6505,7 @@ function closeAiImportDialog() {
 
 function stageImportedAiConfigs(result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>, sourceName: "CC-SWITCH" | "Magpie", noNewConfigsKey: AiImportMessageKey, successKey: AiImportMessageKey, partialKey: AiImportMessageKey, preserveSelection = false) {
   const previousDrafts = preserveSelection ? new Map(aiImportDrafts.value.map((draft) => [draft.config.id, draft] as const)) : null;
-  const scopedResult = sourceName === "CC-SWITCH" ? ccSwitchCodexPageResult(result) : result;
-  const normalized = normalizeAiImportSourceConfigs(scopedResult.configs, sourceName);
+  const normalized = normalizeAiImportSourceConfigs(result.configs, sourceName);
   const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, normalized, sourceName);
   const preparedById = new Map(prepared.map((config) => [config.id, config]));
   aiImportDrafts.value = createAiImportDrafts(normalized, new Set(preparedById.keys())).map((draft) => {
@@ -6532,13 +6522,13 @@ function stageImportedAiConfigs(result: Awaited<ReturnType<typeof loadCcSwitchAi
     }
     return nextDraft;
   });
-  aiImportSkipped.value = scopedResult.skipped;
+  aiImportSkipped.value = result.skipped;
   const sourceKey: AiImportSourceKey = sourceName === "Magpie" ? "magpie" : "cc-switch";
   aiImportSourceSummaries.value[sourceKey] = {
     status: "loaded",
-    total: normalized.length + scopedResult.skipped.length,
+    total: normalized.length + result.skipped.length,
     selected: aiImportDrafts.value.filter((draft) => draft.selectable && draft.selected).length,
-    skipped: scopedResult.skipped.length,
+    skipped: result.skipped.length,
   };
   aiImportMeta.value = { sourceName, noNewConfigsKey, successKey, partialKey };
   aiImportDialogOpen.value = true;
@@ -12974,7 +12964,7 @@ LIMIT 100;</pre>
         <DialogHeader>
           <DialogTitle>{{ t("ai.aiImportSelectTitle", { source: aiImportMeta?.sourceName ?? "" }) }}</DialogTitle>
           <p class="text-sm text-muted-foreground">{{ t("ai.aiImportSelectDescription") }}</p>
-          <p v-if="aiImportMeta?.sourceName === 'CC-SWITCH'" class="text-xs text-muted-foreground">{{ t("ai.aiImportCcSwitchCodexPageNote") }}</p>
+          <p class="text-xs text-muted-foreground">{{ t("ai.aiImportSourceContentsNote") }}</p>
           <p v-if="aiImportMeta?.sourceName === 'Magpie'" class="text-xs text-muted-foreground">{{ t("ai.aiImportMagpieDefaultModelNote") }}</p>
         </DialogHeader>
         <div class="flex items-center justify-between gap-3 border-b pb-3">

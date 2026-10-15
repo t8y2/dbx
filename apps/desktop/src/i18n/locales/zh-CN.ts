@@ -3745,7 +3745,7 @@ export default withEnglishFallback({
     ccSwitchImportPartial: "已从 CC-SWITCH 导入 {count} 个 AI 配置，跳过 {skipped} 个",
     aiImportSelectTitle: "选择要从 {source} 导入的配置",
     aiImportSelectDescription: "勾选要导入的配置，并检查每项的默认模型。",
-    aiImportCcSwitchCodexPageNote: "仅显示 CC-SWITCH 的 Codex 页面配置。",
+    aiImportSourceContentsNote: "列表和数量根据所选来源中已配置的项目生成；不支持的项目会说明原因。",
     aiImportMagpieDefaultModelNote: "如果当前供应商包含 Magpie 正在使用的 Codex 模型，会自动预选；否则请在此选择，或留空不设置。",
     aiImportSelectAll: "全选",
     aiImportDeselectAll: "取消全选",

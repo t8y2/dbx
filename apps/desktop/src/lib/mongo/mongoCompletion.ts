@@ -210,6 +210,11 @@ const DATABASE_METHODS = [
   { label: "serverStatus", detail: "Show server status", apply: "serverStatus()" },
   { label: "createUser", detail: "Create a database user", apply: 'createUser({ user: "${name}", pwd: "${password}", roles: [] })' },
   { label: "createCollection", detail: "Create a collection", apply: 'createCollection("${name}")' },
+  { label: "createView", detail: "Create a view over a collection", apply: 'createView("${name}", "${source}", [\n  { $match: {} }\n])' },
+  { label: "getUsers", detail: "List the users of this database", apply: "getUsers()" },
+  { label: "getUser", detail: "Show one user of this database", apply: 'getUser("${name}")' },
+  { label: "getRoles", detail: "List the roles of this database", apply: "getRoles()" },
+  { label: "getRole", detail: "Show one role of this database", apply: 'getRole("${name}")' },
   { label: "dropDatabase", detail: "Drop the current database", apply: "dropDatabase()" },
 ] as const;
 
@@ -288,6 +293,7 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   dropIndexes: ["indexName"],
   // Database-level helpers whose argument is a document.
   createCollection: ["name", "options"],
+  createView: ["name", "name", "pipeline", "options"],
   runCommand: ["options"],
   createUser: ["options"],
 };
@@ -1167,7 +1173,7 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
       }
       return scan.stack.length === 0 ? { mode: "indexName", method } : { mode: "none" };
     case "pipeline":
-      return classifyPipeline(scan);
+      return method === "createView" ? classifyPipeline(scan, findPipelineArrayIndex(scan.stack), "view") : classifyPipeline(scan);
     case "operations":
       return classifyBulkWriteOperations(scan);
     case "options":
@@ -1744,6 +1750,8 @@ function rootItems(prefix: string): MongoCompletionItem[] {
 const SHOW_SUBCOMMANDS = [
   { label: "dbs", detail: "List available databases", apply: "dbs", boost: 210 },
   { label: "databases", detail: "List available databases", apply: "databases", boost: 200 },
+  { label: "users", detail: "List the users of this database", apply: "users", boost: 190 },
+  { label: "roles", detail: "List the roles of this database", apply: "roles", boost: 180 },
 ] as const;
 
 function showSubcommandItems(prefix: string): MongoCompletionItem[] {
@@ -2134,7 +2142,7 @@ function matchSiblingCollectionPrefix(beforeCursor: string): boolean {
   return !!lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${SIBLING_ROOT_PATTERN}\s*\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`), beforeCursor);
 }
 
-const MONGO_COMMAND_LINE_START_PATTERN = /(?:use\b|show\s+(?:dbs|databases|collections)\b|db(?:\s*\.|\b))/iy;
+const MONGO_COMMAND_LINE_START_PATTERN = /(?:use\b|show\s+(?:dbs|databases|collections|users|roles)\b|db(?:\s*\.|\b))/iy;
 
 function isMongoCommandLineStart(text: string, index: number): boolean {
   MONGO_COMMAND_LINE_START_PATTERN.lastIndex = index;

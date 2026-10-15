@@ -115,6 +115,30 @@ describe("transferTaskStore", () => {
     expect(store.tasks[0]?.config.quoteTargetColumnNames).toBe(true);
   });
 
+  it("keeps legacy tasks on inherited timeouts and round-trips a custom timeout", async () => {
+    const store = useTransferTaskStore();
+    const inherited = await store.saveTask({ name: "inherited", config: makeConfig() });
+    const custom = await store.saveTask({ name: "custom", config: makeConfig({ operationTimeoutSecs: 600 }) });
+    const unlimited = await store.saveTask({ name: "unlimited", config: makeConfig({ operationTimeoutSecs: 0 }) });
+
+    expect(inherited.config.operationTimeoutSecs).toBeUndefined();
+    expect(custom.config.operationTimeoutSecs).toBe(600);
+    expect(unlimited.config.operationTimeoutSecs).toBe(0);
+  });
+
+  it("drops an invalid persisted transfer timeout instead of applying it", async () => {
+    vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue({
+      version: 1,
+      folders: [],
+      tasks: [{ id: "invalid-timeout", name: "invalid timeout", config: makeConfig({ operationTimeoutSecs: 3601 }) }],
+    } as unknown as TransferTaskLibrary);
+    const store = useTransferTaskStore();
+
+    await store.initFromStorage();
+
+    expect(store.getTask("invalid-timeout")?.config.operationTimeoutSecs).toBeUndefined();
+  });
+
   it("loads a legacy rebuild task as append without restoring its previous confirmation", async () => {
     vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue({
       version: 1,

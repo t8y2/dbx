@@ -17,6 +17,7 @@ async fn native_sqlserver_2000_connects_and_checks_manual_transaction_state() {
         "sa",
         &password,
         Some("dbx_manual_test"),
+        None,
         Duration::from_secs(10),
     ))
     .catch_unwind()
@@ -61,6 +62,7 @@ async fn native_sqlserver_2000_rpc_handles_long_unicode_binary_and_nulls() {
         "sa",
         &password,
         Some("dbx_manual_test"),
+        None,
         Duration::from_secs(10),
     )
     .await

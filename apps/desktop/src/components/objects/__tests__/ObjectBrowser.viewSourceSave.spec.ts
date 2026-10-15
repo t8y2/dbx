@@ -4,6 +4,7 @@ import { createApp, defineComponent, h, ref, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
+import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 import type { ConnectionConfig } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -51,7 +52,10 @@ vi.mock("@/stores/settingsStore", () => ({
   }),
 }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key, locale: ref("en-US") }) }));
-vi.mock("@/i18n", () => ({ default: { install: () => undefined } }));
+vi.mock("@/i18n", async () => {
+  const { default: en } = await import("@/i18n/locales/en");
+  return { default: { install: () => undefined, global: { t: (key: string) => en.objects[key.split(".")[1] as keyof typeof en.objects] || key } } };
+});
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: (sql: string) => sql }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("vue-virtual-scroller", () => ({
@@ -159,6 +163,27 @@ async function clickRow(host: HTMLElement, name: string) {
 }
 
 describe("ObjectBrowser view source save", () => {
+  it("does not dispatch a save whose source identity changed during SQL construction", async () => {
+    const host = await mountBrowser();
+    vi.useFakeTimers();
+    await clickRow(host, VIEW_NAME);
+    let complete!: (value: string[]) => void;
+    mocks.buildExecutableObjectSourceStatements.mockReturnValueOnce(
+      new Promise<string[]>((resolve) => {
+        complete = resolve;
+      }),
+    );
+    click(saveButton(host)!);
+    await settle();
+    const migration = freezeSourceIdentities([{ connectionId: connection.id, database: "app", schema: "app", objectType: "VIEW", name: VIEW_NAME }]);
+    migration.markDispatched();
+    migration.finish();
+    complete([ALTER_SQL]);
+    await settle();
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("reload");
+    expect(saveButton(host)).toBeDefined();
+  });
   it("keeps the Save button idle and usable after a successful view-source save", async () => {
     const host = await mountBrowser();
     vi.useFakeTimers();

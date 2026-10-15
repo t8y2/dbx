@@ -1159,17 +1159,13 @@ pub async fn get_mysql_table_auto_increment_core(
     table: &str,
 ) -> Result<Option<String>, String> {
     let db_config = connection_config(state, connection_id).await;
-    let native_mysql = db_config.as_ref().is_some_and(|config| {
-        config.db_type == DatabaseType::Mysql
-            && config
-                .driver_profile
-                .as_deref()
-                .map(str::trim)
-                .is_none_or(|profile| profile.is_empty() || profile.eq_ignore_ascii_case("mysql"))
+    let supported = db_config.as_ref().is_some_and(|config| {
+        crate::db_admin_sql::supports_mysql_auto_increment(Some(config.db_type), config.driver_profile.as_deref())
     });
-    if !native_mysql {
-        return Err("AUTO_INCREMENT metadata is supported only for native MySQL connections.".to_string());
+    if !supported {
+        return Err("AUTO_INCREMENT metadata is supported only for compatible MySQL-family connections.".to_string());
     }
+    let uses_agent_metadata = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Goldendb);
 
     retry_metadata_connection_for_session(state, connection_id, Some(database), None, || async {
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
@@ -1178,10 +1174,58 @@ pub async fn get_mysql_table_auto_increment_core(
             PoolKind::Mysql(pool, mode) if *mode != MysqlMode::OceanBaseOracle => {
                 db::mysql::get_table_auto_increment(pool, database, table).await
             }
-            _ => Err("AUTO_INCREMENT metadata is supported only for native MySQL connections.".to_string()),
+            PoolKind::Agent(client) if uses_agent_metadata => {
+                let sql = mysql_auto_increment_metadata_sql(database, table);
+                let mut client = client.lock().await;
+                let result = client
+                    .execute_query_with_timeout::<db::QueryResult>(
+                        agent_execute_query_params(
+                            &sql,
+                            Some(database),
+                            None,
+                            QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+                        ),
+                        agent_metadata_timeout(db_config.as_ref()),
+                    )
+                    .await?;
+                mysql_auto_increment_from_query_result(result)
+            }
+            _ => Err("AUTO_INCREMENT metadata is supported only for compatible MySQL-family connections.".to_string()),
         }
     })
     .await
+}
+
+fn mysql_auto_increment_metadata_sql(database: &str, table: &str) -> String {
+    format!(
+        "SELECT CAST(AUTO_INCREMENT AS CHAR) AS AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} LIMIT 1",
+        sql_string(database),
+        sql_string(table),
+    )
+}
+
+fn mysql_auto_increment_from_query_result(result: db::QueryResult) -> Result<Option<String>, String> {
+    let column_index = result
+        .columns
+        .iter()
+        .position(|column| column.eq_ignore_ascii_case("AUTO_INCREMENT"))
+        .ok_or_else(|| "AUTO_INCREMENT metadata query did not return the AUTO_INCREMENT column.".to_string())?;
+    let Some(value) = result.rows.first().and_then(|row| row.get(column_index)) else {
+        return Ok(None);
+    };
+    let text = match value {
+        serde_json::Value::Null => return Ok(None),
+        serde_json::Value::String(value) => value.trim().to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        _ => return Err("AUTO_INCREMENT metadata query returned a non-numeric value.".to_string()),
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if !text.bytes().all(|byte| byte.is_ascii_digit()) || text.parse::<u64>().is_err() {
+        return Err("AUTO_INCREMENT metadata query returned an out-of-range value.".to_string());
+    }
+    Ok(Some(text))
 }
 
 async fn get_table_comment_core_for_session(
@@ -3141,18 +3185,19 @@ mod tests {
         filter_table_infos, filter_visible_schema_names, finalize_object_source, gaussdb_m_view_object_source_sql,
         gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config,
         is_oracle_external_driver_config, is_retryable_metadata_error, metadata_error_action,
-        metadata_name_or_comment_matches, mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result,
-        mysql_external_driver_ddl_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
-        mysql_table_list_source_for_config, mysql_table_metadata_catalog, normalize_information_schema_table_type,
-        oracle_columns_from_query_result, oracle_columns_sql, oracle_columns_sql_for_resolved_owner,
-        oracle_completion_synonyms_sql, oracle_current_schema_from_query_result,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
-        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
-        oracle_object_statistics_user_segments_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
-        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
-        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
-        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
-        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        metadata_name_or_comment_matches, mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql,
+        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
+        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
+        oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
+        oracle_current_schema_from_query_result, oracle_object_statistics_dba_segments_sql,
+        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
+        oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_sql,
+        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
+        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
+        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
+        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
         single_table_comment_from_query_result, table_comments_from_query_result, table_name_filter_matches,
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
         uses_mongodb_agent_collection_listing, visible_schema_filter, ExternalDriverStatisticsDialect,
@@ -5748,6 +5793,44 @@ for line in sys.stdin:
         };
 
         assert_eq!(single_table_comment_from_query_result(empty).unwrap(), None);
+    }
+
+    #[test]
+    fn mysql_auto_increment_agent_metadata_is_quoted_and_lossless() {
+        let sql = mysql_auto_increment_metadata_sql("sales'archive", "order'items");
+        assert!(sql.contains("CAST(AUTO_INCREMENT AS CHAR) AS AUTO_INCREMENT"));
+        assert!(sql.contains("TABLE_SCHEMA = 'sales''archive'"));
+        assert!(sql.contains("TABLE_NAME = 'order''items'"));
+
+        let result = db::QueryResult {
+            columns: vec!["AUTO_INCREMENT".to_string()],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![vec![serde_json::json!("18446744073709551615")]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            server_execute_time_us: None,
+            query_timings_ms: None,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+        assert_eq!(
+            mysql_auto_increment_from_query_result(result.clone()).unwrap().as_deref(),
+            Some("18446744073709551615")
+        );
+
+        let mut null = result.clone();
+        null.rows = vec![vec![serde_json::Value::Null]];
+        assert_eq!(mysql_auto_increment_from_query_result(null).unwrap(), None);
+
+        let mut out_of_range = result;
+        out_of_range.rows = vec![vec![serde_json::json!("18446744073709551616")]];
+        assert!(mysql_auto_increment_from_query_result(out_of_range).is_err());
     }
 
     #[test]

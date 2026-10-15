@@ -66,10 +66,36 @@ test("successful tree table paste consumes only the clipboard used to start it",
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
   const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTableImpl");
 
-  assert.match(confirmPasteTableBody, /const clipboardAtPasteStart = connectionStore\.treeClipboard/);
+  assert.match(confirmPasteTableBody, /const shouldConsumeTableClipboard = pasteTableFromClipboard\.value/);
+  assert.match(confirmPasteTableBody, /const clipboardAtPasteStart = shouldConsumeTableClipboard \? connectionStore\.treeClipboard : null/);
   assert.match(confirmPasteTableBody, /if \(pasteFailCount === 0\)/);
-  assert.match(confirmPasteTableBody, /connectionStore\.treeClipboard === clipboardAtPasteStart/);
+  assert.match(confirmPasteTableBody, /shouldConsumeTableClipboard && connectionStore\.treeClipboard === clipboardAtPasteStart/);
   assert.match(confirmPasteTableBody, /connectionStore\.treeClipboard = null/);
+});
+
+test("tree table clone opens the full copy dialog without replacing the clipboard", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const copyAsNewTableBody = functionBody(runtimeHost, "copyAsNewTable");
+
+  assert.match(copyAsNewTableBody, /pasteTableFromClipboard\.value = false/);
+  assert.match(copyAsNewTableBody, /pasteTableMode\.value = defaultPasteTableMode/);
+  assert.match(copyAsNewTableBody, /targetName: `\$\{source\.label\}_copy`/);
+  assert.match(copyAsNewTableBody, /showPasteDialog\.value = true/);
+  assert.doesNotMatch(copyAsNewTableBody, /treeClipboard\s*=/);
+  assert.match(runtimeHost, /sidebarActionId: "contextMenu\.duplicateStructure"[\s\S]*?action: copyAsNewTable/);
+});
+
+test("object browser table clone opens the full copy dialog without consuming the clipboard", () => {
+  const objectBrowser = readFileSync("apps/desktop/src/components/objects/ObjectBrowser.vue", "utf8");
+  const copyAsNewTableBody = functionBody(objectBrowser, "requestCopyAsNewTable");
+  const confirmPasteTableBody = functionBody(objectBrowser, "confirmPasteTableImpl");
+
+  assert.match(copyAsNewTableBody, /pasteTableFromClipboard\.value = false/);
+  assert.match(copyAsNewTableBody, /targetName: `\$\{row\.name\}_copy`/);
+  assert.match(copyAsNewTableBody, /showPasteDialog\.value = true/);
+  assert.doesNotMatch(copyAsNewTableBody, /treeClipboard\s*=/);
+  assert.match(confirmPasteTableBody, /shouldConsumeTableClipboard && connectionStore\.treeClipboard === clipboardAtPasteStart/);
+  assert.match(objectBrowser, /sidebarActionId: "contextMenu\.duplicateStructure"[\s\S]*?requestCopyAsNewTable\(item\)/);
 });
 
 test("tree table paste keeps the clipboard when production confirmation is cancelled", () => {

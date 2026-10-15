@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 import { describe, expect, it } from "vitest";
 import {
   eventToModifierOnlyShortcut,
@@ -10,6 +12,8 @@ import {
   isEditSidebarTableStructureShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
+  isExecuteSqlShortcut,
+  isDefaultQueryShortcutTarget,
   isGoToColumnShortcut,
   isFocusWhereShortcut,
   isGoToFirstPageShortcut,
@@ -17,6 +21,7 @@ import {
   isGoToNextPageShortcut,
   isGoToPreviousPageShortcut,
   isToggleZenModeShortcut,
+  isSidebarFocusedTarget,
   isToggleAiPanelShortcut,
   matchesModifierOnlyShortcut,
   matchesShortcut,
@@ -26,6 +31,32 @@ import { formatShortcutDisplay, isMacShortcutPlatform } from "@/lib/editor/short
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 
 describe("keyboard shortcut matching", () => {
+  it("routes Cmd+Enter by focus surface while preserving editor execution", () => {
+    const sidebar = document.createElement("div");
+    sidebar.dataset.appSidebar = "";
+    const row = document.createElement("button");
+    sidebar.append(row);
+    document.body.append(sidebar);
+
+    expect(isExecuteSqlShortcut({ key: "Enter", metaKey: true }, undefined)).toBe(true);
+    expect(isSidebarFocusedTarget(row, false)).toBe(true);
+    expect(isSidebarFocusedTarget(document.body, true)).toBe(true);
+    const editor = document.createElement("div");
+    editor.dataset.queryEditorRoot = "";
+    document.body.append(editor);
+    expect(isSidebarFocusedTarget(editor, false)).toBe(false);
+    expect(isSidebarFocusedTarget(document.createElement("textarea"), false)).toBe(false);
+    const objectSearch = document.createElement("input");
+    objectSearch.dataset.objectSearchInput = "";
+    document.body.append(objectSearch);
+    expect(isDefaultQueryShortcutTarget(objectSearch, false)).toBe(true);
+    expect(isDefaultQueryShortcutTarget(editor, false)).toBe(false);
+
+    sidebar.remove();
+    editor.remove();
+    objectSearch.remove();
+  });
+
   it("matches configured WHERE focus on macOS and Windows while respecting a cleared binding", () => {
     expect(isFocusWhereShortcut({ key: "L", metaKey: true, shiftKey: true }, { focusWhere: "Mod+Shift+L" }, "MacIntel")).toBe(true);
     expect(isFocusWhereShortcut({ key: "L", ctrlKey: true, shiftKey: true }, { focusWhere: "Mod+Shift+L" }, "Win32")).toBe(true);

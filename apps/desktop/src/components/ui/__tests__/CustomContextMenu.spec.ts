@@ -490,3 +490,99 @@ describe("CustomContextMenu lifecycle", () => {
     app.unmount();
   });
 });
+
+describe("submenu pointer grace area", () => {
+  // The panel sits to the right of the trigger row between these bounds.
+  // happy-dom performs no layout, so the rectangles the component measures are
+  // stubbed on the submenu element directly.
+  const SUBMENU_RECT = { left: 200, right: 300, top: 100, bottom: 200, width: 100, height: 100 } as DOMRect;
+
+  async function mountSubmenuMenu() {
+    const root = defineComponent({
+      setup: () => () => h(CustomContextMenu, { items: [{ label: "Data tools", children: [{ label: "Export" }] }] }, { default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "grace-target", onContextmenu: onContextMenu }) }),
+    });
+    const container = document.createElement("div");
+    mountedContainers.push(container);
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+    container.querySelector("#grace-target")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    const trigger = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent === "Data tools")!;
+    trigger.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, clientX: 150, clientY: 150 }));
+    await nextTick();
+    const submenu = Array.from(document.body.querySelectorAll("[data-dbx-context-menu]")).at(-1) as HTMLElement;
+    submenu.getBoundingClientRect = () => SUBMENU_RECT;
+    return { app, trigger };
+  }
+
+  function submenuIsOpen(): boolean {
+    return document.body.textContent?.includes("Export") ?? false;
+  }
+
+  function movePointerTo(x: number, y: number) {
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: x, clientY: y }));
+  }
+
+  it("keeps the submenu open while the pointer travels diagonally towards it", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, trigger } = await mountSubmenuMenu();
+      expect(submenuIsOpen()).toBe(true);
+
+      // Leaving the trigger row and crossing the gap between the two panels puts
+      // the pointer inside neither rectangle, which is the movement that used to
+      // close the submenu before it could be reached.
+      trigger.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true, clientX: 150, clientY: 150 }));
+      movePointerTo(190, 150);
+      await nextTick();
+      vi.advanceTimersByTime(400);
+      await nextTick();
+
+      expect(submenuIsOpen()).toBe(true);
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the submenu open when the pointer wobbles mid-travel", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, trigger } = await mountSubmenuMenu();
+
+      trigger.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true, clientX: 150, clientY: 150 }));
+      movePointerTo(190, 150);
+      await nextTick();
+      vi.advanceTimersByTime(400);
+      // A second move that is still inside the wedge must not re-arm the close.
+      movePointerTo(195, 165);
+      await nextTick();
+      vi.advanceTimersByTime(400);
+      await nextTick();
+
+      expect(submenuIsOpen()).toBe(true);
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still closes the submenu when the pointer moves away from it", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, trigger } = await mountSubmenuMenu();
+
+      trigger.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true, clientX: 150, clientY: 150 }));
+      movePointerTo(120, 300);
+      await nextTick();
+      vi.advanceTimersByTime(400);
+      await nextTick();
+
+      expect(submenuIsOpen()).toBe(false);
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

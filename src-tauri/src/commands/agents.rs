@@ -231,7 +231,13 @@ pub async fn import_agents_from_zip(
         emit_agent_progress(&app_handle, &operation_id, event)
     })
     .await?;
-    dbx_core::jdbc::import_offline_jdbc_payload(state.plugins.root_dir(), &package_path)?;
+    // The embedded JDBC plugin install scans and waits for processes holding
+    // the JDBC plugin directory (#12004).
+    let plugins_root = state.plugins.root_dir().to_path_buf();
+    run_blocking_agent_task("Failed to import the offline JDBC plugin", move || {
+        dbx_core::jdbc::import_offline_jdbc_payload(&plugins_root, &package_path)
+    })
+    .await?;
     let count = result.drivers_installed.len() as u32;
     emit_agent_progress(&app, &operation_id, AgentProgressEvent::step("done"));
     Ok(serde_json::json!({

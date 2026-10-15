@@ -19,6 +19,7 @@ import {
   Upload,
   FileUp,
   Trash2,
+  Check,
   ChevronDown,
   ChevronUp,
   ChevronLeft,
@@ -46,7 +47,6 @@ import {
   ListTree,
   Maximize2,
   RefreshCw,
-  RefreshCcw,
   TableProperties,
   Network,
   UserRound,
@@ -135,6 +135,7 @@ import {
   shouldIncludeSyntheticRowId,
 } from "@/lib/table/tableEditing";
 import { buildDataGridConditionalUpdateSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import { sumGridCountValues } from "@/lib/dataGrid/dataGridCountValue";
 import {
   buildVisibleTransposeRows,
   averageTransposeRecordWidth,
@@ -152,6 +153,7 @@ import {
   transposeEndAlignmentSpacerWidth,
   transposeFieldWidth,
   transposeScrollLeftForRecord,
+  transposeScrollTopForField,
   visibleTransposeRecordWindow,
   type TransposeScrollAlignment,
 } from "@/lib/dataGrid/dataGridTranspose";
@@ -293,7 +295,7 @@ import { normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGr
 import { dataGridPageSizeSettingsPatch, preferredDataGridPageSize, resolveDataGridPageSizePreference, type DataGridPageSizePreference } from "@/lib/dataGrid/dataGridPageSizePreference";
 import { continuousQueryResultMaxRows, effectiveQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { allNullColumnIndexes, identicalValueColumnIndexes } from "@/lib/dataGrid/dataGridColumnVisibility";
-import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
+import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems, type DataGridColumnLookupMatchMode } from "@/lib/dataGrid/dataGridColumnLookup";
 import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { createPendingSelectionSummary, formatSelectionAggregate, formatSelectionAverage, summarizeSelection, type SelectionSummaryOptions } from "@/lib/dataGrid/gridSelection";
@@ -326,7 +328,7 @@ import {
   splitForeignKeyDisplayValues,
   type ForeignKeyDisplayConfig,
 } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
-import { removeVirtualRowIdentifier, saveVirtualRowIdentifier, type VirtualRowIdentifierScope } from "@/lib/table/virtualRowIdentifier";
+import { removeVirtualRowIdentifier, saveVirtualRowIdentifier, tableDataVirtualRowIdentifierScope, type VirtualRowIdentifierScope } from "@/lib/table/virtualRowIdentifier";
 
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -346,7 +348,7 @@ import { useDataGridColumnLayout, useDataGridColumnLayoutState, type ColumnHeade
 import { createColumnReferencePayload, createTableReferenceDragEndEvent, createTableReferenceDropEvent, createTableReferenceHoverEvent } from "@/lib/editor/queryEditorTableDrop";
 import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableReferenceDragFeedback } from "@/lib/editor/tableReferenceDragFeedback";
 import { dataGridCanvasDevicePixelSize, useDataGridCanvasRuntime, type DataGridCanvasRuntime } from "@/composables/useDataGridCanvasRuntime";
-import { deferUntilPanelResizeEnd, isPanelResizing } from "@/lib/app/panelResizeState";
+import { beginPanelResize, deferUntilPanelResizeEnd, endPanelResize, isPanelResizing } from "@/lib/app/panelResizeState";
 import { uiTuning } from "@/lib/app/uiTuning";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
@@ -2292,6 +2294,7 @@ let highlightedColumnTimer = 0;
 
 const goToColumnOpen = ref(false);
 const goToColumnSearch = ref("");
+const goToColumnMatchMode = ref<DataGridColumnLookupMatchMode>("fuzzy");
 const goToColumnSearchInput = ref<HTMLInputElement>();
 const goToColumnListRef = ref<HTMLElement>();
 const goToColumnSelectedIndex = ref(0);
@@ -2390,7 +2393,7 @@ const goToColumnItems = computed(() =>
   }),
 );
 const filteredGoToColumns = computed(() => {
-  return filterDataGridColumnLookupItems(goToColumnItems.value, goToColumnSearch.value);
+  return filterDataGridColumnLookupItems(goToColumnItems.value, goToColumnSearch.value, goToColumnMatchMode.value);
 });
 const visibleColumns = computed(() => visibleColumnIndexes.value.map((index) => props.result.columns[index]));
 const visibleColumnIndexIndicators = computed(() =>
@@ -2577,6 +2580,11 @@ watch(goToColumnOpen, (open) => {
 });
 
 watch(goToColumnSearch, () => {
+  goToColumnSelectedIndex.value = 0;
+  scrollGoToColumnSelectionIntoView();
+});
+
+watch(goToColumnMatchMode, () => {
   goToColumnSelectedIndex.value = 0;
   scrollGoToColumnSelectionIntoView();
 });
@@ -4159,7 +4167,8 @@ async function lastPage() {
       if (!sql || generation !== manualTotalRowCountGeneration) return;
       const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
       if (generation !== manualTotalRowCountGeneration) return;
-      const total = Number(result.rows?.[0]?.[0] ?? 0);
+      // InfluxQL aggregates return one count per field column with a leading time cell.
+      const total = sumGridCountValues(result.rows?.[0]) ?? 0;
       if (!Number.isFinite(total) || total < 0) return;
       manualTotalRowCount.value = total;
       jumpToCountedLastPage(total);
@@ -4231,7 +4240,8 @@ async function calculateTotalRowCount() {
     if (!countTarget?.sql || generation !== manualTotalRowCountGeneration) return;
     const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", countTarget.sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
     if (generation !== manualTotalRowCountGeneration) return;
-    const total = Number(result.rows?.[0]?.[0] ?? 0);
+    // InfluxQL returns zero rows when nothing matches instead of a count of 0.
+    const total = sumGridCountValues(result.rows?.[0]) ?? 0;
     if (Number.isFinite(total) && total >= 0) {
       manualTotalRowCount.value = total;
     }
@@ -4542,6 +4552,47 @@ const batchAppendPasteRowId = ref<number | null>(null);
 
 const showSqlPreview = ref(false);
 const previewSqlText = ref("");
+const SQL_PREVIEW_DEFAULT_HEIGHT = 208;
+const SQL_PREVIEW_MIN_HEIGHT = 120;
+const SQL_PREVIEW_RESERVED_GRID_HEIGHT = 120;
+const sqlPreviewHeight = ref(SQL_PREVIEW_DEFAULT_HEIGHT);
+const isResizingSqlPreview = ref(false);
+let sqlPreviewResizeStartY = 0;
+let sqlPreviewResizeStartHeight = SQL_PREVIEW_DEFAULT_HEIGHT;
+let sqlPreviewResizeObserver: ResizeObserver | null = null;
+
+function clampSqlPreviewHeight(height: number) {
+  const availableHeight = gridRef.value?.clientHeight;
+  const maxHeight = availableHeight ? Math.max(SQL_PREVIEW_MIN_HEIGHT, availableHeight - SQL_PREVIEW_RESERVED_GRID_HEIGHT) : height;
+  return Math.min(Math.max(height, SQL_PREVIEW_MIN_HEIGHT), maxHeight);
+}
+
+function onSqlPreviewResizeStart(event: PointerEvent) {
+  if (event.button !== 0) return;
+  isResizingSqlPreview.value = true;
+  sqlPreviewResizeStartY = event.clientY;
+  sqlPreviewResizeStartHeight = sqlPreviewHeight.value;
+  beginPanelResize();
+  document.body.classList.add("select-none", "cursor-row-resize");
+  window.addEventListener("pointermove", onSqlPreviewResizeMove);
+  window.addEventListener("pointerup", onSqlPreviewResizeEnd);
+  window.addEventListener("pointercancel", onSqlPreviewResizeEnd);
+}
+
+function onSqlPreviewResizeMove(event: PointerEvent) {
+  if (!isResizingSqlPreview.value) return;
+  sqlPreviewHeight.value = clampSqlPreviewHeight(sqlPreviewResizeStartHeight + sqlPreviewResizeStartY - event.clientY);
+}
+
+function onSqlPreviewResizeEnd() {
+  if (!isResizingSqlPreview.value) return;
+  isResizingSqlPreview.value = false;
+  document.body.classList.remove("select-none", "cursor-row-resize");
+  window.removeEventListener("pointermove", onSqlPreviewResizeMove);
+  window.removeEventListener("pointerup", onSqlPreviewResizeEnd);
+  window.removeEventListener("pointercancel", onSqlPreviewResizeEnd);
+  endPanelResize();
+}
 
 let previewRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -4576,6 +4627,7 @@ async function openSqlPreview() {
 }
 
 function closeSqlPreview() {
+  onSqlPreviewResizeEnd();
   showSqlPreview.value = false;
   if (previewRefreshTimer) {
     clearTimeout(previewRefreshTimer);
@@ -4618,13 +4670,14 @@ const hasResultToolbarLeadingSlot = computed(() => !!slots["result-toolbar-leadi
 const hasResultToolbarActionsSlot = computed(() => !!slots["result-toolbar-actions"]);
 const virtualRowIdentifierScope = computed<VirtualRowIdentifierScope | undefined>(() => {
   if (!props.connectionId || !props.database || !props.tableMeta?.tableName) return undefined;
-  return {
+  const scope = {
     connectionId: props.connectionId,
     database: props.tableMeta.database ?? props.database,
     catalog: props.tableMeta.catalog,
     schema: props.tableMeta.schema,
     tableName: props.tableMeta.tableName,
   };
+  return props.context === "table-data" ? tableDataVirtualRowIdentifierScope(connectionStore.getConfig(props.connectionId), scope) : scope;
 });
 const virtualRowIdentifierColumns = computed(() => props.tableMeta?.virtualPrimaryKeys ?? []);
 const showVirtualRowIdentifierControl = computed(() => {
@@ -5590,15 +5643,22 @@ function scrollToCurrentMatch() {
   if (rowEl) rowEl.scrollIntoView({ block: "center" });
 }
 
-function scrollTransposeFieldIntoView(visibleFieldIndex: number) {
+function scrollTransposeFieldIntoView(visibleFieldIndex: number, alignment: TransposeScrollAlignment = "start") {
   const actualColumnIndex = visibleColumnIndexes.value[visibleFieldIndex];
   const sortedIndex = transposeRows.value.findIndex((item) => item.columnIndex === actualColumnIndex);
   if (sortedIndex < 0) return;
   const scroller = transposeScrollRef.value;
   if (scroller && !(scroller instanceof HTMLElement)) {
-    (scroller as { scrollToItem?: (index: number) => void }).scrollToItem?.(sortedIndex);
+    (scroller as { scrollToItem?: (index: number, options?: { align?: TransposeScrollAlignment }) => void }).scrollToItem?.(sortedIndex, { align: alignment });
   } else if (scroller instanceof HTMLElement) {
-    scroller.scrollTop = sortedIndex * transposeRowHeight.value;
+    scroller.scrollTop = transposeScrollTopForField({
+      fieldIndex: sortedIndex,
+      totalFields: transposeRows.value.length,
+      rowHeight: transposeRowHeight.value,
+      viewportHeight: scroller.clientHeight,
+      currentScrollTop: scroller.scrollTop,
+      alignment,
+    });
   }
 }
 
@@ -7950,8 +8010,8 @@ function onCanvasScroll(event: Event) {
   }
   if (scrollTopChanged || viewportHeightChanged) {
     updateGridVerticalScrollbar(scroller);
-    maybeCheckInfiniteScroll(scroller);
   }
+  maybeCheckInfiniteScroll(scroller);
   if (viewportWidthChanged || viewportHeightChanged) {
     const gutter = scrollbarGutterWidth(scroller);
     if (gridScrollbarGutter.value !== gutter) gridScrollbarGutter.value = gutter;
@@ -8599,8 +8659,17 @@ onMounted(() => {
   window.addEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onSynchronizedTableDataGridColumnOrderChanged);
   window.addEventListener("dbx:before-tab-switch", captureTabSwitchViewSnapshot);
   window.addEventListener("blur", clearInternalClipboardCopy);
+  window.addEventListener("blur", onSqlPreviewResizeEnd);
   document.addEventListener("visibilitychange", clearInternalClipboardCopy);
   nextTick(restoreTabSwitchViewSnapshot);
+  nextTick(() => {
+    if (gridRef.value && typeof ResizeObserver !== "undefined") {
+      sqlPreviewResizeObserver = new ResizeObserver(() => {
+        if (showSqlPreview.value) sqlPreviewHeight.value = clampSqlPreviewHeight(sqlPreviewHeight.value);
+      });
+      sqlPreviewResizeObserver.observe(gridRef.value);
+    }
+  });
 });
 onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
@@ -8612,6 +8681,9 @@ onUnmounted(() => {
   captureTabSwitchViewSnapshot();
   cancelViewSnapshotRestoreFrame();
   onLocalFilterResizeEnd();
+  onSqlPreviewResizeEnd();
+  sqlPreviewResizeObserver?.disconnect();
+  sqlPreviewResizeObserver = null;
   dataGridRuntimeScope.dispose();
   foreignKeyDisplayRequests.dispose();
   clearCellFormatCache();
@@ -8634,6 +8706,7 @@ onUnmounted(() => {
   window.removeEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onSynchronizedTableDataGridColumnOrderChanged);
   window.removeEventListener("dbx:before-tab-switch", captureTabSwitchViewSnapshot);
   window.removeEventListener("blur", clearInternalClipboardCopy);
+  window.removeEventListener("blur", onSqlPreviewResizeEnd);
   document.removeEventListener("visibilitychange", clearInternalClipboardCopy);
 });
 
@@ -9820,8 +9893,8 @@ async function previewConditionalBulkEditMatchCount() {
       whereInput,
     });
     const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, undefined, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
-    const count = Number(result.rows?.[0]?.[0] ?? 0);
-    if (!Number.isFinite(count) || count < 0) throw new Error("Invalid row count returned by the database");
+    const count = sumGridCountValues(result.rows?.[0]);
+    if (count === undefined || count < 0) throw new Error("Invalid row count returned by the database");
     if (requestId !== conditionalBulkEditMatchCountRequestId) return;
     conditionalBulkEditMatchCount.value = count;
   } catch (error: any) {
@@ -10133,7 +10206,9 @@ const DOM_DATA_GRID_ROW_HEIGHT = 26;
 function scrollCellIntoView(rowIndex: number, colIndex: number, block: DataGridScrollAlignment = "nearest", previousPageRowIndex?: number) {
   if (isTransposeMode.value) {
     nextTick(() => {
-      scrollTransposeFieldIntoView(colIndex);
+      // Clicks and keyboard steps pass "nearest" so an already-visible field stays put;
+      // only explicit jump callers still align the field to the top.
+      scrollTransposeFieldIntoView(colIndex, block === "nearest" ? "nearest" : "start");
       scrollTransposeRecordIntoView(rowIndex);
     });
     return;
@@ -12965,6 +13040,7 @@ onUnmounted(() => {
   onDdlResizeEnd();
   onDetailResizeEnd();
   onMongoJsonPreviewResizeEnd();
+  onSqlPreviewResizeEnd();
   finishCellSelection();
   loadAllRowsLoopActive = false;
   clearTimeout(highlightedColumnTimer);
@@ -15430,7 +15506,37 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             </div>
             <div class="relative m-2 shrink-0">
               <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <input ref="goToColumnSearchInput" v-model="goToColumnSearch" :placeholder="t('grid.searchColumn')" class="h-8 w-full rounded-md border bg-transparent pl-7 pr-6 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25" />
+              <input
+                ref="goToColumnSearchInput"
+                v-model="goToColumnSearch"
+                :placeholder="t('grid.searchColumn')"
+                :aria-label="t('grid.searchColumn')"
+                class="h-8 w-full rounded-md border bg-transparent pl-7 pr-28 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
+              />
+              <DropdownMenu>
+                <DropdownMenuTrigger as-child>
+                  <button
+                    type="button"
+                    class="absolute right-7 top-1/2 inline-flex -translate-y-1/2 items-center gap-0.5 rounded px-1 text-[10px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                    :title="goToColumnMatchMode === 'exact' ? t('grid.useFuzzyColumnSearch') : t('grid.useExactColumnSearch')"
+                    :aria-label="goToColumnMatchMode === 'exact' ? t('grid.useFuzzyColumnSearch') : t('grid.useExactColumnSearch')"
+                    @keydown.stop
+                  >
+                    {{ goToColumnMatchMode === "exact" ? t("grid.exactColumnSearch") : t("grid.fuzzyColumnSearch") }}
+                    <ChevronDown class="h-3 w-3" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" class="!w-auto !min-w-0 whitespace-nowrap">
+                  <DropdownMenuItem class="justify-between gap-2 text-xs" @select="goToColumnMatchMode = 'fuzzy'">
+                    {{ t("grid.fuzzyColumnSearch") }}
+                    <Check v-if="goToColumnMatchMode === 'fuzzy'" class="h-3 w-3" />
+                  </DropdownMenuItem>
+                  <DropdownMenuItem class="justify-between gap-2 text-xs" @select="goToColumnMatchMode = 'exact'">
+                    {{ t("grid.exactColumnSearch") }}
+                    <Check v-if="goToColumnMatchMode === 'exact'" class="h-3 w-3" />
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <button v-if="goToColumnSearch" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="goToColumnSearch = ''">
                 <X class="h-3.5 w-3.5" />
               </button>
@@ -15761,23 +15867,17 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               count: result.rows.length,
             })
           }}
-          <i18n-t v-if="showRerunTotalCountAction && !(totalRowCountBusy && !manualTotalRowCountLoading)" keypath="grid.totalRowCountWithAction" tag="span" class="text-muted-foreground/70">
-            <template #button>
-              <button
-                type="button"
-                class="mr-1 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm align-middle text-muted-foreground/70 hover:bg-gray-200 hover:text-foreground disabled:pointer-events-none disabled:opacity-50 dark:hover:bg-gray-800"
-                :disabled="manualTotalRowCountLoading"
-                :aria-busy="manualTotalRowCountLoading ? 'true' : undefined"
-                :title="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
-                :aria-label="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
-                @click="calculateTotalRowCount"
-              >
-                <Loader2 v-if="manualTotalRowCountLoading" aria-hidden="true" class="h-3 w-3 animate-spin" />
-                <RefreshCcw v-else aria-hidden="true" class="h-3 w-3" />
-              </button>
-            </template>
-            <template #count>{{ displayedTotalRowCount }}</template>
-          </i18n-t>
+          <button
+            v-if="showRerunTotalCountAction && !(totalRowCountBusy && !manualTotalRowCountLoading)"
+            type="button"
+            class="text-muted-foreground/70 underline underline-offset-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+            :disabled="manualTotalRowCountLoading"
+            :aria-busy="manualTotalRowCountLoading ? 'true' : undefined"
+            :title="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
+            @click="calculateTotalRowCount"
+          >
+            {{ t(totalRowCountLabelKey, { count: displayedTotalRowCount }) }}
+          </button>
           <span v-else-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t(totalRowCountLabelKey, { count: displayedTotalRowCount }) }}</span>
           <span v-if="totalRowCountBusy && !(showRerunTotalCountAction && manualTotalRowCountLoading)" class="text-muted-foreground/70">
             {{ t("grid.totalRowCountLoading") }}
@@ -16041,7 +16141,15 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     </Dialog>
 
     <!-- SQL Preview panel for pending data changes -->
-    <div v-if="showSqlPreview" class="h-52 shrink-0 border-t">
+    <div v-if="showSqlPreview" class="relative shrink-0 border-t" :style="{ height: `${sqlPreviewHeight}px` }">
+      <div
+        class="absolute inset-x-0 top-0 z-10 h-2 -translate-y-1/2 cursor-row-resize touch-none hover:bg-primary/30 active:bg-primary/50"
+        role="separator"
+        aria-orientation="horizontal"
+        :aria-label="t('grid.resizeSqlPreview')"
+        :title="t('grid.resizeSqlPreview')"
+        @pointerdown.prevent="onSqlPreviewResizeStart"
+      />
       <SqlPreviewPanel :sql="previewSqlText" :loading="isPreviewLoading" :can-undo="canUndoPendingChange" :can-redo="canRedoPendingChange" @undo="undoGridChange" @redo="redoGridChange" @close="closeSqlPreview" />
     </div>
 

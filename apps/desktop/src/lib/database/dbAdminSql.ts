@@ -389,10 +389,14 @@ export function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions
   return api.buildMysqlAutoIncrementSql(options);
 }
 
-export function supportsNativeMysqlAutoIncrement(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
-  if (connection?.db_type !== "mysql") return false;
+const MYSQL_AUTO_INCREMENT_PROFILES = new Set(["mysql", "mariadb", "tidb", "oceanbase", "tdsql", "polardb", "greatsql", "custom_mysql", "dolt", "goldendb"]);
+
+export function supportsMysqlAutoIncrement(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
+  if (!connection) return false;
+  if (connection.db_type === "goldendb") return true;
+  if (connection.db_type !== "mysql") return false;
   const profile = connection.driver_profile?.trim().toLowerCase();
-  return !profile || profile === "mysql";
+  return !profile || MYSQL_AUTO_INCREMENT_PROFILES.has(profile);
 }
 
 const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];

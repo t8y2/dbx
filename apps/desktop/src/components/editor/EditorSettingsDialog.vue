@@ -5877,10 +5877,7 @@ async function refreshAiImportSourceCounts() {
       status: aiMagpiePluginAvailable.value ? "loading" : "unavailable",
     },
   };
-  const [ccSwitchResult, magpieResult] = await Promise.allSettled([
-    loadCcSwitchAiConfigs(),
-    aiMagpiePluginAvailable.value ? loadMagpieAiConfigs() : Promise.resolve(null),
-  ]);
+  const [ccSwitchResult, magpieResult] = await Promise.allSettled([loadCcSwitchAiConfigs(), aiMagpiePluginAvailable.value ? loadMagpieAiConfigs() : Promise.resolve(null)]);
   if (ccSwitchResult.status === "fulfilled") {
     setAiImportSourceSummary("cc-switch", ccSwitchResult.value);
   } else {
@@ -13005,12 +13002,7 @@ LIMIT 100;</pre>
               'opacity-60': !draft.selectable && draft.disabledReason !== 'alreadyImported',
             }"
           >
-            <CheckCircle2
-              v-if="draft.disabledReason === 'alreadyImported'"
-              class="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400"
-              role="img"
-              :aria-label="t('ai.aiImportAlreadyImported')"
-            />
+            <CheckCircle2 v-if="draft.disabledReason === 'alreadyImported'" class="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" role="img" :aria-label="t('ai.aiImportAlreadyImported')" />
             <input v-else v-model="draft.selected" type="checkbox" class="mt-1 h-4 w-4 shrink-0 accent-primary" :disabled="!draft.selectable || aiImportRefreshing || aiImportSaving" :aria-label="t('ai.aiImportSelectConfig', { name: draft.config.name })" />
             <div class="min-w-0 flex-1 space-y-2">
               <div class="flex flex-wrap items-center gap-2">

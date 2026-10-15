@@ -1086,6 +1086,37 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
     Ok(())
 }
 
+async fn shutdown_runtime_resources(app_handle: &tauri::AppHandle) {
+    if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
+        backups.shutdown().await;
+    }
+    if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>() {
+        server.shutdown(Duration::from_secs(1)).await;
+    }
+    if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+        state.shutdown(Duration::from_secs(3)).await;
+    }
+}
+
+fn run_shutdown_on_dedicated_thread(shutdown: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("dbx-runtime-shutdown".into())
+        .spawn(shutdown)
+        .map_err(|error| format!("failed to start runtime shutdown: {error}"))?
+        .join()
+        .map_err(|_| "runtime shutdown thread panicked".to_string())
+}
+
+pub(crate) fn cleanup_before_updater_forced_exit(app_handle: &tauri::AppHandle) {
+    let shutdown_app = app_handle.clone();
+    if let Err(error) = run_shutdown_on_dedicated_thread(move || {
+        tauri::async_runtime::block_on(shutdown_runtime_resources(&shutdown_app));
+    }) {
+        log::warn!("Failed to shut down DBX runtime resources before updater exit: {error}");
+    }
+    app_handle.cleanup_before_exit();
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -1094,15 +1125,32 @@ mod tests {
         linux_appimage_requires_dmabuf_workaround, linux_drm_driver_is_software_only,
         linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
         linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
-        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
-        should_enable_linux_floating_frame, should_enable_single_instance, should_fallback_to_native_quit,
-        should_hide_window_before_exit, should_hide_window_on_close, should_setup_desktop_tray,
-        should_show_main_window_after_setup, should_show_main_window_before_setup_tasks, startup_data_dir_mode,
-        tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        linux_webkit_rendering_workarounds, native_window_decorations_override, run_shutdown_on_dedicated_thread,
+        should_confirm_app_exit_request, should_enable_linux_floating_frame, should_enable_single_instance,
+        should_fallback_to_native_quit, should_hide_window_before_exit, should_hide_window_on_close,
+        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
+        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
+        LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn forced_exit_shutdown_waits_for_a_dedicated_cleanup_thread() {
+        let caller = std::thread::current().id();
+        let cleanup_thread = Arc::new(Mutex::new(None));
+        let observed_thread = cleanup_thread.clone();
+
+        run_shutdown_on_dedicated_thread(move || {
+            *observed_thread.lock().unwrap() = Some(std::thread::current().id());
+        })
+        .unwrap();
+
+        let cleanup_thread = cleanup_thread.lock().unwrap().expect("cleanup thread id");
+        assert_ne!(cleanup_thread, caller);
+    }
 
     #[test]
     fn linux_floating_frame_is_disabled_by_default() {
@@ -2244,9 +2292,16 @@ pub fn run() {
             commands::query::build_duplicate_table_structure_sql,
             commands::query::build_copy_table_data_sql,
             commands::query::build_executable_object_source_statements,
+            commands::query::validate_oracle_executable_object_source,
+            commands::query::fingerprint_oracle_routine_object_source,
             commands::query::build_executable_object_source_sql,
             commands::query::build_editable_object_source,
             commands::query::build_routine_rename_object_source_statements,
+            commands::query::rewrite_oracle_routine_references,
+            commands::query::rewrite_oracle_table_references,
+            commands::query::parse_oracle_object_name,
+            commands::query::build_oracle_view_rename_source,
+            commands::query::review_oracle_view_rename_source,
             commands::query::build_view_ddl_sql,
             commands::query::build_table_structure_change_sql,
             commands::query::build_table_owner_change_sql,
@@ -2821,18 +2876,7 @@ pub fn run() {
                             let _ = window.hide();
                         }
                     }
-                    tauri::async_runtime::block_on(async {
-                        if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
-                            backups.shutdown().await;
-                        }
-                        if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>()
-                        {
-                            server.shutdown(Duration::from_secs(1)).await;
-                        }
-                        if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
-                            state.shutdown(Duration::from_secs(3)).await;
-                        }
-                    });
+                    tauri::async_runtime::block_on(shutdown_runtime_resources(app_handle));
                 }
             }
 

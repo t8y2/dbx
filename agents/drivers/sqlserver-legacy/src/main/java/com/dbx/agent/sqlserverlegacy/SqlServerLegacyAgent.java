@@ -769,10 +769,71 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     static String legacyTlsUrl(ConnectParams params) {
         Map<String, String> properties = baseConnectionProperties(params);
-        properties.put("encrypt", "true");
+        // ENCRYPT is stripped from baseConnectionProperties; resolve it explicitly.
+        // Default remains true for TLS 1.0 legacy servers; honor encrypt=false /
+        // sqlserverEncryption=disabled for instances (or proxies) without SSL.
+        String encrypt = requestedEncrypt(params);
+        properties.put("encrypt", encrypt);
         properties.put("trustServerCertificate", "true");
-        properties.put("sslProtocol", requestedTlsProtocol(params));
+        if (!"false".equalsIgnoreCase(encrypt)) {
+            properties.put("sslProtocol", requestedTlsProtocol(params));
+        }
         return appendProperties(baseJdbcUrl(params), properties);
+    }
+
+    /**
+     * Reads encrypt / sqlserverEncryption from url_params or connection_string.
+     * Defaults to true so existing TLS 1.0 encrypted endpoints keep working.
+     */
+    private static String requestedEncrypt(ConnectParams params) {
+        String value = firstProperty(params.getUrl_params(), new String[]{"encrypt", "sqlserverEncryption"}, true);
+        if (value == null) {
+            value = firstProperty(params.getConnection_string(), new String[]{"encrypt", "sqlserverEncryption"}, false);
+        }
+        if (value == null) {
+            return "true";
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("{") && normalized.endsWith("}")) {
+            normalized = normalized.substring(1, normalized.length() - 1).replace("}}", "}").toLowerCase(Locale.ROOT);
+        }
+        if (normalized.equals("disabled") || normalized.equals("disable") || normalized.equals("false")
+            || normalized.equals("0") || normalized.equals("off") || normalized.equals("no")) {
+            return "false";
+        }
+        if (normalized.equals("true") || normalized.equals("1") || normalized.equals("yes")
+            || normalized.equals("on") || normalized.equals("required")) {
+            return "true";
+        }
+        // strict (TDS 8.0) is not supported by this legacy driver path; other unrecognized
+        // values are rejected instead of silently downgraded to the encrypted default.
+        throw new IllegalArgumentException(
+            "Unsupported SQL Server encrypt value '" + value.trim() + "'; use true, false or strict");
+    }
+
+    /** Returns the last matching property value for any of the given keys. */
+    private static String firstProperty(String properties, String[] keys, boolean urlParams) {
+        if (properties == null) {
+            return null;
+        }
+        String found = null;
+        for (String property : connectionPropertyParts(properties, urlParams)) {
+            String part = property.trim();
+            while (part.startsWith("?")) {
+                part = part.substring(1).trim();
+            }
+            int separator = part.indexOf('=');
+            if (separator <= 0) {
+                continue;
+            }
+            String key = part.substring(0, separator).trim();
+            for (String candidate : keys) {
+                if (candidate.equalsIgnoreCase(key)) {
+                    found = part.substring(separator + 1).trim();
+                }
+            }
+        }
+        return found;
     }
 
     private static String requestedTlsProtocol(ConnectParams params) {

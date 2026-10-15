@@ -11855,7 +11855,7 @@ LIMIT 100;</pre>
                       <TabsList class="settings-mcp-config-tabs h-auto min-h-8 w-full min-w-0 max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain group-data-horizontal/tabs:h-auto">
                         <TabsTrigger value="claude" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
                         <TabsTrigger value="cursor" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
-                        <TabsTrigger value="codebuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">CodeBuddy Code</TabsTrigger>
+                        <TabsTrigger value="codebuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">CodeBuddy Code CLI</TabsTrigger>
                         <TabsTrigger value="zcode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">ZCode</TabsTrigger>
                         <TabsTrigger value="trae" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>
                         <TabsTrigger value="vscode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>

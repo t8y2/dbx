@@ -58,7 +58,7 @@ const surfaceProps = computed(() => ({
 }));
 const contentEmits = createContentSurfaceEventForwarders(emit);
 const editorGroupBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
-const resultSurfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits, activeTab: activeTab.value! }));
+const resultSurfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits, activeTab: activeQueryTab.value! }));
 
 defineExpose({
   focusSearch: (target: Element | null = null) => {
@@ -141,9 +141,9 @@ function setTabBarTarget(groupId: string, element: unknown) {
   if (element instanceof HTMLElement) workspaceTabBarPortal.targets.set(groupId, element);
   else workspaceTabBarPortal.targets.delete(groupId);
 }
-const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
-const showSharedResult = computed(() => activeTab.value?.mode === "query");
-const hasSharedOutput = computed(() => showSharedResult.value && hasQueryOutput(activeTab.value));
+const activeQueryTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
+const showSharedResult = computed(() => activeQueryTab.value?.mode === "query");
+const hasSharedOutput = computed(() => showSharedResult.value && hasQueryOutput(activeQueryTab.value));
 
 const SHARED_RESULT_PANE_MIN_SIZE = 12;
 const SHARED_RESULT_PANE_MAX_SIZE = 80;
@@ -152,9 +152,9 @@ const SHARED_RESULT_PANE_STORAGE_KEY = "dbx-shared-results-pane-size";
 const storedResultPaneSize = Number(safeLocalStorageGet(SHARED_RESULT_PANE_STORAGE_KEY));
 const resultPaneSize = ref(Number.isFinite(storedResultPaneSize) && storedResultPaneSize >= SHARED_RESULT_PANE_MIN_SIZE && storedResultPaneSize <= SHARED_RESULT_PANE_MAX_SIZE ? storedResultPaneSize : SHARED_RESULT_PANE_DEFAULT_SIZE);
 const showResultPane = computed({
-  get: () => activeTab.value?.uiState?.resultPaneOpen ?? true,
+  get: () => activeQueryTab.value?.uiState?.resultPaneOpen ?? true,
   set: (open: boolean) => {
-    const tab = activeTab.value;
+    const tab = activeQueryTab.value;
     if (tab?.mode === "query") queryStore.updateTabUiState(tab.id, { resultPaneOpen: open });
   },
 });
@@ -184,7 +184,7 @@ function toggleSharedResultsPane(): boolean {
 // behavior (see issue #6193): a collapsed shared pane comes back when the
 // active tab starts executing.
 watch(
-  () => [activeTab.value?.id, activeTab.value?.isExecuting, activeTab.value?.isExplaining] as const,
+  () => [activeQueryTab.value?.id, activeQueryTab.value?.isExecuting, activeQueryTab.value?.isExplaining] as const,
   ([, isExecuting, isExplaining]) => {
     if (isExecuting || isExplaining) showResultPane.value = true;
   },

@@ -16,7 +16,7 @@ const tasks = [
   {
     name: "lint",
     command: "oxlint",
-    args: ["--vue-plugin", "apps/desktop/src"],
+    args: ["--vue-plugin", "apps/desktop/src", "--max-warnings=61"],
   },
   {
     name: "typecheck",

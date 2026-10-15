@@ -459,6 +459,11 @@ export function planMongoFindPagination(input: string, command: MongoFindCommand
   };
 }
 
+/** True when the first page already requests every row an explicit `.limit()` allows. */
+export function mongoFindPageCoversLogicalLimit(plan: Pick<MongoFindPaginationPlan, "pageOffset" | "requestLimit" | "logicalLimit">): boolean {
+  return plan.pageOffset === 0 && plan.logicalLimit !== undefined && plan.requestLimit >= plan.logicalLimit;
+}
+
 export function mongoFindLogicalTotal(total: number, plan: Pick<MongoFindPaginationPlan, "logicalSkip" | "logicalLimit">): number {
   const afterSkip = Math.max(0, Math.trunc(total) - plan.logicalSkip);
   return plan.logicalLimit === undefined ? afterSkip : Math.min(afterSkip, plan.logicalLimit);

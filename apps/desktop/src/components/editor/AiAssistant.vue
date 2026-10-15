@@ -203,6 +203,7 @@ import { databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
 import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+import type { AiSqlActionReport } from "@/lib/ai/aiSqlActionFeedback";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { buildAiAgentStepItems, formatAgentToolName, formatToolDurationMs, toolCallStepKey, updateAgentStepApproval, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
@@ -393,9 +394,9 @@ const props = defineProps<{
 // active tab, so AI-generated SQL could be written into, and executed on,
 // another connection's editor.
 const emit = defineEmits<{
-  appendSql: [sql: string, target: AiConversationBinding];
-  executeSql: [sql: string, target: AiConversationBinding];
-  tempRunSql: [sql: string, target: AiConversationBinding];
+  appendSql: [sql: string, target: AiConversationBinding, requestId?: number];
+  executeSql: [sql: string, target: AiConversationBinding, requestId?: number];
+  tempRunSql: [sql: string, target: AiConversationBinding, requestId?: number];
   requestAutoExecuteSql: [sql: string, target: AiConversationBinding];
   insertRedisCommand: [command: string, target: AiConversationBinding];
   executeRedisCommand: [command: string, target: AiConversationBinding];
@@ -1543,6 +1544,9 @@ function submitEdit(visibleIndex: number) {
   }
   draftPluginContext.value = pluginContext.value;
   messages.value = messages.value.slice(0, actualIndex);
+  // The truncated tail carried the positional SQL-block statuses of the messages
+  // that just disappeared; the regenerated message reuses those indices.
+  clearSqlActionBlockStatuses();
   editingMessageIndex.value = null;
   editingContent.value = "";
   selectedMentions.value = editingMentions.value.filter((mention): mention is AiTableMention & { kind: "table" } => mention.kind === "table").map(({ raw, schema, table }) => ({ raw, schema, table }));
@@ -5088,6 +5092,7 @@ function resetPendingRequestState() {
   // unmount must drop it synchronously, or "识别中" stays on screen in the next
   // conversation until that bounded call settles.
   routingInFlight.value = false;
+  clearSqlActionBlockStatuses();
 }
 
 // `alreadyCancelledSessionId`: the session id a caller (cancelStream()) has
@@ -5120,28 +5125,126 @@ function abandonInFlightRequest(alreadyCancelledSessionId?: string) {
   }
 }
 
-function applySql(code: string) {
+function applySql(code: string, key: string) {
   if (isRedisConnection.value) {
     emit("insertRedisCommand", code, conversationBinding.value);
     return;
   }
-  emit("appendSql", code, conversationBinding.value);
+  // Start the block's status before the request leaves: the target tab may not
+  // be on screen, so this block is the only place the user can see it happen.
+  const requestId = beginSqlAction(key);
+  emit("appendSql", code, conversationBinding.value, requestId);
 }
 
-function executeSql(code: string) {
+function executeSql(code: string, key: string) {
   if (isRedisConnection.value) {
     emit("executeRedisCommand", code, conversationBinding.value);
     return;
   }
-  emit("executeSql", code, conversationBinding.value);
+  const requestId = beginSqlAction(key);
+  emit("executeSql", code, conversationBinding.value, requestId);
 }
 
-function tempRunSql(code: string) {
+function tempRunSql(code: string, key: string) {
   if (isRedisConnection.value) {
     emit("executeRedisCommand", code, conversationBinding.value);
     return;
   }
-  emit("tempRunSql", code, conversationBinding.value);
+  const requestId = beginSqlAction(key);
+  emit("tempRunSql", code, conversationBinding.value, requestId);
+}
+
+/**
+ * Per-SQL-block action status (#11962). The panel is the only surface that can
+ * report an AI action's outcome when its editor tab is not on screen, so each
+ * block tracks the request it started and renders running/succeeded/failed
+ * inline.
+ */
+type AiSqlBlockStatus =
+  /** `requestId` is the click this block currently waits for (see beginSqlAction). */
+  | { phase: "running"; requestId: number }
+  | { phase: "succeeded"; rows?: number; affectedRows?: number }
+  /** `apply` appended the SQL to the editor: there is no execution to summarise. */
+  | { phase: "applied" }
+  | { phase: "failed"; message: string }
+  | { phase: "unavailable"; message: string };
+
+const aiSqlBlockStatuses = ref<Map<string, AiSqlBlockStatus>>(new Map());
+const pendingSqlActionRequests = new Map<number, string>();
+let nextSqlActionRequestId = 0;
+
+function beginSqlAction(key: string): number {
+  const requestId = ++nextSqlActionRequestId;
+  pendingSqlActionRequests.set(requestId, key);
+  const next = new Map(aiSqlBlockStatuses.value);
+  // A second click on the same block supersedes the first: the block tracks the
+  // request it is waiting for, so the earlier response cannot overwrite it.
+  next.set(key, { phase: "running", requestId });
+  aiSqlBlockStatuses.value = next;
+  return requestId;
+}
+
+/**
+ * Block keys are positional (`code:${messageIndex}:${segment}`), so a status only
+ * means anything while the transcript that produced it is still on screen.
+ * Every path that replaces or truncates the transcript must drop them, or a
+ * stale "failed" line renders on whatever block now sits at that index — in this
+ * chat after an edit-resend, or in another conversation entirely. The call sites
+ * are `selectConversation`, `clearMessages`, the edit-resend truncation, and
+ * `resetPendingRequestState`.
+ */
+function clearSqlActionBlockStatuses() {
+  if (aiSqlBlockStatuses.value.size) aiSqlBlockStatuses.value = new Map();
+  pendingSqlActionRequests.clear();
+}
+
+/** Host callback: settles the block that started request `requestId`. */
+function reportAiSqlAction(report: AiSqlActionReport) {
+  const key = pendingSqlActionRequests.get(report.requestId);
+  if (key === undefined) return;
+  pendingSqlActionRequests.delete(report.requestId);
+  const pending = aiSqlBlockStatuses.value.get(key);
+  if (pending?.phase === "running" && pending.requestId !== report.requestId) {
+    // The block was clicked again while this request was in flight; that later
+    // click owns the block's status, so this stale answer is dropped.
+    return;
+  }
+  const next = new Map(aiSqlBlockStatuses.value);
+  if (report.status === "dismissed") {
+    // The user answered a dialog (danger/production/parameters/read-only) or the
+    // request was cancelled: there is no outcome to report, so drop the state
+    // instead of leaving the block spinning forever.
+    next.delete(key);
+  } else if (report.status === "succeeded") {
+    next.set(key, { phase: "succeeded", rows: report.rows, affectedRows: report.affectedRows });
+  } else if (report.status === "applied") {
+    next.set(key, { phase: "applied" });
+  } else if (report.status === "failed") {
+    next.set(key, { phase: "failed", message: report.message ?? "" });
+  } else {
+    next.set(key, { phase: "unavailable", message: report.message ?? "" });
+  }
+  aiSqlBlockStatuses.value = next;
+}
+
+const sqlBlockKey = (messageIndex: number, segmentIndex: number) => `code:${messageIndex}:${segmentIndex}`;
+
+/** Status of one SQL block's action, or `undefined` when nothing ran from it. */
+function sqlBlockStatus(messageIndex: number, segmentIndex: number): AiSqlBlockStatus | undefined {
+  return aiSqlBlockStatuses.value.get(sqlBlockKey(messageIndex, segmentIndex));
+}
+
+function sqlBlockStatusText(messageIndex: number, segmentIndex: number): string {
+  const status = sqlBlockStatus(messageIndex, segmentIndex);
+  if (!status) return "";
+  if (status.phase === "running") return t("ai.sqlActionRunning");
+  if (status.phase === "applied") return t("ai.sqlActionApplied");
+  if (status.phase === "succeeded") {
+    if (status.affectedRows) return t("ai.sqlActionSucceededAffected", { count: status.affectedRows });
+    if (status.rows) return t("ai.sqlActionSucceededRows", { count: status.rows });
+    return t("ai.sqlActionSucceeded");
+  }
+  return status.message;
 }
 
 const copiedContentKey = ref("");
@@ -5314,6 +5417,8 @@ function clearMessages() {
   // the transcript, so returning to this conversation shows what changed.
   if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
   messages.value = [];
+  // Positional SQL-block statuses belong to the transcript just wiped.
+  clearSqlActionBlockStatuses();
   draftPluginContext.value = undefined;
   clearContextReferences();
   clearPendingWriteGrant();
@@ -5667,6 +5772,9 @@ function selectConversation(conv: AiConversation) {
   skillHintLatch.value = null;
   const activeRun = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conv.id) : undefined;
   messages.value = activeRun?.messages ?? chatMessagesFromConversation(conv);
+  // Block keys are positional, so the arriving transcript must not inherit the
+  // departing conversation's statuses (#11962).
+  clearSqlActionBlockStatuses();
   // Req 13 after a restart: the transcript keeps the fact that skills were
   // loaded, so the chips can light up before anything is read again. The bodies
   // come back when a request actually needs them (`rehydrateLoadedSkillBodies`).
@@ -6442,7 +6550,7 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch });
+defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch, reportAiSqlAction });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
@@ -6914,7 +7022,7 @@ async function openExternalUrl(url: string) {
                           v-if="!pluginContext && !seg.pending && seg.isSql && !isRedisConnection"
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                           :title="t('ai.tempRunSql')"
-                          @click="tempRunSql(seg.content)"
+                          @click="tempRunSql(seg.content, sqlBlockKey(i, j))"
                         >
                           <FlaskConical class="h-3.5 w-3.5" />
                         </button>
@@ -6922,7 +7030,7 @@ async function openExternalUrl(url: string) {
                           v-if="!pluginContext && !seg.pending && (seg.isSql || isRedisConnection)"
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                           :title="t('ai.executeSql')"
-                          @click="executeSql(seg.content)"
+                          @click="executeSql(seg.content, sqlBlockKey(i, j))"
                         >
                           <Play class="h-3.5 w-3.5" />
                         </button>
@@ -6930,7 +7038,7 @@ async function openExternalUrl(url: string) {
                           v-if="!pluginContext && !seg.pending && (seg.isSql || isRedisConnection)"
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                           :title="t('ai.apply')"
-                          @click="applySql(seg.content)"
+                          @click="applySql(seg.content, sqlBlockKey(i, j))"
                         >
                           <ArrowDownToLine class="h-3.5 w-3.5" />
                         </button>
@@ -6948,6 +7056,25 @@ async function openExternalUrl(url: string) {
                       </div>
                     </div>
                     <pre class="ai-code-block whitespace-pre-wrap break-words [overflow-wrap:anywhere] p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
+                    <!-- #11962: the outcome of an action started from THIS block, so the
+                         user sees it without hunting for the target editor tab. The row
+                         stays mounted while the action runs, so its running → terminal
+                         text change is announced; `role="status"` matches the other
+                         block-level notices in this file. -->
+                    <div
+                      v-if="sqlBlockStatus(i, j)"
+                      data-ai-sql-action-status
+                      role="status"
+                      class="border-t border-zinc-200 px-3 py-1.5 text-[10px] dark:border-zinc-700/50"
+                      :class="sqlBlockStatus(i, j)?.phase === 'failed' || sqlBlockStatus(i, j)?.phase === 'unavailable' ? 'text-red-600 dark:text-red-400' : 'text-zinc-500 dark:text-zinc-400'"
+                    >
+                      <span class="flex items-start gap-1.5">
+                        <Loader2 v-if="sqlBlockStatus(i, j)?.phase === 'running'" class="mt-px h-3 w-3 shrink-0 animate-spin" />
+                        <Check v-else-if="sqlBlockStatus(i, j)?.phase === 'succeeded' || sqlBlockStatus(i, j)?.phase === 'applied'" class="mt-px h-3 w-3 shrink-0 text-emerald-500" />
+                        <CircleSlash v-else class="mt-px h-3 w-3 shrink-0" />
+                        <span class="min-w-0 whitespace-pre-wrap break-words">{{ sqlBlockStatusText(i, j) }}</span>
+                      </span>
+                    </div>
                   </div>
                 </template>
                 <div v-if="msg === proposalConfirmMessage" class="mt-2 flex gap-2" :title="t('ai.proposalConfirmTitle')">

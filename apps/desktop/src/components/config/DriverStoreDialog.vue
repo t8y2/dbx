@@ -274,12 +274,10 @@ function getAgentProgressPercent(dbType: string): number | null {
   return next ?? lastAgentProgressPercent[dbType] ?? null;
 }
 
-const jdbcPluginProgressNumber = computed(() => {
-  const next = driverInstallProgressPercent(jdbcPluginProgress.value);
-  if (next !== null) {
-    lastJdbcPluginProgressPercent.value = next;
-  }
-  return next ?? lastJdbcPluginProgressPercent.value;
+const jdbcPluginProgressNumber = computed(() => driverInstallProgressPercent(jdbcPluginProgress.value) ?? lastJdbcPluginProgressPercent.value);
+watch(jdbcPluginProgress, (progress) => {
+  const next = driverInstallProgressPercent(progress);
+  if (next !== null) lastJdbcPluginProgressPercent.value = next;
 });
 
 function resetAgentInstallProgress() {

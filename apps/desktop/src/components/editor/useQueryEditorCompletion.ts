@@ -50,7 +50,7 @@ import { completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentat
 import { supportsDatabaseNameCompletion } from "@/lib/database/databaseFeatureSupport";
 import { sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { oracleDatabaseLinkCompletionItems } from "@/lib/sql/oracleDatabaseLinkCompletion";
-import { isOracleCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
+import { isOracleCompletionDatabase, isSequenceCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument } from "@/lib/redis/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject } from "@/lib/sql/sqlCompletion";
 import type { CompletionAssistantObjectKind, SqlServerCompletionContext } from "@/types/database";
@@ -1462,7 +1462,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
   function completionObjectKindsForContext(completionContext: ReturnType<typeof getSqlCompletionContext>): CompletionAssistantObjectKind[] {
     if (completionContext.contextKind === "exec") return ["procedure"];
-    if (isOracleCompletionDatabase(props.databaseType)) {
+    if (isSequenceCompletionDatabase(props.databaseType)) {
       if (completionContext.suggestColumns && completionContext.referencedTables.length > 0 && !completionContext.qualifier) {
         return ["function", "sequence"];
       }

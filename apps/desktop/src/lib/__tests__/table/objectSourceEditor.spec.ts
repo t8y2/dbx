@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/lib/backend/api";
-import { executeObjectSourceSave, formatObjectSourceSaveError, resolveObjectSourceEditDraft, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { executeObjectSourceSave, fingerprintOracleRoutineObjectSource, formatObjectSourceSaveError, resolveObjectSourceEditDraft, rewriteOracleRoutineReferences, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { formatSqlForDisplay } from "@/lib/sql/sqlFormatter";
 
@@ -8,6 +8,8 @@ vi.mock("@/lib/backend/api", () => ({
   executeInTransaction: vi.fn().mockResolvedValue({}),
   executeQuery: vi.fn().mockResolvedValue({}),
   executeScript: vi.fn().mockResolvedValue({}),
+  rewriteOracleRoutineReferences: vi.fn().mockResolvedValue("CREATE VIEW v AS SELECT F_NEW(id) FROM t"),
+  fingerprintOracleRoutineObjectSource: vi.fn().mockResolvedValue("fingerprint"),
 }));
 
 beforeEach(() => {
@@ -22,6 +24,7 @@ describe("openGauss rename capabilities", () => {
     expect(supportsSourceBackedRoutineRename("opengauss", "FUNCTION")).toBe(false);
     expect(supportsSourceBackedRoutineRename("opengauss", "PROCEDURE")).toBe(false);
     expect(supportsSourceBackedRoutineRename("postgres", "FUNCTION")).toBe(true);
+    expect(supportsSourceBackedRoutineRename("oceanbase-oracle", "FUNCTION")).toBe(true);
   });
 });
 
@@ -43,6 +46,33 @@ describe("executeObjectSourceSave", () => {
     expect(api.executeQuery).toHaveBeenNthCalledWith(1, "conn-1", "app", "ALTER VIEW v AS SELECT 1", "public");
     expect(api.executeQuery).toHaveBeenNthCalledWith(2, "conn-1", "app", "ALTER VIEW v AS SELECT 2", "public");
     expect(api.executeScript).not.toHaveBeenCalled();
+  });
+
+  it("executes Oracle-family rebuild statements in order and stops at the first failure", async () => {
+    vi.mocked(api.executeQuery)
+      .mockResolvedValueOnce({} as Awaited<ReturnType<typeof api.executeQuery>>)
+      .mockRejectedValueOnce(new Error("CREATE failed"));
+
+    await expect(executeObjectSourceSave("conn-1", "app", "oceanbase-oracle", ["CREATE FUNCTION f_new", "ALTER FUNCTION caller COMPILE", "DROP FUNCTION f_old"], "owner", 45)).rejects.toThrow("CREATE failed");
+
+    expect(api.executeQuery).toHaveBeenCalledTimes(2);
+    expect(api.executeQuery).toHaveBeenNthCalledWith(1, "conn-1", "app", "CREATE FUNCTION f_new", "owner", undefined, { timeoutSecs: 45 });
+    expect(api.executeQuery).toHaveBeenNthCalledWith(2, "conn-1", "app", "ALTER FUNCTION caller COMPILE", "owner", undefined, { timeoutSecs: 45 });
+    expect(api.executeScript).not.toHaveBeenCalled();
+  });
+});
+
+describe("Oracle routine dependency source rewrite", () => {
+  it("routes complete caller source through the shared backend implementation", async () => {
+    const input = { databaseType: "oceanbase-oracle" as const, callerType: "VIEW" as const, targetType: "FUNCTION" as const, schema: "APP", oldName: "F_OLD", newName: "F_NEW", source: "CREATE VIEW v AS SELECT F_OLD(id) FROM t" };
+    await expect(rewriteOracleRoutineReferences(input)).resolves.toBe("CREATE VIEW v AS SELECT F_NEW(id) FROM t");
+    expect(api.rewriteOracleRoutineReferences).toHaveBeenCalledWith(input);
+  });
+
+  it("routes Oracle routine source fingerprint requests through the shared backend implementation", async () => {
+    const input = { databaseType: "oceanbase-oracle" as const, objectType: "PROCEDURE" as const, schema: "APP", name: "CALLER", source: "CREATE PROCEDURE APP.CALLER IS BEGIN NULL; END;" };
+    await expect(fingerprintOracleRoutineObjectSource(input)).resolves.toBe("fingerprint");
+    expect(api.fingerprintOracleRoutineObjectSource).toHaveBeenCalledWith(input);
   });
 });
 

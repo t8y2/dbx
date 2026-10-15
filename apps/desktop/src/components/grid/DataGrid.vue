@@ -326,7 +326,7 @@ import {
   splitForeignKeyDisplayValues,
   type ForeignKeyDisplayConfig,
 } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
-import { removeVirtualRowIdentifier, saveVirtualRowIdentifier, type VirtualRowIdentifierScope } from "@/lib/table/virtualRowIdentifier";
+import { removeVirtualRowIdentifier, saveVirtualRowIdentifier, tableDataVirtualRowIdentifierScope, type VirtualRowIdentifierScope } from "@/lib/table/virtualRowIdentifier";
 
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -946,11 +946,11 @@ function columnIsSorted(column: string, columnIndex: number): boolean {
 }
 
 function columnSortPriority(column: string, columnIndex: number): number {
-  return sortColumns.value.findIndex((sort) => sort.column === column && sort.columnIndex === columnIndex) + 1;
+  return localSortColumns.value.findIndex((sort) => sort.column === column && sort.columnIndex === columnIndex) + 1;
 }
 
 function columnSortDirection(column: string, columnIndex: number): DataGridSortDirection | undefined {
-  return sortColumns.value.find((sort) => sort.column === column && sort.columnIndex === columnIndex)?.direction;
+  return localSortColumns.value.find((sort) => sort.column === column && sort.columnIndex === columnIndex)?.direction;
 }
 
 function currentColumnSortState(column = sortCol.value, columnIndex = sortColIndex.value): DataGridColumnSortState {
@@ -958,7 +958,7 @@ function currentColumnSortState(column = sortCol.value, columnIndex = sortColInd
     column: column && columnIndex !== null && columnIsSorted(column, columnIndex) ? column : null,
     columnIndex,
     direction: column && columnIndex !== null ? (columnSortDirection(column, columnIndex) ?? "asc") : "asc",
-    mode: sortMode.value,
+    mode: localSortMode.value,
   };
 }
 
@@ -1131,7 +1131,7 @@ const previewDialogConfig = shallowRef<{
 const transposeScrollRef = ref<HTMLElement | { $el?: HTMLElement }>();
 const transposeScrollLeft = ref(0);
 const transposeViewportWidth = ref(0);
-const { sortColumn: sortCol, sortColumnIndex: sortColIndex, sortDirection: sortDir, sortMode, sortColumns, setSort, setSortColumns, clearSort } = useDataGridSort();
+const { sortColumn: sortCol, sortColumnIndex: sortColIndex, sortDirection: sortDir, sortMode: localSortMode, sortColumns: localSortColumns, setSort, setSortColumns, clearSort } = useDataGridSort();
 const queryControlsRef = ref<InstanceType<typeof DataGridQueryControls>>();
 const searchBarRef = ref<{ focus: (select?: boolean) => void } | null>(null);
 const replaceOpen = ref(false);
@@ -2743,7 +2743,7 @@ const { initColumnWidths, onResizeStart, autoFitColumn, autoFitAllColumns, rende
   compactColumnHeaderActions,
   columnIndexIndicators: visibleColumnIndexIndicators,
   // Priority badge (12px) plus the adjacent menu (16px), only on multi-sort columns.
-  headerExtraWidths: computed(() => visibleColumnIndexes.value.map((index) => (sortColumns.value.length > 1 && columnIsSorted(props.result.columns[index], index) ? 28 : 0))),
+  headerExtraWidths: computed(() => visibleColumnIndexes.value.map((index) => (localSortColumns.value.length > 1 && columnIsSorted(props.result.columns[index], index) ? 28 : 0))),
   cacheKey: columnWidthCacheKey,
   columnStructureSignature,
   measureHeaderText: measureColumnHeaderText,
@@ -3794,7 +3794,7 @@ function currentWhereInput(): string | undefined {
 }
 
 function effectiveOrderBy(): string | undefined {
-  const columnOrderBy = sortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
+  const columnOrderBy = localSortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
   const manualOrderBy = orderByInput.value.trim() || columnOrderBy;
   return combineDataGridOrderByInputs(manualOrderBy, appliedStructuredOrderByInput.value);
 }
@@ -3855,7 +3855,7 @@ watch(
     const isControlledSort = !!column && !!direction;
     if (columns?.length && mode === "local") setSortColumns(columns, mode);
     else setSort(column && direction ? column : null, typeof columnIndex === "number" && direction ? columnIndex : null, direction ?? "asc", mode ?? "database");
-    if (isControlledSort && sortMode.value === "database") {
+    if (isControlledSort && localSortMode.value === "database") {
       syncOrderByInputWithSort(sortCol.value, sortDir.value);
     } else if (previousOrderWasControlled) {
       syncOrderByInputWithSort(null, null);
@@ -4630,13 +4630,14 @@ const hasResultToolbarLeadingSlot = computed(() => !!slots["result-toolbar-leadi
 const hasResultToolbarActionsSlot = computed(() => !!slots["result-toolbar-actions"]);
 const virtualRowIdentifierScope = computed<VirtualRowIdentifierScope | undefined>(() => {
   if (!props.connectionId || !props.database || !props.tableMeta?.tableName) return undefined;
-  return {
+  const scope = {
     connectionId: props.connectionId,
     database: props.tableMeta.database ?? props.database,
     catalog: props.tableMeta.catalog,
     schema: props.tableMeta.schema,
     tableName: props.tableMeta.tableName,
   };
+  return props.context === "table-data" ? tableDataVirtualRowIdentifierScope(connectionStore.getConfig(props.connectionId), scope) : scope;
 });
 const virtualRowIdentifierColumns = computed(() => props.tableMeta?.virtualPrimaryKeys ?? []);
 const showVirtualRowIdentifierControl = computed(() => {
@@ -7235,7 +7236,7 @@ function applyColumnSort(column: string, columnIndex: number, direction: "asc" |
     resetGridVerticalScroll(true);
   }
   if (mode === "local") {
-    const columns = updateDataGridSortColumns(sortColumns.value, column, columnIndex, direction, append);
+    const columns = updateDataGridSortColumns(localSortColumns.value, column, columnIndex, direction, append);
     setSortColumns(columns);
     syncOrderByInputWithSort(null, null);
     if (append) emit("sort", column, columnIndex, direction, currentWhereInput(), mode, undefined, columns);
@@ -7262,7 +7263,7 @@ function clickColumnSort(event: MouseEvent, column: string, columnIndex: number)
 
 function selectHeaderSort(value: string, column: string, columnIndex: number) {
   if (value === "clear") {
-    applyColumnSort(column, columnIndex, null, sortMode.value);
+    applyColumnSort(column, columnIndex, null, localSortMode.value);
     return;
   }
   const [mode, direction] = value.split("-") as [DataGridSortMode, DataGridSortDirection];
@@ -13605,7 +13606,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       canCopyAlterSql: canCopyAlterColumnSql.value,
       canFilter: canUseWhereSearch.value,
       hasSort: !!sortCol.value,
-      sortMode: sortMode.value,
+      sortMode: localSortMode.value,
       databaseSortEnabled: props.databaseSortEnabled !== false && databaseSortSupportedForDatabase(resolvedDatabaseType.value),
       frozenColumnCount: frozenColumnCount.value,
       contextVisibleColIdx: contextHeaderVisibleColIdx.value ?? undefined,
@@ -14285,7 +14286,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           }"
                           :style="{ width: `${transposePinnedWidth}px` }"
                         >
-                          <span class="flex w-full min-w-0 items-center gap-1 overflow-hidden" :class="sortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex) ? 'pr-12' : 'pr-4 group-hover/header:pr-8 group-focus-within/header:pr-8'">
+                          <span class="flex w-full min-w-0 items-center gap-1 overflow-hidden" :class="localSortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex) ? 'pr-12' : 'pr-4 group-hover/header:pr-8 group-focus-within/header:pr-8'">
                             <KeyRound v-if="transposeColumnIndexKind(item.column) === 'primary'" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass('primary')" :title="transposeColumnIndexText('primary')" />
                             <Hash v-else-if="transposeColumnIndexKind(item.column)" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass(transposeColumnIndexKind(item.column)!)" :title="transposeColumnIndexText(transposeColumnIndexKind(item.column)!)" />
                             <span class="min-w-0 flex-1 truncate font-medium leading-4">{{ item.column }}</span>
@@ -14310,7 +14311,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                 :data-grid-sort-column-index="item.columnIndex"
                                 type="button"
                                 class="absolute top-1 flex h-4 shrink-0 items-center justify-center gap-0.5 rounded"
-                                :class="[sortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex) ? 'right-0 w-7' : 'right-0 w-4', columnIsSorted(item.column, item.columnIndex) ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground']"
+                                :class="[
+                                  localSortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex) ? 'right-0 w-7' : 'right-0 w-4',
+                                  columnIsSorted(item.column, item.columnIndex) ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                                ]"
                                 :title="t('grid.sort')"
                                 :aria-label="`${t('grid.sort')}: ${item.column}`"
                                 @mousedown.stop
@@ -14319,15 +14323,15 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                 <ArrowUp v-if="columnSortDirection(item.column, item.columnIndex) === 'asc'" class="h-3 w-3 shrink-0" />
                                 <ArrowDown v-else-if="columnSortDirection(item.column, item.columnIndex) === 'desc'" class="h-3 w-3 shrink-0" />
                                 <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
-                                <span v-if="sortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex)" data-grid-sort-priority class="text-[9px] leading-none">{{ columnSortPriority(item.column, item.columnIndex) }}</span>
+                                <span v-if="localSortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex)" data-grid-sort-priority class="text-[9px] leading-none">{{ columnSortPriority(item.column, item.columnIndex) }}</span>
                               </button>
                               <button
                                 data-grid-transpose-sort
                                 type="button"
                                 class="absolute top-1 flex h-4 w-3 shrink-0 items-center justify-center rounded"
                                 :class="[
-                                  sortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex) ? 'right-8' : 'right-5',
-                                  open || (sortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex)) ? '' : 'opacity-0 group-hover/header:opacity-100 group-focus-within/header:opacity-100',
+                                  localSortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex) ? 'right-8' : 'right-5',
+                                  open || (localSortColumns.length > 1 && columnIsSorted(item.column, item.columnIndex)) ? '' : 'opacity-0 group-hover/header:opacity-100 group-focus-within/header:opacity-100',
                                   columnIsSorted(item.column, item.columnIndex) ? 'bg-primary text-primary-foreground shadow-sm hover:bg-primary/90' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
                                 ]"
                                 :title="t('grid.sort')"
@@ -14623,7 +14627,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                 :data-grid-sort-column-index="col.actualColIdx"
                                 type="button"
                                 class="flex h-4 shrink-0 items-center justify-center gap-0.5 rounded"
-                                :class="[sortColumns.length > 1 && columnIsSorted(col.name, col.actualColIdx) ? 'w-7' : 'w-4', columnIsSorted(col.name, col.actualColIdx) ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground']"
+                                :class="[localSortColumns.length > 1 && columnIsSorted(col.name, col.actualColIdx) ? 'w-7' : 'w-4', columnIsSorted(col.name, col.actualColIdx) ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground']"
                                 :title="t('grid.sort')"
                                 :aria-label="`${t('grid.sort')}: ${col.name}`"
                                 @mousedown.stop
@@ -14632,14 +14636,14 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                 <ArrowUp v-if="columnSortDirection(col.name, col.actualColIdx) === 'asc'" class="h-3 w-3 shrink-0" />
                                 <ArrowDown v-else-if="columnSortDirection(col.name, col.actualColIdx) === 'desc'" class="h-3 w-3 shrink-0" />
                                 <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
-                                <span v-if="sortColumns.length > 1 && columnIsSorted(col.name, col.actualColIdx)" data-grid-sort-priority class="text-[9px] leading-none">{{ columnSortPriority(col.name, col.actualColIdx) }}</span>
+                                <span v-if="localSortColumns.length > 1 && columnIsSorted(col.name, col.actualColIdx)" data-grid-sort-priority class="text-[9px] leading-none">{{ columnSortPriority(col.name, col.actualColIdx) }}</span>
                               </button>
                               <button
                                 data-grid-sort-menu
                                 type="button"
                                 class="flex h-4 shrink-0 items-center justify-center overflow-hidden rounded group-hover/header:mr-1 group-hover/header:w-3 group-focus-within/header:mr-1 group-focus-within/header:w-3"
                                 :class="[
-                                  open || (sortColumns.length > 1 && columnIsSorted(col.name, col.actualColIdx)) ? 'mr-1 w-3' : 'w-0',
+                                  open || (localSortColumns.length > 1 && columnIsSorted(col.name, col.actualColIdx)) ? 'mr-1 w-3' : 'w-0',
                                   columnIsSorted(col.name, col.actualColIdx) ? 'bg-primary text-primary-foreground shadow-sm hover:bg-primary/90' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
                                 ]"
                                 :title="t('grid.sort')"

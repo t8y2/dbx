@@ -633,6 +633,64 @@ describe("PostgreSQL sequence literal completion", () => {
     );
   });
 
+  it("suggests Dameng sequences like Oracle sequences", () => {
+    const unqualifiedItems = buildSqlCompletionItems("SELECT ord", "SELECT ord".length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "dameng",
+      dialect: "oracle",
+      currentSchema: "APP",
+    });
+
+    expect(unqualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+
+    const pseudoColumnSql = "SELECT ORDER_SEQ.";
+    const pseudoColumnItems = buildSqlCompletionItems(pseudoColumnSql, pseudoColumnSql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "dameng",
+      dialect: "oracle",
+    });
+
+    expect(pseudoColumnItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("does not suggest sequences for databases without Oracle-style sequences", () => {
+    const items = buildSqlCompletionItems("SELECT ord", "SELECT ord".length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+      dialect: "mysql",
+    });
+
+    expect(items).not.toEqual(expect.arrayContaining([expect.objectContaining({ label: "ORDER_SEQ", type: "sequence" })]));
+  });
+
   it("respects keyword case for Oracle sequence pseudo-columns", () => {
     const sql = "SELECT ORDER_SEQ.n";
     const items = buildSqlCompletionItems(sql, sql.length, {

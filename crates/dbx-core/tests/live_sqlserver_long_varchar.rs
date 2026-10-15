@@ -16,6 +16,7 @@ async fn live_sqlserver_long_varchar_results_are_complete_and_use_sql_type_names
         &user,
         &password,
         Some(&database),
+        None,
         Duration::from_secs(15),
     )
     .await

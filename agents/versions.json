@@ -8,7 +8,7 @@
   "databricks": "0.1.75",
   "db2": "0.1.81",
   "duckdb": "0.1.32",
-  "exasol": "0.1.75",
+  "exasol": "0.1.76",
   "firebird": "0.1.78",
   "gbase8a": "0.1.75",
   "gbase8s": "0.1.70",
@@ -26,8 +26,8 @@
   "neo4j": "0.1.53",
   "nebula": "0.1.3",
   "oceanbase-oracle": "0.1.77",
-  "oracle": "0.1.69",
-  "oracle-oci": "0.1.2",
+  "oracle": "0.1.70",
+  "oracle-oci": "0.1.3",
   "snowflake": "0.1.80",
   "sqlite-worker": "0.1.7",
   "spanner": "0.1.33",
@@ -53,5 +53,5 @@
   "kafka": "0.1.17",
   "rocketmq": "0.1.16",
   "rabbitmq": "0.1.15",
-  "sqlserver-legacy": "0.1.54"
+  "sqlserver-legacy": "0.1.55"
 }

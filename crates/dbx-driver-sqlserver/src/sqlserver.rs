@@ -325,12 +325,17 @@ pub async fn connect(
     user: &str,
     pass: &str,
     database: Option<&str>,
-    _url_params: Option<&str>,
+    url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
-    connect_with_port_explicit(host, port, false, user, pass, database, timeout).await
+    connect_with_port_explicit(host, port, false, user, pass, database, url_params, timeout).await
 }
 
+/// Connect with an explicit port flag and optional JDBC-style URL params.
+///
+/// When `encrypt=false` / `sqlserverEncryption=disabled` is present, skip the
+/// `EncryptionLevel::Required` attempt so non-TLS servers are not blocked for a
+/// full connect timeout before the Off/NotSupported fallbacks run.
 pub async fn connect_with_port_explicit(
     host: &str,
     port: u16,
@@ -338,8 +343,16 @@ pub async fn connect_with_port_explicit(
     user: &str,
     pass: &str,
     database: Option<&str>,
+    url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
+    if sqlserver_native_encryption_disabled(url_params) {
+        let skipped = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled".to_string();
+        return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
+            .await
+            .map_err(|fallback_errors| sqlserver_connect_failure_message(&skipped, &fallback_errors));
+    }
+
     match try_connect(host, port, port_explicit, user, pass, database, tiberius::EncryptionLevel::Required, timeout)
         .await
     {
@@ -2966,19 +2979,18 @@ pub async fn get_column_metadata(
     Ok(rows.iter().map(sqlserver_column_metadata_from_row).collect())
 }
 
-pub async fn get_temporal_table_metadata(
-    client: &mut SqlServerClient,
-    schema: &str,
-    table: &str,
-) -> Result<Option<SqlServerTemporalTableMetadata>, String> {
-    // Dynamic SQL keeps pre-2016 servers from binding the newer catalog columns.
-    // Retention metadata was added later, so it has its own feature check.
-    let sql = r#"IF OBJECT_ID(N'sys.periods') IS NOT NULL
+fn sqlserver_temporal_metadata_sql() -> String {
+    // `DECLARE @x <type> = <value>` is 2008+ syntax; SQL Server 2005 fails to
+    // parse the batch before the sys.periods guard can skip it, so keep the
+    // two-step DECLARE + SET form everywhere.
+    r#"IF OBJECT_ID(N'sys.periods') IS NOT NULL
 BEGIN
-    DECLARE @retention nvarchar(max) = N'CAST(NULL AS int), CAST(NULL AS nvarchar(30))';
+    DECLARE @retention nvarchar(max);
+    SET @retention = N'CAST(NULL AS int), CAST(NULL AS nvarchar(30))';
     IF COL_LENGTH(N'sys.tables', N'history_retention_period') IS NOT NULL
         SET @retention = N'CAST(t.history_retention_period AS int), t.history_retention_period_unit_desc';
-    DECLARE @sql nvarchar(max) = N'
+    DECLARE @sql nvarchar(max);
+    SET @sql = N'
         SELECT CAST(t.temporal_type AS int), cs.name, ce.name,
                hs.name, h.name, ps.name, parent.name, ' + @retention + N'
         FROM sys.tables t
@@ -2992,7 +3004,18 @@ BEGIN
         LEFT JOIN sys.schemas ps ON ps.schema_id = parent.schema_id
         WHERE s.name = COALESCE(NULLIF(@schema, N''''), SCHEMA_NAME()) AND t.name = @table';
     EXEC sys.sp_executesql @sql, N'@schema nvarchar(128), @table nvarchar(128)', @schema=@P1, @table=@P2;
-END"#;
+END"#
+        .to_string()
+}
+
+pub async fn get_temporal_table_metadata(
+    client: &mut SqlServerClient,
+    schema: &str,
+    table: &str,
+) -> Result<Option<SqlServerTemporalTableMetadata>, String> {
+    // Dynamic SQL keeps pre-2016 servers from binding the newer catalog columns.
+    // Retention metadata was added later, so it has its own feature check.
+    let sql = sqlserver_temporal_metadata_sql();
     let rows = client
         .query(sql, &[&schema, &table])
         .await
@@ -3234,7 +3257,14 @@ fn sqlserver_filter_definition_missing(error: &tiberius::error::Error) -> bool {
 }
 
 fn sqlserver_filter_definition_error(code: Option<u32>, message: &str) -> bool {
-    code == Some(207) && message.to_ascii_lowercase().contains("filter_definition")
+    if code != Some(207) {
+        return false;
+    }
+    // SQL Server 2005 (and other pre-2008 servers) lack both catalog columns
+    // referenced by the modern index SQL; the first invalid-column error is
+    // whichever appears earlier in the SELECT list (`has_filter` on 2008+).
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("filter_definition") || lowered.contains("has_filter")
 }
 
 fn sqlserver_indexes_sql(schema: &str, table: &str) -> String {
@@ -4278,10 +4308,11 @@ mod tests {
         sqlserver_probe_explicit_alias, sqlserver_query_messages, sqlserver_query_transport_for_engine_edition,
         sqlserver_query_transport_for_request, sqlserver_referential_action, sqlserver_schema_name_predicate,
         sqlserver_spatial_marker, sqlserver_split_name_list, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_triggers_sql,
-        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet,
-        SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_temporal_metadata_sql,
+        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
+        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn,
+        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
+        SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -5157,6 +5188,13 @@ mod tests {
             Some(207),
             "Token error: 列名 'filter_definition' 无效。 (code: 207)"
         ));
+        // SQL Server 2005 has neither filtered-index catalog column; the first
+        // invalid-column error is `has_filter`, which must also trigger fallback.
+        assert!(sqlserver_filter_definition_error(
+            Some(207),
+            "Token error: Column name 'has_filter' is invalid. (code: 207)"
+        ));
+        assert!(sqlserver_filter_definition_error(Some(207), "Invalid column name 'has_filter'."));
         assert!(!sqlserver_filter_definition_error(
             Some(207),
             "Token error: Column name 'other_column' is invalid. (code: 207)"
@@ -5165,6 +5203,17 @@ mod tests {
             Some(229),
             "Token error: SELECT permission denied for filter_definition. (code: 229)"
         ));
+    }
+
+    #[test]
+    fn sqlserver_temporal_metadata_sql_avoids_declare_inline_initialization() {
+        // `DECLARE @x <type> = <value>` is 2008+ syntax; on SQL Server 2005 the
+        // whole batch fails to parse before the sys.periods guard can skip it.
+        let sql = sqlserver_temporal_metadata_sql();
+        assert!(!sql.contains("DECLARE @retention nvarchar(max) ="));
+        assert!(!sql.contains("DECLARE @sql nvarchar(max) ="));
+        assert!(sql.contains("DECLARE @retention nvarchar(max);"));
+        assert!(sql.contains("DECLARE @sql nvarchar(max);"));
     }
 
     #[test]

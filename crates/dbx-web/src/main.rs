@@ -857,13 +857,26 @@ async fn serve() -> Result<(), String> {
             "/query/build-executable-object-source-statements",
             post(routes::query::build_executable_object_source_statements),
         )
+        .route(
+            "/query/validate-oracle-executable-object-source",
+            post(routes::query::validate_oracle_executable_object_source),
+        )
+        .route(
+            "/query/fingerprint-oracle-routine-object-source",
+            post(routes::query::fingerprint_oracle_routine_object_source),
+        )
         .route("/query/build-executable-object-source-sql", post(routes::query::build_executable_object_source_sql))
         .route("/query/build-editable-object-source", post(routes::query::build_editable_object_source))
         .route(
             "/query/build-routine-rename-object-source-statements",
             post(routes::query::build_routine_rename_object_source_statements),
         )
+        .route("/query/rewrite-oracle-routine-references", post(routes::query::rewrite_oracle_routine_references))
+        .route("/query/rewrite-oracle-table-references", post(routes::query::rewrite_oracle_table_references))
         .route("/query/build-view-ddl-sql", post(routes::query::build_view_ddl_sql))
+        .route("/query/parse-oracle-object-name", post(routes::query::parse_oracle_object_name))
+        .route("/query/build-oracle-view-rename-source", post(routes::query::build_oracle_view_rename_source))
+        .route("/query/review-oracle-view-rename-source", post(routes::query::review_oracle_view_rename_source))
         .route("/query/build-table-structure-change-sql", post(routes::query::build_table_structure_change_sql))
         .route("/query/build-table-owner-change-sql", post(routes::query::build_table_owner_change_sql))
         .route("/query/build-table-partition-operation-sql", post(routes::query::build_table_partition_operation_sql))

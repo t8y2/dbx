@@ -1363,7 +1363,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   savedSqlOpenTargetMode: "saved",
   welcomePageMode: "workspace",
   welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
-  compactTabTitle: false,
+  compactTabTitle: true,
   tabLayout: "scroll",
   tabPlacement: "top",
   colorizeConnectionTabs: true,

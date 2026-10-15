@@ -3468,6 +3468,9 @@ let infiniteScrollLoadAllPending = false;
 // row cap bounds each request, not the run — the run only stops when the server
 // runs out of rows, so a table larger than the cap does not silently stop halfway (#10752).
 let loadAllRowsLoopActive = false;
+// Set when a "load all" reloads a jumped-to discrete page from the first row;
+// the replacing result must still land the view on the last row (#11940).
+let loadAllRowsReloadPending = false;
 const loadAllRowsActive = ref(false);
 // Tracks whether the current loading cycle was triggered by a refresh/rollback
 // (as opposed to a normal paginate). Used to decide whether to auto-redirect
@@ -3556,7 +3559,7 @@ const pendingEsDeepPageJump = ref<{ targetPage: number; requestCount: number; up
 // large shot needs an explicit confirmation the way ES deep page jumps do.
 const LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD = 100_000;
 const loadAllRowsConfirmOpen = ref(false);
-const pendingLoadAllRows = ref<{ remaining: number }>();
+const pendingLoadAllRows = ref<{ remaining: number; reloadFromFirstRow?: boolean }>();
 watch(loadAllRowsConfirmOpen, (open) => {
   if (!open) pendingLoadAllRows.value = undefined;
 });
@@ -3983,6 +3986,23 @@ function loadAllRowsAndGoToLast() {
   // against those cursors is untested, so ES/Easysearch grids keep the
   // reveal-only shortcut instead of loading everything.
   if (isResultsContext.value && (resolvedDatabaseType.value === "elasticsearch" || resolvedDatabaseType.value === "easysearch")) return;
+  // A result sitting on a jumped-to page is a discrete window, not a
+  // contiguous 0..rows.length prefix: continuing the run from rows.length
+  // would splice rows starting at the wrong offset (issue #11940 — jumping
+  // past the end left a stale page and "load all" then appended from that
+  // stale boundary, corrupting the row set). "Load all" from here means
+  // reloading every row from the first one in a single request.
+  if (!loadAllRowsLoopActive && (props.pageOffset ?? 0) > 0) {
+    const total = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
+    const reloadLimit = typeof total === "number" && Number.isFinite(total) && total > 0 ? total : infiniteScrollMaxRows.value;
+    if (reloadLimit > LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD) {
+      pendingLoadAllRows.value = { remaining: reloadLimit, reloadFromFirstRow: true };
+      loadAllRowsConfirmOpen.value = true;
+      return;
+    }
+    startLoadAllRows({ offset: 0, limit: reloadLimit }, true);
+    return;
+  }
   const segment = nextLoadAllSegment();
   if (!segment) {
     loadAllRowsActive.value = true;
@@ -4000,17 +4020,23 @@ function loadAllRowsAndGoToLast() {
   startLoadAllRows(segment);
 }
 
-function startLoadAllRows(segment: { offset: number; limit: number }) {
+function startLoadAllRows(segment: { offset: number; limit: number }, reloadFromFirstRow = false) {
   loadAllRowsActive.value = true;
-  loadAllRowsLoopActive = true;
+  loadAllRowsLoopActive = !reloadFromFirstRow;
+  loadAllRowsReloadPending = reloadFromFirstRow;
   infiniteScrollAllLoaded = false;
-  infiniteScrollLoadAllPending = true;
-  infiniteScrollLoading.value = true;
-  isInfiniteScrollPaginating.value = true;
-  infiniteScrollRequestedOffset = segment.offset;
-  infiniteScrollRequestedLimit = segment.limit;
-  currentPage.value++;
-  emit("paginate", segment.offset, segment.limit, currentWhereInput(), effectiveOrderBy(), true);
+  // A reload-from-first-row run replaces the page through the normal (non-
+  // append) execution path; the append watcher must not treat it as one of
+  // its own chunks.
+  infiniteScrollLoadAllPending = !reloadFromFirstRow;
+  infiniteScrollLoading.value = !reloadFromFirstRow;
+  isInfiniteScrollPaginating.value = !reloadFromFirstRow;
+  infiniteScrollRequestedOffset = reloadFromFirstRow ? undefined : segment.offset;
+  infiniteScrollRequestedLimit = reloadFromFirstRow ? undefined : segment.limit;
+  if (!reloadFromFirstRow) currentPage.value++;
+  // A reload-from-first-row run replaces the discrete page with the full
+  // result in one request (appendRequested=false); chunked runs append.
+  emit("paginate", segment.offset, segment.limit, currentWhereInput(), effectiveOrderBy(), !reloadFromFirstRow);
 }
 
 // Continues an explicit "load all" run chunk by chunk until the server runs
@@ -4057,6 +4083,12 @@ function confirmLoadAllRows() {
   if (!pending) return;
   pendingLoadAllRows.value = undefined;
   loadAllRowsConfirmOpen.value = false;
+  if (pending.reloadFromFirstRow) {
+    const total = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
+    const reloadLimit = typeof total === "number" && Number.isFinite(total) && total > 0 ? total : infiniteScrollMaxRows.value;
+    startLoadAllRows({ offset: 0, limit: reloadLimit }, true);
+    return;
+  }
   const segment = nextLoadAllSegment();
   if (segment) startLoadAllRows(segment);
 }
@@ -4083,6 +4115,7 @@ function changePageSize(size: number) {
   infiniteScrollAllLoaded = false;
   loadAllRowsActive.value = false;
   loadAllRowsLoopActive = false;
+  loadAllRowsReloadPending = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
   emit("paginate", 0, normalizedSize, currentWhereInput(), effectiveOrderBy());
@@ -4982,6 +5015,7 @@ function resetInfiniteScrollState() {
   infiniteScrollLoadAllPending = false;
   loadAllRowsActive.value = false;
   loadAllRowsLoopActive = false;
+  loadAllRowsReloadPending = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
 }
@@ -11590,12 +11624,24 @@ watch(
     resetDistinctValueCache();
     filterValueSuggestionLoader.reset({ clearCache: true });
     // A non-append result replaces the whole data set, so a running "load all" is over.
+    const reloadedFromFirstRow = loadAllRowsReloadPending;
+    loadAllRowsReloadPending = false;
     loadAllRowsActive.value = false;
     loadAllRowsLoopActive = false;
-    // The replacement also invalidates the all-loaded marker: a filter change or
-    // page jump swaps in a fresh first page whose remaining segments must be
-    // re-derived instead of being silently skipped.
-    infiniteScrollAllLoaded = false;
+    if (reloadedFromFirstRow) {
+      // A capped/truncated reload must not claim completeness — that would
+      // block the #10752 continuation past the cap; only an uncapped full
+      // reload marks the end (#11940).
+      if (!props.result.truncated && props.result.has_more !== true) {
+        infiniteScrollAllLoaded = true;
+      }
+      selectAndRevealLastLoadedRow();
+    } else {
+      // The replacement also invalidates the all-loaded marker: a filter change or
+      // page jump swaps in a fresh first page whose remaining segments must be
+      // re-derived instead of being silently skipped.
+      infiniteScrollAllLoaded = false;
+    }
     if (getResetScrollAfterResult()) {
       clearResetScrollAfterResult();
       resetGridVerticalScroll();

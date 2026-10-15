@@ -7578,7 +7578,10 @@ function formatCellCached(value: CellValue, columnIndex?: number, originalBytes?
 }
 
 function rowNumberPageOffset(): number {
-  if (infiniteScrollEnabled.value) return 0;
+  // Both "load everything" modes hold the whole result, so the row numbers have
+  // to run from the first row of the result. Keeping the page offset after
+  // "load all" numbered the rows from the page the user started on (#12182).
+  if (infiniteScrollEnabled.value || loadAllRowsActive.value) return 0;
   if (typeof props.pageOffset === "number" && props.pageOffset >= 0) return props.pageOffset;
   return (currentPage.value - 1) * pageSize.value;
 }

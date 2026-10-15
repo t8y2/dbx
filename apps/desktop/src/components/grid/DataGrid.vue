@@ -400,7 +400,7 @@ import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
-import { buildColumnIndexMap, columnIndexColorClass, columnIndexNameKey, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
+import { buildColumnIndexMap, columnIndexCacheAction, columnIndexColorClass, columnIndexNameKey, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { isSchemaAware, supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { buildDataGridLocalFilterOptions, restoreDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
@@ -12586,6 +12586,10 @@ async function refreshActiveTableInfo() {
   }
 }
 
+// 手动刷新会重新发布 tableMeta（例如 catalog/database 从 undefined 变成具体值），
+// 但表身份没有变化。此时清空 indexes 会让表头索引标识闪断（#12093），所以同表刷新
+// 只把缓存标记为过期、保留当前标识直到新结果返回，只有真正切换表才清空。
+let lastMetadataIndexTableIdentity = currentIndexTableIdentity.value;
 watch(
   () => [props.connectionId, props.database, props.tableMeta?.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName],
   () => {
@@ -12602,11 +12606,18 @@ watch(
     tableOverviewLoaded.value = false;
     tableOverviewRequestGeneration.value += 1;
     rawDdlContent.value = "";
-    indexes.value = [];
-    indexesLoaded.value = false;
-    indexesLoading.value = false;
-    indexesError.value = "";
-    indexesRequestGeneration.value += 1;
+    const indexTableIdentity = currentIndexTableIdentity.value;
+    const indexCacheAction = columnIndexCacheAction(lastMetadataIndexTableIdentity, indexTableIdentity, indexesLoaded.value);
+    lastMetadataIndexTableIdentity = indexTableIdentity;
+    if (indexCacheAction === "reset") {
+      indexes.value = [];
+      indexesLoaded.value = false;
+      indexesLoading.value = false;
+      indexesError.value = "";
+      indexesRequestGeneration.value += 1;
+    } else if (indexCacheAction === "keep-refresh") {
+      indexesLoaded.value = false;
+    }
     foreignKeys.value = [];
     foreignKeysLoaded.value = false;
     foreignKeysLoading.value = false;

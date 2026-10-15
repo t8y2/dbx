@@ -4557,6 +4557,7 @@ const {
   transactionActive,
   isSaving,
   saveError,
+  previewValidationMessage,
   useTransaction,
   beginBatch,
   commitBatch,
@@ -4606,6 +4607,7 @@ const {
   recordScrollPosition,
   isPreviewLoading,
   previewChanges,
+  isUntouchedNewRow,
 } = editor;
 getGridNewRows = () => newRows.value;
 getGridRowData = rowDataWithChanges;
@@ -4687,7 +4689,7 @@ function schedulePreviewRefresh() {
 async function openSqlPreview() {
   const stmts = await previewChanges();
   previewSqlText.value = stmts.join("\n");
-  if (stmts.length > 0) {
+  if (stmts.length > 0 || previewValidationMessage.value) {
     showSqlPreview.value = true;
   }
 }
@@ -5410,8 +5412,15 @@ const displayRowRefs = computed<DisplayRowRef[]>(() => {
       // Pending rows must remain visible while a column filter is active so
       // users can fill in and review newly inserted records before saving.
       if (!row) continue;
-      const status: RowStatus = "new";
-      if (!matchesRowStatusFilter(status, rowStatusFilter.value)) continue;
+      // A blank row created as a placeholder is not a pending INSERT. Keep it
+      // visible, but give it the clean row-number treatment so the green
+      // marker only identifies rows that will be submitted.
+      const isUntouched = isUntouchedNewRow(row, newIndex);
+      const status: RowStatus = isUntouched ? "clean" : "new";
+      // Placeholders remain discoverable under the "new" filter so adding a
+      // row does not hide the blank editor the user just created.
+      const filterStatus: RowStatus = isUntouched ? "new" : status;
+      if (!matchesRowStatusFilter(filterStatus, rowStatusFilter.value)) continue;
       refs.push({
         id: -(newIndex + 1),
         displayIndex: refs.length,
@@ -7654,6 +7663,7 @@ function rowNumberPageOffset(): number {
 
 function rowNumberText(item: RowItem | undefined): string {
   if (!item) return "";
+  if (item.isNew && item.status === "clean") return "*";
   return resolveDataGridRowNumberLabel({
     displayIndex: item.displayIndex,
     sourceIndex: item.sourceIndex,
@@ -7732,23 +7742,25 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
             ? settingsStore.editorSettings.dataGridZebraRowBg?.trim() || `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`
             : "var(--data-grid-background)";
   const rowNumberBg =
-    item.status === "new"
-      ? dark
-        ? "rgb(33, 45, 40)"
-        : "rgb(219, 244, 233)"
-      : item.status === "edited"
+    item.isNew && item.status === "clean"
+      ? rowBg
+      : item.status === "new"
         ? dark
-          ? "rgb(48, 41, 28)"
-          : "rgb(253, 241, 219)"
-        : item.status === "deleted"
+          ? "rgb(33, 45, 40)"
+          : "rgb(219, 244, 233)"
+        : item.status === "edited"
           ? dark
-            ? "rgb(55, 31, 32)"
-            : "rgb(255, 244, 244)"
-          : isRowActive(item.displayIndex) && !item.isDeleted
-            ? activeRowBg
-            : dark
-              ? "rgb(35, 37, 42)"
-              : "rgb(255, 255, 255)";
+            ? "rgb(48, 41, 28)"
+            : "rgb(253, 241, 219)"
+          : item.status === "deleted"
+            ? dark
+              ? "rgb(55, 31, 32)"
+              : "rgb(255, 244, 244)"
+            : isRowActive(item.displayIndex) && !item.isDeleted
+              ? activeRowBg
+              : dark
+                ? "rgb(35, 37, 42)"
+                : "rgb(255, 255, 255)";
   return {
     "--data-grid-cell-bg": rowBg,
     "--data-grid-row-number-bg": rowNumberBg,
@@ -9331,7 +9343,11 @@ function openColumnDetailDialog(columnIndex: number) {
 function openContextCellDetailDialog() {
   const cell = contextCell.value;
   if (!cell || cell.col < 0) return;
-  openCellDetailDialog(cell.rowIndex, cell.col);
+  if (cellDetailDialogDefault.value) {
+    openCellDetailDialog(cell.rowIndex, cell.col);
+  } else {
+    showCellDetails(cell.rowIndex, cell.col);
+  }
 }
 
 function openContextColumnDetailDialog() {
@@ -15366,6 +15382,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           @mousedown="onRowNumberMouseDown(item, $event)"
                           @dblclick.stop="toggleTranspose(item.displayIndex)"
                           @contextmenu="onRowContext(item.id, item.displayIndex)"
+                          :title="item.isNew && item.status === 'clean' ? t('grid.uncommittedBlankRow') : undefined"
                         >
                           {{ rowNumberText(item) }}
                         </div>
@@ -15857,7 +15874,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               <DataGridCellDetailHexViewer v-if="activeCellDetailTabs.includes('hexViewer')" :rows="activeBinaryHexRows" :byte-count="activeBinaryHexByteCount" />
 
               <TabsContent v-if="activeCellDetailTabs.includes('valueEditor')" value="valueEditor" class="m-0 min-h-0 min-w-0 flex-1 flex flex-col p-3 text-xs">
-                <div class="min-w-0 flex min-h-0 flex-1 flex-col">
+                <div :style="detailTransformOpen ? { display: 'none' } : null" class="min-w-0 flex min-h-0 flex-1 flex-col">
                   <TemporalCellEditor
                     v-if="detailTemporalEditorConfig"
                     v-model="detailEditValue"
@@ -15878,6 +15895,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :identity="`${activeCellDetail.rowId}:${activeCellDetail.colIndex}:${activeCellDetailTab}`"
                     :incomplete="activeCellDetail.isSourceTruncated"
                     :unsafe-number="typeof activeCellDetail.value === 'number' && Number.isInteger(activeCellDetail.value) && !Number.isSafeInteger(activeCellDetail.value) && detailEditValue === activeCellDetail.rawValue"
+                    :column="activeCellDetail.column"
+                    :row-number="activeCellDetail.rowNumber"
                   />
                   <DropdownMenu v-if="activeCellDetail?.isEditable">
                     <DropdownMenuTrigger as-child>
@@ -16235,7 +16254,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         :title="t('grid.resizeSqlPreview')"
         @pointerdown.prevent="onSqlPreviewResizeStart"
       />
-      <SqlPreviewPanel :sql="previewSqlText" :loading="isPreviewLoading" :can-undo="canUndoPendingChange" :can-redo="canRedoPendingChange" @undo="undoGridChange" @redo="redoGridChange" @close="closeSqlPreview" />
+      <SqlPreviewPanel :sql="previewSqlText" :empty-message="previewValidationMessage || undefined" :loading="isPreviewLoading" :can-undo="canUndoPendingChange" :can-redo="canRedoPendingChange" @undo="undoGridChange" @redo="redoGridChange" @close="closeSqlPreview" />
     </div>
 
     <DangerConfirmDialog

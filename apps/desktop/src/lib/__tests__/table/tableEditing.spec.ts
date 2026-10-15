@@ -263,4 +263,14 @@ describe("tableEditing", () => {
     expect(supportsDataGridTransaction("iris")).toBe(true);
     expect(canUseKeylessRowPredicate("iris", [])).toBe(true);
   });
+
+  it("edits DuckDB table data row by row without a transaction (#12306)", () => {
+    expect(isTableDataEditable("duckdb", ["id"], "TABLE")).toBe(true);
+    expect(isTableDataEditable("duckdb", [], "TABLE")).toBe(true);
+    expect(isTableDataEditable("duckdb", ["id"], "VIEW")).toBe(false);
+    expect(canInsertTableRows("duckdb")).toBe(true);
+    expect(canEditExistingTableRows("duckdb")).toBe(true);
+    expect(supportsDataGridTransaction("duckdb")).toBe(false);
+    expect(canUseKeylessRowPredicate("duckdb", [])).toBe(true);
+  });
 });

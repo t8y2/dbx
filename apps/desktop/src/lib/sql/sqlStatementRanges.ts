@@ -2284,8 +2284,20 @@ function startsWithSapHanaScriptBlock(sql: string): boolean {
 function sapHanaScriptBlockIsComplete(sql: string): boolean {
   if (!startsWithSapHanaScriptBlock(sql)) return false;
 
+  const lastNewline = sql.lastIndexOf("\n");
+  if (
+    lastNewline >= 0 &&
+    !sql
+      .slice(lastNewline + 1)
+      .trimStart()
+      .toUpperCase()
+      .startsWith("END;")
+  )
+    return false;
+
   const tokens = oraclePlSqlTokens(sql);
-  const stack: string[] = [];
+  let blockDepth = 0;
+  let caseDepth = 0;
   let sawBegin = false;
 
   for (let index = 0; index < tokens.length; index += 1) {
@@ -2294,23 +2306,26 @@ function sapHanaScriptBlockIsComplete(sql: string): boolean {
 
     if (token.value === "BEGIN") {
       if (previousWordToken(tokens, index) === "END") continue;
-      stack.push("BLOCK");
+      blockDepth += 1;
       sawBegin = true;
       continue;
     }
-    if (token.value === "IF" || token.value === "FOR" || token.value === "WHILE" || token.value === "CASE") {
-      if (previousWordToken(tokens, index) !== "END") stack.push(token.value);
+    if (token.value === "CASE") {
+      if (previousWordToken(tokens, index) !== "END") caseDepth += 1;
       continue;
     }
     if (token.value === "END") {
       const next = nextWordToken(tokens, index);
-      const top = stack[stack.length - 1];
-      const target = SAP_HANA_SCRIPT_BLOCK_TERMINATORS.has(next ?? "") ? next : top === "CASE" ? "CASE" : "BLOCK";
-      if (top === target) stack.pop();
+      if (SAP_HANA_SCRIPT_BLOCK_TERMINATORS.has(next ?? "")) continue;
+      if (caseDepth > 0) {
+        caseDepth -= 1;
+      } else if (blockDepth > 0) {
+        blockDepth -= 1;
+      }
     }
   }
 
-  return sawBegin && stack.length === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
+  return sawBegin && blockDepth === 0 && caseDepth === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
 }
 
 function oraclePlSqlBlockEnd(sql: string): number | null {

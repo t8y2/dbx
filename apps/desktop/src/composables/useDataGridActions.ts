@@ -19,7 +19,7 @@ import { invalidateTableMetadataCache, loadTableColumns, loadTableMetadata, TABL
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
 import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
-import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { primaryKeyTieBreakerIndexes, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { continuousQueryResultMaxRows, MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
@@ -728,6 +728,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         columnIndex: sortColumns.columnIndex,
         column,
         direction,
+        tieBreakerColumnIndexes: primaryKeyTieBreakerIndexes(tab.querySourceColumns?.length === sortColumns.resultColumns.length ? tab.querySourceColumns : sortColumns.resultColumns, tab.tableMeta?.primaryKeys),
       });
       if (!built.ok || !built.sql) {
         toast(t("grid.sortUnsupported"), 5000);

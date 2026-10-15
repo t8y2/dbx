@@ -8377,6 +8377,7 @@ export const useQueryStore = defineStore("query", () => {
         hiddenPrimaryKeys = prepared.hiddenPrimaryKeys;
         useLargeValuePreview = prepared.largeValuePreview;
         if (options?.querySort) {
+          const visibleColumnCount = options.querySort.resultColumns.length;
           const sorted = await api.buildSortedQuerySql({
             originalSql: sqlToExecute,
             databaseType: effectiveDbType,
@@ -8384,6 +8385,7 @@ export const useQueryStore = defineStore("query", () => {
             columnIndex: options.querySort.columnIndex,
             column: options.querySort.column,
             direction: options.querySort.direction,
+            tieBreakerColumnIndexes: hiddenPrimaryKeys.map((_, index) => visibleColumnCount + index),
           });
           if (!sorted.ok || !sorted.sql) throw new Error("Unable to build sorted query SQL");
           sqlToExecute = sorted.sql;
@@ -8401,6 +8403,7 @@ export const useQueryStore = defineStore("query", () => {
           pagination,
           useAgentCursor,
           firstPageUsesActualSql: hiddenPrimaryKeys.length > 0,
+          executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
         });
         const canPaginateSqlServerUseScript = !!sqlServerUseScript && !!plan.pageSql && typeof plan.pageLimit === "number" && typeof plan.pageOffset === "number";
         if (plan.paginationError) throw new Error(plan.paginationError);
@@ -10236,6 +10239,7 @@ export const useQueryStore = defineStore("query", () => {
           pagination: { limit: effectivePageLimit, offset, sessionId },
           useAgentCursor,
           firstPageUsesActualSql: true,
+          executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
         });
         if (probeRowLimit && plan.paginationError) throw new Error(plan.paginationError);
         if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return cachedResultForExport();

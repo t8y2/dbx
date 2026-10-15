@@ -5354,6 +5354,9 @@ async fn list_indexes_for_relations_with_sql(
         let all_key_options: Vec<i16> = row.try_get::<_, Vec<i16>>(12).unwrap_or_default();
         let key_options = if all_key_options.len() == split_at { all_key_options } else { Vec::new() };
         result.entry(relid).or_default().push(IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: pg_row_try_string(row, 1),
             columns: key_cols,
             is_unique: pg_row_try_bool(row, 4).unwrap_or(false),
@@ -5834,6 +5837,7 @@ pub async fn list_constraints(pool: &Pool, schema: &str, table: &str) -> Result<
             initially_deferred: Some(row.try_get::<_, bool>(11).unwrap_or(false)),
             enabled: Some(true),
             valid: Some(row.try_get::<_, bool>(12).unwrap_or(true)),
+            oracle_metadata: None,
         })
         .collect())
 }
@@ -5905,6 +5909,7 @@ pub async fn list_opengauss_constraints(pool: &Pool, schema: &str, table: &str) 
             initially_deferred: Some(pg_row_try_bool(&row, 11).unwrap_or(false)),
             enabled: Some(true),
             valid: Some(pg_row_try_bool(&row, 12).unwrap_or(true)),
+            oracle_metadata: None,
         });
     }
     Ok(result)
@@ -8297,7 +8302,40 @@ async fn get_columns_with_sql(
     Ok(rows.iter().map(column_info_from_row).collect())
 }
 
+/// Catalog tiers a server can actually execute for column metadata.
+///
+/// GaussDB and openGauss kernels do not implement `pg_sequence`,
+/// `attgenerated` or `LATERAL`, so the modern `primary` probe fails on every
+/// relation and only adds a round trip before the compat tier succeeds
+/// (issue #12324). Those servers start at the compat tier instead.
+fn column_metadata_tiers(modern_tier_supported: bool) -> Vec<(&'static str, &'static str)> {
+    if modern_tier_supported {
+        vec![
+            ("primary", POSTGRES_COLUMNS_SQL),
+            ("compat", POSTGRES_COLUMNS_COMPAT_SQL),
+            ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL),
+        ]
+    } else {
+        vec![("compat", POSTGRES_COLUMNS_COMPAT_SQL), ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL)]
+    }
+}
+
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    get_columns_with_tiers(pool, schema, table, true).await
+}
+
+/// [`get_columns`] for GaussDB / openGauss, whose kernel cannot run the modern
+/// tier: the doomed probe is skipped instead of paid per relation.
+pub async fn get_columns_compat_first(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    get_columns_with_tiers(pool, schema, table, false).await
+}
+
+async fn get_columns_with_tiers(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+    modern_tier_supported: bool,
+) -> Result<Vec<ColumnInfo>, String> {
     let diagnostics_enabled = log::log_enabled!(log::Level::Debug);
     let total_started = diagnostics_enabled.then(Instant::now);
     let client = match checkout_postgres_client(pool, None, super::connection_timeout()).await {
@@ -8313,11 +8351,7 @@ pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<C
             return Err(error);
         }
     };
-    let tiers = [
-        ("primary", POSTGRES_COLUMNS_SQL),
-        ("compat", POSTGRES_COLUMNS_COMPAT_SQL),
-        ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL),
-    ];
+    let tiers = column_metadata_tiers(modern_tier_supported);
     query_with_column_metadata_fallback(
         &tiers,
         |sql| get_columns_with_sql(&client, sql, schema, table),
@@ -9832,6 +9866,9 @@ async fn list_indexes_with_sql(
             let all_key_options: Vec<i16> = row.try_get::<_, Vec<i16>>(11).unwrap_or_default();
             let key_options = if all_key_options.len() == split_at { all_key_options } else { Vec::new() };
             IndexInfo {
+                key_directions: Vec::new(),
+                visibility: None,
+                key_metadata_complete: false,
                 name: pg_row_try_string(row, 0),
                 columns: key_cols,
                 is_unique: pg_row_try_bool(row, 3).unwrap_or(false),
@@ -9849,10 +9886,33 @@ async fn list_indexes_with_sql(
         .collect())
 }
 
+/// Index catalog tiers, mirroring [`column_metadata_tiers`].
+fn index_metadata_tiers(modern_tier_supported: bool) -> Vec<&'static str> {
+    if modern_tier_supported {
+        vec![POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL]
+    } else {
+        vec![POSTGRES_INDEXES_COMPAT_SQL]
+    }
+}
+
 pub async fn list_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    list_indexes_with_tiers(pool, schema, table, true).await
+}
+
+/// [`list_indexes`] for GaussDB / openGauss (skip the doomed modern probe).
+pub async fn list_indexes_compat_first(pool: &Pool, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    list_indexes_with_tiers(pool, schema, table, false).await
+}
+
+async fn list_indexes_with_tiers(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+    modern_tier_supported: bool,
+) -> Result<Vec<IndexInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
-    let tiers = [POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL];
+    let tiers = index_metadata_tiers(modern_tier_supported);
     query_with_compat_fallback("list_indexes", &tiers, |sql| list_indexes_with_sql(client, sql, schema, table)).await
 }
 
@@ -14797,6 +14857,30 @@ mod tests {
             events.last(),
             Some(GetColumnsTierDiagnostic::Done { status: "success", selected_tier: Some("primary"), .. })
         ));
+    }
+
+    #[test]
+    fn gaussdb_column_tiers_skip_the_modern_probe() {
+        let modern = column_metadata_tiers(true);
+        assert_eq!(
+            modern.iter().map(|(tier, _)| *tier).collect::<Vec<_>>(),
+            vec!["primary", "compat", "information_schema"]
+        );
+
+        // GaussDB / openGauss cannot execute the modern tier, so the doomed
+        // probe must not be attempted at all (issue #12324).
+        let compat_first = column_metadata_tiers(false);
+        assert_eq!(
+            compat_first.iter().map(|(tier, _)| *tier).collect::<Vec<_>>(),
+            vec!["compat", "information_schema"]
+        );
+        assert_eq!(compat_first[0].1, POSTGRES_COLUMNS_COMPAT_SQL);
+    }
+
+    #[test]
+    fn gaussdb_index_tiers_skip_the_modern_probe() {
+        assert_eq!(index_metadata_tiers(true), vec![POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL]);
+        assert_eq!(index_metadata_tiers(false), vec![POSTGRES_INDEXES_COMPAT_SQL]);
     }
 
     #[tokio::test]

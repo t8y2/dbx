@@ -233,6 +233,8 @@ vi.mock("@/components/editor/EditorSearchPanel.vue", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));
@@ -269,6 +271,24 @@ vi.mock("@/lib/backend/api", () => ({
   getTablePartitionStatus: mocks.getTablePartitionStatus,
   getTableOwner: mocks.getTableOwner,
 }));
+vi.mock("@/lib/database/oracleConstraints", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/database/oracleConstraints")>();
+  return {
+    ...actual,
+    readOracleIndexSnapshot: vi.fn(async (target) => ({
+      user: target.schema || "TEST",
+      currentSchema: target.schema || "TEST",
+      database: target.database,
+      databaseName: "ORCL",
+      objectId: "1",
+      columns: [],
+      userColumns: [],
+      columnReadMode: "strict-base" as const,
+      indexes: [],
+      indexNames: [],
+    })),
+  };
+});
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
 import { createColumnDrafts, createIndexDrafts } from "@/lib/table/tableStructureEditorState";

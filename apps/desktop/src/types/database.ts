@@ -1226,6 +1226,12 @@ export interface IndexInfo {
   comment?: string | null;
   /** Parallel to `columns`: true at index i means columns[i] is a raw expression, not a plain column name. */
   key_is_expression?: boolean[] | null;
+  /** Parallel to `columns`: Oracle-family key ordering (`ASC` or `DESC`). */
+  key_directions?: string[] | null;
+  /** Oracle-family index visibility (`VISIBLE` or `INVISIBLE`). */
+  visibility?: string | null;
+  /** True only when expression, direction and visibility metadata are aligned and complete. */
+  key_metadata_complete?: boolean;
   /** Parallel to `columns`: operator class name for each key column (PostgreSQL), if non-default. */
   column_opclasses?: (string | null)[] | null;
   /**
@@ -1279,6 +1285,39 @@ export interface ConstraintInfo {
   initially_deferred?: boolean | null;
   enabled?: boolean | null;
   valid?: boolean | null;
+  oracle_metadata?: OracleConstraintMetadata | null;
+}
+
+export interface OracleConstraintMetadata {
+  metadataComplete: boolean;
+  owner: string;
+  constraintType: string | null;
+  status: string | null;
+  validated: string | null;
+  deferrable: string | null;
+  deferred: string | null;
+  rely: string | null;
+  indexOwner: string | null;
+  indexName: string | null;
+  indexSharing: string | null;
+  index: OracleConstraintIndexMetadata | null;
+}
+
+export interface OracleConstraintIndexMetadata {
+  metadataComplete: boolean;
+  owner: string;
+  tableOwner: string;
+  tableName: string;
+  indexType: string;
+  uniqueness: string;
+  status: string;
+  partitioned: boolean;
+  visibility: string;
+  secondary: string | null;
+  columns: string[];
+  directions: string[];
+  keyIsExpression: boolean[];
+  includedColumns: string[];
 }
 
 export interface PartitionInfo {
@@ -1942,6 +1981,15 @@ export interface TableStructureEditorDraft {
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   constraints?: ConstraintInfo[];
+  existingPrimaryKey?: NonNullable<import("@/lib/table/tableStructureEditorSql").BuildTableStructureChangeSqlOptions["primaryKeyChange"]>;
+  oracleConstraintChange?: import("@/lib/table/tableStructureEditorSql").OracleConstraintChange;
+  oracleForeignKeyCreateRecovery?: {
+    tableName: string;
+    tableExists: boolean;
+    details: string;
+    remaining: import("@/lib/table/tableStructureEditorSql").OracleForeignKeyDefinition[];
+    uncertainSteps: string[];
+  };
   constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;

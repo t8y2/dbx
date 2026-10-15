@@ -75,10 +75,16 @@
           ]
         );
 
+        # Match the package manager version declared by package.json.
+        pnpmTool = pkgs.pnpm_10.override {
+          version = "10.34.7";
+          hash = "sha512-upirxYVTmTM3W1lx9LxtbHOhtLftxKh559EC/lQj0eAjCdZ8YKEfBJVQk6luUhrZw7E4zdZUylvlY/N4s65IvQ==";
+        };
+
         # Node / frontend tooling
         nodeDeps = with pkgs; [
           nodejs_22
-          pnpm
+          pnpmTool
           # Optional: for building native node addons (better-sqlite3 etc.)
           python3
           gnumake
@@ -193,11 +199,11 @@
           # a content-addressed store path so the build sandbox has no network. #
           pnpmDeps = pkgs.fetchPnpmDeps {
             inherit (finalAttrs) pname version src;
-            # `fetcherVersion = 4` is supported for `pnpm_11`
+            pnpm = pnpmTool;
             fetcherVersion = 4;
             # Update with the hash reported by a failed fixed-output build:
             #   nix build .#dbx-pnpm-deps 2>&1 | grep 'got:'
-            hash = "sha256-Bo0dVkNR2jupcSthmcrjJw2aAsJ+fMhe3g82T4H8u2M=";
+            hash = "sha256-AUHM0u41ObqzcAvJ/Kx6uLc/SAehBFjTYEJW0IKEPAM=";
           };
 
           # ── Step 2: vendor Cargo dependencies ───────────────────────────── #
@@ -221,7 +227,7 @@
             [
               rustToolchain
               pkgs.nodejs_22
-              pkgs.pnpm
+              pnpmTool
               pkgs.pkg-config
               pkgs.perl
               pkgs.jq                         # used by preConfigure to strip packageManager

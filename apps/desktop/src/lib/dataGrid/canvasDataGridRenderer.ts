@@ -509,7 +509,9 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
                 ? theme.rowNumberActive
                 : rowInSelection
                   ? theme.cellSelected
-                  : theme.rowNumberDefault;
+                  : item.isNew && item.status === "clean"
+                    ? rowBase
+                    : theme.rowNumberDefault;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     // 与 DOM 的 .data-grid-row-number--selected 对齐：选中行号左侧 3px 蓝色条
@@ -534,13 +536,15 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     ctx.rect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.clip();
     ctx.fillText(
-      resolveDataGridRowNumberLabel({
-        displayIndex: item.displayIndex,
-        sourceIndex: item.sourceIndex,
-        isDraft: item.isDraft,
-        sourceRowNumbers: rowNumberMode === "source",
-        pageOffset: infiniteScrollEnabled ? 0 : pageOffset,
-      }),
+      item.isNew && item.status === "clean"
+        ? "*"
+        : resolveDataGridRowNumberLabel({
+            displayIndex: item.displayIndex,
+            sourceIndex: item.sourceIndex,
+            isDraft: item.isDraft,
+            sourceRowNumbers: rowNumberMode === "source",
+            pageOffset: infiniteScrollEnabled ? 0 : pageOffset,
+          }),
       rowNumberTextX,
       textY,
     );

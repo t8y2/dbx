@@ -92,6 +92,16 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
 ]);
 
 const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<DatabaseCapability>>> = {
+  duckdb: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
+    },
+  },
   kyuubi: {
     tableData: {
       insert: false,

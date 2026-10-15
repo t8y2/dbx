@@ -73,6 +73,7 @@ function mountBar(groupId: string, tabs: ReturnType<ReturnType<typeof useQuerySt
             closeLeftTabs: "Close left tabs",
             closeRightTabs: "Close right tabs",
             closeAllTabs: "Close all tabs",
+            saveAllTabs: "Save all tabs",
             closeTabGroup: "Close group",
             editTabGroup: "Edit group",
             resetTabGroup: "Reset group",

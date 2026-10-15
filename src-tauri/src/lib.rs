@@ -715,7 +715,12 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
     let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
 }
 
-fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
+fn register_deep_link_state<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    // macOS can deliver Opened before setup, so its queue must already exist.
+    builder.manage(commands::deep_link::DeepLinkOpenState::default())
+}
+
+fn open_connection_deep_links<R: tauri::Runtime>(app: &tauri::AppHandle<R>, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
@@ -1136,6 +1141,53 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    #[cfg(desktop)]
+    fn deep_links_received_before_setup_survive_until_frontend_ready() {
+        use crate::commands::deep_link::{pending_open_connection_links, DeepLinkOpenState};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tauri::test::{mock_builder, mock_context, noop_assets};
+        use tauri::{Listener, Manager};
+
+        let setup_ran = Arc::new(AtomicBool::new(false));
+        let setup_observed = setup_ran.clone();
+        // Use the production registration path, not a test-only manage call.
+        let mut app = super::register_deep_link_state(mock_builder())
+            .setup(move |_| {
+                setup_observed.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        assert!(!setup_ran.load(Ordering::SeqCst));
+        assert!(app.try_state::<DeepLinkOpenState>().is_some());
+
+        let emitted = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let observed = emitted.clone();
+        app.listen("dbx-open-connection-links", move |event| {
+            observed.lock().unwrap().push(serde_json::from_str(event.payload()).unwrap());
+        });
+        let first = "dbx://connection/new?type=mysql&one_time=true".to_string();
+        let second = "dbx://connection/new?type=postgres&one_time=false".to_string();
+        super::open_connection_deep_links(app.handle(), vec![first.clone()]);
+        super::open_connection_deep_links(app.handle(), vec![first.clone(), second.clone()]);
+        assert!(emitted.lock().unwrap().is_empty());
+
+        // Tauri runs setup here even though MockRuntime's iteration is a no-op.
+        // A single iteration avoids the busy-loop the deprecation warns about.
+        #[allow(deprecated)]
+        app.run_iteration(|_, _| {});
+        assert!(setup_ran.load(Ordering::SeqCst));
+        assert!(emitted.lock().unwrap().is_empty());
+        assert_eq!(pending_open_connection_links(app.state()), vec![first, second]);
+        assert!(pending_open_connection_links(app.state()).is_empty());
+
+        let warm = "dbx://connection/new?type=mysql&host=localhost".to_string();
+        super::open_connection_deep_links(app.handle(), vec![warm.clone()]);
+        assert_eq!(*emitted.lock().unwrap(), vec![vec![warm]]);
+        assert!(pending_open_connection_links(app.state()).is_empty());
+    }
 
     #[test]
     fn forced_exit_shutdown_waits_for_a_dedicated_cleanup_thread() {
@@ -1628,7 +1680,7 @@ pub fn run() {
 
     let startup_begin = Instant::now();
 
-    let builder = tauri::Builder::default()
+    let builder = register_deep_link_state(tauri::Builder::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1895,7 +1947,6 @@ pub fn run() {
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
-            app.manage(commands::deep_link::DeepLinkOpenState::default());
             app.manage(commands::update::PendingUpdateState::default());
             app.manage(commands::ssh_prompt::SshPromptState::new());
             commands::ssh_prompt::install_ssh_prompt_bridge(app.handle());

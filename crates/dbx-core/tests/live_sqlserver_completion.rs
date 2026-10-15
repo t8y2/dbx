@@ -1031,6 +1031,9 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         is_gaussdb_m_mode: false,
         table_collation: None,
         primary_key_name: None,
+        primary_key_change: None,
+        oracle_foreign_key_changes: None,
+        oracle_constraint_changes: None,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);

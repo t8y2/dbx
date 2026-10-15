@@ -153,7 +153,8 @@ pub async fn get_event_info<P: MySqlPoolAccess + ?Sized>(
     let mut conn = get_conn_with_health_check(pool).await?;
     let sql = format!(
         "SELECT EVENT_SCHEMA, EVENT_NAME, DEFINER, TIME_ZONE, EVENT_TYPE, EXECUTE_AT, INTERVAL_VALUE, INTERVAL_FIELD, STARTS, ENDS, STATUS, ON_COMPLETION, EVENT_COMMENT, EVENT_DEFINITION, CREATED, LAST_ALTERED, LAST_EXECUTED FROM information_schema.EVENTS WHERE EVENT_SCHEMA = {} AND EVENT_NAME = {} LIMIT 1",
-        quote_value(database), quote_value(name)
+        quote_value(database),
+        quote_value(name)
     );
     let row = conn
         .query_first::<mysql_async::Row, _>(sql)
@@ -3297,7 +3298,9 @@ pub async fn list_tables_filtered(
         .collect();
 
     if tables.is_empty() {
-        log::debug!("Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables");
+        log::debug!(
+            "Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables"
+        );
         return list_tables_show_filtered(pool, database, filter)
             .await
             .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types, table_name_filter));
@@ -7104,6 +7107,9 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                 let index_position = indexes.len();
                 index_positions.insert(name.clone(), index_position);
                 indexes.push(IndexInfo {
+                    key_directions: Vec::new(),
+                    visibility: None,
+                    key_metadata_complete: false,
                     name: name.clone(),
                     columns: Vec::new(),
                     is_unique: get_opt_i32(&row, "NON_UNIQUE").unwrap_or(1) == 0,
@@ -9781,11 +9787,7 @@ mod tests {
                 Some(MySqlSetupMode::Compatible),
                 "{error}"
             );
-            assert_eq!(
-                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
-                None,
-                "{error}"
-            );
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None, "{error}");
         }
     }
 
@@ -9803,11 +9805,7 @@ mod tests {
                 Some(MySqlSetupMode::Compatible),
                 "{error}"
             );
-            assert_eq!(
-                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
-                None,
-                "{error}"
-            );
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None, "{error}");
         }
     }
 

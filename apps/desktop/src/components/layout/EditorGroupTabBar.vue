@@ -90,7 +90,18 @@ import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
-import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems, createReopenClosedTabMenuItem } from "@/lib/tabs/tabMenu";
+import {
+  createCloseAllTabMenuItem,
+  createCloseLeftTabMenuItem,
+  createCloseOtherTabMenuItem,
+  createCloseRightTabMenuItem,
+  createCloseTabMenuItem,
+  createLocateTabMenuItem,
+  createPinTabMenuItem,
+  createRenameDuplicateTabItems,
+  createReopenClosedTabMenuItem,
+  createSaveAllTabsMenuItem,
+} from "@/lib/tabs/tabMenu";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { findTabWithSameTitleSuffix, joinTabTitleParts, TAB_TITLE_SUFFIX_MAX_LENGTH, tabConnectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabDisplayTitleParts, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
@@ -127,6 +138,7 @@ const emit = defineEmits<{
   "close-driver-store": [];
   "activate-plugin-center": [];
   "close-plugin-center": [];
+  "save-all-tabs": [];
 }>();
 
 const { t } = useI18n();
@@ -1409,6 +1421,10 @@ function hasTabsToLeft(tab: QueryTab) {
   return tabsToLeftInDisplayOrder(tab).length > 0;
 }
 
+function handleSaveAllTabs() {
+  emit("save-all-tabs");
+}
+
 function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
   const items: ContextMenuItem[] = [
     {
@@ -1517,6 +1533,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
     createCloseAllTabMenuItem({
       label: t("contextMenu.closeAllTabs"),
       onClose: () => queryStore.closeAllTabsInGroup(props.groupId, tab.id),
+    }),
+    createSaveAllTabsMenuItem({
+      label: t("contextMenu.saveAllTabs"),
+      disabled: !queryStore.hasDirtyTabs,
+      shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.saveAllTabs ?? ""),
+      onSaveAll: () => handleSaveAllTabs(),
     }),
     {
       label: t("contextMenu.closeTabGroup"),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCloseAllTabsShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCloseAllTabsShortcut, isSaveAllTabsShortcut } from "@/lib/editor/keyboardShortcuts";
 import {
   closeOtherTabsDefaultShortcut,
   countShortcutConflictPairs,
@@ -324,6 +324,23 @@ describe("shortcutRegistry editor actions", () => {
     // 显式分配后生效；默认未绑定时永不触发
     expect(isCloseAllTabsShortcut(event, { closeAllTabs: "Shift+Mod+Alt+W" }, "MacIntel")).toBe(true);
     expect(isCloseAllTabsShortcut(event, {}, "MacIntel")).toBe(false);
+  });
+
+  it("registers saveAllTabs as an unbound global shortcut that users can assign", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "saveAllTabs");
+    expect(definition).toMatchObject({
+      id: "saveAllTabs",
+      labelKey: "contextMenu.saveAllTabs",
+      scope: "global",
+      defaultShortcut: "",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.saveAllTabs).toBe("");
+    expect(normalizeShortcutSettings({}).saveAllTabs).toBe("");
+    expect(normalizeShortcutSettings({ saveAllTabs: "Shift+Mod+Alt+S" }).saveAllTabs).toBe("Shift+Mod+Alt+S");
+    expect(normalizeShortcutSettings({ saveAllTabs: "" }).saveAllTabs).toBe("");
+    const event = { key: "s", shiftKey: true, metaKey: true, altKey: true };
+    expect(isSaveAllTabsShortcut(event, { saveAllTabs: "Shift+Mod+Alt+S" }, "MacIntel")).toBe(true);
+    expect(isSaveAllTabsShortcut(event, {}, "MacIntel")).toBe(false);
   });
 
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {

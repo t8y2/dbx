@@ -11216,7 +11216,7 @@ LIMIT 100;</pre>
                       <SelectTrigger inputClass="h-8 text-xs">
                         <SelectValue>
                           <span class="flex items-center gap-2">
-                            <img v-if="aiIsCcSwitchProvider" src="/ai-config-import/plugin.png" alt="" aria-hidden="true" class="h-5 w-5 shrink-0 object-contain" />
+                            <img v-if="aiIsCcSwitchProvider" :src="'/ai-config-import/plugin.png'" alt="" aria-hidden="true" class="h-5 w-5 shrink-0 object-contain" />
                             <AiProviderLogo v-else :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" :icon-path="selectedAiProviderPreset.iconPath" />
                             <span>{{ aiIsCcSwitchProvider ? t("ai.ccSwitchProvider") : selectedAiProviderPreset.label }}</span>
                           </span>
@@ -11234,7 +11234,7 @@ LIMIT 100;</pre>
                             </SelectItem>
                             <SelectItem v-if="!isWeb && aiCcSwitchPluginAvailable" :value="CC_SWITCH_PROVIDER_ID">
                               <span class="flex w-full min-w-0 items-center gap-2">
-                                <img src="/ai-config-import/plugin.png" alt="" aria-hidden="true" class="h-5 w-5 shrink-0 object-contain" />
+                                <img :src="'/ai-config-import/plugin.png'" alt="" aria-hidden="true" class="h-5 w-5 shrink-0 object-contain" />
                                 <span class="truncate">{{ t("ai.ccSwitchProvider") }}</span>
                               </span>
                             </SelectItem>
@@ -11265,7 +11265,7 @@ LIMIT 100;</pre>
 
                 <div v-if="aiIsCcSwitchProvider && !isWeb && aiCcSwitchPluginAvailable" class="rounded-md border border-primary/20 bg-primary/5 px-3 py-3">
                   <div class="flex items-start gap-3">
-                    <img src="/ai-config-import/plugin.png" alt="" aria-hidden="true" class="mt-0.5 h-8 w-8 shrink-0 object-contain" />
+                    <img :src="'/ai-config-import/plugin.png'" alt="" aria-hidden="true" class="mt-0.5 h-8 w-8 shrink-0 object-contain" />
                     <div class="min-w-0 space-y-1">
                       <div class="flex flex-wrap items-center gap-2">
                         <p class="text-sm font-medium">{{ t("ai.ccSwitchProvider") }}</p>
@@ -11292,7 +11292,7 @@ LIMIT 100;</pre>
                       <div class="flex flex-col items-start gap-1.5">
                         <Button type="button" size="sm" variant="outline" :disabled="aiConfigImporting" @click="aiImportCcSwitchConfigs">
                           <Loader2 v-if="aiConfigImportingSource === 'cc-switch'" class="mr-1 h-3.5 w-3.5 animate-spin" />
-                          <img v-else src="/ai-config-import/cc-switch.png" alt="" aria-hidden="true" class="mr-1 h-4 w-4 object-contain" />
+                          <img v-else :src="'/ai-config-import/cc-switch.png'" alt="" aria-hidden="true" class="mr-1 h-4 w-4 object-contain" />
                           {{ aiConfigImportingSource === "cc-switch" ? t("ai.ccSwitchImporting") : t("ai.ccSwitchImport") }}
                         </Button>
                         <p class="pl-1 text-xs text-muted-foreground">{{ aiImportSourceSummaryText("cc-switch") }}</p>
@@ -11300,7 +11300,7 @@ LIMIT 100;</pre>
                       <div class="flex flex-col items-start gap-1.5">
                         <Button type="button" size="sm" variant="outline" :disabled="aiConfigImporting || !aiMagpiePluginAvailable" @click="aiImportMagpieConfigs">
                           <Loader2 v-if="aiConfigImportingSource === 'magpie'" class="mr-1 h-3.5 w-3.5 animate-spin" />
-                          <img v-else src="/ai-config-import/magpie.png" alt="" aria-hidden="true" class="mr-1 h-4 w-4 object-contain" />
+                          <img v-else :src="'/ai-config-import/magpie.png'" alt="" aria-hidden="true" class="mr-1 h-4 w-4 object-contain" />
                           {{ aiConfigImportingSource === "magpie" ? t("ai.magpieImporting") : t("ai.magpieImport") }}
                         </Button>
                         <p class="pl-1 text-xs text-muted-foreground">{{ aiImportSourceSummaryText("magpie") }}</p>

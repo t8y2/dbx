@@ -30,11 +30,15 @@ const severityBadgeClasses: Record<SeverityTone, string> = {
     </div>
     <div v-else class="overflow-hidden">
       <div v-for="(message, index) in messages" :key="index" class="flex items-start gap-2 border-b px-3 py-2 text-xs last:border-b-0">
-        <Badge variant="secondary" class="mt-px shrink-0 font-mono text-[10px] uppercase" :class="severityBadgeClasses[severityTone(message.severity)]">
+        <!-- The badge is a fixed `h-5` (20px) pill with `items-center`, so its vertical centre sits
+             at 10px from the row's content-box top. The message text below must therefore own an
+             explicit 20px first line box (`leading-5`); an arbitrary font size like `text-[11px]`
+             sets no line-height, so it would otherwise inherit `text-xs`' 16px and ride 2px high. -->
+        <Badge variant="secondary" class="shrink-0 font-mono text-[10px] uppercase leading-none" :class="severityBadgeClasses[severityTone(message.severity)]">
           {{ message.severity }}
         </Badge>
         <div class="min-w-0 flex-1">
-          <div class="font-mono text-[11px] whitespace-pre-wrap break-words text-foreground">{{ message.message }}</div>
+          <div class="font-mono text-[11px] leading-5 whitespace-pre-wrap break-words text-foreground">{{ message.message }}</div>
           <div v-if="message.detail" class="mt-0.5 font-mono text-[11px] whitespace-pre-wrap break-words text-muted-foreground">{{ message.detail }}</div>
           <div v-if="message.hint" class="mt-0.5 font-mono text-[11px] whitespace-pre-wrap break-words text-muted-foreground">{{ message.hint }}</div>
           <div v-if="message.code" class="mt-0.5 font-mono text-[10px] text-muted-foreground">{{ t("queryMessages.code", { code: message.code }) }}</div>

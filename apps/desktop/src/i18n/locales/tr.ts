@@ -62,6 +62,51 @@ const consul = {
 
 export default withEnglishFallback({
   sidebarMenu,
+  plDebug: {
+    toolbar: {
+      resume: "Resume",
+      stepOver: "Step over",
+      stepIn: "Step into",
+      stepOut: "Step out",
+      abort: "Abort execution",
+    },
+    state: {
+      running: "running",
+      paused: "paused at breakpoint",
+      finished: "finished",
+    },
+    variables: {
+      filter: "Filter variables",
+      name: "Name",
+      value: "Value",
+      empty: "No variables are visible while the program is running",
+    },
+    stack: {
+      empty: "No call stack is available while the program is running",
+    },
+    output: {
+      refresh: "Refresh DBMS_OUTPUT",
+      empty: "DBMS_OUTPUT appears after the program finishes or is aborted",
+    },
+    panel: {
+      variables: "Variables",
+      stack: "Call stack",
+      output: "DBMS Output",
+    },
+    params: {
+      name: "Name",
+      mode: "Mode",
+      type: "Type",
+      value: "Value",
+      valuePlaceholder: "Parameter value",
+      empty: "This routine has no parameters",
+    },
+    start: {
+      title: "Debug PL/SQL",
+      confirm: "Start debugging",
+    },
+  },
+
   pluginPlatform: {
     dataAccessConsent: '"{name}", "{connection}" bağlantısındaki verileri okumak istiyor. Bu bağlantı açık olduğu sürece eklenti, Eklenti Merkezi\'nden erişimi iptal edene kadar bağlantıda salt okunur sorgular çalıştırabilir. İzin verilsin mi?',
     dataAccessConsentTitle: "Veri Erişim İsteği",
@@ -8083,6 +8128,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "Sonuç tablosu odaktayken geçerli",
     shortcutScopeHintSearch: "Arama alanı odaktayken geçerli",
     shortcutScopeHintSidebar: "Kenar çubuğu odaktayken geçerli",
+    shortcutScopeDebug: "PL/SQL hata ayıklayıcısı",
+    shortcutScopeHintDebug: "Hata ayıklayıcı etkin sekmeyi kullanırken geçerli",
     shortcutGroupCount: "{count} eylem",
     shortcutGroupCollapse: "Grubu daralt",
     shortcutGroupExpand: "Grubu genişlet",

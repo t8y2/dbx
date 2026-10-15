@@ -60,6 +60,8 @@ import {
   WrapText,
   X,
   Wrench,
+  Bug,
+  CircleDot,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import i18n from "@/i18n";
@@ -80,7 +82,8 @@ import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, PgTablePartitioning, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
-import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
+import { supportsAiAssistantContext, supportsDataDictionary, supportsPlDebugRoutine, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
+import { launchPlDebug } from "@/components/debug/plDebugLaunch";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
@@ -153,6 +156,11 @@ import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutio
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
+import { buildOracleCompileSql } from "@/lib/database/oracleCompileSql";
+import { runOracleCompileAction } from "@/lib/database/oracleCompileAction";
+import { resolveRoutineEntryLine, routineProgramName, type OracleRoutineEntryLines } from "@/lib/debug/oracleRoutineEntryLine";
+import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
+import { usePlDebugStore } from "@/stores/plDebugStore";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
@@ -1830,6 +1838,87 @@ function openProcedureExecution(row: ObjectBrowserRow) {
   if (row.type !== "PROCEDURE") return;
   procedureExecutionTarget.value = row;
   showProcedureExecutionConfirm.value = true;
+}
+
+/**
+ * 「调试」from the source panel: the user is looking at a routine's source and wants to
+ * run it under the debugger, so the button reuses the tree action's gate and payload
+ * instead of opening a second launch path (reported from use, 2026-10-13).
+ */
+function debugSourceRow() {
+  const row = sourceRow.value;
+  if (!row) return;
+  openPlDebugRoutine(row);
+}
+
+/** Only routines the debugger can attach to get the button (mirrors the tree action). */
+const sourceRowDebuggable = computed(() => {
+  const type = (sourceRow.value?.type ?? "").toUpperCase();
+  return !sourceEditing.value && (type === "PROCEDURE" || type === "FUNCTION");
+});
+
+function openPlDebugRoutine(row: ObjectBrowserRow) {
+  if (row.type !== "PROCEDURE" && row.type !== "FUNCTION") return;
+  // The capability probe and the INVALID-object pre-check both live in
+  // `launchPlDebug`, so every entry point goes through the same gate.
+  void launchPlDebug({
+    connectionId: props.connection.id,
+    database: props.database,
+    databaseType: effectiveDatabaseType.value,
+    schema: row.schema || selectedSchema.value,
+    objectType: row.type,
+    objectName: row.name,
+    valid: row.valid,
+  });
+}
+
+/**
+ * 「设断点（过程入口）」：断点属于调试会话（`applyBreakpoints` 就挂在 session 上），
+ * 所以没有存活的会话时只报错、不偷偷开会话 —— 开会话要选参数，那一步是调试入口的职责。
+ *
+ * 行号解析见 `resolveRoutineEntryLine`：先试子程序头行，服务器不接受（oracle 侧
+ * entrypointname 臂仍在真机探针验证中）再试子程序体第一条语句；两次都失败时把服务器
+ * 的原话报出来，绝不静默。
+ */
+async function setRoutineEntryBreakpoint(row: ObjectBrowserRow) {
+  if (!supportsPlDebugRoutine(effectiveDatabaseType.value) || (row.type !== "PROCEDURE" && row.type !== "FUNCTION")) return;
+  const debugStore = usePlDebugStore();
+  if (!debugStore.hasSession) {
+    toast(t("contextMenu.setEntryBreakpointNoSession"), 5000);
+    return;
+  }
+  const schema = row.schema || selectedSchema.value || props.database;
+  let resolved: OracleRoutineEntryLines | null = null;
+  try {
+    const { source } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, props.connection.id, props.database, schema, row.name, row.type);
+    resolved = resolveRoutineEntryLine(source.source ?? "", row.name);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+    return;
+  }
+  if (!resolved) {
+    toast(t("contextMenu.setEntryBreakpointUnresolved", { name: row.name }), 5000);
+    return;
+  }
+  const program = routineProgramName({ objectName: row.name });
+  const lines = resolved.candidateLine === null ? [resolved.headLine] : [resolved.headLine, resolved.candidateLine];
+  let lastError = "";
+  for (const line of lines) {
+    try {
+      // 同一个程序的旧断点先摘掉：重设入口断点时不该留下两条。
+      await debugStore.applyBreakpoints([...debugStore.breakpoints.filter((breakpoint) => (breakpoint.name ?? "").toUpperCase() !== program.toUpperCase()), { owner: schema, name: program, line, kind: row.type }]);
+      if (line !== resolved.headLine) {
+        // 头行被服务器拒绝后落到回退行：把上一次失败留在工具栏的错误清掉，并如实说明。
+        debugStore.clearError();
+        debugStore.pushHistory("WARN", `breakpoint on ${program}:${resolved.headLine} rejected (${lastError}); set on line ${line} instead`);
+      }
+      toast(t("contextMenu.setEntryBreakpointSuccess", { name: program, line }), 3000);
+      return;
+    } catch (caught) {
+      lastError = String(caught);
+    }
+  }
+  toast(t("contextMenu.setEntryBreakpointFailed", { name: program, error: lastError }), 5000);
 }
 
 function openProcedureExecutionSql(sql: string) {
@@ -3515,6 +3604,54 @@ async function compileDamengView(row: ObjectBrowserRow) {
   }
 }
 
+/**
+ * Oracle answers `ALTER ... COMPILE` with success even when the object is left INVALID, so
+ * the compile is followed by an ALL_ERRORS read-back and *that* decides between the success
+ * toast and the error dialog: the DDL's own result would always say "compiled". The two
+ * statements and that decision live in `runOracleCompileAction`; this wrapper only supplies
+ * the query channel (DDL through the production guard, the read-back straight to the API,
+ * as before) and refreshes the view.
+ */
+async function compileOracleObject(row: ObjectBrowserRow) {
+  if (effectiveDatabaseType.value !== "oracle") return;
+  const schema = row.schema || selectedSchema.value;
+  const outcome = await runOracleCompileAction({
+    connectionId: props.connection.id,
+    database: props.database,
+    schema,
+    owner: schema,
+    name: row.name,
+    objectType: row.type,
+    runQuery: ({ sql, stage }) => (stage === "compile" ? executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema)) : api.executeQuery(props.connection.id, props.database, sql, schema)),
+  });
+  if (outcome.status === "unsupported" || outcome.status === "blocked") return;
+  // A statement that threw is reported before the reload: the original code showed the
+  // dialog straight from its catch block, without refreshing the list.
+  if (outcome.status === "failed") {
+    compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
+    compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: row.name, message: outcome.message });
+    showCompileErrorDialog.value = true;
+    return;
+  }
+  await reload();
+  await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+  if (outcome.status === "success") {
+    toast(t("contextMenu.compileObjectSuccess", { name: row.name }));
+    return;
+  }
+  compileErrorTitle.value = t("contextMenu.compileObjectFailedTitle");
+  compileErrorMessage.value = t("contextMenu.compileObjectFailedMessage", { name: row.name, message: outcome.message });
+  showCompileErrorDialog.value = true;
+}
+
+/** The Compile entry for an Oracle object, or null when Oracle cannot recompile that kind. */
+function oracleCompileMenuItem(row: ObjectBrowserRow): ContextMenuItem | null {
+  if (effectiveDatabaseType.value !== "oracle") return null;
+  const schema = row.schema || selectedSchema.value;
+  if (!buildOracleCompileSql({ objectType: row.type, schema, name: row.name })) return null;
+  return { label: t("contextMenu.compileObject"), action: () => compileOracleObject(row), icon: Wrench };
+}
+
 async function refreshTruncatePreviewSql(row: ObjectBrowserRow) {
   truncatePreviewSql.value = "";
   truncatePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })).catch(() => "");
@@ -4430,6 +4567,8 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     ...(item.type === "PROCEDURE" ? [{ label: t("contextMenu.executeProcedure"), action: () => openProcedureExecution(item), icon: Play }] : []),
+    ...(supportsPlDebugRoutine(effectiveDatabaseType.value) ? [{ label: t("contextMenu.debugRoutine"), action: () => openPlDebugRoutine(item), icon: Bug }] : []),
+    ...(supportsPlDebugRoutine(effectiveDatabaseType.value) ? [{ label: t("contextMenu.setEntryBreakpoint"), action: () => void setRoutineEntryBreakpoint(item), icon: CircleDot }] : []),
     ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
@@ -4496,12 +4635,19 @@ function getObjectBrowserActionMenuItems(item: ObjectBrowserRow): ContextMenuIte
       { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
     ];
   }
-  if (item.type === "TABLE") return getTableMenuItems(item);
-  if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
-  if (item.type === "EVENT") return getEventMenuItems(item);
-  if (item.type === "TYPE" || item.type === "TYPE_BODY") return getTypeMenuItems(item);
-  if (isSourceOnlyObjectBrowserRow(item)) return getPackageMenuItems(item);
-  return getProcFuncMenuItems(item);
+  let items: ContextMenuItem[];
+  if (item.type === "TABLE") items = getTableMenuItems(item);
+  else if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") items = getViewMenuItems(item);
+  else if (item.type === "EVENT") items = getEventMenuItems(item);
+  else if (item.type === "TYPE" || item.type === "TYPE_BODY") items = getTypeMenuItems(item);
+  else if (isSourceOnlyObjectBrowserRow(item)) items = getPackageMenuItems(item);
+  else items = getProcFuncMenuItems(item);
+  // Appended once here rather than per kind: every kind Oracle can recompile gets the action
+  // (the helper rejects the rest), and its outcome is the ALL_ERRORS read-back rather than the
+  // DDL's own result.
+  const oracleCompile = oracleCompileMenuItem(item);
+  if (oracleCompile) items.push(oracleCompile);
+  return items;
 }
 
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
@@ -5166,6 +5312,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </Button>
             <Button v-if="!sourceEditing && sourceCanEdit" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
               <PencilLine class="h-3 w-3" />
+            </Button>
+            <Button v-if="sourceRowDebuggable" variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('objects.debugSourceTitle')" @click="debugSourceRow">
+              <Bug class="h-3 w-3" />
+              {{ t("objects.debugSource") }}
             </Button>
             <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="sourceLoading || sourceSaving" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="refreshActiveSource">
               <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': sourceLoading }" />

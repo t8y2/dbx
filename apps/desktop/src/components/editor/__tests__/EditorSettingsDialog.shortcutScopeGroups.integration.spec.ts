@@ -212,7 +212,9 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     hoisted.shortcuts = defaults();
     const host = await mountShortcutsTab();
 
-    expect(groupLabels(host)).toEqual(["settings.shortcutScopeGlobal", "settings.shortcutScopeEditor", "settings.shortcutScopeGrid", "settings.shortcutScopeSearch", "settings.shortcutScopeSidebar"]);
+    // `debug` leads: App.vue claims the PL/SQL debugger step keys before the
+    // global quickOpen branch, so the debug scope is the outermost tier.
+    expect(groupLabels(host)).toEqual(["settings.shortcutScopeDebug", "settings.shortcutScopeGlobal", "settings.shortcutScopeEditor", "settings.shortcutScopeGrid", "settings.shortcutScopeSearch", "settings.shortcutScopeSidebar"]);
 
     // Scope moved into the group header — rows must not repeat it.
     const rendered = rows(host);
@@ -408,8 +410,9 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     });
 
     // Only scopes that actually have actions render, but whatever renders must be
-    // a sub-sequence of the dispatch order (global -> editor -> grid -> search -> sidebar).
-    const dispatchOrder = ["global", "editor", "grid", "search", "sidebar"];
+    // a sub-sequence of the dispatch order. `debug` leads because App.vue claims
+    // the debugger step keys before the global quickOpen branch.
+    const dispatchOrder = ["debug", "global", "editor", "grid", "search", "sidebar"];
     for (const scope of rendered) expect(scopes).toContain(scope);
     const positions = rendered.map((scope) => dispatchOrder.indexOf(scope));
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
@@ -423,8 +426,9 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     const crossBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-warning/30"]');
     const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
 
-    // 未搜索：全局口径（默认键位 6 组跨域同键），且默认无同作用域阻断冲突。
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=6");
+    // 未搜索：全局口径（默认键位 7 组跨域同键：上游既有 6 组 + PL/SQL 调试器 step 键 Mod+P
+    // 与 global quickOpen 的同键重叠），且默认无同作用域阻断冲突。
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
     expect(conflictBadge()).toBeNull();
 
     const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
@@ -447,7 +451,7 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     search.value = "";
     search.dispatchEvent(new Event("input", { bubbles: true }));
     await flushAsyncUpdates();
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=6");
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
   });
 
   it("scopes the red same-scope badge to the search results while the footer gate stays global", async () => {

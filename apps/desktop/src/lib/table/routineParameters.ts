@@ -8,6 +8,8 @@ export interface LoadRoutineParametersOptions {
   databaseType?: DatabaseType;
   schema?: string;
   routineName: string;
+  /** Set when the routine is a member of a package rather than a standalone object. */
+  packageName?: string;
 }
 
 export async function loadRoutineParameters(options: LoadRoutineParametersOptions): Promise<RoutineParameter[]> {
@@ -39,7 +41,7 @@ export function supportsRoutineParameterMetadata(databaseType?: DatabaseType): b
   );
 }
 
-export function routineParametersQuery(options: Pick<LoadRoutineParametersOptions, "database" | "databaseType" | "schema" | "routineName">): string | null {
+export function routineParametersQuery(options: Pick<LoadRoutineParametersOptions, "database" | "databaseType" | "schema" | "routineName" | "packageName">): string | null {
   if (!supportsRoutineParameterMetadata(options.databaseType)) return null;
   const effectiveSchema = options.schema || (options.databaseType === "postgres" ? "public" : "") || (options.databaseType === "mysql" || options.databaseType === "doris" || options.databaseType === "starrocks" ? options.database : "");
   const schema = quoteSqlLiteral(effectiveSchema);
@@ -125,7 +127,43 @@ WHERE o.type IN ('P', 'PC')
   AND o.name = ${name}
 ORDER BY p.parameter_id;`.trim();
   }
+  if (options.databaseType === "oracle" && options.packageName) {
+    // Oracle 19c has no PROCEDURE_NAME column in ALL_ARGUMENTS
+    // (ORA-00904: "PROCEDURE_NAME": invalid identifier), and for a package
+    // member OBJECT_NAME holds the member while PACKAGE_NAME holds the package
+    // (verified live on Oracle 19c EE). The member is therefore resolved
+    // through ALL_PROCEDURES by SUBPROGRAM_ID.
+    return `
+SELECT
+  a.ARGUMENT_NAME AS "name",
+  a.DATA_TYPE AS "data_type",
+  a.IN_OUT AS "mode",
+  a.POSITION AS "ordinal",
+  a.DEFAULTED AS "has_default"
+FROM ALL_ARGUMENTS a
+JOIN ALL_PROCEDURES p
+  ON p.OWNER = a.OWNER
+ AND p.OBJECT_NAME = a.PACKAGE_NAME
+ AND p.SUBPROGRAM_ID = a.SUBPROGRAM_ID
+WHERE a.OWNER = UPPER(${schema})
+  AND a.PACKAGE_NAME = UPPER(${quoteSqlLiteral(options.packageName)})
+  AND p.PROCEDURE_NAME = UPPER(${name})
+  AND a.POSITION > 0
+ORDER BY a.SEQUENCE;`.trim();
+  }
   if (options.databaseType === "oracle" || options.databaseType === "dameng" || options.databaseType === "oceanbase-oracle") {
+    // Standalone routines are scoped by OWNER/OBJECT_NAME alone.
+    // Dameng and OceanBase-Oracle package members keep the PACKAGE_NAME +
+    // PROCEDURE_NAME shape: their dictionary behaviour was not verified on a
+    // live server (only the Oracle 19c path was fixed here), so do not align
+    // them with Oracle without a live check.
+    const packageFilter =
+      options.databaseType !== "oracle" && options.packageName
+        ? `
+  AND PACKAGE_NAME = UPPER(${quoteSqlLiteral(options.packageName)})
+  AND PROCEDURE_NAME = UPPER(${name})`
+        : "";
+    const object = options.packageName ? quoteSqlLiteral(options.packageName) : name;
     return `
 SELECT
   ARGUMENT_NAME AS "name",
@@ -135,7 +173,7 @@ SELECT
   DEFAULTED AS "has_default"
 FROM ALL_ARGUMENTS
 WHERE OWNER = UPPER(${schema})
-  AND OBJECT_NAME = UPPER(${name})
+  AND OBJECT_NAME = UPPER(${object})${packageFilter}
   AND POSITION > 0
 ORDER BY SEQUENCE;`.trim();
   }

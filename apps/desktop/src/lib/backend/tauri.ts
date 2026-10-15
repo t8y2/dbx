@@ -6717,6 +6717,7 @@ export async function exportQueryResultHtml(filePath: string, title: string | un
 export * from "@/lib/backend/mq-tauri";
 export * from "@/lib/backend/mqtt-tauri";
 export * from "@/lib/backend/nacos-tauri";
+// PL debug API is desktop-only; imported directly from "@/lib/backend/pl-debug-tauri".
 
 export async function openQueryResultTempFile(path: string): Promise<void> {
   return invoke("open_query_result_temp_file", { path });

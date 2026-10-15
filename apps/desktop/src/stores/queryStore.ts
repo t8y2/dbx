@@ -3080,6 +3080,25 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   /**
+   * The debugger UI is driven by `plDebugStore`, which owns a single session, so
+   * every debug target shares one "debug" tab instead of accumulating one tab per
+   * routine. Starting a session on another connection re-points that tab (the
+   * same way the editor toolbar's change-connection action does).
+   */
+  function openPlDebugTab(options: { connectionId: string; database: string; title?: string; schema?: string }): string {
+    const existing = tabs.value.find((tab) => tab.mode === "debug");
+    if (existing) {
+      existing.connectionId = options.connectionId;
+      existing.database = options.database;
+      existing.schema = options.schema;
+      if (options.title) existing.title = options.title;
+      switchTab(existing.id);
+      return existing.id;
+    }
+    return createTab(options.connectionId, options.database, options.title || "Debug", "debug", options.schema, undefined, undefined, { forceNew: true });
+  }
+
+  /**
    * 正在后台重新校验源码的 tab。非响应式：仅用于避免同一个 tab 上叠起多次
    * 取源请求（Oracle 的 GET_DDL 正是慢的那一步）。
    */
@@ -10305,6 +10324,7 @@ export const useQueryStore = defineStore("query", () => {
     createTab,
     openObjectSourceTab,
     openObjectSourceTabPending,
+    openPlDebugTab,
     retryObjectSourceTab,
     refreshObjectSourceTab,
     loadDdlViewerTab,

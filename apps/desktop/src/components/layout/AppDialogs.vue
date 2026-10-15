@@ -26,6 +26,7 @@ const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/s
 const ConnectionPasswordPromptDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionPasswordPromptDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
+const PlDebugLaunchDialog = defineAsyncComponent(() => import("@/components/debug/PlDebugLaunchDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
@@ -400,4 +401,5 @@ watch(
   </Dialog>
   <SshHostKeyPromptDialog />
   <ConnectionPasswordPromptDialog />
+  <PlDebugLaunchDialog />
 </template>

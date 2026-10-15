@@ -8989,6 +8989,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "Berlaku saat grid hasil difokuskan",
     shortcutScopeHintSearch: "Berlaku saat bidang pencarian difokuskan",
     shortcutScopeHintSidebar: "Berlaku saat bilah sisi difokuskan",
+    shortcutScopeDebug: "Debugger PL/SQL",
+    shortcutScopeHintDebug: "Berlaku saat debugger menempati tab aktif",
     shortcutGroupCount: "{count} aksi",
     shortcutGroupUnbound: "{count} belum terikat",
     shortcutGroupUnboundTooltip: "Aksi ini belum memiliki pintasan yang ditetapkan; gunakan ikon pensil pada baris untuk merekamnya.",

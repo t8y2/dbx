@@ -175,6 +175,51 @@ export default withEnglishFallback({
     resultChanged: "結果或連線已變更，請重新整理後再試。",
     updateFailed: "屬性更新失敗。",
   },
+  plDebug: {
+    toolbar: {
+      resume: "继续执行",
+      stepOver: "单步跳过",
+      stepIn: "单步进入",
+      stepOut: "单步跳出",
+      abort: "终止执行",
+    },
+    state: {
+      running: "运行中",
+      paused: "已停在断点",
+      finished: "已结束",
+    },
+    variables: {
+      filter: "筛选变量",
+      name: "名称",
+      value: "值",
+      empty: "程序运行中，暂无可见变量",
+    },
+    stack: {
+      empty: "程序运行中，暂无调用栈",
+    },
+    output: {
+      refresh: "刷新 DBMS_OUTPUT",
+      empty: "程序结束或终止后显示 DBMS_OUTPUT",
+    },
+    panel: {
+      variables: "变量",
+      stack: "调用堆栈",
+      output: "DBMS 输出",
+    },
+    params: {
+      name: "名称",
+      mode: "模式",
+      type: "类型",
+      value: "值",
+      valuePlaceholder: "参数值",
+      empty: "该对象没有参数",
+    },
+    start: {
+      title: "调试 PL/SQL",
+      confirm: "开始调试",
+    },
+  },
+
   mongoDump,
   damengDump,
   cellTransform: {
@@ -7683,6 +7728,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "結果表格聚焦時生效",
     shortcutScopeHintSearch: "搜尋框聚焦時生效",
     shortcutScopeHintSidebar: "側邊欄聚焦時生效",
+    shortcutScopeDebug: "PL/SQL 偵錯器",
+    shortcutScopeHintDebug: "偵錯器佔用目前分頁時生效",
     shortcutGroupCount: "{count} 項",
     shortcutGroupCollapse: "摺疊分組",
     shortcutGroupExpand: "展開分組",

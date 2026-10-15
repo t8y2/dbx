@@ -175,6 +175,51 @@ export default withEnglishFallback({
     resultChanged: "結果または接続が変更されました。更新して再試行してください。",
     updateFailed: "プロパティを更新できませんでした。",
   },
+  plDebug: {
+    toolbar: {
+      resume: "Resume",
+      stepOver: "Step over",
+      stepIn: "Step into",
+      stepOut: "Step out",
+      abort: "Abort execution",
+    },
+    state: {
+      running: "running",
+      paused: "paused at breakpoint",
+      finished: "finished",
+    },
+    variables: {
+      filter: "Filter variables",
+      name: "Name",
+      value: "Value",
+      empty: "No variables are visible while the program is running",
+    },
+    stack: {
+      empty: "No call stack is available while the program is running",
+    },
+    output: {
+      refresh: "Refresh DBMS_OUTPUT",
+      empty: "DBMS_OUTPUT appears after the program finishes or is aborted",
+    },
+    panel: {
+      variables: "Variables",
+      stack: "Call stack",
+      output: "DBMS Output",
+    },
+    params: {
+      name: "Name",
+      mode: "Mode",
+      type: "Type",
+      value: "Value",
+      valuePlaceholder: "Parameter value",
+      empty: "This routine has no parameters",
+    },
+    start: {
+      title: "Debug PL/SQL",
+      confirm: "Start debugging",
+    },
+  },
+
   mongoDump,
   damengDump,
   cellTransform: {
@@ -8364,6 +8409,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "結果グリッドにフォーカス時",
     shortcutScopeHintSearch: "検索フィールドにフォーカス時",
     shortcutScopeHintSidebar: "サイドバーにフォーカス時",
+    shortcutScopeDebug: "PL/SQL デバッガー",
+    shortcutScopeHintDebug: "デバッガーが現在のタブのとき有効",
     shortcutGroupCount: "{count} 件",
     shortcutGroupCollapse: "グループを折りたたむ",
     shortcutGroupExpand: "グループを展開",

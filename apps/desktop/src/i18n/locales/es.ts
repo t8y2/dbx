@@ -176,6 +176,51 @@ export default withEnglishFallback({
     resultChanged: "El resultado o la conexión cambió. Actualiza y vuelve a intentarlo.",
     updateFailed: "No se pudo actualizar la propiedad.",
   },
+  plDebug: {
+    toolbar: {
+      resume: "Resume",
+      stepOver: "Step over",
+      stepIn: "Step into",
+      stepOut: "Step out",
+      abort: "Abort execution",
+    },
+    state: {
+      running: "running",
+      paused: "paused at breakpoint",
+      finished: "finished",
+    },
+    variables: {
+      filter: "Filter variables",
+      name: "Name",
+      value: "Value",
+      empty: "No variables are visible while the program is running",
+    },
+    stack: {
+      empty: "No call stack is available while the program is running",
+    },
+    output: {
+      refresh: "Refresh DBMS_OUTPUT",
+      empty: "DBMS_OUTPUT appears after the program finishes or is aborted",
+    },
+    panel: {
+      variables: "Variables",
+      stack: "Call stack",
+      output: "DBMS Output",
+    },
+    params: {
+      name: "Name",
+      mode: "Mode",
+      type: "Type",
+      value: "Value",
+      valuePlaceholder: "Parameter value",
+      empty: "This routine has no parameters",
+    },
+    start: {
+      title: "Debug PL/SQL",
+      confirm: "Start debugging",
+    },
+  },
+
   mongoDump,
   damengDump,
   cellTransform: {
@@ -8612,6 +8657,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "Se aplica con la tabla de resultados enfocada",
     shortcutScopeHintSearch: "Se aplica con el campo de búsqueda enfocado",
     shortcutScopeHintSidebar: "Se aplica con la barra lateral enfocada",
+    shortcutScopeDebug: "Depurador de PL/SQL",
+    shortcutScopeHintDebug: "Se aplica mientras el depurador ocupa la pestaña activa",
     shortcutGroupCount: "{count} acciones",
     shortcutGroupCollapse: "Contraer grupo",
     shortcutGroupExpand: "Expandir grupo",

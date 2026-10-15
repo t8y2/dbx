@@ -62,6 +62,51 @@ const consul = {
 
 export default withEnglishFallback({
   sidebarMenu,
+  plDebug: {
+    toolbar: {
+      resume: "Resume",
+      stepOver: "Step over",
+      stepIn: "Step into",
+      stepOut: "Step out",
+      abort: "Abort execution",
+    },
+    state: {
+      running: "running",
+      paused: "paused at breakpoint",
+      finished: "finished",
+    },
+    variables: {
+      filter: "Filter variables",
+      name: "Name",
+      value: "Value",
+      empty: "No variables are visible while the program is running",
+    },
+    stack: {
+      empty: "No call stack is available while the program is running",
+    },
+    output: {
+      refresh: "Refresh DBMS_OUTPUT",
+      empty: "DBMS_OUTPUT appears after the program finishes or is aborted",
+    },
+    panel: {
+      variables: "Variables",
+      stack: "Call stack",
+      output: "DBMS Output",
+    },
+    params: {
+      name: "Name",
+      mode: "Mode",
+      type: "Type",
+      value: "Value",
+      valuePlaceholder: "Parameter value",
+      empty: "This routine has no parameters",
+    },
+    start: {
+      title: "Debug PL/SQL",
+      confirm: "Start debugging",
+    },
+  },
+
   pluginPlatform: {
     dataAccessConsent: '"{name}" "{connection}" bağlantısındakı məlumatları oxumaq istəyir. Bu bağlantı açıq olduqca plagin, Plagin Mərkəzində girişi ləğv edənə qədər orada yalnız oxuma sorğuları icra edə bilər. İcazə verilsin?',
     dataAccessConsentTitle: "Məlumat girişi sorğusu",
@@ -8182,6 +8227,8 @@ export default withEnglishFallback({
     shortcutScopeHintGrid: "Nəticə cədvəli fokusda olduqda keçərlidir",
     shortcutScopeHintSearch: "Axtarış sahəsi fokusda olduqda keçərlidir",
     shortcutScopeHintSidebar: "Yan panel fokusda olduqda keçərlidir",
+    shortcutScopeDebug: "PL/SQL sazlayıcısı",
+    shortcutScopeHintDebug: "Sazlayıcı aktiv tabda olduqda keçərlidir",
     shortcutGroupCount: "{count} əməliyyat",
     shortcutGroupCollapse: "Qrupu yığ",
     shortcutGroupExpand: "Qrupu genişləndir",

@@ -432,6 +432,10 @@ pub struct AppState {
     mysql_preserved_transactions: Arc<RwLock<HashSet<String>>>,
     pub transaction_sessions: Arc<RwLock<HashMap<String, TransactionSession>>>,
     pub sqlserver_transaction_ends: Arc<std::sync::Mutex<crate::query::sqlserver_manual_transaction::EndedSessions>>,
+    /// Live PL/SQL debug sessions keyed by the DBMS_DEBUG debug id. Each entry
+    /// pins the dedicated agent pool that owns the session so debug calls can
+    /// be routed back to it and released deterministically on close.
+    pub pl_debug_sessions: Arc<RwLock<HashMap<String, crate::query::pl_debug::PlDebugSessionHandle>>>,
     /// `save_password=false` 连接本次运行期的临时密码（内存，进程退出即丢，
     /// 绝不落盘）。键为 `(owner_scope, connection_id)`：桌面端 owner 为空串，
     /// Web 端 owner 为已认证会话 token，不同登录会话互不可见。建池/池重建/
@@ -1725,6 +1729,7 @@ impl AppState {
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             sqlserver_transaction_ends: Arc::new(std::sync::Mutex::new(Default::default())),
+            pl_debug_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_credentials: SessionCredentialStore::new(),
             write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
@@ -5955,6 +5960,11 @@ impl AppState {
     }
 
     pub async fn remove_connection_pools(&self, connection_id: &str) {
+        // Live PL debug sessions own dedicated pools and a parked debuggee: close them
+        // through the agent before their pools are drained. This is the only path that
+        // releases the debuggee without waiting for the server-side timeout, and it keeps
+        // `pl_debug_sessions` from holding handles to pools that are about to disappear.
+        crate::query::pl_debug::pl_debug_close_all_for_connection_core(self, connection_id).await;
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let mut removed = self.drain_connection_pools(connection_id).await;
@@ -5981,6 +5991,17 @@ impl AppState {
     }
 
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
+        // The agent-side close is one blocking RPC per session, which would defeat the
+        // detached drain below, so this path only forgets the handles: draining the pools
+        // kills the agent processes, and the parked debuggee is released by the
+        // server-side SET_TIMEOUT.
+        let forgotten = crate::query::pl_debug::pl_debug_forget_all_for_connection(self, connection_id).await;
+        if !forgotten.is_empty() {
+            log::debug!(
+                "[pl-debug] forgot {} session(s) while removing connection {connection_id} in the background",
+                forgotten.len()
+            );
+        }
         self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let mut removed = self.drain_connection_pools(connection_id).await;

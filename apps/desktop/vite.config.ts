@@ -110,7 +110,12 @@ export default defineConfig(async () => ({
       },
     },
     watch: {
-      ignored: ["**/src-tauri/**"],
+      // 写入工具用「临时目录 + 改名」做原子写，落点形如
+      // `src/i18n/locales/.ru.ts.<pid>.<uuid>.tmpdir/ru.ts.tmp`。chokidar 在 Windows
+      // 上去 watch 那个还占用着的临时文件会抛 EBUSY，而 Vite 的 watcher 错误会直接
+      // 结束 dev server（已在成批改写 i18n/locales 时复现两次），所以整段临时路径
+      // 一律不监听。第三条是目录本身：忽略目录能让 chokidar 连遍历都不做。
+      ignored: ["**/src-tauri/**", "**/.*tmpdir", "**/.*tmpdir/**", "**/.*.tmp"],
     },
   },
 }));

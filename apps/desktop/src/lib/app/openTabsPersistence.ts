@@ -119,9 +119,11 @@ function shouldPersistTabSql(tab: QueryTab) {
 
 // Pending object-source tabs are transient work surfaces. Persisting one while
 // its request is in flight would restore an empty source tab after restart,
-// because the request itself is intentionally not durable.
+// because the request itself is intentionally not durable. Debug tabs are
+// transient for the same reason: their DBMS_DEBUG session lives in the agent
+// process, so a restored tab could only ever show an empty panel.
 function shouldPersistOpenTab(tab: QueryTab): boolean {
-  return !tab.sourceLoad;
+  return !tab.sourceLoad && tab.mode !== "debug";
 }
 
 function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: string) {

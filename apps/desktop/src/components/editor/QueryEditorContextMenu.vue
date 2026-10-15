@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import {
   AlignLeft,
   ArrowDownUp,
+  Bug,
   Camera,
   CaseLower,
   CaseSensitive,
@@ -36,7 +37,7 @@ import {
 } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
-import { supportsQueryEditorBlockComments } from "@/lib/database/databaseFeatureSupport";
+import { supportsPlDebugRoutine, supportsQueryEditorBlockComments } from "@/lib/database/databaseFeatureSupport";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { queryContextObjectActions, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
@@ -56,6 +57,8 @@ export interface QueryEditorContextMenuState {
   expandSelectStar: (() => void) | undefined;
   canExplain?: boolean;
   hasContent?: boolean;
+  /** Whether the tab addresses a connection + database, which debugging needs. */
+  canDebugAnonymousBlock?: boolean;
 }
 
 export interface QueryEditorContextMenuActions {
@@ -85,6 +88,7 @@ export interface QueryEditorContextMenuActions {
   emitContextObjectAction: (action: QueryContextObjectAction) => void;
   openCodeSnapshot: () => void;
   sendSelectionToAi: () => void;
+  debugAnonymousBlockFromContextMenu: () => void;
   toggleFoldFromContextMenu?: () => void;
   foldAllFromContextMenu?: () => void;
   unfoldAllFromContextMenu?: () => void;
@@ -208,6 +212,19 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
           },
         ]),
     ...queryContextObjectActions(state.contextObjectTarget?.type).map((action) => contextObjectMenuItem(action, state.contextObjectTarget)),
+    // Anonymous-block debugging only exists on engines with the PL/SQL debugger
+    // (the same gate the object browser's entry uses), and the editor has to have
+    // content: a selection wins over the whole document.
+    ...(supportsPlDebugRoutine(state.databaseType)
+      ? [
+          {
+            label: t("editor.contextMenu.debugAnonymousBlock"),
+            action: actions.debugAnonymousBlockFromContextMenu,
+            disabled: !state.hasContent || state.canDebugAnonymousBlock === false,
+            icon: Bug,
+          },
+        ]
+      : []),
     {
       sidebarActionId: "editor.contextMenu.expandSelectStar",
       label: t("editor.contextMenu.expandSelectStar"),

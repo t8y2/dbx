@@ -8286,6 +8286,8 @@ export default withEnglishFallback({
     redisScanPageSize: "Conteggio scansione Redis",
     redisScanPageSizeDescription: "Chiavi richieste per pagina SCAN di Redis durante la navigazione delle chiavi.",
     redisScanPageSizeOption: "{count} chiavi",
+    redisValuePreviewLimit: "Limite di anteprima dei valori",
+    redisValuePreviewLimitDescription: "Dimensione massima dei valori String e Bitmap caricati nell’editor. Predefinito: 64 KiB; intervallo: 1–65536 KiB (64 MiB). I valori più grandi possono essere scaricati per intero. La modifica aggiorna i dettagli aperti senza modifiche non salvate.",
     redisDatabaseDisplayLimit: "Limite elenco database nella barra laterale",
     redisDatabaseDisplayLimitDescription: 'Numero massimo di database mostrati contemporaneamente nella barra laterale; il resto può essere visualizzato con "Carica altro".',
     redisDatabaseDisplayLimitOption: "{count} database",

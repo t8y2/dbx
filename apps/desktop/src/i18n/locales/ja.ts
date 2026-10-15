@@ -8283,6 +8283,8 @@ export default withEnglishFallback({
     redisScanPageSize: "Redisスキャンカウント",
     redisScanPageSizeDescription: "キー参照時のRedis SCANページあたりの要求キー数。",
     redisScanPageSizeOption: "{count}キー",
+    redisValuePreviewLimit: "値のプレビュー上限",
+    redisValuePreviewLimitDescription: "エディターに読み込む String と Bitmap 値の最大サイズ。既定値は 64 KiB、範囲は 1～65536 KiB（64 MiB）です。上限を超える値は全体をダウンロードできます。変更すると、未保存の編集がない詳細が更新されます。",
     redisDatabaseDisplayLimit: "サイドバーのデータベース一覧の上限",
     redisDatabaseDisplayLimitDescription: "サイドバーに一度に表示するデータベースの最大数。残りは「もっと読み込む」で表示できます。",
     redisDatabaseDisplayLimitOption: "{count}個のデータベース",

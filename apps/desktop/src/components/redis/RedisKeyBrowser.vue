@@ -18,6 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import DateTimePicker from "@/components/ui/date-time-picker/DateTimePicker.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { redisValuePreviewLimitBytes } from "@/lib/redis/redisValuePreviewLimit";
 import RedisValueViewer from "./RedisValueViewer.vue";
 import RedisPubSubPanel from "./RedisPubSubPanel.vue";
 import RedisSlowlogPanel from "./RedisSlowlogPanel.vue";
@@ -2327,7 +2328,7 @@ function isRedisMissingKeyError(error: unknown): boolean {
 }
 
 async function syncWrittenKey(keyRaw: string): Promise<boolean> {
-  const created = await api.redisGetValue(props.connectionId, props.db, keyRaw);
+  const created = await api.redisGetValue(props.connectionId, props.db, keyRaw, redisValuePreviewLimitBytes(settingsStore.editorSettings.redisValuePreviewLimitKiB));
   if (created.redis_type === "none") {
     removeKnownKey(keyRaw);
     return false;
@@ -3737,6 +3738,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                 :key-display="selectedKey.key_display"
                 :key-raw="selectedKey.key_raw"
                 :metadata="selectedKey"
+                :preview-limit-ki-b="settingsStore.editorSettings.redisValuePreviewLimitKiB"
                 @deleted="onKeyDeleted"
                 @renamed="onKeyRenamed"
                 @loaded="onKeyLoaded"

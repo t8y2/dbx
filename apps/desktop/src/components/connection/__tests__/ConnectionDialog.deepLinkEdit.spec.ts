@@ -171,7 +171,7 @@ async function settle() {
 }
 
 async function mountDialog(config: ConnectionConfig, url: string, initiallyOpen = true) {
-  const props = reactive({ open: initiallyOpen, editConfig: config, updatePrefill: parseConnectionDeepLinkUpdate(url) });
+  const props = reactive({ open: initiallyOpen, editConfig: config, updatePrefill: url ? parseConnectionDeepLinkUpdate(url) : null });
   store.getConfig.mockReturnValue(config);
   const container = document.createElement("div");
   document.body.append(container);
@@ -209,6 +209,25 @@ afterEach(() => {
 });
 
 describe("ConnectionDialog deep-link edit confirmation", () => {
+  it("shows the global Redis preview limit in advanced settings and persists it", async () => {
+    visibleTab.value = "advanced";
+    settings.editorSettings.redisValuePreviewLimitKiB = 64;
+    const redis = savedConnection({ id: "redis-connection", name: "Redis", db_type: "redis", driver_profile: "redis", driver_label: "Redis", host: "127.0.0.1", port: 6379, database: "0" });
+    await mountDialog(redis, "");
+    const input = document.querySelector<HTMLInputElement>("#redis-value-preview-limit-input");
+    expect(input?.value).toBe("64");
+    expect(input?.min).toBe("1");
+    expect(input?.max).toBe("65536");
+    input!.value = "256";
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    save!.click();
+    await settle();
+    expect(settings.updateEditorSettingsAndPersist).toHaveBeenCalledWith({ redisValuePreviewLimitKiB: 256 });
+    expect(store.updateConnection).toHaveBeenCalled();
+  });
+
   it("changes the advanced badge picker and persists it while retaining production protection", async () => {
     visibleTab.value = "advanced";
     await mountDialog(savedConnection({ production_badge_scope: "connection" }), "dbx://connection/new?id=saved-production");

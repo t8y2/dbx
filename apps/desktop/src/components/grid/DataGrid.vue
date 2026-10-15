@@ -386,6 +386,7 @@ import {
   DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER,
   dataGridDeleteRowToolbarState,
   dataGridToolbarActionCollapseCount,
+  shouldCompactDataGridConditionInput,
   isDataGridToolbarCompact,
   type DataGridReloadIntent,
   type DataGridToolbarActionCapability,
@@ -832,6 +833,7 @@ const dataGridViewportWidth = ref(0);
 const dataGridTopbarOverflowCompact = ref(false);
 const dataGridTopbarOverflowActionCount = ref(0);
 const dataGridTopbarExpandedRequiredWidth = ref(0);
+const dataGridFilterExpandedRequiredWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const showColumnHeaderTooltips = computed(() => settingsStore.editorSettings.showColumnHeaderTooltips !== false);
@@ -853,10 +855,15 @@ const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.c
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
 const dataGridRowNumberMode = computed(() => settingsStore.editorSettings.dataGridRowNumberMode);
-const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
 const splitDataGridToolbar = computed(() => settingsStore.editorSettings.dataGridToolbarLayout === "split");
-const responsiveDataGridToolbarActionCount = computed(() => dataGridToolbarActionCollapseCount(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
+const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || (!splitDataGridToolbar.value && isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
+const responsiveDataGridToolbarActionCount = computed(() => (splitDataGridToolbar.value ? 0 : dataGridToolbarActionCollapseCount(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
 const compactDataGridToolbarActionCount = computed(() => Math.max(responsiveDataGridToolbarActionCount.value, dataGridTopbarOverflowActionCount.value));
+const compactDataGridToolbarActions = computed(() => (splitDataGridToolbar.value ? compactDataGridToolbarActionCount.value > 0 : compactDataGridToolbar.value));
+watch(splitDataGridToolbar, () => {
+  resetDataGridTopbarOverflowCompact();
+  nextTick(updateDataGridTopbarWidth);
+});
 const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
 const queryResultMaxRows = computed(() => effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
 const paginationMaxRows = computed(() => (isResultsContext.value ? queryResultMaxRows.value : undefined));
@@ -3107,6 +3114,50 @@ function updateDataGridTopbarWidth() {
       return;
     }
 
+    if (splitDataGridToolbar.value) {
+      // Split rows each have the whole pane: the single-row breakpoint reserves
+      // space for controls that no longer share their row. Measure them separately.
+      const filters = currentTopbar.querySelector<HTMLElement>('[data-grid-topbar-row="filters"]');
+      const filterWidth = filters?.clientWidth ?? 0;
+      const conditionEditors = filters?.querySelectorAll<HTMLElement>("[data-grid-condition-editor]") ?? [];
+      let conditionInputsNeedCompact = false;
+      for (const editor of conditionEditors) {
+        const input = editor.querySelector<HTMLElement>("[data-grid-condition-input-viewport]");
+        if (!input) continue;
+        // Input widths change when the WHERE/ORDER BY divider moves even when
+        // the whole toolbar keeps the same width. Observe their own viewports.
+        dataGridTopbarResizeObserver?.observe(input);
+        const label = editor.querySelector<HTMLElement>(".data-grid-topbar-condition-label");
+        const hiddenLabelWidth = label ? Math.max(0, label.scrollWidth - label.clientWidth) : 0;
+        conditionInputsNeedCompact ||= shouldCompactDataGridConditionInput(input.clientWidth, hiddenLabelWidth, dataGridTopbarOverflowCompact.value);
+      }
+      const filtersOverflow = filterWidth > 0 && !!filters && filters.scrollWidth > filterWidth + 1;
+      let changed = false;
+      if (dataGridTopbarOverflowCompact.value && filterWidth >= dataGridFilterExpandedRequiredWidth.value && !conditionInputsNeedCompact) {
+        dataGridTopbarOverflowCompact.value = false;
+        dataGridFilterExpandedRequiredWidth.value = 0;
+        changed = true;
+      } else if (!dataGridTopbarOverflowCompact.value && filterWidth > 0 && (filtersOverflow || conditionInputsNeedCompact)) {
+        dataGridFilterExpandedRequiredWidth.value = filtersOverflow ? filters!.scrollWidth + DATA_GRID_TOPBAR_EXPAND_HYSTERESIS_PX : 0;
+        dataGridTopbarOverflowCompact.value = true;
+        changed = true;
+      }
+
+      const actionRows = currentTopbar.querySelectorAll<HTMLElement>(':scope > [data-grid-topbar-row="actions"]');
+      const actionsWidth = Array.from(actionRows).reduce((width, row) => width + Math.max(row.clientWidth, row.scrollWidth), 0);
+      if (dataGridTopbarOverflowActionCount.value > 0 && dataGridTopbarWidth.value >= dataGridTopbarExpandedRequiredWidth.value) {
+        dataGridTopbarOverflowActionCount.value = 0;
+        dataGridTopbarExpandedRequiredWidth.value = 0;
+        changed = true;
+      } else if (dataGridTopbarWidth.value > 0 && actionsWidth > dataGridTopbarWidth.value + 1 && dataGridTopbarOverflowActionCount.value < DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.length) {
+        dataGridTopbarExpandedRequiredWidth.value = Math.max(dataGridTopbarExpandedRequiredWidth.value, actionsWidth + DATA_GRID_TOPBAR_EXPAND_HYSTERESIS_PX);
+        dataGridTopbarOverflowActionCount.value += 1;
+        changed = true;
+      }
+      if (changed) scheduleDataGridTopbarRecheck();
+      return;
+    }
+
     if (dataGridTopbarOverflowCompact.value || dataGridTopbarOverflowActionCount.value > 0) {
       if (dataGridTopbarWidth.value >= dataGridTopbarExpandedRequiredWidth.value) {
         dataGridTopbarOverflowCompact.value = false;
@@ -3139,6 +3190,7 @@ function resetDataGridTopbarOverflowCompact() {
   dataGridTopbarOverflowCompact.value = false;
   dataGridTopbarOverflowActionCount.value = 0;
   dataGridTopbarExpandedRequiredWidth.value = 0;
+  dataGridFilterExpandedRequiredWidth.value = 0;
   scheduleDataGridTopbarRecheck();
 }
 
@@ -13921,7 +13973,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           :class="splitDataGridToolbar ? 'grid h-16 grid-cols-[auto_minmax(0,1fr)] grid-rows-2' : 'flex h-8 items-center'"
         >
           <div v-if="hasResultToolbarLeadingSlot" data-grid-topbar-row="actions" class="flex shrink-0 items-center border-r" :class="splitDataGridToolbar ? 'col-start-1 row-start-1' : ''">
-            <slot name="result-toolbar-leading" :compact="compactDataGridToolbar" />
+            <slot name="result-toolbar-leading" :compact="compactDataGridToolbarActions" />
           </div>
           <!-- Clip both axes instead of creating a hidden scroll container around the toolbar controls. -->
           <div data-grid-topbar-row="filters" class="data-grid-topbar-scroll min-w-0 overflow-clip" :class="splitDataGridToolbar ? 'data-grid-topbar-scroll--row-divider col-span-2 row-start-2' : 'flex-1'">
@@ -14035,12 +14087,12 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             @wheel="onDataGridTopbarFixedActionWheel"
           >
             <template #leading>
-              <slot v-if="hasResultToolbarActionsSlot" name="result-toolbar-actions" :compact="compactDataGridToolbar" />
+              <slot v-if="hasResultToolbarActionsSlot" name="result-toolbar-actions" :compact="compactDataGridToolbarActions" />
               <DataGridVirtualRowIdentifier
                 v-if="showVirtualRowIdentifierControl"
                 :columns="props.tableMeta!.columns"
                 :selected-columns="virtualRowIdentifierColumns"
-                :compact="compactDataGridToolbar"
+                :compact="compactDataGridToolbarActions"
                 :disabled="virtualRowIdentifierDisabled"
                 @apply="applyVirtualRowIdentifier"
                 @clear="clearVirtualRowIdentifier"
@@ -14071,7 +14123,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   <Button
                     variant="ghost"
                     size="sm"
-                    :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', mongoJsonPreviewOpen ? 'text-primary bg-primary/10 hover:bg-primary/15' : '']"
+                    :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbarActions ? 'data-grid-topbar-action-button--compact' : '', mongoJsonPreviewOpen ? 'text-primary bg-primary/10 hover:bg-primary/15' : '']"
                     :aria-pressed="mongoJsonPreviewOpen"
                     @click="toggleMongoJsonPreview"
                   >
@@ -14079,7 +14131,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     <span
                       class="data-grid-topbar-action-label"
                       :class="{
-                        'data-grid-topbar-action-label--compact': compactDataGridToolbar,
+                        'data-grid-topbar-action-label--compact': compactDataGridToolbarActions,
                       }"
                       >{{ t("grid.mongoJsonPreview") }}</span
                     >

@@ -642,12 +642,12 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
 </script>
 
 <template>
-  <div ref="controlRef" class="relative flex min-w-0 flex-1 items-stretch">
+  <div ref="controlRef" :data-grid-condition-editor="props.kind" class="relative flex min-w-0 flex-1 items-stretch">
     <div class="flex min-w-0 flex-1 items-center gap-1">
       <span class="data-grid-topbar-condition-label" :class="[props.kind === 'where' ? 'data-grid-topbar-condition-label--where' : 'data-grid-topbar-condition-label--order', { 'data-grid-topbar-condition-label--compact': props.compact }]">
         {{ props.kind === "where" ? "WHERE" : "ORDER BY" }}
       </span>
-      <div class="relative h-6 min-w-0 flex-1 overflow-hidden">
+      <div data-grid-condition-input-viewport class="relative h-6 min-w-0 flex-1 overflow-hidden">
         <div v-if="!composing" aria-hidden="true" class="data-grid-condition-highlight pointer-events-none absolute left-0 top-0" :style="collapsedHighlightStyle">
           <span v-for="(token, tokenIndex) in highlightTokens" :key="tokenIndex" :class="highlightTokenClass(token.type)">{{ token.text }}</span>
         </div>

@@ -8848,6 +8848,8 @@ export default withEnglishFallback({
     redisScanPageSize: "Jumlah scan Redis",
     redisScanPageSizeDescription: "Key yang diminta per halaman SCAN Redis saat menjelajahi key.",
     redisScanPageSizeOption: "{count} key",
+    redisValuePreviewLimit: "Batas pratinjau nilai",
+    redisValuePreviewLimitDescription: "Ukuran maksimum nilai String dan Bitmap yang dimuat di editor. Default: 64 KiB; rentang: 1–65536 KiB (64 MiB). Nilai yang lebih besar dapat diunduh lengkap. Perubahan menyegarkan detail terbuka tanpa edit yang belum disimpan.",
     redisDatabaseDisplayLimit: "Batas daftar database bilah sisi",
     redisDatabaseDisplayLimitDescription: 'Jumlah maksimum database yang ditampilkan sekaligus di bilah sisi; sisanya dapat ditampilkan dengan "Muat lebih banyak".',
     redisDatabaseDisplayLimitOption: "{count} database",

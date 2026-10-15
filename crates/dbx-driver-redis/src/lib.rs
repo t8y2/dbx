@@ -19,7 +19,15 @@ use tokio::sync::{Mutex, MutexGuard};
 const STREAM_ENTRY_PAGE_SIZE: usize = 50;
 const STREAM_PENDING_PAGE_SIZE: usize = 100;
 const COLLECTION_PAGE_SIZE: usize = 200;
-const STRING_PREVIEW_MAX_BYTES: usize = 64 * 1024;
+pub const STRING_PREVIEW_MAX_BYTES: usize = 64 * 1024;
+pub const VALUE_PREVIEW_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+pub fn validate_value_preview_limit(limit: usize) -> Result<(), String> {
+    if !(1024..=VALUE_PREVIEW_MAX_BYTES).contains(&limit) {
+        return Err("Redis value preview limit must be between 1024 and 67108864 bytes".to_string());
+    }
+    Ok(())
+}
 /// A collection page is capped by payload size as well as item count.
 ///
 /// `COLLECTION_PAGE_SIZE` alone bounds a page only when the members are small. A hash, list, set
@@ -3239,6 +3247,19 @@ pub async fn get_value_scoped<C>(con: &mut C, key: &[u8], scope: &RedisOperation
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
+    get_value_scoped_with_preview_limit(con, key, scope, STRING_PREVIEW_MAX_BYTES).await
+}
+
+pub async fn get_value_scoped_with_preview_limit<C>(
+    con: &mut C,
+    key: &[u8],
+    scope: &RedisOperationScope,
+    preview_limit_bytes: usize,
+) -> Result<RedisValue, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    validate_value_preview_limit(preview_limit_bytes)?;
     let redis_type: String = redis::cmd("TYPE").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
 
     // For Streams, fetch metadata and the initial page together after TYPE.
@@ -3257,15 +3278,15 @@ where
             let v: RedisRawValue = redis::cmd("GETRANGE")
                 .arg(key)
                 .arg(0)
-                .arg(STRING_PREVIEW_MAX_BYTES as i64)
+                .arg(preview_limit_bytes as i64)
                 .query_async(con)
                 .await
                 .map_err(|e| e.to_string())?;
             let mut bytes =
                 redis_value_to_bytes(v).ok_or_else(|| "Redis string payload is not byte-addressable".to_string())?;
-            let truncated = bytes.len() > STRING_PREVIEW_MAX_BYTES;
+            let truncated = bytes.len() > preview_limit_bytes;
             if truncated {
-                bytes.truncate(STRING_PREVIEW_MAX_BYTES);
+                bytes.truncate(preview_limit_bytes);
             }
             let total_bytes = if truncated {
                 redis::cmd("STRLEN").arg(key).query_async(con).await.ok()
@@ -3319,9 +3340,9 @@ where
             // 且 GET 返回的字节与 Redis 位序一致，可直接按字符串预览。
             let raw: RedisRawValue = redis::cmd("GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
             let mut bytes = redis_value_to_bytes(raw).unwrap_or_default();
-            let truncated = bytes.len() > STRING_PREVIEW_MAX_BYTES;
+            let truncated = bytes.len() > preview_limit_bytes;
             if truncated {
-                bytes.truncate(STRING_PREVIEW_MAX_BYTES);
+                bytes.truncate(preview_limit_bytes);
             }
             // 截断后拿不到准确长度（kvrocks 位图没有可用的 STRLEN），置空交给前端按未知处理
             let total_bytes = (!truncated).then_some(bytes.len() as u64);
@@ -3347,7 +3368,7 @@ where
 
 /// Read the complete raw payload for a Redis string-like key.
 ///
-/// The normal value path deliberately caps previews at 64 KiB. Downloads must
+/// The normal value path caps previews at the configured size. Downloads must
 /// bypass that cap while preserving the exact bytes, including non-UTF-8 data.
 pub async fn get_raw_value<C>(con: &mut C, key: &[u8]) -> Result<RedisBlob, String>
 where
@@ -7044,6 +7065,94 @@ mod tests {
         assert_eq!(con.command_count("GETRANGE"), 1);
         assert_eq!(con.command_count("GET"), 0);
         assert_eq!(con.command_count("STRLEN"), 1);
+    }
+
+    #[tokio::test]
+    async fn value_preview_limit_controls_the_range_and_exact_boundary() {
+        for limit in [1024, 256 * 1024, super::VALUE_PREVIEW_MAX_BYTES] {
+            // Large limit uses a small payload to avoid allocating 64 MiB in a unit test.
+            let size = limit.min(256 * 1024);
+            let mut con = FakeRedisConnection::new(vec![
+                bulk("string"),
+                RedisRawValue::Int(-1),
+                RedisRawValue::BulkString(vec![b'x'; size]),
+            ]);
+            let value = super::get_value_scoped_with_preview_limit(
+                &mut con,
+                b"large",
+                &super::RedisOperationScope::default(),
+                limit,
+            )
+            .await
+            .unwrap();
+            let RedisValueData::String { content, total_bytes, truncated } = value.data else {
+                panic!("expected string")
+            };
+            assert!(!truncated);
+            assert_eq!(total_bytes, Some(size as u64));
+            assert_eq!(content.raw_base64, base64::engine::general_purpose::STANDARD.encode(vec![b'x'; size]));
+            assert!(con.commands.iter().any(|command| command.contains(&format!("\r\n{limit}\r\n"))));
+            assert_eq!(con.command_count("GET"), 0);
+        }
+        let limit = 128 * 1024;
+        let mut con = FakeRedisConnection::new(vec![
+            bulk("string"),
+            RedisRawValue::Int(-1),
+            RedisRawValue::BulkString(vec![0xff; limit + 1]),
+            RedisRawValue::Int(200_000),
+        ]);
+        let value = super::get_value_scoped_with_preview_limit(
+            &mut con,
+            b"binary",
+            &super::RedisOperationScope::default(),
+            limit,
+        )
+        .await
+        .unwrap();
+        let RedisValueData::String { content, total_bytes, truncated } = value.data else { panic!("expected string") };
+        assert!(truncated);
+        assert_eq!(total_bytes, Some(200_000));
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(content.raw_base64).unwrap().len(), limit);
+    }
+
+    #[tokio::test]
+    async fn value_preview_limit_rejects_invalid_sizes_before_redis_io() {
+        for limit in [0, 1023, super::VALUE_PREVIEW_MAX_BYTES + 1, usize::MAX] {
+            let mut con = FakeRedisConnection::new(vec![]);
+            assert!(super::get_value_scoped_with_preview_limit(
+                &mut con,
+                b"key",
+                &super::RedisOperationScope::default(),
+                limit,
+            )
+            .await
+            .is_err());
+            assert!(con.commands.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn bitmap_preview_uses_the_configured_limit() {
+        let mut con = FakeRedisConnection::new(vec![
+            bulk("bitmap"),
+            RedisRawValue::Int(-1),
+            RedisRawValue::BulkString(vec![0x80; 4097]),
+            RedisRawValue::Int(4097),
+        ]);
+        let value = super::get_value_scoped_with_preview_limit(
+            &mut con,
+            b"bitmap",
+            &super::RedisOperationScope::default(),
+            4096,
+        )
+        .await
+        .unwrap();
+        let RedisValueData::Bitmap { content, total_bytes, truncated, .. } = value.data else {
+            panic!("expected bitmap")
+        };
+        assert!(truncated);
+        assert_eq!(total_bytes, None);
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(content.raw_base64).unwrap().len(), 4096);
     }
 
     #[test]

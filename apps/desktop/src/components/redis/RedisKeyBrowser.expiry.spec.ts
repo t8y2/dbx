@@ -1347,7 +1347,7 @@ describe("RedisKeyBrowser expiry creation", () => {
     await submitCreate();
 
     expectWriterBefore(mocks.redisSetString, mocks.redisSetTtl);
-    expect(mocks.redisGetValue).toHaveBeenCalledWith("connection", 0, KEY_RAW);
+    expect(mocks.redisGetValue).toHaveBeenCalledWith("connection", 0, KEY_RAW, 65536);
     expect(mocks.redisDeleteKey).not.toHaveBeenCalled();
     expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
     expect(mocks.toast).toHaveBeenCalledWith("TTL command failed", 5000);

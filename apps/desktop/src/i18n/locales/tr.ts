@@ -7943,6 +7943,8 @@ export default withEnglishFallback({
     redisScanPageSize: "Redis tarama sayısı",
     redisScanPageSizeDescription: "Anahtarlara gözatılırken her Redis SCAN sayfasında istenen anahtar sayısı.",
     redisScanPageSizeOption: "{count} anahtar",
+    redisValuePreviewLimit: "Değer önizleme sınırı",
+    redisValuePreviewLimitDescription: "Düzenleyicide yüklenen String ve Bitmap değerlerinin en büyük boyutu. Varsayılan: 64 KiB; aralık: 1–65536 KiB (64 MiB). Daha büyük değerler tamamen indirilebilir. Değişiklik, kaydedilmemiş düzenlemesi olmayan açık ayrıntıları yeniler.",
     redisDatabaseDisplayLimit: "Kenar çubuğu veritabanı listesi sınırı",
     redisDatabaseDisplayLimitDescription: 'Kenar çubuğunda bir seferde gösterilecek maksimum veritabanı sayısı; kalanlar "Daha fazla yükle" ile görüntülenebilir.',
     redisDatabaseDisplayLimitOption: "{count} veritabanı",

@@ -126,15 +126,16 @@ impl PluginHost {
         env: PluginRuntimeEnv,
     ) -> Result<Arc<PluginSidecarSession>, String> {
         let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
-        if let Some(session) = self.running_session(plugin_id).await {
-            return Ok(session);
-        }
-
         let _activation = self.inner.activation_lock.lock().await;
         if let Some(session) = self.running_session(plugin_id).await {
             return Ok(session);
         }
-        self.inner.sessions.write().await.remove(plugin_id);
+        // Failed/stopping sessions still own process handles. Do not silently replace one.
+        let previous = self.inner.sessions.read().await.get(plugin_id).cloned();
+        if let Some(previous) = previous {
+            previous.shutdown().await?;
+            self.inner.sessions.write().await.remove(plugin_id);
+        }
 
         let plugin = self
             .inner
@@ -145,10 +146,104 @@ impl PluginHost {
             return Err(format!("Plugin '{plugin_id}' is incompatible: {}", plugin.compatibility.errors.join("; ")));
         }
         let env = env.with_plugin_data_dir(&self.inner.registry.plugin_data_dir(&plugin.manifest.id));
-        let session = PluginSidecarSession::start(plugin, self.inner.registry.app_version().to_string(), env).await?;
+        let runtime_lease = self.inner.registry.lifecycle.runtime_lease(plugin_id)?;
+        let probe = self.inner.registry.lifecycle.update_probe(plugin_id)?;
+        let session = PluginSidecarSession::start_with_runtime_lease(
+            plugin,
+            self.inner.registry.app_version().to_string(),
+            env,
+            runtime_lease,
+        )
+        .await?;
+        // Registration can wait for the session map; cancellation there must still stop the child.
+        let startup = super::runtime::ShutdownOnDrop::new(session.clone());
         self.forward_session_events(&session);
         self.inner.sessions.write().await.insert(plugin_id.to_string(), session.clone());
+        self.watch_session(&session, probe);
+        startup.disarm();
         Ok(session)
+    }
+
+    /// Discovery must not leave one idle process per installed plugin in every MCP client.
+    /// Reuse a live session, but keep a session started only for probing short-lived.
+    pub async fn probe<T>(
+        &self,
+        plugin_id: &str,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Option<Duration>,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
+        if let Some(session) = self.running_session(plugin_id).await {
+            return session.invoke_with_timeout(method, params, None, timeout).await;
+        }
+        let plugin = self
+            .inner
+            .registry
+            .find_plugin(plugin_id)?
+            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
+        if !plugin.compatibility.compatible {
+            return Err(format!("Plugin '{plugin_id}' is incompatible: {}", plugin.compatibility.errors.join("; ")));
+        }
+        let env = PluginRuntimeEnv::default().with_plugin_data_dir(&self.inner.registry.plugin_data_dir(plugin_id));
+        let session = PluginSidecarSession::start_with_runtime_lease(
+            plugin,
+            self.inner.registry.app_version().to_string(),
+            env,
+            self.inner.registry.lifecycle.runtime_lease(plugin_id)?,
+        )
+        .await?;
+        let _cleanup = super::runtime::ShutdownOnDrop::new(session.clone());
+        let result = session.invoke_with_timeout(method, params, None, timeout).await;
+        let shutdown = session.shutdown().await;
+        match (result, shutdown) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(shutdown)) => Err(format!("{error}; additionally failed to stop plugin: {shutdown}")),
+        }
+    }
+
+    fn watch_session(&self, session: &Arc<PluginSidecarSession>, probe: super::lifecycle::PluginUpdateProbe) {
+        let owner = Arc::downgrade(&self.inner);
+        let runtime = Arc::downgrade(session);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let Some(session) = runtime.upgrade() else { break };
+                let Some(inner) = owner.upgrade() else {
+                    // The stdout task owns an Arc to the session; dropping the host alone cannot
+                    // break that cycle while the sidecar is waiting for its next request.
+                    match session.shutdown().await {
+                        Ok(()) => break,
+                        Err(error) => log::warn!("{error}"),
+                    }
+                    continue;
+                };
+                let plugin_id = &session.plugin().manifest.id;
+                let stop = match probe.requested() {
+                    Ok(requested) => {
+                        requested
+                            || matches!(
+                                session.status().state,
+                                PluginSessionState::Stopping | PluginSessionState::Stopped | PluginSessionState::Exited
+                            )
+                    }
+                    Err(error) => {
+                        log::warn!("{error}");
+                        false
+                    }
+                };
+                if stop {
+                    match stop_host_session(&inner, plugin_id, Some(&session)).await {
+                        Ok(()) => break,
+                        Err(error) => log::warn!("{error}"),
+                    }
+                }
+            }
+        });
     }
 
     pub async fn invoke<T>(
@@ -340,17 +435,14 @@ impl PluginHost {
     }
 
     pub async fn stop(&self, plugin_id: &str) -> Result<(), String> {
-        if let Some(session) = self.inner.sessions.write().await.remove(plugin_id) {
-            session.shutdown().await?;
-        }
-        Ok(())
+        stop_host_session(&self.inner, plugin_id, None).await
     }
 
     pub async fn stop_all(&self) -> Result<(), String> {
-        let sessions = std::mem::take(&mut *self.inner.sessions.write().await);
+        let plugins = self.inner.sessions.read().await.keys().cloned().collect::<Vec<_>>();
         let mut errors = Vec::new();
-        for (plugin_id, session) in sessions {
-            if let Err(error) = session.shutdown().await {
+        for plugin_id in plugins {
+            if let Err(error) = self.stop(&plugin_id).await {
                 errors.push(format!("{plugin_id}: {error}"));
             }
         }
@@ -370,14 +462,19 @@ impl PluginHost {
     /// Callers drain the plugin's connection pools and external driver pools first: the lease is
     /// refused while the plugin still has an active connection or operation.
     pub async fn uninstall_plugin(&self, plugin_id: &str) -> Result<(), String> {
-        let _update = self.inner.registry.lifecycle.begin_update(plugin_id)?;
+        let update = self.inner.registry.lifecycle.begin_update(plugin_id)?;
         self.stop(plugin_id).await?;
         let root_dir = self.inner.registry.root_dir().to_path_buf();
         let app_version = self.inner.registry.app_version().to_string();
         // Uninstall never validates a package signature, so it must not load the user trust store.
         let installer = PluginPackageInstaller::with_trust_store(root_dir, app_version, PluginTrustStore::default());
         let plugin_id = plugin_id.to_string();
-        tokio::task::spawn_blocking(move || installer.uninstall(&plugin_id)).await.map_err(|error| error.to_string())?
+        tokio::task::spawn_blocking(move || {
+            update.drain_runtimes()?;
+            installer.uninstall(&plugin_id)
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     async fn running_session(&self, plugin_id: &str) -> Option<Arc<PluginSidecarSession>> {
@@ -449,6 +546,24 @@ impl PluginHost {
             }
         });
     }
+}
+
+async fn stop_host_session(
+    inner: &PluginHostInner,
+    plugin_id: &str,
+    expected: Option<&Arc<PluginSidecarSession>>,
+) -> Result<(), String> {
+    let _activation = inner.activation_lock.lock().await;
+    let session = inner.sessions.read().await.get(plugin_id).cloned();
+    if let Some(session) = session {
+        if expected.is_some_and(|expected| !Arc::ptr_eq(expected, &session)) {
+            return Ok(());
+        }
+        session.shutdown().await?;
+        // Keep a session tracked on failure, so a retry can still terminate its process tree.
+        inner.sessions.write().await.remove(plugin_id);
+    }
+    Ok(())
 }
 
 fn required_plugin_binding<'a>(value: &'a Option<String>, field: &str) -> Result<&'a str, String> {

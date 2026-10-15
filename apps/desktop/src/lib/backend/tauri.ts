@@ -3659,8 +3659,8 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
   });
 }
 
-export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
-  return invoke("redis_get_value", { connectionId, db, keyRaw });
+export async function redisGetValue(connectionId: string, db: number, keyRaw: string, previewLimitBytes?: number): Promise<RedisValue> {
+  return invoke("redis_get_value", { connectionId, db, keyRaw, previewLimitBytes });
 }
 
 export async function redisGetRawValue(connectionId: string, db: number, keyRaw: string): Promise<RedisBlob> {

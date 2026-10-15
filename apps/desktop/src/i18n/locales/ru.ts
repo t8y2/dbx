@@ -9639,6 +9639,8 @@ export default withEnglishFallback({
     redisScanPageSize: "Количество ключей при сканировании Redis",
     redisScanPageSizeDescription: "Число ключей, запрашиваемых за одну страницу Redis SCAN при просмотре ключей.",
     redisScanPageSizeOption: "{count} ключей",
+    redisValuePreviewLimit: "Лимит предпросмотра значений",
+    redisValuePreviewLimitDescription: "Максимальный размер значений String и Bitmap, загружаемых в редактор. По умолчанию: 64 КиБ; диапазон: 1–65536 КиБ (64 МиБ). Большие значения можно скачать целиком. Изменение обновляет открытые сведения без несохранённых правок.",
     redisDatabaseDisplayLimit: "Лимит списка баз данных в боковой панели",
     redisDatabaseDisplayLimitDescription: "Максимальное число баз данных, показываемых сразу в боковой панели; остальные можно показать кнопкой «Загрузить ещё».",
     redisDatabaseDisplayLimitOption: "{count} баз данных",

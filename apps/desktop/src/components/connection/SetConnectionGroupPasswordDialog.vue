@@ -12,6 +12,7 @@
         <div class="space-y-2">
           <PasswordInput v-model="password" :placeholder="t('connectionGroup.newPasswordPlaceholder')" input-class="pl-10 h-11" autocomplete="new-password" autofocus />
           <p class="text-sm text-muted-foreground">{{ t("connectionGroup.passwordOptionalPlaceholder") }}</p>
+          <p v-if="error" class="text-sm text-destructive">{{ error }}</p>
         </div>
         <DialogFooter>
           <DialogClose as-child>
@@ -42,6 +43,7 @@ const connectionStore = useConnectionStore();
 const isOpen = ref(false);
 const password = ref("");
 const saving = ref(false);
+const error = ref("");
 
 const hasPassword = computed(() => {
   const node = sidebarFormTarget.value;
@@ -55,6 +57,7 @@ watch(
   (show) => {
     if (show) {
       password.value = setGroupPasswordValue.value;
+      error.value = "";
       isOpen.value = true;
     } else {
       isOpen.value = false;
@@ -75,6 +78,7 @@ async function handleSubmit() {
   if (!password.value) return;
 
   saving.value = true;
+  error.value = "";
   try {
     // The backend command mints the verifier; the plaintext is only sent for
     // hashing and never persisted. Removing a password goes through the
@@ -82,6 +86,10 @@ async function handleSubmit() {
     await connectionStore.setConnectionGroupPassword(node.id, password.value);
     showSetGroupPasswordDialog.value = false;
     setGroupPasswordValue.value = "";
+  } catch (err) {
+    // Surface transport/auth failures (e.g. an expired session returning 401)
+    // instead of closing silently.
+    error.value = (err as { status?: number }).status === 401 ? t("auth.protectionLoginExpired") : t("auth.protectionSaveFailed");
   } finally {
     saving.value = false;
   }

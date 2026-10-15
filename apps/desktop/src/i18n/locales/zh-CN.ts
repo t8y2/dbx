@@ -624,6 +624,8 @@ export default withEnglishFallback({
     clearProtectionPasswordSuccess: "保护密码已清除",
     clearProtectionPasswordFailed: "清除保护密码失败",
     clearProtectionPasswordNoLoginPassword: "未设置登录密码，无法验证该操作",
+    protectionLoginExpired: "登录已过期，请刷新页面重新登录后再试",
+    protectionSaveFailed: "保存保护密码失败，请重试",
     resetProtectionPasswordMenu: "重置保护密码",
     resetProtectionPasswordTitle: "重置保护密码",
     resetProtectionPasswordMessage: "将清除「{name}」的访问密码并立即解锁，该操作需登录密码确认。",

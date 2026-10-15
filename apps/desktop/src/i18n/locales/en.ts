@@ -688,6 +688,8 @@ export default {
     clearProtectionPasswordSuccess: "Protection password cleared",
     clearProtectionPasswordFailed: "Failed to clear protection password",
     clearProtectionPasswordNoLoginPassword: "No login password is configured, so this operation cannot be verified",
+    protectionLoginExpired: "Your session has expired. Refresh the page and sign in again",
+    protectionSaveFailed: "Failed to save the protection password. Please retry",
     resetProtectionPasswordMenu: "Reset protection password",
     resetProtectionPasswordTitle: "Reset protection password",
     resetProtectionPasswordMessage: 'This will clear the access password of "{name}" and unlock it immediately. Your login password is required to confirm.',

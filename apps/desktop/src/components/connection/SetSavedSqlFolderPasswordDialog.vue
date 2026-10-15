@@ -12,6 +12,7 @@
         <div class="space-y-2">
           <PasswordInput v-model="password" :placeholder="t('savedSql.newPasswordPlaceholder')" input-class="pl-10 h-11" autocomplete="new-password" autofocus />
           <p class="text-sm text-muted-foreground">{{ t("savedSql.passwordOptionalPlaceholder") }}</p>
+          <p v-if="error" class="text-sm text-destructive">{{ error }}</p>
         </div>
         <DialogFooter>
           <DialogClose as-child>
@@ -50,13 +51,17 @@ const { t } = useI18n();
 
 const password = ref("");
 const saving = ref(false);
+const error = ref("");
 
 const hasPassword = computed(() => !!props.folder?.hasPassword);
 
 watch(
   () => props.open,
   (open) => {
-    if (open) password.value = "";
+    if (open) {
+      password.value = "";
+      error.value = "";
+    }
   },
 );
 
@@ -68,6 +73,7 @@ async function handleSubmit() {
   const folder = props.folder;
   if (!folder || !password.value) return;
   saving.value = true;
+  error.value = "";
   try {
     // The verifier is minted by the backend command; the plaintext is only
     // sent for hashing and never persisted. Removing a password goes through
@@ -75,6 +81,10 @@ async function handleSubmit() {
     await props.setPassword(folder.id, password.value);
     emit("update:open", false);
     emit("changed", hasPassword.value, false);
+  } catch (err) {
+    // Surface transport/auth failures (e.g. an expired session returning 401)
+    // instead of closing silently.
+    error.value = (err as { status?: number }).status === 401 ? t("auth.protectionLoginExpired") : t("auth.protectionSaveFailed");
   } finally {
     saving.value = false;
   }

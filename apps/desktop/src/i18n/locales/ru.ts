@@ -3500,7 +3500,7 @@ export default withEnglishFallback({
     ccSwitchImportPartial: "Импортировано конфигураций ИИ из CC-SWITCH: {count}; пропущено: {skipped}",
     aiImportSelectTitle: "Выберите конфигурации из {source}",
     aiImportSelectDescription: "Выберите конфигурации для импорта и проверьте модель по умолчанию для каждой.",
-    aiImportSourceContentsNote: "Список и количество соответствуют настроенным элементам выбранного источника; для неподдерживаемых элементов указана причина.",
+    aiImportSourceContentsNote: "Список и количество соответствуют конфигурациям, полученным из выбранного источника; для неподдерживаемых элементов указана причина.",
     aiImportMagpieDefaultModelNote: "Активная модель Codex в Magpie будет выбрана заранее, если она есть у этого провайдера. Иначе выберите модель здесь или оставьте поле пустым.",
     aiImportSelectAll: "Выбрать все",
     aiImportDeselectAll: "Снять выделение",

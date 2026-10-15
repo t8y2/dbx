@@ -3443,7 +3443,7 @@ export default withEnglishFallback({
     ccSwitchImportPartial: "CC-SWITCH から {count} 件の AI 設定をインポートし、{skipped} 件をスキップしました",
     aiImportSelectTitle: "{source} からインポートする設定を選択",
     aiImportSelectDescription: "インポートする設定を選び、それぞれのデフォルトモデルを確認してください。",
-    aiImportSourceContentsNote: "一覧と件数は選択したソースの設定済み項目に基づきます。非対応項目には理由が表示されます。",
+    aiImportSourceContentsNote: "一覧と件数は選択したソースから返された設定項目に基づきます。非対応項目には理由が表示されます。",
     aiImportMagpieDefaultModelNote: "Magpie で現在使っている Codex モデルがこのプロバイダーにあれば、あらかじめ選択されます。ない場合はここで選択するか、未設定のままにしてください。",
     aiImportSelectAll: "すべて選択",
     aiImportDeselectAll: "すべて選択解除",

@@ -3815,7 +3815,7 @@ export default {
     ccSwitchImportPartial: "Imported {count} AI config(s) from CC-SWITCH; skipped {skipped}",
     aiImportSelectTitle: "Select configurations from {source}",
     aiImportSelectDescription: "Choose which configurations to import and review the default model for each one.",
-    aiImportSourceContentsNote: "The list and counts reflect configured entries from the selected source; unsupported entries include a reason.",
+    aiImportSourceContentsNote: "The list and counts reflect configuration entries returned by the selected source; unsupported entries include a reason.",
     aiImportMagpieDefaultModelNote: "Magpie's active Codex model is preselected when this provider offers it. Otherwise choose one here or leave it unset.",
     aiImportSelectAll: "Select all",
     aiImportDeselectAll: "Deselect all",

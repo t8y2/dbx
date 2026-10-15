@@ -3710,7 +3710,7 @@ export default withEnglishFallback({
     defaultModel: "โมเดลเริ่มต้น",
     aiImportSelectTitle: "เลือกการกำหนดค่าจาก {source}",
     aiImportSelectDescription: "เลือกการกำหนดค่าที่ต้องการนำเข้าและตรวจสอบโมเดลเริ่มต้นของแต่ละรายการ",
-    aiImportSourceContentsNote: "รายการและจำนวนอ้างอิงจากรายการที่ตั้งค่าไว้ในแหล่งข้อมูลที่เลือก โดยจะแสดงเหตุผลสำหรับรายการที่ไม่รองรับ",
+    aiImportSourceContentsNote: "รายการและจำนวนอ้างอิงจากการตั้งค่าที่ได้รับจากแหล่งข้อมูลที่เลือก โดยจะแสดงเหตุผลสำหรับรายการที่ไม่รองรับ",
     aiImportMagpieDefaultModelNote: "ระบบจะเลือกโมเดล Codex ที่ใช้อยู่ใน Magpie ไว้ล่วงหน้าเมื่อผู้ให้บริการนี้รองรับ หากไม่รองรับ ให้เลือกที่นี่หรือปล่อยว่างไว้",
     aiImportSelectAll: "เลือกทั้งหมด",
     aiImportDeselectAll: "ยกเลิกการเลือกทั้งหมด",

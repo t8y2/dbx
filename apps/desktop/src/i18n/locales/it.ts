@@ -3420,7 +3420,7 @@ export default withEnglishFallback({
     ccSwitchImportPartial: "Importate {count} configurazioni AI da CC-SWITCH; ignorate {skipped}",
     aiImportSelectTitle: "Seleziona le configurazioni da {source}",
     aiImportSelectDescription: "Scegli le configurazioni da importare e controlla il modello predefinito di ciascuna.",
-    aiImportSourceContentsNote: "L'elenco e i conteggi riflettono gli elementi configurati nella fonte selezionata; gli elementi non supportati includono il motivo.",
+    aiImportSourceContentsNote: "L'elenco e i conteggi riflettono le configurazioni restituite dalla fonte selezionata; gli elementi non supportati includono il motivo.",
     aiImportMagpieDefaultModelNote: "Il modello Codex attivo in Magpie viene preselezionato se è disponibile in questo provider. Altrimenti scegline uno qui o lascia il campo vuoto.",
     aiImportSelectAll: "Seleziona tutto",
     aiImportDeselectAll: "Deseleziona tutto",

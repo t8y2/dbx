@@ -3421,7 +3421,7 @@ export default withEnglishFallback({
     ccSwitchImportPartial: "已從 CC-SWITCH 匯入 {count} 個 AI 設定，略過 {skipped} 個",
     aiImportSelectTitle: "選擇要從 {source} 匯入的設定",
     aiImportSelectDescription: "勾選要匯入的設定，並確認每項的預設模型。",
-    aiImportSourceContentsNote: "清單和數量依所選來源中已設定的項目產生；不支援的項目會說明原因。",
+    aiImportSourceContentsNote: "清單和數量依所選來源讀取到的設定項目產生；不支援的項目會說明原因。",
     aiImportMagpieDefaultModelNote: "如果目前供應商包含 Magpie 正在使用的 Codex 模型，會自動預選；否則請在此選擇，或留空不設定。",
     aiImportSelectAll: "全選",
     aiImportDeselectAll: "取消全選",

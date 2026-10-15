@@ -3369,7 +3369,7 @@ export default withEnglishFallback({
     ccSwitchImportPartial: "CC-SWITCH에서 AI 구성 {count}개를 가져왔고 {skipped}개를 건너뛰었습니다",
     aiImportSelectTitle: "{source}에서 가져올 구성 선택",
     aiImportSelectDescription: "가져올 구성을 선택하고 각 구성의 기본 모델을 확인하세요.",
-    aiImportSourceContentsNote: "목록과 개수는 선택한 소스에서 설정된 항목을 기준으로 합니다. 지원되지 않는 항목에는 이유가 표시됩니다.",
+    aiImportSourceContentsNote: "목록과 개수는 선택한 소스에서 반환한 구성 항목을 기준으로 합니다. 지원되지 않는 항목에는 이유가 표시됩니다.",
     aiImportMagpieDefaultModelNote: "Magpie의 현재 Codex 모델이 이 공급자에 있으면 미리 선택됩니다. 없으면 여기서 선택하거나 설정하지 않은 상태로 둘 수 있습니다.",
     aiImportSelectAll: "모두 선택",
     aiImportDeselectAll: "모두 선택 해제",

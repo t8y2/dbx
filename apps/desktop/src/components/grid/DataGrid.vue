@@ -7399,8 +7399,11 @@ async function applyOrderBySearch(_value?: string, structuredOrderByOverride?: s
   // in its own tab field so store-side rebuilds keep the composite ORDER BY
   // while the manual input stays free of the structured terms.
   emit("update:structuredOrderByInput", structuredOrderBy ?? "");
-  const manualOrderByClause = orderByInput.value.trim();
-  if (manualOrderByClause) rememberDataGridConditionHistory("orderBy", conditionHistoryScope.value, manualOrderByClause);
+  // Record the clause that is actually applied, so sorts built with the sort
+  // builder (not only the manual ORDER BY input) are restorable from the ORDER BY
+  // history. This mirrors applyWhereFilter, which remembers currentWhereInput()
+  // and therefore already keeps structured filter rules in the WHERE history (#12224).
+  if (orderByClause) rememberDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByClause);
   isApplyingWhere.value = true;
   queryControlError.value = "";
   currentPage.value = 1;

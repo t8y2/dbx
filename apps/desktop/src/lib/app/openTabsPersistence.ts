@@ -49,6 +49,7 @@ export interface SavedOpenTab {
   resultSortedSql?: string;
   resultSortColumn?: string;
   resultSortColumnIndex?: number;
+  resultSortColumns?: QueryTab["resultSortColumns"];
   resultSortDirection?: QueryTab["resultSortDirection"];
   resultSortMode?: QueryTab["resultSortMode"];
   orderByInput?: string;
@@ -198,6 +199,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.resultSortedSql !== undefined ? { resultSortedSql: tab.resultSortedSql } : {}),
     ...(tab.resultSortColumn !== undefined ? { resultSortColumn: tab.resultSortColumn } : {}),
     ...(tab.resultSortColumnIndex !== undefined ? { resultSortColumnIndex: tab.resultSortColumnIndex } : {}),
+    ...(tab.resultSortColumns !== undefined ? { resultSortColumns: tab.resultSortColumns } : {}),
     ...(tab.resultSortDirection !== undefined ? { resultSortDirection: tab.resultSortDirection } : {}),
     ...(tab.resultSortMode !== undefined ? { resultSortMode: tab.resultSortMode } : {}),
     ...(tab.orderByInput !== undefined ? { orderByInput: tab.orderByInput } : {}),

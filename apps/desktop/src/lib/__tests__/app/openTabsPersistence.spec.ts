@@ -21,6 +21,16 @@ function roundTrip(tabs: QueryTab[]) {
 }
 
 describe("openTabsPersistence originalSql round-trip", () => {
+  it("preserves multi-column local sort priority across a round-trip", () => {
+    const columns = [
+      { column: "name", columnIndex: 0, direction: "asc" as const },
+      { column: "score", columnIndex: 1, direction: "desc" as const },
+    ];
+    const [restored] = roundTrip([queryTab({ resultSortColumn: "name", resultSortColumnIndex: 0, resultSortDirection: "asc", resultSortMode: "local", resultSortColumns: columns })]);
+    expect(restored.resultSortColumns).toEqual(columns);
+    expect(restored.resultSortMode).toBe("local");
+  });
+
   it("preserves per-tab output view state across a round-trip", () => {
     const [restored] = roundTrip([queryTab({ uiState: { activeOutputView: "chart", redisResultViewMode: "console", resultPaneOpen: false } })]);
 

@@ -662,7 +662,7 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledWith("doris-1", "mydb", "SELECT * FROM `ice`.`mydb`.`tt2` LIMIT 100", undefined, expect.any(String), expect.objectContaining({ catalog: "ice" }));
   });
 
-  it("refreshes one targeted tab while preserving its query context", async () => {
+  it.each([undefined, "database"] as const)("refreshes one targeted tab while preserving its query context (sort mode=%s)", async (sortMode) => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const firstTabId = store.createTab("pg-1", "app", "users", "data", "public");
@@ -683,6 +683,7 @@ describe("queryStore table data refresh", () => {
     firstTab.whereInput = "status = 'ACTIVE'";
     firstTab.resultSortColumn = "created_at";
     firstTab.resultSortDirection = "desc";
+    firstTab.resultSortMode = sortMode;
     firstTab.resultPageLimit = 25;
     firstTab.resultPageOffset = 50;
 

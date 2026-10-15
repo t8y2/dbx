@@ -4,6 +4,7 @@ import { useDataGridSort } from "@/composables/useDataGridSort";
 describe("useDataGridSort", () => {
   it("stores the selected database or local sort state", () => {
     const sort = useDataGridSort();
+    expect(sort.sortMode.value).toBe("database");
 
     sort.setSort("name", 2, "desc", "local");
 
@@ -23,5 +24,6 @@ describe("useDataGridSort", () => {
     expect(sort.sortColumnIndex.value).toBeNull();
     expect(sort.sortDirection.value).toBe("asc");
     expect(sort.sortMode.value).toBe("database");
+    expect(sort.sortColumns.value).toEqual([]);
   });
 });

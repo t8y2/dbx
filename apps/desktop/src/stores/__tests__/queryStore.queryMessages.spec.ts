@@ -1,5 +1,5 @@
-import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, expect, it, vi } from "vitest";
+import { createPinia, disposePinia, setActivePinia } from "pinia";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { QueryMessage, QueryResult } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({ executeMulti: vi.fn(), subscribe: vi.fn(), cleanup: vi.fn() }));
@@ -22,11 +22,16 @@ vi.mock("@/stores/connectionStore", () => ({
 }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { pageSize: 100, autoCalculateTotalRows: false } }) }));
 
+let pinia: ReturnType<typeof createPinia>;
+
 beforeEach(() => {
   vi.clearAllMocks();
-  setActivePinia(createPinia());
+  pinia = createPinia();
+  setActivePinia(pinia);
   mocks.subscribe.mockResolvedValue(mocks.cleanup);
 });
+
+afterEach(() => disposePinia(pinia));
 
 const notice: QueryMessage = { severity: "NOTICE", message: "running output" };
 

@@ -102,7 +102,7 @@ import { sqlServerCountUsesLocalTempTable } from "@/lib/query/queryResultCountSe
 import { stripPaginationRowNumber } from "@/lib/query/queryPaginationResult";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 import { appendLargeValueCells, canUseTableDataLargeValuePreview, remapLargeValueCells, supportsTableDataLargeValuePreview, tableDataLargeValuePreviewOptions, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
-import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
+import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexesByColumns, type DataGridSortColumn, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
 import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility, stripMysqlClientDisplayCommand } from "@/lib/sql/sqlStatementRanges";
@@ -1868,6 +1868,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultLocalSortOriginalLargeValueCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
+    tab.resultSortColumns = undefined;
     tab.resultSortMode = undefined;
     tab.resultSessionId = undefined;
     tab.resultClientSessionId = undefined;
@@ -1900,6 +1901,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortColumn = undefined;
     tab.resultSortColumnIndex = undefined;
     tab.resultSortDirection = undefined;
+    tab.resultSortColumns = undefined;
     tab.resultSortMode = undefined;
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalLargeValueCells = undefined;
@@ -1984,6 +1986,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortColumn = run.resultSortColumn;
     tab.resultSortColumnIndex = run.resultSortColumnIndex;
     tab.resultSortDirection = run.resultSortDirection;
+    tab.resultSortColumns = run.resultSortColumns;
     tab.resultSortMode = run.resultSortMode;
     tab.resultLocalSortOriginalRows = run.resultLocalSortOriginalRows;
     tab.resultLocalSortOriginalLargeValueCells = run.resultLocalSortOriginalLargeValueCells;
@@ -2375,6 +2378,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortColumn: tab.resultSortColumn,
       resultSortColumnIndex: tab.resultSortColumnIndex,
       resultSortDirection: tab.resultSortDirection,
+      resultSortColumns: tab.resultSortColumns,
       resultSortMode: tab.resultSortMode,
       resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows,
       resultLocalSortOriginalLargeValueCells: tab.resultLocalSortOriginalLargeValueCells,
@@ -2485,6 +2489,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortColumn: tab.resultSortColumn,
       resultSortColumnIndex: tab.resultSortColumnIndex,
       resultSortDirection: tab.resultSortDirection,
+      resultSortColumns: tab.resultSortColumns,
       resultSortMode: tab.resultSortMode,
       resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows,
       resultLocalSortOriginalLargeValueCells: tab.resultLocalSortOriginalLargeValueCells,
@@ -2562,7 +2567,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultViewGeneration = uuid();
   }
 
-  function sortTabResultLocally(id: string, column: string, columnIndex: number, direction: DataGridSortDirection | null) {
+  function sortTabResultLocally(id: string, column: string, columnIndex: number, direction: DataGridSortDirection | null, columns?: readonly DataGridSortColumn[]) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab?.result) return;
 
@@ -2574,8 +2579,8 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const originalRows = tab.resultLocalSortOriginalRows;
-    const columnType = tab.result.column_types?.[columnIndex];
-    const rowIndexes = direction ? sortDataGridRowIndexes(originalRows, columnIndex, direction, columnType) : originalRows.map((_, index) => index);
+    const sortColumns = columns ?? (direction ? [{ column, columnIndex, direction }] : []);
+    const rowIndexes = sortDataGridRowIndexesByColumns(originalRows, sortColumns, tab.result.column_types);
     const rows = rowIndexes.map((index) => originalRows[index]!);
     const originalMongoDocuments = tab.resultLocalSortOriginalMongoDocuments;
     const mongo_documents = originalMongoDocuments ? rowIndexes.map((index) => originalMongoDocuments[index]) : undefined;
@@ -2586,12 +2591,14 @@ export const useQueryStore = defineStore("query", () => {
     // Reordering rows invalidates source-index view snapshots.
     publishResultGeneration(tab, "local-sort");
 
-    tab.resultSortColumn = direction ? column : undefined;
-    tab.resultSortColumnIndex = direction ? columnIndex : undefined;
-    tab.resultSortDirection = direction ?? undefined;
-    tab.resultSortMode = direction ? "local" : undefined;
+    const first = sortColumns[0];
+    tab.resultSortColumn = first?.column;
+    tab.resultSortColumnIndex = first?.columnIndex;
+    tab.resultSortDirection = first?.direction;
+    tab.resultSortColumns = sortColumns.length ? sortColumns.map((sort) => ({ ...sort })) : undefined;
+    tab.resultSortMode = first ? "local" : undefined;
     tab.resultSortedSql = undefined;
-    if (!direction) {
+    if (!sortColumns.length) {
       tab.resultLocalSortOriginalRows = undefined;
       tab.resultLocalSortOriginalLargeValueCells = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
@@ -2773,6 +2780,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortColumn: t.resultSortColumn,
       resultSortColumnIndex: t.resultSortColumnIndex,
       resultSortDirection: t.resultSortDirection,
+      resultSortColumns: t.resultSortColumns,
       resultSortMode: t.resultSortMode,
       orderByInput: t.orderByInput,
       structuredOrderByInput: t.structuredOrderByInput,
@@ -4937,6 +4945,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortColumn: original.mode === "data" && original.resultSortMode === "database" ? original.resultSortColumn : undefined,
       resultSortColumnIndex: original.mode === "data" && original.resultSortMode === "database" ? original.resultSortColumnIndex : undefined,
       resultSortDirection: original.mode === "data" && original.resultSortMode === "database" ? original.resultSortDirection : undefined,
+      resultSortColumns: undefined,
       resultSortMode: original.mode === "data" && original.resultSortMode === "database" ? original.resultSortMode : undefined,
       resultLocalSortOriginalRows: undefined,
       resultLocalSortOriginalLargeValueCells: undefined,
@@ -5233,7 +5242,7 @@ export const useQueryStore = defineStore("query", () => {
 
       clearInvalidDataTabSortState(tab, tableMeta.columns);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortMode !== "local" && tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = combineDataGridOrderByInputs(tab.orderByInput, tab.structuredOrderByInput) || sortOrder;
       const limit = tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
       const offset = tab.resultPageOffset ?? 0;
@@ -6139,7 +6148,7 @@ export const useQueryStore = defineStore("query", () => {
   function clearInvalidDataTabSortState(tab: QueryTab, columns: NonNullable<QueryTab["tableMeta"]>["columns"]): boolean {
     if (tab.mode !== "data") return false;
     const hasColumn = (name: string) => columns.some((column) => column.name === name);
-    const structuredSortMissing = !!tab.resultSortColumn && !hasColumn(tab.resultSortColumn);
+    const structuredSortMissing = (!!tab.resultSortColumn && !hasColumn(tab.resultSortColumn)) || !!tab.resultSortColumns?.some((sort) => !hasColumn(sort.column));
     const simpleOrderMissing = simpleDataGridOrderByReferencesMissingColumn(
       tab.orderByInput,
       columns.map((column) => column.name),
@@ -6153,6 +6162,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.resultSortColumn = undefined;
       tab.resultSortColumnIndex = undefined;
       tab.resultSortDirection = undefined;
+      tab.resultSortColumns = undefined;
       tab.resultSortMode = undefined;
       tab.resultSortedSql = undefined;
       tab.resultLocalSortOriginalRows = undefined;
@@ -6313,6 +6323,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.resultSortColumn = undefined;
       tab.resultSortColumnIndex = undefined;
       tab.resultSortDirection = undefined;
+      tab.resultSortColumns = undefined;
       tab.resultSortMode = undefined;
       tab.resultSortedSql = undefined;
     }
@@ -7435,6 +7446,13 @@ export const useQueryStore = defineStore("query", () => {
     }
     if (captureResultRun && tab.activeResultRunId) {
       pendingResultRunRestores.set(executionId, tab.activeResultRunId);
+    }
+    if (tab.resultSortMode === "local") {
+      tab.resultSortColumn = undefined;
+      tab.resultSortColumnIndex = undefined;
+      tab.resultSortDirection = undefined;
+      tab.resultSortColumns = undefined;
+      tab.resultSortMode = undefined;
     }
     if (batchResume) {
       tab.batchSqlExecution = prepareBatchSqlRecovery(batchResume.batch, executionId, batchResume.startStatementIndex);
@@ -9534,6 +9552,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortColumn = undefined;
     tab.resultSortColumnIndex = undefined;
     tab.resultSortDirection = undefined;
+    tab.resultSortColumns = undefined;
     tab.resultSortMode = undefined;
     tab.resultSortedSql = undefined;
     tab.resultTotalRowCount = undefined;
@@ -9656,6 +9675,14 @@ export const useQueryStore = defineStore("query", () => {
     tab.results = results;
     tab.activeResultIndex = snapshot.activeResultIndex;
     tab.resultEditorFingerprint = snapshot.resultEditorFingerprint;
+    tab.resultSortColumns = snapshot.resultSortColumns;
+    if (tab.resultSortColumns?.length) {
+      const first = tab.resultSortColumns[0]!;
+      tab.resultSortColumn = first.column;
+      tab.resultSortColumnIndex = first.columnIndex;
+      tab.resultSortDirection = first.direction;
+      tab.resultSortMode = "local";
+    }
     tab.result = snapshot.result ? markQueryResultRowsRaw(snapshot.result) : results?.[activeIndex] ? markQueryResultRowsRaw(results[activeIndex]) : undefined;
     tab.resultLocalSortOriginalRows = snapshot.resultLocalSortOriginalRows ? markRaw(snapshot.resultLocalSortOriginalRows) : undefined;
     tab.resultLocalSortOriginalLargeValueCells = snapshot.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell }));
@@ -9812,7 +9839,7 @@ export const useQueryStore = defineStore("query", () => {
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       const identifierQuote = connStore.connectionIdentifierQuote?.(tab.connectionId);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortMode !== "local" && tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = combineDataGridOrderByInputs(tab.orderByInput, tab.structuredOrderByInput) || sortOrder;
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
       const executionDatabase = tab.database;

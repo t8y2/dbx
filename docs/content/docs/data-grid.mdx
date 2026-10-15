@@ -35,6 +35,8 @@ Column widths, order, frozen state, and several display preferences can persist 
 
 The `WHERE` and `ORDER BY` inputs support long expressions, collapse/expand behavior, and metadata-based condition suggestions. The default sort used when opening tables can be configured in settings.
 
+Click the sort button beside a column header to use database sorting, cycling through ascending, descending, and clear. Hold `Alt` while clicking to sort the current page and add, change, or remove a sort column while preserving the other conditions and their priority. Cycling an individual column to clear with `Alt` removes only that column; choosing **Clear sort** in the dropdown clears all sort columns. When multiple columns are sorted, numbers beside the arrows show their priority. Clicking without `Alt` switches back to database sorting by that column. This works in both normal and transposed views. The dropdown offers explicit database and current-page sorting; when database sorting is unavailable, header clicks use current-page sorting.
+
 <Callout type="info">For large tables, prefer database-side `WHERE` and `ORDER BY`. Client search, value filters, and current-page sorting do not reduce the amount of data returned by the database.</Callout>
 
 ## When Results Are Editable

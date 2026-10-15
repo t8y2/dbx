@@ -18,6 +18,7 @@ function createResizeState(options: {
   compactColumnHeaderActions?: boolean;
   indexIndicatorColumnIndexes?: number[] | ReturnType<typeof ref<number[]>>;
   headerTextWidth?: number;
+  headerExtraWidths?: Ref<number[]>;
   viewportWidth?: number | ReturnType<typeof ref<number>>;
   widthMode?: DataGridColumnWidthMode | Ref<DataGridColumnWidthMode>;
   displayValue?: (value: string | number | boolean | null, columnIndex: number) => string | number | boolean | null;
@@ -38,6 +39,7 @@ function createResizeState(options: {
     widthMode,
     compactColumnHeaderActions: computed(() => compact.value),
     columnIndexIndicators: computed(() => options.columns.map((_, index) => indexIndicatorColumnIndexes.value.includes(index))),
+    headerExtraWidths: options.headerExtraWidths ? computed(() => options.headerExtraWidths!.value) : undefined,
     cacheKey: computed(() => options.cacheKey),
     columnStructureSignature: computed(() => createDataGridColumnStructureSignature(options.columns, options.columnTypes)),
     measureHeaderText: () => headerTextWidth.value,
@@ -70,6 +72,25 @@ function createResizeState(options: {
 describe("useDataGridColumnResize", () => {
   beforeEach(() => {
     clearDataGridColumnWidthStates();
+  });
+
+  it("reserves transient controls only on affected columns without changing stored or manual widths", () => {
+    const extraWidths = ref([0, 0]);
+    const state = createResizeState({ columns: ["region", "score"], rows: [["North", 8]], widthMode: "content", headerExtraWidths: extraWidths });
+    state.initColumnWidths();
+    const base = state.renderedColumnWidths.value.slice();
+    extraWidths.value = [28, 0];
+    expect(state.renderedColumnWidths.value).toEqual([base[0] + 28, base[1]]);
+    expect(state.columnWidths.value).toEqual(base);
+    extraWidths.value = [0, 0];
+    expect(state.renderedColumnWidths.value).toEqual(base);
+    extraWidths.value = [28, 0];
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 120 }));
+    const manualWidth = state.columnWidths.value[0];
+    expect(state.renderedColumnWidths.value[0]).toBe(manualWidth);
+    extraWidths.value = [0, 0];
+    expect(state.renderedColumnWidths.value[0]).toBe(manualWidth);
   });
 
   it("fits every visible column to its content when auto fitting the whole grid", () => {

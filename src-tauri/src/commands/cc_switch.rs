@@ -22,13 +22,17 @@ pub async fn load_cc_switch_ai_configs(
     }
     let home_dir = app.path().home_dir().map_err(|error| format!("ccSwitchHomeDirectoryFailed:{error}"))?;
     let database_path = home_dir.join(".cc-switch").join("cc-switch.db");
+    let settings_path = home_dir.join(".cc-switch").join("settings.json");
     state
         .plugins
         .invoke_capability_for_plugin(
             dbx_core::cc_switch::CC_SWITCH_PLUGIN_ID,
             dbx_core::cc_switch::CC_SWITCH_PLUGIN_CAPABILITY,
             dbx_core::cc_switch::CC_SWITCH_IMPORT_METHOD,
-            serde_json::json!({ "databasePath": database_path }),
+            serde_json::json!({
+                "databasePath": database_path,
+                "settingsPath": settings_path,
+            }),
         )
         .await
 }

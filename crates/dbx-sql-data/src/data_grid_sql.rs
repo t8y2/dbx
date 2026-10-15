@@ -55,6 +55,9 @@ const MYSQL_DATA_GRID_BATCH_MAX_ROWS: usize = 500;
 const MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES: usize = 256 * 1024;
 const ORACLE_SQL_LITERAL_MAX_BYTES: usize = 4000;
 const ORACLE_LOB_LITERAL_CHUNK_BYTES: usize = 3900;
+/// SQL Server types an `N'..' + NCHAR(n) + N'..'` chain of non-`max` operands as
+/// `nvarchar(4000)`; a longer concatenation result is truncated without an error.
+const SQLSERVER_NVARCHAR_LITERAL_MAX_CHARS: usize = 4000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -2887,10 +2890,19 @@ fn format_sqlserver_unicode_literal(text: &str) -> String {
         parts.push(format!("N'{}'", segment.replace('\'', "''")));
     }
     if parts.is_empty() {
-        "N''".to_string()
-    } else {
-        parts.join(" + ")
+        return "N''".to_string();
     }
+    // SQL Server types a `+` chain of ordinary literals and `NCHAR(n)` as
+    // `nvarchar(4000)`, and silently truncates a longer result instead of
+    // failing, so a long value needs an `nvarchar(max)` operand to survive
+    // (issue #12202). A single literal needs no anchor: SQL Server already types
+    // a literal longer than 4000 characters as `nvarchar(max)`. Each emitted
+    // character of the chain is one UTF-16 code unit of `text`, so the value's
+    // own length is the length of the concatenation.
+    if parts.len() > 1 && text.encode_utf16().count() > SQLSERVER_NVARCHAR_LITERAL_MAX_CHARS {
+        parts.insert(0, "CAST(N'' AS NVARCHAR(MAX))".to_string());
+    }
+    parts.join(" + ")
 }
 
 fn is_sqlite_literal_database(database_type: Option<DatabaseType>) -> bool {
@@ -10333,6 +10345,26 @@ mod tests {
             format_grid_sql_literal(&json!("line1\\\r\nline2"), Some(DatabaseType::SqlServer), None),
             r"N'line1\' + NCHAR(13) + NCHAR(10) + N'line2'"
         );
+    }
+
+    #[test]
+    fn sqlserver_long_multiline_literals_anchor_nvarchar_max() {
+        // A `+` chain of non-`max` operands is typed nvarchar(4000) by SQL Server, which
+        // silently truncates a longer result, so a long value must be anchored on
+        // nvarchar(max) or the copied statement loses everything past 4000 characters
+        // (issue #12202).
+        let long_value = format!("{}\n{}", "a".repeat(3000), "b".repeat(3000));
+        let literal = format_grid_sql_literal(&json!(long_value), Some(DatabaseType::SqlServer), None);
+        assert!(literal.starts_with("CAST(N'' AS NVARCHAR(MAX)) + N'"), "{literal}");
+        assert!(literal.contains(" + NCHAR(10) + N'"), "{literal}");
+
+        // A value that fits in nvarchar(4000) keeps the plain chain.
+        let short_value = format_grid_sql_literal(&json!("line1\nline2"), Some(DatabaseType::SqlServer), None);
+        assert_eq!(short_value, r"N'line1' + NCHAR(10) + N'line2'");
+
+        // A single long literal is already nvarchar(max) by SQL Server's own rules.
+        let single_line = format_grid_sql_literal(&json!("a".repeat(5000)), Some(DatabaseType::SqlServer), None);
+        assert_eq!(single_line, format!("N'{}'", "a".repeat(5000)));
     }
 
     #[test]

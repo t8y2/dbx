@@ -25,6 +25,7 @@ use crate::transfer::{
     quote_postgres_string_literal, wrap_dameng_identity_insert_sql_for_table,
 };
 use crate::types::{ObjectSourceKind, SpatialColumn, SqlExportColumnSelection};
+use dbx_sql::value_literals::format_pg_array_text;
 
 static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -625,7 +626,7 @@ pub fn format_export_sql_literal(value: &Value) -> String {
     format_export_sql_literal_for_database(value, None)
 }
 
-fn format_standard_sql_literal(value: &Value) -> String {
+fn format_standard_sql_literal(value: &Value, database_type: Option<DatabaseType>) -> String {
     if value.is_null() {
         return "NULL".to_string();
     }
@@ -634,6 +635,14 @@ fn format_standard_sql_literal(value: &Value) -> String {
     }
     if let Some(value) = value.as_bool() {
         return if value { "TRUE" } else { "FALSE" }.to_string();
+    }
+    if let Some(arr) = value.as_array() {
+        if database_type == Some(DatabaseType::Postgres) {
+            // The array text carries its own backslash escapes, which a plain
+            // '...' literal keeps verbatim under PostgreSQL's default
+            // `standard_conforming_strings = on`, as it does for other text.
+            return quote_standard_export_sql_string(&format_pg_array_text(arr));
+        }
     }
 
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
@@ -1690,7 +1699,7 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
                 value
             };
             let literal = if insert_dialect == SqlInsertDialect::Standard {
-                format_standard_sql_literal(value)
+                format_standard_sql_literal(value, options.database_type)
             } else if let Some(literal) =
                 crate::data_grid_sql::format_oracle_lob_export_literal(value, options.database_type, column_type)?
             {
@@ -7869,6 +7878,30 @@ mod tests {
         );
         assert!(!sql.contains("IDENTITY_INSERT"));
         assert!(!sql.contains("N'"));
+    }
+
+    #[test]
+    fn standard_sql_insert_writes_postgres_arrays_as_array_literals() {
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "postgres",
+            "insertDialect": "standard",
+            "schema": "public",
+            "tableName": "users_role",
+            "columns": ["id", "permissions", "tricky", "empty", "meta"],
+            "columnTypes": ["integer", "text[]", "text[]", "integer[]", "jsonb"],
+            "rows": [
+                [1, ["add_issue", "view_issues"], ["say \"hi\"", "a,b", null, "C:\\tmp", "it's"], [], "{\"k\": [1]}"]
+            ],
+            "batchSize": 10
+        }))
+        .expect("deserialize Standard SQL INSERT payload");
+
+        let sql = build_export_sql_insert(options).expect("build Standard SQL INSERT");
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "public"."users_role" ("id", "permissions", "tricky", "empty", "meta") VALUES (1, '{"add_issue","view_issues"}', '{"say \"hi\"","a,b",NULL,"C:\\tmp","it''s"}', '{}', '{"k": [1]}');"#
+        );
     }
 
     #[test]

@@ -35,4 +35,9 @@ describe("data grid filter mode order", () => {
     resetDataGridFilterModeOrder("mysql");
     expect(orderDataGridFilterModeOptions("mysql", options).map((item) => item.value)).toEqual(["equals", "like", "is-null"]);
   });
+
+  it("ignores malformed persisted data", () => {
+    storage.set("dbx-data-grid-filter-mode-order-v1", "not-json");
+    expect(orderDataGridFilterModeOptions("mysql", options).map((item) => item.value)).toEqual(["equals", "like", "is-null"]);
+  });
 });

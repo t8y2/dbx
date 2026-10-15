@@ -3103,6 +3103,7 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "Simpan atau batalkan perubahan pratinjau sebelum melanjutkan pencarian atau menutup.",
     filePreview: "Pratinjau berkas",
     previewFailed: "Berkas ini tidak dapat dipratinjau. Buka berkas untuk melihat isinya.",
     previewEmpty: "Berkas ini kosong",

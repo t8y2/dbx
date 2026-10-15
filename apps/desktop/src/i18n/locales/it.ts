@@ -3122,6 +3122,7 @@ export default withEnglishFallback({
     inputPlaceholder: "AAAA-MM-GG HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "Salva o annulla le modifiche all’anteprima prima di continuare la ricerca o chiudere.",
     filePreview: "Anteprima del file",
     previewFailed: "Impossibile visualizzare l’anteprima. Apri il file per vedere il contenuto.",
     previewEmpty: "Il file è vuoto",

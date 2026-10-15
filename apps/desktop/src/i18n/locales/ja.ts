@@ -3146,6 +3146,7 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "検索を続けるか閉じる前に、プレビューの編集を保存またはキャンセルしてください。",
     filePreview: "ファイルプレビュー",
     previewFailed: "このファイルをプレビューできません。ファイルを開いて内容を確認してください。",
     previewEmpty: "ファイルは空です",

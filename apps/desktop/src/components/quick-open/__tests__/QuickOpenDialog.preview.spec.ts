@@ -2,13 +2,14 @@
 
 import { createApp, h, nextTick, reactive, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EditorView } from "@codemirror/view";
 
-const mocks = vi.hoisted(() => ({ select: vi.fn(), updateOpen: vi.fn(), read: vi.fn() }));
+const mocks = vi.hoisted(() => ({ select: vi.fn(), updateOpen: vi.fn(), read: vi.fn(), write: vi.fn(), toast: vi.fn() }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [], treeNodes: [], connectedIds: new Set() }) }));
 vi.mock("@/stores/savedSqlStore", () => ({ useSavedSqlStore: () => ({ allFiles: [] }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { shortcuts: {}, fontSize: 13, fontFamily: "monospace", theme: "app" } }) }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false }, themePalette: { value: "pearl" } }) }));
-vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/lib/editor/editorThemes", () => ({ editorFontTheme: () => [], loadEditorTheme: async () => [] }));
 vi.mock("@/lib/backend/safeStorage", () => ({ safeLocalStorageGet: () => null, safeLocalStorageSet: vi.fn() }));
 vi.mock("@/components/plugins/PluginIcon.vue", () => ({ default: { render: () => null } }));
@@ -26,7 +27,8 @@ vi.mock("@/lib/globalSearch/globalSearchSettings", async () => {
 });
 vi.mock("@/lib/backend/api", () => ({
   listPlugins: async () => [],
-  readExternalSqlFile: mocks.read,
+  readExternalSqlFileSnapshot: async (...args: unknown[]) => ({ content: await mocks.read(...args), version: { contentHash: "original", modifiedNs: "1", sizeBytes: 26 }, encoding: "utf8" }),
+  writeExternalSqlFile: mocks.write,
   globalSearch: async () => [
     { path: "/sql/first.sql", fileName: "first.sql", line: 2, column: 8, lineText: "SELECT needle;", matchText: "needle" },
     { path: "/sql/second.sql", fileName: "second.sql", line: 1, column: 8, lineText: "SELECT needle, 2;", matchText: "needle" },
@@ -40,7 +42,14 @@ vi.mock("@/components/ui/dialog", async () => {
       () =>
         h("div", slots.default?.()),
   });
-  return { Dialog: passthrough, DialogContent: passthrough };
+  const dialog = defineComponent({
+    emits: ["update:open"],
+    setup:
+      (_, { slots, emit }) =>
+      () =>
+        h("div", [h("button", { "data-close-search": "", onClick: () => emit("update:open", false) }, "Close search"), slots.default?.()]),
+  });
+  return { Dialog: dialog, DialogContent: passthrough };
 });
 
 import QuickOpenDialog from "../QuickOpenDialog.vue";
@@ -62,7 +71,7 @@ async function mountSearch() {
   input.value = "needle";
   input.dispatchEvent(new Event("input", { bubbles: true }));
   await vi.waitFor(() => expect(host.querySelectorAll("[data-selected]")).toHaveLength(2));
-  await vi.waitFor(() => expect(host.querySelector(".cm-editor")).not.toBeNull());
+  await vi.waitFor(() => expect(host.querySelector(".cm-editor")).not.toBeNull(), { timeout: 10000 });
   return { input, props, rows: [...host.querySelectorAll<HTMLElement>("[data-selected]")] };
 }
 
@@ -70,6 +79,8 @@ beforeEach(() => {
   mocks.select.mockReset();
   mocks.updateOpen.mockReset();
   mocks.read.mockReset().mockResolvedValue("-- heading\nSELECT needle;");
+  mocks.write.mockReset().mockResolvedValue({ kind: "written", version: { contentHash: "saved", modifiedNs: "2", sizeBytes: 30 } });
+  mocks.toast.mockReset();
   vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
 });
 afterEach(() => {
@@ -79,6 +90,54 @@ afterEach(() => {
 });
 
 describe("content search preview navigation", () => {
+  it("pins the preview while editing and resumes navigation after saving", async () => {
+    const { input, rows, props } = await mountSearch();
+    host.querySelector<HTMLButtonElement>('button[aria-label="Edit"]')!.click();
+    await nextTick();
+    await nextTick();
+    const view = EditorView.findFromDOM(host.querySelector<HTMLElement>(".cm-editor")!)!;
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\nSELECT 3;" } });
+    rows[1]!.dispatchEvent(new MouseEvent("mouseenter"));
+    rows[1]!.click();
+    await nextTick();
+    expect(input.disabled).toBe(true);
+    expect(rows[0]!.dataset.selected).toBe("true");
+    expect(mocks.read).toHaveBeenCalledTimes(1);
+    expect(mocks.select).not.toHaveBeenCalled();
+    expect(mocks.updateOpen).not.toHaveBeenCalled();
+    host.querySelector<HTMLButtonElement>("[data-close-search]")!.click();
+    expect(mocks.updateOpen).not.toHaveBeenCalled();
+    props.initialContentMode = false;
+    await nextTick();
+    expect(host.querySelector(".cm-editor")).not.toBeNull();
+    const save = [...host.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent?.trim() === "Save")!;
+    save.click();
+    await vi.waitFor(() => expect(input.disabled).toBe(false));
+    expect(mocks.write).toHaveBeenCalledWith("/sql/first.sql", "-- heading\nSELECT needle;\nSELECT 3;", expect.objectContaining({ expectedContentHash: "original" }));
+    rows[1]!.dispatchEvent(new MouseEvent("mouseenter"));
+    await vi.waitFor(() => expect(mocks.read).toHaveBeenLastCalledWith("/sql/second.sql", 32 * 1024 * 1024));
+  });
+
+  it("keeps edits after a save error and allows closing after cancellation", async () => {
+    mocks.write.mockRejectedValue(new Error("write failed"));
+    await mountSearch();
+    host.querySelector<HTMLButtonElement>('button[aria-label="Edit"]')!.click();
+    await nextTick();
+    await nextTick();
+    const view = EditorView.findFromDOM(host.querySelector<HTMLElement>(".cm-editor")!)!;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "my draft" } });
+    [...host.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent?.trim() === "Save")!.click();
+    await vi.waitFor(() => expect(host.querySelector('[role="alert"]')).not.toBeNull());
+    host.querySelector<HTMLButtonElement>("[data-close-search]")!.click();
+    expect(mocks.updateOpen).not.toHaveBeenCalled();
+    expect(view.state.doc.toString()).toBe("my draft");
+    [...host.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent?.trim() === "Cancel")!.click();
+    await nextTick();
+    expect(view.state.doc.toString()).toBe("-- heading\nSELECT needle;");
+    host.querySelector<HTMLButtonElement>("[data-close-search]")!.click();
+    expect(mocks.updateOpen).toHaveBeenCalledWith(false);
+  });
+
   it("previews hovered results while keeping the dialog open", async () => {
     const { rows } = await mountSearch();
     rows[1]!.dispatchEvent(new MouseEvent("mouseenter"));

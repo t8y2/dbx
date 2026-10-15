@@ -3073,6 +3073,7 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "검색을 계속하거나 닫기 전에 미리보기 편집을 저장하거나 취소하세요.",
     filePreview: "파일 미리 보기",
     previewFailed: "이 파일을 미리 볼 수 없습니다. 파일을 열어 내용을 확인하세요.",
     previewEmpty: "파일이 비어 있습니다",

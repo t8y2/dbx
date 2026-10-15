@@ -3445,6 +3445,7 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "请先保存或取消预览编辑，再继续搜索或关闭。",
     filePreview: "文件预览",
     previewFailed: "无法预览此文件，请打开文件查看",
     previewEmpty: "文件内容为空",

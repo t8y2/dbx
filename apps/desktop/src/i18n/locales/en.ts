@@ -3512,6 +3512,7 @@ export default {
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "Save or cancel preview edits before continuing your search or closing.",
     filePreview: "File preview",
     previewFailed: "Unable to preview this file. Open it to view its contents.",
     previewEmpty: "This file is empty",

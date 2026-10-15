@@ -3457,6 +3457,7 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "บันทึกหรือยกเลิกการแก้ไขตัวอย่างก่อนค้นหาต่อหรือปิด",
     filePreview: "ตัวอย่างไฟล์",
     previewFailed: "ไม่สามารถแสดงตัวอย่างไฟล์นี้ได้ เปิดไฟล์เพื่อดูเนื้อหา",
     previewEmpty: "ไฟล์นี้ว่างเปล่า",

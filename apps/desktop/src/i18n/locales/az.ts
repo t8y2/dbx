@@ -2777,6 +2777,7 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "Axtarışa davam etməzdən və ya bağlamazdan əvvəl önbaxış dəyişikliklərini yadda saxlayın və ya ləğv edin.",
     filePreview: "Fayla önbaxış",
     previewFailed: "Bu fayla önbaxış mümkün deyil. Məzmunu görmək üçün faylı açın.",
     previewEmpty: "Fayl boşdur",

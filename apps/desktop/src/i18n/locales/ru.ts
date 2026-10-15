@@ -3223,6 +3223,7 @@ export default withEnglishFallback({
     inputPlaceholder: "ГГГГ-ММ-ДД ЧЧ:мм:сс",
   },
   quickOpen: {
+    finishEditing: "Сохраните или отмените изменения в предпросмотре, прежде чем продолжить поиск или закрыть окно.",
     filePreview: "Предпросмотр файла",
     previewFailed: "Не удалось показать файл. Откройте его для просмотра содержимого.",
     previewEmpty: "Файл пуст",

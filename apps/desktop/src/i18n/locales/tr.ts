@@ -2753,6 +2753,7 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "Aramaya devam etmeden veya kapatmadan önce önizleme değişikliklerini kaydedin ya da iptal edin.",
     filePreview: "Dosya önizlemesi",
     previewFailed: "Bu dosya önizlenemiyor. İçeriğini görmek için dosyayı açın.",
     previewEmpty: "Bu dosya boş",

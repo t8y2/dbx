@@ -13,6 +13,22 @@ export function databaseSortSupportedForDatabase(databaseType?: DatabaseType): b
   return databaseType !== "cassandra";
 }
 
+/**
+ * Result-column positions of the table's complete primary key, appended to a
+ * database sort so tied rows keep one order across pages and exports. Empty
+ * unless every key column maps to exactly one result column.
+ */
+export function primaryKeyTieBreakerIndexes(sourceColumns: readonly (string | undefined)[] | undefined, primaryKeys: readonly string[] | undefined): number[] {
+  if (!sourceColumns?.length || !primaryKeys?.length) return [];
+  const indexes: number[] = [];
+  for (const primaryKey of primaryKeys) {
+    const matches = sourceColumns.flatMap((column, index) => (column === primaryKey ? [index] : []));
+    if (matches.length !== 1) return [];
+    indexes.push(matches[0]!);
+  }
+  return indexes;
+}
+
 export interface DataGridSortState {
   column: string | null;
   columnIndex: number | null;

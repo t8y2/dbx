@@ -121,6 +121,12 @@ pub struct SortedQuerySqlOptions {
     pub column_index: usize,
     pub column: String,
     pub direction: QuerySortDirection,
+    /// Result-column positions appended after the sort column, typically the
+    /// primary key. The sort column alone is not unique, and tied rows come
+    /// back in a different order for each `LIMIT`/`OFFSET` page than for the
+    /// full export, so pages repeat or skip rows.
+    #[serde(default)]
+    pub tie_breaker_column_indexes: Vec<usize>,
 }
 
 pub fn build_query_pagination_execution_plan(
@@ -478,6 +484,15 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
             options.result_columns[..index].iter().any(|candidate| same_label(candidate, column))
         })
     };
+    let mut seen_tie_breakers = HashSet::new();
+    let tie_breaker_indexes = options
+        .tie_breaker_column_indexes
+        .iter()
+        .copied()
+        .filter(|&index| {
+            index < options.result_columns.len() && index != options.column_index && seen_tie_breakers.insert(index)
+        })
+        .collect::<Vec<_>>();
     let derived_table_rejects_duplicate_labels = match options.database_type {
         Some(DatabaseType::Oracle) => has_duplicate_labels(|left, right| left == right),
         Some(DatabaseType::Mysql) => has_duplicate_labels(str::eq_ignore_ascii_case),
@@ -518,7 +533,12 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
             "{execution_hint}{}",
             append_sql_suffix(
                 statement[..order_by_index.unwrap_or(statement.len())].trim_end(),
-                &format!("ORDER BY {} {};", options.column_index + 1, options.direction.as_sql()),
+                &format!(
+                    "ORDER BY {} {}{};",
+                    options.column_index + 1,
+                    options.direction.as_sql(),
+                    tie_breaker_indexes.iter().map(|index| format!(", {} ASC", index + 1)).collect::<String>()
+                ),
             )
         ));
     }
@@ -562,27 +582,41 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     } else {
         options.result_columns.get(options.column_index).cloned().unwrap_or_else(|| options.column.clone())
     };
-    // Oracle-compatible derived tables do not accept a PostgreSQL-style
-    // column alias list. Use the selected column position when duplicate
-    // labels would otherwise make ORDER BY ambiguous.
-    let use_sort_ordinal = !use_derived_column_aliases
-        && matches!(
-            options.database_type,
-            Some(DatabaseType::Dameng | DatabaseType::OceanbaseOracle | DatabaseType::SapHana | DatabaseType::Iris)
-        )
-        && options.result_columns.get(options.column_index).is_some_and(|column| {
-            options.result_columns.iter().filter(|candidate| candidate.eq_ignore_ascii_case(column)).count() > 1
-        });
-    let sort_reference = if use_sort_ordinal {
-        (options.column_index + 1).to_string()
-    } else if options.database_type == Some(DatabaseType::Iris) {
-        // With delimited identifiers disabled, a quoted ORDER BY name becomes
-        // a string literal on Caché and the sort silently degrades to a
-        // constant. Ordinary names must be sent unquoted.
-        quote_iris_identifier(&sort_alias, None)
-    } else {
-        quote_table_identifier(options.database_type, &sort_alias)
+    let column_reference = |index: usize, alias: &str| {
+        // Oracle-compatible derived tables do not accept a PostgreSQL-style
+        // column alias list. Use the column position when duplicate labels
+        // would otherwise make ORDER BY ambiguous.
+        let use_ordinal = !use_derived_column_aliases
+            && matches!(
+                options.database_type,
+                Some(DatabaseType::Dameng | DatabaseType::OceanbaseOracle | DatabaseType::SapHana | DatabaseType::Iris)
+            )
+            && options.result_columns.get(index).is_some_and(|column| {
+                options.result_columns.iter().filter(|candidate| candidate.eq_ignore_ascii_case(column)).count() > 1
+            });
+        if use_ordinal {
+            (index + 1).to_string()
+        } else if options.database_type == Some(DatabaseType::Iris) {
+            // With delimited identifiers disabled, a quoted ORDER BY name becomes
+            // a string literal on Caché and the sort silently degrades to a
+            // constant. Ordinary names must be sent unquoted.
+            quote_iris_identifier(alias, None)
+        } else {
+            quote_table_identifier(options.database_type, alias)
+        }
     };
+    let sort_reference = column_reference(options.column_index, &sort_alias);
+    let tie_breaker_order = tie_breaker_indexes
+        .iter()
+        .map(|&index| {
+            let alias = if use_derived_column_aliases {
+                aliases.get(index).cloned().unwrap_or_else(|| fallback_alias(index))
+            } else {
+                options.result_columns[index].clone()
+            };
+            format!(", {} ASC", column_reference(index, &alias))
+        })
+        .collect::<String>();
     if options.database_type == Some(DatabaseType::SqlServer)
         && find_top_level_trailing_order_by(statement).is_none()
         && sql_server_ast_has_order_by(statement)
@@ -609,12 +643,12 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
             .collect::<Vec<_>>()
             .join(", ");
         ok(format!(
-            "{execution_hint}SELECT * FROM ({wrapped_statement}) t({alias_list}) ORDER BY {sort_reference} {};",
+            "{execution_hint}SELECT * FROM ({wrapped_statement}) t({alias_list}) ORDER BY {sort_reference} {}{tie_breaker_order};",
             options.direction.as_sql()
         ))
     } else {
         ok(format!(
-            "{execution_hint}SELECT * FROM ({wrapped_statement}) t ORDER BY {sort_reference} {};",
+            "{execution_hint}SELECT * FROM ({wrapped_statement}) t ORDER BY {sort_reference} {}{tie_breaker_order};",
             options.direction.as_sql()
         ))
     }
@@ -2912,6 +2946,7 @@ mod tests {
                 column_index: 1,
                 column: "NAME".into(),
                 direction: QuerySortDirection::Desc,
+                tie_breaker_column_indexes: Vec::new(),
             });
             assert!(sorted.ok, "{sql}");
             let sorted = sorted.sql.unwrap();
@@ -2938,6 +2973,7 @@ mod tests {
                 column_index: 0,
                 column: "NAME".into(),
                 direction: QuerySortDirection::Asc,
+                tie_breaker_column_indexes: Vec::new(),
             });
             assert!(!sorted.ok);
         }
@@ -2955,6 +2991,7 @@ mod tests {
                 column_index: 0,
                 column: "id".into(),
                 direction: QuerySortDirection::Asc,
+                tie_breaker_column_indexes: Vec::new(),
             });
 
             assert!(!sorted.ok, "must not append a second ORDER BY: {sql}");
@@ -2970,6 +3007,7 @@ mod tests {
             column_index: 0,
             column: "id".into(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
         assert!(sorted.ok);
         assert_eq!(sorted.sql.unwrap(), "SELECT * FROM t ORDER BY 1 ASC;");
@@ -4890,6 +4928,7 @@ WHERE u.id = picked.id;
                 column_index: 0,
                 column: "id".to_string(),
                 direction: QuerySortDirection::Asc,
+                tie_breaker_column_indexes: Vec::new(),
             });
 
             assert_eq!(page.sql.unwrap(), "SELECT id FROM users LIMIT 50;");
@@ -6237,6 +6276,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6254,6 +6294,7 @@ WHERE u.id = picked.id;
             column_index: 0,
             column: "iso3".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6277,9 +6318,79 @@ WHERE u.id = picked.id;
             column_index: 3,
             column: "login_name".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT * FROM admin LIMIT 100) t ORDER BY `login_name` ASC;");
+    }
+
+    #[test]
+    fn postgres_sort_appends_tie_breaker_columns_after_the_sort_column() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT * FROM sales ORDER BY id DESC".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            result_columns: vec!["id".to_string(), "kdrq".to_string(), "spmc".to_string()],
+            column_index: 1,
+            column: "kdrq".to_string(),
+            direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: vec![0],
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT * FROM sales ORDER BY id DESC) t(\"id\", \"kdrq\", \"spmc\") ORDER BY \"kdrq\" DESC, \"id\" ASC;"
+        );
+    }
+
+    #[test]
+    fn mysql_sort_appends_hidden_key_tie_breaker_by_name() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT kdrq, spmc, `id` AS `__DBX_PK_0` FROM sales".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            result_columns: vec!["kdrq".to_string(), "spmc".to_string(), "__DBX_PK_0".to_string()],
+            column_index: 0,
+            column: "kdrq".to_string(),
+            direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: vec![2],
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT kdrq, spmc, `id` AS `__DBX_PK_0` FROM sales) t ORDER BY `kdrq` ASC, `__DBX_PK_0` ASC;"
+        );
+    }
+
+    #[test]
+    fn duplicate_label_sort_appends_tie_breaker_ordinals() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "select c1, t.* from dbx_eval_t t order by c1".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            result_columns: vec!["C1".to_string(), "C1".to_string(), "C2".to_string()],
+            column_index: 2,
+            column: "C2".to_string(),
+            direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: vec![1],
+        });
+
+        assert_eq!(result.sql.unwrap(), "select c1, t.* from dbx_eval_t t ORDER BY 3 DESC, 2 ASC;");
+    }
+
+    #[test]
+    fn sort_ignores_out_of_range_repeated_and_sort_column_tie_breakers() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT a, b FROM t".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            result_columns: vec!["a".to_string(), "b".to_string()],
+            column_index: 1,
+            column: "b".to_string(),
+            direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: vec![5, 1, 0, 0],
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT a, b FROM t) t(\"a\", \"b\") ORDER BY \"b\" ASC, \"a\" ASC;"
+        );
     }
 
     #[test]
@@ -6293,6 +6404,7 @@ WHERE u.id = picked.id;
                     column_index: 1,
                     column: "name".to_string(),
                     direction,
+                    tie_breaker_column_indexes: Vec::new(),
                 });
 
                 assert_eq!(
@@ -6314,6 +6426,7 @@ WHERE u.id = picked.id;
                 column_index: 0,
                 column: "id".to_string(),
                 direction: QuerySortDirection::Asc,
+                tie_breaker_column_indexes: Vec::new(),
             });
 
             assert_eq!(
@@ -6344,6 +6457,7 @@ WHERE u.id = picked.id;
                     column_index: 1,
                     column: "name".to_string(),
                     direction: QuerySortDirection::Desc,
+                    tie_breaker_column_indexes: Vec::new(),
                 });
 
                 assert_eq!(
@@ -6366,6 +6480,7 @@ WHERE u.id = picked.id;
                     column_index: usize::MAX,
                     column: "display name".to_string(),
                     direction: QuerySortDirection::Asc,
+                    tie_breaker_column_indexes: Vec::new(),
                 });
 
                 assert_eq!(
@@ -6390,6 +6505,7 @@ WHERE u.id = picked.id;
                         column_index,
                         column: "name".to_string(),
                         direction: QuerySortDirection::Desc,
+                        tie_breaker_column_indexes: Vec::new(),
                     });
 
                     assert_eq!(result, err("unsupported"), "{database_type:?} {result_columns:?} {column_index}");
@@ -6417,6 +6533,7 @@ WHERE u.id = picked.id;
                     column_index: 0,
                     column: "id".to_string(),
                     direction: QuerySortDirection::Asc,
+                    tie_breaker_column_indexes: Vec::new(),
                 });
 
                 assert_eq!(result, err(reason), "{database_type:?} {original_sql:?}");
@@ -6441,6 +6558,7 @@ WHERE u.id = picked.id;
                 column_index: 1,
                 column: "id".to_string(),
                 direction: QuerySortDirection::Desc,
+                tie_breaker_column_indexes: Vec::new(),
             });
 
             assert_eq!(
@@ -6460,6 +6578,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "NAME".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6481,6 +6600,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "Name".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
         let sql = result.sql.unwrap();
         assert!(!sql.contains(") t("), "derived column alias list must not be emitted: {sql}");
@@ -6496,6 +6616,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6523,6 +6644,7 @@ WHERE u.id = picked.id;
                 column_index: 0,
                 column: "@@server_id".to_string(),
                 direction: QuerySortDirection::Asc,
+                tie_breaker_column_indexes: Vec::new(),
             });
 
             assert!(result.ok, "{prefix}: {result:?}");
@@ -6542,6 +6664,7 @@ WHERE u.id = picked.id;
             column_index: 0,
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6559,6 +6682,7 @@ WHERE u.id = picked.id;
             column_index: 0,
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users LIMIT 100) t ORDER BY `id` DESC;");
@@ -6573,6 +6697,7 @@ WHERE u.id = picked.id;
             column_index: 0,
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6590,6 +6715,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "name".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6609,6 +6735,7 @@ WHERE u.id = picked.id;
                 column_index: 0,
                 column: "id".to_string(),
                 direction: QuerySortDirection::Asc,
+                tie_breaker_column_indexes: Vec::new(),
             });
 
             assert!(!result.ok, "must refuse the unsafe wrap: {original}");
@@ -6631,6 +6758,7 @@ WHERE u.id = picked.id;
                 column_index: 0,
                 column: "id".to_string(),
                 direction: QuerySortDirection::Asc,
+                tie_breaker_column_indexes: Vec::new(),
             });
 
             assert!(result.ok, "must keep the wrap legal: {original}");
@@ -6648,6 +6776,7 @@ WHERE u.id = picked.id;
             column_index: 0,
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t ORDER BY \"id\" ASC;");
@@ -6662,6 +6791,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6679,6 +6809,7 @@ WHERE u.id = picked.id;
             column_index: 0,
             column: "ID".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id ORDER BY 1 ASC;");
@@ -6693,6 +6824,7 @@ WHERE u.id = picked.id;
             column_index: 2,
             column: "C2".to_string(),
             direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(result.sql.unwrap(), "select c1, t.* from dbx_eval_t t ORDER BY 3 DESC;");
@@ -6707,6 +6839,7 @@ WHERE u.id = picked.id;
             column_index: 0,
             column: "C1".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert!(!result.ok);
@@ -6722,6 +6855,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "X".to_string(),
             direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6739,6 +6873,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "C2".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT * FROM dbx_eval_t) t ORDER BY \"C2\" ASC;");
@@ -6754,6 +6889,7 @@ WHERE u.id = picked.id;
             column_index: 2,
             column: "name".to_string(),
             direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6771,6 +6907,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT a.ID, b.id FROM a JOIN b ON b.a_id = a.id ORDER BY 2 ASC;");
@@ -6785,6 +6922,7 @@ WHERE u.id = picked.id;
             column_index: 2,
             column: "name".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert!(!result.ok);
@@ -6800,6 +6938,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "ID".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6817,6 +6956,7 @@ WHERE u.id = picked.id;
             column_index: 1,
             column: "score".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(
@@ -6842,6 +6982,7 @@ WHERE u.id = picked.id;
             column_index: 0,
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t(id, name) ORDER BY id ASC;");
@@ -6856,6 +6997,7 @@ WHERE u.id = picked.id;
             column_index: 0,
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
         });
 
         assert_eq!(result, err("with"));

@@ -8,6 +8,7 @@ import * as api from "@/lib/backend/api";
 import { classifyEtcdDashboardError } from "@/lib/kv/etcdDashboardError";
 import { counterMapRates, counterRate, histogramAverageMilliseconds, histogramMapAverageMilliseconds, ratePercentage } from "@/lib/kv/etcdDashboardMetrics";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
+import AutoRefreshControl from "@/components/common/AutoRefreshControl.vue";
 
 const props = defineProps<{ connectionId: string }>();
 const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ refreshSeconds?: number }>({}, "EtcdDashboard");
@@ -197,6 +198,14 @@ function refresh(): boolean {
   return true;
 }
 
+function disableAutoRefresh() {
+  refreshSeconds.value = 0;
+}
+
+function selectAutoRefreshInterval(seconds: number) {
+  refreshSeconds.value = seconds;
+}
+
 watch(
   () => props.connectionId,
   () => {
@@ -227,18 +236,18 @@ defineExpose({ refresh });
       <p class="hidden truncate text-xs text-muted-foreground sm:block">{{ t("etcd.dashboard.description") }}</p>
       <div class="flex-1" />
       <div class="flex items-center gap-2">
-        <select v-model.number="refreshSeconds" class="h-8 rounded-md border bg-background px-2 text-xs">
-          <option :value="0">{{ t("etcd.dashboard.autoRefreshOff") }}</option>
-          <option :value="5">5s</option>
-          <option :value="10">10s</option>
-          <option :value="30">30s</option>
-          <option :value="60">60s</option>
-        </select>
-        <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="load">
-          <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
-          <RefreshCw v-else class="h-3.5 w-3.5" />
-          {{ t("etcd.dashboard.refresh") }}
-        </Button>
+        <AutoRefreshControl
+          :enabled="refreshSeconds > 0"
+          :interval-seconds="refreshSeconds || 5"
+          :intervals="[5, 10, 30, 60]"
+          :loading="loading"
+          :label="t('redis.autoRefresh')"
+          :off-label="t('etcd.dashboard.autoRefreshOff')"
+          :refresh-label="t('etcd.dashboard.refresh')"
+          @refresh="load"
+          @disable="disableAutoRefresh"
+          @select="selectAutoRefreshInterval"
+        />
       </div>
     </header>
 

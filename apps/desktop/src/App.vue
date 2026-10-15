@@ -129,6 +129,7 @@ import {
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
+  isDefaultQueryShortcutTarget,
   isFocusSearchShortcut,
   isFocusWhereShortcut,
   isGoToColumnShortcut,
@@ -143,6 +144,7 @@ import {
   isRefreshDataShortcut,
   isSaveShortcut,
   isSendSelectionToAiShortcut,
+  isSidebarFocusedTarget,
   isSwitchToNextTabShortcut,
   isSwitchToPreviousTabShortcut,
   isToggleResultsPaneShortcut,
@@ -3144,6 +3146,7 @@ function openConnectionSettings(connectionId: string, initialTab: ConfigTab = "c
 
 interface NewQueryOptions {
   preferredSource?: NewQueryContextSource;
+  openDefault?: boolean;
 }
 
 async function newQuery(options: NewQueryOptions = {}) {
@@ -3196,6 +3199,25 @@ async function newQuery(options: NewQueryOptions = {}) {
       } else {
         queryStore.createTab(target.connectionId, "", `${conn.name}:keys`, connectionTarget.kind);
       }
+    } catch (e: any) {
+      toast(
+        t("connection.connectFailed", {
+          message: translateBackendError(t, e),
+        }),
+        5000,
+      );
+    }
+    return;
+  }
+  if (options.openDefault) {
+    try {
+      await connectionStore.ensureConnected(target.connectionId);
+      let database = target.database;
+      if (target.shouldRefreshDefaultDatabase || !database) {
+        const databaseOptions = await getDatabaseOptions(target.connectionId);
+        database = resolveDefaultDatabase(conn, databaseOptions);
+      }
+      await queryStore.openDefaultQuery({ connectionId: target.connectionId, database, catalog: target.catalog });
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {
@@ -4519,8 +4541,7 @@ async function handleKeydown(e: KeyboardEvent) {
     // Otherwise Ctrl+F from empty space in the sidebar incorrectly opens the
     // search belonging to the active table/query tab.
     const target = e.target instanceof Element ? e.target : null;
-    const targetIsDocument = !target || target === document.body || target === document.documentElement;
-    const sidebarFocused = target?.closest("[data-app-sidebar]") || (targetIsDocument && lastFocusedSidebarSurface.value);
+    const sidebarFocused = isSidebarFocusedTarget(target, lastFocusedSidebarSurface.value);
     const focused = sidebarFocused ? appSidebarRef.value?.focusSearch(target) : focusSearchInAuxiliarySurface(target) || contentAreaRef.value?.focusSearch(target) || appSidebarRef.value?.focusSearch(target);
     if (focused) {
       e.preventDefault();
@@ -4543,8 +4564,7 @@ async function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     const target = e.target instanceof Element ? e.target : null;
-    const targetIsDocument = !target || target === document.body || target === document.documentElement;
-    const sidebarFocused = target?.closest("[data-app-sidebar]") || (targetIsDocument && lastFocusedSidebarSurface.value);
+    const sidebarFocused = isSidebarFocusedTarget(target, lastFocusedSidebarSurface.value);
     void newQuery({ preferredSource: sidebarFocused ? "sidebar" : undefined });
     return;
   }
@@ -4638,6 +4658,13 @@ async function handleKeydown(e: KeyboardEvent) {
   }
   // CodeMirror ignores keydown events after an IME composition changes the
   // document, so this app-level fallback must share the editor shortcut guard.
+  const defaultQueryShortcutTarget = isDefaultQueryShortcutTarget(e.target, lastFocusedSidebarSurface.value);
+  if (isExecuteSqlShortcut(e, shortcuts) && defaultQueryShortcutTarget) {
+    e.preventDefault();
+    e.stopPropagation();
+    void newQuery({ preferredSource: "sidebar", openDefault: true });
+    return;
+  }
   if (activeTab.value?.mode === "query" && isExecuteSqlInNewResultTabShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
@@ -5084,7 +5111,7 @@ onUnmounted(() => {
           :show-logout="!isDesktop && needsAuth"
           @new-connection="showConnectionDialog = true"
           @expand-sidebar="setSidebarOpen(true)"
-          @new-query="newQuery"
+          @new-query="newQuery({ preferredSource: lastFocusedSidebarSurface ? 'sidebar' : undefined })"
           @set-theme-mode="setThemeMode"
           @toggle-ai="toggleRightSidebarPanel('ai')"
           @toggle-history="toggleRightSidebarPanel('history')"
@@ -5120,6 +5147,7 @@ onUnmounted(() => {
             @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
             @add-to-ai="addToAi"
             @mousedown="rememberSidebarSearchSurface"
+            @focusin="rememberSidebarSearchSurface"
           />
 
           <div
@@ -5127,6 +5155,7 @@ onUnmounted(() => {
             v-show="isSpecialPageActive || (!isAiPanelMaximized && !isHistoryPanelMaximized) || isZenMode"
             :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'"
             @mousedown="rememberEditorContentSurface"
+            @focusin="rememberEditorContentSurface"
           >
             <div class="h-full flex min-h-0 min-w-0 flex-col">
               <AppTabBar

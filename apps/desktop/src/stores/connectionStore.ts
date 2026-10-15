@@ -711,6 +711,7 @@ export const useConnectionStore = defineStore("connection", () => {
   };
   const connectInFlight = new Map<string, Promise<void>>();
   const disconnectInFlight = new Map<string, Promise<void>>();
+  const credentialCloseInFlight = new Map<string, Promise<void>>();
   const disconnectInFlightScoped = new Map<string, boolean>();
   const passwordChangeReconnectRequired = new Map<string, "retiring" | "ready">();
   const cancelDisconnectInFlight = new Map<string, Promise<void>>();
@@ -1119,12 +1120,14 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function getBlockingDisconnectInFlight(connectionId: string): Promise<void> | undefined {
+    const credentialClose = credentialCloseInFlight.get(connectionId);
+    if (credentialClose) return credentialClose;
     return disconnectInFlightScoped.get(connectionId) ? undefined : disconnectInFlight.get(connectionId);
   }
 
   /** True while any disconnect for the connection is in flight (full or scoped). */
   function hasDisconnectInFlight(connectionId: string): boolean {
-    return disconnectInFlight.has(connectionId);
+    return credentialCloseInFlight.has(connectionId) || disconnectInFlight.has(connectionId);
   }
 
   /** 用户显式关闭过、且此后没有重新连上的连接（见 `userClosedConnectionIds`）。 */
@@ -1172,13 +1175,43 @@ export const useConnectionStore = defineStore("connection", () => {
     return bounded;
   }
 
-  function startDisconnectRequest(connectionId: string, metadataDrain?: Promise<void>, expectedConfigFingerprint?: string): Promise<void> {
+  function startDisconnectRequest(connectionId: string, metadataDrain?: Promise<void>, expectedConfigFingerprint?: string, beforeDisconnect?: () => Promise<void>): Promise<void> {
+    const pendingCredentialClose = credentialCloseInFlight.get(connectionId);
+    if (pendingCredentialClose) return pendingCredentialClose;
     const clientAttempt = activeLocalConnectionAttempts.get(connectionId) ?? successfulLocalConnectionAttempts.get(connectionId);
     const disconnectIfCurrent = () => {
       const config = getConfig(connectionId);
       if (expectedConfigFingerprint && (!config || connectionConfigFingerprint(config) !== expectedConfigFingerprint)) return;
       return api.disconnectDb(connectionId, clientAttempt);
     };
+    if (beforeDisconnect) {
+      // Register before any asynchronous retirement work. A scoped pool teardown
+      // may normally overlap reconnect, but a pending forget must never do so.
+      const request = Promise.resolve().then(async () => {
+        let retirementFailed = false;
+        let retirementError: unknown;
+        try {
+          await beforeDisconnect();
+        } catch (error) {
+          retirementFailed = true;
+          retirementError = error;
+        }
+        try {
+          const poolRequest = metadataDrain ? metadataDrain.then(disconnectIfCurrent) : Promise.resolve(disconnectIfCurrent());
+          await trackDisconnectRequest(connectionId, poolRequest, clientAttempt != null);
+        } catch (error) {
+          if (!retirementFailed) throw error;
+        }
+        if (retirementFailed) throw retirementError;
+      });
+      const tracked = request.finally(() => {
+        if (credentialCloseInFlight.get(connectionId) === tracked) credentialCloseInFlight.delete(connectionId);
+      });
+      // Disconnect also awaits UI persistence; observe an early rejection now.
+      void tracked.catch(() => undefined);
+      credentialCloseInFlight.set(connectionId, tracked);
+      return tracked;
+    }
     let request: Promise<void>;
     try {
       request = metadataDrain ? metadataDrain.then(disconnectIfCurrent) : Promise.resolve(disconnectIfCurrent());
@@ -4602,6 +4635,17 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  async function retireSessionCredentialIfPresent(connectionId: string): Promise<void> {
+    if (!(await api.sessionCredentialStatus(connectionId))) return;
+    try {
+      await api.forgetSessionCredential(connectionId);
+    } catch (error) {
+      const alreadyGone = `Connection has no transient session credential to forget: ${connectionId}`;
+      if (connectionErrorMessage(error) === alreadyGone && !(await api.sessionCredentialStatus(connectionId))) return;
+      throw error;
+    }
+  }
+
   /**
    * Prompt for a transient password when saving is disabled, or when a server
    * confirms that a metadata-only synced connection sent no password. The
@@ -4690,7 +4734,7 @@ export const useConnectionStore = defineStore("connection", () => {
         const prompted = await ensureConnectionPassword({ ...config, password: "", save_password: false }, true);
         config = prompted.config;
         rememberPassword = prompted.rememberPassword;
-      } else if (connectionNeedsPasswordPrompt(config) && (await pluginConnectionPasswordPromptNeeded(config)) && !(await hasSessionCredential(config.id))) {
+      } else if (connectionNeedsPasswordPrompt(config) && (await pluginConnectionPasswordPromptNeeded(config)) && (isConnectionClosedByUser(config.id) || !(await hasSessionCredential(config.id)))) {
         const prompted = await ensureConnectionPassword(config);
         config = prompted.config;
         rememberPassword = prompted.rememberPassword;
@@ -4884,11 +4928,18 @@ export const useConnectionStore = defineStore("connection", () => {
     // 重新挂载，也不该在这一刻把连接连回来。
     if (options.markClosedByUser !== false) markConnectionClosedByUser(connectionId);
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
-    if (hasSqlServerActivityTraceForConnection(connectionId)) {
+    const shouldRetireCredential = options.markClosedByUser !== false && getConfig(connectionId)?.save_password === false;
+    if (!shouldRetireCredential && hasSqlServerActivityTraceForConnection(connectionId)) {
       await disposeSqlServerActivityTracesForConnection(connectionId);
       if (!isExpectedConfigCurrent()) return;
     }
-    const disconnectRequest = startDisconnectRequest(connectionId, metadataDrain, options.expectedConfigFingerprint);
+    const beforeDisconnect = shouldRetireCredential
+      ? async () => {
+          await retireSessionCredentialIfPresent(connectionId);
+          if (hasSqlServerActivityTraceForConnection(connectionId)) await disposeSqlServerActivityTracesForConnection(connectionId);
+        }
+      : undefined;
+    const disconnectRequest = startDisconnectRequest(connectionId, metadataDrain, options.expectedConfigFingerprint, beforeDisconnect);
     cancelLocalConnectionAttempt(connectionId);
 
     connectedIds.value.delete(connectionId);
@@ -4958,11 +5009,11 @@ export const useConnectionStore = defineStore("connection", () => {
   /**
    * "断开并忘记本次密码"：关闭连接池（保留其它已保存连接的凭据），并清除该
    * `save_password === false` 连接本次运行期的会话密码，使下一次连接必须重新输入。
-   * 若该连接本无会话凭据，后端会返回错误并在此抛出（不静默吞掉），避免误报成功。
+   * 普通关闭已清除凭据时可安全重复；真实 API 错误仍向调用方传播。
    */
   async function disconnectAndForgetConnectionPassword(connectionId: string) {
     await disconnect(connectionId);
-    await api.forgetSessionCredential(connectionId);
+    if (getConfig(connectionId)?.save_password !== false) await retireSessionCredentialIfPresent(connectionId);
   }
 
   async function retirePasswordAfterChange(connectionId: string, expectedConfigFingerprint?: string): Promise<{ status: "retired"; fingerprint: string } | { status: "skipped" }> {
@@ -5107,7 +5158,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // Fast-path the common case (password saved or no password needed) so the
       // in-flight dedup above keeps its exact microtask cadence; only await the
       // interactive prompt when the connection actually needs a typed password.
-      if (connectionNeedsPasswordPrompt(config) && (await pluginConnectionPasswordPromptNeeded(config)) && !(await hasSessionCredential(connectionId))) {
+      if (connectionNeedsPasswordPrompt(config) && (await pluginConnectionPasswordPromptNeeded(config)) && (isConnectionClosedByUser(connectionId) || !(await hasSessionCredential(connectionId)))) {
         if (options.allowPasswordPrompt === false) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
         const prompted = await ensureConnectionPassword(config);
         config = prompted.config;
@@ -5275,7 +5326,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadSidebarDatabaseStorage(connectionId: string, options?: { force?: boolean }): Promise<void> {
-    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || !connectedIds.value.has(connectionId)) return;
+    if ((settingsStore.editorSettings.sidebarObjectInfoMode !== "size" && settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-and-size") || !connectedIds.value.has(connectionId)) return;
     if (!supportsSidebarDatabaseStorage(getConfig(connectionId))) return;
     const connectionNode = findConnectionNode(connectionId);
     const databases = sidebarDatabaseNames(connectionNode?.children);
@@ -5317,7 +5368,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadSidebarTableStorage(scope: SidebarTableStorageScope, options?: { force?: boolean }): Promise<void> {
-    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || !connectedIds.value.has(scope.connectionId)) return;
+    if ((settingsStore.editorSettings.sidebarObjectInfoMode !== "size" && settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-and-size") || !connectedIds.value.has(scope.connectionId)) return;
     if (!supportsSidebarTableStorage(getConfig(scope.connectionId))) return;
     const requestKey = sidebarTableStorageRequestKey(scope);
     const cacheScope = sidebarTableStorageCacheScope(scope);
@@ -5347,7 +5398,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   const sidebarDatabaseStorageScope = computed(() => {
-    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size") return "";
+    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" && settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-and-size") return "";
     return [...connectedIds.value]
       .filter((connectionId) => supportsSidebarDatabaseStorage(getConfig(connectionId)))
       .map((connectionId) => sidebarDatabaseStorageRequestKey(connectionId, sidebarDatabaseNames(findConnectionNode(connectionId)?.children)))
@@ -5358,7 +5409,7 @@ export const useConnectionStore = defineStore("connection", () => {
   watch(
     sidebarDatabaseStorageScope,
     () => {
-      if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size") return;
+      if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" && settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-and-size") return;
       for (const connectionId of connectedIds.value) {
         void loadSidebarDatabaseStorage(connectionId);
       }

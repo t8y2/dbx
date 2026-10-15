@@ -1087,6 +1087,10 @@ export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile
   return post("/api/saved-sql", file);
 }
 
+export async function saveDefaultQueryContent(id: string, sql: string, updatedAt: string): Promise<void> {
+  return post(`/api/saved-sql/${encodeURIComponent(id)}/default-content`, { sql, updatedAt });
+}
+
 export async function deleteSavedSqlFile(id: string): Promise<void> {
   return del(`/api/saved-sql/${encodeURIComponent(id)}`);
 }
@@ -3061,11 +3065,12 @@ export async function saveGlobalSearchSettings(settings: GlobalSearchSettings): 
 // ---------------------------------------------------------------------------
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
+  const { operationTimeoutSecs, ...backendRequest } = request;
   // 1. POST to start the transfer
   const res = await fetch(apiUrl("/api/transfer/start"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ request }),
+    body: JSON.stringify({ request: backendRequest, operationTimeoutSecs }),
   });
   if (!res.ok) throw await backendResponseError(res);
   onStarted?.();

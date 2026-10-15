@@ -24,8 +24,10 @@ pub async fn start_transfer(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     request: TransferRequest,
+    operation_timeout_secs: Option<u64>,
 ) -> Result<(), String> {
     let state = state.inner().clone();
+    dbx_core::transfer::validate_transfer_operation_timeout(operation_timeout_secs)?;
     // Reject transfer early if the target connection is read-only — writing to it is inherently required
     ensure_connection_writable(&state, &request.target_connection_id, "Transfer").await?;
 
@@ -73,7 +75,11 @@ pub async fn start_transfer(
     )
     .await?;
 
-    dbx_core::transfer::ensure_transfer_source_types_supported(&state, &request, &source_pool_key).await?;
+    dbx_core::transfer::with_transfer_operation_timeout(
+        operation_timeout_secs,
+        dbx_core::transfer::ensure_transfer_source_types_supported(&state, &request, &source_pool_key),
+    )
+    .await?;
 
     let history = match TransferTaskJournal::accept(&state.storage, &state, &request, TaskLifecycleOwner::Tauri).await {
         Ok(history) => history,
@@ -90,6 +96,7 @@ pub async fn start_transfer(
             source_pool_key,
             target_pool_key,
             history.clone(),
+            operation_timeout_secs,
             |progress| emit_progress(&app, progress),
         )
         .await;

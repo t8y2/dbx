@@ -21,9 +21,9 @@ export function sidebarMenuScope(type: SidebarMenuTargetType): SidebarMenuScope 
 }
 
 const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
-  connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "contextMenu.openDatabaseBrowser", "contextMenu.editConnection", "contextMenu.refreshChildren"],
-  database: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
-  schema: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
+  connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.openDatabaseBrowser", "contextMenu.editConnection", "contextMenu.refreshChildren"],
+  database: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
+  schema: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
   table: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editStructure", "contextMenu.newQuery", "contextMenu.refreshChildren"],
   view: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editView", "contextMenu.newQuery", "contextMenu.refreshChildren"],
   "sql-editor": ["editor.execute", "editor.format", "editor.contextMenu.copySelection", "editor.contextMenu.cutSelection", "editor.contextMenu.pasteFromClipboard", "editor.contextMenu.findReplace"],

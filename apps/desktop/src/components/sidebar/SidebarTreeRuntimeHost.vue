@@ -191,7 +191,7 @@ import {
   buildMysqlAutoIncrementSql,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
-  supportsNativeMysqlAutoIncrement,
+  supportsMysqlAutoIncrement as connectionSupportsMysqlAutoIncrement,
   supportsSchemaComment,
   type DropTableChildObjectSqlOptions,
   type DropObjectSqlOptions,
@@ -337,6 +337,7 @@ import {
   showPasteDialog,
   pasteTableMode,
   pasteTableEntries,
+  pasteTableFromClipboard,
   showCreateDatabaseDialog,
   createDatabaseName,
   createDatabaseCharset,
@@ -1525,6 +1526,7 @@ function requestPasteTreeClipboard(): boolean {
   if (clipboard?.kind !== "table-copy") return false;
   if (canTransferTreeClipboardToCurrentNode()) return openTransferFromTreeClipboard();
   if (!canPasteTreeClipboardToCurrentNode()) return false;
+  pasteTableFromClipboard.value = true;
   pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
@@ -2148,9 +2150,9 @@ function shouldOpenQueryOnActivation(node: TreeNode): boolean {
 async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
   const node = activeNode.value;
   if (!node.connectionId) return;
-  // Activation opens (or focuses) "the" query page for the connection scope;
+  // Activation opens the persistent default SQL file for this database;
   // the context-menu entry keeps creating a fresh tab per invocation.
-  const reuseOptions = options.reuseQueryTabByScope === true ? [{ reuseQueryTabByScope: true }] : [];
+  const openDefault = options.reuseQueryTabByScope === true;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
@@ -2173,13 +2175,16 @@ async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
         openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, sql);
         return;
       }
-      queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog, ...reuseOptions);
+      if (openDefault) await queryStore.openDefaultQuery({ connectionId: node.connectionId, database: node.database, catalog: node.catalog });
+      else queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog);
       return;
     }
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
     const databaseOptions = await getDatabaseOptions(node.connectionId);
-    queryStore.createTab(node.connectionId, resolveDefaultDatabase(connection, databaseOptions), undefined, "query", connection.default_schema, undefined, undefined, ...reuseOptions);
+    const database = resolveDefaultDatabase(connection, databaseOptions);
+    if (openDefault) await queryStore.openDefaultQuery({ connectionId: node.connectionId, database });
+    else queryStore.createTab(node.connectionId, database, undefined, "query", connection.default_schema);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(e?.message || String(e));
@@ -3335,7 +3340,7 @@ function selectedBatchMysqlAutoIncrementTargets(): TreeNode[] {
   const targets = selectedBatchTableTargets();
   return targets.filter((node) => {
     const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
-    return supportsNativeMysqlAutoIncrement(config);
+    return connectionSupportsMysqlAutoIncrement(config);
   });
 }
 
@@ -3387,7 +3392,7 @@ async function confirmBatchMysqlAutoIncrement() {
     }
     try {
       const config = connectionStore.getConfig(target.connectionId);
-      if (!supportsNativeMysqlAutoIncrement(config)) throw new Error("Setting AUTO_INCREMENT is supported only for native MySQL connections.");
+      if (!connectionSupportsMysqlAutoIncrement(config)) throw new Error("Setting AUTO_INCREMENT is supported only for compatible MySQL-family connections.");
       await connectionStore.ensureConnected(target.connectionId);
       const sqlOptions = batchMysqlAutoIncrementSqlOptionsForNode(target);
       const sql = await buildMysqlAutoIncrementSql(sqlOptions);
@@ -5258,12 +5263,22 @@ async function confirmDropSchema() {
   }
 }
 
-function duplicateStructure(source: TreeNode = activeNode.value) {
+function copyAsNewTable(source: TreeNode = activeNode.value) {
   if (!isDuplicateStructureSource(source)) return;
   if (databaseTypeForNode(source) === "victoriametrics") return;
-  duplicateStructureSource.value = source;
-  duplicateTableName.value = `${source.label}_copy`;
-  showDuplicateDialog.value = true;
+  pasteTableFromClipboard.value = false;
+  pasteTableMode.value = defaultPasteTableMode(databaseTypeForNode(source));
+  pasteTableEntries.value = [
+    {
+      sourceName: source.label,
+      targetName: `${source.label}_copy`,
+      connectionId: source.connectionId,
+      database: source.database,
+      schema: normalizeTreeClipboardSchema(source.connectionId, source.database, source.schema),
+      tableComment: source.comment,
+    },
+  ];
+  showPasteDialog.value = true;
 }
 
 function isDuplicateStructureSource(node: TreeNode): node is DuplicateStructureSource {
@@ -5335,7 +5350,9 @@ async function confirmPasteTableImpl() {
     .filter((entry) => entry.targetName.trim())
     .map((entry) => ({ ...entry, databaseType: entry.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) : undefined, identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId) }));
   if (entries.length === 0) return;
-  const clipboardAtPasteStart = connectionStore.treeClipboard;
+  const shouldConsumeTableClipboard = pasteTableFromClipboard.value;
+  const clipboardAtPasteStart = shouldConsumeTableClipboard ? connectionStore.treeClipboard : null;
+  pasteTableFromClipboard.value = false;
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
@@ -5502,7 +5519,7 @@ async function confirmPasteTableImpl() {
   }
   const pasteFeedback = tablePasteFeedback(successCount, pasteFailCount, firstPasteError);
   if (pasteFailCount === 0) {
-    if (connectionStore.treeClipboard === clipboardAtPasteStart) {
+    if (shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
     toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
@@ -5529,6 +5546,7 @@ function openPasteTableDialog() {
     toast(t("contextMenu.noTableToPaste"), 2000);
     return;
   }
+  pasteTableFromClipboard.value = true;
   pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
@@ -6239,6 +6257,7 @@ function objectDialogCapabilities() {
     showPasteDialog,
     pasteTableEntries,
     pasteTableMode,
+    pasteTableFromClipboard,
     pasteTableDataCopySupported: pasteTableDataCopySupported.value,
     confirmPasteTable,
   };
@@ -6564,6 +6583,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     const supportsAiContext = supportsAiAssistantContext(currentDatabaseType());
     if (supportsQueryActions) {
       items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       if (supportsAiContext) {
         items.push(addToAiMenuItem(node));
       }
@@ -6874,6 +6894,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: "", separator: true });
       if (canOpenObjectBrowser.value) items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
       items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
@@ -6896,6 +6917,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (supportsConnectionQueryActions(currentDatabaseType())) {
       items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       if (node.type === "database" && supportsAiAssistantContext(currentDatabaseType())) {
         items.push(addToAiMenuItem(node));
       }
@@ -7028,6 +7050,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   if (node.type === "saved-sql-root" || node.type === "saved-sql-folder") {
     if (supportsConnectionQueryActions(currentDatabaseType())) {
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       items.push({ label: "", separator: true });
     }
     items.push({
@@ -7112,7 +7135,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "nacos-access-control" || node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control" || node.type === "zookeeper-root" || node.type === "consul-root" || node.type === "consul-overview") {
+  if (node.type === "nacos-access-control" || node.type === "zookeeper-root" || node.type === "consul-root" || node.type === "consul-overview") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return true;
   }
@@ -7431,7 +7454,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push(copyStructureAsSubmenu());
     if (isTableNotView.value) {
       items.push({ label: "", separator: true });
-      items.push({ sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: duplicateStructure, icon: CopyPlus });
+      items.push({ sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: copyAsNewTable, icon: CopyPlus });
       // Keep menu copy aligned with keyboard copy so frozen multi-selection and single-row fallback stay compatible.
       items.push(...treeTableClipboardMenuItems(node));
       if (supportsVacuum.value) {

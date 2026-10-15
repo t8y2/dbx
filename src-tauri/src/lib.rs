@@ -2487,6 +2487,7 @@ pub fn run() {
             commands::saved_sql::save_saved_sql_folder,
             commands::saved_sql::delete_saved_sql_folder,
             commands::saved_sql::save_saved_sql_file,
+            commands::saved_sql::save_default_query_content,
             commands::saved_sql::delete_saved_sql_file,
             commands::saved_sql::saved_sql_storage_dir,
             commands::saved_sql::open_saved_sql_storage_dir,

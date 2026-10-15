@@ -15,6 +15,8 @@ export interface DataGridColumnLookupOptions {
   commentByColumn?: ReadonlyMap<string, string>;
 }
 
+export type DataGridColumnLookupMatchMode = "fuzzy" | "exact";
+
 function normalizedSearchText(value: string): string {
   return value.trim();
 }
@@ -51,8 +53,12 @@ export function buildDataGridColumnLookupItems(options: DataGridColumnLookupOpti
   });
 }
 
-export function filterDataGridColumnLookupItems<ColumnLookupItem extends DataGridColumnLookupItem>(items: readonly ColumnLookupItem[], query: string): ColumnLookupItem[] {
+export function filterDataGridColumnLookupItems<ColumnLookupItem extends DataGridColumnLookupItem>(items: readonly ColumnLookupItem[], query: string, matchMode: DataGridColumnLookupMatchMode = "fuzzy"): ColumnLookupItem[] {
   const normalizedQuery = normalizedSearchText(query);
   if (!normalizedQuery) return [...items];
+  if (matchMode === "exact") {
+    const normalizedQueryLower = normalizedQuery.toLocaleLowerCase();
+    return items.filter((item) => [item.name, item.sourceName].filter((value): value is string => !!value).some((value) => value.trim().toLocaleLowerCase() === normalizedQueryLower));
+  }
   return items.filter((item) => [item.name, item.sourceName, item.comment].filter((value): value is string => !!value).some((value) => matchesIdentifierSearch(value, normalizedQuery)));
 }

@@ -368,3 +368,24 @@ export function transposeScrollLeftForRecord(options: TransposeScrollLeftOptions
   const maxScrollLeft = Math.max(0, totalWidth - options.viewportWidth);
   return Math.max(0, Math.min(desired, maxScrollLeft));
 }
+
+export interface TransposeScrollTopForFieldOptions {
+  fieldIndex: number;
+  totalFields: number;
+  rowHeight: number;
+  viewportHeight: number;
+  currentScrollTop?: number;
+  alignment?: TransposeScrollAlignment;
+}
+
+export function transposeScrollTopForField(options: TransposeScrollTopForFieldOptions): number {
+  if (options.rowHeight <= 0 || options.totalFields <= 0) return 0;
+  const fieldIndex = Math.max(0, Math.min(options.totalFields - 1, options.fieldIndex));
+  const fieldStart = fieldIndex * options.rowHeight;
+  const fieldEnd = fieldStart + options.rowHeight;
+  const viewportHeight = Math.max(0, options.viewportHeight);
+  const currentScrollTop = Math.max(0, options.currentScrollTop ?? fieldStart);
+  const desired = options.alignment === "start" ? fieldStart : fieldStart < currentScrollTop ? fieldStart : fieldEnd > currentScrollTop + viewportHeight ? fieldEnd - viewportHeight : currentScrollTop;
+  const maxScrollTop = Math.max(0, options.totalFields * options.rowHeight - viewportHeight);
+  return Math.max(0, Math.min(desired, maxScrollTop));
+}

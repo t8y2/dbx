@@ -76,7 +76,152 @@ describe("connectionStore save_password opt-out", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it.each(["postgres", "mysql", "redis"] as const)("ordinary close retires the %s transient password before disconnect", async (db_type) => {
+    const calls: string[] = [];
+    installApiMocks({
+      sessionCredentialStatus: vi.fn().mockResolvedValue(true),
+      forgetSessionCredential: vi.fn(async () => {
+        calls.push("forget");
+      }),
+      disconnectDb: vi.fn(async () => {
+        calls.push("disconnect");
+      }),
+    });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection({ db_type, save_password: false })];
+    await store.disconnect("pg-1");
+    expect(calls).toEqual(["forget", "disconnect"]);
+  });
+
+  it.each([true, undefined])("preserves ordinary-close behavior for save_password=%s", async (save_password) => {
+    installApiMocks();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection({ save_password })];
+    await store.disconnect("pg-1");
+    const api = await import("@/lib/backend/api");
+    expect(api.sessionCredentialStatus).not.toHaveBeenCalled();
+    expect(api.forgetSessionCredential).not.toHaveBeenCalled();
+    expect(api.disconnectDb).toHaveBeenCalledTimes(1);
+  });
+
+  it("system disconnect does not retire a transient credential", async () => {
+    installApiMocks();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection({ save_password: false })];
+    await store.disconnect("pg-1", { markClosedByUser: false });
+    const api = await import("@/lib/backend/api");
+    expect(api.sessionCredentialStatus).not.toHaveBeenCalled();
+    expect(api.forgetSessionCredential).not.toHaveBeenCalled();
+  });
+
+  it("ordinary and explicit repeated closes are safe when there is no credential", async () => {
+    installApiMocks();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection({ save_password: false })];
+    await store.disconnect("pg-1");
+    await store.disconnectAndForgetConnectionPassword("pg-1");
+    const api = await import("@/lib/backend/api");
+    expect(api.forgetSessionCredential).not.toHaveBeenCalled();
+    expect(api.disconnectDb).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces concurrent closes so an old forget cannot erase a newly entered password", async () => {
+    const forget = deferred<void>();
+    installApiMocks({ sessionCredentialStatus: vi.fn().mockResolvedValue(true), forgetSessionCredential: vi.fn(() => forget.promise) });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection({ save_password: false })];
+    const closes = [store.disconnect("pg-1"), store.disconnectAndForgetConnectionPassword("pg-1")];
+    await vi.waitFor(async () => {
+      const api = await import("@/lib/backend/api");
+      expect(api.forgetSessionCredential).toHaveBeenCalledTimes(1);
+    });
+    forget.resolve();
+    await Promise.all(closes);
+    const api = await import("@/lib/backend/api");
+    expect(api.forgetSessionCredential).toHaveBeenCalledTimes(1);
+    expect(api.disconnectDb).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])("accepts exact already-gone error only if absence is confirmed: remaining=%s", async (remaining) => {
+    const error = new Error("Connection has no transient session credential to forget: pg-1");
+    installApiMocks({ sessionCredentialStatus: vi.fn().mockResolvedValueOnce(true).mockResolvedValue(remaining), forgetSessionCredential: vi.fn().mockRejectedValue(error) });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection({ save_password: false })];
+    const closing = store.disconnect("pg-1");
+    if (remaining) await expect(closing).rejects.toThrow(error.message);
+    else await closing;
+    const api = await import("@/lib/backend/api");
+    expect(api.disconnectDb).toHaveBeenCalledTimes(1);
+    expect(api.sessionCredentialStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["status", "forget"])("propagates %s failure, still disconnects and forces fresh input on retry", async (failure) => {
+    const status = vi.fn().mockResolvedValue(true);
+    const forget = vi.fn().mockResolvedValue(undefined);
+    (failure === "status" ? status : forget).mockRejectedValueOnce(new Error("transport failed"));
+    installApiMocks({ sessionCredentialStatus: status, forgetSessionCredential: forget });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "fresh", rememberPassword: false });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const config = postgresConnection({ save_password: false });
+    store.connections = [config];
+    await expect(store.disconnect(config.id)).rejects.toThrow("transport failed");
+    const api = await import("@/lib/backend/api");
+    expect(api.disconnectDb).toHaveBeenCalledTimes(1);
+    await store.connect(config);
+    expect(requestPassword).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the pool disconnect timeout after retiring the credential", async () => {
+    vi.useFakeTimers();
+    installApiMocks({ sessionCredentialStatus: vi.fn().mockResolvedValue(true), disconnectDb: vi.fn(() => new Promise<void>(() => {})) });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection({ save_password: false })];
+    const closing = store.disconnect("pg-1");
+    await vi.advanceTimersByTimeAsync(6_000);
+    await closing;
+    const api = await import("@/lib/backend/api");
+    expect(api.forgetSessionCredential).toHaveBeenCalledTimes(1);
+    expect(api.disconnectDb).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["connect", "ensureConnected"] as const)("immediate %s waits beyond the pool timeout for retirement and prompts even with stale status", async (reopen) => {
+    vi.useFakeTimers();
+    const forget = deferred<void>();
+    const disconnectDb = vi.fn().mockResolvedValue(undefined);
+    installApiMocks({ sessionCredentialStatus: vi.fn().mockResolvedValue(true), forgetSessionCredential: vi.fn(() => forget.promise), disconnectDb });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "new-input", rememberPassword: false });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const config = postgresConnection({ save_password: false });
+    store.connections = [config];
+    await store.connect(config);
+    const api = await import("@/lib/backend/api");
+    vi.mocked(api.connectDb).mockClear();
+    const closing = store.disconnect(config.id);
+    const reopening = reopen === "connect" ? store.connect(config) : store.ensureConnected(config.id);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(disconnectDb).not.toHaveBeenCalled();
+    expect(api.connectDb).not.toHaveBeenCalled();
+    expect(requestPassword).not.toHaveBeenCalled();
+    forget.resolve();
+    await closing;
+    await reopening;
+    expect(requestPassword).toHaveBeenCalledTimes(1);
+    expect(api.connectDb).toHaveBeenCalledWith(expect.objectContaining({ password: "new-input" }), expect.any(Number));
   });
 
   it("addConnection blanks the in-memory password when save_password is false", async () => {

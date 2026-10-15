@@ -12,7 +12,7 @@ import {
   buildTruncateTableSql,
   buildVacuumTableSql,
   supportsDropTableCascade,
-  supportsNativeMysqlAutoIncrement,
+  supportsMysqlAutoIncrement,
   supportsTruncateTableCascade,
   type MysqlAutoIncrementSqlOptions,
   type TableAdminSqlOptions,
@@ -74,7 +74,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
   });
   const canDropTableCascade = computed(() => activeNode.value.type === "table" && supportsDropTableCascade(currentDatabaseType()));
   const canTruncateTableCascade = computed(() => activeNode.value.type === "table" && supportsTruncateTableCascade(currentDatabaseType()));
-  const supportsMysqlAutoIncrement = computed(() => activeNode.value.type === "table" && supportsNativeMysqlAutoIncrement(activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined));
+  const supportsMysqlAutoIncrementAction = computed(() => activeNode.value.type === "table" && supportsMysqlAutoIncrement(activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined));
 
   function tableAdminSqlOptions(optionsOverride?: { cascade?: boolean }): TableAdminSqlOptions {
     const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
@@ -153,7 +153,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
   }
 
   function mysqlAutoIncrement() {
-    if (!supportsMysqlAutoIncrement.value) return;
+    if (!supportsMysqlAutoIncrementAction.value) return;
     mysqlAutoIncrementValue.value = "1";
     mysqlAutoIncrementPreviewKey.value = "";
     void refreshMysqlAutoIncrementPreviewSql();
@@ -165,7 +165,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     if (!node.connectionId || !node.database) return;
     try {
       const config = connectionStore.getConfig(node.connectionId);
-      if (!supportsNativeMysqlAutoIncrement(config)) throw new Error("Setting AUTO_INCREMENT is supported only for native MySQL connections.");
+      if (!supportsMysqlAutoIncrement(config)) throw new Error("Setting AUTO_INCREMENT is supported only for compatible MySQL-family connections.");
       await connectionStore.ensureConnected(node.connectionId);
       const sqlOptions = mysqlAutoIncrementSqlOptionsForNode(node);
       const previewKey = mysqlAutoIncrementPreviewKeyForNode(node, sqlOptions);
@@ -571,7 +571,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     supportsVacuum,
     canDropTableCascade,
     canTruncateTableCascade,
-    supportsMysqlAutoIncrement,
+    supportsMysqlAutoIncrement: supportsMysqlAutoIncrementAction,
     refreshDropTablePreviewSql,
     refreshTruncateTablePreviewSql,
     dropTable,

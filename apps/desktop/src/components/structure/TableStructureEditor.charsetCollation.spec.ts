@@ -379,6 +379,18 @@ describe("TableStructureEditor MySQL AUTO_INCREMENT counter", () => {
     expect(root.querySelector("[data-mysql-auto-increment-editor-trigger]")?.getAttribute("title")).toContain("structureEditor.editMysqlAutoIncrementValue");
   });
 
+  it("loads and renders the counter for MariaDB connections", async () => {
+    mocks.connection.name = "MariaDB";
+    mocks.connection.driver_label = "MariaDB";
+    mocks.connection.driver_profile = "mariadb";
+
+    const root = await mountEditor(true);
+
+    await vi.waitFor(() => expect(mocks.getMysqlTableAutoIncrement).toHaveBeenCalledWith("structure-charset-test", "test", "users"));
+    expect(root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.value).toBe("10");
+    expect(root.querySelector("[data-mysql-auto-increment-editor-trigger]")).not.toBeNull();
+  });
+
   it("loads an editable blank counter when auto-increment is checked before saving", async () => {
     mocks.getMysqlTableAutoIncrement.mockResolvedValueOnce(null);
     const root = await mountEditor(false);

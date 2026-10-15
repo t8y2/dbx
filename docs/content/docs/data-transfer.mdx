@@ -83,8 +83,11 @@ This entry point lists target drivers with implemented transactional writes. It 
 | Upsert | Updates or inserts by key when the target path supports it and a usable key is available |
 | Target table name case | Preserve, lowercase, or uppercase; transformed target names must remain unique |
 | Batch size | Controls paged reads and batched writes; the UI default is 1000 |
+| Operation timeout | Inherits the source and target connection query timeouts by default; override this transfer with `0`–`3600` seconds, where `0` means unlimited |
 
 If table creation is disabled, compatible target tables must already exist. Even with table creation enabled, cross-engine DDL may require manual changes when the target does not support a source type, default, constraint, or object.
+
+The operation timeout does not cap the overall transfer duration. Drivers with incremental result streams treat it as an inactivity window that resets whenever data arrives; drivers that return a result all at once apply it to the total duration of each database operation. A custom value affects only this transfer and its saved task, not the connection or query-editor timeout settings.
 
 <Callout type="warn">**Rebuild structure and data** replaces existing target tables and their indexes, triggers, constraints, comments, and object permissions with source structure. The original table is renamed to a backup first, then dropped after a successful transfer. If any step fails, the backup table is retained and can be manually restored.</Callout>
 

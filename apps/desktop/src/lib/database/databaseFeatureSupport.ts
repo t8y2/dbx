@@ -116,7 +116,7 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  * ZooKeeper has no query surface: its agent implements only kv_* operations,
  * so the sidebar "new query" flow would call list-databases and fail
  * (issue #8215). It is excluded alongside the other specialized surfaces
- * (nacos, consul, hbase) whose connection workbench replaces query tabs.
+ * (nacos, consul, hbase, etcd) whose connection workbench replaces query tabs.
  *
  * The message-queue surfaces (`mq` — Pulsar/Kafka/RocketMQ/RabbitMQ — and
  * `mqtt`) belong to the same group: brokers have no SQL engine, and their
@@ -128,7 +128,7 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  * hidden there as well (issue #9609).
  */
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt" && dbType !== "meilisearch" && dbType !== "salesforce";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "etcd" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt" && dbType !== "meilisearch" && dbType !== "salesforce";
 }
 
 /**

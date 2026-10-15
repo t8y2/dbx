@@ -4352,19 +4352,7 @@ fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 /// database) is left untouched, since it already resolves correctly wherever
 /// the sync script runs.
 fn rewrite_ddl_header_qualifier(ddl: &str, header_keywords: &[&str], schema: Option<&str>, qualified: &str) -> String {
-    let leading_ws = ddl.len() - ddl.trim_start().len();
-    let body = &ddl[leading_ws..];
-    let Some(keyword) = header_keywords.iter().find(|keyword| starts_with_ignore_ascii_case(body, keyword)) else {
-        return ddl.to_string();
-    };
-
-    let mut idx = skip_ascii_whitespace(ddl, leading_ws + keyword.len());
-    if starts_with_ignore_ascii_case(&ddl[idx..], "IF NOT EXISTS") {
-        idx = skip_ascii_whitespace(ddl, idx + "IF NOT EXISTS".len());
-    }
-
-    let ident_start = idx;
-    let Some(parsed) = parse_qualified_identifier(ddl, idx) else {
+    let Some((ident_start, parsed)) = parse_ddl_header_name(ddl, header_keywords) else {
         return ddl.to_string();
     };
     let Some((schema_start, schema_end)) = parsed.schema_span else {
@@ -4380,6 +4368,90 @@ fn rewrite_ddl_header_qualifier(ddl: &str, header_keywords: &[&str], schema: Opt
         return ddl.to_string();
     }
     format!("{}{}{}", &ddl[..ident_start], qualified, &ddl[parsed.end..])
+}
+
+/// Locates the object name that follows one of `header_keywords` at the start
+/// of `ddl`, returning its start offset and parsed span.
+fn parse_ddl_header_name(ddl: &str, header_keywords: &[&str]) -> Option<(usize, ParsedDdlName)> {
+    let leading_ws = ddl.len() - ddl.trim_start().len();
+    let body = &ddl[leading_ws..];
+    let keyword = header_keywords.iter().find(|keyword| starts_with_ignore_ascii_case(body, keyword))?;
+
+    let mut idx = skip_ascii_whitespace(ddl, leading_ws + keyword.len());
+    if starts_with_ignore_ascii_case(&ddl[idx..], "IF NOT EXISTS") {
+        idx = skip_ascii_whitespace(ddl, idx + "IF NOT EXISTS".len());
+    }
+    parse_qualified_identifier(ddl, idx).map(|parsed| (idx, parsed))
+}
+
+/// Oracle's native table DDL qualifies more than its `CREATE TABLE` head with
+/// the source schema: foreign key `REFERENCES`, and the `CREATE INDEX` and
+/// `COMMENT ON` statements the agent appends. Rewriting only the head left
+/// those pointing at the source schema, so the sync script failed on the target
+/// or ran them against the source schema (#12048).
+/// After the head rewrite, every `"SOURCE".` qualifier in code is moved to the
+/// target schema. References to other schemas, string literals, and comments
+/// keep their text.
+fn rewrite_oracle_native_table_ddl(ddl: &str, schema: Option<&str>, qualified: &str) -> String {
+    let source_schema = parse_ddl_header_name(ddl, TABLE_DDL_HEADER_KEYWORDS)
+        .and_then(|(_, parsed)| parsed.schema_span)
+        .map(|(start, end)| strip_identifier_quotes(&ddl[start..end]));
+    let rewritten = rewrite_ddl_header_qualifier(ddl, TABLE_DDL_HEADER_KEYWORDS, schema, qualified);
+    let target_schema = schema.map(str::trim).filter(|schema| !schema.is_empty());
+    match (source_schema, target_schema) {
+        (Some(source), Some(target)) if source != target => {
+            rewrite_quoted_schema_qualifier(&rewritten, &source, &quote_id(target, DatabaseType::Oracle))
+        }
+        _ => rewritten,
+    }
+}
+
+/// Replaces each double-quoted `source_schema` identifier that is followed by
+/// `.` with `target_qualifier`, skipping single-quoted literals, `--` and
+/// `/* */` comments.
+fn rewrite_quoted_schema_qualifier(sql: &str, source_schema: &str, target_qualifier: &str) -> String {
+    let source = format!("\"{}\"", source_schema.replace('"', "\"\""));
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut copied = 0;
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let skip_to = match bytes[idx] {
+            b'\'' => {
+                let mut end = idx + 1;
+                while end < bytes.len() {
+                    if bytes[end] == b'\'' {
+                        if bytes.get(end + 1) == Some(&b'\'') {
+                            end += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    end += 1;
+                }
+                end + 1
+            }
+            b'-' if bytes.get(idx + 1) == Some(&b'-') => {
+                sql[idx..].find('\n').map_or(bytes.len(), |offset| idx + offset)
+            }
+            b'/' if bytes.get(idx + 1) == Some(&b'*') => {
+                sql[idx + 2..].find("*/").map_or(bytes.len(), |offset| idx + 2 + offset + 2)
+            }
+            b'"' => {
+                let end = parse_identifier_segment_end(sql, idx).unwrap_or(bytes.len());
+                if sql[idx..end] == source && sql[end..].starts_with('.') {
+                    out.push_str(&sql[copied..idx]);
+                    out.push_str(target_qualifier);
+                    copied = end;
+                }
+                end
+            }
+            _ => idx + 1,
+        };
+        idx = skip_to.min(bytes.len());
+    }
+    out.push_str(&sql[copied..]);
+    out
 }
 
 struct ParsedDdlName {
@@ -6351,7 +6423,11 @@ fn generate_schema_sync_sql_inner(
                 // Prefer native source DDL when the target profile wants it
                 // (MySQL-family), or as fallback without a structured snapshot.
                 if let Some(ddl) = &diff.ddl {
-                    let ddl = rewrite_ddl_header_qualifier(ddl, TABLE_DDL_HEADER_KEYWORDS, schema, &table);
+                    let ddl = if db_type == DatabaseType::Oracle {
+                        rewrite_oracle_native_table_ddl(ddl, schema, &table)
+                    } else {
+                        rewrite_ddl_header_qualifier(ddl, TABLE_DDL_HEADER_KEYWORDS, schema, &table)
+                    };
                     lines.push(format!("-- Create {}: {}", diff.object_type.as_deref().unwrap_or("table"), diff.name));
                     lines.push(format!("{};", ddl.trim_end().trim_end_matches(';')));
                     lines.push(String::new());
@@ -15794,6 +15870,62 @@ mod tests {
 
         assert!(sql.contains("CREATE OR REPLACE FORCE VIEW DBX_TGT.V_NEW"), "{sql}");
         assert!(!sql.contains("DBX_TEST.V_NEW"), "{sql}");
+    }
+
+    #[test]
+    fn added_oracle_table_native_ddl_moves_dependent_statements_to_target_schema() {
+        // Issue #12048: only the CREATE TABLE head moved to the target schema, so the
+        // appended index and comments, and the foreign key, still named the source schema.
+        let ddl = [
+            "CREATE TABLE \"MESDEMO\".\"YZCM_F\" ",
+            "   (\t\"ID\" NUMBER, ",
+            "\t\"PID\" NUMBER, ",
+            "\t\"OID\" NUMBER, ",
+            "\t CONSTRAINT \"PK_YZCM_F\" PRIMARY KEY (\"ID\") ENABLE, ",
+            "\t CONSTRAINT \"FK_YZCM_F_P\" FOREIGN KEY (\"PID\")",
+            "\t  REFERENCES \"MESDEMO\".\"YZCM_P\" (\"ID\") ENABLE, ",
+            "\t CONSTRAINT \"FK_YZCM_F_O\" FOREIGN KEY (\"OID\")",
+            "\t  REFERENCES \"SHARED\".\"ORGS\" (\"ID\") ENABLE",
+            "   ) TABLESPACE \"USERS\";",
+            "",
+            "CREATE INDEX \"MESDEMO\".\"IDX_YZCM_F_PID\" ON \"MESDEMO\".\"YZCM_F\" (\"PID\") ",
+            "  TABLESPACE \"USERS\";",
+            "",
+            "-- copied from \"MESDEMO\".\"YZCM_F\"",
+            "COMMENT ON TABLE \"MESDEMO\".\"YZCM_F\" IS 'mirrors \"MESDEMO\".\"YZCM_F\"';",
+            "",
+            "COMMENT ON COLUMN \"MESDEMO\".\"YZCM_F\".\"PID\" IS 'parent id'",
+        ]
+        .join("\n");
+        let diffs = vec![TableDiff {
+            diff_type: "added".to_string(),
+            object_type: Some("table".to_string()),
+            name: "YZCM_F".to_string(),
+            ddl: Some(ddl),
+            ..TableDiff::default()
+        }];
+
+        let sql = generate_schema_sync_sql(
+            &diffs,
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Oracle,
+            Some("MESDATA"),
+            false,
+            Some(DialectKind::Oracle),
+            &[],
+        );
+
+        assert!(sql.contains("CREATE TABLE MESDATA.YZCM_F"), "{sql}");
+        assert!(sql.contains("REFERENCES MESDATA.\"YZCM_P\""), "{sql}");
+        assert!(sql.contains("CREATE INDEX MESDATA.\"IDX_YZCM_F_PID\" ON MESDATA.\"YZCM_F\""), "{sql}");
+        assert!(sql.contains("COMMENT ON TABLE MESDATA.\"YZCM_F\" IS 'mirrors \"MESDEMO\".\"YZCM_F\"'"), "{sql}");
+        assert!(sql.contains("COMMENT ON COLUMN MESDATA.\"YZCM_F\".\"PID\""), "{sql}");
+        assert!(sql.contains("REFERENCES \"SHARED\".\"ORGS\""), "{sql}");
+        assert!(sql.contains("-- copied from \"MESDEMO\".\"YZCM_F\""), "{sql}");
+        assert_eq!(sql.matches("\"MESDEMO\".").count(), 2, "only the literal and the comment keep it: {sql}");
     }
 
     #[test]

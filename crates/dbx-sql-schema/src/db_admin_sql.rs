@@ -250,6 +250,8 @@ pub struct CopyTableDataSqlOptions {
 
 const MYSQL_COMPATIBLE_PROFILES: &[&str] = &["mysql", "mariadb", "tidb", "oceanbase", "custom_mysql"];
 const CREATE_DATABASE_CHARSET_UNSUPPORTED_PROFILES: &[&str] = &["doris", "selectdb", "starrocks"];
+const MYSQL_AUTO_INCREMENT_PROFILES: &[&str] =
+    &["mysql", "mariadb", "tidb", "oceanbase", "tdsql", "polardb", "greatsql", "custom_mysql", "dolt", "goldendb"];
 
 pub fn supports_create_database_charset(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
     let normalized_profile = driver_profile.map(str::to_ascii_lowercase);
@@ -261,6 +263,17 @@ pub fn supports_create_database_charset(database_type: Option<DatabaseType>, dri
     }
     matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb))
         || normalized_profile.as_deref().is_some_and(|profile| MYSQL_COMPATIBLE_PROFILES.contains(&profile))
+}
+
+pub fn supports_mysql_auto_increment(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
+    if database_type == Some(DatabaseType::Goldendb) {
+        return true;
+    }
+    if database_type != Some(DatabaseType::Mysql) {
+        return false;
+    }
+    let profile = driver_profile.map(str::trim).unwrap_or_default();
+    profile.is_empty() || MYSQL_AUTO_INCREMENT_PROFILES.iter().any(|candidate| profile.eq_ignore_ascii_case(candidate))
 }
 
 pub fn build_create_database_sql(options: CreateDatabaseSqlOptions) -> Result<String, String> {
@@ -653,11 +666,8 @@ fn supports_vacuum_table(database_type: Option<DatabaseType>) -> bool {
 }
 
 pub(crate) fn validate_mysql_auto_increment_options(options: &MysqlAutoIncrementSqlOptions) -> Result<(), String> {
-    let profile = options.driver_profile.as_deref().map(str::trim).unwrap_or_default();
-    if options.database_type != Some(DatabaseType::Mysql)
-        || (!profile.is_empty() && !profile.eq_ignore_ascii_case("mysql"))
-    {
-        return Err("Setting AUTO_INCREMENT is supported only for native MySQL connections.".to_string());
+    if !supports_mysql_auto_increment(options.database_type, options.driver_profile.as_deref()) {
+        return Err("Setting AUTO_INCREMENT is supported only for compatible MySQL-family connections.".to_string());
     }
 
     let value = options.value.as_str();
@@ -2169,6 +2179,31 @@ mod tests {
             );
         }
 
+        for (database_type, driver_profile) in [
+            (Some(DatabaseType::Mysql), None),
+            (Some(DatabaseType::Mysql), Some("mariadb".to_string())),
+            (Some(DatabaseType::Mysql), Some("tidb".to_string())),
+            (Some(DatabaseType::Mysql), Some("oceanbase".to_string())),
+            (Some(DatabaseType::Mysql), Some("tdsql".to_string())),
+            (Some(DatabaseType::Mysql), Some("polardb".to_string())),
+            (Some(DatabaseType::Mysql), Some("greatsql".to_string())),
+            (Some(DatabaseType::Mysql), Some("custom_mysql".to_string())),
+            (Some(DatabaseType::Mysql), Some("dolt".to_string())),
+            (Some(DatabaseType::Mysql), Some("goldendb".to_string())),
+            (Some(DatabaseType::Goldendb), Some("goldendb".to_string())),
+        ] {
+            assert_eq!(
+                build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
+                    database_type,
+                    driver_profile,
+                    schema: Some("sales".to_string()),
+                    table_name: "events".to_string(),
+                    value: "42".to_string(),
+                }),
+                Ok("ALTER TABLE `sales`.`events` AUTO_INCREMENT = 42;".to_string())
+            );
+        }
+
         for value in
             ["", "0", "01", " 1", "1 ", "+1", "-1", "1.0", "1e3", "1; DROP TABLE users", "18446744073709551616"]
         {
@@ -2188,12 +2223,12 @@ mod tests {
         for (database_type, driver_profile) in [
             (Some(DatabaseType::Postgres), None),
             (Some(DatabaseType::Jdbc), Some("mysql".to_string())),
-            (Some(DatabaseType::Mysql), Some("mariadb".to_string())),
-            (Some(DatabaseType::Mysql), Some("tidb".to_string())),
-            (Some(DatabaseType::Mysql), Some("oceanbase".to_string())),
-            (Some(DatabaseType::Mysql), Some("dolt".to_string())),
-            (Some(DatabaseType::Goldendb), Some("goldendb".to_string())),
-            (Some(DatabaseType::Doris), Some("selectdb".to_string())),
+            (Some(DatabaseType::Mysql), Some("unknown".to_string())),
+            (Some(DatabaseType::Mysql), Some("doris".to_string())),
+            (Some(DatabaseType::Mysql), Some("selectdb".to_string())),
+            (Some(DatabaseType::Mysql), Some("starrocks".to_string())),
+            (Some(DatabaseType::Mysql), Some("manticoresearch".to_string())),
+            (Some(DatabaseType::Doris), Some("doris".to_string())),
             (Some(DatabaseType::StarRocks), Some("starrocks".to_string())),
         ] {
             assert!(build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {

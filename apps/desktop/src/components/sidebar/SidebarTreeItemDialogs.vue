@@ -90,6 +90,7 @@ const {
   showPasteDialog,
   pasteTableEntries,
   pasteTableMode,
+  pasteTableFromClipboard,
   pasteTableDataCopySupported,
   confirmPasteTable,
   showCreateDatabaseDialog,
@@ -608,7 +609,7 @@ watch(
   <Dialog v-model:open="showPasteDialog">
     <DialogContent class="sm:max-w-[500px]">
       <DialogHeader>
-        <DialogTitle>{{ pasteTableEntries.length > 1 ? t("contextMenu.batchPasteTitle") : t("contextMenu.pasteTableConfirmTitle") }}</DialogTitle>
+        <DialogTitle>{{ pasteTableFromClipboard ? (pasteTableEntries.length > 1 ? t("contextMenu.batchPasteTitle") : t("contextMenu.pasteTableConfirmTitle")) : t("contextMenu.duplicateNameTitle") }}</DialogTitle>
       </DialogHeader>
       <div class="space-y-4">
         <div class="flex gap-2">

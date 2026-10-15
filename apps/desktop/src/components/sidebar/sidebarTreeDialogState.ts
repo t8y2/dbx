@@ -89,6 +89,7 @@ export const duplicateStructureSource = ref<DuplicateStructureSource | null>(nul
 export const showPasteDialog = ref(false);
 export const pasteTableMode = ref<PasteTableMode>("structure-and-data");
 export const pasteTableEntries = ref<Array<{ sourceName: string; targetName: string; connectionId: string; database: string; schema?: string; tableComment?: string | null }>>([]);
+export const pasteTableFromClipboard = ref(false);
 export const showCreateDatabaseDialog = ref(false);
 export const createDatabaseName = ref("");
 export const createDatabaseCharset = ref("utf8mb4");

@@ -12175,8 +12175,12 @@ fn mysql_create_table_start_value() {
         assert!(!result.warnings.is_empty(), "{value}");
     }
     options.mysql_auto_increment_value = Some("66".to_string());
-    options.driver_profile = Some("tidb".to_string());
+    options.driver_profile = Some("doris".to_string());
     assert!(build_create_table_sql(options.clone()).statements.is_empty());
+    options.driver_profile = Some("tidb".to_string());
+    let tidb_result = build_create_table_sql(options.clone());
+    assert!(tidb_result.warnings.is_empty());
+    assert!(tidb_result.statements.iter().any(|sql| sql.contains("AUTO_INCREMENT = 66")));
     options.driver_profile = None;
     options.columns[0].extra = None;
     assert!(build_create_table_sql(options).statements.is_empty());

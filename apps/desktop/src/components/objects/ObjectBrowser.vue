@@ -436,6 +436,7 @@ const batchEmptyPlan = ref<BatchTableEmptyPlanItem<ObjectBrowserRow>[]>([]);
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
 const pasteTableEntries = ref<{ sourceName: string; targetName: string; schema?: string; tableComment?: string | null }[]>([]);
+const pasteTableFromClipboard = ref(false);
 const pasteTableDataCopySupported = computed(() => supportsWholeRowTableDataCopy(effectiveDatabaseType.value));
 const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   select: 34,
@@ -3094,10 +3095,18 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
   }
 }
 
-function requestDuplicateStructure(row: ObjectBrowserRow) {
-  duplicateTarget.value = row;
-  duplicateTableName.value = `${row.name}_copy`;
-  showDuplicateDialog.value = true;
+function requestCopyAsNewTable(row: ObjectBrowserRow) {
+  pasteTableFromClipboard.value = false;
+  pasteTableMode.value = defaultPasteTableMode(effectiveDatabaseType.value);
+  pasteTableEntries.value = [
+    {
+      sourceName: row.name,
+      targetName: `${row.name}_copy`,
+      schema: normalizeObjectBrowserTableClipboardSchema(row.schema || selectedSchema.value),
+      tableComment: row.comment,
+    },
+  ];
+  showPasteDialog.value = true;
 }
 
 function captureTableCopyContext() {
@@ -3300,6 +3309,7 @@ function openPasteTableDialog() {
     toast(t("contextMenu.noTableToPaste"), 2000);
     return;
   }
+  pasteTableFromClipboard.value = true;
   pasteTableMode.value = defaultPasteTableMode(effectiveDatabaseType.value);
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
@@ -3335,7 +3345,9 @@ async function confirmPasteTableImpl() {
   const entries = pasteTableEntries.value.filter((entry) => entry.targetName.trim()).map((entry) => ({ ...entry }));
   if (entries.length === 0) return;
   const context = captureTableCopyContext();
-  const clipboardAtPasteStart = connectionStore.treeClipboard;
+  const shouldConsumeTableClipboard = pasteTableFromClipboard.value;
+  const clipboardAtPasteStart = shouldConsumeTableClipboard ? connectionStore.treeClipboard : null;
+  pasteTableFromClipboard.value = false;
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
@@ -3444,7 +3456,7 @@ async function confirmPasteTableImpl() {
   }
   const pasteFeedback = tablePasteFeedback(successCount, pasteFailCount, firstPasteError);
   if (pasteFailCount === 0) {
-    if (connectionStore.treeClipboard === clipboardAtPasteStart) {
+    if (shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
     toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
@@ -4375,7 +4387,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { sidebarActionId: "contextMenu.exportStructure", label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
     ...(canOpenDataDictionary.value ? [{ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
-    { sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
+    { sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: () => requestCopyAsNewTable(item), icon: CopyPlus },
     ...tableClipboardMenuItems(item),
     { label: "", separator: true },
     { sidebarActionId: "common.more", label: t("common.more"), icon: ListTree, children: moreActions },
@@ -5457,7 +5469,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   <Dialog v-model:open="showPasteDialog">
     <DialogContent class="sm:max-w-[500px]">
       <DialogHeader>
-        <DialogTitle>{{ pasteTableEntries.length > 1 ? t("contextMenu.batchPasteTitle") : t("contextMenu.pasteTableConfirmTitle") }}</DialogTitle>
+        <DialogTitle>{{ pasteTableFromClipboard ? (pasteTableEntries.length > 1 ? t("contextMenu.batchPasteTitle") : t("contextMenu.pasteTableConfirmTitle")) : t("contextMenu.duplicateNameTitle") }}</DialogTitle>
       </DialogHeader>
       <div class="space-y-4">
         <div class="flex gap-2">

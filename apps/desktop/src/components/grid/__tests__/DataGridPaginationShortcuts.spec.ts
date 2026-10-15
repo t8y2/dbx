@@ -317,6 +317,60 @@ describe("DataGrid pagination shortcuts", () => {
   });
 });
 
+describe("DataGrid infinite scroll", () => {
+  it("requests the next Dameng table-data segment after dragging the canvas scrollbar to the bottom", async () => {
+    const { host, paginate, gridState } = mountGrid({ infiniteScroll: true, pageOffset: 0, totalRowCount: 300 });
+    gridState.value = {
+      databaseType: "dameng",
+      context: "table-data",
+      pageLimit: 100,
+      pageOffset: 0,
+      totalRowCount: 300,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 100 }, (_, index) => [index + 1]),
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    const scroller = host.querySelector<HTMLElement>(".canvas-grid-scroller");
+    expect(scroller).not.toBeNull();
+    Object.defineProperties(scroller!, {
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 2600 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    scroller!.dispatchEvent(new Event("scroll"));
+    await settle();
+
+    const scrollbar = host.querySelector<HTMLElement>(".data-grid-vertical-scrollbar");
+    expect(scrollbar).not.toBeNull();
+    vi.spyOn(scrollbar!, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 300,
+      top: 0,
+      right: 10,
+      bottom: 300,
+      left: 0,
+      toJSON: () => ({}),
+    });
+    scrollbar!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, clientY: 300 }));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    expect(scroller!.scrollTop).toBe(2300);
+
+    scroller!.dispatchEvent(new Event("scroll"));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    await vi.waitFor(() => expect(paginate).toHaveBeenCalledOnce());
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([100, 100]);
+  });
+});
+
 describe("DataGrid custom page size persistence", () => {
   it("applying a custom page size is temporary and does not write editor settings", async () => {
     const { host, paginate, settingsStore } = mountGrid();

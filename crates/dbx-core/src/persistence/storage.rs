@@ -1247,6 +1247,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         password_set_by TEXT
     )",
     "CREATE TABLE IF NOT EXISTS saved_sql_files (
+        is_default_query INTEGER NOT NULL DEFAULT 0,
         id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL,
         folder_id TEXT,
@@ -3191,6 +3192,7 @@ fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
         ("password_set_by", "TEXT"),
     ];
     const FILE_COLUMNS: &[(&str, &str)] = &[
+        ("is_default_query", "INTEGER NOT NULL DEFAULT 0"),
         ("catalog_name", "TEXT"),
         ("order_index", "INTEGER NOT NULL DEFAULT 0"),
         ("open_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -3199,6 +3201,12 @@ fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
 
     ensure_table_columns(conn, "saved_sql_folders", FOLDER_COLUMNS)?;
     ensure_table_columns(conn, "saved_sql_files", FILE_COLUMNS)?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_sql_default_scope
+         ON saved_sql_files(connection_id, COALESCE(catalog_name, ''), database_name)
+         WHERE is_default_query = 1;",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -7818,8 +7826,8 @@ impl Storage {
             for file in &library.files {
                 tx.execute(
                     "INSERT INTO saved_sql_files \
-                     (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         file.id,
                         file.connection_id,
@@ -7833,7 +7841,8 @@ impl Storage {
                         file.open_count,
                         file.opened_at,
                         file.created_at,
-                        file.updated_at
+                        file.updated_at,
+                        file.is_default_query
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -7872,7 +7881,7 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7893,6 +7902,7 @@ impl Storage {
                         opened_at: row.get(10)?,
                         created_at: row.get(11)?,
                         updated_at: row.get(12)?,
+                        is_default_query: row.get(13)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7908,7 +7918,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7929,6 +7939,7 @@ impl Storage {
                         opened_at: row.get(10)?,
                         created_at: row.get(11)?,
                         updated_at: row.get(12)?,
+                        is_default_query: row.get(13)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7967,7 +7978,7 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7988,6 +7999,7 @@ impl Storage {
                         opened_at: row.get(9)?,
                         created_at: row.get(10)?,
                         updated_at: row.get(11)?,
+                        is_default_query: row.get(12)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -8004,7 +8016,7 @@ impl Storage {
         self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files WHERE id = ?1",
                 )
                 .map_err(|e| e.to_string())?;
@@ -8024,6 +8036,7 @@ impl Storage {
                     opened_at: row.get(10)?,
                     created_at: row.get(11)?,
                     updated_at: row.get(12)?,
+                    is_default_query: row.get(13)?,
                 })
             }) {
                 Ok(file) => Ok(Some(file)),
@@ -8144,8 +8157,8 @@ impl Storage {
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO saved_sql_files \
-                 (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  folder_id = excluded.folder_id, \
@@ -8153,11 +8166,12 @@ impl Storage {
                  database_name = excluded.database_name, \
                  catalog_name = excluded.catalog_name, \
                  schema_name = excluded.schema_name, \
-                 sql_text = CASE WHEN ?14 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
+                 sql_text = CASE WHEN ?15 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
                  order_index = excluded.order_index, \
                  open_count = excluded.open_count, \
                  opened_at = excluded.opened_at, \
-                 updated_at = excluded.updated_at",
+                 updated_at = excluded.updated_at, \
+                 is_default_query = excluded.is_default_query",
                 params![
                     file.id,
                     file.connection_id,
@@ -8172,11 +8186,31 @@ impl Storage {
                     file.opened_at,
                     file.created_at,
                     file.updated_at,
+                    file.is_default_query,
                     file.sql_loaded
                 ],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Autosave only the document body: concurrent metadata writes must not be
+    /// overwritten, and a deleted default query must never be recreated here.
+    pub async fn save_default_query_content(&self, id: &str, sql: &str, updated_at: &str) -> Result<(), String> {
+        let (id, sql, updated_at) = (id.to_string(), sql.to_string(), updated_at.to_string());
+        self.with_conn(move |conn| {
+            let changed = conn
+                .execute(
+                    "UPDATE saved_sql_files SET sql_text = ?2, updated_at = ?3 WHERE id = ?1 AND is_default_query = 1",
+                    params![id, sql, updated_at],
+                )
+                .map_err(|e| e.to_string())?;
+            if changed == 0 {
+                return Err("Default query no longer exists".to_string());
+            }
+            Ok(())
         })
         .await
     }
@@ -9523,8 +9557,8 @@ fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary, merge_
     }
     for file in &library.files {
         tx.execute(
-            "INSERT OR REPLACE INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![file.id, file.connection_id, file.folder_id, file.name, file.database, file.catalog, file.schema, file.sql, file.order_index, file.open_count, file.opened_at, file.created_at, file.updated_at],
+            "INSERT INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET connection_id=excluded.connection_id, folder_id=excluded.folder_id, name=excluded.name, database_name=excluded.database_name, catalog_name=excluded.catalog_name, schema_name=excluded.schema_name, sql_text=excluded.sql_text, order_index=excluded.order_index, open_count=excluded.open_count, opened_at=excluded.opened_at, created_at=excluded.created_at, updated_at=excluded.updated_at, is_default_query=excluded.is_default_query",
+            params![file.id, file.connection_id, file.folder_id, file.name, file.database, file.catalog, file.schema, file.sql, file.order_index, file.open_count, file.opened_at, file.created_at, file.updated_at, file.is_default_query],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -13983,6 +14017,7 @@ mod tests {
         let path = temp_db_path("saved-sql-summary");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let file = SavedSqlFile {
+            is_default_query: false,
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
             folder_id: None,
@@ -14024,6 +14059,7 @@ mod tests {
         let path = temp_db_path("saved-sql-preserve-unloaded-text");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut file = SavedSqlFile {
+            is_default_query: false,
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
             folder_id: None,
@@ -14092,6 +14128,7 @@ mod tests {
         assert_eq!(legacy.catalog, None);
 
         let external = SavedSqlFile {
+            is_default_query: false,
             id: "external".to_string(),
             connection_id: "conn-1".to_string(),
             catalog: Some("iceberg_catalog".to_string()),

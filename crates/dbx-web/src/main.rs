@@ -227,6 +227,35 @@ fn normalize_public_base_path(value: Option<String>) -> String {
     }
 }
 
+/// Only directory-backed frontend responses pass through this middleware.
+/// ServeDir's not-found service returns index.html with 404 for SPA routes;
+/// revalidate that HTML too, without changing its existing status code. Other
+/// paths follow serve_embedded_asset's existing assets/ cache policy.
+async fn directory_static_cache_policy(request: Request<axum::body::Body>, next: middleware::Next) -> Response {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+
+    let path = request.uri().path().to_owned();
+    let mut response = next.run(request).await;
+    let is_html = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
+    let cache_control = if is_html
+        && (path.ends_with('/') || path.ends_with("/index.html") || response.status() == StatusCode::NOT_FOUND)
+    {
+        Some("no-cache")
+    } else if response.status().is_success() && path.starts_with("/assets/") {
+        Some("public, max-age=31536000, immutable")
+    } else {
+        None
+    };
+    if let Some(value) = cache_control {
+        response.headers_mut().insert(CACHE_CONTROL, value.parse().expect("valid static cache policy"));
+    }
+    response
+}
+
 fn add_public_base_path_redirect<S>(app: Router<S>, public_base_path: &str) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -336,7 +365,9 @@ fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<S
             use tower_http::services::{ServeDir, ServeFile};
             let index_path = static_dir.join("index.html");
             let serve_dir = ServeDir::new(static_dir).not_found_service(ServeFile::new(index_path));
-            app = app.fallback_service(serve_dir);
+            let static_router =
+                Router::new().fallback_service(serve_dir).layer(middleware::from_fn(directory_static_cache_policy));
+            app = app.fallback_service(static_router);
         }
         #[cfg(feature = "embed-static")]
         Some(StaticSource::Embedded) => {
@@ -354,7 +385,9 @@ fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<S
     match source {
         Some(StaticSource::Dir(static_dir)) => {
             use tower_http::services::ServeFile;
-            app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(static_dir.join("index.html")));
+            let index_service = axum::routing::get_service(ServeFile::new(static_dir.join("index.html")))
+                .layer(middleware::from_fn(directory_static_cache_policy));
+            app = app.route(&format!("{public_base_path}/"), index_service);
         }
         #[cfg(feature = "embed-static")]
         Some(StaticSource::Embedded) => {
@@ -1311,6 +1344,7 @@ async fn serve() -> Result<(), String> {
             "/saved-sql/{id}",
             get(routes::saved_sql::load_saved_sql_file).delete(routes::saved_sql::delete_saved_sql_file),
         )
+        .route("/saved-sql/{id}/default-content", post(routes::saved_sql::save_default_query_content))
         .route("/saved-sql/folders", post(routes::saved_sql::save_saved_sql_folder))
         .route("/saved-sql/folders/{id}", delete(routes::saved_sql::delete_saved_sql_folder))
         // AI
@@ -1651,7 +1685,7 @@ mod tests {
     use crate::routes::table_import;
     use axum::body::Body;
     use axum::extract::{DefaultBodyLimit, Multipart};
-    use axum::http::header::CONTENT_TYPE;
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
     use axum::http::{Response, StatusCode};
     use axum::routing::{get, post};
     use axum::Router;
@@ -1826,6 +1860,9 @@ mod tests {
         std::fs::create_dir_all(&static_dir).expect("create static directory");
         std::fs::write(static_dir.join("index.html"), "subpath index").expect("write index");
         std::fs::write(static_dir.join("app.js"), "subpath asset").expect("write asset");
+        std::fs::create_dir_all(static_dir.join("assets")).expect("create assets directory");
+        std::fs::write(static_dir.join("assets/app-12136abc.js"), "hashed asset").expect("write hashed asset");
+        std::fs::write(static_dir.join("assets/plain.js"), "unversioned asset").expect("write plain asset");
 
         for public_base_path in ["/dbx", "/xxxx/rsu"] {
             let router = mount_static_assets(
@@ -1867,7 +1904,50 @@ mod tests {
                 .await
                 .expect("GET trailing slash base path");
             assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
             assert_eq!(response.text().await.expect("read index response"), "subpath index");
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/index.html"))
+                .send()
+                .await
+                .expect("GET explicit index");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read explicit index"), "subpath index");
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/route/within/app"))
+                .send()
+                .await
+                .expect("GET SPA fallback");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read fallback response"), "subpath index");
+
+            for asset in ["app-12136abc.js", "plain.js"] {
+                let response = client
+                    .get(format!("http://{address}{public_base_path}/assets/{asset}"))
+                    .send()
+                    .await
+                    .expect("GET asset");
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(
+                    response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+                    Some("public, max-age=31536000, immutable")
+                );
+            }
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/assets/missing.js"))
+                .send()
+                .await
+                .expect("GET missing asset");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+            assert_ne!(
+                response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+                Some("public, max-age=31536000, immutable")
+            );
 
             let response = client
                 .get(format!("http://{address}{public_base_path}/app.js"))
@@ -1875,11 +1955,13 @@ mod tests {
                 .await
                 .expect("GET static asset");
             assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert!(response.headers().get(CACHE_CONTROL).is_none());
             assert_eq!(response.text().await.expect("read asset response"), "subpath asset");
 
             let response =
                 client.get(format!("http://{address}{public_base_path}/api/ping")).send().await.expect("GET API route");
             assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert!(response.headers().get(CACHE_CONTROL).is_none());
             assert_eq!(response.text().await.expect("read API response"), "pong");
 
             server.abort();
@@ -1894,6 +1976,8 @@ mod tests {
         std::fs::create_dir_all(&static_dir).expect("create static directory");
         std::fs::write(static_dir.join("index.html"), "root index").expect("write index");
         std::fs::write(static_dir.join("app.js"), "root asset").expect("write asset");
+        std::fs::create_dir_all(static_dir.join("assets")).expect("create assets directory");
+        std::fs::write(static_dir.join("assets/app-12136abc.js"), "hashed asset").expect("write hashed asset");
         let router = mount_static_assets(
             Router::new().route("/api/ping", get(|| async { "pong" })),
             "/",
@@ -1909,8 +1993,33 @@ mod tests {
         for (request_path, expected_body) in [("/", "root index"), ("/app.js", "root asset"), ("/api/ping", "pong")] {
             let response = client.get(format!("http://{address}{request_path}")).send().await.expect("GET root route");
             assert_eq!(response.status(), reqwest::StatusCode::OK);
+            if request_path == "/" {
+                assert_eq!(
+                    response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+                    Some("no-cache")
+                );
+            } else {
+                assert!(response.headers().get(CACHE_CONTROL).is_none());
+            }
             assert_eq!(response.text().await.expect("read root response"), expected_body);
         }
+
+        for request_path in ["/index.html", "/route/within/app"] {
+            let response = client.get(format!("http://{address}{request_path}")).send().await.expect("GET index");
+            assert_eq!(
+                response.status(),
+                if request_path == "/index.html" { reqwest::StatusCode::OK } else { reqwest::StatusCode::NOT_FOUND }
+            );
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read index response"), "root index");
+        }
+
+        let response = client.get(format!("http://{address}/assets/app-12136abc.js")).send().await.expect("GET asset");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+            Some("public, max-age=31536000, immutable")
+        );
 
         server.abort();
         std::fs::remove_dir_all(static_dir).expect("remove static directory");

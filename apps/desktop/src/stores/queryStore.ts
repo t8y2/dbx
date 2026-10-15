@@ -2762,6 +2762,7 @@ export const useQueryStore = defineStore("query", () => {
       editorViewport: t.editorViewport,
       editorSelection: t.editorSelection,
       savedSqlId: t.savedSqlId,
+      isDefaultQuery: t.isDefaultQuery,
       externalSqlPath: t.externalSqlPath,
       externalSqlEncoding: t.externalSqlEncoding,
       externalSqlFileVersion: t.externalSqlFileVersion,
@@ -2847,7 +2848,8 @@ export const useQueryStore = defineStore("query", () => {
   // reflects the latest in-memory tabs without waiting for the 300ms debounce.
   // Lets callers (e.g. tests that reload the store) read back persisted state
   // deterministically instead of racing the debounce timer.
-  function flushPendingPersist(): Promise<void> {
+  async function flushPendingPersist(): Promise<void> {
+    await flushDefaultQueries();
     if (isDetachedWindow()) return flushDetachedTabPersistence(activeTabId.value ?? undefined);
     if (storePersistGeneration !== persistGeneration) return Promise.resolve();
     if (persistTimer) {
@@ -2863,6 +2865,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.mode !== "query" && tab.mode !== "data") throw new Error("Only SQL and data tabs can be detached");
     if (tab.isExecuting || tab.isCancelling || tab.isExplaining) throw new Error("Wait for the current operation to finish before detaching this tab");
 
+    await flushDefaultQuery(tab);
     const savedTab = serializeOpenTabs([tab])[0];
     if (!savedTab) throw new Error("Unable to serialize tab");
 
@@ -4297,6 +4300,78 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
+  const defaultQuerySaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const defaultQuerySaves = new Map<string, Promise<void>>();
+
+  function needsDefaultQuerySave(tab: QueryTab): boolean {
+    return !!tab.isDefaultQuery && !!tab.savedSqlId && tab.originalSql !== undefined && tab.sql !== tab.originalSql;
+  }
+
+  function reportDefaultQuerySaveError(error: unknown) {
+    useToast().toast(i18n.global.t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, i18n.global.t) }), 8000);
+  }
+
+  function flushDefaultQuery(tab: QueryTab): Promise<void> {
+    const timer = defaultQuerySaveTimers.get(tab.id);
+    if (timer) clearTimeout(timer);
+    defaultQuerySaveTimers.delete(tab.id);
+    const pending = defaultQuerySaves.get(tab.id);
+    if (pending) return pending;
+    if (!needsDefaultQuerySave(tab)) return Promise.resolve();
+    const save = (async () => {
+      while (tabs.value.includes(tab) && needsDefaultQuerySave(tab)) {
+        const fileId = tab.savedSqlId!;
+        const sql = tab.sql;
+        await useSavedSqlStore().saveDefaultQueryContent(fileId, sql);
+        // Only acknowledge the snapshot actually saved, never newer edits.
+        if (tab.savedSqlId !== fileId) return;
+        tab.originalSql = sql;
+      }
+    })();
+    defaultQuerySaves.set(tab.id, save);
+    const cleanup = () => {
+      if (defaultQuerySaves.get(tab.id) === save) defaultQuerySaves.delete(tab.id);
+    };
+    void save.then(cleanup, cleanup);
+    return save;
+  }
+
+  async function flushDefaultQueries(ids?: readonly string[]): Promise<void> {
+    await Promise.all(tabs.value.filter((tab) => tab.isDefaultQuery && (!ids || ids.includes(tab.id))).map(flushDefaultQuery));
+  }
+
+  // Watch content rather than only updateSql: formatting, history restoration
+  // and clearing the editor can also replace a tab's document directly.
+  watch(
+    () => tabs.value.filter(needsDefaultQuerySave).map((tab) => ({ id: tab.id, sql: tab.sql })),
+    (drafts) => {
+      const ids = new Set(drafts.map((draft) => draft.id));
+      for (const [id, timer] of defaultQuerySaveTimers) {
+        if (!ids.has(id)) {
+          clearTimeout(timer);
+          defaultQuerySaveTimers.delete(id);
+        }
+      }
+      for (const { id } of drafts) {
+        const previous = defaultQuerySaveTimers.get(id);
+        if (previous) clearTimeout(previous);
+        defaultQuerySaveTimers.set(
+          id,
+          setTimeout(() => {
+            defaultQuerySaveTimers.delete(id);
+            const tab = tabs.value.find((item) => item.id === id);
+            if (tab) void flushDefaultQuery(tab).catch(reportDefaultQuerySaveError);
+          }, 500),
+        );
+      }
+    },
+    { deep: true },
+  );
+  onScopeDispose(() => {
+    for (const timer of defaultQuerySaveTimers.values()) clearTimeout(timer);
+    defaultQuerySaveTimers.clear();
+  });
+
   function isTabDirty(tab: QueryTab): boolean {
     if (tab.mode === "structure") {
       // Legacy persisted structure drafts predate the dirty flag; treat them as dirty until the editor rehydrates them.
@@ -4312,9 +4387,10 @@ export const useQueryStore = defineStore("query", () => {
   const hasDirtyTabs = computed(() => tabs.value.some((tab) => isTabDirty(tab)));
   const shouldConfirmUnsavedSqlClose = computed(() => useSettingsStore().editorSettings.confirmUnsavedSqlClose);
   const keepUnsavedTabsDraftsOnAppClose = computed(() => useSettingsStore().editorSettings.appCloseUnsavedTabsMode === "keep-drafts");
-  const requiresAppCloseDraftPersist = computed(() => shouldConfirmUnsavedSqlClose.value && keepUnsavedTabsDraftsOnAppClose.value && tabs.value.some((tab) => tab.mode === "query" && isTabDirty(tab)));
+  const requiresAppCloseDraftPersist = computed(() => tabs.value.some((tab) => tab.isDefaultQuery) || (shouldConfirmUnsavedSqlClose.value && keepUnsavedTabsDraftsOnAppClose.value && tabs.value.some((tab) => tab.mode === "query" && isTabDirty(tab))));
 
   function shouldConfirmTabOnAppClose(tab: QueryTab): boolean {
+    if (tab.isDefaultQuery) return false;
     if (!shouldConfirmTabClose(tab)) return false;
     return !keepUnsavedTabsDraftsOnAppClose.value || tab.mode !== "query";
   }
@@ -4530,6 +4606,21 @@ export const useQueryStore = defineStore("query", () => {
       return;
     }
 
+    if (
+      remainingIds.some((id) => {
+        const tab = tabs.value.find((item) => item.id === id);
+        return tab && (needsDefaultQuerySave(tab) || defaultQuerySaves.has(id));
+      })
+    ) {
+      void flushDefaultQueries(remainingIds)
+        .then(() => continuePendingBatchClose())
+        .catch((error) => {
+          cancelClosePendingTab();
+          reportDefaultQuerySaveError(error);
+        });
+      return;
+    }
+
     const dirtyTab = remainingIds.map((id) => tabs.value.find((tab) => tab.id === id)).find((tab): tab is QueryTab => !!tab && shouldConfirmTabClose(tab));
     if (dirtyTab) {
       // Batch close must pause before dropping dirty tabs so the shared save/discard dialog protects every editable surface.
@@ -4635,6 +4726,12 @@ export const useQueryStore = defineStore("query", () => {
   function closeTab(id: string, { force = false, skipHistory = false }: { force?: boolean; skipHistory?: boolean } = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
+    if (needsDefaultQuerySave(tab) || (tab.isDefaultQuery && defaultQuerySaves.has(id))) {
+      void flushDefaultQuery(tab)
+        .then(() => closeTab(id, { force, skipHistory }))
+        .catch(reportDefaultQuerySaveError);
+      return;
+    }
     if (!force && shouldConfirmTabClose(tab)) {
       showDirtyTabCloseConfirm(tab, "tab");
       return;
@@ -4695,6 +4792,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function shouldConfirmTabClose(tab: QueryTab): boolean {
+    if (tab.isDefaultQuery) return false;
     if (tab.mode === "structure") return isTabDirty(tab);
     return shouldConfirmUnsavedSqlClose.value && isTabDirty(tab);
   }
@@ -5031,6 +5129,16 @@ export const useQueryStore = defineStore("query", () => {
     if (!entry) return null;
 
     const restoredTab = snapshotClosedTab(entry.tab);
+    if (restoredTab.isDefaultQuery) {
+      const existing = tabs.value.find((tab) => tab.savedSqlId === restoredTab.savedSqlId);
+      if (existing) {
+        switchTab(existing.id);
+        return existing.id;
+      }
+      // Reopen the current document, not an old closed-tab SQL snapshot.
+      void openDefaultQuery(savedSqlExecutionTargetFromTab(restoredTab)!).catch(reportDefaultQuerySaveError);
+      return null;
+    }
     if (tabs.value.some((t) => t.id === restoredTab.id)) {
       restoredTab.id = uuid();
     }
@@ -5077,6 +5185,12 @@ export const useQueryStore = defineStore("query", () => {
     if (closingIds.size === 0) return;
 
     const closingTabs = tabs.value.filter((tab) => closingIds.has(tab.id));
+    if (closingTabs.some((tab) => needsDefaultQuerySave(tab) || (tab.isDefaultQuery && defaultQuerySaves.has(tab.id)))) {
+      void flushDefaultQueries([...closingIds])
+        .then(() => closeTabsWhere((tab) => closingIds.has(tab.id)))
+        .catch(reportDefaultQuerySaveError);
+      return;
+    }
     closingTabs.forEach((tab) => {
       if (tab.mode === "sqlserver-trace") void disposeSqlServerActivityTrace(tab.id);
       clearDataGridPendingSnapshotsForTab(tab.id);
@@ -5421,6 +5535,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateSql(id: string, sql: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
+      if (tab.isDefaultQuery && tab.originalSql === undefined) tab.originalSql = "";
       tab.sql = sql;
       queueSavedSqlEditorPositionPersist(tab);
     }
@@ -5840,6 +5955,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.savedSqlId = savedSqlId;
+    tab.isDefaultQuery = useSavedSqlStore().getFile(savedSqlId)?.isDefaultQuery === true;
     tab.externalSqlPath = undefined;
     tab.externalSqlEncoding = undefined;
     tab.externalSqlFileVersion = undefined;
@@ -5860,6 +5976,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.externalSqlIgnoredFileVersion = undefined;
     tab.externalSqlFileMissing = undefined;
     tab.savedSqlId = undefined;
+    tab.isDefaultQuery = false;
     if (title) {
       tab.title = title;
       tab.customTitle = true;
@@ -5897,16 +6014,22 @@ export const useQueryStore = defineStore("query", () => {
     return synchronized;
   }
 
+  async function openDefaultQuery(target: SavedSqlExecutionTarget) {
+    const file = await useSavedSqlStore().ensureDefaultQuery({ ...target, schema: undefined });
+    return openSavedSql(file);
+  }
+
   function openSavedSql(file: SavedSqlFile, options: OpenSavedSqlOptions = {}) {
-    const targetMode = options.targetMode ?? useSettingsStore().editorSettings.savedSqlOpenTargetMode;
+    const targetMode = file.isDefaultQuery ? "saved" : (options.targetMode ?? useSettingsStore().editorSettings.savedSqlOpenTargetMode);
     const currentTarget = currentSavedSqlExecutionTarget();
     const resolvedCurrent = targetMode === "current" ? currentTarget : undefined;
     const effectiveConnectionId = file.connectionId || resolvedCurrent?.connectionId || currentTarget?.connectionId || "";
     const connection = effectiveConnectionId ? useConnectionStore().getConfig(effectiveConnectionId) : undefined;
     const fallbackDb = connection ? targetDefaultDatabase(connection) || connection.database : undefined;
-    const target = resolveSavedSqlExecutionTarget(file, targetMode, resolvedCurrent ?? currentTarget, fallbackDb);
+    const target = file.isDefaultQuery ? savedSqlExecutionTargetFromFile(file) : resolveSavedSqlExecutionTarget(file, targetMode, resolvedCurrent ?? currentTarget, fallbackDb);
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
+      existing.isDefaultQuery = file.isDefaultQuery === true;
       persistSavedSqlEditorPosition(existing);
       if (!existing.sql && file.sql && existing.originalSql === undefined) {
         existing.sql = file.sql;
@@ -5936,6 +6059,7 @@ export const useQueryStore = defineStore("query", () => {
       catalog: target.catalog,
       sql: file.sql,
       savedSqlId: file.id,
+      isDefaultQuery: file.isDefaultQuery === true,
       originalSql: file.sql,
       isExecuting: false,
       isCancelling: false,
@@ -5953,6 +6077,11 @@ export const useQueryStore = defineStore("query", () => {
     await initSavedSqlEditorPositions();
     const savedSqlStore = useSavedSqlStore();
     const linkedTabs = tabs.value.filter((tab) => tab.savedSqlId && tab.sql === "" && tab.originalSql === undefined);
+    const hasUnindexedSavedSqlTab = tabs.value.some((tab) => tab.savedSqlId && !savedSqlStore.getFile(tab.savedSqlId));
+    if (linkedTabs.length > 0 && hasUnindexedSavedSqlTab) await savedSqlStore.initFromStorage();
+    for (const tab of tabs.value) {
+      if (tab.savedSqlId) tab.isDefaultQuery = savedSqlStore.getFile(tab.savedSqlId)?.isDefaultQuery === true;
+    }
     for (const tab of linkedTabs) {
       const file = await savedSqlStore.ensureFileContent(tab.savedSqlId!);
       if (!file) continue;
@@ -6022,6 +6151,15 @@ export const useQueryStore = defineStore("query", () => {
     if (options.persistSavedSqlTarget === false || tab.mode !== "query" || !tab.savedSqlId) return;
     const savedSqlStore = useSavedSqlStore();
     const savedSqlId = tab.savedSqlId;
+    const file = savedSqlStore.getFile(savedSqlId);
+    if (file?.isDefaultQuery && (file.connectionId !== tab.connectionId || file.database !== tab.database || (file.catalog || "") !== (tab.catalog || ""))) {
+      const target = savedSqlExecutionTargetFromTab(tab)!;
+      applySavedSqlExecutionTarget(tab, savedSqlExecutionTargetFromFile(file));
+      void flushDefaultQuery(tab)
+        .then(() => openDefaultQuery(target))
+        .catch(reportDefaultQuerySaveError);
+      return;
+    }
     void savedSqlStore
       .updateFileExecutionTarget(savedSqlId, {
         connectionId: tab.connectionId,
@@ -10425,6 +10563,8 @@ export const useQueryStore = defineStore("query", () => {
     linkExternalSqlPath,
     openExternalSqlFile,
     openSavedSql,
+    openDefaultQuery,
+    flushDefaultQueries,
     hydrateSavedSqlTabs,
     syncSavedSqlExecutionTargets,
     togglePinnedTab,

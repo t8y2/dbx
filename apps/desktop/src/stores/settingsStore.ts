@@ -927,7 +927,7 @@ export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [
   },
 ];
 
-export type SidebarObjectInfoMode = "comment-inline" | "comment-aligned" | "comment-right" | "size" | "hidden";
+export type SidebarObjectInfoMode = "comment-inline" | "comment-aligned" | "comment-right" | "size" | "comment-and-size" | "hidden";
 
 /**
  * 删除连接时记住的「连接名 → 数据库」。带上 `dbType` 是为了只在新建同名**同类型**
@@ -1765,7 +1765,7 @@ function normalizeConnectionListSortMode(value: unknown): ConnectionListSortMode
 }
 
 function normalizeSidebarObjectInfoMode(value: unknown, legacyCommentLayout?: unknown, legacyHideTableComments?: unknown, legacyShowDatabaseSizes?: unknown): SidebarObjectInfoMode {
-  if (value === "comment-inline" || value === "comment-aligned" || value === "comment-right" || value === "size" || value === "hidden") return value;
+  if (value === "comment-inline" || value === "comment-aligned" || value === "comment-right" || value === "size" || value === "comment-and-size" || value === "hidden") return value;
   if (legacyCommentLayout === "hidden" || legacyHideTableComments === true) return "hidden";
   if (legacyShowDatabaseSizes === true) return "size";
   if (legacyCommentLayout === "aligned") return "comment-aligned";

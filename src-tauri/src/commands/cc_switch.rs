@@ -5,6 +5,11 @@ use tauri::{AppHandle, Manager};
 use super::connection::AppState;
 pub use dbx_core::cc_switch::CcSwitchImportResult;
 
+fn cc_switch_config_paths(home_dir: &std::path::Path) -> (PathBuf, PathBuf) {
+    let config_dir = home_dir.join(".cc-switch");
+    (config_dir.join("cc-switch.db"), config_dir.join("settings.json"))
+}
+
 #[tauri::command]
 pub async fn load_cc_switch_ai_configs(
     state: tauri::State<'_, Arc<AppState>>,
@@ -21,8 +26,7 @@ pub async fn load_cc_switch_ai_configs(
         return Err("ccSwitchPluginNotInstalled".to_string());
     }
     let home_dir = app.path().home_dir().map_err(|error| format!("ccSwitchHomeDirectoryFailed:{error}"))?;
-    let database_path = home_dir.join(".cc-switch").join("cc-switch.db");
-    let settings_path = home_dir.join(".cc-switch").join("settings.json");
+    let (database_path, settings_path) = cc_switch_config_paths(&home_dir);
     state
         .plugins
         .invoke_capability_for_plugin(
@@ -35,6 +39,20 @@ pub async fn load_cc_switch_ai_configs(
             }),
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cc_switch_config_paths;
+    use std::path::Path;
+
+    #[test]
+    fn resolves_cc_switch_database_and_visibility_settings_paths() {
+        let (database_path, settings_path) = cc_switch_config_paths(Path::new("/home/test-user"));
+
+        assert_eq!(database_path, Path::new("/home/test-user/.cc-switch/cc-switch.db"));
+        assert_eq!(settings_path, Path::new("/home/test-user/.cc-switch/settings.json"));
+    }
 }
 
 #[tauri::command]

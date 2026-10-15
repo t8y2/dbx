@@ -7214,6 +7214,7 @@ fn builds_mysql_trigger_changes() {
         event: "UPDATE".to_string(),
         timing: "BEFORE".to_string(),
         statement: Some("SET NEW.updated_at = CURRENT_TIMESTAMP".to_string()),
+        condition: None,
         enabled: None,
     });
 
@@ -7296,6 +7297,7 @@ fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
             "CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (0); END"
                 .to_string(),
         ),
+        condition: None,
         enabled: None,
     });
 
@@ -7339,6 +7341,7 @@ fn sqlserver_trigger_edit_restores_disabled_state() {
         event: "INSERT".to_string(),
         timing: "AFTER".to_string(),
         statement: Some("CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT AS PRINT 'old'".to_string()),
+        condition: None,
         enabled: Some(false),
     });
 
@@ -7388,6 +7391,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
         statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+        condition: None,
         enabled: None,
     });
 
@@ -7424,6 +7428,7 @@ fn changed_postgres_trigger_remains_unsupported() {
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
         statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+        condition: None,
         enabled: None,
     });
 
@@ -7494,6 +7499,7 @@ fn existing_trigger(
         event: event.to_string(),
         timing: timing.to_string(),
         statement: Some(statement.to_string()),
+        condition: None,
         enabled,
     });
     existing
@@ -7566,6 +7572,96 @@ fn oracle_trigger_with_unstructured_source_can_still_toggle_enabled() {
 }
 
 #[test]
+fn creates_dameng_trigger() {
+    let result = trigger_change_sql(
+        DatabaseType::Dameng,
+        "APP",
+        "ORDERS",
+        vec![trigger("ORDERS_AUDIT", "BEFORE EACH ROW", "INSERT OR UPDATE", "BEGIN\n  NULL;\nEND;")],
+    );
+
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE OR REPLACE TRIGGER \"APP\".\"ORDERS_AUDIT\" BEFORE INSERT OR UPDATE ON \"APP\".\"ORDERS\"\nFOR EACH ROW\nBEGIN\n  NULL;\nEND;"
+        ]
+    );
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn dameng_trigger_edit_rebuilds_with_create_or_replace() {
+    let mut existing = existing_trigger("ORDERS_AUDIT", "AFTER EACH ROW", "INSERT", "BEGIN\n  NULL;\nEND;", Some(true));
+    existing.statement = "BEGIN\n  DBMS_OUTPUT.PUT_LINE('x');\nEND;".to_string();
+
+    let result = trigger_change_sql(DatabaseType::Dameng, "APP", "ORDERS", vec![existing]);
+
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE OR REPLACE TRIGGER \"APP\".\"ORDERS_AUDIT\" AFTER INSERT ON \"APP\".\"ORDERS\"\nFOR EACH ROW\nBEGIN\n  DBMS_OUTPUT.PUT_LINE('x');\nEND;"
+        ]
+    );
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn dameng_statement_trigger_keeps_statement_level_timing() {
+    // 达梦字典只给裸 BEFORE 时代表语句级（未写 FOR EACH），重建不能改成行级触发器。
+    let mut existing = existing_trigger("ORDERS_AUDIT", "BEFORE", "INSERT", "BEGIN\n  NULL;\nEND;", Some(true));
+    existing.statement = "BEGIN\n  DBMS_OUTPUT.PUT_LINE('x');\nEND;".to_string();
+
+    let result = trigger_change_sql(DatabaseType::Dameng, "APP", "ORDERS", vec![existing]);
+
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE OR REPLACE TRIGGER \"APP\".\"ORDERS_AUDIT\" BEFORE INSERT ON \"APP\".\"ORDERS\"\nBEGIN\n  DBMS_OUTPUT.PUT_LINE('x');\nEND;"
+        ]
+    );
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn dameng_trigger_enabled_toggle_emits_alter_trigger() {
+    let mut existing = existing_trigger("ORDERS_AUDIT", "AFTER EACH ROW", "INSERT", "BEGIN NULL; END;", Some(true));
+    existing.enabled = Some(false);
+
+    let result = trigger_change_sql(DatabaseType::Dameng, "APP", "ORDERS", vec![existing]);
+
+    assert_eq!(result.statements, vec!["ALTER TRIGGER \"APP\".\"ORDERS_AUDIT\" DISABLE;"]);
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn rejects_editing_dameng_trigger_with_when_condition() {
+    let mut existing = existing_trigger("ORDERS_AUDIT", "BEFORE EACH ROW", "INSERT", "BEGIN NULL; END;", Some(true));
+    if let Some(original) = existing.original.as_mut() {
+        original.condition = Some("NEW.STATUS = 'OPEN'".to_string());
+    }
+    existing.statement = "BEGIN\n  NULL;\nEND;".to_string();
+
+    let result = trigger_change_sql(DatabaseType::Dameng, "APP", "ORDERS", vec![existing]);
+
+    assert!(result.statements.is_empty(), "unexpected statements: {:?}", result.statements);
+    assert_eq!(
+        result.warnings,
+        vec!["Editing existing Dameng trigger \"ORDERS_AUDIT\" requires its complete source definition."]
+    );
+}
+
+#[test]
+fn drops_existing_dameng_trigger() {
+    let mut existing = existing_trigger("ORDERS_AUDIT", "AFTER EACH ROW", "INSERT", "BEGIN NULL; END;", Some(true));
+    existing.marked_for_drop = true;
+
+    let result = trigger_change_sql(DatabaseType::Dameng, "APP", "ORDERS", vec![existing]);
+
+    assert_eq!(result.statements, vec!["DROP TRIGGER \"APP\".\"ORDERS_AUDIT\";"]);
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
 fn sqlserver_trigger_enabled_toggle_emits_enable_disable_trigger() {
     let mut disable = existing_trigger("orders_audit", "AFTER", "INSERT", "BEGIN SET NOCOUNT ON; END", Some(true));
     disable.enabled = Some(false);
@@ -7597,6 +7693,7 @@ fn allows_editing_existing_oracle_trigger() {
         event: "INSERT OR UPDATE OR DELETE".to_string(),
         timing: "AFTER EACH ROW".to_string(),
         statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+        condition: None,
         enabled: None,
     });
 
@@ -7670,6 +7767,7 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         event: "INSERT".to_string(),
         timing: "AFTER EACH ROW".to_string(),
         statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+        condition: None,
         enabled: None,
     });
     existing.marked_for_drop = true;

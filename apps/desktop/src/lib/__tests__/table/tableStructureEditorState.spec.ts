@@ -395,6 +395,40 @@ describe("tableStructureEditorState", () => {
     ).toBe(true);
   });
 
+  it("allows existing Dameng trigger drafts to be edited only without a WHEN clause or complete source", () => {
+    const [existing, withCondition, completeSource] = createTriggerDrafts([
+      { name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT", statement: "BEGIN NULL; END;", enabled: true },
+      {
+        name: "ORDERS_WHEN",
+        timing: "BEFORE EACH ROW",
+        event: "INSERT",
+        statement: "BEGIN NULL; END;",
+        condition: "NEW.ID > 0",
+      },
+      {
+        name: "ORDERS_FULL",
+        timing: "BEFORE EACH ROW",
+        event: "INSERT",
+        statement: 'CREATE OR REPLACE TRIGGER "APP"."ORDERS_FULL" BEFORE INSERT ON "APP"."ORDERS" FOR EACH ROW BEGIN NULL; END;',
+      },
+    ]);
+    if (!existing || !withCondition || !completeSource) throw new Error("expected existing trigger drafts");
+
+    expect(canEditStructuredTriggerDraft("dameng", existing)).toBe(true);
+    expect(canEditStructuredTriggerDraft("dameng", withCondition)).toBe(false);
+    expect(canEditStructuredTriggerDraft("dameng", completeSource)).toBe(false);
+    expect(
+      canEditStructuredTriggerDraft("dameng", {
+        id: "new:trigger",
+        name: "ORDERS_AUDIT",
+        timing: "AFTER EACH ROW",
+        event: "INSERT",
+        statement: "BEGIN NULL; END;",
+        markedForDrop: false,
+      }),
+    ).toBe(true);
+  });
+
   it("hydrates Kingbase type parameters returned separately from the data type", () => {
     const columns = createColumnDrafts(
       [

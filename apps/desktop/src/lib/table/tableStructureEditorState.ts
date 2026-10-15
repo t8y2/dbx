@@ -1354,7 +1354,10 @@ export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undef
   if (databaseType === undefined) return false;
   // The Oracle driver keeps the `TRIGGER ...` declaration when the source has clauses (WHEN,
   // REFERENCING, FOLLOWS, ...) that the timing/event/body form would drop on CREATE OR REPLACE.
-  return databaseType !== "oracle" || isStructuredOracleTriggerSource(trigger.original.statement);
+  // Dameng reports a plain body plus a separate `WHEN` clause, so the same guard applies: the
+  // structured form can only rebuild triggers that have neither of those extra clauses.
+  if (databaseType !== "oracle" && databaseType !== "dameng") return true;
+  return isStructuredOracleTriggerSource(trigger.original.statement) && !trigger.original.condition?.trim();
 }
 
 function isStructuredOracleTriggerSource(statement: string | null | undefined): boolean {

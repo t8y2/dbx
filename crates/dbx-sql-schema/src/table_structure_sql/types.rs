@@ -225,6 +225,11 @@ pub struct TriggerInfo {
     pub timing: String,
     #[serde(default)]
     pub statement: Option<String>,
+    /// Catalog-reported `WHEN` clause (Dameng `ALL_TRIGGERS.WHEN_CLAUSE`). A non-empty
+    /// condition means the timing/event/body form cannot rebuild the trigger without
+    /// dropping it.
+    #[serde(default)]
+    pub condition: Option<String>,
     /// Carries the catalog-reported enabled state so SQL Server edits can
     /// restore it after the DROP + CREATE rebuild (`DISABLE TRIGGER`).
     #[serde(default)]

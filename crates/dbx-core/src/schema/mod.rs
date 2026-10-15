@@ -8446,6 +8446,12 @@ async fn get_columns_core_for_session_inner_with_pool(
             {
                 db::postgres::get_redshift_columns(p, schema, table).await.map(deduplicate_column_infos)
             }
+            // GaussDB / openGauss kernels cannot run the modern catalog tier, so
+            // skip the destined-to-fail probe instead of paying it per relation
+            // (issue #12324).
+            PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_family_config) => {
+                db::postgres::get_columns_compat_first(p, schema, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::Postgres(p) => db::postgres::get_columns(p, schema, table).await.map(deduplicate_column_infos),
             PoolKind::Sqlite(p) => db::sqlite::get_columns(p, schema, table).await.map(deduplicate_column_infos),
             PoolKind::Rqlite(client) => {
@@ -8732,6 +8738,10 @@ async fn list_indexes_core_for_session(
                 if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) =>
             {
                 Ok(vec![])
+            }
+            // See `get_columns`: GaussDB / openGauss skip the modern index tier.
+            PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_family_config) => {
+                db::postgres::list_indexes_compat_first(p, schema, table).await
             }
             PoolKind::Postgres(p) => db::postgres::list_indexes(p, schema, table).await,
             PoolKind::Sqlite(p) => db::sqlite::list_indexes(p, schema, table).await,

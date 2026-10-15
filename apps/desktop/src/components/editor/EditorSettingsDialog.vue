@@ -5518,8 +5518,8 @@ const clearPasswordSubmitting = ref(false);
 const clearPasswordTarget = ref<ProtectedItem | null>(null);
 
 const protectedItems = computed<ProtectedItem[]>(() => {
-  const groups = (connectionStore.sidebarLayout.groups ?? []).filter((group) => !!group.passwordHash).map((group) => ({ id: group.id, name: group.name, targetType: "group" as const }));
-  const folders = (savedSqlStore.allFolders ?? []).filter((folder) => !!folder.passwordHash).map((folder) => ({ id: folder.id, name: folder.name, targetType: "folder" as const }));
+  const groups = (connectionStore.sidebarLayout.groups ?? []).filter((group) => !!group.hasPassword).map((group) => ({ id: group.id, name: group.name, targetType: "group" as const }));
+  const folders = (savedSqlStore.allFolders ?? []).filter((folder) => !!folder.hasPassword).map((folder) => ({ id: folder.id, name: folder.name, targetType: "folder" as const }));
   return [...groups, ...folders];
 });
 
@@ -5537,31 +5537,27 @@ async function confirmClearPassword() {
   clearPasswordSubmitting.value = true;
   clearPasswordError.value = "";
   try {
-    const url = target.targetType === "folder" ? apiUrl(`/api/saved-sql/folders/${encodeURIComponent(target.id)}/clear-password`) : apiUrl(`/api/layout/sidebar/groups/${encodeURIComponent(target.id)}/clear-password`);
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ loginPassword: clearPasswordInput.value }),
-    });
-    if (res.ok) {
-      if (target.targetType === "folder") {
-        await savedSqlStore.setSavedSqlFolderPassword(target.id, null);
-      } else {
-        connectionStore.setConnectionGroupPassword(target.id, null);
-      }
-      showClearPasswordConfirm.value = false;
-      clearPasswordTarget.value = null;
-      clearPasswordInput.value = "";
-      clearPasswordNotice.value = t("auth.clearProtectionPasswordSuccess");
-    } else if (res.status === 401) {
+    // The store call posts the login password to the backend (which verifies
+    // it server-side and clears the stored verifier) and refreshes the
+    // in-memory state from the response.
+    if (target.targetType === "folder") {
+      await savedSqlStore.clearSavedSqlFolderPassword(target.id, clearPasswordInput.value);
+    } else {
+      await connectionStore.clearConnectionGroupPassword(target.id, clearPasswordInput.value);
+    }
+    showClearPasswordConfirm.value = false;
+    clearPasswordTarget.value = null;
+    clearPasswordInput.value = "";
+    clearPasswordNotice.value = t("auth.clearProtectionPasswordSuccess");
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status === 401) {
       clearPasswordError.value = t("auth.oldPasswordWrong");
-    } else if (res.status === 409) {
+    } else if (status === 409) {
       clearPasswordError.value = t("auth.clearProtectionPasswordNoLoginPassword");
     } else {
       clearPasswordError.value = t("auth.clearProtectionPasswordFailed");
     }
-  } catch {
-    clearPasswordError.value = t("auth.connectFailed");
   } finally {
     clearPasswordSubmitting.value = false;
   }

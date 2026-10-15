@@ -20,9 +20,6 @@
           <Button type="submit" :disabled="saving">
             {{ saving ? t("common.processing") : t("common.save") }}
           </Button>
-          <Button v-if="hasPassword" type="button" variant="destructive" @click="handleRemovePassword" :disabled="saving">
-            {{ t("savedSql.removePassword") }}
-          </Button>
         </DialogFooter>
       </form>
     </DialogContent>
@@ -36,13 +33,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Button } from "@/components/ui/button";
 import { KeyRound } from "@lucide/vue";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
-import { hashProtectionPassword } from "@/lib/sidebar/protectionPassword";
 import type { SavedSqlFolder } from "@/types/database";
 
 const props = defineProps<{
   open: boolean;
   folder: SavedSqlFolder | null;
-  setPassword: (folderId: string, passwordHash: string | null) => Promise<void>;
+  setPassword: (folderId: string, password: string) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -55,7 +51,7 @@ const { t } = useI18n();
 const password = ref("");
 const saving = ref(false);
 
-const hasPassword = computed(() => !!props.folder?.passwordHash);
+const hasPassword = computed(() => !!props.folder?.hasPassword);
 
 watch(
   () => props.open,
@@ -70,28 +66,15 @@ function handleOpenChange(open: boolean) {
 
 async function handleSubmit() {
   const folder = props.folder;
-  if (!folder) return;
-  if (!hasPassword.value && !password.value) return; // nothing to set or remove
+  if (!folder || !password.value) return;
   saving.value = true;
   try {
-    const hash = password.value ? await hashProtectionPassword(password.value) : null;
-    await props.setPassword(folder.id, hash);
-    const hadPassword = hasPassword.value;
+    // The verifier is minted by the backend command; the plaintext is only
+    // sent for hashing and never persisted. Removing a password goes through
+    // the login-password-gated recovery path instead of this dialog.
+    await props.setPassword(folder.id, password.value);
     emit("update:open", false);
-    emit("changed", hadPassword, !password.value);
-  } finally {
-    saving.value = false;
-  }
-}
-
-async function handleRemovePassword() {
-  const folder = props.folder;
-  if (!folder) return;
-  saving.value = true;
-  try {
-    await props.setPassword(folder.id, null);
-    emit("update:open", false);
-    emit("changed", true, true);
+    emit("changed", hasPassword.value, false);
   } finally {
     saving.value = false;
   }

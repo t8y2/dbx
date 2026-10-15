@@ -37,6 +37,7 @@ use crate::history::{
     HistorySearchRequest, HistorySearchResult, MAX_HISTORY,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
+use crate::persistence::protection_password::{check_protection_password, ProtectionPasswordCheck};
 use crate::persistence::secret_codec::{
     key_file_candidates, SecretCodec, SecretKeyPolicy, SecretKeyResolution, SecretKeySource,
 };
@@ -262,6 +263,14 @@ struct MigrationFailure {
 }
 
 const MIGRATION_LOCK_FILE: &str = ".dbx-secret-migration.lock";
+
+/// True when a `fs2` try-lock failure means another handle already holds the
+/// migration lock. Windows surfaces contention as `ERROR_LOCK_VIOLATION`, whose
+/// std `ErrorKind` is not `WouldBlock`, so compare against fs2's own contended
+/// error as well.
+fn migration_lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
 
 pub const SECRET_STORE_MIGRATION_ID: &str = "secret-store-v1";
 
@@ -2013,7 +2022,7 @@ impl Storage {
             };
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => Ok(false), // Closing the handle releases the probe lock.
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+            Err(error) if migration_lock_is_contended(&error) => Ok(true),
             Err(_) => Err("MIGRATION_LOCK_UNAVAILABLE".to_string()),
         }
     }
@@ -2030,7 +2039,7 @@ impl Storage {
             .open(self.data_dir().join(MIGRATION_LOCK_FILE))
             .map_err(|_| "MIGRATION_LOCK_UNAVAILABLE".to_string())?;
         fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
+            if migration_lock_is_contended(&error) {
                 "MIGRATION_IN_PROGRESS".to_string()
             } else {
                 "MIGRATION_LOCK_UNAVAILABLE".to_string()
@@ -7862,6 +7871,7 @@ impl Storage {
                         order_index: row.get(4)?,
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
+                        has_password: row.get::<_, Option<String>>(7)?.is_some(),
                         password_hash: row.get(7)?,
                         password_set_by: row.get(8)?,
                     })
@@ -7957,6 +7967,7 @@ impl Storage {
                         order_index: row.get(4)?,
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
+                        has_password: row.get::<_, Option<String>>(7)?.is_some(),
                         password_hash: row.get(7)?,
                         password_set_by: row.get(8)?,
                     })
@@ -8034,20 +8045,22 @@ impl Storage {
         .await
     }
 
+    /// Upsert a folder's metadata. The protection-password verifier is
+    /// deliberately excluded: it is server-side state written only through
+    /// [`Self::set_saved_sql_folder_password`], so a client round-trip can
+    /// never erase or overwrite it.
     pub async fn save_saved_sql_folder(&self, folder: &SavedSqlFolder) -> Result<(), String> {
         let folder = folder.clone();
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at, password_hash, password_set_by) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  parent_folder_id = excluded.parent_folder_id, \
                  name = excluded.name, \
                  order_index = excluded.order_index, \
-                 updated_at = excluded.updated_at, \
-                 password_hash = excluded.password_hash, \
-                 password_set_by = excluded.password_set_by",
+                 updated_at = excluded.updated_at",
                 params![
                     folder.id,
                     folder.connection_id,
@@ -8055,9 +8068,7 @@ impl Storage {
                     folder.name,
                     folder.order_index,
                     folder.created_at,
-                    folder.updated_at,
-                    folder.password_hash,
-                    folder.password_set_by
+                    folder.updated_at
                 ],
             )
             .map(|_| ())
@@ -8109,6 +8120,60 @@ impl Storage {
         .await
     }
 
+    /// Store the verifier for a folder's protection password. Returns Ok(false)
+    /// when no folder with this id exists.
+    pub async fn set_saved_sql_folder_password(&self, folder_id: &str, password_hash: &str) -> Result<bool, String> {
+        let folder_id = folder_id.to_string();
+        let password_hash = password_hash.to_string();
+        self.with_conn(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE saved_sql_folders SET password_hash = ?1, password_set_by = NULL WHERE id = ?2",
+                    params![password_hash, folder_id],
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(updated > 0)
+        })
+        .await
+    }
+
+    /// Check a plaintext password against a folder's stored verifier.
+    /// - Ok(true): the password matches, or the folder carries no verifier at
+    ///   all; matching legacy verifiers are upgraded to Argon2 in place.
+    /// - Ok(false): the password does not match.
+    /// - Err: the folder does not exist.
+    pub async fn verify_saved_sql_folder_password(&self, folder_id: &str, password: &str) -> Result<bool, String> {
+        let folder_id = folder_id.to_string();
+        let password = password.to_string();
+        self.with_conn(move |conn| {
+            let stored: Option<Option<String>> = conn
+                .query_row("SELECT password_hash FROM saved_sql_folders WHERE id = ?1", [folder_id.as_str()], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let Some(stored) = stored else {
+                return Err(format!("Saved SQL folder not found: {folder_id}"));
+            };
+            let Some(stored_hash) = stored else { return Ok(true) };
+            match check_protection_password(&password, &stored_hash) {
+                ProtectionPasswordCheck::Matched => Ok(true),
+                ProtectionPasswordCheck::MatchedLegacy { upgraded_hash } => {
+                    if let Some(upgraded) = upgraded_hash {
+                        conn.execute(
+                            "UPDATE saved_sql_folders SET password_hash = ?1, password_set_by = NULL WHERE id = ?2",
+                            params![upgraded, folder_id],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    Ok(true)
+                }
+                ProtectionPasswordCheck::Mismatch => Ok(false),
+            }
+        })
+        .await
+    }
+
     pub async fn get_saved_sql_folder(&self, folder_id: &str) -> Result<Option<SavedSqlFolder>, String> {
         let folder_id = folder_id.to_string();
         self.with_conn(move |conn| {
@@ -8128,6 +8193,7 @@ impl Storage {
                         order_index: row.get(4)?,
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
+                        has_password: row.get::<_, Option<String>>(7)?.is_some(),
                         password_hash: row.get(7)?,
                         password_set_by: row.get(8)?,
                     })
@@ -8141,7 +8207,7 @@ impl Storage {
 
     /// Clear the protection password of a connection group inside the persisted
     /// sidebar layout. Returns Ok(false) when no layout or no group with this id
-    /// exists; Ok(true) when the group was found (its passwordHash is cleared if
+    /// exists; Ok(true) when the group was found (its passwordHash is removed if
     /// present, so the call is idempotent).
     pub async fn clear_connection_group_password(&self, group_id: &str) -> Result<bool, String> {
         let group_id = group_id.to_string();
@@ -8161,12 +8227,89 @@ impl Storage {
                 return Ok(false);
             };
             if let Some(object) = group.as_object_mut() {
-                object.insert("passwordHash".to_string(), serde_json::Value::Null);
+                object.remove("passwordHash");
             }
             let updated = serde_json::to_string(&layout).map_err(|e| e.to_string())?;
             conn.execute("UPDATE sidebar_layout SET layout_json = ?1 WHERE id = 1", [updated])
                 .map_err(|e| e.to_string())?;
             Ok(true)
+        })
+        .await
+    }
+
+    /// Store the verifier for a connection group's protection password inside
+    /// the persisted sidebar layout. Returns Ok(false) when no layout or no
+    /// group with this id exists.
+    pub async fn set_connection_group_password(&self, group_id: &str, password_hash: &str) -> Result<bool, String> {
+        let group_id = group_id.to_string();
+        let password_hash = password_hash.to_string();
+        self.with_conn(move |conn| {
+            let existing: Option<String> = conn
+                .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let Some(json) = existing else { return Ok(false) };
+            let mut layout: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            let Some(groups) = layout.get_mut("groups").and_then(|groups| groups.as_array_mut()) else {
+                return Ok(false);
+            };
+            let Some(group) =
+                groups.iter_mut().find(|group| group.get("id").and_then(|id| id.as_str()) == Some(group_id.as_str()))
+            else {
+                return Ok(false);
+            };
+            let Some(object) = group.as_object_mut() else { return Ok(false) };
+            object.insert("passwordHash".to_string(), serde_json::Value::String(password_hash));
+            let updated = serde_json::to_string(&layout).map_err(|e| e.to_string())?;
+            conn.execute("UPDATE sidebar_layout SET layout_json = ?1 WHERE id = 1", [updated])
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        })
+        .await
+    }
+
+    /// Check a plaintext password against a connection group's stored verifier.
+    /// - Ok(true): the password matches, or the group carries no verifier at
+    ///   all; matching legacy verifiers are upgraded to Argon2 in place.
+    /// - Ok(false): the password does not match.
+    /// - Err: no persisted layout, or no group with this id.
+    pub async fn verify_connection_group_password(&self, group_id: &str, password: &str) -> Result<bool, String> {
+        let group_id = group_id.to_string();
+        let password = password.to_string();
+        self.with_conn(move |conn| {
+            let existing: Option<String> = conn
+                .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let Some(json) = existing else {
+                return Err(format!("Connection group not found: {group_id}"));
+            };
+            let mut layout: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            let Some(groups) = layout.get_mut("groups").and_then(|groups| groups.as_array_mut()) else {
+                return Err(format!("Connection group not found: {group_id}"));
+            };
+            let Some(group) =
+                groups.iter_mut().find(|group| group.get("id").and_then(|id| id.as_str()) == Some(group_id.as_str()))
+            else {
+                return Err(format!("Connection group not found: {group_id}"));
+            };
+            let stored_hash = group.get("passwordHash").and_then(|hash| hash.as_str()).map(str::to_string);
+            let Some(stored_hash) = stored_hash else { return Ok(true) };
+            match check_protection_password(&password, &stored_hash) {
+                ProtectionPasswordCheck::Matched => Ok(true),
+                ProtectionPasswordCheck::MatchedLegacy { upgraded_hash } => {
+                    if let Some(upgraded) = upgraded_hash {
+                        if let Some(object) = group.as_object_mut() {
+                            object.insert("passwordHash".to_string(), serde_json::Value::String(upgraded));
+                        }
+                        let updated = serde_json::to_string(&layout).map_err(|e| e.to_string())?;
+                        conn.execute("UPDATE sidebar_layout SET layout_json = ?1 WHERE id = 1", [updated])
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(true)
+                }
+                ProtectionPasswordCheck::Mismatch => Ok(false),
+            }
         })
         .await
     }
@@ -8388,9 +8531,15 @@ impl Storage {
 // Layout
 
 impl Storage {
+    /// Persist the sidebar layout. The protection-password verifiers inside
+    /// `groups` are server-side state that clients never receive (or send), so
+    /// the persisted values for surviving groups are restored here and anything
+    /// a caller tried to inject is stripped.
     pub async fn save_sidebar_layout(&self, layout: &serde_json::Value) -> Result<(), String> {
-        let json = serde_json::to_string(layout).map_err(|e| e.to_string())?;
+        let mut layout = layout.clone();
         self.with_conn(move |conn| {
+            preserve_connection_group_password_hashes(conn, &mut layout)?;
+            let json = serde_json::to_string(&layout).map_err(|e| e.to_string())?;
             conn.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -8407,6 +8556,21 @@ impl Storage {
             })
             .await?;
         json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
+    }
+
+    /// Client-facing variant of [`Self::load_sidebar_layout`]: each group's
+    /// verifier is replaced by a plain `hasPassword` flag so protection-password
+    /// hashes never reach a frontend payload.
+    pub async fn load_sidebar_layout_for_client(&self) -> Result<Option<serde_json::Value>, String> {
+        let Some(mut layout) = self.load_sidebar_layout().await? else { return Ok(None) };
+        if let Some(groups) = layout.get_mut("groups").and_then(|groups| groups.as_array_mut()) {
+            for group in groups {
+                let Some(object) = group.as_object_mut() else { continue };
+                let has_password = object.remove("passwordHash").map(|value| !value.is_null()).unwrap_or(false);
+                object.insert("hasPassword".to_string(), serde_json::Value::Bool(has_password));
+            }
+        }
+        Ok(Some(layout))
     }
 
     pub async fn save_table_vgroups(&self, scope_key: &str, layout: &serde_json::Value) -> Result<(), String> {
@@ -8457,6 +8621,42 @@ impl Storage {
         })
         .await
     }
+}
+
+/// The persisted verifier is server-side state: layout saves arriving from
+/// clients never carry it, so restore it for surviving groups and strip
+/// anything a caller injected.
+fn preserve_connection_group_password_hashes(conn: &Connection, layout: &mut serde_json::Value) -> Result<(), String> {
+    let existing: Option<String> = conn
+        .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let mut stored = HashMap::new();
+    if let Some(json) = existing {
+        if let Ok(previous) = serde_json::from_str::<serde_json::Value>(&json) {
+            if let Some(groups) = previous.get("groups").and_then(|groups| groups.as_array()) {
+                for group in groups {
+                    if let (Some(id), Some(hash)) = (
+                        group.get("id").and_then(|id| id.as_str()),
+                        group.get("passwordHash").and_then(|hash| hash.as_str()),
+                    ) {
+                        stored.insert(id.to_string(), hash.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let Some(groups) = layout.get_mut("groups").and_then(|groups| groups.as_array_mut()) else {
+        return Ok(());
+    };
+    for group in groups {
+        let Some(object) = group.as_object_mut() else { continue };
+        object.remove("passwordHash");
+        if let Some(hash) = object.get("id").and_then(|id| id.as_str()).and_then(|id| stored.get(id)).cloned() {
+            object.insert("passwordHash".to_string(), serde_json::Value::String(hash));
+        }
+    }
+    Ok(())
 }
 
 // Schema cache
@@ -9959,6 +10159,9 @@ mod tests {
     use crate::history::{HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest};
     use crate::models::connection::{
         ConnectionConfig, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,
+    };
+    use crate::persistence::protection_password::{
+        check_protection_password, hash_protection_password, ProtectionPasswordCheck,
     };
     use crate::persistence::secret_codec::{managed_key_path, SecretCodec, SecretKeyPolicy};
     use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
@@ -15241,6 +15444,7 @@ mod tests {
                         updated_at: String::new(),
                         password_hash: None,
                         password_set_by: None,
+                        has_password: false,
                     },
                     SavedSqlFolder {
                         id: "duplicate-folder".to_string(),
@@ -15252,6 +15456,7 @@ mod tests {
                         updated_at: String::new(),
                         password_hash: None,
                         password_set_by: None,
+                        has_password: false,
                     },
                 ],
                 files: Vec::new(),
@@ -15453,7 +15658,7 @@ mod tests {
         assert!(reopened.get_task_run_detail(&run.run_id).await.unwrap().is_none());
     }
 
-    fn sample_saved_folder(id: &str, password_hash: Option<String>) -> SavedSqlFolder {
+    fn sample_saved_folder(id: &str) -> SavedSqlFolder {
         SavedSqlFolder {
             id: id.to_string(),
             connection_id: "conn-1".to_string(),
@@ -15462,8 +15667,9 @@ mod tests {
             order_index: 0,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
-            password_hash,
+            password_hash: None,
             password_set_by: None,
+            has_password: false,
         }
     }
 
@@ -15471,16 +15677,16 @@ mod tests {
     async fn clear_saved_sql_folder_password_removes_hash_and_is_idempotent() {
         let directory = tempfile::tempdir().unwrap();
         let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
-        storage
-            .save_saved_sql_folder(&sample_saved_folder(
-                "folder-1",
-                Some("pbkdf2-sha256$600000$c2FsdA==$aGFzaA==".to_string()),
-            ))
-            .await
-            .unwrap();
+        storage.save_saved_sql_folder(&sample_saved_folder("folder-1")).await.unwrap();
+        storage.set_saved_sql_folder_password("folder-1", "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==").await.unwrap();
+
+        let protected = storage.get_saved_sql_folder("folder-1").await.unwrap().expect("folder must survive clearing");
+        assert!(protected.has_password);
+        assert!(protected.password_hash.is_some());
 
         storage.clear_saved_sql_folder_password("folder-1").await.unwrap();
         let cleared = storage.get_saved_sql_folder("folder-1").await.unwrap().expect("folder must survive clearing");
+        assert!(!cleared.has_password);
         assert!(cleared.password_hash.is_none());
         assert!(cleared.password_set_by.is_none());
 
@@ -15497,12 +15703,17 @@ mod tests {
         let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let layout = serde_json::json!({
             "groups": [
-                { "id": "group-locked", "name": "Locked", "collapsed": false, "passwordHash": "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==" },
+                { "id": "group-locked", "name": "Locked", "collapsed": false },
                 { "id": "group-open", "name": "Open", "collapsed": false },
             ],
             "order": [],
         });
         storage.save_sidebar_layout(&layout).await.unwrap();
+        assert!(storage
+            .set_connection_group_password("group-locked", "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==")
+            .await
+            .unwrap());
+        assert!(!storage.set_connection_group_password("group-unknown", "hash").await.unwrap());
 
         assert!(storage.clear_connection_group_password("group-locked").await.unwrap());
 
@@ -15510,7 +15721,7 @@ mod tests {
         let groups = updated["groups"].as_array().expect("groups must remain an array");
         let locked = groups.iter().find(|group| group["id"] == "group-locked").expect("locked group must remain");
         let open = groups.iter().find(|group| group["id"] == "group-open").expect("open group must remain");
-        assert_eq!(locked["passwordHash"], serde_json::Value::Null);
+        assert!(locked.get("passwordHash").is_none());
         assert!(open.get("passwordHash").is_none());
 
         // Unknown groups report Ok(false); a second clear of the same group is Ok(true).
@@ -15523,5 +15734,154 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         assert!(!storage.clear_connection_group_password("group-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn saved_sql_folder_password_roundtrip_verifies_and_upgrades_legacy() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        storage.save_saved_sql_folder(&sample_saved_folder("folder-1")).await.unwrap();
+
+        // A folder without a verifier lets any password through.
+        assert!(storage.verify_saved_sql_folder_password("folder-1", "anything").await.unwrap());
+
+        let verifier = hash_protection_password("s3cret").unwrap();
+        assert!(storage.set_saved_sql_folder_password("folder-1", &verifier).await.unwrap());
+        assert!(!storage.set_saved_sql_folder_password("missing", &verifier).await.unwrap());
+        assert!(storage.verify_saved_sql_folder_password("folder-1", "s3cret").await.unwrap());
+        assert!(!storage.verify_saved_sql_folder_password("folder-1", "wrong").await.unwrap());
+        assert!(storage.verify_saved_sql_folder_password("missing", "s3cret").await.is_err());
+
+        // A legacy verifier matches once and is upgraded to Argon2 in place.
+        let legacy_digest = {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(b"dbx-connection-group:legacy-pass");
+            digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        };
+        storage.set_saved_sql_folder_password("folder-1", &legacy_digest).await.unwrap();
+        assert!(storage.verify_saved_sql_folder_password("folder-1", "legacy-pass").await.unwrap());
+        let upgraded = storage.get_saved_sql_folder("folder-1").await.unwrap().unwrap();
+        let upgraded_hash = upgraded.password_hash.expect("legacy verifier must be upgraded");
+        assert!(upgraded_hash.starts_with("$argon2"));
+        assert_eq!(check_protection_password("legacy-pass", &upgraded_hash), ProtectionPasswordCheck::Matched);
+        assert!(!storage.verify_saved_sql_folder_password("folder-1", "legacy-pass-wrong").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn save_saved_sql_folder_never_touches_the_stored_verifier() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        storage.save_saved_sql_folder(&sample_saved_folder("folder-1")).await.unwrap();
+        let verifier = hash_protection_password("s3cret").unwrap();
+        storage.set_saved_sql_folder_password("folder-1", &verifier).await.unwrap();
+
+        // A client round-trip carries no verifier: metadata updates must keep
+        // the stored one, and an injected value must never win.
+        let mut round_tripped = storage.get_saved_sql_folder("folder-1").await.unwrap().unwrap();
+        round_tripped.name = "Renamed".to_string();
+        round_tripped.password_hash = Some("client-injected".to_string());
+        storage.save_saved_sql_folder(&round_tripped).await.unwrap();
+
+        let stored = storage.get_saved_sql_folder("folder-1").await.unwrap().unwrap();
+        assert_eq!(stored.name, "Renamed");
+        assert!(stored.has_password);
+        assert!(!storage.verify_saved_sql_folder_password("folder-1", "client-injected").await.unwrap());
+        assert!(storage.verify_saved_sql_folder_password("folder-1", "s3cret").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn saved_sql_library_payloads_expose_only_has_password() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        storage.save_saved_sql_folder(&sample_saved_folder("folder-1")).await.unwrap();
+        let verifier = hash_protection_password("s3cret").unwrap();
+        storage.set_saved_sql_folder_password("folder-1", &verifier).await.unwrap();
+
+        let library = storage.load_saved_sql_library().await.unwrap();
+        assert!(library.folders.iter().find(|folder| folder.id == "folder-1").unwrap().has_password);
+        let payload = serde_json::to_string(&library).unwrap();
+        assert!(!payload.contains("passwordHash"));
+        assert!(!payload.contains("$argon2"));
+        assert!(payload.contains("\"hasPassword\":true"));
+
+        let summary = storage.load_saved_sql_library_summary().await.unwrap();
+        assert!(summary.folders.iter().find(|folder| folder.id == "folder-1").unwrap().has_password);
+    }
+
+    #[tokio::test]
+    async fn set_and_verify_connection_group_password_roundtrip() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let layout = serde_json::json!({
+            "groups": [{ "id": "group-1", "name": "Group", "collapsed": false }],
+            "order": [],
+        });
+        storage.save_sidebar_layout(&layout).await.unwrap();
+
+        // No verifier yet: anything matches, and unknown ids error out.
+        assert!(storage.verify_connection_group_password("group-1", "anything").await.unwrap());
+        assert!(storage.verify_connection_group_password("group-missing", "anything").await.is_err());
+
+        let verifier = hash_protection_password("s3cret").unwrap();
+        assert!(storage.set_connection_group_password("group-1", &verifier).await.unwrap());
+        assert!(!storage.set_connection_group_password("group-missing", &verifier).await.unwrap());
+        assert!(storage.verify_connection_group_password("group-1", "s3cret").await.unwrap());
+        assert!(!storage.verify_connection_group_password("group-1", "wrong").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn save_sidebar_layout_preserves_stored_group_passwords_and_strips_injected_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let layout = serde_json::json!({
+            "groups": [
+                { "id": "group-1", "name": "Group", "collapsed": false },
+                { "id": "group-2", "name": "Other", "collapsed": false },
+            ],
+            "order": [],
+        });
+        storage.save_sidebar_layout(&layout).await.unwrap();
+        let verifier = hash_protection_password("s3cret").unwrap();
+        assert!(storage.set_connection_group_password("group-1", &verifier).await.unwrap());
+
+        // Re-saving the layout restores the stored verifier for group-1 while a
+        // verifier injected for group-2 is discarded rather than persisted.
+        let mut resaved = layout.clone();
+        resaved["groups"][1]["passwordHash"] = serde_json::json!("client-injected");
+        storage.save_sidebar_layout(&resaved).await.unwrap();
+
+        let stored = storage.load_sidebar_layout().await.unwrap().unwrap();
+        let groups = stored["groups"].as_array().unwrap();
+        let group_1 = groups.iter().find(|group| group["id"] == "group-1").unwrap();
+        let group_2 = groups.iter().find(|group| group["id"] == "group-2").unwrap();
+        assert_eq!(group_1["passwordHash"], serde_json::Value::String(verifier));
+        assert!(group_2.get("passwordHash").is_none());
+        assert!(storage.verify_connection_group_password("group-1", "s3cret").await.unwrap());
+        assert!(!storage.verify_connection_group_password("group-1", "client-injected").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn load_sidebar_layout_for_client_replaces_verifiers_with_flags() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let layout = serde_json::json!({
+            "groups": [
+                { "id": "group-locked", "name": "Locked", "collapsed": false },
+                { "id": "group-open", "name": "Open", "collapsed": false },
+            ],
+            "order": [],
+        });
+        storage.save_sidebar_layout(&layout).await.unwrap();
+        let verifier = hash_protection_password("s3cret").unwrap();
+        storage.set_connection_group_password("group-locked", &verifier).await.unwrap();
+
+        let client_layout = storage.load_sidebar_layout_for_client().await.unwrap().expect("layout must persist");
+        let groups = client_layout["groups"].as_array().unwrap();
+        let locked = groups.iter().find(|group| group["id"] == "group-locked").unwrap();
+        let open = groups.iter().find(|group| group["id"] == "group-open").unwrap();
+        assert!(locked.get("passwordHash").is_none());
+        assert_eq!(locked["hasPassword"], serde_json::Value::Bool(true));
+        assert_eq!(open["hasPassword"], serde_json::Value::Bool(false));
+        assert!(!client_layout.to_string().contains("$argon2"));
     }
 }

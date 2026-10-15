@@ -5588,6 +5588,7 @@ mod tests {
             updated_at: String::new(),
             password_hash: None,
             password_set_by: None,
+            has_password: false,
         };
         // Saved SQL is written after tunnel metadata and secrets in the same transaction.
         snapshot.saved_sql.folders = vec![folder.clone(), folder];

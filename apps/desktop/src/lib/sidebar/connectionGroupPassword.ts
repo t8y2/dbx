@@ -1,19 +1,22 @@
+import { verifyConnectionGroupPassword } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useConnectionGroupPasswordPromptStore } from "@/stores/connectionGroupPasswordPromptStore";
 import type { ConnectionGroup } from "@/types/database";
-import { isProtectionPasswordFeatureActive, verifyProtectionPassword } from "./protectionPassword";
+import { isProtectionPasswordFeatureActive } from "./protectionPassword";
 import { findConnectionLocation } from "./sidebarLayout";
 
 export async function promptConnectionGroupUnlock(group: ConnectionGroup): Promise<boolean> {
   // Desktop never gates group access — protection passwords are web-only.
-  if (!isProtectionPasswordFeatureActive() || !group.passwordHash) return true;
+  if (!isProtectionPasswordFeatureActive() || !group.hasPassword) return true;
   const connectionStore = useConnectionStore();
   if (connectionStore.isConnectionGroupUnlocked(group.id)) return true;
   const promptStore = useConnectionGroupPasswordPromptStore();
+  // The verifier stays server-side: the prompt resolves through the verify
+  // command, which also migrates legacy hashes to Argon2 transparently.
   const unlocked = await promptStore.requestPassword({
     groupId: group.id,
     groupName: group.name,
-    verify: (password) => verifyProtectionPassword(password, group.passwordHash!, (upgradedHash) => connectionStore.persistConnectionGroupPasswordHash(group.id, upgradedHash)),
+    verify: (password) => verifyConnectionGroupPassword(group.id, password),
   });
   if (!unlocked) return false;
   connectionStore.unlockConnectionGroup(group.id);
@@ -39,7 +42,7 @@ export function connectionGroupForConnection(connectionId: string): ConnectionGr
 export function lockedConnectionGroupForConnection(connectionId: string): ConnectionGroup | null {
   if (!isProtectionPasswordFeatureActive()) return null;
   const group = connectionGroupForConnection(connectionId);
-  if (!group?.passwordHash) return null;
+  if (!group?.hasPassword) return null;
   return useConnectionStore().isConnectionGroupUnlocked(group.id) ? null : group;
 }
 
@@ -63,7 +66,7 @@ export function lockedConnectionGroupIds(): ReadonlySet<string> {
   const connectionStore = useConnectionStore();
   const locked = new Set<string>();
   for (const group of connectionStore.sidebarLayout.groups) {
-    if (group.passwordHash && !connectionStore.isConnectionGroupUnlocked(group.id)) locked.add(group.id);
+    if (group.hasPassword && !connectionStore.isConnectionGroupUnlocked(group.id)) locked.add(group.id);
   }
   return locked;
 }

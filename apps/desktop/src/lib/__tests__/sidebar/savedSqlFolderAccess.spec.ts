@@ -7,9 +7,10 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   loadSavedSqlLibrary: async () => ({ folders: mocks.savedFolders, files: [] }),
   saveSavedSqlFolder: async (folder: unknown) => folder,
   deleteSavedSqlFolder: async () => {},
+  setSavedSqlFolderPassword: async () => {},
+  clearSavedSqlFolderPassword: async () => {},
+  verifySavedSqlFolderPassword: vi.fn(async () => true),
 }));
-
-const PROTECTION_HASH = "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==";
 
 async function setupStore() {
   const { useSavedSqlStore } = await import("@/stores/savedSqlStore");
@@ -33,7 +34,8 @@ describe("savedSqlFolderAccess", () => {
   it("hides files of a locked folder and keeps reachable ones", async () => {
     const store = await setupStore();
     const open = await store.createFolder("conn", "Open");
-    const locked = await store.createFolder("conn", "Secret", undefined, PROTECTION_HASH);
+    const locked = await store.createFolder("conn", "Secret");
+    await store.setSavedSqlFolderPassword(locked.id, "pw");
     const { excludeLockedSavedSqlFiles } = await import("@/lib/sidebar/savedSqlFolderAccess");
 
     const files = [{ folderId: locked.id }, { folderId: open.id }, {}];
@@ -42,7 +44,8 @@ describe("savedSqlFolderAccess", () => {
 
   it("hides files nested inside a locked branch", async () => {
     const store = await setupStore();
-    const locked = await store.createFolder("conn", "Secret", undefined, PROTECTION_HASH);
+    const locked = await store.createFolder("conn", "Secret");
+    await store.setSavedSqlFolderPassword(locked.id, "pw");
     const child = await store.createFolder("conn", "Child", locked.id);
     const { excludeLockedSavedSqlFiles } = await import("@/lib/sidebar/savedSqlFolderAccess");
 
@@ -51,7 +54,8 @@ describe("savedSqlFolderAccess", () => {
 
   it("reveals a locked branch again once it is unlocked for the session", async () => {
     const store = await setupStore();
-    const locked = await store.createFolder("conn", "Secret", undefined, PROTECTION_HASH);
+    const locked = await store.createFolder("conn", "Secret");
+    await store.setSavedSqlFolderPassword(locked.id, "pw");
     const { excludeLockedSavedSqlFiles } = await import("@/lib/sidebar/savedSqlFolderAccess");
 
     expect(excludeLockedSavedSqlFiles([{ folderId: locked.id }])).toEqual([]);
@@ -62,7 +66,8 @@ describe("savedSqlFolderAccess", () => {
   it("resolves the gating folder only for locked branches", async () => {
     const store = await setupStore();
     const open = await store.createFolder("conn", "Open");
-    const locked = await store.createFolder("conn", "Secret", undefined, PROTECTION_HASH);
+    const locked = await store.createFolder("conn", "Secret");
+    await store.setSavedSqlFolderPassword(locked.id, "pw");
     const child = await store.createFolder("conn", "Child", locked.id);
     const { lockedFolderForSavedSqlFile } = await import("@/lib/sidebar/savedSqlFolderAccess");
 
@@ -85,7 +90,8 @@ describe("savedSqlFolderAccess", () => {
 
   it("gates opening a locked file behind the prompt and unlocks on success", async () => {
     const store = await setupStore();
-    const locked = await store.createFolder("conn", "Secret", undefined, PROTECTION_HASH);
+    const locked = await store.createFolder("conn", "Secret");
+    await store.setSavedSqlFolderPassword(locked.id, "pw");
     const { ensureSavedSqlFileAccessible } = await import("@/lib/sidebar/savedSqlFolderAccess");
     const { useSavedSqlFolderPasswordPromptStore } = await import("@/stores/savedSqlFolderPasswordPromptStore");
 
@@ -98,9 +104,30 @@ describe("savedSqlFolderAccess", () => {
     expect(store.isSavedSqlFolderUnlocked(locked.id)).toBe(true);
   });
 
+  it("verifies the typed password against the backend verify command", async () => {
+    const store = await setupStore();
+    const locked = await store.createFolder("conn", "Secret");
+    await store.setSavedSqlFolderPassword(locked.id, "pw");
+    const { ensureSavedSqlFileAccessible } = await import("@/lib/sidebar/savedSqlFolderAccess");
+    const { useSavedSqlFolderPasswordPromptStore } = await import("@/stores/savedSqlFolderPasswordPromptStore");
+    const api = await import("@/lib/backend/api");
+
+    // Verification runs server-side: the prompt's verify callback only
+    // forwards the plaintext to the command and never touches a local hash.
+    const pending = ensureSavedSqlFileAccessible({ folderId: locked.id });
+    const promptStore = useSavedSqlFolderPasswordPromptStore();
+    await vi.waitFor(() => expect(promptStore.current).not.toBeNull());
+    await expect(promptStore.current!.verify("pw")).resolves.toBe(true);
+    expect(api.verifySavedSqlFolderPassword).toHaveBeenCalledWith(locked.id, "pw");
+    promptStore.resolve(true);
+
+    await expect(pending).resolves.toBe(true);
+  });
+
   it("keeps the folder locked when the password prompt is dismissed", async () => {
     const store = await setupStore();
-    const locked = await store.createFolder("conn", "Secret", undefined, PROTECTION_HASH);
+    const locked = await store.createFolder("conn", "Secret");
+    await store.setSavedSqlFolderPassword(locked.id, "pw");
     const { ensureSavedSqlFileAccessible } = await import("@/lib/sidebar/savedSqlFolderAccess");
     const { useSavedSqlFolderPasswordPromptStore } = await import("@/stores/savedSqlFolderPasswordPromptStore");
 

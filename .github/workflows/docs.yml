@@ -28,9 +28,9 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v6
       - run: cd docs && pnpm install --frozen-lockfile && pnpm build
-      # - name: Deploy to Cloudflare Workers
-      #  working-directory: docs
-      #  run: pnpm dlx wrangler@4 deploy
-     #   env:
-       #   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-       #   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Deploy to Cloudflare Workers
+        working-directory: docs
+        run: pnpm dlx wrangler@4 deploy
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

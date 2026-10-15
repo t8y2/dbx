@@ -18,3 +18,19 @@ export function nearestLockedFolder(folderId: string | undefined, allFolders: re
   }
   return null;
 }
+
+/**
+ * Search-visibility gate for the SQL library panel: a still-locked branch is
+ * opaque to search. Neither the folder itself, nor any descendant folder, nor
+ * any file inside the branch may surface in search results; an in-session
+ * unlock (or an inactive protection feature) restores visibility.
+ */
+export function isSavedSqlFolderSearchVisible(featureActive: boolean, folderId: string, allFolders: readonly SavedSqlFolder[], isFolderLocked: (folder: SavedSqlFolder) => boolean): boolean {
+  if (!featureActive) return true;
+  return !nearestLockedFolder(folderId, allFolders, isFolderLocked);
+}
+
+export function isSavedSqlFileSearchVisible(featureActive: boolean, fileFolderId: string | undefined, allFolders: readonly SavedSqlFolder[], isFolderLocked: (folder: SavedSqlFolder) => boolean): boolean {
+  if (!featureActive) return true;
+  return !nearestLockedFolder(fileFolderId, allFolders, isFolderLocked);
+}

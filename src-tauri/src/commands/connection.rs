@@ -1183,7 +1183,40 @@ pub async fn save_sidebar_layout(state: State<'_, Arc<AppState>>, layout: serde_
 
 #[tauri::command]
 pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
-    state.storage.load_sidebar_layout().await
+    // Client-facing projection: stored protection-password verifiers are
+    // replaced by plain hasPassword flags and never sent to the frontend.
+    state.storage.load_sidebar_layout_for_client().await
+}
+
+#[tauri::command]
+pub async fn set_connection_group_password(
+    state: State<'_, Arc<AppState>>,
+    group_id: String,
+    password: String,
+) -> Result<(), String> {
+    // The verifier is minted in Rust; the plaintext never touches storage.
+    let verifier = dbx_core::persistence::protection_password::hash_protection_password(&password)?;
+    if !state.storage.set_connection_group_password(&group_id, &verifier).await? {
+        return Err(format!("Connection group not found: {group_id}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn verify_connection_group_password(
+    state: State<'_, Arc<AppState>>,
+    group_id: String,
+    password: String,
+) -> Result<bool, String> {
+    state.storage.verify_connection_group_password(&group_id, &password).await
+}
+
+#[tauri::command]
+pub async fn clear_connection_group_password(state: State<'_, Arc<AppState>>, group_id: String) -> Result<(), String> {
+    if !state.storage.clear_connection_group_password(&group_id).await? {
+        return Err(format!("Connection group not found: {group_id}"));
+    }
+    Ok(())
 }
 
 #[tauri::command]

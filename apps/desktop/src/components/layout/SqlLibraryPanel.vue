@@ -31,6 +31,7 @@ import {
   Pencil,
   Play,
   Search,
+  ShieldAlert,
   Trash2,
   Upload,
   X,
@@ -51,8 +52,9 @@ import * as api from "@/lib/backend/api";
 import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { useSavedSqlStore, type SavedSqlFileSortMode, type SavedSqlFolderSortMode } from "@/stores/savedSqlStore";
 import { useSavedSqlFolderPasswordPromptStore } from "@/stores/savedSqlFolderPasswordPromptStore";
-import { isProtectionPasswordFeatureActive, verifyProtectionPassword } from "@/lib/sidebar/protectionPassword";
-import { nearestLockedFolder } from "@/lib/sidebar/savedSqlFolderSearch";
+import { useResetProtectionPasswordPromptStore } from "@/stores/resetProtectionPasswordPromptStore";
+import { isProtectionPasswordFeatureActive } from "@/lib/sidebar/protectionPassword";
+import { isSavedSqlFileSearchVisible, isSavedSqlFolderSearchVisible, nearestLockedFolder } from "@/lib/sidebar/savedSqlFolderSearch";
 import SetSavedSqlFolderPasswordDialog from "@/components/connection/SetSavedSqlFolderPasswordDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -363,15 +365,13 @@ function folderSearchVisible(folder: SavedSqlFolder): boolean {
   // still locked (password set and not unlocked yet) hides its branch from
   // results, while an in-session unlock makes it searchable again. Desktop
   // has no protection passwords, so nothing is ever excluded there.
-  if (!isProtectionPasswordFeatureActive()) return true;
-  return !nearestLockedFolder(folder.id, savedSqlStore.allFolders, isFolderPasswordLockable);
+  return isSavedSqlFolderSearchVisible(isProtectionPasswordFeatureActive(), folder.id, savedSqlStore.allFolders, isFolderPasswordLockable);
 }
 
 function fileSearchVisible(file: SavedSqlFile): boolean {
   // Same session semantics as folderSearchVisible: files of an unlocked (or
   // unprotected) branch stay searchable; only still-locked branches are hidden.
-  if (!isProtectionPasswordFeatureActive()) return true;
-  return !lockedAncestorForFile(file);
+  return isSavedSqlFileSearchVisible(isProtectionPasswordFeatureActive(), file.folderId, savedSqlStore.allFolders, isFolderPasswordLockable);
 }
 
 function fileMatchesQuery(file: SavedSqlFile) {
@@ -517,6 +517,7 @@ function toggleFolder(folderId: string) {
 }
 
 const folderPasswordPromptStore = useSavedSqlFolderPasswordPromptStore();
+const resetProtectionPasswordPromptStore = useResetProtectionPasswordPromptStore();
 
 async function promptSavedSqlFolderUnlock(folder: SavedSqlFolder): Promise<boolean> {
   // Desktop never gates folder access — protection passwords are web-only.
@@ -524,7 +525,9 @@ async function promptSavedSqlFolderUnlock(folder: SavedSqlFolder): Promise<boole
   const unlocked = await folderPasswordPromptStore.requestPassword({
     folderId: folder.id,
     folderName: folder.name,
-    verify: (password) => verifyProtectionPassword(password, folder.passwordHash!, (upgradedHash) => savedSqlStore.setSavedSqlFolderPassword(folder.id, upgradedHash)),
+    // Verification runs server-side: the command receives the plaintext,
+    // checks it against the stored argon2 verifier and returns a boolean.
+    verify: (password) => api.verifySavedSqlFolderPassword(folder.id, password),
   });
   if (unlocked) {
     savedSqlStore.unlockSavedSqlFolder(folder.id);
@@ -544,14 +547,12 @@ function openSetFolderPasswordDialog(folder: SavedSqlFolder) {
   showSetFolderPasswordDialog.value = true;
 }
 
-async function applySetFolderPassword(folderId: string, passwordHash: string | null) {
-  await savedSqlStore.setSavedSqlFolderPassword(folderId, passwordHash);
-  if (passwordHash) {
-    // Lock takes effect immediately: collapse the folder so its contents stay hidden until unlocked.
-    const next = new Set(collapsedFolders.value);
-    next.add(folderId);
-    collapsedFolders.value = next;
-  }
+async function applySetFolderPassword(folderId: string, password: string) {
+  await savedSqlStore.setSavedSqlFolderPassword(folderId, password);
+  // Lock takes effect immediately: collapse the folder so its contents stay hidden until unlocked.
+  const next = new Set(collapsedFolders.value);
+  next.add(folderId);
+  collapsedFolders.value = next;
 }
 
 function handleFolderPasswordChanged(hadPassword: boolean, removed: boolean) {
@@ -565,12 +566,12 @@ function handleFolderPasswordChanged(hadPassword: boolean, removed: boolean) {
 function isFolderPasswordLockable(folder: SavedSqlFolder): boolean {
   // Protection passwords are web-only; desktop folders are never locked.
   if (!isProtectionPasswordFeatureActive()) return false;
-  return !!folder.passwordHash && !savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
+  return !!folder.hasPassword && !savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
 }
 
 function isFolderPasswordUnlocked(folder: SavedSqlFolder): boolean {
   if (!isProtectionPasswordFeatureActive()) return false;
-  return !!folder.passwordHash && savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
+  return !!folder.hasPassword && savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
 }
 
 function lockFolderFromMenu(folder: SavedSqlFolder) {
@@ -1490,8 +1491,11 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     { label: t("savedSql.renameFolder"), action: () => startRenameFolder(target), icon: Pencil, disabled: folderLocked },
     // Locked folders cannot have password changed or removed — unlock first.
     // Desktop has no protection-password feature, so the entry is hidden entirely.
-    ...(isFolderPasswordLockable(target) || !isProtectionPasswordFeatureActive() ? [] : [{ label: target.passwordHash ? t("savedSql.changePassword") : t("savedSql.setPassword"), action: () => openSetFolderPasswordDialog(target), icon: KeyRound }]),
+    ...(isFolderPasswordLockable(target) || !isProtectionPasswordFeatureActive() ? [] : [{ label: target.hasPassword ? t("savedSql.changePassword") : t("savedSql.setPassword"), action: () => openSetFolderPasswordDialog(target), icon: KeyRound }]),
     ...(isFolderPasswordLockable(target) ? [{ label: t("savedSql.unlockFolder"), action: () => void promptSavedSqlFolderUnlock(target), icon: LockOpen }] : isFolderPasswordUnlocked(target) ? [{ label: t("savedSql.lockFolder"), action: () => lockFolderFromMenu(target), icon: Lock }] : []),
+    // Forgotten-password recovery path (#11907): opens a confirm dialog that
+    // re-verifies the app's login password before clearing the verifier.
+    ...(isFolderPasswordLockable(target) ? [{ label: t("auth.resetProtectionPasswordMenu"), action: () => resetProtectionPasswordPromptStore.requestReset({ targetType: "folder", id: target.id, name: target.name }), icon: ShieldAlert }] : []),
     { label: "", separator: true },
     // Locked folders cannot be deleted — unlock first.
     ...(isFolderPasswordLockable(target)

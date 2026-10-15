@@ -1,4 +1,5 @@
-import { isProtectionPasswordFeatureActive, verifyProtectionPassword } from "@/lib/sidebar/protectionPassword";
+import { verifySavedSqlFolderPassword } from "@/lib/backend/api";
+import { isProtectionPasswordFeatureActive } from "@/lib/sidebar/protectionPassword";
 import { nearestLockedFolder } from "@/lib/sidebar/savedSqlFolderSearch";
 import { useSavedSqlFolderPasswordPromptStore } from "@/stores/savedSqlFolderPasswordPromptStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -11,7 +12,7 @@ import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
  */
 export function isSavedSqlFolderLocked(folder: SavedSqlFolder): boolean {
   if (!isProtectionPasswordFeatureActive()) return false;
-  return !!folder.passwordHash && !useSavedSqlStore().isSavedSqlFolderUnlocked(folder.id);
+  return !!folder.hasPassword && !useSavedSqlStore().isSavedSqlFolderUnlocked(folder.id);
 }
 
 /**
@@ -42,7 +43,9 @@ export async function ensureSavedSqlFileAccessible(file: Pick<SavedSqlFile, "fol
   const unlocked = await useSavedSqlFolderPasswordPromptStore().requestPassword({
     folderId: lockedFolder.id,
     folderName: lockedFolder.name,
-    verify: (password) => verifyProtectionPassword(password, lockedFolder.passwordHash!, (upgradedHash) => store.setSavedSqlFolderPassword(lockedFolder.id, upgradedHash)),
+    // The verifier stays server-side: the prompt resolves through the verify
+    // command, which also migrates legacy hashes to Argon2 transparently.
+    verify: (password) => verifySavedSqlFolderPassword(lockedFolder.id, password),
   });
   if (unlocked) store.unlockSavedSqlFolder(lockedFolder.id);
   return unlocked;

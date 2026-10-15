@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { nearestLockedFolder } from "@/lib/sidebar/savedSqlFolderSearch";
+import { beforeEach, describe, expect, it } from "vitest";
+import { isSavedSqlFileSearchVisible, isSavedSqlFolderSearchVisible, nearestLockedFolder } from "@/lib/sidebar/savedSqlFolderSearch";
 import type { SavedSqlFolder } from "@/types/database";
 
-function folder(id: string, options: { parentFolderId?: string; passwordHash?: string } = {}): SavedSqlFolder {
+function folder(id: string, options: { parentFolderId?: string; hasPassword?: boolean } = {}): SavedSqlFolder {
   return {
     id,
     connectionId: "conn",
@@ -11,7 +11,7 @@ function folder(id: string, options: { parentFolderId?: string; passwordHash?: s
     createdAt: "",
     updatedAt: "",
     ...(options.parentFolderId ? { parentFolderId: options.parentFolderId } : {}),
-    ...(options.passwordHash ? { passwordHash: options.passwordHash } : {}),
+    ...(options.hasPassword ? { hasPassword: true } : {}),
   };
 }
 
@@ -41,9 +41,9 @@ describe("nearestLockedFolder", () => {
 
   it("unhides a protected branch once the session lock predicate clears", () => {
     // 搜索过滤与会话解锁共用同一语义:未解锁时锁定,解锁后(谓词返回 false)恢复可见。
-    const folders = [folder("vault", { passwordHash: "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==" }), folder("child", { parentFolderId: "vault" })];
+    const folders = [folder("vault", { hasPassword: true }), folder("child", { parentFolderId: "vault" })];
     const unlocked = new Set<string>();
-    const isFolderLockedBySession = (candidate: SavedSqlFolder) => !!candidate.passwordHash && !unlocked.has(candidate.id);
+    const isFolderLockedBySession = (candidate: SavedSqlFolder) => !!candidate.hasPassword && !unlocked.has(candidate.id);
 
     expect(nearestLockedFolder("child", folders, isFolderLockedBySession)?.id).toBe("vault");
     unlocked.add("vault");
@@ -56,5 +56,45 @@ describe("nearestLockedFolder", () => {
     const folders = [folder("orphan", { parentFolderId: "missing" }), folder("a", { parentFolderId: "b" }), folder("b", { parentFolderId: "a" })];
     expect(nearestLockedFolder("orphan", folders, isFolderLocked)).toBeNull();
     expect(nearestLockedFolder("a", folders, isFolderLocked)).toBeNull();
+  });
+});
+
+describe("search opacity for locked branches", () => {
+  const unlocked = new Set<string>();
+  const isFolderLockedBySession = (candidate: SavedSqlFolder) => !!candidate.hasPassword && !unlocked.has(candidate.id);
+
+  beforeEach(() => {
+    unlocked.clear();
+  });
+
+  it("keeps a locked folder, its descendants and its files out of search results", () => {
+    const folders = [folder("open"), folder("vault", { hasPassword: true }), folder("child", { parentFolderId: "vault" })];
+
+    // A locked folder whose name matches the query must not surface...
+    expect(isSavedSqlFolderSearchVisible(true, "vault", folders, isFolderLockedBySession)).toBe(false);
+    // ...nor may any descendant branch or file inside the locked branch.
+    expect(isSavedSqlFolderSearchVisible(true, "child", folders, isFolderLockedBySession)).toBe(false);
+    expect(isSavedSqlFileSearchVisible(true, "child", folders, isFolderLockedBySession)).toBe(false);
+    expect(isSavedSqlFileSearchVisible(true, "vault", folders, isFolderLockedBySession)).toBe(false);
+
+    // Unprotected branches and unfiled files stay searchable.
+    expect(isSavedSqlFolderSearchVisible(true, "open", folders, isFolderLockedBySession)).toBe(true);
+    expect(isSavedSqlFileSearchVisible(true, undefined, folders, isFolderLockedBySession)).toBe(true);
+  });
+
+  it("restores search visibility after an in-session unlock", () => {
+    const folders = [folder("vault", { hasPassword: true }), folder("child", { parentFolderId: "vault" })];
+    unlocked.add("vault");
+
+    expect(isSavedSqlFolderSearchVisible(true, "vault", folders, isFolderLockedBySession)).toBe(true);
+    expect(isSavedSqlFolderSearchVisible(true, "child", folders, isFolderLockedBySession)).toBe(true);
+    expect(isSavedSqlFileSearchVisible(true, "child", folders, isFolderLockedBySession)).toBe(true);
+  });
+
+  it("never filters when the protection feature is inactive (desktop)", () => {
+    const folders = [folder("vault", { hasPassword: true }), folder("child", { parentFolderId: "vault" })];
+
+    expect(isSavedSqlFolderSearchVisible(false, "vault", folders, isFolderLockedBySession)).toBe(true);
+    expect(isSavedSqlFileSearchVisible(false, "vault", folders, isFolderLockedBySession)).toBe(true);
   });
 });

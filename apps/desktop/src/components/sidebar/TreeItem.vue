@@ -239,7 +239,7 @@ const isLockedConnectionGroup = computed(() => {
   // Protection passwords are web-only; desktop never shows the lock badge.
   if (!isProtectionPasswordFeatureActive()) return false;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === props.node.id);
-  return !!group?.passwordHash && !connectionStore.isConnectionGroupUnlocked(props.node.id);
+  return !!group?.hasPassword && !connectionStore.isConnectionGroupUnlocked(props.node.id);
 });
 
 // Session semantics: a protected group unlocked in this session keeps an
@@ -248,7 +248,7 @@ const isUnlockedConnectionGroup = computed(() => {
   if (props.node.type !== "connection-group") return false;
   if (!isProtectionPasswordFeatureActive()) return false;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === props.node.id);
-  return !!group?.passwordHash && connectionStore.isConnectionGroupUnlocked(props.node.id);
+  return !!group?.hasPassword && connectionStore.isConnectionGroupUnlocked(props.node.id);
 });
 
 const showProductionBadge = computed(() => {

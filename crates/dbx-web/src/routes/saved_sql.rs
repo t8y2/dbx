@@ -61,6 +61,49 @@ pub async fn clear_saved_sql_folder_password(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderPasswordRequest {
+    pub password: String,
+}
+
+/// Set (or replace) a SQL library folder's protection password. The verifier
+/// is minted server-side; the plaintext never touches persistent storage.
+pub async fn set_saved_sql_folder_password(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Json(body): Json<FolderPasswordRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let verifier = dbx_core::persistence::protection_password::hash_protection_password(&body.password)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated = state
+        .app
+        .storage
+        .set_saved_sql_folder_password(&id, &verifier)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !updated {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Verify a SQL library folder's protection password. Answers
+/// `{ ok: true | false }` so the stored verifier never leaves the server.
+pub async fn verify_saved_sql_folder_password(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Json(body): Json<FolderPasswordRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let matched = state
+        .app
+        .storage
+        .verify_saved_sql_folder_password(&id, &body.password)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "ok": matched })))
+}
+
 pub async fn save_saved_sql_file(
     State(state): State<Arc<WebState>>,
     Json(file): Json<SavedSqlFile>,

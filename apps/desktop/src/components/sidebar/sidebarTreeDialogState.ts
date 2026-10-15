@@ -211,7 +211,6 @@ export const showMoveToNewGroupDialog = ref(false);
 export const moveToNewGroupName = ref("");
 export const showSetGroupPasswordDialog = ref(false);
 export const setGroupPasswordValue = ref("");
-export const setGroupPasswordRemove = ref(false);
 
 const openFlags = [
   showDeleteConfirm,
@@ -296,5 +295,4 @@ export function resetSidebarTreeDialogState() {
   tableVGroupDialogParentGroupId.value = null;
   tableVGroupDialogTableNames.value = [];
   setGroupPasswordValue.value = "";
-  setGroupPasswordRemove.value = false;
 }

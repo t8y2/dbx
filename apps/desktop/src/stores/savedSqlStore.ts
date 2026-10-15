@@ -364,7 +364,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     return hydrated;
   }
 
-  async function createFolder(connectionId: string, name: string, parentFolderId?: string, passwordHash?: string) {
+  async function createFolder(connectionId: string, name: string, parentFolderId?: string) {
     const key = folderCreateKey(connectionId, name, parentFolderId);
     const pending = pendingFolderCreates.get(key);
     if (pending) return pending;
@@ -379,7 +379,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
         orderIndex: maxOrderIndex(folders.value.filter((item) => item.connectionId === connectionId && (item.parentFolderId || "") === (parentFolderId || ""))) + 1,
         createdAt: timestamp,
         updatedAt: timestamp,
-        ...(passwordHash ? { passwordHash } : {}),
+        hasPassword: false,
       };
       const saved = await api.saveSavedSqlFolder(folder);
       folders.value = [...folders.value.filter((item) => item.id !== saved.id), saved];
@@ -437,19 +437,29 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     unlockedSavedSqlFolderIds.value = next;
   }
 
-  async function setSavedSqlFolderPassword(folderId: string, passwordHash: string | null) {
+  /** Set (or replace) a folder's protection password through the backend command; the verifier is minted in Rust and never travels through the frontend. */
+  async function setSavedSqlFolderPassword(folderId: string, password: string) {
     const existing = folders.value.find((folder) => folder.id === folderId);
     if (!existing) return;
-    // Invalidate unlock state when password changes
-    if (unlockedSavedSqlFolderIds.value.has(folderId)) {
-      const next = new Set(unlockedSavedSqlFolderIds.value);
-      next.delete(folderId);
-      unlockedSavedSqlFolderIds.value = next;
-    }
-    // 无多用户体系：passwordSetBy 不填充（保留字段以兼容已持久化的数据）。
-    const updated: SavedSqlFolder = passwordHash ? { ...existing, passwordHash, updatedAt: nowIso() } : { ...existing, passwordHash: undefined, passwordSetBy: undefined, updatedAt: nowIso() };
-    await api.saveSavedSqlFolder(updated);
-    folders.value = folders.value.map((folder) => (folder.id === folderId ? updated : folder));
+    await api.setSavedSqlFolderPassword(folderId, password);
+    // Changing the password invalidates this session's unlock.
+    const next = new Set(unlockedSavedSqlFolderIds.value);
+    next.delete(folderId);
+    unlockedSavedSqlFolderIds.value = next;
+    folders.value = folders.value.map((folder) => (folder.id === folderId ? { ...folder, hasPassword: true, updatedAt: nowIso() } : folder));
+    bumpVersion();
+    await syncToLocalDirectory();
+  }
+
+  /** Recovery path: clear a folder's protection password after the caller verified the app's login password (web only). */
+  async function clearSavedSqlFolderPassword(folderId: string, loginPassword?: string) {
+    const existing = folders.value.find((folder) => folder.id === folderId);
+    if (!existing) return;
+    await api.clearSavedSqlFolderPassword(folderId, loginPassword);
+    const next = new Set(unlockedSavedSqlFolderIds.value);
+    next.delete(folderId);
+    unlockedSavedSqlFolderIds.value = next;
+    folders.value = folders.value.map((folder) => (folder.id === folderId ? { ...folder, hasPassword: false, updatedAt: nowIso() } : folder));
     bumpVersion();
     await syncToLocalDirectory();
   }
@@ -1101,6 +1111,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     unlockSavedSqlFolder,
     lockSavedSqlFolder,
     setSavedSqlFolderPassword,
+    clearSavedSqlFolderPassword,
     saveFile,
     updateFileExecutionTarget,
     updateFilesExecutionTarget,

@@ -13,7 +13,6 @@ import type {
   CompletionAssistantObjectKind,
   CompletionAssistantRequest,
   ConnectionConfig,
-  ConnectionGroup,
   ConnectionLivenessMessage,
   DatabaseType,
   DatabaseConnectionInfo,
@@ -10708,8 +10707,8 @@ export const useConnectionStore = defineStore("connection", () => {
     loadSidebarTableSearchIndex,
     loadSidebarTableSearchIndexScopes,
     refreshSidebarTableSearchIndex,
-    createConnectionGroup(name: string, parentGroupId?: string | null, passwordHash?: string) {
-      const result = createGroupOp(sidebarLayout.value, name, parentGroupId, passwordHash);
+    createConnectionGroup(name: string, parentGroupId?: string | null) {
+      const result = createGroupOp(sidebarLayout.value, name, parentGroupId);
       updateLayoutAndRebuild(result.layout);
       return result.groupId;
     },
@@ -10738,31 +10737,32 @@ export const useConnectionStore = defineStore("connection", () => {
         rebuildTreeNodes();
       }
     },
-    setConnectionGroupPassword(groupId: string, passwordHash: string | null) {
+    /** Set (or replace) a group's protection password through the backend command; the verifier is minted in Rust and never travels through the frontend. */
+    async setConnectionGroupPassword(groupId: string, password: string) {
       const group = sidebarLayout.value.groups.find((g) => g.id === groupId);
       if (!group) return;
-      // Invalidate unlock state when password changes
-      if (unlockedConnectionGroupIds.value.has(groupId)) {
-        const next = new Set(unlockedConnectionGroupIds.value);
-        next.delete(groupId);
-        unlockedConnectionGroupIds.value = next;
-      }
-      // 无多用户体系：passwordSetBy 不填充（保留字段以兼容已持久化的数据）。
-      const nextGroup: ConnectionGroup = passwordHash ? { ...group, passwordHash, collapsed: true } : { id: group.id, name: group.name, collapsed: group.collapsed };
+      await api.setConnectionGroupPassword(groupId, password);
+      // Changing the password invalidates this session's unlock, and locking
+      // the group right away keeps the new lock state visible.
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.delete(groupId);
+      unlockedConnectionGroupIds.value = next;
       updateLayoutAndRebuild({
         ...sidebarLayout.value,
-        groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? nextGroup : g)),
+        groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? { ...g, hasPassword: true, collapsed: true } : g)),
       });
     },
-    // Re-persist a group's protection hash without touching unlock/collapse
-    // state. Used when lazily migrating a legacy verifier to the salted PBKDF2
-    // format right after a successful unlock.
-    persistConnectionGroupPasswordHash(groupId: string, passwordHash: string) {
+    /** Recovery path: clear a group's protection password after the caller verified the app's login password (web only). */
+    async clearConnectionGroupPassword(groupId: string, loginPassword?: string) {
       const group = sidebarLayout.value.groups.find((g) => g.id === groupId);
       if (!group) return;
+      await api.clearConnectionGroupPassword(groupId, loginPassword);
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.delete(groupId);
+      unlockedConnectionGroupIds.value = next;
       updateLayoutAndRebuild({
         ...sidebarLayout.value,
-        groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? { ...g, passwordHash } : g)),
+        groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? { ...g, hasPassword: false } : g)),
       });
     },
     renameConnectionGroup(groupId: string, name: string) {

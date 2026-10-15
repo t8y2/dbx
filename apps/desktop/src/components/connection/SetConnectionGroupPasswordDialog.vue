@@ -20,9 +20,6 @@
           <Button type="submit" :disabled="saving">
             {{ saving ? t("common.processing") : t("common.save") }}
           </Button>
-          <Button v-if="hasPassword" type="button" variant="destructive" @click="handleRemovePassword" :disabled="saving">
-            {{ t("connectionGroup.removePassword") }}
-          </Button>
         </DialogFooter>
       </form>
     </DialogContent>
@@ -36,9 +33,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Button } from "@/components/ui/button";
 import { KeyRound } from "@lucide/vue";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
-import { showSetGroupPasswordDialog, setGroupPasswordValue, setGroupPasswordRemove, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
+import { showSetGroupPasswordDialog, setGroupPasswordValue, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { hashProtectionPassword } from "@/lib/sidebar/protectionPassword";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -51,7 +47,7 @@ const hasPassword = computed(() => {
   const node = sidebarFormTarget.value;
   if (node?.type !== "connection-group") return false;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
-  return !!group?.passwordHash;
+  return !!group?.hasPassword;
 });
 
 watch(
@@ -70,36 +66,22 @@ function handleOpenChange(open: boolean) {
   if (!open) {
     showSetGroupPasswordDialog.value = false;
     setGroupPasswordValue.value = "";
-    setGroupPasswordRemove.value = false;
   }
 }
 
 async function handleSubmit() {
   const node = sidebarFormTarget.value;
   if (node?.type !== "connection-group") return;
+  if (!password.value) return;
 
   saving.value = true;
   try {
-    const hash = password.value ? await hashProtectionPassword(password.value) : null;
-    await connectionStore.setConnectionGroupPassword(node.id, hash);
+    // The backend command mints the verifier; the plaintext is only sent for
+    // hashing and never persisted. Removing a password goes through the
+    // login-password-gated recovery path instead of this dialog.
+    await connectionStore.setConnectionGroupPassword(node.id, password.value);
     showSetGroupPasswordDialog.value = false;
     setGroupPasswordValue.value = "";
-    setGroupPasswordRemove.value = false;
-  } finally {
-    saving.value = false;
-  }
-}
-
-async function handleRemovePassword() {
-  const node = sidebarFormTarget.value;
-  if (node?.type !== "connection-group") return;
-
-  saving.value = true;
-  try {
-    await connectionStore.setConnectionGroupPassword(node.id, null);
-    showSetGroupPasswordDialog.value = false;
-    setGroupPasswordValue.value = "";
-    setGroupPasswordRemove.value = false;
   } finally {
     saving.value = false;
   }

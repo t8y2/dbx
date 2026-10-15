@@ -75,9 +75,11 @@ import {
   KeyRound,
   LockOpen,
   Lock,
+  ShieldAlert,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { promptConnectionGroupUnlock } from "@/lib/sidebar/connectionGroupPassword";
+import { useResetProtectionPasswordPromptStore } from "@/stores/resetProtectionPasswordPromptStore";
 import { isProtectionPasswordFeatureActive } from "@/lib/sidebar/protectionPassword";
 import { ensureSavedSqlFileAccessible, excludeLockedSavedSqlFiles } from "@/lib/sidebar/savedSqlFolderAccess";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -418,6 +420,7 @@ const cloneDialog = useOceanbaseCloneDialog(t);
 const { state: cloneDialogState, open: cloneDialogOpen } = cloneDialog;
 
 const connectionStore = useConnectionStore();
+const resetProtectionPasswordPromptStore = useResetProtectionPasswordPromptStore();
 
 const queryStore = useQueryStore();
 
@@ -910,7 +913,7 @@ async function toggle(requestId = beginNavigationRequest()) {
     // Locked groups require password verification before expanding.
     if (!node.isExpanded) {
       const group = connectionStore.sidebarLayout.groups.find((item) => item.id === node.id);
-      if (group?.passwordHash && !(await promptConnectionGroupUnlock(group))) return;
+      if (group?.hasPassword && !(await promptConnectionGroupUnlock(group))) return;
     }
     node.isExpanded = !node.isExpanded;
     if (!node.isExpanded) collapseSubtreeDescendants(node);
@@ -6300,6 +6303,13 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
         action: unlockConnectionGroupFromMenu,
         icon: LockOpen,
       });
+      // Forgotten-password recovery path (#11907): opens a confirm dialog
+      // that re-verifies the app's login password before clearing.
+      items.push({
+        label: t("auth.resetProtectionPasswordMenu"),
+        action: requestResetGroupProtection,
+        icon: ShieldAlert,
+      });
     } else if (connectionGroupPasswordUnlocked()) {
       items.push({
         label: t("connectionGroup.lockGroup"),
@@ -6327,7 +6337,7 @@ function connectionGroupPasswordMenuLabel(): string {
   const node = activeNode.value;
   if (node?.type !== "connection-group") return "";
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
-  return group?.passwordHash ? t("connectionGroup.changePassword") : t("connectionGroup.setPassword");
+  return group?.hasPassword ? t("connectionGroup.changePassword") : t("connectionGroup.setPassword");
 }
 
 function openSetGroupPasswordDialog() {
@@ -6343,7 +6353,7 @@ function connectionGroupPasswordLockable(): boolean {
   // Protection passwords are web-only; desktop groups are never locked.
   if (!isProtectionPasswordFeatureActive()) return false;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
-  return !!group?.passwordHash && !connectionStore.isConnectionGroupUnlocked(node.id);
+  return !!group?.hasPassword && !connectionStore.isConnectionGroupUnlocked(node.id);
 }
 
 function connectionGroupPasswordUnlocked(): boolean {
@@ -6351,14 +6361,22 @@ function connectionGroupPasswordUnlocked(): boolean {
   if (node?.type !== "connection-group") return false;
   if (!isProtectionPasswordFeatureActive()) return false;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
-  return !!group?.passwordHash && connectionStore.isConnectionGroupUnlocked(node.id);
+  return !!group?.hasPassword && connectionStore.isConnectionGroupUnlocked(node.id);
+}
+
+function requestResetGroupProtection() {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  if (!group) return;
+  resetProtectionPasswordPromptStore.requestReset({ targetType: "group", id: group.id, name: group.name });
 }
 
 async function unlockConnectionGroupFromMenu() {
   const node = activeNode.value;
   if (node?.type !== "connection-group") return;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
-  if (!group?.passwordHash) return;
+  if (!group?.hasPassword) return;
   await promptConnectionGroupUnlock(group);
 }
 
@@ -6366,7 +6384,7 @@ function lockConnectionGroupFromMenu() {
   const node = activeNode.value;
   if (node?.type !== "connection-group") return;
   const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
-  if (!group?.passwordHash) return;
+  if (!group?.hasPassword) return;
   connectionStore.lockConnectionGroup(node.id);
 }
 

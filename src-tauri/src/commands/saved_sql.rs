@@ -89,6 +89,34 @@ pub async fn delete_saved_sql_folder(state: State<'_, Arc<AppState>>, id: String
 }
 
 #[tauri::command]
+pub async fn set_saved_sql_folder_password(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    password: String,
+) -> Result<(), String> {
+    // The verifier is minted in Rust; the plaintext never touches storage.
+    let verifier = dbx_core::persistence::protection_password::hash_protection_password(&password)?;
+    if !state.storage.set_saved_sql_folder_password(&id, &verifier).await? {
+        return Err(format!("Saved SQL folder not found: {id}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn verify_saved_sql_folder_password(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    password: String,
+) -> Result<bool, String> {
+    state.storage.verify_saved_sql_folder_password(&id, &password).await
+}
+
+#[tauri::command]
+pub async fn clear_saved_sql_folder_password(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    state.storage.clear_saved_sql_folder_password(&id).await
+}
+
+#[tauri::command]
 pub async fn save_saved_sql_file(state: State<'_, Arc<AppState>>, file: SavedSqlFile) -> Result<SavedSqlFile, String> {
     state.storage.save_saved_sql_file(&file).await?;
     Ok(file)

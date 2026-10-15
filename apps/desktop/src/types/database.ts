@@ -1720,9 +1720,9 @@ export interface ConnectionGroup {
   id: string;
   name: string;
   collapsed: boolean;
-  /** Salted PBKDF2 verifier of the optional protection password (`pbkdf2-sha256$...`; legacy plain SHA-256 digests are migrated lazily on unlock). Absent when the group is not password-protected. */
-  passwordHash?: string;
-  /** User ID who set the protection password. Used to restrict password clearing to the original setter. */
+  /** Whether a protection password is set for this group. The verifier itself stays server-side; unlock goes through a backend command. */
+  hasPassword?: boolean;
+  /** Kept for compatibility with data persisted by builds that fill it; unused (single-user app). */
   passwordSetBy?: string;
 }
 
@@ -2438,9 +2438,9 @@ export interface SavedSqlFolder {
   orderIndex?: number;
   createdAt: string;
   updatedAt: string;
-  /** Salted PBKDF2 verifier of the optional protection password (`pbkdf2-sha256$...`; legacy plain SHA-256 digests are migrated lazily on unlock). Absent when the folder is not password-protected. */
-  passwordHash?: string;
-  /** User ID who set the protection password. Used to restrict password clearing to the original setter. */
+  /** Whether a protection password is set for this folder. The verifier itself stays server-side; unlock goes through a backend command. */
+  hasPassword?: boolean;
+  /** Kept for compatibility with data persisted by builds that fill it; unused (single-user app). */
   passwordSetBy?: string;
 }
 

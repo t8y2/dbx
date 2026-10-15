@@ -1082,6 +1082,30 @@ export async function deleteSavedSqlFolder(id: string): Promise<void> {
   return del(`/api/saved-sql/folders/${encodeURIComponent(id)}`);
 }
 
+export async function setSavedSqlFolderPassword(id: string, password: string): Promise<void> {
+  await post(`/api/saved-sql/folders/${encodeURIComponent(id)}/set-password`, { password });
+}
+
+export async function verifySavedSqlFolderPassword(id: string, password: string): Promise<boolean> {
+  const result = await post<{ ok: boolean }>(`/api/saved-sql/folders/${encodeURIComponent(id)}/verify-password`, { password });
+  return !!result?.ok;
+}
+
+export async function clearSavedSqlFolderPassword(id: string, loginPassword?: string): Promise<void> {
+  const res = await fetch(apiUrl(`/api/saved-sql/folders/${encodeURIComponent(id)}/clear-password`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ loginPassword: loginPassword ?? "" }),
+  });
+  if (!res.ok) {
+    const err = await backendResponseError(res);
+    // Keep the HTTP status on the error so recovery UIs can tell a wrong
+    // login password (401) apart from a missing login password (409).
+    (err as { status?: number }).status = res.status;
+    throw err;
+  }
+}
+
 export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile> {
   return post("/api/saved-sql", file);
 }
@@ -5614,6 +5638,28 @@ export async function saveSidebarLayout(layout: SidebarLayout): Promise<void> {
 
 export async function loadSidebarLayout(): Promise<SidebarLayout | null> {
   return get("/api/layout/sidebar");
+}
+
+export async function setConnectionGroupPassword(groupId: string, password: string): Promise<void> {
+  await post(`/api/layout/sidebar/groups/${encodeURIComponent(groupId)}/set-password`, { password });
+}
+
+export async function verifyConnectionGroupPassword(groupId: string, password: string): Promise<boolean> {
+  const result = await post<{ ok: boolean }>(`/api/layout/sidebar/groups/${encodeURIComponent(groupId)}/verify-password`, { password });
+  return !!result?.ok;
+}
+
+export async function clearConnectionGroupPassword(groupId: string, loginPassword?: string): Promise<void> {
+  const res = await fetch(apiUrl(`/api/layout/sidebar/groups/${encodeURIComponent(groupId)}/clear-password`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ loginPassword: loginPassword ?? "" }),
+  });
+  if (!res.ok) {
+    const err = await backendResponseError(res);
+    (err as { status?: number }).status = res.status;
+    throw err;
+  }
 }
 
 export async function saveTableVGroups(scopeKey: string, layout: TableVGroupLayout): Promise<void> {

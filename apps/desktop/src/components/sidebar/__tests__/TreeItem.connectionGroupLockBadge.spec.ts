@@ -125,7 +125,7 @@ function groupNode(id: string): TreeNode {
 }
 
 function protectedGroup(id: string): ConnectionGroup {
-  return { id, name: `Group ${id}`, collapsed: false, passwordHash: "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==" };
+  return { id, name: `Group ${id}`, collapsed: false, hasPassword: true };
 }
 
 describe("TreeItem connection group lock badge", () => {

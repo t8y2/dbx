@@ -7,6 +7,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   loadSavedSqlLibrary: async () => ({ folders: mocks.savedFolders, files: [] }),
   saveSavedSqlFolder: async (folder: unknown) => folder,
   deleteSavedSqlFolder: async () => {},
+  setSavedSqlFolderPassword: async () => {},
+  clearSavedSqlFolderPassword: async () => {},
 }));
 
 describe("savedSqlStore folder lock state machine", () => {
@@ -34,13 +36,17 @@ describe("savedSqlStore folder lock state machine", () => {
     expect(store.isSavedSqlFolderUnlocked(folder.id)).toBe(false);
   });
 
-  it("stores a protection hash on creation when one is provided", async () => {
+  it("marks a folder protected through the backend set command", async () => {
     const { useSavedSqlStore } = await import("@/stores/savedSqlStore");
     const store = useSavedSqlStore();
     await store.initFromStorage();
-    const folder = await store.createFolder("conn", "Secret", undefined, "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==");
+    const folder = await store.createFolder("conn", "Secret");
 
-    expect(store.allFolders.find((f) => f.id === folder.id)?.passwordHash).toBe("pbkdf2-sha256$600000$c2FsdA==$aGFzaA==");
+    // The verifier is minted by the backend command; the store only flips the
+    // hasPassword flag that drives the lock UI.
+    expect(store.allFolders.find((f) => f.id === folder.id)?.hasPassword).toBe(false);
+    await store.setSavedSqlFolderPassword(folder.id, "pw");
+    expect(store.allFolders.find((f) => f.id === folder.id)?.hasPassword).toBe(true);
   });
 
   it("invalidates the session unlock whenever the password is set or cleared", async () => {
@@ -50,13 +56,14 @@ describe("savedSqlStore folder lock state machine", () => {
     const folder = await store.createFolder("conn", "Secret");
 
     store.unlockSavedSqlFolder(folder.id);
-    await store.setSavedSqlFolderPassword(folder.id, "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==");
+    await store.setSavedSqlFolderPassword(folder.id, "pw");
     expect(store.isSavedSqlFolderUnlocked(folder.id)).toBe(false);
 
     store.unlockSavedSqlFolder(folder.id);
-    await store.setSavedSqlFolderPassword(folder.id, null);
+    // Clearing goes through the login-password-gated recovery command.
+    await store.clearSavedSqlFolderPassword(folder.id, "login-pw");
     expect(store.isSavedSqlFolderUnlocked(folder.id)).toBe(false);
-    expect(store.allFolders.find((f) => f.id === folder.id)?.passwordHash).toBeUndefined();
+    expect(store.allFolders.find((f) => f.id === folder.id)?.hasPassword).toBe(false);
   });
 
   it("is a no-op for unknown folder ids", async () => {
@@ -64,7 +71,8 @@ describe("savedSqlStore folder lock state machine", () => {
     const store = useSavedSqlStore();
     await store.initFromStorage();
 
-    await expect(store.setSavedSqlFolderPassword("missing", "pbkdf2-sha256$600000$c2FsdA==$aGFzaA==")).resolves.toBeUndefined();
+    await expect(store.setSavedSqlFolderPassword("missing", "pw")).resolves.toBeUndefined();
+    await expect(store.clearSavedSqlFolderPassword("missing", "login-pw")).resolves.toBeUndefined();
     expect(store.isSavedSqlFolderUnlocked("missing")).toBe(false);
   });
 });

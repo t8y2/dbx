@@ -27,6 +27,7 @@ const ConnectionPasswordPromptDialog = defineAsyncComponent(() => import("@/comp
 const ConnectionGroupPasswordDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionGroupPasswordDialog.vue"));
 const SetConnectionGroupPasswordDialog = defineAsyncComponent(() => import("@/components/connection/SetConnectionGroupPasswordDialog.vue"));
 const SavedSqlFolderPasswordDialog = defineAsyncComponent(() => import("@/components/connection/SavedSqlFolderPasswordDialog.vue"));
+const ResetProtectionPasswordDialog = defineAsyncComponent(() => import("@/components/connection/ResetProtectionPasswordDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -406,4 +407,5 @@ watch(
   <ConnectionGroupPasswordDialog />
   <SetConnectionGroupPasswordDialog />
   <SavedSqlFolderPasswordDialog />
+  <ResetProtectionPasswordDialog />
 </template>

@@ -516,9 +516,9 @@ export function reorderEntries(layout: SidebarLayout, draggedIds: string[], targ
   return nextLayout;
 }
 
-export function createGroup(layout: SidebarLayout, name: string, parentGroupId?: string | null, passwordHash?: string): { layout: SidebarLayout; groupId: string } {
+export function createGroup(layout: SidebarLayout, name: string, parentGroupId?: string | null): { layout: SidebarLayout; groupId: string } {
   const groupId = uuid();
-  const group: ConnectionGroup = { id: groupId, name, collapsed: false, ...(passwordHash ? { passwordHash } : {}) };
+  const group: ConnectionGroup = { id: groupId, name, collapsed: false };
   const order = cloneEntries(layout.order);
   const entry: SidebarOrderEntry = { type: "group", id: groupId, children: [] };
   let parentFound = false;

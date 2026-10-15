@@ -3228,6 +3228,20 @@ export async function deleteSavedSqlFolder(id: string): Promise<void> {
   return invoke("delete_saved_sql_folder", { id });
 }
 
+export async function setSavedSqlFolderPassword(id: string, password: string): Promise<void> {
+  return invoke("set_saved_sql_folder_password", { id, password });
+}
+
+export async function verifySavedSqlFolderPassword(id: string, password: string): Promise<boolean> {
+  return invoke("verify_saved_sql_folder_password", { id, password });
+}
+
+export async function clearSavedSqlFolderPassword(id: string, _loginPassword?: string): Promise<void> {
+  // Desktop has no login-password gate; the parameter only matches the web
+  // transport's signature and is deliberately not forwarded to the command.
+  return invoke("clear_saved_sql_folder_password", { id });
+}
+
 export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile> {
   return invoke("save_saved_sql_file", { file });
 }
@@ -3274,6 +3288,19 @@ export async function saveSidebarLayout(layout: import("@/types/database").Sideb
 
 export async function loadSidebarLayout(): Promise<import("@/types/database").SidebarLayout | null> {
   return invoke("load_sidebar_layout");
+}
+
+export async function setConnectionGroupPassword(groupId: string, password: string): Promise<void> {
+  return invoke("set_connection_group_password", { groupId, password });
+}
+
+export async function verifyConnectionGroupPassword(groupId: string, password: string): Promise<boolean> {
+  return invoke("verify_connection_group_password", { groupId, password });
+}
+
+export async function clearConnectionGroupPassword(groupId: string, _loginPassword?: string): Promise<void> {
+  // Desktop has no login-password gate; see clearSavedSqlFolderPassword.
+  return invoke("clear_connection_group_password", { groupId });
 }
 
 export async function saveTableVGroups(scopeKey: string, layout: TableVGroupLayout): Promise<void> {

@@ -25,4 +25,12 @@ describe("EditorSettingsDialog CC-SWITCH provider", () => {
     expect(dialogSource).toContain("t(aiCcSwitchPluginStatusText)");
     expect(dialogSource).toContain(`@click="emit('open-cc-switch-plugin-center')"`);
   });
+
+  it("lists unsupported source entries as disabled with a reason and can refresh the source", () => {
+    expect(dialogSource).toContain('@click="refreshAiImportSources"');
+    expect(dialogSource).toContain('v-for="(skipped, index) in aiImportSkipped"');
+    expect(dialogSource).toContain(":aria-label=\"t('ai.aiImportUnsupported')\"");
+    expect(dialogSource).toContain("aiImportSkippedReason(skipped.reason)");
+    expect(dialogSource).toContain("ccSwitchUnsupportedProviderType");
+  });
 });

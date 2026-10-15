@@ -65,7 +65,6 @@ import {
   AI_PROVIDER_PRESETS,
   AI_PROVIDER_PARTNER_PRESETS,
   CC_SWITCH_PROVIDER_ID,
-  CC_SWITCH_PROVIDER_PRESET,
   AI_OUTPUT_TOKENS_MAX,
   AI_OUTPUT_TOKENS_MIN,
   EDITOR_THEMES,
@@ -241,6 +240,8 @@ import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatem
 import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { prepareImportedAiConfigs, validateConfigName, generateId, type AiConfigItem, type ConfigNameValidationResult } from "@/lib/ai/aiConfigList";
+import { aiImportSelectableModels, createAiImportDrafts, normalizeAiImportSourceConfigs, selectedAiImportConfigs, type AiImportDraft } from "@/lib/ai/aiImportSelection";
+import type { CcSwitchImportSkipped } from "@/types/ai";
 import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES, tableColumnTemplateRowsToSettings } from "@/lib/table/tableColumnTemplates";
@@ -5777,11 +5778,40 @@ const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 const aiConfigImporting = ref(false);
 const aiConfigImportingSource = ref<"cc-switch" | "magpie" | null>(null);
+const aiImportSaving = ref(false);
+const aiImportRefreshing = ref(false);
+const aiImportDialogOpen = ref(false);
+const AI_IMPORT_NO_DEFAULT_MODEL = "__dbx_no_default_model__";
+type AiImportMessageKey = "ai.ccSwitchNoNewConfigs" | "ai.ccSwitchImportSuccess" | "ai.ccSwitchImportPartial" | "ai.magpieNoNewConfigs" | "ai.magpieImportSuccess" | "ai.magpieImportPartial";
+type AiImportSourceKey = "cc-switch" | "magpie";
+type AiImportSourceSummary = {
+  status: "idle" | "loading" | "loaded" | "error" | "unavailable";
+  total: number;
+  selected: number;
+  skipped: number;
+};
+const aiImportDrafts = ref<AiImportDraft[]>([]);
+const aiImportSkipped = ref<CcSwitchImportSkipped[]>([]);
+const aiImportMeta = ref<{
+  sourceName: "CC-SWITCH" | "Magpie";
+  noNewConfigsKey: AiImportMessageKey;
+  successKey: AiImportMessageKey;
+  partialKey: AiImportMessageKey;
+} | null>(null);
+const aiImportSelectedCount = computed(() => aiImportDrafts.value.filter((item) => item.selectable && item.selected).length);
+const aiImportSelectableCount = computed(() => aiImportDrafts.value.filter((item) => item.selectable).length);
+const aiImportAllSelected = computed(() => aiImportSelectableCount.value > 0 && aiImportSelectedCount.value === aiImportSelectableCount.value);
+const aiImportSourceCountsLoading = ref(false);
+const aiImportSourceSummaries = ref<Record<AiImportSourceKey, AiImportSourceSummary>>({
+  "cc-switch": { status: "idle", total: 0, selected: 0, skipped: 0 },
+  magpie: { status: "idle", total: 0, selected: 0, skipped: 0 },
+});
 const aiCcSwitchPlugins = ref<InstalledPlugin[]>([]);
 const aiCcSwitchPluginLoading = ref(false);
 const aiCcSwitchPluginStatus = computed(() => getCcSwitchPluginStatus(aiCcSwitchPlugins.value));
 const aiCcSwitchPluginAvailable = computed(() => isCcSwitchPluginAvailable(aiCcSwitchPlugins.value));
 const aiMagpiePluginAvailable = computed(() => isMagpieImportAvailable(aiCcSwitchPlugins.value));
+const aiCcSwitchPluginVersion = computed(() => aiCcSwitchPlugins.value.find((plugin) => plugin.manifest.id === "cc-switch")?.manifest.version ?? "");
 const magpieImportMinimumPluginVersion = MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION;
 const aiCcSwitchPluginStatusText = computed(() => {
   if (aiCcSwitchPluginLoading.value) return "ai.ccSwitchPluginChecking";
@@ -5804,6 +5834,87 @@ async function refreshCcSwitchPluginAvailability() {
   } finally {
     aiCcSwitchPluginLoading.value = false;
   }
+  if (aiCcSwitchPluginAvailable.value) {
+    await refreshAiImportSourceCounts();
+  } else {
+    aiImportSourceSummaries.value = {
+      "cc-switch": { status: "idle", total: 0, selected: 0, skipped: 0 },
+      magpie: { status: "idle", total: 0, selected: 0, skipped: 0 },
+    };
+  }
+}
+
+function ccSwitchCodexPageResult(result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>) {
+  // CC-SWITCH stores profiles for every app in one database; this importer view mirrors its Codex page.
+  return {
+    configs: result.configs.filter((config) => config.id.startsWith("cc-switch-codex-")),
+    skipped: result.skipped.filter((item) => item.appType === "codex"),
+  };
+}
+
+function setAiImportSourceSummary(source: AiImportSourceKey, result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>) {
+  const sourceName = source === "magpie" ? "Magpie" : "CC-SWITCH";
+  const scopedResult = source === "cc-switch" ? ccSwitchCodexPageResult(result) : result;
+  const normalized = normalizeAiImportSourceConfigs(scopedResult.configs, sourceName);
+  const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, normalized, sourceName);
+  const importableIds = new Set(prepared.map((config) => config.id));
+  const drafts = createAiImportDrafts(normalized, importableIds);
+  aiImportSourceSummaries.value[source] = {
+    status: "loaded",
+    total: normalized.length + scopedResult.skipped.length,
+    selected: drafts.filter((draft) => draft.selectable && draft.selected).length,
+    skipped: scopedResult.skipped.length,
+  };
+}
+
+async function refreshAiImportSourceCounts() {
+  if (isWeb || !aiCcSwitchPluginAvailable.value || aiImportSourceCountsLoading.value) return;
+  aiImportSourceCountsLoading.value = true;
+  aiImportSourceSummaries.value = {
+    "cc-switch": { ...aiImportSourceSummaries.value["cc-switch"], status: "loading" },
+    magpie: {
+      ...aiImportSourceSummaries.value.magpie,
+      status: aiMagpiePluginAvailable.value ? "loading" : "unavailable",
+    },
+  };
+  const [ccSwitchResult, magpieResult] = await Promise.allSettled([
+    loadCcSwitchAiConfigs(),
+    aiMagpiePluginAvailable.value ? loadMagpieAiConfigs() : Promise.resolve(null),
+  ]);
+  if (ccSwitchResult.status === "fulfilled") {
+    setAiImportSourceSummary("cc-switch", ccSwitchResult.value);
+  } else {
+    aiImportSourceSummaries.value["cc-switch"] = {
+      status: "error",
+      total: 0,
+      selected: 0,
+      skipped: 0,
+    };
+  }
+  if (aiMagpiePluginAvailable.value && magpieResult.status === "fulfilled" && magpieResult.value) {
+    setAiImportSourceSummary("magpie", magpieResult.value);
+  } else if (aiMagpiePluginAvailable.value) {
+    aiImportSourceSummaries.value.magpie = {
+      status: "error",
+      total: 0,
+      selected: 0,
+      skipped: 0,
+    };
+  }
+  aiImportSourceCountsLoading.value = false;
+}
+
+function aiImportSourceSummaryText(source: AiImportSourceKey): string {
+  const summary = aiImportSourceSummaries.value[source];
+  if (summary.status === "loading") return t("ai.aiImportSourceLoading");
+  if (summary.status === "error") return t("ai.aiImportSourceReadFailed");
+  if (summary.status === "unavailable") return t("ai.magpiePluginUpdateRequired", { version: magpieImportMinimumPluginVersion });
+  if (summary.status !== "loaded") return t("ai.aiImportSourceNotLoaded");
+  return t("ai.aiImportSourceCounts", {
+    selected: summary.selected,
+    total: summary.total,
+    unsupported: summary.skipped,
+  });
 }
 
 const aiEditProvider = ref<AiProvider>("claude");
@@ -6381,30 +6492,127 @@ function magpieImportErrorMessage(error: unknown): string {
   return message;
 }
 
-type AiImportMessageKey = "ai.ccSwitchNoNewConfigs" | "ai.ccSwitchImportSuccess" | "ai.ccSwitchImportPartial" | "ai.magpieNoNewConfigs" | "ai.magpieImportSuccess" | "ai.magpieImportPartial";
+function aiImportModelSelectionValue(draft: AiImportDraft): string {
+  return draft.defaultModel || AI_IMPORT_NO_DEFAULT_MODEL;
+}
 
-async function addImportedAiConfigs(result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>, sourceName: "CC-SWITCH" | "Magpie", noNewConfigsKey: AiImportMessageKey, successKey: AiImportMessageKey, partialKey: AiImportMessageKey) {
-  const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, result.configs, sourceName);
-  if (prepared.length === 0) {
-    toast(t(noNewConfigsKey), 4000);
+function aiSetImportDefaultModel(draft: AiImportDraft, value: string) {
+  draft.defaultModel = value === AI_IMPORT_NO_DEFAULT_MODEL ? "" : value;
+}
+
+function aiToggleImportSelectionAll() {
+  const selected = !aiImportAllSelected.value;
+  for (const draft of aiImportDrafts.value) {
+    if (draft.selectable) draft.selected = selected;
+  }
+}
+
+function closeAiImportDialog() {
+  if (aiImportSaving.value || aiImportRefreshing.value) return;
+  aiImportDialogOpen.value = false;
+  aiImportDrafts.value = [];
+  aiImportSkipped.value = [];
+  aiImportMeta.value = null;
+}
+
+function stageImportedAiConfigs(result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>, sourceName: "CC-SWITCH" | "Magpie", noNewConfigsKey: AiImportMessageKey, successKey: AiImportMessageKey, partialKey: AiImportMessageKey, preserveSelection = false) {
+  const previousDrafts = preserveSelection ? new Map(aiImportDrafts.value.map((draft) => [draft.config.id, draft] as const)) : null;
+  const scopedResult = sourceName === "CC-SWITCH" ? ccSwitchCodexPageResult(result) : result;
+  const normalized = normalizeAiImportSourceConfigs(scopedResult.configs, sourceName);
+  const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, normalized, sourceName);
+  const preparedById = new Map(prepared.map((config) => [config.id, config]));
+  aiImportDrafts.value = createAiImportDrafts(normalized, new Set(preparedById.keys())).map((draft) => {
+    const config = preparedById.get(draft.config.id) ?? draft.config;
+    const previous = previousDrafts?.get(draft.config.id);
+    const nextDraft = {
+      ...draft,
+      config,
+      selected: previous ? draft.selectable && previous.selected : draft.selected,
+      defaultModel: draft.defaultModel,
+    };
+    if (previous && aiImportSelectableModels(nextDraft).some((model) => model.value === previous.defaultModel)) {
+      nextDraft.defaultModel = previous.defaultModel;
+    }
+    return nextDraft;
+  });
+  aiImportSkipped.value = scopedResult.skipped;
+  const sourceKey: AiImportSourceKey = sourceName === "Magpie" ? "magpie" : "cc-switch";
+  aiImportSourceSummaries.value[sourceKey] = {
+    status: "loaded",
+    total: normalized.length + scopedResult.skipped.length,
+    selected: aiImportDrafts.value.filter((draft) => draft.selectable && draft.selected).length,
+    skipped: scopedResult.skipped.length,
+  };
+  aiImportMeta.value = { sourceName, noNewConfigsKey, successKey, partialKey };
+  aiImportDialogOpen.value = true;
+}
+
+function aiImportSkippedReason(reason: string): string {
+  const reasonKeys: Record<string, string> = {
+    ccSwitchInvalidCodexConfig: "ai.aiImportReasonInvalidCodexConfig",
+    ccSwitchInvalidProviderConfig: "ai.aiImportReasonInvalidProviderConfig",
+    ccSwitchProviderNotConfigured: "ai.aiImportReasonProviderNotConfigured",
+    ccSwitchUnsupportedProviderType: "ai.aiImportReasonUnsupportedProviderType",
+    magpieNoCompatibleEndpoint: "ai.aiImportReasonNoCompatibleEndpoint",
+    magpieProviderDisabled: "ai.aiImportReasonProviderDisabled",
+    magpieProviderHasNoModels: "ai.aiImportReasonProviderHasNoModels",
+    magpieProviderHidden: "ai.aiImportReasonProviderHidden",
+    magpieProviderNotConfigured: "ai.aiImportReasonProviderNotConfigured",
+  };
+  const key = reasonKeys[reason];
+  return key ? t(key) : reason;
+}
+
+async function confirmAiImportSelection() {
+  const meta = aiImportMeta.value;
+  const selected = selectedAiImportConfigs(aiImportDrafts.value);
+  if (!meta || selected.length === 0) {
+    toast(t("ai.aiImportNoSelection"), 4000);
     return;
   }
 
+  aiImportSaving.value = true;
   const hadConfigs = settingsStore.aiConfigs.length > 0;
-  for (const [index, config] of prepared.entries()) {
-    await settingsStore.createAiConfig({
-      ...config,
-      id: generateId(),
-      isDefault: !hadConfigs && index === 0,
-    });
+  try {
+    for (const [index, config] of selected.entries()) {
+      await settingsStore.createAiConfig({
+        ...config,
+        id: generateId(),
+        isDefault: !hadConfigs && index === 0,
+      });
+    }
+    toast(
+      t(aiImportSkipped.value.length > 0 ? meta.partialKey : meta.successKey, {
+        count: selected.length,
+        skipped: aiImportSkipped.value.length,
+      }),
+      4000,
+    );
+    aiImportDialogOpen.value = false;
+    aiImportDrafts.value = [];
+    aiImportSkipped.value = [];
+    aiImportMeta.value = null;
+    await refreshAiImportSourceCounts();
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  } finally {
+    aiImportSaving.value = false;
   }
-  toast(
-    t(result.skipped.length > 0 ? partialKey : successKey, {
-      count: prepared.length,
-      skipped: result.skipped.length,
-    }),
-    4000,
-  );
+}
+
+async function refreshAiImportSources() {
+  const meta = aiImportMeta.value;
+  if (!meta || aiImportSaving.value || aiImportRefreshing.value) return;
+  aiImportRefreshing.value = true;
+  try {
+    const result = meta.sourceName === "Magpie" ? await loadMagpieAiConfigs() : await loadCcSwitchAiConfigs();
+    stageImportedAiConfigs(result, meta.sourceName, meta.noNewConfigsKey, meta.successKey, meta.partialKey, true);
+    toast(t("ai.aiImportRefreshed"), 2500);
+  } catch (error) {
+    toast(meta.sourceName === "Magpie" ? magpieImportErrorMessage(error) : ccSwitchImportErrorMessage(error), 5000);
+  } finally {
+    aiImportRefreshing.value = false;
+  }
 }
 
 async function aiImportCcSwitchConfigs() {
@@ -6413,7 +6621,7 @@ async function aiImportCcSwitchConfigs() {
   aiConfigImportingSource.value = "cc-switch";
   try {
     const result = await loadCcSwitchAiConfigs();
-    await addImportedAiConfigs(result, "CC-SWITCH", "ai.ccSwitchNoNewConfigs", "ai.ccSwitchImportSuccess", "ai.ccSwitchImportPartial");
+    await stageImportedAiConfigs(result, "CC-SWITCH", "ai.ccSwitchNoNewConfigs", "ai.ccSwitchImportSuccess", "ai.ccSwitchImportPartial");
   } catch (error) {
     toast(ccSwitchImportErrorMessage(error), 5000);
   } finally {
@@ -6428,7 +6636,7 @@ async function aiImportMagpieConfigs() {
   aiConfigImportingSource.value = "magpie";
   try {
     const result = await loadMagpieAiConfigs();
-    await addImportedAiConfigs(result, "Magpie", "ai.magpieNoNewConfigs", "ai.magpieImportSuccess", "ai.magpieImportPartial");
+    await stageImportedAiConfigs(result, "Magpie", "ai.magpieNoNewConfigs", "ai.magpieImportSuccess", "ai.magpieImportPartial");
   } catch (error) {
     toast(magpieImportErrorMessage(error), 5000);
   } finally {
@@ -11021,7 +11229,8 @@ LIMIT 100;</pre>
                       <SelectTrigger inputClass="h-8 text-xs">
                         <SelectValue>
                           <span class="flex items-center gap-2">
-                            <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="aiIsCcSwitchProvider ? t('ai.ccSwitchProvider') : selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" :icon-path="selectedAiProviderPreset.iconPath" />
+                            <img v-if="aiIsCcSwitchProvider" src="/ai-config-import/plugin.png" alt="" aria-hidden="true" class="h-5 w-5 shrink-0 object-contain" />
+                            <AiProviderLogo v-else :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" :icon-path="selectedAiProviderPreset.iconPath" />
                             <span>{{ aiIsCcSwitchProvider ? t("ai.ccSwitchProvider") : selectedAiProviderPreset.label }}</span>
                           </span>
                         </SelectValue>
@@ -11038,7 +11247,7 @@ LIMIT 100;</pre>
                             </SelectItem>
                             <SelectItem v-if="!isWeb && aiCcSwitchPluginAvailable" :value="CC_SWITCH_PROVIDER_ID">
                               <span class="flex w-full min-w-0 items-center gap-2">
-                                <AiProviderLogo :provider="CC_SWITCH_PROVIDER_PRESET.provider" :label="t('ai.ccSwitchProvider')" />
+                                <img src="/ai-config-import/plugin.png" alt="" aria-hidden="true" class="h-5 w-5 shrink-0 object-contain" />
                                 <span class="truncate">{{ t("ai.ccSwitchProvider") }}</span>
                               </span>
                             </SelectItem>
@@ -11069,9 +11278,12 @@ LIMIT 100;</pre>
 
                 <div v-if="aiIsCcSwitchProvider && !isWeb && aiCcSwitchPluginAvailable" class="rounded-md border border-primary/20 bg-primary/5 px-3 py-3">
                   <div class="flex items-start gap-3">
-                    <PackageSearch class="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                    <img src="/ai-config-import/plugin.png" alt="" aria-hidden="true" class="mt-0.5 h-8 w-8 shrink-0 object-contain" />
                     <div class="min-w-0 space-y-1">
-                      <p class="text-sm font-medium">{{ t("ai.ccSwitchProvider") }}</p>
+                      <div class="flex flex-wrap items-center gap-2">
+                        <p class="text-sm font-medium">{{ t("ai.ccSwitchProvider") }}</p>
+                        <Badge variant="outline" class="h-5 px-1.5 text-[10px]">v{{ aiCcSwitchPluginVersion || "—" }}</Badge>
+                      </div>
                       <p class="text-xs leading-relaxed text-muted-foreground">{{ t("ai.ccSwitchProviderDescription") }}</p>
                     </div>
                   </div>
@@ -11089,18 +11301,23 @@ LIMIT 100;</pre>
                         {{ t("ai.ccSwitchPluginRefresh") }}
                       </Button>
                     </div>
-                    <div class="flex flex-wrap items-center gap-2">
-                      <Button type="button" size="sm" variant="outline" :disabled="aiConfigImporting" @click="aiImportCcSwitchConfigs">
-                        <Loader2 v-if="aiConfigImportingSource === 'cc-switch'" class="mr-1 h-3.5 w-3.5 animate-spin" />
-                        <Upload v-else class="mr-1 h-3.5 w-3.5" />
-                        {{ aiConfigImportingSource === "cc-switch" ? t("ai.ccSwitchImporting") : t("ai.ccSwitchImport") }}
-                      </Button>
-                      <Button v-if="aiMagpiePluginAvailable" type="button" size="sm" variant="outline" :disabled="aiConfigImporting" @click="aiImportMagpieConfigs">
-                        <Loader2 v-if="aiConfigImportingSource === 'magpie'" class="mr-1 h-3.5 w-3.5 animate-spin" />
-                        <Upload v-else class="mr-1 h-3.5 w-3.5" />
-                        {{ aiConfigImportingSource === "magpie" ? t("ai.magpieImporting") : t("ai.magpieImport") }}
-                      </Button>
-                      <p v-else class="text-xs text-muted-foreground">{{ t("ai.magpiePluginUpdateRequired", { version: magpieImportMinimumPluginVersion }) }}</p>
+                    <div class="space-y-2">
+                      <div class="flex flex-col items-start gap-1.5">
+                        <Button type="button" size="sm" variant="outline" :disabled="aiConfigImporting" @click="aiImportCcSwitchConfigs">
+                          <Loader2 v-if="aiConfigImportingSource === 'cc-switch'" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                          <img v-else src="/ai-config-import/cc-switch.png" alt="" aria-hidden="true" class="mr-1 h-4 w-4 object-contain" />
+                          {{ aiConfigImportingSource === "cc-switch" ? t("ai.ccSwitchImporting") : t("ai.ccSwitchImport") }}
+                        </Button>
+                        <p class="pl-1 text-xs text-muted-foreground">{{ aiImportSourceSummaryText("cc-switch") }}</p>
+                      </div>
+                      <div class="flex flex-col items-start gap-1.5">
+                        <Button type="button" size="sm" variant="outline" :disabled="aiConfigImporting || !aiMagpiePluginAvailable" @click="aiImportMagpieConfigs">
+                          <Loader2 v-if="aiConfigImportingSource === 'magpie'" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                          <img v-else src="/ai-config-import/magpie.png" alt="" aria-hidden="true" class="mr-1 h-4 w-4 object-contain" />
+                          {{ aiConfigImportingSource === "magpie" ? t("ai.magpieImporting") : t("ai.magpieImport") }}
+                        </Button>
+                        <p class="pl-1 text-xs text-muted-foreground">{{ aiImportSourceSummaryText("magpie") }}</p>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -12755,6 +12972,94 @@ LIMIT 100;</pre>
 
     <!-- AI Config Delete Confirmation -->
     <DangerConfirmDialog v-model:open="aiDeleteConfirmOpen" :title="t('ai.deleteConfigTitle')" :message="t('ai.deleteConfigConfirm')" :confirm-label="t('common.delete')" @confirm="aiConfirmDeleteConfig" />
+    <Dialog :open="aiImportDialogOpen" @update:open="(open) => !open && closeAiImportDialog()">
+      <DialogContent class="max-h-[min(82vh,760px)] sm:max-w-[680px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("ai.aiImportSelectTitle", { source: aiImportMeta?.sourceName ?? "" }) }}</DialogTitle>
+          <p class="text-sm text-muted-foreground">{{ t("ai.aiImportSelectDescription") }}</p>
+          <p v-if="aiImportMeta?.sourceName === 'CC-SWITCH'" class="text-xs text-muted-foreground">{{ t("ai.aiImportCcSwitchCodexPageNote") }}</p>
+          <p v-if="aiImportMeta?.sourceName === 'Magpie'" class="text-xs text-muted-foreground">{{ t("ai.aiImportMagpieDefaultModelNote") }}</p>
+        </DialogHeader>
+        <div class="flex items-center justify-between gap-3 border-b pb-3">
+          <div class="flex items-center gap-2">
+            <Button type="button" variant="outline" size="sm" :disabled="aiImportRefreshing || aiImportSaving" @click="refreshAiImportSources">
+              <RefreshCw class="mr-1.5 h-3.5 w-3.5" :class="{ 'animate-spin': aiImportRefreshing }" />
+              {{ t("ai.aiImportRefresh") }}
+            </Button>
+            <Button type="button" variant="outline" size="sm" :disabled="aiImportSelectableCount === 0 || aiImportRefreshing || aiImportSaving" @click="aiToggleImportSelectionAll">
+              {{ t(aiImportAllSelected ? "ai.aiImportDeselectAll" : "ai.aiImportSelectAll") }}
+            </Button>
+          </div>
+          <span class="text-xs text-muted-foreground">{{ t("ai.aiImportSelectedCount", { count: aiImportSelectedCount }) }}</span>
+        </div>
+        <div v-if="aiImportDrafts.length === 0 && aiImportSkipped.length === 0" class="py-8 text-center text-sm text-muted-foreground">
+          {{ t("ai.aiImportNoEntries") }}
+        </div>
+        <div v-else class="max-h-[48vh] space-y-2 overflow-y-auto pr-1">
+          <div
+            v-for="draft in aiImportDrafts"
+            :key="draft.config.id"
+            class="flex gap-3 rounded-md border p-3"
+            :class="{
+              'border-emerald-500/40 bg-emerald-500/5': draft.disabledReason === 'alreadyImported',
+              'opacity-60': !draft.selectable && draft.disabledReason !== 'alreadyImported',
+            }"
+          >
+            <CheckCircle2
+              v-if="draft.disabledReason === 'alreadyImported'"
+              class="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400"
+              role="img"
+              :aria-label="t('ai.aiImportAlreadyImported')"
+            />
+            <input v-else v-model="draft.selected" type="checkbox" class="mt-1 h-4 w-4 shrink-0 accent-primary" :disabled="!draft.selectable || aiImportRefreshing || aiImportSaving" :aria-label="t('ai.aiImportSelectConfig', { name: draft.config.name })" />
+            <div class="min-w-0 flex-1 space-y-2">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="break-all text-sm font-medium">{{ draft.config.name }}</span>
+                <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ draft.config.provider }}</Badge>
+                <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ draft.config.apiStyle }}</Badge>
+                <Badge v-if="draft.disabledReason === 'alreadyImported'" variant="outline" class="h-5 border-emerald-600/30 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-700 dark:text-emerald-400">
+                  {{ t("ai.aiImportAlreadyImported") }}
+                </Badge>
+              </div>
+              <p v-if="draft.disabledReason" class="text-xs text-muted-foreground">{{ t("ai.aiImportReasonAlreadyImported") }}</p>
+              <div v-if="aiImportSelectableModels(draft).length" class="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2">
+                <Label class="text-xs">{{ t("ai.defaultModel") }}</Label>
+                <Select :disabled="!draft.selectable || aiImportRefreshing || aiImportSaving" :model-value="aiImportModelSelectionValue(draft)" @update:model-value="(value) => aiSetImportDefaultModel(draft, String(value))">
+                  <SelectTrigger class="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem :value="AI_IMPORT_NO_DEFAULT_MODEL">{{ t("ai.aiImportNoDefaultModel") }}</SelectItem>
+                    <SelectItem v-for="model in aiImportSelectableModels(draft)" :key="model.value" :value="model.value">
+                      {{ model.label }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <p v-else class="text-xs text-muted-foreground">{{ t("ai.aiImportNoModelsAvailable") }}</p>
+            </div>
+          </div>
+          <div v-for="(skipped, index) in aiImportSkipped" :key="`${skipped.appType}:${skipped.name}:${index}`" class="flex gap-3 rounded-md border p-3 opacity-60">
+            <input type="checkbox" class="mt-1 h-4 w-4 shrink-0 accent-primary" disabled :aria-label="t('ai.aiImportUnsupported')" />
+            <div class="min-w-0 flex-1 space-y-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="break-all text-sm font-medium">{{ skipped.name }}</span>
+                <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ skipped.appType }}</Badge>
+                <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ t("ai.aiImportUnsupported") }}</Badge>
+              </div>
+              <p class="text-xs text-muted-foreground">{{ aiImportSkippedReason(skipped.reason) }}</p>
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" :disabled="aiImportSaving || aiImportRefreshing" @click="closeAiImportDialog">{{ t("common.cancel") }}</Button>
+          <Button type="button" :disabled="aiImportSaving || aiImportRefreshing || aiImportSelectedCount === 0" @click="confirmAiImportSelection">
+            <Loader2 v-if="aiImportSaving" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            {{ t("ai.aiImportConfirm", { count: aiImportSelectedCount }) }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     <DangerConfirmDialog
       v-model:open="templateDeleteConfirmOpen"
       :title="t('ai.promptTemplateDeleteTitle')"

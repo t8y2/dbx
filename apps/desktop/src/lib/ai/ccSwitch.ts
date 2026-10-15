@@ -3,7 +3,7 @@ import { compareVersions } from "@/lib/plugins/pluginMarketplace";
 
 export const CC_SWITCH_PLUGIN_ID = "cc-switch";
 export const CC_SWITCH_PLUGIN_CAPABILITY = "ai-config-import";
-export const MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION = "0.2.0";
+export const MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION = "0.2.2";
 
 export type CcSwitchPluginStatus = "available" | "incompatible" | "not-installed";
 

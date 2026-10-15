@@ -1,18 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable } from "@/lib/ai/ccSwitch";
+import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable, isMagpieImportAvailable, MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION } from "@/lib/ai/ccSwitch";
 import type { InstalledPlugin } from "@/types/database";
 
 function plugin(overrides: Partial<InstalledPlugin> = {}): InstalledPlugin {
+  const { manifest, ...otherOverrides } = overrides;
   return {
     manifest: {
       id: "cc-switch",
       name: "AI Config Importer",
       drivers: [],
       capabilities: [{ id: "ai-config-import", label: "AI configuration import" }],
-      ...overrides.manifest,
+      ...manifest,
     },
     compatibility: { compatible: true },
-    ...overrides,
+    ...otherOverrides,
   };
 }
 
@@ -29,5 +30,12 @@ describe("isCcSwitchPluginAvailable", () => {
     expect(getCcSwitchPluginStatus([plugin({ compatibility: { compatible: false } })])).toBe("incompatible");
     expect(getCcSwitchPluginStatus([plugin({ manifest: { id: "cc-switch", capabilities: [] } })])).toBe("incompatible");
     expect(getCcSwitchPluginStatus([plugin()])).toBe("available");
+  });
+});
+
+describe("isMagpieImportAvailable", () => {
+  it("requires the plugin version that reads Magpie active model preferences", () => {
+    expect(isMagpieImportAvailable([plugin({ manifest: { version: "0.2.1" } })])).toBe(false);
+    expect(isMagpieImportAvailable([plugin({ manifest: { version: MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION } })])).toBe(true);
   });
 });

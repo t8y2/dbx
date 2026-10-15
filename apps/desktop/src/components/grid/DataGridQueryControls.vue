@@ -16,7 +16,7 @@ import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState,
 import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import type { DataGridFilterEditorView } from "@/stores/settingsStore";
 import type { DatabaseType } from "@/types/database";
-import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
+import { clampSearchSplitWidth, MIN_SEARCH_SPLIT_PANE_WIDTH } from "@/lib/dataGrid/dataGridSearchSplit";
 
 type LocalFilterSummary = {
   columnIndex: number;
@@ -114,7 +114,15 @@ const resizing = ref(false);
 let resizeStartX = 0;
 let resizeStartWidth = 0;
 
-const wherePaneStyle = computed(() => (whereWidth.value == null ? {} : { flex: `0 0 ${whereWidth.value}px` }));
+const wherePaneStyle = computed(() =>
+  whereWidth.value == null
+    ? {}
+    : {
+        // Retain the dragged preference while keeping both panes visible when
+        // their container later shrinks, without a reactive resize loop.
+        flex: `0 0 clamp(min(${MIN_SEARCH_SPLIT_PANE_WIDTH}px, 50%), ${whereWidth.value}px, max(50%, calc(100% - ${MIN_SEARCH_SPLIT_PANE_WIDTH}px)))`,
+      },
+);
 
 function containerWidth(): number {
   return containerRef.value?.getBoundingClientRect().width ?? 0;

@@ -928,6 +928,28 @@ SELECT @value AS Message;`;
     expect(executeCurrentSql).toHaveBeenCalledWith(resolvedSql, { tabId: "tab-1", openInNewResultTab: true });
   });
 
+  it("settles a failed execution after accepting a SQL parameter dialog", async () => {
+    const sql = "SELECT * FROM users WHERE id = :id";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    vi.spyOn(useQueryStore(), "executeCurrentSql").mockRejectedValue(new Error("connection lost"));
+    const onDeferredExecutionSettled = vi.fn();
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+      onDeferredExecutionSettled,
+    });
+
+    await execution.tryExecute();
+    await execution.onSqlParametersConfirm("SELECT * FROM users WHERE id = 7");
+
+    expect(onDeferredExecutionSettled).toHaveBeenCalledWith({ status: "started", ok: false, errorMessage: "connection lost", tabId: "tab-1" });
+  });
+
   it("executes the PostgreSQL ARRAY date-format query without opening the parameter dialog", async () => {
     const sql = `
       WITH rec_flow AS (
@@ -1590,6 +1612,28 @@ SELECT @value AS Message;`;
     await execution.onDangerConfirm();
 
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1", openInNewResultTab: true });
+  });
+
+  it("settles a failed execution after accepting a dangerous-SQL dialog", async () => {
+    const sql = "DELETE FROM users WHERE id = 7";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    vi.spyOn(useQueryStore(), "executeCurrentSql").mockRejectedValue(new Error("connection lost"));
+    const onDeferredExecutionSettled = vi.fn();
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+      onDeferredExecutionSettled,
+    });
+
+    await execution.tryExecute();
+    await execution.onDangerConfirm();
+
+    expect(onDeferredExecutionSettled).toHaveBeenCalledWith({ status: "started", ok: false, errorMessage: "connection lost", tabId: "tab-1" });
   });
 
   it("keeps the active retained result when a new-result dangerous prompt is cancelled", async () => {

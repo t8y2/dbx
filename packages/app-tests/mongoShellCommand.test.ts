@@ -33,6 +33,7 @@ import {
   parseMongoGetIndexesCommand,
   parseMongoVersionCommand,
   planMongoFindPagination,
+  mongoFindPageCoversLogicalLimit,
   parseMongoWriteCommand,
   splitMongoCommands,
   splitMongoCommandRanges,
@@ -253,6 +254,23 @@ test("planMongoFindPagination preserves explicit skip and limit bounds", () => {
     logicalLimit: 150,
   });
   assert.equal(mongoFindLogicalTotal(824, plan!), 150);
+});
+
+test("mongoFindPageCoversLogicalLimit only skips counting when the first page holds every limited row", () => {
+  const plan = (source: string, pageOffset: number, pageLimit = 100) => {
+    const command = parseMongoFindCommand(source);
+    assert.ok(command);
+    const result = planMongoFindPagination(source, command, pageOffset, pageLimit);
+    assert.ok(result);
+    return result;
+  };
+
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({ type: 0 }).sort({ eventTime: -1 }).limit(50)", 0)), true);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).skip(20).limit(100)", 0)), true);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).limit(150)", 0)), false);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).limit(150)", 100)), false);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({})", 0)), false);
+  assert.equal(mongoFindPageCoversLogicalLimit(plan("db.events.find({}).limit(0)", 0)), false);
 });
 
 test("parseMongoFindCommand accepts line breaks before find and chained calls", () => {
@@ -1454,6 +1472,64 @@ test("parseMongoRunCommand reads db.dropDatabase() and db.createCollection() as 
     assert.equal(parseMongoCommand(source), null, source);
     assert.match(describeMongoCommandParseFailure(source), expected, source);
   }
+});
+
+test("parseMongoRunCommand reads db.createView() as a create command with viewOn and pipeline", () => {
+  assert.deepEqual(JSON.parse(parseMongoRunCommand('db.createView("active_users", "users", [{ $match: { active: true } }])')!.commandJson), {
+    create: "active_users",
+    viewOn: "users",
+    pipeline: [{ $match: { active: true } }],
+  });
+  assert.deepEqual(JSON.parse(parseMongoRunCommand("db.createView('v', 'users', [], { collation: { locale: 'fr' } });")!.commandJson), {
+    create: "v",
+    viewOn: "users",
+    pipeline: [],
+    collation: { locale: "fr" },
+  });
+  assert.equal(parseMongoCommand('db.createView("v", "users", [])')?.command.kind, "runCommand");
+
+  for (const [source, expected] of [
+    ['db.createView("v", "users")', /createView\(\) expects a view name, a source collection name, a pipeline/],
+    ['db.createView("v", "users", {})', /createView\(\) expects/],
+    ['db.createView("v", 1, [])', /createView\(\) expects/],
+    ['db.createView("v", "users", [], { viewOn: "other" })', /createView\(\) expects/],
+    ['db.createView("v", "users", [{ $match: { a: Foo() } }])', /Unsupported value Foo\(\.\.\.\) in the pipeline argument of createView\(\)/],
+  ] as const) {
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+});
+
+test("parseMongoRunCommand reads user and role helpers as usersInfo and rolesInfo", () => {
+  for (const [source, expected] of [
+    ["show users", { usersInfo: 1 }],
+    ["SHOW ROLES;", { rolesInfo: 1 }],
+    ["db.getUsers()", { usersInfo: 1 }],
+    ["db.getUsers({ showCredentials: false, filter: { roles: { $size: 0 } } })", { usersInfo: 1, showCredentials: false, filter: { roles: { $size: 0 } } }],
+    ['db.getUser("app")', { usersInfo: "app" }],
+    ["db.getUser('app', { showPrivileges: true })", { usersInfo: "app", showPrivileges: true }],
+    ["db.getRoles({ showBuiltinRoles: true })", { rolesInfo: 1, showBuiltinRoles: true }],
+    ['db.getRole("reader")', { rolesInfo: "reader" }],
+  ] as const) {
+    assert.deepEqual(JSON.parse(parseMongoRunCommand(source)?.commandJson ?? "null"), expected, source);
+    assert.equal(parseMongoCommand(source)?.command.kind, "runCommand", source);
+  }
+
+  for (const [source, expected] of [
+    ["db.getUser()", /getUser\(\) expects a user name/],
+    ["db.getUser(1)", /getUser\(\) expects a user name/],
+    ["db.getUsers({ usersInfo: 2 })", /getUsers\(\) expects optional options/],
+    ["db.getRoles({}, {})", /getRoles\(\) expects optional options/],
+    ['db.getRole("a").x()', /Unexpected text after getRole/],
+  ] as const) {
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+  assert.equal(parseMongoCommand("show users extra"), null);
+  assert.deepEqual(
+    splitMongoCommands("use admin\nshow users\nshow roles").map(({ command }) => command.kind),
+    ["use", "runCommand", "runCommand"],
+  );
 });
 
 test("parseMongoRunCommand reads db.stats() and db.serverStatus() as run commands", () => {

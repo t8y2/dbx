@@ -25,7 +25,7 @@ import { ORACLE_FUNCTION_APPLY_TEMPLATES, ORACLE_FUNCTION_SIGNATURES } from "@/l
 import { POSTGRES_FUNCTION_APPLY_TEMPLATES, POSTGRES_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/postgres";
 import { TRINO_FUNCTION_APPLY_TEMPLATES, TRINO_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/trino";
 import { rejectsAliasReferenceInHaving } from "@/lib/database/databaseFeatureSupport";
-import { isOracleCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
+import { isOracleCompletionDatabase, isSequenceCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
 import { normalizeSqlTableCompletionSchemaQualification, type SqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
@@ -1916,7 +1916,7 @@ class SqlCompletionProvider {
       this.items.push(...buildColumnItems(context, this.columnsByTable, this.dialect, this.databaseType, this.input.quoteIdentifiers));
       this.items.push(...buildSelectAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.databaseType));
       this.items.push(...buildInsertAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.input.keywordCase));
-      if (isOracleLikeDatabase(this.databaseType) && context.qualifier && !completionQualifierIsReferencedTable(context)) {
+      if ((isOracleLikeDatabase(this.databaseType) || isSequenceCompletionDatabase(this.databaseType)) && context.qualifier && !completionQualifierIsReferencedTable(context)) {
         const profileObjects = driverProfileCompletionObjects(this.input.driverProfile, context);
         const allObjects = [...(this.input.objects ?? []), ...profileObjects];
         const hasKnownSequence = allObjects.some((object) => sequenceMatchesQualifier(object, context));
@@ -4827,7 +4827,7 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
   const onlyProcedures = context.contextKind === "exec";
   const onlyFunctions = context.suggestColumns && context.referencedTables.length > 0 && !context.qualifier;
   const prioritizeOracleFunctions = isOracleCompletionDatabase(databaseType) && context.statementKind === "select";
-  const allowOracleSequences = isOracleCompletionDatabase(databaseType) && !onlyProcedures;
+  const allowOracleSequences = isSequenceCompletionDatabase(databaseType) && !onlyProcedures;
   return objects
     .filter((object) => {
       if (object.type === "sequence") {

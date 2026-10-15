@@ -23,9 +23,10 @@ describe("StarRocks object rename", () => {
 });
 
 describe("OceanBase Oracle object rename", () => {
-  it("offers table rename without enabling other object renames", () => {
+  it("offers table and ordinary view rename while keeping materialized views deferred", () => {
     expect(supportsObjectRename("oceanbase-oracle", "TABLE")).toBe(true);
-    expect(supportsObjectRename("oceanbase-oracle", "VIEW")).toBe(false);
+    expect(supportsObjectRename("oceanbase-oracle", "VIEW")).toBe(true);
+    expect(supportsObjectRename("oceanbase-oracle", "MATERIALIZED_VIEW")).toBe(false);
   });
 });
 

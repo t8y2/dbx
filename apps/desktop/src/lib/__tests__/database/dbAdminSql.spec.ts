@@ -25,7 +25,7 @@ import {
   oracleDuplicateTableCreateOptions,
   sqlServerClonePrimaryKeyConstraintName,
   SQLSERVER_IDENTIFIER_MAX_LENGTH,
-  supportsNativeMysqlAutoIncrement,
+  supportsMysqlAutoIncrement,
 } from "@/lib/database/dbAdminSql";
 
 beforeEach(() => {
@@ -33,24 +33,37 @@ beforeEach(() => {
 });
 
 describe("MySQL AUTO_INCREMENT administration", () => {
-  it("is available only for explicit native MySQL connections", () => {
-    expect(supportsNativeMysqlAutoIncrement({ db_type: "mysql", driver_profile: undefined })).toBe(true);
-    expect(supportsNativeMysqlAutoIncrement({ db_type: "mysql", driver_profile: "" })).toBe(true);
-    expect(supportsNativeMysqlAutoIncrement({ db_type: "mysql", driver_profile: " MySQL " })).toBe(true);
-
+  it("is available for supported MySQL-family connections", () => {
     for (const connection of [
-      { db_type: "jdbc", driver_profile: "mysql" },
+      { db_type: "mysql", driver_profile: undefined },
+      { db_type: "mysql", driver_profile: "" },
+      { db_type: "mysql", driver_profile: " MySQL " },
       { db_type: "mysql", driver_profile: "mariadb" },
       { db_type: "mysql", driver_profile: "tidb" },
       { db_type: "mysql", driver_profile: "oceanbase" },
+      { db_type: "mysql", driver_profile: "tdsql" },
+      { db_type: "mysql", driver_profile: "polardb" },
+      { db_type: "mysql", driver_profile: "greatsql" },
+      { db_type: "mysql", driver_profile: "custom_mysql" },
       { db_type: "mysql", driver_profile: "dolt" },
-      { db_type: "goldendb", driver_profile: "goldendb" },
       { db_type: "mysql", driver_profile: "goldendb" },
+      { db_type: "goldendb", driver_profile: "goldendb" },
+    ] as const) {
+      expect(supportsMysqlAutoIncrement(connection as any), JSON.stringify(connection)).toBe(true);
+    }
+
+    for (const connection of [
+      { db_type: "jdbc", driver_profile: "mysql" },
+      { db_type: "mysql", driver_profile: "unknown" },
       { db_type: "doris", driver_profile: "doris" },
+      { db_type: "mysql", driver_profile: "doris" },
+      { db_type: "mysql", driver_profile: "selectdb" },
+      { db_type: "mysql", driver_profile: "starrocks" },
+      { db_type: "mysql", driver_profile: "manticoresearch" },
       { db_type: "doris", driver_profile: "selectdb" },
       { db_type: "starrocks", driver_profile: "starrocks" },
     ] as const) {
-      expect(supportsNativeMysqlAutoIncrement(connection as any)).toBe(false);
+      expect(supportsMysqlAutoIncrement(connection as any), JSON.stringify(connection)).toBe(false);
     }
   });
 

@@ -161,7 +161,8 @@ import type { BuildCreatePartitionedTableSqlOptions, BuildTableOwnerChangeSqlOpt
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { DatabaseStructureSearchSql, DatabaseStructureSearchSqlOptions } from "@/lib/database/databaseStructureSearch";
-import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput } from "@/lib/table/objectSourceEditor";
+import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput, FingerprintOracleRoutineObjectSourceInput, RewriteOracleRoutineReferencesInput, ValidateOracleExecutableObjectSourceInput } from "@/lib/table/objectSourceEditor";
+import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
@@ -2383,6 +2384,14 @@ export async function buildExecutableObjectSourceStatements(input: BuildEditable
   return invoke("build_executable_object_source_statements", { input });
 }
 
+export async function validateOracleExecutableObjectSource(input: ValidateOracleExecutableObjectSourceInput): Promise<void> {
+  return invoke("validate_oracle_executable_object_source", { input });
+}
+
+export async function fingerprintOracleRoutineObjectSource(input: FingerprintOracleRoutineObjectSourceInput): Promise<string> {
+  return invoke("fingerprint_oracle_routine_object_source", { input });
+}
+
 export async function buildExecutableObjectSourceSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return invoke("build_executable_object_source_sql", { input });
 }
@@ -2395,8 +2404,28 @@ export async function buildRoutineRenameObjectSourceStatements(input: BuildRouti
   return invoke("build_routine_rename_object_source_statements", { input });
 }
 
+export async function rewriteOracleRoutineReferences(input: RewriteOracleRoutineReferencesInput): Promise<string> {
+  return invoke("rewrite_oracle_routine_references", { input });
+}
+
+export async function rewriteOracleTableReferences(input: OracleTableReferenceRewriteInput): Promise<string> {
+  return invoke("rewrite_oracle_table_references", { input });
+}
+
 export async function buildViewDdlSql(input: BuildViewDdlInput): Promise<string> {
   return invoke("build_view_ddl_sql", { input });
+}
+
+export async function parseOracleObjectName(input: string): Promise<string> {
+  return invoke("parse_oracle_object_name", { input });
+}
+
+export async function buildOracleViewRenameSource(input: OracleViewRenameSourceInput): Promise<OracleViewRenameSource> {
+  return invoke("build_oracle_view_rename_source", { input });
+}
+
+export async function reviewOracleViewRenameSource(input: OracleViewRenameSourceInput): Promise<OracleViewRenameSourceReview> {
+  return invoke("review_oracle_view_rename_source", { input });
 }
 
 export async function buildTableStructureChangeSql(options: BuildTableStructureChangeSqlOptions, starrocks?: StarRocksAlterOptions): Promise<TableStructureChangeSql> {
@@ -3230,6 +3259,10 @@ export async function deleteSavedSqlFolder(id: string): Promise<void> {
 
 export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile> {
   return invoke("save_saved_sql_file", { file });
+}
+
+export async function saveDefaultQueryContent(id: string, sql: string, updatedAt: string): Promise<void> {
+  return invoke("save_default_query_content", { id, sql, updatedAt });
 }
 
 export async function deleteSavedSqlFile(id: string): Promise<void> {
@@ -4828,8 +4861,8 @@ export async function vectorListCollections(connectionId: string, database?: str
   return documentListCollections(connectionId, database || "default");
 }
 
-export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<MongoDocumentResult> {
-  return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, collation, executionId);
+export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, includeTotal?: boolean): Promise<MongoDocumentResult> {
+  return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, collation, executionId, undefined, undefined, includeTotal);
 }
 
 export async function mongoFindOne(connectionId: string, database: string, collection: string, filter?: string, projection?: string, options?: string, executionId?: string): Promise<MongoDocumentResult> {
@@ -4862,6 +4895,7 @@ export async function documentFindDocuments(
   executionId?: string,
   cursor?: string,
   cursorPagination?: boolean,
+  includeTotal?: boolean,
 ): Promise<DocumentQueryResult> {
   return invoke("document_find_documents", {
     connectionId,
@@ -4875,6 +4909,7 @@ export async function documentFindDocuments(
     collation,
     cursor,
     cursorPagination,
+    includeTotal,
     executionId,
   });
 }
@@ -5764,6 +5799,8 @@ export interface TransferRequest {
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
+  /** Per-operation timeout for this transfer. Undefined inherits each connection; 0 disables the limit. */
+  operationTimeoutSecs?: number;
   /**
    * Optional per-source-table transfer filter.
    * Key = source table name; value = a bare `WHERE` predicate
@@ -5827,6 +5864,7 @@ export interface TransferProgress {
 }
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
+  const { operationTimeoutSecs, ...backendRequest } = request;
   return new Promise((resolve, reject) => {
     let unlisten: UnlistenFn | null = null;
     void (async () => {
@@ -5840,7 +5878,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
           }
         });
 
-        await invoke("start_transfer", { request });
+        await invoke("start_transfer", { request: backendRequest, operationTimeoutSecs });
         onStarted?.();
       } catch (e) {
         unlisten?.();

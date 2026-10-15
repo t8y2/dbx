@@ -8,6 +8,50 @@ import type { GraphResult } from "@/lib/graph/graphResult";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
+export interface OracleViewRenameSourceInput {
+  source: string;
+  owner: string;
+  viewName: string;
+  oldName: string;
+  newName: string;
+  targetViewName?: string;
+}
+
+export interface OracleViewRenameSource {
+  source: string;
+  fingerprint: string;
+  references: OracleViewRenameReference[];
+}
+
+export interface OracleViewRenameReference {
+  owner: string;
+  name: string;
+}
+
+export interface OracleViewRenameIssue {
+  code: string;
+  message: string;
+  viewName?: string;
+  hintText?: string | null;
+  location?: { line: number; column: number; endLine?: number; endColumn?: number } | null;
+  repairable: boolean;
+}
+
+export interface OracleViewRenameSourceReview {
+  source: OracleViewRenameSource | null;
+  references: OracleViewRenameReference[];
+  issues: OracleViewRenameIssue[];
+}
+
+export interface OracleTableReferenceRewriteInput {
+  databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">;
+  objectType: "PROCEDURE" | "FUNCTION" | "TRIGGER";
+  schema: string;
+  oldName: string;
+  newName: string;
+  source: string;
+}
+
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
 }
@@ -1980,7 +2024,7 @@ export interface DatabaseSearchResultItem {
   searchScope?: DatabaseSearchScope;
   columnName?: string;
   columnComment?: string;
-  structureMatchIn?: Array<"name" | "comment">;
+  structureMatchIn?: Array<"name" | "comment" | "tableComment">;
 }
 
 export interface DatabaseSearchTableTask {
@@ -2004,6 +2048,7 @@ export interface DatabaseSearchTabState {
 }
 
 export interface QueryTab {
+  isDefaultQuery?: boolean;
   id: string;
   /** Stable creation time used when tabs are displayed in creation order. */
   createdAt?: number;
@@ -2437,6 +2482,8 @@ export interface SavedSqlFolder {
 }
 
 export interface SavedSqlFile {
+  /** The persistent, autosaved query for this connection/catalog/database. */
+  isDefaultQuery?: boolean;
   id: string;
   connectionId: string;
   folderId?: string;
@@ -2477,6 +2524,8 @@ export interface TransferTaskConfig {
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
   batchSize: number;
+  /** Per-operation timeout for this task. Undefined inherits each connection; 0 disables the limit. */
+  operationTimeoutSecs?: number;
   /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
   tableFilters?: Record<string, string>;
   /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */

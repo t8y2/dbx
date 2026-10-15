@@ -306,12 +306,14 @@ async function runStructureSearch(currentRun: number) {
         executeQuery: (sql, runExecutionId) => api.executeQuery(props.connectionId, props.database, sql, undefined, runExecutionId),
       });
       for (const [index, hit] of hits.entries()) {
+        // 表注释命中没有列名，用固定占位符保证结果行 id 唯一。
+        const columnKey = hit.columnName ?? "__table__";
         merged.push({
-          id: `${hit.schema ? `${hit.schema}.` : ""}${hit.tableName}:${hit.columnName}:${index}`,
+          id: `${hit.schema ? `${hit.schema}.` : ""}${hit.tableName}:${columnKey}:${index}`,
           schema: hit.schema ?? schema,
           tableName: hit.tableName,
           tableType: hit.tableType ?? tableTypeByName.get(hit.tableName) ?? "UNKNOWN",
-          matchedColumns: [hit.columnName],
+          matchedColumns: hit.columnName ? [hit.columnName] : [],
           preview: structureHitPreview(hit),
           whereInput: "",
           searchScope: "structure",

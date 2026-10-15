@@ -187,7 +187,7 @@ import {
   buildMysqlAutoIncrementSql,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
-  supportsNativeMysqlAutoIncrement,
+  supportsMysqlAutoIncrement as connectionSupportsMysqlAutoIncrement,
   supportsSchemaComment,
   type DropTableChildObjectSqlOptions,
   type DropObjectSqlOptions,
@@ -199,7 +199,12 @@ import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
 import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
-import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
+import { prepareOracleRoutineRename, executeOracleRoutineRename, OracleRoutineRenameFailure, type OracleRoutineRenamePlan } from "@/lib/table/oracleRoutineRename";
+import { prepareOracleTableRename, executeOracleTableRename, OracleTableRenameFailure, type OracleTableRenamePlan } from "@/lib/table/oracleTableRename";
+import { executeOraclePackageSaveAs, OraclePackageSaveAsFailure, prepareOraclePackageSaveAs, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
+import { buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
@@ -328,6 +333,7 @@ import {
   showPasteDialog,
   pasteTableMode,
   pasteTableEntries,
+  pasteTableFromClipboard,
   showCreateDatabaseDialog,
   createDatabaseName,
   createDatabaseCharset,
@@ -1510,6 +1516,7 @@ function requestPasteTreeClipboard(): boolean {
   if (clipboard?.kind !== "table-copy") return false;
   if (canTransferTreeClipboardToCurrentNode()) return openTransferFromTreeClipboard();
   if (!canPasteTreeClipboardToCurrentNode()) return false;
+  pasteTableFromClipboard.value = true;
   pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
@@ -2129,9 +2136,9 @@ function shouldOpenQueryOnActivation(node: TreeNode): boolean {
 async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
   const node = activeNode.value;
   if (!node.connectionId) return;
-  // Activation opens (or focuses) "the" query page for the connection scope;
+  // Activation opens the persistent default SQL file for this database;
   // the context-menu entry keeps creating a fresh tab per invocation.
-  const reuseOptions = options.reuseQueryTabByScope === true ? [{ reuseQueryTabByScope: true }] : [];
+  const openDefault = options.reuseQueryTabByScope === true;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
@@ -2154,13 +2161,16 @@ async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
         openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, sql);
         return;
       }
-      queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog, ...reuseOptions);
+      if (openDefault) await queryStore.openDefaultQuery({ connectionId: node.connectionId, database: node.database, catalog: node.catalog });
+      else queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog);
       return;
     }
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
     const databaseOptions = await getDatabaseOptions(node.connectionId);
-    queryStore.createTab(node.connectionId, resolveDefaultDatabase(connection, databaseOptions), undefined, "query", connection.default_schema, undefined, undefined, ...reuseOptions);
+    const database = resolveDefaultDatabase(connection, databaseOptions);
+    if (openDefault) await queryStore.openDefaultQuery({ connectionId: node.connectionId, database });
+    else queryStore.createTab(node.connectionId, database, undefined, "query", connection.default_schema);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(e?.message || String(e));
@@ -3316,7 +3326,7 @@ function selectedBatchMysqlAutoIncrementTargets(): TreeNode[] {
   const targets = selectedBatchTableTargets();
   return targets.filter((node) => {
     const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
-    return supportsNativeMysqlAutoIncrement(config);
+    return connectionSupportsMysqlAutoIncrement(config);
   });
 }
 
@@ -3368,7 +3378,7 @@ async function confirmBatchMysqlAutoIncrement() {
     }
     try {
       const config = connectionStore.getConfig(target.connectionId);
-      if (!supportsNativeMysqlAutoIncrement(config)) throw new Error("Setting AUTO_INCREMENT is supported only for native MySQL connections.");
+      if (!connectionSupportsMysqlAutoIncrement(config)) throw new Error("Setting AUTO_INCREMENT is supported only for compatible MySQL-family connections.");
       await connectionStore.ensureConnected(target.connectionId);
       const sqlOptions = batchMysqlAutoIncrementSqlOptionsForNode(target);
       const sql = await buildMysqlAutoIncrementSql(sqlOptions);
@@ -3424,27 +3434,53 @@ function requestDropSelectedNode(): boolean {
   return false;
 }
 
-function nodeRenameObjectType(): RenameableObjectType | null {
-  if (activeNode.value.type === "table") return "TABLE";
-  if (activeNode.value.type === "view") return "VIEW";
-  if (activeNode.value.type === "materialized_view") return "MATERIALIZED_VIEW";
-  if (activeNode.value.type === "procedure") return "PROCEDURE";
-  if (activeNode.value.type === "function") return "FUNCTION";
+function nodeRenameObjectType(node: TreeNode = activeNode.value): RenameableObjectType | null {
+  if (node.type === "table") return "TABLE";
+  if (node.type === "view") return "VIEW";
+  if (node.type === "materialized_view") return "MATERIALIZED_VIEW";
+  if (node.type === "procedure") return "PROCEDURE";
+  if (node.type === "function") return "FUNCTION";
   return null;
 }
 
 const canRenameObject = computed(() => {
-  const objectType = nodeRenameObjectType();
-  return !!objectType && (supportsObjectRename(currentDatabaseType(), objectType) || supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any));
+  const node = activeNode.value;
+  const objectType = nodeRenameObjectType(node);
+  return !!objectType && (supportsObjectRename(currentDatabaseType(), objectType) || (databaseTypeForNode(node) === "oceanbase-oracle" && (objectType === "PROCEDURE" || objectType === "FUNCTION")) || supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any));
 });
 
 function openRenameObjectDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
-  renameObjectName.value = activeNode.value.label;
+  const node = sidebarFormTarget.value ?? activeNode.value;
+  const targetKey = JSON.stringify([node.connectionId, node.database, node.schema || node.database, node.type, node.objectName || node.label, databaseTypeForNode(node)]);
+  if (targetKey !== currentSidebarViewRenameTargetKey) renameObjectName.value = node.label;
   renameObjectError.value = "";
   renameObjectPreviewSql.value = "";
+  viewRenamePlan.value = undefined;
+  routineRenamePlan.value = undefined;
+  tableRenamePlan.value = undefined;
   showRenameObjectDialog.value = true;
+}
+
+let currentPackageSaveAsSourceKey = "";
+function openPackageSaveAsDialog(node = activeNode.value) {
+  if ((databaseTypeForNode(node) !== "oracle" && databaseTypeForNode(node) !== "oceanbase-oracle") || (node.type !== "package" && node.type !== "package-body")) return;
+  const oldName = node.objectName || node.label;
+  const sourceKey = JSON.stringify([node.connectionId, node.database, node.schema || node.database, oldName, databaseTypeForNode(node)]);
+  const sameTarget = sourceKey === currentPackageSaveAsSourceKey;
+  currentPackageSaveAsSourceKey = sourceKey;
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  packageSaveAsTarget.value = node;
+  if (!sameTarget) {
+    packageSaveAsName.value = `${oldName}_COPY`;
+    packageSaveAsDrafts.value = {};
+  }
+  packageSaveAsPlan.value = undefined;
+  packageSaveAsError.value = "";
+  packageSaveAsDiagnostic.value = "";
+  packageSaveAsOpen.value = true;
 }
 
 function openRenameDatabaseDialog() {
@@ -3453,6 +3489,9 @@ function openRenameDatabaseDialog() {
   renameObjectName.value = activeNode.value.label;
   renameObjectError.value = "";
   renameObjectPreviewSql.value = "";
+  viewRenamePlan.value = undefined;
+  viewRenameDrafts.value = {};
+  routineRenamePlan.value = undefined;
   showRenameObjectDialog.value = true;
 }
 
@@ -3501,13 +3540,36 @@ async function executeTreeNodeSqlWithProductionGuard(
 }
 
 let renameObjectPreviewRequestId = 0;
+let currentSidebarViewRenameTargetKey = "";
+const viewRenamePlan = ref<OracleViewRenamePlan>();
+const viewRenameDrafts = ref<Record<string, string>>({});
+const routineRenamePlan = ref<OracleRoutineRenamePlan>();
+const routineRenameDrafts = ref<Record<string, string>>({});
+const tableRenamePlan = ref<OracleTableRenamePlan>();
+const tableRenameDrafts = ref<Record<string, string>>({});
+const packageSaveAsOpen = ref(false);
+const packageSaveAsTarget = ref<TreeNode | null>(null);
+const packageSaveAsName = ref("");
+const packageSaveAsPlan = ref<OraclePackageSaveAsPlan>();
+const packageSaveAsDrafts = ref<{ spec?: string; body?: string }>({});
+const packageSaveAsLoading = ref(false);
+const packageSaveAsExecuting = ref(false);
+const packageSaveAsError = ref("");
+const packageSaveAsDiagnostic = ref("");
+const viewRenameLoading = ref(false);
+const viewRenameValidating = ref(false);
+const packageSaveAsValidating = ref(false);
+const viewRenameExecuting = ref(false);
 
 async function refreshRenameObjectPreviewSql() {
-  const node = activeNode.value;
+  const node = sidebarFormTarget.value ?? activeNode.value;
   const requestId = ++renameObjectPreviewRequestId;
   const newName = renameObjectName.value.trim();
   if (!showRenameObjectDialog.value || !newName || newName === node.label) {
     renameObjectPreviewSql.value = "";
+    viewRenamePlan.value = undefined;
+    routineRenamePlan.value = undefined;
+    tableRenamePlan.value = undefined;
     return;
   }
   // Database rename path
@@ -3524,16 +3586,63 @@ async function refreshRenameObjectPreviewSql() {
     }
     return;
   }
-  const objectType = nodeRenameObjectType();
+  const objectType = nodeRenameObjectType(node);
   if (!objectType) {
     renameObjectPreviewSql.value = "";
     return;
   }
+  if ((databaseTypeForNode(node) === "oracle" || databaseTypeForNode(node) === "oceanbase-oracle") && (objectType === "PROCEDURE" || objectType === "FUNCTION") && node.connectionId && node.database) {
+    const targetKey = JSON.stringify([node.connectionId, node.database, node.schema || node.database, objectType, node.objectName || node.label, newName]);
+    const drafts = { ...routineRenameDrafts.value };
+    viewRenameLoading.value = true;
+    try {
+      const plan = await prepareOracleRoutineRename({ connectionId: node.connectionId, database: node.database, databaseType: databaseTypeForNode(node) as "oracle" | "oceanbase-oracle", schema: node.schema || node.database, objectType, oldName: node.objectName || node.label, newName }, drafts);
+      const currentNode = sidebarFormTarget.value ?? activeNode.value;
+      const currentTargetKey = JSON.stringify([currentNode.connectionId, currentNode.database, currentNode.schema || currentNode.database, nodeRenameObjectType(currentNode), currentNode.objectName || currentNode.label, renameObjectName.value.trim()]);
+      if (requestId === renameObjectPreviewRequestId && showRenameObjectDialog.value && targetKey === currentTargetKey && JSON.stringify(drafts) === JSON.stringify(routineRenameDrafts.value)) {
+        routineRenamePlan.value = plan;
+        renameObjectError.value = "";
+        renameObjectPreviewSql.value = plan.statements.join("\n\n");
+      }
+    } catch (error) {
+      if (requestId === renameObjectPreviewRequestId) renameObjectError.value = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (requestId === renameObjectPreviewRequestId) viewRenameLoading.value = false;
+    }
+    return;
+  }
+  if ((databaseTypeForNode(node) === "oracle" || databaseTypeForNode(node) === "oceanbase-oracle") && objectType === "TABLE" && node.connectionId && node.database) {
+    viewRenameLoading.value = true;
+    try {
+      const databaseType = databaseTypeForNode(node) as "oracle" | "oceanbase-oracle";
+      const plan = await prepareOracleTableRename({ connectionId: node.connectionId, database: node.database, databaseType, schema: node.schema || node.database, oldName: node.objectName || node.label, newName }, tableRenameDrafts.value);
+      if (requestId === renameObjectPreviewRequestId) {
+        tableRenamePlan.value = plan;
+        renameObjectError.value = "";
+        renameObjectPreviewSql.value = `-- ${t("objects.tableRenameCoverage")}\n\n${plan.statements.join("\n\n")}`;
+      }
+    } catch (error) {
+      if (requestId === renameObjectPreviewRequestId) renameObjectError.value = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (requestId === renameObjectPreviewRequestId) viewRenameLoading.value = false;
+    }
+    return;
+  }
   if (supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any)) {
-    renameObjectPreviewSql.value = `-- Recreate ${objectType} from source, then drop the original object.`;
+    renameObjectPreviewSql.value = t("objects.routineRenamePreview");
     return;
   }
   try {
+    if (databaseTypeForNode(node) === "oceanbase-oracle" && objectType === "VIEW" && node.connectionId && node.database) {
+      viewRenameLoading.value = true;
+      const plan = await prepareOracleViewRename({ connectionId: node.connectionId, database: node.database, schema: node.schema || node.database, oldName: node.objectName || node.label, newName }, viewRenameDrafts.value);
+      if (requestId === renameObjectPreviewRequestId) {
+        viewRenamePlan.value = plan;
+        renameObjectError.value = "";
+        renameObjectPreviewSql.value = `-- ${t("objects.viewRenameCoverage")}\n\n${plan.statements.join("\n\n")}`;
+      }
+      return;
+    }
     const sql = await buildRenameObjectSql({
       databaseType: currentDatabaseType(),
       objectType,
@@ -3542,23 +3651,249 @@ async function refreshRenameObjectPreviewSql() {
       newName,
     });
     if (requestId === renameObjectPreviewRequestId) renameObjectPreviewSql.value = sql;
-  } catch {
-    if (requestId === renameObjectPreviewRequestId) renameObjectPreviewSql.value = "";
+  } catch (error) {
+    if (requestId === renameObjectPreviewRequestId) {
+      renameObjectPreviewSql.value = "";
+      if (databaseTypeForNode(node) === "oceanbase-oracle" && objectType === "VIEW") renameObjectError.value = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    if (requestId === renameObjectPreviewRequestId) viewRenameLoading.value = false;
   }
 }
 
-watch([showRenameObjectDialog, renameObjectName, () => activeNode.value.label, () => activeNode.value.schema, () => activeNode.value.type, () => currentDatabaseType()], () => {
-  void refreshRenameObjectPreviewSql();
-});
+function editSidebarViewRenameDraft(name: string, source: string) {
+  viewRenameDrafts.value = { ...viewRenameDrafts.value, [name]: source };
+  if (viewRenamePlan.value) viewRenamePlan.value = { ...viewRenamePlan.value, executable: false };
+}
+
+function editSidebarTableRenameDraft(name: string, source: string) {
+  tableRenameDrafts.value = { ...tableRenameDrafts.value, [name]: source };
+  if (tableRenamePlan.value) tableRenamePlan.value = { ...tableRenamePlan.value, executable: false };
+}
+
+function editSidebarRoutineRenameDraft(name: string, source: string) {
+  routineRenameDrafts.value = { ...routineRenameDrafts.value, [name]: source };
+  ++renameObjectPreviewRequestId;
+  if (routineRenamePlan.value) routineRenamePlan.value = { ...routineRenamePlan.value, executable: false };
+}
+
+async function validateSidebarRoutineRenameDrafts() {
+  if (routineRenamePlan.value) routineRenamePlan.value = { ...routineRenamePlan.value, executable: false };
+  viewRenameValidating.value = true;
+  try {
+    await refreshRenameObjectPreviewSql();
+  } finally {
+    viewRenameValidating.value = false;
+  }
+}
+
+async function validateSidebarTableRenameDrafts(clearDrafts = false) {
+  if (clearDrafts) tableRenameDrafts.value = {};
+  viewRenameValidating.value = true;
+  try {
+    await refreshRenameObjectPreviewSql();
+  } finally {
+    viewRenameValidating.value = false;
+  }
+}
+
+async function validateSidebarViewRenameDrafts(clearDrafts = false) {
+  if (clearDrafts) viewRenameDrafts.value = {};
+  viewRenameValidating.value = true;
+  try {
+    await refreshRenameObjectPreviewSql();
+  } finally {
+    viewRenameValidating.value = false;
+  }
+}
+
+watch(
+  () => {
+    const target = sidebarFormTarget.value ?? activeNode.value;
+    return [showRenameObjectDialog.value, renameObjectName.value, target.connectionId, target.database, target.schema, target.type, target.objectName, target.label, databaseTypeForNode(target)];
+  },
+  (_value, _oldValue, onCleanup) => {
+    ++renameObjectPreviewRequestId;
+    const target = sidebarFormTarget.value ?? activeNode.value;
+    const targetKey =
+      ((databaseTypeForNode(target) === "oracle" || databaseTypeForNode(target) === "oceanbase-oracle") && ["procedure", "function", "table"].includes(target.type)) || (databaseTypeForNode(target) === "oceanbase-oracle" && target.type === "view")
+        ? JSON.stringify([target.connectionId, target.database, target.schema || target.database, target.type, target.objectName || target.label, databaseTypeForNode(target)])
+        : "";
+    if (targetKey !== currentSidebarViewRenameTargetKey) {
+      currentSidebarViewRenameTargetKey = targetKey;
+      viewRenameDrafts.value = {};
+      viewRenamePlan.value = undefined;
+      routineRenamePlan.value = undefined;
+      tableRenamePlan.value = undefined;
+      routineRenameDrafts.value = {};
+      tableRenameDrafts.value = {};
+    } else if (viewRenamePlan.value) viewRenamePlan.value = { ...viewRenamePlan.value, executable: false };
+    if (routineRenamePlan.value) routineRenamePlan.value = { ...routineRenamePlan.value, executable: false };
+    if (tableRenamePlan.value) tableRenamePlan.value = { ...tableRenamePlan.value, executable: false };
+    const databaseType = databaseTypeForNode(target);
+    const supportedTarget = ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && (target.type === "table" || target.type === "procedure" || target.type === "function")) || (databaseType === "oceanbase-oracle" && target.type === "view");
+    if (!supportedTarget) {
+      viewRenamePlan.value = undefined;
+      routineRenamePlan.value = undefined;
+      tableRenamePlan.value = undefined;
+      void refreshRenameObjectPreviewSql();
+      return;
+    }
+    const timer = setTimeout(() => void refreshRenameObjectPreviewSql(), 250);
+    onCleanup(() => clearTimeout(timer));
+  },
+);
+
+let packageSaveAsPreviewRequestId = 0;
+watch(
+  () => {
+    const target = packageSaveAsTarget.value;
+    return [packageSaveAsOpen.value, packageSaveAsName.value, target?.connectionId, target?.database, target?.schema, target?.type, target?.objectName, target?.label, target ? databaseTypeForNode(target) : undefined];
+  },
+  (_value, _oldValue, onCleanup) => {
+    const requestId = ++packageSaveAsPreviewRequestId;
+    const target = packageSaveAsTarget.value;
+    const newName = packageSaveAsName.value.trim();
+    const oldName = target?.objectName || target?.label || "";
+    const sourceKey = target ? JSON.stringify([target.connectionId, target.database, target.schema || target.database, oldName, databaseTypeForNode(target)]) : "";
+    if (sourceKey && sourceKey !== currentPackageSaveAsSourceKey) {
+      currentPackageSaveAsSourceKey = sourceKey;
+      packageSaveAsDrafts.value = {};
+    }
+    packageSaveAsPlan.value = undefined;
+    packageSaveAsError.value = "";
+    packageSaveAsDiagnostic.value = "";
+    if (!packageSaveAsOpen.value || !target || !target.connectionId || !target.database || !newName) return;
+    const databaseType = databaseTypeForNode(target);
+    if ((databaseType !== "oracle" && databaseType !== "oceanbase-oracle") || (target.type !== "package" && target.type !== "package-body") || newName === oldName) return;
+    const timer = setTimeout(async () => {
+      packageSaveAsLoading.value = true;
+      const drafts = { ...packageSaveAsDrafts.value };
+      try {
+        const plan = await prepareOraclePackageSaveAs({ connectionId: target.connectionId!, database: target.database!, databaseType, schema: target.schema || target.database!, oldName, newName }, drafts);
+        if (requestId === packageSaveAsPreviewRequestId && packageSaveAsTarget.value === target && packageSaveAsName.value.trim() === newName && JSON.stringify(packageSaveAsDrafts.value) === JSON.stringify(drafts)) packageSaveAsPlan.value = plan;
+      } catch (error) {
+        if (requestId === packageSaveAsPreviewRequestId) packageSaveAsDiagnostic.value = error instanceof Error ? error.message : String(error);
+      } finally {
+        if (requestId === packageSaveAsPreviewRequestId) packageSaveAsLoading.value = false;
+      }
+    }, 250);
+    onCleanup(() => clearTimeout(timer));
+  },
+);
+
+function editPackageSaveAsDraft(part: "spec" | "body", source: string) {
+  packageSaveAsDrafts.value = { ...packageSaveAsDrafts.value, [part]: source };
+  ++packageSaveAsPreviewRequestId;
+  if (packageSaveAsPlan.value) packageSaveAsPlan.value = { ...packageSaveAsPlan.value, executable: false };
+}
+
+async function validatePackageSaveAsDrafts() {
+  const target = packageSaveAsTarget.value;
+  const newName = packageSaveAsName.value.trim();
+  if (!target?.connectionId || !target.database || !newName) return;
+  const databaseType = databaseTypeForNode(target);
+  if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle") return;
+  const oldName = target.objectName || target.label;
+  if (newName === oldName) return;
+  const requestId = ++packageSaveAsPreviewRequestId;
+  const drafts = { ...packageSaveAsDrafts.value };
+  const targetKey = JSON.stringify([target.connectionId, target.database, target.schema || target.database, oldName, databaseType]);
+  packageSaveAsValidating.value = true;
+  try {
+    const plan = await prepareOraclePackageSaveAs({ connectionId: target.connectionId, database: target.database, databaseType, schema: target.schema || target.database, oldName, newName }, drafts);
+    const current = packageSaveAsTarget.value;
+    const currentKey = current ? JSON.stringify([current.connectionId, current.database, current.schema || current.database, current.objectName || current.label, databaseTypeForNode(current)]) : "";
+    if (requestId === packageSaveAsPreviewRequestId && packageSaveAsTarget.value === target && packageSaveAsOpen.value && packageSaveAsName.value.trim() === newName && targetKey === currentKey && JSON.stringify(packageSaveAsDrafts.value) === JSON.stringify(drafts)) packageSaveAsPlan.value = plan;
+  } catch (error) {
+    packageSaveAsDiagnostic.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    packageSaveAsValidating.value = false;
+  }
+}
+
+async function confirmPackageSaveAs() {
+  const target = packageSaveAsTarget.value;
+  const plan = packageSaveAsPlan.value;
+  if (!target || !target.connectionId || !target.database || !plan?.executable || !packageSaveAsOpen.value) return;
+  if (plan.target.connectionId !== target.connectionId || plan.target.database !== target.database || plan.target.schema !== (target.schema || target.database) || plan.target.oldName !== (target.objectName || target.label) || plan.target.newName !== packageSaveAsName.value.trim()) {
+    packageSaveAsError.value = t("objects.packageSaveAsMetadataProblem");
+    return;
+  }
+  packageSaveAsExecuting.value = true;
+  packageSaveAsError.value = "";
+  packageSaveAsDiagnostic.value = "";
+  const isCurrentPlan = () => {
+    const current = packageSaveAsTarget.value;
+    return (
+      packageSaveAsOpen.value &&
+      packageSaveAsPlan.value === plan &&
+      !!current &&
+      current.connectionId === plan.target.connectionId &&
+      current.database === plan.target.database &&
+      (current.schema || current.database) === plan.target.schema &&
+      (current.objectName || current.label) === plan.target.oldName &&
+      databaseTypeForNode(current) === plan.target.databaseType &&
+      packageSaveAsName.value.trim() === plan.target.newName
+    );
+  };
+  try {
+    await connectionStore.ensureConnected(target.connectionId);
+    const executed = await executeTreeNodeSqlWithProductionGuard(target, plan.statements.join("\n\n"), {
+      execute: async () => {
+        await executeOraclePackageSaveAs(plan, () => {
+          const current = packageSaveAsTarget.value;
+          return (
+            packageSaveAsPlan.value === plan &&
+            packageSaveAsOpen.value &&
+            !!current &&
+            current.connectionId === plan.target.connectionId &&
+            current.database === plan.target.database &&
+            (current.schema || current.database) === plan.target.schema &&
+            (current.objectName || current.label) === plan.target.oldName &&
+            packageSaveAsName.value.trim() === plan.target.newName &&
+            databaseTypeForNode(current) === plan.target.databaseType
+          );
+        });
+        return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+      },
+    });
+    if (!executed) return;
+    toast(t("objects.packageSaveAsSuccess", { oldName: plan.target.oldName, newName: plan.canonicalNewName }));
+    packageSaveAsOpen.value = false;
+    await connectionStore.refreshObjectListTreeNode(target.connectionId, target.database, target.schema || target.database);
+  } catch (error) {
+    if (isCurrentPlan()) {
+      packageSaveAsError.value = t("objects.packageSaveAsFailed");
+      packageSaveAsDiagnostic.value = error instanceof Error ? error.message : String(error);
+      packageSaveAsPlan.value = { ...plan, executable: false };
+    }
+    if (error instanceof OraclePackageSaveAsFailure && error.dispatched) {
+      try {
+        await connectionStore.refreshObjectListTreeNode(plan.target.connectionId, plan.target.database, plan.target.schema);
+      } catch {
+        // Keep the package DDL failure visible when metadata refresh also fails.
+      }
+    }
+  } finally {
+    packageSaveAsExecuting.value = false;
+  }
+}
 
 async function confirmRenameObject() {
   const node = sidebarFormTarget.value ?? activeNode.value;
-  const newName = renameObjectName.value.trim();
+  let newName = renameObjectName.value.trim();
   if (!newName || newName === node.label || !node.connectionId || !node.database) return;
   renameObjectError.value = "";
   let renameApplied = false;
+  let updatedViewDependencies: number | undefined;
+  let updatedTableDependencies: number | undefined;
+  let tableRenameFreeze: ReturnType<typeof freezeSourceIdentities> | undefined;
   try {
     const dbType = databaseTypeForNode(node);
+    if (node.type === "table" && dbType === "dameng") {
+      tableRenameFreeze = freezeSourceIdentities([{ connectionId: node.connectionId, database: node.database, schema: node.schema || node.database, objectType: "TABLE", name: node.label }]);
+    }
     await connectionStore.ensureConnected(node.connectionId);
 
     // Database rename path
@@ -3613,9 +3948,79 @@ async function confirmRenameObject() {
       return;
     }
 
-    const objectType = node.type === "table" ? "TABLE" : node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : node.type === "function" ? "FUNCTION" : null;
+    const objectType = nodeRenameObjectType(node);
     if (!objectType) return;
-    if (supportsSourceBackedRoutineRename(dbType, objectType as any)) {
+    if ((dbType === "oracle" || dbType === "oceanbase-oracle") && objectType === "TABLE") {
+      const plan = tableRenamePlan.value;
+      const schema = node.schema || node.database;
+      if (!plan || plan.target.newName !== newName || plan.target.oldName !== (node.objectName || node.label) || plan.target.schema !== schema || plan.target.connectionId !== node.connectionId || plan.target.database !== node.database) throw new Error(t("objects.viewRenameRefresh"));
+      if (!plan.executable) throw new Error(t("objects.viewRenameValidationPending"));
+      viewRenameExecuting.value = true;
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.statements.join("\n\n"), {
+        database: node.database,
+        schema,
+        execute: async () => {
+          await executeOracleTableRename(plan, tableRenameDrafts.value, () => {
+            const current = sidebarFormTarget.value ?? activeNode.value;
+            return (
+              tableRenamePlan.value === plan &&
+              showRenameObjectDialog.value &&
+              current.connectionId === plan.target.connectionId &&
+              current.database === plan.target.database &&
+              (current.schema || current.database) === plan.target.schema &&
+              (current.objectName || current.label) === plan.target.oldName
+            );
+          });
+          return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+        },
+      });
+      if (executed === undefined) return;
+      newName = plan.canonicalNewName;
+      updatedTableDependencies = plan.dependents.length;
+    } else if (dbType === "oceanbase-oracle" && objectType === "VIEW") {
+      const plan = viewRenamePlan.value;
+      if (!plan || plan.target.newName !== newName || plan.target.oldName !== (node.objectName || node.label) || plan.target.schema !== (node.schema || node.database) || plan.target.connectionId !== node.connectionId || plan.target.database !== node.database)
+        throw new Error(t("objects.viewRenameRefresh"));
+      if (!plan.executable) throw new Error(t("objects.viewRenameValidationPending"));
+      viewRenameExecuting.value = true;
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.statements.join("\n"), {
+        execute: async () => {
+          await executeOracleViewRename(plan, () => viewRenamePlan.value === plan && showRenameObjectDialog.value && (sidebarFormTarget.value ?? activeNode.value).connectionId === plan.target.connectionId && (sidebarFormTarget.value ?? activeNode.value).database === plan.target.database);
+          return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+        },
+      });
+      if (executed === undefined) return;
+      newName = plan.canonicalNewName;
+      updatedViewDependencies = plan.views.length - 1;
+    } else if ((dbType === "oracle" || dbType === "oceanbase-oracle") && (objectType === "PROCEDURE" || objectType === "FUNCTION")) {
+      const plan = routineRenamePlan.value;
+      const schema = node.schema || node.database;
+      if (!plan || plan.target.newName !== newName || plan.target.oldName !== (node.objectName || node.label) || plan.target.schema !== schema || plan.target.connectionId !== node.connectionId || plan.target.database !== node.database) throw new Error(t("objects.viewRenameRefresh"));
+      if (!plan.executable) throw new Error(t("objects.viewRenameValidationPending"));
+      viewRenameExecuting.value = true;
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.statements.join("\n\n"), {
+        database: node.database,
+        schema,
+        execute: async () => {
+          await executeOracleRoutineRename(plan, () => {
+            const current = sidebarFormTarget.value ?? activeNode.value;
+            const currentType = nodeRenameObjectType(current);
+            return (
+              routineRenamePlan.value === plan &&
+              showRenameObjectDialog.value &&
+              current.connectionId === plan.target.connectionId &&
+              current.database === plan.target.database &&
+              (current.schema || current.database) === plan.target.schema &&
+              (current.objectName || current.label) === plan.target.oldName &&
+              currentType === plan.target.objectType
+            );
+          });
+          return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+        },
+      });
+      if (executed === undefined) return;
+      newName = plan.canonicalNewName;
+    } else if (supportsSourceBackedRoutineRename(dbType, objectType as any)) {
       const schema = node.schema || node.database;
       const source = await api.getObjectSource(node.connectionId, node.database, schema, node.objectName || node.label, objectType as any, node.signature);
       const statements = await buildRoutineRenameObjectSourceStatements({
@@ -3626,9 +4031,15 @@ async function confirmRenameObject() {
         newName,
         source: source.source,
       });
-      for (const sql of statements) {
-        await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema });
-      }
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, statements.join(";\n"), {
+        database: node.database,
+        schema,
+        execute: async (timeoutSecs) => {
+          await executeObjectSourceSave(node.connectionId!, node.database!, dbType!, statements, schema, timeoutSecs);
+          return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+        },
+      });
+      if (executed === undefined) return;
     } else {
       const sql = await buildRenameObjectSql({
         databaseType: dbType,
@@ -3637,21 +4048,51 @@ async function confirmRenameObject() {
         oldName: node.label,
         newName,
       });
-      await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
+        database: node.database,
+        schema: node.schema,
+        markDispatched: () => tableRenameFreeze?.markDispatched(),
+      });
+      if (executed === undefined) return;
     }
     renameApplied = true;
-    toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
+    toast(
+      updatedTableDependencies !== undefined
+        ? t("objects.tableRenameSuccess", { oldName: node.label, newName, count: updatedTableDependencies })
+        : updatedViewDependencies !== undefined
+          ? t("objects.viewRenameSuccess", { oldName: node.label, newName, count: updatedViewDependencies })
+          : t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }),
+      3000,
+    );
     showRenameObjectDialog.value = false;
     const renamedNode: TreeNode = { ...node, label: newName, objectName: newName, tableName: newName };
     await refreshTableList(node);
     connectionStore.replacePinnedTreeNode(node, renamedNode);
   } catch (e: any) {
+    if (e instanceof OracleViewRenameFailure) {
+      connectionStore.removePinnedTreeNodes([node]);
+      renameObjectPreviewSql.value += `\n\n-- ${t("objects.viewRenameRecovery")}\n${e.plan.views.map((view) => view.source).join("\n\n")}`;
+    }
+    if (e instanceof OracleRoutineRenameFailure) {
+      renameObjectError.value = e.message;
+      if (routineRenamePlan.value) routineRenamePlan.value = { ...routineRenamePlan.value, executable: false };
+    }
+    if (e instanceof OracleTableRenameFailure) {
+      renameObjectError.value = e.message;
+      if (tableRenamePlan.value) tableRenamePlan.value = { ...tableRenamePlan.value, executable: false };
+      if (e.completed.some((step) => step.startsWith("TABLE "))) connectionStore.removePinnedTreeNodes([node]);
+    }
+    if (viewRenamePlan.value) viewRenamePlan.value = { ...viewRenamePlan.value, executable: false, issues: [...viewRenamePlan.value.issues, { code: "metadata_drift", message: e?.message || String(e), repairable: false }] };
     if (renameApplied) {
       // The database mutation succeeded even when metadata refresh did not;
       // remove the old pin instead of allowing it to revive later.
       connectionStore.removePinnedTreeNodes([node]);
     }
     renameObjectError.value = e?.message || String(e);
+  } finally {
+    tableRenameFreeze?.cancel();
+    tableRenameFreeze?.finish();
+    viewRenameExecuting.value = false;
   }
 }
 
@@ -4808,12 +5249,22 @@ async function confirmDropSchema() {
   }
 }
 
-function duplicateStructure(source: TreeNode = activeNode.value) {
+function copyAsNewTable(source: TreeNode = activeNode.value) {
   if (!isDuplicateStructureSource(source)) return;
   if (databaseTypeForNode(source) === "victoriametrics") return;
-  duplicateStructureSource.value = source;
-  duplicateTableName.value = `${source.label}_copy`;
-  showDuplicateDialog.value = true;
+  pasteTableFromClipboard.value = false;
+  pasteTableMode.value = defaultPasteTableMode(databaseTypeForNode(source));
+  pasteTableEntries.value = [
+    {
+      sourceName: source.label,
+      targetName: `${source.label}_copy`,
+      connectionId: source.connectionId,
+      database: source.database,
+      schema: normalizeTreeClipboardSchema(source.connectionId, source.database, source.schema),
+      tableComment: source.comment,
+    },
+  ];
+  showPasteDialog.value = true;
 }
 
 function isDuplicateStructureSource(node: TreeNode): node is DuplicateStructureSource {
@@ -4885,7 +5336,9 @@ async function confirmPasteTableImpl() {
     .filter((entry) => entry.targetName.trim())
     .map((entry) => ({ ...entry, databaseType: entry.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) : undefined, identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId) }));
   if (entries.length === 0) return;
-  const clipboardAtPasteStart = connectionStore.treeClipboard;
+  const shouldConsumeTableClipboard = pasteTableFromClipboard.value;
+  const clipboardAtPasteStart = shouldConsumeTableClipboard ? connectionStore.treeClipboard : null;
+  pasteTableFromClipboard.value = false;
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
@@ -5008,9 +5461,10 @@ async function confirmPasteTableImpl() {
       }
       successCount++;
       if (preparedClones.has(entry)) completedCloneTargets.push(`${schema}.${targetName}`);
-    } catch (e: any) {
+    } catch (caught: any) {
+      // 在 catch 开头统一归一化克隆错误，保证块内后续所有引用都能拿到 e
+      const e = completedClone && !(caught instanceof OceanbaseTableCloneError) ? oceanbaseCloneDataPreparationError(completedClone, caught) : caught;
       if (preparedClones.has(entry)) {
-        if (completedClone && !(e instanceof OceanbaseTableCloneError)) e = oceanbaseCloneDataPreparationError(completedClone, e);
         queueRefreshTarget({ ...entry, schema: e instanceof OceanbaseTableCloneError ? e.targetSchema : schema });
         cloneFailure = {
           error: e,
@@ -5022,8 +5476,8 @@ async function confirmPasteTableImpl() {
         break;
       }
       pasteFailCount++;
-      firstPasteError ??= e;
-      console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
+      firstPasteError ??= caught;
+      console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, caught);
     }
   }
   for (const refreshTarget of refreshTargets.values()) {
@@ -5051,7 +5505,7 @@ async function confirmPasteTableImpl() {
   }
   const pasteFeedback = tablePasteFeedback(successCount, pasteFailCount, firstPasteError);
   if (pasteFailCount === 0) {
-    if (connectionStore.treeClipboard === clipboardAtPasteStart) {
+    if (shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
     toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
@@ -5078,6 +5532,7 @@ function openPasteTableDialog() {
     toast(t("contextMenu.noTableToPaste"), 2000);
     return;
   }
+  pasteTableFromClipboard.value = true;
   pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
@@ -5724,12 +6179,51 @@ function connectionDialogCapabilities() {
 }
 
 function objectDialogCapabilities() {
+  const renameTarget = computed(() => sidebarFormTarget.value ?? activeNode.value);
   return {
     showRenameObjectDialog,
     renameObjectName,
     renameObjectDialogTitle,
     renameObjectPreviewSql,
     renameObjectError,
+    viewRenamePlan,
+    viewRenameDrafts,
+    routineRenamePlan,
+    routineRenameDrafts,
+    tableRenamePlan,
+    tableRenameDrafts,
+    packageSaveAsOpen,
+    packageSaveAsTarget,
+    packageSaveAsName,
+    packageSaveAsPlan,
+    packageSaveAsDrafts,
+    packageSaveAsLoading,
+    packageSaveAsExecuting,
+    packageSaveAsValidating,
+    packageSaveAsError,
+    packageSaveAsDiagnostic,
+    confirmPackageSaveAs,
+    viewRenameLoading,
+    viewRenameValidating,
+    viewRenameExecuting,
+    isOracleViewRename: computed(() => databaseTypeForNode(renameTarget.value) === "oceanbase-oracle" && renameTarget.value.type === "view"),
+    isOracleRoutineRename: computed(() => {
+      const target = renameTarget.value;
+      return (databaseTypeForNode(target) === "oracle" || databaseTypeForNode(target) === "oceanbase-oracle") && (target.type === "procedure" || target.type === "function");
+    }),
+    isOracleTableRename: computed(() => {
+      const target = renameTarget.value;
+      return (databaseTypeForNode(target) === "oracle" || databaseTypeForNode(target) === "oceanbase-oracle") && target.type === "table";
+    }),
+    editSidebarViewRenameDraft,
+    editSidebarTableRenameDraft,
+    editSidebarRoutineRenameDraft,
+    editPackageSaveAsDraft,
+    validateSidebarViewRenameDrafts,
+    validateSidebarTableRenameDrafts,
+    validateSidebarRoutineRenameDrafts,
+    validatePackageSaveAsDrafts,
+    refreshRenameObjectPreviewSql,
     confirmRenameObject,
     showStructurePreviewDialog,
     structurePreviewTitle,
@@ -5749,6 +6243,7 @@ function objectDialogCapabilities() {
     showPasteDialog,
     pasteTableEntries,
     pasteTableMode,
+    pasteTableFromClipboard,
     pasteTableDataCopySupported: pasteTableDataCopySupported.value,
     confirmPasteTable,
   };
@@ -6074,6 +6569,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     const supportsAiContext = supportsAiAssistantContext(currentDatabaseType());
     if (supportsQueryActions) {
       items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       if (supportsAiContext) {
         items.push(addToAiMenuItem(node));
       }
@@ -6315,6 +6811,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: "", separator: true });
       if (canOpenObjectBrowser.value) items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
       items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
@@ -6337,6 +6834,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (supportsConnectionQueryActions(currentDatabaseType())) {
       items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       if (node.type === "database" && supportsAiAssistantContext(currentDatabaseType())) {
         items.push(addToAiMenuItem(node));
       }
@@ -6469,6 +6967,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   if (node.type === "saved-sql-root" || node.type === "saved-sql-folder") {
     if (supportsConnectionQueryActions(currentDatabaseType())) {
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       items.push({ label: "", separator: true });
     }
     items.push({
@@ -6553,7 +7052,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "nacos-access-control" || node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control" || node.type === "zookeeper-root" || node.type === "consul-root" || node.type === "consul-overview") {
+  if (node.type === "nacos-access-control" || node.type === "zookeeper-root" || node.type === "consul-root" || node.type === "consul-overview") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return true;
   }
@@ -6872,7 +7371,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push(copyStructureAsSubmenu());
     if (isTableNotView.value) {
       items.push({ label: "", separator: true });
-      items.push({ sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: duplicateStructure, icon: CopyPlus });
+      items.push({ sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: copyAsNewTable, icon: CopyPlus });
       // Keep menu copy aligned with keyboard copy so frozen multi-selection and single-row fallback stay compatible.
       items.push(...treeTableClipboardMenuItems(node));
       if (supportsVacuum.value) {
@@ -7072,6 +7571,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   }
 
   if (node.type === "trigger" || node.type === "package" || node.type === "package-body") {
+    if ((databaseTypeForNode(node) === "oracle" || databaseTypeForNode(node) === "oceanbase-oracle") && (node.type === "package" || node.type === "package-body")) {
+      items.push({ label: t("objects.packageSaveAsTitle"), action: () => openPackageSaveAsDialog(node), icon: CopyPlus });
+    }
     if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }

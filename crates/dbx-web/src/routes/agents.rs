@@ -296,8 +296,17 @@ pub async fn import_agents_from_zip(
             })
             .await
             .map_err(AppError::from)?;
-            dbx_core::jdbc::import_offline_jdbc_payload(state.app.plugins.root_dir(), &package_path)
-                .map_err(AppError::from)?;
+            let plugins_root = state.app.plugins.root_dir().to_path_buf();
+            // Blocking on purpose: the embedded plugin install scans and waits
+            // for processes holding the JDBC plugin directory (#12004); the
+            // blocking pool absorbs it.
+            let package_path = package_path.clone();
+            let import = tokio::task::spawn_blocking(move || {
+                dbx_core::jdbc::import_offline_jdbc_payload(&plugins_root, &package_path)
+            })
+            .await
+            .map_err(|err| AppError::internal(err.to_string()))?;
+            import.map_err(AppError::from)?;
             Ok::<_, AppError>(import_result)
         }
         .await;

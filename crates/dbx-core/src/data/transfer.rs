@@ -52,6 +52,36 @@ use crate::sql_dialect::{
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
+pub const MAX_TRANSFER_OPERATION_TIMEOUT_SECS: u64 = 3600;
+
+tokio::task_local! {
+    static TRANSFER_OPERATION_TIMEOUT_SECS: Option<u64>;
+}
+
+pub fn validate_transfer_operation_timeout(timeout_secs: Option<u64>) -> Result<(), String> {
+    if timeout_secs.is_some_and(|value| value > MAX_TRANSFER_OPERATION_TIMEOUT_SECS) {
+        return Err(format!(
+            "Transfer operation timeout must be between 0 and {MAX_TRANSFER_OPERATION_TIMEOUT_SECS} seconds"
+        ));
+    }
+    Ok(())
+}
+
+pub async fn with_transfer_operation_timeout<T>(
+    timeout_secs: Option<u64>,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    TRANSFER_OPERATION_TIMEOUT_SECS.scope(timeout_secs, future).await
+}
+
+fn current_transfer_operation_timeout_secs() -> Option<u64> {
+    TRANSFER_OPERATION_TIMEOUT_SECS.try_with(|timeout_secs| *timeout_secs).ok().flatten()
+}
+
+fn effective_transfer_operation_timeout_secs(connection_timeout_secs: u64) -> u64 {
+    current_transfer_operation_timeout_secs().unwrap_or(connection_timeout_secs)
+}
+
 static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:AUTO_INCREMENT_MODE|REPLICA_NUM|USE_BLOOM_FILTER|TABLET_SIZE|PCTFREE)\s*=")
         .expect("valid OceanBase MySQL table option regex")
@@ -7767,7 +7797,7 @@ async fn transfer_pool_context(
         config.map(|config| config.id.clone()),
         database_from_pool_key(pool_key).map(str::to_string),
         config.map(|config| config.db_type),
-        config.map(|config| config.effective_query_timeout_secs()),
+        config.map(|config| effective_transfer_operation_timeout_secs(config.effective_query_timeout_secs())),
     )
 }
 
@@ -10808,8 +10838,8 @@ async fn fetch_agent_transfer_batch(
     let query_timeout_secs = if cursor.started {
         0
     } else {
-        let configs = state.configs.read().await;
-        configs.get(&request.source_connection_id).map(|config| config.query_timeout_secs).unwrap_or(0)
+        let (_, _, _, timeout_secs) = transfer_pool_context(state, pool_key).await;
+        timeout_secs.unwrap_or(0)
     };
     let pool_handle = state.pool_handle(pool_key).await;
     let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
@@ -12713,28 +12743,32 @@ where
     let request_target_catalog = request.target_catalog.clone();
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
     let (source_count_tx, mut source_count_rx) = tokio::sync::mpsc::channel(1);
+    let operation_timeout_secs = current_transfer_operation_timeout_secs();
 
     let mut task = tokio::spawn(async move {
         let mut task_pending_fk_alters = Vec::new();
-        let result = transfer_table_inner(
-            &state,
-            &request,
-            &table,
-            table_index,
-            &source_db_type,
-            &target_db_type,
-            &source_pool_key,
-            &target_pool_key,
-            &known_foreign_keys,
-            &mut task_pending_fk_alters,
-            preexisting_backup_names.as_ref(),
-            target_cleared,
-            move |progress| {
-                try_send_transfer_progress(&progress_tx, progress);
-            },
-            move |source_count| {
-                let _ = source_count_tx.try_send(source_count);
-            },
+        let result = with_transfer_operation_timeout(
+            operation_timeout_secs,
+            transfer_table_inner(
+                &state,
+                &request,
+                &table,
+                table_index,
+                &source_db_type,
+                &target_db_type,
+                &source_pool_key,
+                &target_pool_key,
+                &known_foreign_keys,
+                &mut task_pending_fk_alters,
+                preexisting_backup_names.as_ref(),
+                target_cleared,
+                move |progress| {
+                    try_send_transfer_progress(&progress_tx, progress);
+                },
+                move |source_count| {
+                    let _ = source_count_tx.try_send(source_count);
+                },
+            ),
         )
         .await;
         (result, task_pending_fk_alters)
@@ -13599,6 +13633,28 @@ for line in sys.stdin:
         assert!(is_transfer_query_timeout("查询超时 (1s)"));
         assert!(is_transfer_query_timeout("查詢逾時 (1s)"));
         assert!(!is_transfer_query_timeout("Connection timed out while loading tables"));
+    }
+
+    #[test]
+    fn transfer_operation_timeout_validation_accepts_inherit_custom_and_unlimited() {
+        assert!(validate_transfer_operation_timeout(None).is_ok());
+        assert!(validate_transfer_operation_timeout(Some(0)).is_ok());
+        assert!(validate_transfer_operation_timeout(Some(MAX_TRANSFER_OPERATION_TIMEOUT_SECS)).is_ok());
+        assert!(validate_transfer_operation_timeout(Some(MAX_TRANSFER_OPERATION_TIMEOUT_SECS + 1)).is_err());
+    }
+
+    #[tokio::test]
+    async fn transfer_operation_timeout_override_is_task_scoped() {
+        assert_eq!(effective_transfer_operation_timeout_secs(60), 60);
+        assert_eq!(
+            with_transfer_operation_timeout(Some(600), async { effective_transfer_operation_timeout_secs(60) }).await,
+            600
+        );
+        assert_eq!(
+            with_transfer_operation_timeout(Some(0), async { effective_transfer_operation_timeout_secs(60) }).await,
+            0
+        );
+        assert_eq!(effective_transfer_operation_timeout_secs(60), 60);
     }
 
     fn jdbc_transfer_config(connection_string: &str, driver_class: &str, profile: &str) -> ConnectionConfig {

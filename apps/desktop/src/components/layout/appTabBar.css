@@ -193,11 +193,11 @@
 }
 
 .has-tab-overflow-control .app-tab-strip {
-  padding-inline-end: 2.125rem;
+  padding-inline-end: 2.5rem;
 }
 
 .has-tab-overflow-control .app-tab-scrollbar {
-  inset-inline-end: 2.125rem;
+  inset-inline-end: 2.5rem;
 }
 
 /* The top-row overflow control overlays a small reserved area. Blend that

@@ -958,7 +958,7 @@ function scheduleSidebarCommentLabelMeasure() {
 function sidebarNodeHasTrailingMetadata(node: TreeNode): boolean {
   const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
   if (mode.startsWith("comment-") && sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes)) return true;
-  return mode === "size" && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
+  return (mode === "size" || mode === "comment-and-size") && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
 }
 
 const sidebarTreeNaturalWidthItems = computed(() =>
@@ -1022,7 +1022,7 @@ watch(
 );
 
 const visibleSidebarTableStorageScopes = computed(() => {
-  if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size") return [];
+  if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" && settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-and-size") return [];
   return sidebarTableStorageScopes(flatNodes.value.map(({ node }) => node)).filter((scope) => supportsSidebarTableStorage(store.getConfig(scope.connectionId)));
 });
 

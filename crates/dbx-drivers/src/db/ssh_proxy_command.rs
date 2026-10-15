@@ -13,6 +13,8 @@
 //! it expands to the same value as `%h` — prefer `%h` in new configs.
 
 use std::process::Stdio;
+#[cfg(any(target_os = "macos", test))]
+use std::{ffi::OsStr, io, path::Path};
 
 use tokio::io::{AsyncReadExt, Join};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -122,6 +124,59 @@ pub fn validate_proxy_command_program(program: &str) -> Result<(), String> {
     ))
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn homebrew_directories(arch: &str) -> [&'static str; 2] {
+    if arch == "aarch64" {
+        ["/opt/homebrew/bin", "/usr/local/bin"]
+    } else {
+        ["/usr/local/bin", "/opt/homebrew/bin"]
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn spawn_with_homebrew_fallback<T>(
+    program: &str,
+    path: Option<&OsStr>,
+    directories: &[&str; 2],
+    mut spawn: impl FnMut(&Path) -> io::Result<T>,
+    path_entry_exists: impl Fn(&Path) -> bool,
+) -> Result<T, String> {
+    let original_error = match spawn(Path::new(program)) {
+        Ok(child) => return Ok(child),
+        Err(error) => error,
+    };
+    let original_message = || format!("Failed to start ProxyCommand '{program}': {original_error}");
+
+    // An explicit path, or any error other than NotFound, must retain its
+    // original meaning. A PATH entry with a missing script interpreter can
+    // also produce NotFound, so never replace that program with Homebrew's.
+    if program.contains(['/', '\\']) || original_error.kind() != io::ErrorKind::NotFound {
+        return Err(original_message());
+    }
+    if path.is_some_and(|path| std::env::split_paths(path).any(|directory| path_entry_exists(&directory.join(program))))
+    {
+        return Err(format!(
+            "{}; a PATH entry exists, so check its executable or interpreter, or configure an explicit helper path",
+            original_message()
+        ));
+    }
+
+    for directory in directories {
+        let candidate = Path::new(directory).join(program);
+        match spawn(&candidate) {
+            Ok(child) => return Ok(child),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!("Failed to start ProxyCommand '{}': {error}", candidate.display()));
+            }
+        }
+    }
+    Err(format!(
+        "{}; configure ProxyCommand with the helper's absolute path if it is installed elsewhere",
+        original_message()
+    ))
+}
+
 /// Starts the `ProxyCommand` process and returns its stdin/stdout joined into
 /// one duplex stream for the SSH handshake. The child is reaped in the
 /// background; dropping the stream closes its stdin, which makes the usual
@@ -137,12 +192,19 @@ pub fn spawn_proxy_command_stream(
     let (program, args) = argv.split_first().expect("parse_proxy_command_argv never returns empty");
     validate_proxy_command_program(program)?;
 
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let spawn = |path: &std::path::Path| {
+        Command::new(path).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+    };
+    #[cfg(target_os = "macos")]
+    let mut child = spawn_with_homebrew_fallback(
+        program,
+        std::env::var_os("PATH").as_deref(),
+        &homebrew_directories(std::env::consts::ARCH),
+        spawn,
+        |path| path.symlink_metadata().is_ok(),
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    let mut child = spawn(std::path::Path::new(program))
         .map_err(|error| format!("Failed to start ProxyCommand '{program}': {error}"))?;
 
     let Some(stdout) = child.stdout.take() else {
@@ -174,6 +236,15 @@ pub fn spawn_proxy_command_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    fn test_path() -> std::ffi::OsString {
+        std::env::join_paths(["/usr/bin", "/bin"]).unwrap()
+    }
+
+    fn not_found() -> io::Error {
+        io::Error::from(io::ErrorKind::NotFound)
+    }
 
     #[test]
     fn expands_host_port_and_user_tokens() {
@@ -221,5 +292,173 @@ mod tests {
         let argv = parse_proxy_command_argv("nc %h %p; rm -rf /").unwrap();
         assert_eq!(argv, vec!["nc", "%h", "%p;", "rm", "-rf", "/"]);
         assert!(validate_proxy_command_program(&argv[0]).is_ok());
+    }
+
+    #[test]
+    fn homebrew_order_matches_build_architecture() {
+        assert_eq!(homebrew_directories("aarch64"), ["/opt/homebrew/bin", "/usr/local/bin"]);
+        assert_eq!(homebrew_directories("x86_64"), ["/usr/local/bin", "/opt/homebrew/bin"]);
+    }
+
+    #[test]
+    fn original_path_wins_for_allowlisted_helpers() {
+        for program in ["socat", "cloudflared"] {
+            validate_proxy_command_program(program).unwrap();
+            let attempts = RefCell::new(Vec::new());
+            let path = test_path();
+            let result = spawn_with_homebrew_fallback(
+                program,
+                Some(&path),
+                &homebrew_directories("aarch64"),
+                |candidate| {
+                    attempts.borrow_mut().push(candidate.to_path_buf());
+                    Ok(())
+                },
+                |_| false,
+            );
+            assert!(result.is_ok());
+            assert_eq!(*attempts.borrow(), [Path::new(program)]);
+        }
+        assert!(validate_proxy_command_program("sh").is_err());
+    }
+
+    #[test]
+    fn not_found_falls_back_to_both_homebrew_directories() {
+        let path = test_path();
+        let attempts = RefCell::new(Vec::new());
+        let result = spawn_with_homebrew_fallback(
+            "socat",
+            Some(&path),
+            &homebrew_directories("aarch64"),
+            |candidate| {
+                attempts.borrow_mut().push(candidate.to_path_buf());
+                if candidate == Path::new("/usr/local/bin/socat") {
+                    Ok(())
+                } else {
+                    Err(not_found())
+                }
+            },
+            |_| false,
+        );
+        assert!(result.is_ok());
+        assert_eq!(
+            *attempts.borrow(),
+            [Path::new("socat"), Path::new("/opt/homebrew/bin/socat"), Path::new("/usr/local/bin/socat")]
+        );
+    }
+
+    #[test]
+    fn missing_path_still_tries_homebrew_directories() {
+        let attempts = RefCell::new(Vec::new());
+        let result = spawn_with_homebrew_fallback(
+            "cloudflared",
+            None,
+            &homebrew_directories("aarch64"),
+            |candidate| {
+                attempts.borrow_mut().push(candidate.to_path_buf());
+                if candidate == Path::new("/opt/homebrew/bin/cloudflared") {
+                    Ok(())
+                } else {
+                    Err(not_found())
+                }
+            },
+            |_| panic!("an absent PATH has no entries to probe"),
+        );
+        assert!(result.is_ok());
+        assert_eq!(*attempts.borrow(), [Path::new("cloudflared"), Path::new("/opt/homebrew/bin/cloudflared")]);
+    }
+
+    #[test]
+    fn explicit_paths_and_non_not_found_errors_do_not_fall_back() {
+        let path = test_path();
+        for program in ["/custom/bin/socat", "./socat", "tools/cloudflared"] {
+            validate_proxy_command_program(program).unwrap();
+            let attempts = RefCell::new(Vec::new());
+            let error = spawn_with_homebrew_fallback::<()>(
+                program,
+                Some(&path),
+                &homebrew_directories("aarch64"),
+                |candidate| {
+                    attempts.borrow_mut().push(candidate.to_path_buf());
+                    Err(not_found())
+                },
+                |_| false,
+            )
+            .unwrap_err();
+            assert_eq!(*attempts.borrow(), [Path::new(program)]);
+            assert!(error.contains(program));
+        }
+        let attempts = RefCell::new(Vec::new());
+        let error = spawn_with_homebrew_fallback::<()>(
+            "socat",
+            Some(&path),
+            &homebrew_directories("aarch64"),
+            |candidate| {
+                attempts.borrow_mut().push(candidate.to_path_buf());
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            |_| false,
+        )
+        .unwrap_err();
+        assert_eq!(*attempts.borrow(), [Path::new("socat")]);
+        assert!(error.to_lowercase().contains("permission denied"));
+    }
+
+    #[test]
+    fn existing_path_entry_with_missing_interpreter_is_not_overridden() {
+        let path = test_path();
+        let attempts = RefCell::new(Vec::new());
+        let error = spawn_with_homebrew_fallback::<()>(
+            "socat",
+            Some(&path),
+            &homebrew_directories("aarch64"),
+            |candidate| {
+                attempts.borrow_mut().push(candidate.to_path_buf());
+                Err(not_found())
+            },
+            |candidate| candidate == Path::new("/usr/bin/socat"),
+        )
+        .unwrap_err();
+        assert_eq!(*attempts.borrow(), [Path::new("socat")]);
+        assert!(error.contains("interpreter"));
+    }
+
+    #[test]
+    fn candidate_permission_error_names_attempted_path() {
+        let path = test_path();
+        let attempts = RefCell::new(Vec::new());
+        let error = spawn_with_homebrew_fallback::<()>(
+            "socat",
+            Some(&path),
+            &homebrew_directories("aarch64"),
+            |candidate| {
+                attempts.borrow_mut().push(candidate.to_path_buf());
+                if candidate == Path::new("socat") {
+                    Err(not_found())
+                } else {
+                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                }
+            },
+            |_| false,
+        )
+        .unwrap_err();
+        assert_eq!(*attempts.borrow(), [Path::new("socat"), Path::new("/opt/homebrew/bin/socat")]);
+        assert!(error.contains("/opt/homebrew/bin/socat"));
+        assert!(error.to_lowercase().contains("permission denied"));
+    }
+
+    #[test]
+    fn missing_candidates_offer_explicit_path_hint() {
+        let path = test_path();
+        let error = spawn_with_homebrew_fallback::<()>(
+            "cloudflared",
+            Some(&path),
+            &homebrew_directories("x86_64"),
+            |_| Err(not_found()),
+            |_| false,
+        )
+        .unwrap_err();
+        assert!(error.contains("ProxyCommand 'cloudflared'"));
+        assert!(error.contains("absolute path"));
     }
 }

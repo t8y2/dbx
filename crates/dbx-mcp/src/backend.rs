@@ -906,7 +906,7 @@ impl LocalBackend {
             let tools: Value = match self
                 .state
                 .plugin_host
-                .invoke(&plugin.manifest.id, "mcp/tools", json!({}), None, Some(std::time::Duration::from_secs(30)))
+                .probe(&plugin.manifest.id, "mcp/tools", json!({}), Some(std::time::Duration::from_secs(30)))
                 .await
             {
                 Ok(tools) => tools,
@@ -980,14 +980,14 @@ impl LocalBackend {
             })
             .map(|plugin| (plugin.manifest.id.clone(), plugin.manifest.name.clone()))
             .collect();
-        // Probe every candidate's sidecar concurrently; the probes share the
-        // plugin sidecar sessions, so repeated listings are cheap.
+        // Discovery uses short-lived sessions: merely listing tools must not keep every
+        // installed plugin loaded in every independent MCP host.
         let probes = candidates.into_iter().map(|(plugin_id, plugin_name)| {
             let state = Arc::clone(&self.state);
             async move {
                 let listing = state
                     .plugin_host
-                    .invoke::<Value>(&plugin_id, "mcp/tools", json!({}), None, Some(PLUGIN_TOOLS_PROBE_TIMEOUT))
+                    .probe::<Value>(&plugin_id, "mcp/tools", json!({}), Some(PLUGIN_TOOLS_PROBE_TIMEOUT))
                     .await;
                 (plugin_id, plugin_name, listing)
             }

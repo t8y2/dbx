@@ -135,6 +135,7 @@ import {
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { isAiConnectionTestConfigCurrent } from "@/lib/ai/aiConnectionTest";
+import { formatAiInlineMarkdownFragment, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
 import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 import type { DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
@@ -5838,6 +5839,7 @@ const aiEditQoderCliEnvRows = ref<AiEnvRow[]>([]);
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 const selectedAiProviderPreset = computed(() => getAiProviderPresetOption(aiEditProviderPresetId.value));
 const selectedAiPartnerPreset = computed(() => (isAiPartnerProviderPreset(selectedAiProviderPreset.value) ? selectedAiProviderPreset.value : null));
+const selectedAiPartnerDescriptionHtml = computed(() => (selectedAiPartnerPreset.value ? formatAiInlineMarkdownFragment(t(selectedAiPartnerPreset.value.descriptionKey)) : ""));
 const aiIsCcSwitchProvider = computed(() => aiEditProviderPresetId.value === CC_SWITCH_PROVIDER_ID);
 
 const aiTesting = ref(false);
@@ -8605,6 +8607,7 @@ onUnmounted(() => {
                     <SelectItem value="comment-aligned">{{ t("settings.sidebarObjectInfoModeCommentAligned") }}</SelectItem>
                     <SelectItem value="comment-right">{{ t("settings.sidebarObjectInfoModeCommentRight") }}</SelectItem>
                     <SelectItem value="size">{{ t("settings.sidebarObjectInfoModeSize") }}</SelectItem>
+                    <SelectItem value="comment-and-size">{{ t("settings.sidebarObjectInfoModeCommentAndSize") }}</SelectItem>
                     <SelectItem value="hidden">{{ t("settings.sidebarObjectInfoModeHidden") }}</SelectItem>
                   </SelectContent>
                 </Select>
@@ -11021,7 +11024,7 @@ LIMIT 100;</pre>
                     </Select>
                     <div v-if="selectedAiPartnerPreset" class="flex items-center gap-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2">
                       <div class="min-w-0 flex-1">
-                        <p class="whitespace-pre-line text-[11px] leading-4 text-muted-foreground">{{ t(selectedAiPartnerPreset.descriptionKey) }}</p>
+                        <p class="whitespace-pre-line text-[11px] leading-4 text-muted-foreground [&_a]:text-primary [&_a]:underline" @click="handleAiMarkdownLinkClick($event, openExternalUrl)" v-html="selectedAiPartnerDescriptionHtml"></p>
                       </div>
                       <Button type="button" variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('ai.visitPartner')" :aria-label="t('ai.visitPartner')" @click="openExternalUrl(selectedAiPartnerPreset.websiteUrl)">
                         <ExternalLink class="h-3.5 w-3.5" />
@@ -11855,7 +11858,7 @@ LIMIT 100;</pre>
                       <TabsList class="settings-mcp-config-tabs h-auto min-h-8 w-full min-w-0 max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain group-data-horizontal/tabs:h-auto">
                         <TabsTrigger value="claude" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
                         <TabsTrigger value="cursor" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
-                        <TabsTrigger value="codebuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">CodeBuddy Code</TabsTrigger>
+                        <TabsTrigger value="codebuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">CodeBuddy Code CLI</TabsTrigger>
                         <TabsTrigger value="zcode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">ZCode</TabsTrigger>
                         <TabsTrigger value="trae" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>
                         <TabsTrigger value="vscode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>

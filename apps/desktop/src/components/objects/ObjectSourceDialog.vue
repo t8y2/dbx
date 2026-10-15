@@ -9,6 +9,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, resolveObjectSourceEditDraft } from "@/lib/table/objectSourceEditor";
 import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
+import { assertSourceIdentity, beginSourceSave, captureSourceIdentity, renewSourceIdentity, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
 import { jdbcRoutineMetadata, xuguRoutineMetadataFromDefinition, type RoutineMetadata } from "@/lib/table/routineParameters";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
@@ -61,6 +62,7 @@ const routineMetadata = ref<RoutineMetadata | null>(null);
 /** May differ from props.objectType after PROCEDURE/FUNCTION/PACKAGE fallback resolution. */
 const resolvedObjectType = ref<ObjectSourceKind>(props.objectType);
 let loadSerial = 0;
+let sourceIdentity: SourceIdentitySnapshot | undefined;
 onBeforeUnmount(() => {
   ++loadSerial;
 });
@@ -81,6 +83,8 @@ watch(
 async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
   const serial = ++loadSerial;
   const target = { ...props };
+  const identity = captureSourceIdentity({ ...target, schema: target.schema || target.database });
+  sourceIdentity = undefined;
   saving.value = false;
   content.value = "";
   editableText.value = "";
@@ -117,6 +121,9 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
     const displaySource = resolvedType === "SEQUENCE" ? result.source : editable;
     const formatted = await formatSqlForDisplay(displaySource, target.formatDialect ?? target.dialect, settingsStore.editorSettings.sqlFormatter);
     if (serial !== loadSerial) return;
+    const renewed = renewSourceIdentity(identity);
+    sourceIdentity = resolvedType === target.objectType ? renewed : captureSourceIdentity({ ...identity, objectType: resolvedType });
+    assertSourceIdentity(sourceIdentity);
     editableText.value = editable;
     content.value = formatted;
     draft.value = nextEditing && canEdit.value ? resolveObjectSourceEditDraft(props.databaseType, resolvedType, formatted, editable) : "";
@@ -180,6 +187,9 @@ async function saveSource() {
   saving.value = true;
   saveError.value = "";
   try {
+    if (!sourceIdentity) return;
+    const identity = sourceIdentity;
+    assertSourceIdentity(identity);
     const statements = await buildExecutableObjectSourceStatements({
       databaseType,
       objectType,
@@ -189,21 +199,27 @@ async function saveSource() {
     });
     if (serial !== loadSerial) return;
     const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
+    const execute = async () => {
+      if (serial !== loadSerial || !props.open) return false;
+      const release = beginSourceSave(identity);
+      try {
+        await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
+        return true;
+      } finally {
+        release();
+      }
+    };
     if (executableSql.trim()) {
       const saved = await executeWithProductionSqlGuard({
         connection: connectionStore.getConfig(connectionId),
         database,
         sql: executableSql,
         source: t("production.sourceObjectSource"),
-        execute: async () => {
-          if (serial !== loadSerial || !props.open) return false;
-          await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
-          return true;
-        },
+        execute,
       });
       if (!saved) return;
     } else {
-      await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
+      if (!(await execute())) return;
     }
     if (serial !== loadSerial) return;
     toast(t("objects.sourceSaved"));

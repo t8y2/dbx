@@ -61,14 +61,19 @@ impl ManagedAgentProcessTarget {
     }
 }
 
+/// Normalize a process path for Windows matching: unify slashes, strip the
+/// `\\?\` prefix and quotes, lowercase. Shared by every "is this process
+/// holding our files" check (agent drivers, JREs, the JDBC plugin directory).
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-fn normalized_process_path(path: &Path) -> String {
+pub fn normalized_process_path(path: &Path) -> String {
     let normalized = path.to_string_lossy().trim_matches('"').replace('/', "\\");
     normalized.strip_prefix(r"\\?\").unwrap_or(&normalized).trim_end_matches('\\').to_ascii_lowercase()
 }
 
+/// Whether `candidate` equals `directory` or is a child path of it, on
+/// normalized Windows form. Shared by the agent/JRE/JDBC process matcher.
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-fn process_path_is_within(candidate: &str, directory: &str) -> bool {
+pub fn process_path_is_within(candidate: &str, directory: &str) -> bool {
     candidate == directory || candidate.strip_prefix(directory).is_some_and(|remainder| remainder.starts_with('\\'))
 }
 

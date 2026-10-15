@@ -64,6 +64,7 @@ async fn finish_transfer_channel(state: &Arc<WebState>, transfer_id: &str, chann
 #[serde(rename_all = "camelCase")]
 pub struct StartTransferRequest {
     pub request: TransferRequest,
+    pub operation_timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -82,8 +83,10 @@ pub async fn start_transfer(
     State(state): State<Arc<WebState>>,
     Json(body): Json<StartTransferRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let operation_timeout_secs = body.operation_timeout_secs;
     let req = body.request;
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
+    transfer::validate_transfer_operation_timeout(operation_timeout_secs).map_err(AppError::from)?;
 
     // Demo mode skips connection-backed validation: the simulated web build may not
     // carry the requested connections, and the spawned task reports failures as
@@ -188,7 +191,12 @@ pub async fn start_transfer(
             }
         };
 
-        if let Err(error) = transfer::ensure_transfer_source_types_supported(&app, &req, &source_pool_key).await {
+        if let Err(error) = transfer::with_transfer_operation_timeout(
+            operation_timeout_secs,
+            transfer::ensure_transfer_source_types_supported(&app, &req, &source_pool_key),
+        )
+        .await
+        {
             send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, error));
             finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
             return;
@@ -204,6 +212,7 @@ pub async fn start_transfer(
             source_pool_key,
             target_pool_key,
             history,
+            operation_timeout_secs,
             move |progress| send_transfer_progress(&progress_channel_for_run, &progress),
         )
         .await;
@@ -436,12 +445,17 @@ mod tests {
 
         let req = transfer_request("src", "dst", &dir);
         let transfer_id = req.transfer_id.clone();
-        let response = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
+        let response = start_transfer(
+            State(state.clone()),
+            Json(StartTransferRequest { request: req, operation_timeout_secs: None }),
+        )
+        .await
+        .unwrap();
         let _ = response.into_response();
 
         let duplicate = start_transfer(
             State(state.clone()),
-            Json(StartTransferRequest { request: transfer_request("src", "dst", &dir) }),
+            Json(StartTransferRequest { request: transfer_request("src", "dst", &dir), operation_timeout_secs: None }),
         )
         .await
         .unwrap_err();
@@ -511,7 +525,12 @@ mod tests {
         Arc::get_mut(&mut state).unwrap().demo_mode = true;
         let req = transfer_request("src", "dst", &dir);
         let transfer_id = req.transfer_id.clone();
-        let _ = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req })).await.unwrap();
+        let _ = start_transfer(
+            State(state.clone()),
+            Json(StartTransferRequest { request: req, operation_timeout_secs: None }),
+        )
+        .await
+        .unwrap();
         let channel = {
             let channels = state.transfer_progress_channels.read().await;
             channels.get(&transfer_id).cloned().expect("transfer channel registered")

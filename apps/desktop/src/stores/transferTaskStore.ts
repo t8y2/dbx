@@ -4,6 +4,7 @@ import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import type { TransferTask, TransferTaskConfig, TransferTaskFolder, TransferTaskLibrary } from "@/types/database";
 import { resolveTransferStrategy, transferStrategyOptions } from "@/components/transfer/transferStrategy";
+import { MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 
 export class TransferTaskNameConflictError extends Error {
   readonly code = "TRANSFER_TASK_NAME_CONFLICT";
@@ -70,6 +71,11 @@ function normalizeTransferTableFilters(raw: unknown): Record<string, string> | u
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+function normalizeTransferOperationTimeoutSecs(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > MAX_QUERY_TIMEOUT_SECS) return undefined;
+  return raw;
+}
+
 function normalizeTask(raw: unknown): TransferTask | null {
   if (!raw || typeof raw !== "object") return null;
   const candidate = raw as Partial<TransferTask>;
@@ -102,6 +108,7 @@ function normalizeTask(raw: unknown): TransferTask | null {
       targetTableNameCase: config.targetTableNameCase ?? "preserve",
       quoteTargetColumnNames: config.quoteTargetColumnNames ?? true,
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
+      operationTimeoutSecs: normalizeTransferOperationTimeoutSecs(config.operationTimeoutSecs),
       tableFilters: normalizeTransferTableFilters(config.tableFilters),
       dropTargetConfirmed: false,
     },
@@ -294,7 +301,12 @@ export const useTransferTaskStore = defineStore("transferTasks", () => {
     const folderId = Object.prototype.hasOwnProperty.call(input, "folderId") ? input.folderId || undefined : existing?.folderId;
     ensureTaskNameAvailable(trimmed, folderId, input.id);
     const timestamp = nowIso();
-    const config: TransferTaskConfig = { ...input.config, ...transferStrategyOptions(resolveTransferStrategy(input.config)), dropTargetConfirmed: false };
+    const config: TransferTaskConfig = {
+      ...input.config,
+      ...transferStrategyOptions(resolveTransferStrategy(input.config)),
+      operationTimeoutSecs: normalizeTransferOperationTimeoutSecs(input.config.operationTimeoutSecs),
+      dropTargetConfirmed: false,
+    };
     const task: TransferTask = existing
       ? { ...existing, folderId, name: trimmed, config, updatedAt: timestamp }
       : {

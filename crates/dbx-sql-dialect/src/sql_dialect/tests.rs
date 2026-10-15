@@ -16,6 +16,23 @@ fn transfer_identifier_policy_preserves_legacy_output() {
 }
 
 #[test]
+fn backtick_family_predicate_matches_quoting() {
+    // `uses_backtick_identifier_quoting` is the single source of truth the "Standard
+    // SQL" export dialect consults to decide when to deviate from ANSI double
+    // quotes. It must agree with what `quote_table_identifier` actually emits, so a
+    // new backtick-family engine cannot silently drift between the two.
+    for &database_type in DatabaseType::ALL {
+        let quoted = quote_table_identifier(Some(database_type), "tbl");
+        let emits_backtick = quoted.starts_with('`');
+        assert_eq!(
+            uses_backtick_identifier_quoting(Some(database_type)),
+            emits_backtick,
+            "{database_type:?} quoting/backtick-family mismatch: {quoted}"
+        );
+    }
+}
+
+#[test]
 fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Nebula), "tag`name"), "`tag\\`name`");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Mysql), "user`name"), "`user``name`");

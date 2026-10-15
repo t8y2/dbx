@@ -70,6 +70,7 @@ pub struct DocumentFindRequest {
     pub cursor: Option<String>,
     #[serde(default)]
     pub cursor_pagination: bool,
+    pub include_total: Option<bool>,
     pub execution_id: Option<String>,
 }
 
@@ -342,7 +343,7 @@ pub async fn find_documents(
     let result = run_cancellable(
         &state,
         req.execution_id,
-        dbx_core::document_ops::find_documents_core(
+        dbx_core::document_ops::find_documents_core_with_total(
             &state.app,
             &req.connection_id,
             &req.database,
@@ -355,6 +356,7 @@ pub async fn find_documents(
             req.collation.as_deref(),
             req.cursor.as_deref(),
             req.cursor_pagination,
+            req.include_total.unwrap_or(true),
         ),
     )
     .await?;

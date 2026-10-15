@@ -244,7 +244,7 @@ function mountWithReactiveConnection(initialConnection: ConnectionConfig) {
   document.body.append(root);
   app = createApp(Harness);
   app.mount(root);
-  updateConnection = (app._instance?.exposed as { update: (connection: ConnectionConfig) => void }).update;
+  updateConnection = (app._instance?.exposed ?? ({ update: () => undefined } as unknown as { update: (connection: ConnectionConfig) => void })).update;
 }
 
 afterEach(() => {

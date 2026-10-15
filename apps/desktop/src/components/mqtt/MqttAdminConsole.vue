@@ -456,6 +456,22 @@ function toggleMessagePayload(messageKey: string) {
   collapsedMessageKeys.value = nextCollapsedMessageKeys;
 }
 
+function collapseAllMessagePayloads() {
+  const nextCollapsedMessageKeys = new Set(collapsedMessageKeys.value);
+  for (const msg of filteredMessages.value) nextCollapsedMessageKeys.add(msg.previewKey);
+  collapsedMessageKeys.value = nextCollapsedMessageKeys;
+}
+
+function expandAllMessagePayloads() {
+  if (filteredMessages.value.length === 0) {
+    collapsedMessageKeys.value = new Set();
+    return;
+  }
+  const keysToExpand = new Set(filteredMessages.value.map((msg) => msg.previewKey));
+  const nextCollapsedMessageKeys = new Set([...collapsedMessageKeys.value].filter((key) => !keysToExpand.has(key)));
+  collapsedMessageKeys.value = nextCollapsedMessageKeys;
+}
+
 function formatMessagePayload(msg: MqttMessage): string {
   if (displayEncoding.value === "plaintext") return messagePayloadText(msg);
   return decodePayload(msg.payloadBase64, displayEncoding.value);
@@ -602,6 +618,14 @@ onUnmounted(stopPolling);
                 <Play v-if="messagesPaused" class="h-3.5 w-3.5" />
                 <Pause v-else class="h-3.5 w-3.5" />
                 <span>{{ messagesPaused ? t("connection.mqttResumeMessages") : t("connection.mqttPauseMessages") }}</span>
+              </Button>
+              <Button type="button" size="sm" variant="ghost" data-testid="mqtt-message-payload-collapse-all" class="h-6 gap-1 px-2 text-[11px] font-normal normal-case" :disabled="filteredMessages.length === 0" :title="t('connection.mqttCollapseAllPayloads')" @click="collapseAllMessagePayloads">
+                <ChevronUp class="h-3.5 w-3.5" />
+                <span>{{ t("connection.mqttCollapseAllPayloads") }}</span>
+              </Button>
+              <Button type="button" size="sm" variant="ghost" data-testid="mqtt-message-payload-expand-all" class="h-6 gap-1 px-2 text-[11px] font-normal normal-case" :disabled="filteredMessages.length === 0" :title="t('connection.mqttExpandAllPayloads')" @click="expandAllMessagePayloads">
+                <ChevronDown class="h-3.5 w-3.5" />
+                <span>{{ t("connection.mqttExpandAllPayloads") }}</span>
               </Button>
               <Button
                 size="sm"

@@ -346,11 +346,10 @@ export async function snapshotElementToPng(element: HTMLElement): Promise<string
   const width = Math.max(element.offsetWidth, element.scrollWidth);
   const height = Math.max(element.offsetHeight, element.scrollHeight);
   const basePixels = width * height;
-  if (width > MAX_EXPORT_CANVAS_EDGE || height > MAX_EXPORT_CANVAS_EDGE || basePixels > MAX_EXPORT_CANVAS_PIXELS) {
-    throw new Error(`Snapshot is too large to export safely (${width} × ${height}px). Reduce the code size and try again.`);
-  }
-
   const targetScale = Math.min(MAX_EXPORT_PIXEL_RATIO, Math.max(1, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1));
+  // Keep the output canvas within browser limits without rejecting a larger
+  // source layout. Wide grids can still be captured safely by rasterizing the
+  // full DOM at a reduced scale.
   const scale = Math.min(targetScale, MAX_EXPORT_CANVAS_EDGE / width, MAX_EXPORT_CANVAS_EDGE / height, Math.sqrt(MAX_EXPORT_CANVAS_PIXELS / basePixels));
   const useLegacyLineNumberFallback = legacyWebViewExportFallbackEnabled();
   return domtoimage.toPng(element, {

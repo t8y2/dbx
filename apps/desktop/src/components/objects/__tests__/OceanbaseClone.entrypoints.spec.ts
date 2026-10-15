@@ -10,8 +10,10 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { OraclePackageSaveAsFailure, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
 
 const backend = vi.hoisted(() => ({ executeQuery: vi.fn(), buildCreateTableSql: vi.fn(), buildCopyTableDataSql: vi.fn() }));
+const packageSaveAs = vi.hoisted(() => ({ prepare: vi.fn(), execute: vi.fn() }));
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/backend/api")>()),
   ...backend,
@@ -29,6 +31,10 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   listIndexes: vi.fn().mockResolvedValue([]),
   listTriggers: vi.fn().mockResolvedValue([]),
 }));
+vi.mock("@/lib/table/oraclePackageSaveAs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/table/oraclePackageSaveAs")>();
+  return { ...actual, prepareOraclePackageSaveAs: (...args: unknown[]) => packageSaveAs.prepare(...args), executeOraclePackageSaveAs: (...args: unknown[]) => packageSaveAs.execute(...args) };
+});
 
 const result = (rows: unknown[][] = []) => ({ columns: [], rows, affected_rows: 0, execution_time_ms: 0 });
 const connection = { id: "ob-entry", name: "OB", db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", host: "test", port: 2881, username: "APP", database: "APP" } as ConnectionConfig;
@@ -54,6 +60,8 @@ beforeEach(() => {
   );
   backend.buildCreateTableSql.mockImplementation(async ({ schema, tableName }) => ({ statements: [`CREATE TABLE "${schema}"."${tableName}" ("ID" NUMBER);`], warnings: [] }));
   backend.buildCopyTableDataSql.mockResolvedValue('INSERT INTO "APP"."MixedCopy" SELECT * FROM "APP"."SOURCE"');
+  packageSaveAs.prepare.mockReset();
+  packageSaveAs.execute.mockReset();
   backend.executeQuery.mockImplementation(async (_id, _db, sql: string) => {
     if (sql.includes("ALL_TAB_COMMENTS")) return result([["source comment"]]);
     if (sql.includes("ALL_TABLES")) return result([["NO", "N"]]);
@@ -77,6 +85,7 @@ async function mountEntry(surface: "sidebar" | "objects") {
   const store = useConnectionStore();
   store.connections = [{ ...connection }];
   store.connectedIds.add(connection.id);
+  vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
   store.treeNodes = [{ id: `${connection.id}:APP:APP`, type: "schema", label: "APP", connectionId: connection.id, database: "APP", schema: "APP", children: [], isExpanded: false }];
   const refresh = vi.spyOn(store, "refreshObjectListTreeNode");
   const component = ref<any>(null);
@@ -110,7 +119,7 @@ async function mountEntry(surface: "sidebar" | "objects") {
   if (surface === "objects") controller.duplicateTarget = { name: "SOURCE", schema: "APP", object_type: "TABLE" };
   controller.pasteTableEntries = [{ sourceName: "SOURCE", targetName: '"MixedCopy"', connectionId: connection.id, database: "APP", schema: "APP" }];
   controller.pasteTableMode = "structure-and-data";
-  return { controller, refresh, context, app };
+  return { controller, refresh, context, app, runtime: component.value.$.setupState };
 }
 
 async function acceptClone() {
@@ -492,5 +501,108 @@ describe("ObjectBrowser clone confirmation identity", () => {
     safety.cancel();
     await pending;
     expect(ddlCalls()).toEqual([]);
+  });
+});
+
+async function beginPackageSaveAs(surface: "sidebar" | "objects") {
+  const { controller, refresh, context, runtime } = await mountEntry(surface);
+  const packageTarget = surface === "sidebar" ? ({ id: `${connection.id}:APP:APP:package:P_OLD`, type: "package", label: "P_OLD", objectName: "P_OLD", connectionId: connection.id, database: "APP", schema: "APP" } as TreeNode) : { name: "P_OLD", type: "PACKAGE", schema: "APP" };
+  const plan = {
+    target: { connectionId: connection.id, database: "APP", databaseType: "oceanbase-oracle", schema: "APP", oldName: "P_OLD", newName: "P_NEW" },
+    canonicalNewName: "P_NEW",
+    snapshot: null,
+    specDraft: "PACKAGE P_OLD AS END P_OLD;",
+    bodyDraft: null,
+    specSource: 'CREATE PACKAGE "P_NEW" AS END "P_NEW";',
+    bodySource: null,
+    statements: ["CREATE PACKAGE"],
+    issues: [],
+    metadataComplete: true,
+    executable: true,
+  } as OraclePackageSaveAsPlan;
+  packageSaveAs.prepare.mockResolvedValue(plan);
+  if (surface === "sidebar") {
+    const action = runtime.buildContextMenu(packageTarget).find((item: { label: string }) => item.label === i18n.global.t("objects.packageSaveAsTitle")) as { action?: () => void } | undefined;
+    expect(action?.action).toBeDefined();
+    action!.action!();
+  } else controller.requestPackageSaveAs(packageTarget);
+  controller.packageSaveAsName = "P_NEW";
+  await vi.waitFor(() => expect(controller.packageSaveAsPlan).toBeDefined());
+  return { controller, refresh, context, plan };
+}
+
+describe.each(["sidebar", "objects"] as const)("%s Oracle package Save As failure refresh", (surface) => {
+  it("refreshes the target tree and keeps the failed plan editable for recovery", async () => {
+    const { controller, refresh, plan } = await beginPackageSaveAs(surface);
+    packageSaveAs.execute.mockRejectedValue(new OraclePackageSaveAsFailure(plan, ["PACKAGE P_NEW"], "PACKAGE BODY P_NEW", new Error("body failed"), true));
+
+    await controller.confirmPackageSaveAs();
+
+    expect(refresh).toHaveBeenCalledWith(connection.id, "APP", "APP");
+    expect(controller.packageSaveAsOpen).toBe(true);
+    expect(controller.packageSaveAsError).not.toBe("");
+    expect(controller.packageSaveAsPlan).toMatchObject({ executable: false });
+  });
+
+  it("keeps the DDL failure and disabled plan when the metadata refresh also fails", async () => {
+    const { controller, refresh, plan } = await beginPackageSaveAs(surface);
+    const drafts = { ...controller.packageSaveAsDrafts };
+    refresh.mockRejectedValue(new Error("refresh unavailable"));
+    packageSaveAs.execute.mockRejectedValue(new OraclePackageSaveAsFailure(plan, ["PACKAGE P_NEW"], "PACKAGE BODY P_NEW", new Error("body failed"), true));
+
+    await controller.confirmPackageSaveAs();
+
+    expect(refresh).toHaveBeenCalledWith(connection.id, "APP", "APP");
+    expect(controller.packageSaveAsDiagnostic).toContain("body failed");
+    expect(controller.packageSaveAsPlan).toMatchObject({ executable: false });
+    expect(controller.packageSaveAsDrafts).toEqual(drafts);
+  });
+
+  it("does not apply a late failure to a different target or draft", async () => {
+    const { controller, refresh, context, plan } = await beginPackageSaveAs(surface);
+    let rejectExecution!: (error: unknown) => void;
+    packageSaveAs.execute.mockReturnValue(
+      new Promise<void>((_resolve, reject) => {
+        rejectExecution = reject;
+      }),
+    );
+    const pending = controller.confirmPackageSaveAs();
+    await vi.waitFor(() => expect(packageSaveAs.execute).toHaveBeenCalled());
+
+    if (surface === "sidebar") {
+      controller.packageSaveAsTarget = { id: "other:APP:APP:package:P_OTHER", type: "package", label: "P_OTHER", objectName: "P_OTHER", connectionId: "other", database: "APP", schema: "APP" };
+    } else {
+      context.value = { connection: { ...connection, id: "other" }, database: "OTHER", schema: "OTHER" };
+    }
+    await nextTick();
+    controller.packageSaveAsDrafts = { body: "P_OTHER draft" };
+    rejectExecution(new OraclePackageSaveAsFailure(plan, ["PACKAGE P_NEW"], "PACKAGE BODY P_NEW", new Error("body failed"), true));
+    await pending;
+
+    expect(refresh).toHaveBeenCalledWith(connection.id, "APP", "APP");
+    expect(controller.packageSaveAsDrafts).toEqual({ body: "P_OTHER draft" });
+    expect(controller.packageSaveAsError).toBe("");
+  });
+
+  it("preserves a same-scope replacement draft when the previous target fails late", async () => {
+    const { controller, refresh, plan } = await beginPackageSaveAs(surface);
+    let rejectExecution!: (error: unknown) => void;
+    packageSaveAs.execute.mockReturnValue(
+      new Promise<void>((_resolve, reject) => {
+        rejectExecution = reject;
+      }),
+    );
+    const pending = controller.confirmPackageSaveAs();
+    await vi.waitFor(() => expect(packageSaveAs.execute).toHaveBeenCalled());
+
+    controller.packageSaveAsTarget = surface === "sidebar" ? { id: `${connection.id}:APP:APP:package:P_OTHER`, type: "package", label: "P_OTHER", objectName: "P_OTHER", connectionId: connection.id, database: "APP", schema: "APP" } : { name: "P_OTHER", type: "PACKAGE", schema: "APP" };
+    await nextTick();
+    controller.packageSaveAsDrafts = { body: "P_OTHER draft" };
+    rejectExecution(new OraclePackageSaveAsFailure(plan, ["PACKAGE P_NEW"], "PACKAGE BODY P_NEW", new Error("body failed"), true));
+    await pending;
+
+    expect(refresh).toHaveBeenCalledWith(connection.id, "APP", "APP");
+    expect(controller.packageSaveAsDrafts).toEqual({ body: "P_OTHER draft" });
+    expect(controller.packageSaveAsError).toBe("");
   });
 });

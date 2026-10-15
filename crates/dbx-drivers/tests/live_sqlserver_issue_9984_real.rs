@@ -19,6 +19,7 @@ async fn live_sqlserver_issue_9984_real_round_trip() {
         &user,
         &password,
         Some(&database),
+        None,
         Duration::from_secs(15),
     )
     .await

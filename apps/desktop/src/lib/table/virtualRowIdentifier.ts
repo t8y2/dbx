@@ -1,4 +1,5 @@
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { metadataSchemaForConnection, type JdbcDialectConnection } from "@/lib/database/jdbcDialect";
 import type { ColumnInfo } from "@/types/database";
 
 const STORAGE_PREFIX = "dbx-table-virtual-row-identifier:";
@@ -19,6 +20,15 @@ interface StoredVirtualRowIdentifier {
 
 export function virtualRowIdentifierScopeKey(scope: VirtualRowIdentifierScope): string {
   return JSON.stringify([scope.connectionId, scope.database, scope.catalog ?? "", scope.schema ?? "", scope.tableName]);
+}
+
+/**
+ * Table data tabs load the key with the schema they send to the metadata
+ * request, which for database-only engines such as MySQL is the database name
+ * rather than the tab's empty schema. Saving and clearing must use that scope.
+ */
+export function tableDataVirtualRowIdentifierScope(connection: JdbcDialectConnection | undefined, scope: VirtualRowIdentifierScope): VirtualRowIdentifierScope {
+  return { ...scope, schema: metadataSchemaForConnection(connection, scope.database, scope.schema) };
 }
 
 export function resolveRowIdentifierColumns(requestedColumns: readonly string[], availableColumns: readonly Pick<ColumnInfo, "name">[]): string[] | null {

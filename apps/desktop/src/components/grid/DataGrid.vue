@@ -326,7 +326,7 @@ import {
   splitForeignKeyDisplayValues,
   type ForeignKeyDisplayConfig,
 } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
-import { removeVirtualRowIdentifier, saveVirtualRowIdentifier, type VirtualRowIdentifierScope } from "@/lib/table/virtualRowIdentifier";
+import { removeVirtualRowIdentifier, saveVirtualRowIdentifier, tableDataVirtualRowIdentifierScope, type VirtualRowIdentifierScope } from "@/lib/table/virtualRowIdentifier";
 
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -4618,13 +4618,14 @@ const hasResultToolbarLeadingSlot = computed(() => !!slots["result-toolbar-leadi
 const hasResultToolbarActionsSlot = computed(() => !!slots["result-toolbar-actions"]);
 const virtualRowIdentifierScope = computed<VirtualRowIdentifierScope | undefined>(() => {
   if (!props.connectionId || !props.database || !props.tableMeta?.tableName) return undefined;
-  return {
+  const scope = {
     connectionId: props.connectionId,
     database: props.tableMeta.database ?? props.database,
     catalog: props.tableMeta.catalog,
     schema: props.tableMeta.schema,
     tableName: props.tableMeta.tableName,
   };
+  return props.context === "table-data" ? tableDataVirtualRowIdentifierScope(connectionStore.getConfig(props.connectionId), scope) : scope;
 });
 const virtualRowIdentifierColumns = computed(() => props.tableMeta?.virtualPrimaryKeys ?? []);
 const showVirtualRowIdentifierControl = computed(() => {

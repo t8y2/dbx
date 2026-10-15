@@ -161,7 +161,8 @@ import type { BuildCreatePartitionedTableSqlOptions, BuildTableOwnerChangeSqlOpt
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { DatabaseStructureSearchSql, DatabaseStructureSearchSqlOptions } from "@/lib/database/databaseStructureSearch";
-import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput } from "@/lib/table/objectSourceEditor";
+import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput, FingerprintOracleRoutineObjectSourceInput, RewriteOracleRoutineReferencesInput, ValidateOracleExecutableObjectSourceInput } from "@/lib/table/objectSourceEditor";
+import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
@@ -2383,6 +2384,14 @@ export async function buildExecutableObjectSourceStatements(input: BuildEditable
   return invoke("build_executable_object_source_statements", { input });
 }
 
+export async function validateOracleExecutableObjectSource(input: ValidateOracleExecutableObjectSourceInput): Promise<void> {
+  return invoke("validate_oracle_executable_object_source", { input });
+}
+
+export async function fingerprintOracleRoutineObjectSource(input: FingerprintOracleRoutineObjectSourceInput): Promise<string> {
+  return invoke("fingerprint_oracle_routine_object_source", { input });
+}
+
 export async function buildExecutableObjectSourceSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return invoke("build_executable_object_source_sql", { input });
 }
@@ -2395,8 +2404,28 @@ export async function buildRoutineRenameObjectSourceStatements(input: BuildRouti
   return invoke("build_routine_rename_object_source_statements", { input });
 }
 
+export async function rewriteOracleRoutineReferences(input: RewriteOracleRoutineReferencesInput): Promise<string> {
+  return invoke("rewrite_oracle_routine_references", { input });
+}
+
+export async function rewriteOracleTableReferences(input: OracleTableReferenceRewriteInput): Promise<string> {
+  return invoke("rewrite_oracle_table_references", { input });
+}
+
 export async function buildViewDdlSql(input: BuildViewDdlInput): Promise<string> {
   return invoke("build_view_ddl_sql", { input });
+}
+
+export async function parseOracleObjectName(input: string): Promise<string> {
+  return invoke("parse_oracle_object_name", { input });
+}
+
+export async function buildOracleViewRenameSource(input: OracleViewRenameSourceInput): Promise<OracleViewRenameSource> {
+  return invoke("build_oracle_view_rename_source", { input });
+}
+
+export async function reviewOracleViewRenameSource(input: OracleViewRenameSourceInput): Promise<OracleViewRenameSourceReview> {
+  return invoke("review_oracle_view_rename_source", { input });
 }
 
 export async function buildTableStructureChangeSql(options: BuildTableStructureChangeSqlOptions, starrocks?: StarRocksAlterOptions): Promise<TableStructureChangeSql> {

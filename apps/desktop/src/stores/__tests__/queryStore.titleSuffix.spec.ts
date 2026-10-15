@@ -25,7 +25,7 @@ describe("queryStore tab title suffix", () => {
   async function createStoreWithDataTab() {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
-    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    const id = store.createTab("pg-1", "app", "scratch", "query");
     return { store, id };
   }
 

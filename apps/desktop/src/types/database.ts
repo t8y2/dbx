@@ -8,6 +8,50 @@ import type { GraphResult } from "@/lib/graph/graphResult";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
+export interface OracleViewRenameSourceInput {
+  source: string;
+  owner: string;
+  viewName: string;
+  oldName: string;
+  newName: string;
+  targetViewName?: string;
+}
+
+export interface OracleViewRenameSource {
+  source: string;
+  fingerprint: string;
+  references: OracleViewRenameReference[];
+}
+
+export interface OracleViewRenameReference {
+  owner: string;
+  name: string;
+}
+
+export interface OracleViewRenameIssue {
+  code: string;
+  message: string;
+  viewName?: string;
+  hintText?: string | null;
+  location?: { line: number; column: number; endLine?: number; endColumn?: number } | null;
+  repairable: boolean;
+}
+
+export interface OracleViewRenameSourceReview {
+  source: OracleViewRenameSource | null;
+  references: OracleViewRenameReference[];
+  issues: OracleViewRenameIssue[];
+}
+
+export interface OracleTableReferenceRewriteInput {
+  databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">;
+  objectType: "PROCEDURE" | "FUNCTION" | "TRIGGER";
+  schema: string;
+  oldName: string;
+  newName: string;
+  source: string;
+}
+
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
 }

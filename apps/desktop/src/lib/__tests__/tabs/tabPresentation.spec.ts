@@ -54,6 +54,9 @@ beforeEach(() => {
     removeItem: vi.fn((key: string) => values.delete(key)),
   });
   setActivePinia(createPinia());
+  // Compact titles are the shipped default now (#12310); pin the flag so these
+  // assertions keep describing full titles and compact cases opt in themselves.
+  useSettingsStore().editorSettings.compactTabTitle = false;
 });
 
 function queryTab(overrides: Partial<QueryTab>): QueryTab {

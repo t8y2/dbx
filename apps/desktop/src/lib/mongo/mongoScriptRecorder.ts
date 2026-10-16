@@ -3,6 +3,8 @@
  * worker; scripts must pass `checkMongoScript` (mongoScriptCheck.ts) first.
  */
 
+import { uuid } from "@/lib/common/utils";
+
 export type MongoScriptExpansion = { ok: true; commands: string[] } | { ok: false; error: string };
 
 /** Upper bound on recorded commands, so a runaway loop fails instead of flooding the server. */
@@ -80,7 +82,7 @@ export function recordMongoScriptCommands(script: string): MongoScriptExpansion 
     NumberInt: (value: unknown) => new MongoShellLiteral(`NumberInt(${JSON.stringify(String(value))})`),
     NumberLong: (value: unknown) => new MongoShellLiteral(`NumberLong(${JSON.stringify(String(value))})`),
     NumberDecimal: (value: unknown) => new MongoShellLiteral(`NumberDecimal(${JSON.stringify(String(value))})`),
-    UUID: (value?: unknown) => new MongoShellLiteral(`UUID(${JSON.stringify(value === undefined ? crypto.randomUUID() : String(value))})`),
+    UUID: (value?: unknown) => new MongoShellLiteral(`UUID(${JSON.stringify(value === undefined ? uuid() : String(value))})`),
   };
 
   try {

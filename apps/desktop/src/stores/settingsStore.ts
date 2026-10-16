@@ -1032,6 +1032,7 @@ export interface EditorSettings {
   autoCalculateTotalRows: boolean;
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
+  dataGridColumnCommentsInInfoArea: boolean;
   showColumnTypesInHeader: boolean;
   showColumnHeaderTooltips: boolean;
   /** 结果集页签/结果列表的名称是否带上库名（关闭后只显示表名，完整名称仍在悬浮提示中）。 */
@@ -1068,6 +1069,7 @@ export interface EditorSettings {
   /** Prefer SQL preamble comments in source naming mode, preserving the original naming behavior. */
   resultTabPreferComments: boolean;
   dataGridShowTransposeFieldMetadata: boolean;
+  dataGridTransposeMetadataInInfoColumn: boolean;
   colorizeDataGridCellTypes: boolean;
   dataGridTypeColorSchemes: DataGridTypeColorScheme[];
   activeDataGridTypeColorSchemeId: string;
@@ -1401,6 +1403,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   autoCalculateTotalRows: false,
   mongoViewMode: "document",
   showColumnCommentsInHeader: true,
+  dataGridColumnCommentsInInfoArea: false,
   showColumnTypesInHeader: true,
   showColumnHeaderTooltips: true,
   showResultSourceDatabase: true,
@@ -1411,6 +1414,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   resultTabNamingMode: "source",
   resultTabPreferComments: true,
   dataGridShowTransposeFieldMetadata: false,
+  dataGridTransposeMetadataInInfoColumn: false,
   colorizeDataGridCellTypes: false,
   dataGridTypeColorSchemes: [],
   activeDataGridTypeColorSchemeId: DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID,
@@ -2060,6 +2064,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     autoCalculateTotalRows: settings.autoCalculateTotalRows ?? DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows,
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
     showColumnCommentsInHeader: settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
+    dataGridColumnCommentsInInfoArea: settings.dataGridColumnCommentsInInfoArea ?? DEFAULT_EDITOR_SETTINGS.dataGridColumnCommentsInInfoArea,
     showColumnTypesInHeader: settings.showColumnTypesInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader,
     showColumnHeaderTooltips: settings.showColumnHeaderTooltips ?? DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips,
     showResultSourceDatabase: settings.showResultSourceDatabase ?? DEFAULT_EDITOR_SETTINGS.showResultSourceDatabase,
@@ -2070,6 +2075,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     resultTabNamingMode: normalizeResultTabNamingMode(settings.resultTabNamingMode),
     resultTabPreferComments: settings.resultTabPreferComments !== false,
     dataGridShowTransposeFieldMetadata: settings.dataGridShowTransposeFieldMetadata === true,
+    dataGridTransposeMetadataInInfoColumn: settings.dataGridTransposeMetadataInInfoColumn === true,
     colorizeDataGridCellTypes: settings.colorizeDataGridCellTypes ?? DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes,
     dataGridTypeColorSchemes,
     activeDataGridTypeColorSchemeId: normalizeActiveDataGridTypeColorSchemeId(dataGridTypeColorSchemes, settings.activeDataGridTypeColorSchemeId),
@@ -2953,6 +2959,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.autoCalculateTotalRows !== undefined) editorSettings.value.autoCalculateTotalRows = partial.autoCalculateTotalRows === true;
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
     if (partial.showColumnCommentsInHeader !== undefined) editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
+    if (partial.dataGridColumnCommentsInInfoArea !== undefined) editorSettings.value.dataGridColumnCommentsInInfoArea = partial.dataGridColumnCommentsInInfoArea;
     if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
     if (partial.showColumnHeaderTooltips !== undefined) editorSettings.value.showColumnHeaderTooltips = partial.showColumnHeaderTooltips;
     if (partial.showResultSourceDatabase !== undefined) editorSettings.value.showResultSourceDatabase = partial.showResultSourceDatabase;
@@ -2963,6 +2970,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.resultTabNamingMode !== undefined) editorSettings.value.resultTabNamingMode = normalizeResultTabNamingMode(partial.resultTabNamingMode);
     if (partial.resultTabPreferComments !== undefined) editorSettings.value.resultTabPreferComments = partial.resultTabPreferComments !== false;
     if (partial.dataGridShowTransposeFieldMetadata !== undefined) editorSettings.value.dataGridShowTransposeFieldMetadata = partial.dataGridShowTransposeFieldMetadata === true;
+    if (partial.dataGridTransposeMetadataInInfoColumn !== undefined) editorSettings.value.dataGridTransposeMetadataInInfoColumn = partial.dataGridTransposeMetadataInInfoColumn === true;
     if (partial.colorizeDataGridCellTypes !== undefined) editorSettings.value.colorizeDataGridCellTypes = partial.colorizeDataGridCellTypes === true;
     if (partial.dataGridTypeColorSchemes !== undefined) {
       editorSettings.value.dataGridTypeColorSchemes = normalizeDataGridTypeColorSchemes(partial.dataGridTypeColorSchemes);

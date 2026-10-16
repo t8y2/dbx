@@ -54,7 +54,7 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-async function mountPage() {
+async function mountPage(initialTab: "editor" | "data" = "editor") {
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useSettingsStore();
@@ -73,7 +73,7 @@ async function mountPage() {
               ref: page,
               variant: "page",
               open: true,
-              initialTab: "editor",
+              initialTab,
               "onUpdate:open": (value: boolean) => {
                 open.value = value;
               },
@@ -102,6 +102,27 @@ function clickText(key: string) {
 }
 
 describe("settings page external close request", () => {
+  it("saves and restores independent normal and transpose information placement", async () => {
+    const { page, open, store } = await mountPage("data");
+    const transposeSwitch = () => host.querySelector<HTMLButtonElement>("#data-grid-transpose-metadata-in-info-column")!;
+    expect(transposeSwitch().getAttribute("aria-checked")).toBe("false");
+    transposeSwitch().click();
+    await settle();
+    expect(host.querySelector<HTMLButtonElement>("#data-grid-show-transpose-field-metadata")!.disabled).toBe(true);
+    expect(store.editorSettings.dataGridTransposeMetadataInInfoColumn).toBe(false);
+    clickText("settings.apply");
+    await settle();
+    expect(store.editorSettings.dataGridTransposeMetadataInInfoColumn).toBe(true);
+    expect(store.editorSettings.dataGridColumnCommentsInInfoArea).toBe(false);
+    expect(backend.saves).toHaveBeenCalledWith(expect.objectContaining({ dataGridTransposeMetadataInInfoColumn: true, dataGridColumnCommentsInInfoArea: false }));
+    page.value!.requestClose();
+    await settle();
+    open.value = true;
+    await settle();
+    expect(transposeSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(host.querySelector<HTMLButtonElement>("#column-comments-in-info-area")!.getAttribute("aria-checked")).toBe("false");
+  });
+
   it("keeps a dirty draft when continuing, and closes without saving only after discarding", async () => {
     const { page, open, store, changeFontSize } = await mountPage();
     const originalFontSize = store.editorSettings.fontSize;

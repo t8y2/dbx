@@ -1084,6 +1084,25 @@ impl TypeMappingMatrix {
                     requires_cast: false,
                 });
             }
+            (DialectKind::Postgres, DialectKind::Oracle) => {
+                // The Oracle family (Oracle, OceanBase's Oracle mode, Dameng, and the
+                // rest of the profile family) has no BOOLEAN type until Oracle 23ai,
+                // so an unmapped `boolean` reaches the target verbatim and fails
+                // CREATE TABLE there (#12453). NUMBER(1) is the family's boolean
+                // stand-in; the data path writes booleans as the 1/0 integer spelling
+                // for these targets, so no value-level cast is needed.
+                //
+                // Everything else keeps passing through: PostgreSQL types such as
+                // `timestamp with time zone`, `text` and `jsonb` are already accepted
+                // by these engines, and mapping them here would change working
+                // migrations for no gain.
+                rules.push(TypeConversionRule {
+                    source_type: "BOOLEAN".into(),
+                    target_type: "NUMBER(1)".into(),
+                    precision_loss: false,
+                    requires_cast: false,
+                });
+            }
             _ => {}
         }
         rules
@@ -1325,6 +1344,22 @@ mod tests {
         assert_eq!(matrix.convert_type("BYTEA"), ("BLOB".to_string(), false));
         assert_eq!(matrix.convert_type("BOOLEAN"), ("TINYINT(1)".to_string(), true));
         assert_eq!(matrix.convert_type("UUID"), ("CHAR(36)".to_string(), true));
+    }
+
+    #[test]
+    fn postgres_to_oracle_type_mapping() {
+        // Issue #12453: the Oracle family has no BOOLEAN type until Oracle 23ai, so an
+        // unmapped `boolean` used to reach Dameng CREATE TABLE verbatim and fail the
+        // whole table with "无效的数据类型".
+        let matrix = TypeMappingMatrix::for_dialects(DialectKind::Postgres, DialectKind::Oracle);
+        assert_eq!(matrix.convert_type("BOOLEAN"), ("NUMBER(1)".to_string(), false));
+        // Everything else stays on the passthrough path: these engines already accept
+        // PostgreSQL's timestamp with time zone / text / jsonb spellings, and remapping
+        // them would change working migrations for no gain.
+        let (result, lossy) = matrix.convert_type("TIMESTAMPTZ");
+        assert_eq!(result, "TIMESTAMPTZ");
+        assert!(lossy);
+        assert_eq!(matrix.convert_type("TEXT"), ("TEXT".to_string(), true));
     }
 
     #[test]

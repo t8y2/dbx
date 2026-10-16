@@ -3395,7 +3395,10 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                     "0".to_string()
                 }
             }
-            DatabaseType::SqlServer | DatabaseType::Dameng => {
+            // NUMBER(1) (see map_column_type) takes the integer spelling; Oracle and
+            // OceanBase's Oracle mode joined Dameng/SQL Server here for the same
+            // reason the DDL arm does — TRUE/FALSE is not a numeric literal.
+            DatabaseType::SqlServer | DatabaseType::Dameng | DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
                 if *b {
                     "1".to_string()
                 } else {
@@ -4270,6 +4273,14 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
         "bool" | "boolean" => match target_db {
             DatabaseType::Mysql => "TINYINT(1)".into(),
             DatabaseType::SqlServer => "BIT".into(),
+            // The Oracle family has no BOOLEAN type (Oracle only gained it in 23ai),
+            // so passing the source spelling through fails CREATE TABLE outright on
+            // Oracle, OceanBase's Oracle mode and Dameng alike (#12453: a PostgreSQL
+            // to Dameng transfer failed every table holding a boolean column with
+            // "无效的数据类型"). NUMBER(1) is the family's boolean stand-in and pairs
+            // with the 1/0 boolean literals escape_value_typed writes for these
+            // targets, so structure and data agree without per-engine special cases.
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "NUMBER(1)".into(),
             _ => "BOOLEAN".into(),
         },
         "date" => "DATE".into(),
@@ -21159,6 +21170,74 @@ SELECT 1 FROM dual"#
         assert!(!ddl.contains("TEXT"), "{ddl}");
         // The byte length unit still travels between Oracle-family targets.
         assert!(ddl.contains("\"REMARK\" VARCHAR(100 byte)"), "{ddl}");
+    }
+
+    #[test]
+    fn map_column_type_uses_number1_for_boolean_on_oracle_family_targets() {
+        // Issue #12453: a PostgreSQL to Dameng transfer failed every table that held a
+        // boolean column with "无效的数据类型". The old `_ => "BOOLEAN"` fallback passed
+        // the source spelling through, and no engine in the Oracle family accepts it
+        // (Oracle only gained BOOLEAN in 23ai). NUMBER(1) is the family stand-in and
+        // pairs with the 1/0 boolean literals escape_value_typed writes for these
+        // targets.
+        for target in [DatabaseType::Dameng, DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(map_column_type("boolean", &DatabaseType::Postgres, &target), "NUMBER(1)");
+            assert_eq!(map_column_type("bool", &DatabaseType::Postgres, &target), "NUMBER(1)");
+        }
+
+        // MySQL and SQL Server keep their proven per-engine spellings.
+        assert_eq!(map_column_type("boolean", &DatabaseType::Postgres, &DatabaseType::Mysql), "TINYINT(1)");
+        assert_eq!(map_column_type("boolean", &DatabaseType::Postgres, &DatabaseType::SqlServer), "BIT");
+        // Postgres to Postgres is the same dialect and passes through untouched.
+        assert_eq!(map_column_type("boolean", &DatabaseType::Postgres, &DatabaseType::Postgres), "boolean");
+    }
+
+    #[test]
+    fn transfer_create_table_postgres_to_dameng_rewrites_boolean_columns() {
+        // Issue #12453, structure side: the generated DDL must not contain a `boolean`
+        // column for a Dameng target.
+        let columns = vec![
+            db::ColumnInfo { is_primary_key: true, ..test_column("ID", "bigint") },
+            test_column("STATUS", "boolean"),
+            test_column("IS_SYNC", "boolean"),
+            test_column("NAME", "varchar(255)"),
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &columns,
+            "T_BOOL_PROBE",
+            "DBX_TEST",
+            "DBX_TEST",
+            &DatabaseType::Dameng,
+            &DatabaseType::Postgres,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("\"STATUS\" NUMBER(1)"), "{ddl}");
+        assert!(ddl.contains("\"IS_SYNC\" NUMBER(1)"), "{ddl}");
+        assert!(!ddl.to_ascii_uppercase().contains("BOOLEAN"), "{ddl}");
+        // Untouched types survive the hop, with the Oracle-family CHAR unit pinned.
+        assert!(ddl.contains("\"NAME\" VARCHAR(255 CHAR)"), "{ddl}");
+    }
+
+    #[test]
+    fn escape_value_typed_writes_integer_booleans_for_oracle_family_targets() {
+        // The DDL side maps boolean to NUMBER(1) for the Oracle family (#12453), so the
+        // data side must write the integer spelling there or the insert fails on the
+        // TRUE/FALSE literal.
+        for target in [DatabaseType::Dameng, DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(escape_value_typed(&serde_json::json!(true), &target, Some("NUMBER(1)")), "1");
+            assert_eq!(escape_value_typed(&serde_json::json!(false), &target, Some("NUMBER(1)")), "0");
+        }
+        // SQL Server kept the 1/0 spelling before this change and still has it.
+        assert_eq!(escape_value_typed(&serde_json::json!(true), &DatabaseType::SqlServer, Some("BIT")), "1");
+        // Targets that own a BOOLEAN type keep the TRUE/FALSE spelling.
+        assert_eq!(escape_value_typed(&serde_json::json!(true), &DatabaseType::Postgres, Some("boolean")), "TRUE");
+        // MySQL's TINYINT(1) keeps the plain 1/0 spelling; only a BIT column is quoted.
+        assert_eq!(escape_value_typed(&serde_json::json!(true), &DatabaseType::Mysql, Some("tinyint(1)")), "1");
+        assert_eq!(escape_value_typed(&serde_json::json!(false), &DatabaseType::Mysql, Some("tinyint(1)")), "0");
+        assert_eq!(escape_value_typed(&serde_json::json!(true), &DatabaseType::Mysql, Some("bit(1)")), "b'1'");
     }
 
     #[test]

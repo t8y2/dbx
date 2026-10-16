@@ -1052,6 +1052,7 @@ export default withEnglishFallback({
     databasePlaceholderRequired: "Obbligatorio, inserisci un database esistente",
     databasePlaceholderWithDefault: "Opzionale, predefinito {database}",
     kingbaseDatabaseRequired: "KingbaseES richiede un database esistente prima di connettersi o caricare l'elenco dei database.",
+    gbase8cDatabaseRequired: "GBase 8c richiede un database esistente prima di connettersi.",
     xuguDatabaseRequired: "XuguDB richiede un database esistente prima di connettersi.",
     defaultDatabase: "DB Predefinito",
     authDatabase: "DB di Autenticazione",
@@ -1775,6 +1776,7 @@ export default withEnglishFallback({
     damengDriverModeHint: "Usa il driver integrato per DM8. Per DM6 o un'altra versione compatibile, seleziona il relativo JAR JDBC ufficiale.",
     damengCustomDriverHint: "Seleziona un JAR JDBC Dameng da una fonte autorizzata. Il driver viene caricato in modo isolato nell'agente Dameng e non richiede il plugin JDBC generico.",
     damengCustomDriverRequired: "Seleziona un JAR del driver JDBC Dameng.",
+    gbase8cCustomDriverHint: "GBase 8c richiede il driver JDBC del fornitore (com.gbase8c.Driver), che il pacchetto Agent non include. Scaricalo da gbase.cn, attiva «Classpath manuale» e indicalo su gbase8c-jdbc-*.jar. Se il pacchetto driver installato lo contiene già, lascia vuoto.",
     sundbCustomDriverHint:
       "L'agente SunDB include il driver JDBC del fornitore, quindi non serve alcun JAR (classe driver csii.sundb.jdbc.SundbDriver). Indica qui un JAR solo per caricare un driver del fornitore più recente; il driver personalizzato viene caricato in modo isolato all'interno dell'agente.",
     zookeeperClusterInputHint: "Il cluster ZooKeeper può essere specificato inserendo tutti i nodi nell'URL superiore (ad esempio zookeeper://zk-1:2181,zk-2:2181/app), oppure nella stringa di connessione sottostante.",

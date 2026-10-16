@@ -1063,6 +1063,7 @@ export default withEnglishFallback({
     databasePlaceholderRequired: "Obligatorio, ingresa una base de datos existente",
     databasePlaceholderWithDefault: "Opcional, por defecto {database}",
     kingbaseDatabaseRequired: "KingbaseES requiere una base de datos existente antes de conectar o cargar la lista de bases de datos.",
+    gbase8cDatabaseRequired: "GBase 8c requiere una base de datos existente antes de conectarse.",
     xuguDatabaseRequired: "XuguDB requiere una base de datos existente antes de conectarse.",
     defaultDatabase: "BD predeterminada",
     authDatabase: "BD de autenticación",
@@ -1866,6 +1867,7 @@ export default withEnglishFallback({
     damengDriverModeHint: "Use el controlador incluido para DM8. Para DM6 u otra versión compatible, seleccione su JAR JDBC oficial.",
     damengCustomDriverHint: "Seleccione un JAR JDBC de Dameng de una fuente con licencia. El controlador se carga de forma aislada en el agente de Dameng y no requiere el complemento JDBC genérico.",
     damengCustomDriverRequired: "Seleccione un JAR del controlador JDBC de Dameng.",
+    gbase8cCustomDriverHint: "GBase 8c requiere el controlador JDBC del fabricante (com.gbase8c.Driver), que el paquete del Agent no incluye. Descárguelo desde gbase.cn, active «Classpath manual» y apúntelo a gbase8c-jdbc-*.jar. Si el paquete de controlador instalado ya lo incluye, déjelo vacío.",
     sundbCustomDriverHint:
       "El agente de SunDB ya incluye el controlador JDBC del fabricante, por lo que no se necesita ningún JAR (clase de controlador csii.sundb.jdbc.SundbDriver). Indique aquí un JAR solo para cargar un controlador del fabricante más reciente; el controlador personalizado se carga de forma aislada dentro del agente.",
     zookeeperClusterInputHint: "El clúster ZooKeeper puede completarse con todos los nodos en la URL superior (por ejemplo, zookeeper://zk-1:2181,zk-2:2181/app), o en el Connect String a continuación.",

@@ -1026,6 +1026,9 @@ impl ConnectionConfig {
             DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Uxdb => Some("uxdb"),
+            // GBase 8c keeps the PostgreSQL-shaped `postgres` maintenance database
+            // (measured on GBase8cV6 1.0.0B20), so an empty database field resolves to it.
+            DatabaseType::Gbase8c => Some("postgres"),
             DatabaseType::Yashandb => Some("yasdb"),
             DatabaseType::Oracle
                 if !self.oracle_connection_type.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("tns")) =>
@@ -1230,6 +1233,7 @@ impl ConnectionConfig {
             DatabaseType::Highgo => format!("highgo://{host}:{port}{db_part}"),
             DatabaseType::Uxdb => format!("uxdb://{host}:{port}{db_part}"),
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
+            DatabaseType::Gbase8c => format!("gbase8c://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
             DatabaseType::Gaussdb => {
                 if is_multi_host(raw_host) {
@@ -1428,6 +1432,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Vastbase => {
                 format!("vastbase://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Gbase8c => {
+                format!("gbase8c://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Goldendb => {
                 format!("goldendb://{}:{}@{host}:{port}{db_part}", username, password)

@@ -316,6 +316,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
+            | DatabaseType::Gbase8c
             | DatabaseType::Vastbase
             | DatabaseType::Goldendb
             | DatabaseType::Databend

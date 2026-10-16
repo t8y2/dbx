@@ -2984,6 +2984,7 @@ fn keeps_literal_backslashes(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::Kwdb
         )
     )
@@ -4533,6 +4534,7 @@ fn is_postgres_like_pattern_database(database_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
@@ -4664,6 +4666,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
+                | DatabaseType::Gbase8c
                 | DatabaseType::Vastbase
                 | DatabaseType::Goldendb
                 | DatabaseType::Yashandb

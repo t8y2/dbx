@@ -1032,6 +1032,7 @@ export default withEnglishFallback({
     databasePlaceholderRequired: "Обязательно, укажите существующую базу данных",
     databasePlaceholderWithDefault: "Необязательно, по умолчанию {database}",
     kingbaseDatabaseRequired: "KingbaseES требует существующую базу данных перед подключением или загрузкой списка баз данных.",
+    gbase8cDatabaseRequired: "GBase 8c требует существующую базу данных перед подключением.",
     xuguDatabaseRequired: "XuguDB требует существующую базу данных перед подключением.",
     defaultDatabase: "БД по умолчанию",
     authDatabase: "БД аутентификации",
@@ -1159,6 +1160,7 @@ export default withEnglishFallback({
     damengDriverModeHint: "Используйте встроенный драйвер для DM8. Для DM6 или другой совместимой версии выберите её официальный JDBC JAR.",
     damengCustomDriverHint: "Выберите Dameng JDBC JAR из лицензированного источника. Пользовательский драйвер изолирован внутри агента Dameng и не требует универсального плагина JDBC.",
     damengCustomDriverRequired: "Выберите JAR-файл драйвера Dameng JDBC.",
+    gbase8cCustomDriverHint: "Для GBase 8c нужен JDBC-драйвер производителя (com.gbase8c.Driver), которого нет в пакете Agent. Скачайте его с gbase.cn, включите «Ручной classpath» и укажите gbase8c-jdbc-*.jar. Если в установленном пакете драйвера он уже есть, оставьте поле пустым.",
     sundbCustomDriverHint:
       "Агент SunDB уже включает драйвер JDBC от производителя, поэтому JAR указывать не нужно (класс драйвера csii.sundb.jdbc.SundbDriver). Укажите JAR здесь, только чтобы загрузить более новую версию драйвера производителя; пользовательский драйвер загружается изолированно внутри агента.",
     redisTlsInsecure: "Пропускать проверку сертификата",

@@ -57,6 +57,7 @@ pub fn build_database_structure_search_sql(
         | DatabaseType::Kingbase
         | DatabaseType::Highgo
         | DatabaseType::Uxdb
+        | DatabaseType::Gbase8c
         | DatabaseType::Vastbase
         | DatabaseType::OpenGauss
         | DatabaseType::Gaussdb

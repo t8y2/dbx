@@ -25,6 +25,7 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 | exasol | Exasol | Exasol JDBC |
 | oceanbase-oracle | OceanBase Oracle 模式 | OceanBase JDBC |
 | gbase8a | GBase 8a | 外部 GBase 8a JDBC |
+| gbase8c | GBase 8c | 外部 GBase 8c JDBC |
 | gbase8s | GBase 8s | 外部 GBase 8s JDBC |
 | oracle | Oracle 10g+ | go-ora 原生 agent |
 | h2 | H2 | H2 JDBC |

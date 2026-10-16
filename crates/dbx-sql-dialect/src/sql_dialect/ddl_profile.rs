@@ -856,7 +856,7 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
         }
 
         // PostgreSQL family
-        Postgres | Redshift | Gaussdb | Kingbase | Highgo | Vastbase | OpenGauss | Kwdb | Uxdb => {
+        Postgres | Redshift | Gaussdb | Kingbase | Highgo | Vastbase | OpenGauss | Kwdb | Uxdb | Gbase8c => {
             postgres_family(db_type)
         }
 

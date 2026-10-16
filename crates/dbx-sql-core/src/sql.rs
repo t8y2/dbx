@@ -326,6 +326,7 @@ impl SqlDialectProfile {
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
+                | DatabaseType::Gbase8c
                 | DatabaseType::Kwdb
         )
     }

@@ -641,6 +641,7 @@ export default withEnglishFallback({
     databasePlaceholderRequired: "Tələb olunur, mövcud verilənlər bazasını daxil edin",
     databasePlaceholderWithDefault: "İstəyə bağlı, standart olaraq {database}",
     kingbaseDatabaseRequired: "KingbaseES əlaqə qurmazdan və ya verilənlər bazası siyahısını yükləməzdən əvvəl mövcud verilənlər bazası tələb edir.",
+    gbase8cDatabaseRequired: "GBase 8c üçün qoşulmadan əvvəl mövcud verilənlər bazası tələb olunur.",
     xuguDatabaseRequired: "XuguDB-yə qoşulmaq üçün əvvəlcə mövcud verilənlər bazası daxil edilməlidir.",
     defaultDatabase: "Standart verilənlər bazası",
     authDatabase: "Autentifikasiya verilənlər bazası",
@@ -768,6 +769,8 @@ export default withEnglishFallback({
     damengDriverModeHint: "DM8 üçün daxil edilmiş drayverdən istifadə edin. DM6 və ya başqa uyğun versiya üçün onun rəsmi JDBC JAR faylını seçin.",
     damengCustomDriverHint: "Lisenziyalı mənbədən Dameng JDBC JAR faylı seçin. Fərdi drayver Dameng agenti daxilində təcrid olunur və ümumi JDBC plaginini tələb etmir.",
     damengCustomDriverRequired: "Dameng JDBC drayverinin JAR faylını seçin.",
+    gbase8cCustomDriverHint:
+      "GBase 8c üçün Agent ilə birlikdə gəlməyən vendor JDBC drayveri (com.gbase8c.Driver) tələb olunur. gbase.cn saytından endirin, «Əl ilə təyin olunan classpath» açarını yandırın və gbase8c-jdbc-*.jar faylını göstərin. Quraşdırılmış drayver paketi bu drayveri artıq ehtiva edirsə, heç nə doldurmaq lazım deyil.",
     sundbCustomDriverHint: "SunDB agenti vendor JDBC drayverini özü ilə gətirir, ona görə JAR tələb olunmur (drayver sinfi csii.sundb.jdbc.SundbDriver). Yalnız daha yeni vendor drayveri yükləmək üçün burada JAR göstərin; fərdi drayver agent daxilində təcrid olunaraq yüklənir.",
     redisTlsInsecure: "Sertifikat yoxlamasını ötür",
     redisTlsInsecureHint: "Öz imzalı sertifikatlar və ya özəl CA-lar üçün redis-cli --tls --insecure əmrinə bərabərdir.",

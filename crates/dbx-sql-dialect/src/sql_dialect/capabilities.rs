@@ -35,6 +35,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
+            | DatabaseType::Gbase8c
             | DatabaseType::Vastbase
             | DatabaseType::Yashandb
             | DatabaseType::Oscar

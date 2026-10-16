@@ -317,6 +317,13 @@ profiles:
     icon: gbase
     port: 9088
     user: gbasedbt
+  - id: gbase8c
+    dbType: gbase8c
+    label: 南大通用 GBase 8c
+    icon: gbase
+    port: 5432
+    user: gbase
+    category: domestic
   - id: opengauss
     dbType: opengauss
     label: openGauss

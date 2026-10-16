@@ -1,0 +1,17 @@
+dependencies {
+    // 厂商只公开提供一个 zip 下载，Maven Central 没有 cn.gbase 坐标，也没有任何再分发条款，
+    // 因此驱动不入库：发布产物由 manifest 的 Agent-External-Driver 标记为需要用户自备，
+    // 经 jdbc_driver_paths 传入后由 AbstractJdbcAgent 用隔离的 URLClassLoader 加载。
+    // 本地开发/冒烟时可把厂商 jar 放进 libs/（agents/.gitignore 的 **/libs/*.jar 已忽略）。
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes(
+            'Agent-Label': 'GBase 8c',
+            'Agent-External-Driver': 'true',
+            'Main-Class': 'com.dbx.agent.gbase8c.Gbase8cAgent'
+        )
+    }
+}

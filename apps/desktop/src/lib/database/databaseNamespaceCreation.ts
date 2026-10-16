@@ -64,6 +64,9 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   "oceanbase-oracle": { deferred: "Oracle-mode schemas are users; use a dedicated user workflow" },
   questdb: { deferred: "single database model in DBX" },
   gbase: { database: "schema" },
+  // GBase 8c creates databases with an explicit DBCOMPATIBILITY mode that is fixed at
+  // creation time, so the generic PostgreSQL-shaped create path cannot pick a correct mode.
+  gbase8c: { deferred: "database creation needs an explicit DBCOMPATIBILITY mode fixed at creation time" },
   access: { deferred: "file-backed; create a new connection/file instead" },
   h2: { database: "schema" },
   snowflake: { connection: "database", database: "schema" },

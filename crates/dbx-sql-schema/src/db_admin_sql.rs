@@ -660,6 +660,7 @@ fn supports_vacuum_table(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
@@ -709,6 +710,7 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )

@@ -25,6 +25,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | exasol | Exasol | Exasol JDBC |
 | oceanbase-oracle | OceanBase Oracle Mode | OceanBase JDBC |
 | gbase8a | GBase 8a | External GBase 8a JDBC |
+| gbase8c | GBase 8c | External GBase 8c JDBC |
 | gbase8s | GBase 8s | External GBase 8s JDBC |
 | oracle | Oracle 10g+ | go-ora native agent |
 | oracle-oci | Oracle OCI (thick driver) | godror native agent (Windows x64, CGO; shares `drivers/oracle-go`, built with `-tags oci`) |

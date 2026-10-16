@@ -2119,6 +2119,11 @@ fn rownum_wrapper_projection_is_safe(statement: &str) -> bool {
     let [Statement::Query(query)] = statements.as_slice() else {
         return false;
     };
+    // Oracle-compatible servers reject `seq.NEXTVAL` / `seq.CURRVAL` inside a
+    // derived table with ORA-02287, so the ROWNUM wrapper cannot be used.
+    if references_sequence_pseudocolumn(&statements[0]) {
+        return false;
+    }
     fn safe_projection(body: &SetExpr) -> bool {
         match body {
             SetExpr::Query(query) => safe_projection(&query.body),
@@ -2160,6 +2165,23 @@ fn rownum_wrapper_projection_is_safe(statement: &str) -> bool {
         }
     }
     safe_projection(&query.body)
+}
+
+fn references_sequence_pseudocolumn(statement: &Statement) -> bool {
+    visit_expressions(statement, |expr| match expr {
+        Expr::CompoundIdentifier(parts)
+            if parts.len() > 1
+                && parts.last().is_some_and(|name| match name.quote_style {
+                    // A quoted name is a pseudocolumn only when written in its stored uppercase form.
+                    Some(_) => matches!(name.value.as_str(), "NEXTVAL" | "CURRVAL"),
+                    None => name.value.eq_ignore_ascii_case("NEXTVAL") || name.value.eq_ignore_ascii_case("CURRVAL"),
+                }) =>
+        {
+            ControlFlow::Break(())
+        }
+        _ => ControlFlow::Continue(()),
+    })
+    .is_break()
 }
 
 fn add_rownum_limit(statement: &str, limit: usize, offset: usize) -> String {
@@ -2891,6 +2913,48 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // #12271: OceanBase Oracle, like Oracle, raises ORA-02287 when a sequence
+    // pseudocolumn sits inside the ROWNUM pagination derived table.
+    #[test]
+    fn oceanbase_sequence_pseudocolumns_keep_the_original_statement() {
+        for sql in [
+            "SELECT to_char(sysdate,'yyyymmdd')||seq_yaz001.nextval FROM DUAL",
+            "SELECT seq_yaz001.NEXTVAL AS id FROM DUAL",
+            "SELECT app.seq_yaz001.currval AS id FROM DUAL",
+            "SELECT \"SEQ_YAZ001\".\"NEXTVAL\" AS id FROM DUAL",
+            "SELECT NVL(seq_yaz001.nextval, 0) AS id FROM DUAL",
+        ] {
+            for limit in [1, 100] {
+                let plan = oceanbase_plan(sql, limit, 0, true);
+                assert_eq!(plan.sql_to_execute, sql);
+                assert!(plan.use_agent_result_session, "{sql}");
+                assert!(plan.page_sql.is_none());
+                assert_eq!(plan.page_limit, Some(limit));
+
+                let plan = oceanbase_plan(sql, limit, 0, false);
+                assert_eq!(plan.sql_to_execute, sql);
+                assert!(plan.page_sql.is_none());
+                assert!(plan.pagination_error.is_none());
+            }
+            let paginated = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql: sql.into(),
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                limit: 100,
+                offset: 100,
+            });
+            assert!(!paginated.ok, "{sql}");
+        }
+    }
+
+    #[test]
+    fn oceanbase_columns_named_like_pseudocolumns_keep_bounded_sql() {
+        for sql in ["SELECT t.\"nextval\" AS v FROM t", "SELECT nextval AS v FROM t"] {
+            let plan = oceanbase_plan(sql, 100, 0, true);
+            assert!(!plan.use_agent_result_session, "{sql}");
+            assert!(plan.sql_to_execute.contains("ROWNUM <= 100"), "{sql}");
         }
     }
 

@@ -29,14 +29,14 @@ test("formats SQL with uppercase keywords and readable line breaks by default", 
   assert.match(formatted, /\nORDER BY\b/);
 });
 
-test("puts each SELECT field on its own line even when the statement fits on one line", async () => {
+test("aligns SELECT field continuations under the first field", async () => {
   const formatted = await formatSqlText("select id, name from users where active = 1 order by name", "postgres");
 
   assert.equal(formatted, "SELECT id,\n       name\nFROM users\nWHERE active = 1\nORDER BY name");
   assert.equal(await formatSqlText(formatted, "postgres"), formatted);
 });
 
-test("aligns explicit SELECT aliases to the widest expression", async () => {
+test("aligns explicit SELECT aliases in the default layout", async () => {
   const formatted = await formatSqlText("select bh.id as unique_value, bh.title as title, bh.house_type as type from biz_house bh", "mysql");
 
   assert.equal(
@@ -336,4 +336,3 @@ test("formats SQL preserving original keyword case when keywordCase is preserve 
   assert.doesNotMatch(formatted, /\bFROM\b/);
   assert.doesNotMatch(formatted, /\bWHERE\b/);
 });
-

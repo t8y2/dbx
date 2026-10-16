@@ -3182,22 +3182,22 @@ mod tests {
         deduplicate_column_infos, ephemeral_agent_metadata_session_id, external_driver_statistics_dialect,
         external_driver_statistics_query_plan, external_driver_uses_generic_ddl, external_driver_uses_mysql_ddl,
         filter_mongodb_agent_collections, filter_mysql_system_databases_for_config, filter_object_infos,
-        filter_table_infos, filter_visible_schema_names, finalize_object_source, gaussdb_m_view_object_source_sql,
-        gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config,
-        is_oracle_external_driver_config, is_retryable_metadata_error, metadata_error_action,
-        metadata_name_or_comment_matches, mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql,
-        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
-        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
-        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
-        oracle_current_schema_from_query_result, oracle_object_statistics_dba_segments_sql,
-        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
-        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
-        oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_sql,
-        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
-        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        filter_table_infos, filter_visible_schema_names, finalize_object_source, gaussdb_m_indexes_sql,
+        gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
+        is_mysql_external_driver_config, is_oracle_external_driver_config, is_retryable_metadata_error,
+        metadata_error_action, metadata_name_or_comment_matches, mysql_auto_increment_from_query_result,
+        mysql_auto_increment_metadata_sql, mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result,
+        mysql_external_driver_ddl_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
+        mysql_table_list_source_for_config, mysql_table_metadata_catalog, normalize_information_schema_table_type,
+        oracle_columns_from_query_result, oracle_columns_sql, oracle_columns_sql_for_resolved_owner,
+        oracle_completion_synonyms_sql, oracle_current_schema_from_query_result,
+        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
+        oracle_object_statistics_user_segments_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
+        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
+        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
+        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
         single_table_comment_from_query_result, table_comments_from_query_result, table_name_filter_matches,
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
         uses_mongodb_agent_collection_listing, visible_schema_filter, ExternalDriverStatisticsDialect,
@@ -3415,6 +3415,7 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
             keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
@@ -4355,6 +4356,20 @@ done
             ),
             None
         );
+    }
+
+    #[test]
+    fn gaussdb_m_indexes_sql_excludes_system_attributes() {
+        let sql = gaussdb_m_indexes_sql("sec_acct", "main_sec_acct_info");
+        assert!(sql.contains("FROM information_schema.STATISTICS s"), "{sql}");
+        assert!(sql.contains("JOIN pg_catalog.pg_attribute a"), "{sql}");
+        assert!(sql.contains("a.attnum > 0"), "{sql}");
+        assert!(sql.contains("NOT a.attisdropped"), "{sql}");
+        assert!(sql.contains("s.TABLE_SCHEMA = 'sec_acct'"), "{sql}");
+        assert!(sql.contains("s.TABLE_NAME = 'main_sec_acct_info'"), "{sql}");
+        assert!(sql.contains("ORDER BY s.INDEX_NAME, s.SEQ_IN_INDEX"), "{sql}");
+        // Escaping still goes through `sql_string`.
+        assert!(gaussdb_m_indexes_sql("a'b", "c'd").contains("s.TABLE_SCHEMA = 'a''b'"));
     }
 
     #[test]
@@ -10234,20 +10249,7 @@ async fn external_driver_gaussdb_m_indexes(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::IndexInfo>, String> {
-    // Query information_schema.STATISTICS row by row (one row per index column,
-    // ordered by SEQ_IN_INDEX).
-    // Docs: https://support.huaweicloud.com/intl/en-us/centralized-m-comp-devg-v8-gaussdb/gaussdb-81-0134.html
-    // The STATISTICS view has no EXPRESSION column in GaussDB M-mode. Expression
-    // indexes are not supported via this path.
-    let sql = format!(
-        "SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE, \
-                INDEX_TYPE, INDEX_COMMENT, SUB_PART \
-         FROM information_schema.STATISTICS \
-         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
-         ORDER BY INDEX_NAME, SEQ_IN_INDEX",
-        sql_string(schema),
-        sql_string(table),
-    );
+    let sql = gaussdb_m_indexes_sql(schema, table);
     log::debug!("[gaussdb-m][list_indexes] sql={sql}");
 
     let timeout = agent_metadata_timeout(Some(config));
@@ -10396,6 +10398,36 @@ async fn external_driver_gaussdb_m_indexes(
     }
 
     Ok(indexes)
+}
+
+/// Index-list SQL for GaussDB M-mode (one row per index column, ordered by `SEQ_IN_INDEX`).
+///
+/// A GaussDB/openGauss GLOBAL index carries system attributes in `pg_index.indkey` as
+/// negative attnums (e.g. `tableoid` = -7, `oid` = -2). `information_schema.STATISTICS`
+/// reports those system attributes as ordinary key columns, even though `pg_get_indexdef`
+/// omits them, so the object browser showed a bogus `tableoid` key part. Requiring a matching
+/// `pg_attribute` row with `attnum > 0` drops the system attributes while keeping real columns
+/// (including a genuine user column that happens to be named `oid`/`tableoid`).
+///
+/// Docs: https://support.huaweicloud.com/intl/en-us/centralized-m-comp-devg-v8-gaussdb/gaussdb-81-0134.html
+/// The STATISTICS view has no EXPRESSION column in GaussDB M-mode, so expression indexes are
+/// not represented via this path.
+fn gaussdb_m_indexes_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT s.INDEX_NAME, s.COLUMN_NAME, s.SEQ_IN_INDEX, s.NON_UNIQUE, \
+                s.INDEX_TYPE, s.INDEX_COMMENT, s.SUB_PART \
+         FROM information_schema.STATISTICS s \
+         JOIN pg_catalog.pg_class c \
+           ON c.relname = s.TABLE_NAME \
+         JOIN pg_catalog.pg_namespace n \
+           ON n.oid = c.relnamespace AND n.nspname = s.TABLE_SCHEMA \
+         JOIN pg_catalog.pg_attribute a \
+           ON a.attrelid = c.oid AND a.attname = s.COLUMN_NAME AND a.attnum > 0 AND NOT a.attisdropped \
+         WHERE s.TABLE_SCHEMA = {} AND s.TABLE_NAME = {} \
+         ORDER BY s.INDEX_NAME, s.SEQ_IN_INDEX",
+        sql_string(schema),
+        sql_string(table),
+    )
 }
 
 fn gaussdb_m_view_object_source_sql(

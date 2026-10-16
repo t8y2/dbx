@@ -3,6 +3,19 @@ import { test } from "vitest";
 import { canvasDataGridActionReservedWidth, drawBooleanCheckbox, fitCanvasText, resolveCanvasCellTextLayout, resolveCanvasDataGridRowBase, resolveCanvasDataGridRowFill } from "../../apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, resolveDataGridPaintTheme } from "../../apps/desktop/src/lib/dataGrid/dataGridPaintTheme.ts";
 
+function rgbChannels(color: string): number[] {
+  const match = color.match(/rgba?\(([^)]+)\)/);
+  assert.ok(match, `not an rgb colour: ${color}`);
+  return match[1]!.split(",").slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+}
+
+/** 最大单通道差值：用于证明「一眼可辨」，而不是仅仅不相等。 */
+function channelDistance(first: string, second: string): number {
+  const left = rgbChannels(first);
+  const right = rgbChannels(second);
+  return Math.max(...left.map((channel, index) => Math.abs(channel - right[index]!)));
+}
+
 function measureContext(charWidth = 1): CanvasRenderingContext2D {
   return {
     font: "13px sans-serif",
@@ -57,6 +70,31 @@ test("data grid paint themes use the increased striped row contrast", () => {
   assert.equal(lightTheme.rowMuted, DATA_GRID_LIGHT_STRIPED_ROW_BG);
   assert.notEqual(lightTheme.rowMuted, lightTheme.rowNew);
   assert.equal(resolveDataGridPaintTheme({ getVar, isDark: true }).rowMuted, DATA_GRID_DARK_STRIPED_ROW_BG);
+});
+
+test("pending new rows are visually distinct from striped rows and the base surface in both themes", () => {
+  const getVar = () => "";
+
+  for (const isDark of [false, true]) {
+    const theme = resolveDataGridPaintTheme({ getVar, isDark });
+    // 19/20 世纪那种「243 vs 240」的差距在屏幕上不可辨：要求至少一个通道差 ≥ 8
+    assert.ok(channelDistance(theme.rowNew, theme.rowMuted) >= 8, `new vs striped (dark=${isDark}): ${theme.rowNew} / ${theme.rowMuted}`);
+    assert.ok(channelDistance(theme.rowNew, theme.background) >= 8, `new vs background (dark=${isDark}): ${theme.rowNew} / ${theme.background}`);
+    assert.ok(channelDistance(theme.rowMuted, theme.background) >= 8, `striped vs background (dark=${isDark}): ${theme.rowMuted} / ${theme.background}`);
+  }
+});
+
+test("pending new rows keep their own colour when they hold the active cursor", () => {
+  const theme = { background: "bg-base", rowMuted: "row-muted", rowNew: "row-new", rowDeleted: "row-deleted", cellActive: "active-blue", cellSelected: "selected-blue" };
+  const newRow = { displayIndex: 0, isDeleted: false, isNew: true, isDraft: false };
+  const baseRow = { displayIndex: 0, isDeleted: false, isNew: false, isDraft: false };
+
+  // 光标总在新行上（新增后立即进入编辑），活动行底色不得盖掉「这行还没保存」
+  assert.equal(resolveCanvasDataGridRowBase(theme, newRow, { isActive: true }), "row-new");
+  assert.equal(resolveCanvasDataGridRowFill(theme, "row-new", { isActive: true, isDeleted: false, isSelected: false, isNew: true }), "row-new");
+  // 对照：普通行的活动底色与选中底色保持不变
+  assert.equal(resolveCanvasDataGridRowFill(theme, "bg-base", { isActive: true, isDeleted: false, isSelected: false }), "active-blue");
+  assert.equal(resolveCanvasDataGridRowFill(theme, "row-new", { isActive: true, isDeleted: false, isSelected: true, isNew: true }), "selected-blue");
 });
 
 test("data grid paint theme uses the resolved striped row token", () => {

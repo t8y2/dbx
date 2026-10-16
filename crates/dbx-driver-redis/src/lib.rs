@@ -1472,10 +1472,44 @@ pub async fn list_databases<C>(con: &mut C) -> Result<Vec<RedisDatabaseInfo>, St
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let configured_count =
-        redis::cmd("CONFIG").arg("GET").arg("databases").query_async(con).await.ok().and_then(parse_database_count);
+    list_databases_with_timeout(con, connection_timeout()).await
+}
 
-    let keyspace_db_infos = list_keyspace_databases(con).await.unwrap_or_default();
+/// Lists the logical databases of a standalone Redis connection.
+///
+/// Both metadata probes are bounded. A server (or a proxy in front of it) that accepts the
+/// connection and answers `PING` but never replies to `CONFIG GET databases` / `INFO keyspace`
+/// used to keep the caller waiting forever: the connection dialog's database picker stayed in
+/// its loading state with the rest of the dialog disabled (#12426). A probe that never answers
+/// now reports a timeout — the call stops there instead of issuing another command, because a
+/// multiplexed connection cannot answer later requests while a reply is still outstanding.
+pub async fn list_databases_with_timeout<C>(con: &mut C, timeout: Duration) -> Result<Vec<RedisDatabaseInfo>, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let configured_count =
+        match tokio::time::timeout(timeout, redis::cmd("CONFIG").arg("GET").arg("databases").query_async(con)).await {
+            Ok(Ok(value)) => parse_database_count(value),
+            // Renamed or denied CONFIG keeps the DBX default, as before.
+            Ok(Err(_)) => None,
+            Err(_) => {
+                return Err(format!(
+                    "Redis database list timed out ({}s): the server did not answer CONFIG GET databases",
+                    timeout.as_secs()
+                ))
+            }
+        };
+
+    let keyspace_db_infos = match tokio::time::timeout(timeout, list_keyspace_databases(con)).await {
+        Ok(Ok(infos)) => infos,
+        Ok(Err(_)) => Vec::new(),
+        Err(_) => {
+            return Err(format!(
+                "Redis database list timed out ({}s): the server did not answer INFO keyspace",
+                timeout.as_secs()
+            ))
+        }
+    };
     let database_count = configured_count.unwrap_or(DEFAULT_REDIS_DATABASES);
     let max_db = keyspace_db_infos.iter().map(|db| db.db).max().map(|db| db + 1).unwrap_or(0);
     let visible_count = database_count.max(max_db).max(1);
@@ -6470,6 +6504,138 @@ mod tests {
         assert!(error.contains("connection timed out"));
     }
 
+    #[derive(Clone, Copy)]
+    enum MetadataReply {
+        Answer,
+        Deny,
+        /// Accept the command and keep the socket open without ever answering it.
+        Silent,
+    }
+
+    /// Minimal RESP server for the standalone database-list probes: it answers the
+    /// connection handshake and `PING`, and follows the script for the two metadata
+    /// commands.
+    async fn database_list_mock(
+        config: MetadataReply,
+        info: MetadataReply,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let count: usize = line.trim().strip_prefix('*').unwrap().parse().unwrap();
+                    let mut args = Vec::new();
+                    for _ in 0..count {
+                        line.clear();
+                        reader.read_line(&mut line).await.unwrap();
+                        let len: usize = line.trim().strip_prefix('$').unwrap().parse().unwrap();
+                        let mut arg = vec![0; len + 2];
+                        reader.read_exact(&mut arg).await.unwrap();
+                        arg.truncate(len);
+                        args.push(arg);
+                    }
+                    let command = args[0].to_ascii_uppercase();
+                    match command.as_slice() {
+                        b"PING" => writer.write_all(b"+PONG\r\n").await.unwrap(),
+                        b"CONFIG" => match config {
+                            MetadataReply::Answer => {
+                                writer.write_all(b"*2\r\n$9\r\ndatabases\r\n$1\r\n4\r\n").await.unwrap();
+                            }
+                            MetadataReply::Deny => {
+                                writer
+                                    .write_all(b"-NOPERM this user has no permissions to run the 'config' command\r\n")
+                                    .await
+                                    .unwrap();
+                            }
+                            MetadataReply::Silent => {
+                                tokio::time::sleep(Duration::from_secs(30)).await;
+                                break;
+                            }
+                        },
+                        b"INFO" => match info {
+                            MetadataReply::Answer => {
+                                let keyspace = b"# Keyspace\r\ndb2:keys=5,expires=0,avg_ttl=0\r\n";
+                                writer.write_all(format!("${}\r\n", keyspace.len()).as_bytes()).await.unwrap();
+                                writer.write_all(keyspace).await.unwrap();
+                                writer.write_all(b"\r\n").await.unwrap();
+                            }
+                            MetadataReply::Deny => {
+                                writer
+                                    .write_all(b"-NOPERM this user has no permissions to run the 'info' command\r\n")
+                                    .await
+                                    .unwrap();
+                            }
+                            MetadataReply::Silent => {
+                                tokio::time::sleep(Duration::from_secs(30)).await;
+                                break;
+                            }
+                        },
+                        _ => writer.write_all(b"+OK\r\n").await.unwrap(),
+                    }
+                }
+            }
+        });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn database_list_uses_the_configured_count_with_keyspace_counts() {
+        let (address, server) = database_list_mock(MetadataReply::Answer, MetadataReply::Answer).await;
+        let mut con = super::connect(&format!("redis://{address}"), Duration::from_secs(3)).await.unwrap();
+
+        let databases = super::list_databases_with_timeout(&mut con, Duration::from_millis(200)).await.unwrap();
+
+        assert_eq!(databases.len(), 4);
+        assert_eq!(databases[2].keys, Some(5));
+        assert_eq!(databases[0].keys, None);
+        server.abort();
+    }
+
+    // 既有的降级路径：CONFIG 被改名/拒绝时用 DBX 默认值，键数量仍来自 INFO keyspace。
+    #[tokio::test]
+    async fn database_list_degrades_when_the_config_probe_is_denied() {
+        let (address, server) = database_list_mock(MetadataReply::Deny, MetadataReply::Answer).await;
+        let mut con = super::connect(&format!("redis://{address}"), Duration::from_secs(3)).await.unwrap();
+
+        let databases = super::list_databases_with_timeout(&mut con, Duration::from_millis(200)).await.unwrap();
+
+        assert_eq!(databases.len(), 16);
+        assert_eq!(databases[2].keys, Some(5));
+        server.abort();
+    }
+
+    // #12426：服务端/代理不回答 CONFIG 时返回超时错误，而不是让选择器一直等待。
+    #[tokio::test]
+    async fn database_list_reports_a_timeout_when_the_config_probe_stays_silent() {
+        let (address, server) = database_list_mock(MetadataReply::Silent, MetadataReply::Answer).await;
+        let mut con = super::connect(&format!("redis://{address}"), Duration::from_secs(3)).await.unwrap();
+
+        let error = super::list_databases_with_timeout(&mut con, Duration::from_millis(200)).await.unwrap_err();
+
+        assert!(error.contains("CONFIG GET databases"), "{error}");
+        server.abort();
+    }
+
+    // #12426：INFO keyspace 一直不回答时返回超时错误，而不是无限等待。
+    #[tokio::test]
+    async fn database_list_reports_a_timeout_when_the_keyspace_probe_stays_silent() {
+        let (address, server) = database_list_mock(MetadataReply::Answer, MetadataReply::Silent).await;
+        let mut con = super::connect(&format!("redis://{address}"), Duration::from_secs(3)).await.unwrap();
+
+        let error = super::list_databases_with_timeout(&mut con, Duration::from_millis(200)).await.unwrap_err();
+
+        assert!(error.contains("INFO keyspace"), "{error}");
+        server.abort();
+    }
+
     struct SentinelMockReply {
         command: &'static str,
         response: Vec<u8>,
@@ -10371,6 +10537,7 @@ mod tests {
             connect_timeout_secs: dbx_types::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_types::models::connection::default_query_timeout_secs(),
             idle_timeout_secs: dbx_types::models::connection::default_idle_timeout_secs(),
+            manual_transaction_timeout_secs: dbx_types::models::connection::default_manual_transaction_timeout_secs(),
             keepalive_interval_secs: dbx_types::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),

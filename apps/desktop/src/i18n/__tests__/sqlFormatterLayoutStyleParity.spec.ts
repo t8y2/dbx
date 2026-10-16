@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
  * `en` under the locale at import time, so asserting on the imported modules
  * would report the key as present even after a locale drops it.
  */
-const LOCALE_FILES = ["az", "en", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"];
+const LOCALE_FILES = ["az", "en", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "th", "tr", "zh-CN", "zh-TW"];
 
 const LAYOUT_STYLE_KEYS = ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"];
 
@@ -41,7 +41,7 @@ describe("SQL formatter layout style i18n parity", () => {
     const source = localeSource("en");
 
     expect(declaredString(source, "sqlFormatterLayoutStyle")).toBe("Layout style");
-    expect(declaredString(source, "sqlFormatterLayoutStyleDbx")).toBe("DBX (default)");
+    expect(declaredString(source, "sqlFormatterLayoutStyleDbx")).toBe("DBX");
     expect(declaredString(source, "sqlFormatterLayoutStyleClassic")).toBe("Classic");
   });
 

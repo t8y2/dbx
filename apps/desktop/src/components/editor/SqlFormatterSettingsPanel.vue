@@ -102,8 +102,8 @@ const indentStyleOptions: { value: SqlFormatterIndentStyle; labelKey: string }[]
 ];
 
 const layoutStyleOptions: { value: SqlFormatterLayoutStyle; labelKey: string }[] = [
-  { value: "dbx", labelKey: "settings.sqlFormatterLayoutStyleDbx" },
   { value: "classic", labelKey: "settings.sqlFormatterLayoutStyleClassic" },
+  { value: "dbx", labelKey: "settings.sqlFormatterLayoutStyleDbx" },
 ];
 
 const tabWidthOptions: SqlFormatterTabWidth[] = [2, 4];

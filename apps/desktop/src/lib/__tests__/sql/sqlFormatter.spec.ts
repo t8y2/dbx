@@ -1,7 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { canFormatSqlForDatabaseType, compressSqlText, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
+import {
+  canFormatSqlForDatabaseType,
+  compressSqlText,
+  formatSqlForDisplay as formatSqlForDisplayWithBuildDefaults,
+  formatSqlForEditing as formatSqlForEditingWithBuildDefaults,
+  formatSqlText as formatSqlTextWithBuildDefaults,
+  MAX_SQL_FORMAT_CHARS,
+  sqlFormatDialectForDbType,
+  UnsupportedStructuredInputError,
+} from "@/lib/sql/sqlFormatter";
+import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { extractSqlParameters } from "@/lib/sql/sqlParameters";
+
+// Most cases in this regression suite pin the former compact layout while
+// checking dialect-specific token handling. New default-layout behavior is
+// exercised explicitly with the build-default aliases below.
+function withDbxLayout(settings: Partial<SqlFormatterSettings> = {}): Partial<SqlFormatterSettings> {
+  return { layoutStyle: "dbx", ...settings };
+}
+
+const formatSqlText = (sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = {}) => formatSqlTextWithBuildDefaults(sql, dialect, withDbxLayout(settings));
+const formatSqlForEditing = (sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = {}) => formatSqlForEditingWithBuildDefaults(sql, dialect, withDbxLayout(settings));
+const formatSqlForDisplay = (sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = {}) => formatSqlForDisplayWithBuildDefaults(sql, dialect, withDbxLayout(settings));
 
 describe("Neo4j Cypher formatting", () => {
   const reproduction = `MATCH (a:LibraryDomainOrganization) WHERE a.id= $id CALL apoc.path.expandConfig(a, {uniqueness:'RELATIONSHIP_GLOBAL', minLevel:0, maxLevel:-1, relationshipFilter:'HasLibrary>|HasLibraryParameter>' }) YIELD path UNWIND relationships(path) as r WITH DISTINCT r WITH r, startNode(r) as s, endNode(r) as e OPTIONAL MATCH (s)-[:panda_data_master_version_rel]-(so) OPTIONAL MATCH (e)-[:panda_data_master_version_rel]-(eo) WITH r, CASE WHEN s.classType = 'COMMON' OR s.classType = 'INTERFACE' THEN s WHEN type(r) = 'panda_data_master_version_rel' THEN null ELSE so END as sm OPTIONAL MATCH (sm)-[permission:panda_dataPermission]->(target) WHERE target:panda_member AND target.id IN $memberIds AND permission.permissionType IN ['OWNER','ACTIVE','PASSIVE'] RETURN type(r) as relationType, sm, [s, e] as endpoints`;
@@ -779,24 +800,26 @@ describe("classic layout style (v0.6.15 reproduction)", () => {
     await expect(formatSqlText(sql, "oracle", { ...classic, functionCase: "upper" })).resolves.toBe(lines("SELECT", "  SUBSTRB(NAME, 1, 3),", "  INSTR2(NAME, 'x'),", "  LENGTHB(NAME)", "FROM", "  t;"));
   });
 
-  it("keeps DBX's own printer as the default and for the explicit dbx style", async () => {
+  it("uses the DBX layout by default and keeps classic selectable", async () => {
     const sql = "select * from task order by created_at desc;";
     const collapsed = "SELECT * FROM task ORDER BY created_at DESC;";
 
-    // Same input, opposite layouts: the collapsed form is the DBX printer's,
-    // so this proves the routing split rather than the goldens above.
-    expect(await formatSqlText(sql, "mysql", { layoutStyle: "dbx" })).toBe(collapsed);
-    expect(await formatSqlText(sql, "mysql")).toBe(collapsed);
-    // A settings object saved before `layoutStyle` existed normalizes to dbx.
-    expect(await formatSqlText(sql, "mysql", {} as Partial<SqlFormatterSettings>)).toBe(collapsed);
+    expect(await formatSqlTextWithBuildDefaults(sql, "mysql")).toBe(collapsed);
+    expect(await formatSqlTextWithBuildDefaults(sql, "mysql", {} as Partial<SqlFormatterSettings>)).toBe(collapsed);
+    expect(await formatSqlTextWithBuildDefaults(sql, "mysql", { layoutStyle: "classic" })).toBe("SELECT\n  *\nFROM task\nORDER BY\n  created_at DESC;");
+  });
+
+  it("formats multiple statements on separate blocks by default", async () => {
+    const sql = "select id, name from users; select count(*) from orders;";
+
+    await expect(formatSqlTextWithBuildDefaults(sql, "mysql")).resolves.toBe("SELECT id,\n       name\nFROM users;\n\nSELECT count(*) FROM orders;");
   });
 
   it("merges a classic FROM clause onto its source with a single space under the standard indent", async () => {
     // `sameLine` (the default) merges the clause line with the source line, and
     // the merge must not reuse the source's indent as the gap: that is the
     // tabular styles' alignment column, but under the standard indent it would
-    // read `FROM  t`. Selecting classic is now the only path to this merge, so
-    // the classic style is what pins its appearance.
+    // read `FROM  t`. This explicitly exercises sql-formatter's upstream layout.
     expect(await formatSqlText("select * from t", "mysql", classic)).toBe(lines("SELECT", "  *", "FROM", "  t"));
     expect(await formatSqlText("select * from t", "mysql", { ...classic, fromClauseLayout: "sameLine" })).toBe(lines("SELECT", "  *", "FROM t"));
   });

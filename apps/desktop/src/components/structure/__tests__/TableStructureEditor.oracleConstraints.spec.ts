@@ -207,8 +207,11 @@ function configureOracleIndexCatalog(
     }
     if (sql.includes("SYS_CONTEXT")) return { columns: [], rows: [["APP", "APP", "ORCL"]], affected_rows: 0, execution_time_ms: 1 } as never;
     if (sql.includes("SYS.ALL_OBJECTS")) return { columns: [], rows: [["APP", "CONTACTS", 77]], affected_rows: 0, execution_time_ms: 1 } as never;
-    if (sql.includes("SYS.ALL_TABLES")) return { columns: [], rows: [[null, "N"]], affected_rows: 0, execution_time_ms: 1 } as never;
-    if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 } as never;
+    if (sql.includes("SYS.ALL_TABLES")) return { columns: [], rows: [sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]], affected_rows: 0, execution_time_ms: 1 } as never;
+    if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) {
+      if (connection.db_type === "oceanbase-oracle") throw new Error("ORA-00942: SYS.ALL_EXTERNAL_TABLES does not exist");
+      return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 } as never;
+    }
     if (sql.includes("SYS.ALL_TAB_COLS")) {
       const rows = sql.includes("USER_GENERATED")
         ? [

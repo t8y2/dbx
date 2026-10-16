@@ -54,6 +54,13 @@ fn invalid_schedule_and_path_templates_are_rejected() {
     assert!(super::models::matches_pattern("app.public.user?", "users", "app", "public", true));
     assert!(!super::models::matches_pattern("PUBLIC.*", "users", "app", "public", true));
     assert!(super::models::matches_pattern("PUBLIC.*", "users", "app", "public", false));
+    schedule.time_zone = "America/New_York".into();
+    schedule.retention_count = 0;
+    assert!(schedule.validate().is_ok());
+    schedule.retention_count = 1000;
+    assert!(schedule.validate().is_ok());
+    schedule.retention_count = 1001;
+    assert!(schedule.validate().is_err());
 }
 
 #[test]

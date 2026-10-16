@@ -2132,7 +2132,7 @@ test("replaces typed new keyword when completing new Date", () => {
   // keeps the other `…d…` constructors alongside `new Date`.
   assert.deepEqual(
     items1.map((candidate) => candidate.label),
-    ["ISODate", "ObjectId", "BinData", "new Date", "NumberDecimal", "UUID"],
+    ["Decimal128", "Double", "ISODate", "ObjectId", "BinData", "new Date", "NumberDecimal", "UUID"],
   );
 
   // Bad case 2: cursor after `new ` (trailing space)

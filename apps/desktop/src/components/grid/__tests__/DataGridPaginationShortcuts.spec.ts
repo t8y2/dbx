@@ -475,6 +475,199 @@ describe("DataGrid SQL load-all exhaustion", () => {
   });
 });
 
+describe("DataGrid load-all on a jumped-to discrete page (#11940)", () => {
+  it("reloads from the first row instead of splicing from the stale page boundary", async () => {
+    // 30-row table, 10 rows/page, jumped to page 9 (offset 80, past the
+    // end): the grid still holds the stale first page. Continuing the run
+    // from rows.length would append rows starting at the wrong offset and
+    // mark the broken set as fully loaded. "Load all" must reload every row
+    // from row 0 in one non-append request instead.
+    const { host, paginate, gridState } = mountGrid({ pageOffset: 80, totalRowCount: 30 });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: 30,
+      result: { columns: ["id"], rows: [[1]], has_more: false, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+    const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!;
+    button.click();
+    await settle();
+
+    expect(paginate).toHaveBeenCalledOnce();
+    // The reload limit comes from the displayed total, which the #10968
+    // reconcile may have extended past the stale COUNT — it only needs to
+    // cover every row; the server stops at the real end.
+    expect(paginate.mock.calls[0]?.[0]).toBe(0);
+    expect(paginate.mock.calls[0]?.[1]).toBeGreaterThanOrEqual(30);
+    expect(paginate.mock.calls[0]?.[4]).toBe(false);
+  });
+
+  it("reloads through the confirm dialog when the reload is large", async () => {
+    const { host, paginate, gridState } = mountGrid({ pageOffset: 80, totalRowCount: 260_000 });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: 260_000,
+      result: { columns: ["id"], rows: [[1]], has_more: false, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+    const confirmButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent?.trim() === i18n.global.t("grid.loadAllRowsContinue"));
+    expect(confirmButton).toBeDefined();
+    confirmButton!.click();
+    await settle();
+
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.[0]).toBe(0);
+    expect(paginate.mock.calls[0]?.[1]).toBeGreaterThanOrEqual(260_000);
+    expect(paginate.mock.calls[0]?.[4]).toBe(false);
+  });
+
+  it("a finished reload lands on the last row, reports all loaded, and restarts row numbers at 1", async () => {
+    const { host, settingsStore, gridState } = mountGrid({ pageOffset: 80, totalRowCount: 30 });
+    // DOM rendering so row numbers and the footer are inspectable.
+    settingsStore.updateEditorSettings({ dataGridRenderMode: "dom" });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: 30,
+      result: { columns: ["id"], rows: [[1]], has_more: false, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+
+    // The reload replaces the discrete page through the normal (non-append)
+    // path: offset 0, all 30 rows, no appended_from_row_count.
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 30,
+      pageOffset: 0,
+      totalRowCount: 30,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 30 }, (_, index) => [index + 1]),
+        has_more: false,
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+
+    const footer = host.textContent || "";
+    expect(footer).toMatch(/all loaded/i);
+    // Row numbers restart at 1 and never run past the reloaded set.
+    const rowNumbers = [...host.querySelectorAll("*")].map((el) => (el.childElementCount === 0 ? Number(el.textContent) : NaN)).filter((n) => Number.isInteger(n) && n > 0 && n <= 999);
+    expect(rowNumbers.length).toBeGreaterThan(0);
+    expect(Math.max(...rowNumbers)).toBeLessThanOrEqual(30);
+    expect(Math.min(...rowNumbers)).toBe(1);
+  });
+
+  it("continues chunking past the cap when total row count is unknown and has_more is true (#12418)", async () => {
+    // Jumped to page 9 (offset 80), unknown total, result cap is 5.
+    const { host, paginate, settingsStore, gridState } = mountGrid({ pageOffset: 80 });
+    settingsStore.updateEditorSettings({ dataGridRenderMode: "dom", queryResultMaxRowsEnabled: true, queryResultMaxRows: 5 });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: undefined,
+      result: { columns: ["id"], rows: [[1]], has_more: true, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+
+    // 1st request: reloads from first row (offset: 0, limit: 5, append: false)
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([0, 5]);
+    expect(paginate.mock.calls[0]?.[4]).toBe(false);
+
+    // Backend returns 5 rows with has_more: true
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 5,
+      pageOffset: 0,
+      totalRowCount: undefined,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 5 }, (_, index) => [index + 1]),
+        has_more: true,
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+
+    // 2nd request: continues past the cap via append (offset: 5, limit: 5, append: true)
+    expect(paginate).toHaveBeenCalledTimes(2);
+    expect(paginate.mock.calls[1]?.slice(0, 2)).toEqual([5, 5]);
+    expect(paginate.mock.calls[1]?.[4]).toBe(true);
+
+    // Second chunk lands with 3 rows (tail) and has_more: false
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 5,
+      pageOffset: 0,
+      totalRowCount: undefined,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 8 }, (_, index) => [index + 1]),
+        has_more: false,
+        appended_from_row_count: 5,
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+
+    // Run terminates after tail chunk
+    expect(paginate).toHaveBeenCalledTimes(2);
+    const footer = host.textContent || "";
+    expect(footer).toMatch(/all loaded/i);
+  });
+
+  it("does not report all loaded if reload lands at cap with unknown total and missing has_more (#12418)", async () => {
+    const { host, settingsStore, gridState } = mountGrid({ pageOffset: 80 });
+    settingsStore.updateEditorSettings({ dataGridRenderMode: "dom", queryResultMaxRowsEnabled: true, queryResultMaxRows: 5 });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: undefined,
+      result: { columns: ["id"], rows: [[1]], has_more: false, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+
+    // Reload returned exactly 5 rows (the cap), but has_more is undefined
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 5,
+      pageOffset: 0,
+      totalRowCount: undefined,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 5 }, (_, index) => [index + 1]),
+        has_more: undefined,
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+
+    const footer = host.textContent || "";
+    expect(footer).not.toMatch(/all loaded/i);
+  });
+});
+
 describe("DataGrid multi-chunk load-all run", () => {
   it("keeps loading consecutive chunks across multiple post-flush ticks until total is reached (#11230)", async () => {
     const { host, paginate, settingsStore, gridState } = mountGrid({ infiniteScroll: true, pageOffset: 0, totalRowCount: 260_000 });

@@ -269,7 +269,7 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     app.mount(root);
     const content = () => root.querySelector(".cm-content")?.textContent ?? "";
     const toggle = () => root.querySelector<HTMLButtonElement>('[role="switch"]')!;
-    await vi.waitFor(() => expect(content()).toContain("PARTITION BY HASH"));
+    await vi.waitFor(() => expect(content()).toMatch(/PARTITION BY\s+HASH/));
     expect(content()).not.toContain("PCTFREE");
     expect(toggle().getAttribute("aria-checked")).toBe("true");
     toggle().click();

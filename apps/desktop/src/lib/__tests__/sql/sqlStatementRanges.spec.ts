@@ -909,6 +909,28 @@ END;`;
     }
   });
 
+  it("keeps DECODE consecutive CASE expressions inside Oracle-family procedures", () => {
+    // Punctuation between `end` and the next `case` must not look like PL/SQL `END CASE`.
+    const procedure = `CREATE OR REPLACE PROCEDURE dm.sp_demo IS
+BEGIN
+  INSERT INTO t(c)
+  SELECT decode(
+    company_no,
+    'A', (case when x = 1 then 'one' else 'other' end),
+    'B', (case when y = 2 then 'two' else 'other' end)
+  ) as business_type_name
+  FROM src;
+  COMMIT;
+EXCEPTION
+  WHEN OTHERS THEN
+    NULL;
+END sp_demo;`;
+
+    for (const database of ["oracle", "oceanbase-oracle"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(procedure, database))).toEqual([procedure]);
+    }
+  });
+
   it("keeps SAP HANA DO blocks together", () => {
     const ranges = splitSqlStatementRanges(sapHanaDoBlockFixture, "saphana");
 

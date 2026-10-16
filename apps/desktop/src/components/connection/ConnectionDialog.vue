@@ -77,8 +77,19 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isWindows } from "@/lib/backend/platform";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { hasGbase8cConnectionDatabase } from "@/lib/connection/gbase8cDatabase";
+import { loadVisibleDatabasesPickerNames } from "@/lib/connection/visibleDatabasesPickerLoad";
 import { hasXuguConnectionDatabase } from "@/lib/connection/xuguDatabase";
-import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_CONNECT_TIMEOUT_SECS, MAX_IDLE_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS, supportsIdleTimeout } from "@/lib/connection/timeoutLimits";
+import {
+  DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
+  DEFAULT_QUERY_TIMEOUT_SECS,
+  MAX_CONNECT_TIMEOUT_SECS,
+  MAX_IDLE_TIMEOUT_SECS,
+  MAX_MANUAL_TRANSACTION_TIMEOUT_SECS,
+  MAX_QUERY_TIMEOUT_SECS,
+  MIN_MANUAL_TRANSACTION_TIMEOUT_SECS,
+  normalizeManualTransactionTimeoutSecs,
+  supportsIdleTimeout,
+} from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
 import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
 import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseConnectionDeepLinkUpdate, parseServiceConnectionUrl, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
@@ -89,7 +100,7 @@ import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/z
 import { setZooKeeperAuthScheme, zooKeeperAuthScheme as resolveZooKeeperAuthScheme, type ZooKeeperAuthScheme } from "@/lib/zookeeper/zookeeperConnectionOptions";
 import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mq/mqPinnedVersionOptions";
-import { mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
+import { looksLikeMongoSrvHost, mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoSrvConnectionString, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
@@ -157,7 +168,7 @@ import {
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
 import { resolveVisibleDatabaseSaveAction } from "@/components/sidebar/visibleDatabasesDialogState";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
-import { isSchemaAware, isSingleDatabase, supportsDataDictionary } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, isSingleDatabase, supportsDataDictionary, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
@@ -424,6 +435,7 @@ const defaultForm = (): ConnectionForm => ({
   query_timeout_secs: settingsStore.editorSettings.globalQueryTimeoutSecs,
   query_timeout_inherit: true,
   idle_timeout_secs: 60,
+  manual_transaction_timeout_secs: DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
   keepalive_interval_secs: 30,
   ssl: false,
   ca_cert_path: "",
@@ -3121,6 +3133,7 @@ watch(
         query_timeout_secs: config.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? DEFAULT_QUERY_TIMEOUT_SECS),
         query_timeout_inherit: config.query_timeout_inherit === true,
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
+        manual_transaction_timeout_secs: normalizeManualTransactionTimeoutSecs(config.manual_transaction_timeout_secs),
         keepalive_interval_secs: config.keepalive_interval_secs ?? 30,
         sysdba: config.sysdba || isOracleSysUser(config),
         oracle_oci_nls_lang: config.oracle_oci_nls_lang || "",
@@ -3859,6 +3872,7 @@ const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
 const supportsIdleTimeoutSetting = computed(() => supportsIdleTimeout(form.value.db_type));
+const supportsManualTransactionTimeoutSetting = computed(() => supportsTransaction(form.value.db_type));
 const supportsDoltSystemTables = computed(() => isDoltDriverProfile(form.value.driver_profile));
 const showDoltSystemTables = computed({
   get: () => doltSystemTablesVisible(form.value),
@@ -4430,6 +4444,11 @@ const mongoTlsAllowInvalidCertificates = computed({
     form.value.url_params = next;
   },
 });
+const mongoSrvHostSuggested = computed(() => form.value.db_type === "mongodb" && !mongoUseUrl.value && looksLikeMongoSrvHost(form.value.host));
+function switchMongoFormToSrvUrl() {
+  form.value.connection_string = mongoSrvConnectionString(form.value);
+  mongoUseUrl.value = true;
+}
 const mongoRetryWrites = computed({
   get: () => mongoUrlParamIsTrue(form.value.url_params, "retryWrites", true),
   set: (value: boolean) => {
@@ -4844,6 +4863,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.query_timeout_secs = form.value.query_timeout_secs;
     config.query_timeout_inherit = form.value.query_timeout_inherit;
     config.idle_timeout_secs = form.value.idle_timeout_secs;
+    config.manual_transaction_timeout_secs = normalizeManualTransactionTimeoutSecs(form.value.manual_transaction_timeout_secs);
     config.keepalive_interval_secs = form.value.keepalive_interval_secs;
     config.read_only = form.value.read_only;
     config.save_password = form.value.save_password;
@@ -5692,12 +5712,15 @@ async function preloadVisibleDatabaseNames() {
       id: draftId,
       one_time: true,
     };
-    await api.connectDb(draftConfig);
-    visibleDatabaseNames.value = await loadVisibleDatabaseNames(draftId, draftConfig);
+    visibleDatabaseNames.value = await loadVisibleDatabasesPickerNames({
+      connect: () => api.connectDb(draftConfig),
+      listNames: () => loadVisibleDatabaseNames(draftId, draftConfig),
+      disconnect: () => api.disconnectDb(draftId),
+      queryTimeoutSecs: form.value.query_timeout_secs,
+    });
   } catch {
     // silently fail
   } finally {
-    await api.disconnectDb(draftId).catch(() => undefined);
     isLoadingVisibleDatabases.value = false;
   }
 }
@@ -5717,8 +5740,12 @@ async function openVisibleDatabasesPicker() {
       id: draftId,
       one_time: true,
     };
-    await api.connectDb(draftConfig);
-    const names = await loadVisibleDatabaseNames(draftId, draftConfig);
+    const names = await loadVisibleDatabasesPickerNames({
+      connect: () => api.connectDb(draftConfig),
+      listNames: () => loadVisibleDatabaseNames(draftId, draftConfig),
+      disconnect: () => api.disconnectDb(draftId),
+      queryTimeoutSecs: form.value.query_timeout_secs,
+    });
     visibleDatabaseNames.value = names;
     visibleDatabaseShowSystem.value = false;
     const configuredSchemas = visibleSchemaObjectSelection.value;
@@ -5734,7 +5761,6 @@ async function openVisibleDatabasesPicker() {
     testResult.value = { ok: false, message: visibleDatabaseError.value };
     showVisibleDatabasesDialog.value = true;
   } finally {
-    await api.disconnectDb(draftId).catch(() => undefined);
     isLoadingVisibleDatabases.value = false;
   }
 }
@@ -8410,6 +8436,12 @@ function openExternalUrl(url: string) {
                         <Input v-model="form.host" class="col-span-2" />
                         <Input v-model.number="form.port" type="number" class="col-span-1" />
                       </div>
+                      <div v-if="mongoSrvHostSuggested" class="grid grid-cols-4 items-start gap-4">
+                        <div class="col-start-2 col-span-3 flex flex-col items-start gap-2 text-xs leading-5 text-muted-foreground">
+                          <span>{{ t("connection.mongoSrvHostHint") }}</span>
+                          <Button size="sm" variant="outline" @click="switchMongoFormToSrvUrl">{{ t("connection.mongoUseSrvUrl") }}</Button>
+                        </div>
+                      </div>
                       <div class="grid grid-cols-4 items-center gap-4">
                         <span />
                         <label class="col-span-3 flex items-center gap-2 text-sm">
@@ -10320,6 +10352,13 @@ function openExternalUrl(url: string) {
                   <div class="col-span-3 space-y-1">
                     <Input v-model.number="form.idle_timeout_secs" type="number" min="0" :max="MAX_IDLE_TIMEOUT_SECS" step="1" @input="clampIdleTimeoutInput($event)" />
                     <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.idleTimeoutHint") }}</p>
+                  </div>
+                </div>
+                <div v-show="supportsManualTransactionTimeoutSetting" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.manualTransactionTimeout") }}</Label>
+                  <div class="col-span-3 space-y-1">
+                    <Input v-model.number="form.manual_transaction_timeout_secs" type="number" :min="MIN_MANUAL_TRANSACTION_TIMEOUT_SECS" :max="MAX_MANUAL_TRANSACTION_TIMEOUT_SECS" step="1" />
+                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.manualTransactionTimeoutHint", { min: MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, max: MAX_MANUAL_TRANSACTION_TIMEOUT_SECS }) }}</p>
                   </div>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">

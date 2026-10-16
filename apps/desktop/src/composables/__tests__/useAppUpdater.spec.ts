@@ -55,6 +55,7 @@ async function flush() {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.stubEnv("VITE_DBX_DISABLE_UPDATER", "");
   settings.updateDownloadSource = "official";
   settings.ignoredUpdateVersion = "";
   settings.updateNotificationsEnabled = true;
@@ -70,6 +71,7 @@ beforeEach(() => {
 afterEach(() => {
   app?.unmount();
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 describe("older version release pages", () => {
   it("maps a historical version to the matching GitHub release page", () => {
@@ -89,6 +91,21 @@ describe("older version release pages", () => {
 });
 
 describe("silent update lifecycle", () => {
+  it("does not check or download updates when disabled for an isolated dev client", async () => {
+    vi.stubEnv("VITE_DBX_DISABLE_UPDATER", "1");
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+    await updater.checkUpdates();
+    await updater.downloadUpdateInBackground();
+    await updater.installDownloadedUpdate();
+
+    expect(mocks.getDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+  });
+
   it("checks and shows a badge without downloading when automatic downloads are disabled", async () => {
     settings.autoUpdateApp = false;
     const updater = mount();

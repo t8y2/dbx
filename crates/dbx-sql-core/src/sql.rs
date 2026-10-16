@@ -3071,7 +3071,7 @@ impl HanaScriptBlock {
 
         for (index, token) in self.tokens.iter().enumerate() {
             if token.is_word("BEGIN") {
-                if previous_word_token(&self.tokens, index).is_some_and(|previous| previous == "END") {
+                if previous_adjacent_word(&self.tokens, index).is_some_and(|previous| previous == "END") {
                     continue;
                 }
                 block_depth += 1;
@@ -3079,13 +3079,13 @@ impl HanaScriptBlock {
                 continue;
             }
             if token.is_word("CASE") {
-                if previous_word_token(&self.tokens, index).is_none_or(|previous| previous != "END") {
+                if previous_adjacent_word(&self.tokens, index).is_none_or(|previous| previous != "END") {
                     case_depth += 1;
                 }
                 continue;
             }
             if token.is_word("END") {
-                let next = next_word_token(&self.tokens, index);
+                let next = next_adjacent_word(&self.tokens, index);
                 if matches!(next, Some("IF" | "FOR" | "WHILE")) {
                     continue;
                 }
@@ -3119,6 +3119,9 @@ enum OraclePlSqlToken {
     /// the server rejected the truncated statement (#10434).
     QuotedIdentifier,
     Semicolon,
+    /// Punctuation / operators / numbers. Kept so `end ), (case` is not treated as the
+    /// PL/SQL closer `END CASE` (adjacent-word checks must not skip across these).
+    Other,
 }
 
 impl OraclePlSqlBlock {
@@ -3245,11 +3248,12 @@ impl OraclePlSqlBlock {
             } else if token.is_word("CASE") {
                 // Both CASE expressions and CASE statements own an END.
                 // The CASE token that follows END CASE is a suffix, not a scope start.
-                if previous_word_token(&self.tokens, index) != Some("END") {
+                // Require source adjacency: `end ), (case` must open a new CASE scope.
+                if previous_adjacent_word(&self.tokens, index) != Some("END") {
                     scopes.push(OraclePlSqlScope::Case);
                 }
             } else if token.is_word("END") {
-                let next = self.tokens.get(index + 1).and_then(OraclePlSqlToken::as_word);
+                let next = next_adjacent_word(&self.tokens, index);
                 if matches!(next, Some("IF" | "LOOP")) {
                     continue;
                 }
@@ -3313,11 +3317,11 @@ impl OraclePlSqlBlock {
 
             match word {
                 "BEGIN" => scopes.push(OraclePlSqlScope::Block),
-                "CASE" if previous_word_token(&self.tokens, index) != Some("END") => {
+                "CASE" if previous_adjacent_word(&self.tokens, index) != Some("END") => {
                     scopes.push(OraclePlSqlScope::Case);
                 }
                 "END" => {
-                    let next = self.tokens.get(index + 1).and_then(OraclePlSqlToken::as_word);
+                    let next = next_adjacent_word(&self.tokens, index);
                     if matches!(next, Some("IF" | "LOOP")) {
                         continue;
                     }
@@ -3439,7 +3443,8 @@ impl OraclePlSqlToken {
             Token::Word(word) if word.quote_style.is_none() => Some(Self::Word(word.value.to_ascii_uppercase())),
             Token::Word(_) => Some(Self::QuotedIdentifier),
             Token::SemiColon => Some(Self::Semicolon),
-            _ => None,
+            Token::Whitespace(_) | Token::Placeholder(_) => None,
+            _ => Some(Self::Other),
         }
     }
 
@@ -3450,7 +3455,7 @@ impl OraclePlSqlToken {
     fn as_word(&self) -> Option<&str> {
         match self {
             Self::Word(value) => Some(value),
-            Self::QuotedIdentifier | Self::Semicolon => None,
+            Self::QuotedIdentifier | Self::Semicolon | Self::Other => None,
         }
     }
 
@@ -3463,18 +3468,36 @@ impl OraclePlSqlToken {
     }
 }
 
-fn previous_word_token(tokens: &[OraclePlSqlToken], index: usize) -> Option<&str> {
-    tokens[..index].iter().rev().find_map(OraclePlSqlToken::as_word)
+/// Word immediately before `index` in the token stream (no skipping punctuation).
+/// Used for `END CASE` / `END IF` pairing so `end ), (case` is not treated as `END CASE`.
+fn previous_adjacent_word(tokens: &[OraclePlSqlToken], index: usize) -> Option<&str> {
+    index.checked_sub(1).and_then(|previous| tokens.get(previous)).and_then(OraclePlSqlToken::as_word)
 }
 
-fn next_word_token(tokens: &[OraclePlSqlToken], index: usize) -> Option<&str> {
-    tokens[index + 1..].iter().find_map(OraclePlSqlToken::as_word)
+fn next_adjacent_word(tokens: &[OraclePlSqlToken], index: usize) -> Option<&str> {
+    tokens.get(index + 1).and_then(OraclePlSqlToken::as_word)
+}
+
+fn push_other_token(tokens: &mut Vec<OraclePlSqlToken>) {
+    if tokens.last() != Some(&OraclePlSqlToken::Other) {
+        tokens.push(OraclePlSqlToken::Other);
+    }
 }
 
 fn oracle_plsql_tokens(sql: &str) -> Vec<OraclePlSqlToken> {
     let dialect = OracleDialect {};
     if let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() {
-        return tokens.into_iter().filter_map(OraclePlSqlToken::from_sqlparser_token).collect();
+        let mut out = Vec::new();
+        for token in tokens {
+            if let Some(mapped) = OraclePlSqlToken::from_sqlparser_token(token) {
+                if mapped == OraclePlSqlToken::Other {
+                    push_other_token(&mut out);
+                } else {
+                    out.push(mapped);
+                }
+            }
+        }
+        return out;
     }
 
     oracle_plsql_tokens_fallback(sql)
@@ -3521,6 +3544,8 @@ fn oracle_plsql_tokens_fallback(sql: &str) -> Vec<OraclePlSqlToken> {
                     }
                 }
             }
+            // String literals separate keywords the same way punctuation does.
+            push_other_token(&mut tokens);
             continue;
         }
 
@@ -3551,7 +3576,10 @@ fn oracle_plsql_tokens_fallback(sql: &str) -> Vec<OraclePlSqlToken> {
                 }
             }
             tokens.push(OraclePlSqlToken::word(token));
+            continue;
         }
+
+        push_other_token(&mut tokens);
     }
 
     tokens
@@ -6427,6 +6455,31 @@ SELECT 1;";
                     "SELECT 1"
                 ]
             );
+        }
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_decode_consecutive_case_expressions_inside_procedure() {
+        // Punctuation between `end` and the next `case` must not look like PL/SQL `END CASE`,
+        // or CREATE PROCEDURE is truncated at the INSERT terminator (OceanBase OBE-00900 near insert).
+        let procedure = "\
+CREATE OR REPLACE PROCEDURE dm.sp_demo IS
+BEGIN
+  INSERT INTO t(c)
+  SELECT decode(
+    company_no,
+    'A', (case when x = 1 then 'one' else 'other' end),
+    'B', (case when y = 2 then 'two' else 'other' end)
+  ) as business_type_name
+  FROM src;
+  COMMIT;
+EXCEPTION
+  WHEN OTHERS THEN
+    NULL;
+END sp_demo;";
+
+        for database in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(split_sql_statements_for_database(procedure, database), vec![procedure.to_string()]);
         }
     }
 

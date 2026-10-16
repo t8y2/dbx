@@ -7,13 +7,14 @@ use dbx_core::cloud_sync::{
     describe_sync_snapshot, finalize_snippet_migration, forget_snippet_token, forget_webdav_password,
     forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase, resolve_snippet_token,
     resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup,
-    save_snippet_sync_id_for_instance as core_save_snippet_sync_id, save_snippet_token, save_webdav_password,
-    save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference, snippet_saved_token_status,
+    save_snippet_passphrase, save_snippet_sync_id_for_instance as core_save_snippet_sync_id, save_snippet_token,
+    save_webdav_password, save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference,
+    snippet_saved_passphrase_status, snippet_saved_token_status,
     snippet_sync_settings_for_instance as core_snippet_sync_settings, webdav_saved_password_status,
     webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions, ApplySnapshotSummary,
-    SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings, SnippetSyncSummary, SnippetTokenStatus,
-    SyncSelection, SyncSnapshotCatalog, WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus,
-    WebDavSyncSummary,
+    SnippetPassphraseStatus, SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings,
+    SnippetSyncSummary, SnippetTokenStatus, SyncSelection, SyncSnapshotCatalog, WebDavClient, WebDavConfig,
+    WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
 };
 use dbx_core::storage::DesktopSettings;
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,13 @@ pub struct SaveSnippetTokenRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SaveSnippetPassphraseRequest {
+    pub config: SnippetSyncConfig,
+    pub passphrase: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SnippetUploadRequest {
     pub config: SnippetSyncConfig,
     pub editor_settings: Option<serde_json::Value>,
@@ -127,6 +135,7 @@ pub struct SnippetUploadRequest {
     pub secrets_passphrase: Option<String>,
     #[serde(default)]
     pub selection: Option<SyncSelection>,
+    pub expected_remote_content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -341,6 +350,29 @@ pub async fn forget_snippet_saved_token(
     Ok(Json(()))
 }
 
+pub async fn snippet_passphrase_status(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SnippetConfigRequest>,
+) -> Result<Json<SnippetPassphraseStatus>, AppError> {
+    snippet_saved_passphrase_status(&state.app.storage, &req.config).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn save_snippet_saved_passphrase(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SaveSnippetPassphraseRequest>,
+) -> Result<Json<()>, AppError> {
+    save_snippet_passphrase(&state.app.storage, &req.config, &req.passphrase).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn forget_snippet_saved_passphrase(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SnippetConfigRequest>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::cloud_sync::forget_snippet_passphrase(&state.app.storage, &req.config).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
 pub async fn snippet_sync_settings(
     State(state): State<Arc<WebState>>,
     Json(req): Json<SnippetSyncSettingsRequest>,
@@ -377,6 +409,13 @@ pub async fn snippet_sync_upload(
 ) -> Result<Json<SnippetSyncSummary>, AppError> {
     state.ensure_secret_export_allowed(req.include_secrets)?;
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
+    let snippet_passphrase = dbx_core::cloud_sync::resolve_snippet_passphrase(
+        &state.app.storage,
+        &req.config,
+        req.snippet_passphrase.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
     let secrets_passphrase = if req.include_secrets {
         Some(
             req.secrets_passphrase
@@ -407,7 +446,12 @@ pub async fn snippet_sync_upload(
     .map_err(AppError::from)?;
     let client = SnippetSyncClient::new(req.config).map_err(AppError::from)?;
     let mut summary = client
-        .put_snapshot(&snapshot, req.snippet_passphrase.as_deref(), secrets_passphrase)
+        .put_snapshot_with_expected_remote_hash(
+            &snapshot,
+            snippet_passphrase.as_deref(),
+            secrets_passphrase,
+            req.expected_remote_content_hash.as_deref(),
+        )
         .await
         .map_err(AppError::from)?;
     finalize_snippet_migration(&state.app.storage, &client, &mut summary).await.map_err(AppError::from)?;
@@ -419,9 +463,16 @@ pub async fn snippet_sync_download(
     Json(mut req): Json<SnippetDownloadRequest>,
 ) -> Result<Json<SnippetDownloadResult>, AppError> {
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
+    let snippet_passphrase = dbx_core::cloud_sync::resolve_snippet_passphrase(
+        &state.app.storage,
+        &req.config,
+        req.snippet_passphrase.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
     let (snapshot, summary) = SnippetSyncClient::new(req.config)
         .map_err(AppError::from)?
-        .get_snapshot(req.snippet_passphrase.as_deref())
+        .get_snapshot(snippet_passphrase.as_deref())
         .await
         .map_err(AppError::from)?;
     let apply_summary = apply_sync_snapshot_with_selection(
@@ -449,9 +500,16 @@ pub async fn snippet_sync_inspect(
     Json(mut req): Json<SnippetInspectRequest>,
 ) -> Result<Json<SyncSnapshotCatalog>, AppError> {
     resolve_snippet_token(&state.app.storage, &mut req.config).await.map_err(AppError::from)?;
+    let snippet_passphrase = dbx_core::cloud_sync::resolve_snippet_passphrase(
+        &state.app.storage,
+        &req.config,
+        req.snippet_passphrase.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
     let (snapshot, _) = SnippetSyncClient::new(req.config)
         .map_err(AppError::from)?
-        .get_snapshot(req.snippet_passphrase.as_deref())
+        .get_snapshot(snippet_passphrase.as_deref())
         .await
         .map_err(AppError::from)?;
     let explicit = req.secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());

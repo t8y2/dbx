@@ -204,6 +204,39 @@ class JdbcExecutorTest {
     }
 
     @Test
+    void executeCountsDriverMessageReadingInExecutionTime() {
+        JdbcExecutor.StatementMessageReader reader = statement -> {
+            try {
+                Thread.sleep(30L);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new SQLException(error);
+            }
+            return Collections.singletonList("procedure output");
+        };
+
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(false, -1, null, new AtomicInteger(), null, null),
+            "BEGIN OUTPUT_TEXT(); END;", "", schema -> "", () -> "", 100, null, 0,
+            JdbcExecutor.INSTANCE::defaultResultValue, reader
+        );
+
+        assertTrue(result.getExecution_time_ms() >= 25L,
+            "driver message reading must count toward execution_time_ms but was " + result.getExecution_time_ms() + "ms");
+        for (boolean bounded : List.of(false, true)) {
+            Connection connection = executionConnection(false, -1, null, new AtomicInteger(), null, null);
+            QueryPageResult page = bounded
+                ? JdbcExecutor.INSTANCE.executeBoundedPage(connection, "BEGIN OUTPUT_TEXT(); END;", "",
+                    schema -> "", () -> "", new QueryPageOptions(), JdbcExecutor.INSTANCE::defaultResultValue, reader)
+                : JdbcExecutor.INSTANCE.executePage(connection, "BEGIN OUTPUT_TEXT(); END;", "",
+                    schema -> "", () -> "", new QueryPageOptions(), JdbcExecutor.INSTANCE::defaultResultValue, reader, false);
+            assertEquals(List.of(List.of("procedure output")), page.getRows());
+            assertTrue(page.getExecution_time_ms() >= 25L,
+                "paged message reading must count toward execution_time_ms but was " + page.getExecution_time_ms() + "ms");
+        }
+    }
+
+    @Test
     void executeReturnsMultipleStatementWarningsForNoResultStatements() {
         SQLWarning first = new SQLWarning("identity value is 443", "S0003", 7998);
         first.setNextWarning(new SQLWarning("DBCC execution completed", "S0001", 2528));
@@ -334,6 +367,42 @@ class JdbcExecutorTest {
         assertEquals(Arrays.asList("id", "name"), result.getColumns());
         assertEquals(Arrays.asList(Arrays.asList(1, "Ada")), result.getRows());
         assertEquals("informational", result.getMessages().get(0).get("message"));
+    }
+
+    @Test
+    void executeRetainsRowsAndAddsDriverMessagesWhenResultSetCompletes() {
+        CountingResultSetFixture fixture = countingResultSet(new Object[][]{{1, "Ada"}});
+        boolean[] closed = {false};
+        JdbcExecutor.StatementMessageReader reader = new JdbcExecutor.StatementMessageReader() {
+            @Override
+            public List<String> read(Statement statement) {
+                return Collections.emptyList();
+            }
+
+            @Override
+            public List<String> close(Statement statement) {
+                closed[0] = true;
+                return Arrays.asList("procedure output");
+            }
+        };
+
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(true, -1, null, new AtomicInteger(), fixture.resultSet(), null),
+            "BEGIN OPEN_RESULT(); END;",
+            "",
+            schema -> "",
+            () -> "",
+            100,
+            null,
+            0,
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            reader
+        );
+
+        assertTrue(closed[0]);
+        assertEquals(Arrays.asList("id", "name"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList(1, "Ada")), result.getRows());
+        assertEquals("procedure output", result.getMessages().get(0).get("message"));
     }
 
     @Test

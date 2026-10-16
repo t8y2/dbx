@@ -363,6 +363,34 @@ test("parseMongoFindCommand rewrites epoch-millisecond and numeric BSON construc
   });
 });
 
+test("parseMongoCommand accepts the mongosh Int32, Long, Double and Decimal128 constructors", () => {
+  const insert = parseMongoCommand('db.getCollection("issue_demo").insert({\n    name: "demo",\n    coins: Int32("15000"),\n    amount: Decimal128("100")\n});');
+  assert.equal(insert?.command.kind, "insert");
+  assert.deepEqual(JSON.parse((insert!.command as { docsJson: string }).docsJson), {
+    name: "demo",
+    coins: { $numberInt: "15000" },
+    amount: { $numberDecimal: "100" },
+  });
+
+  const command = parseMongoFindCommand('db.orders.find({a: Int32(3), b: new Int32(-4), c: Long("9223372036854775807"), d: Long(5), e: Double(1.5), f: Double("2"), g: Decimal128("12.34")})');
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.filter), {
+    a: { $numberInt: "3" },
+    b: { $numberInt: "-4" },
+    c: { $numberLong: "9223372036854775807" },
+    d: { $numberLong: "5" },
+    e: { $numberDouble: "1.5" },
+    f: { $numberDouble: "2" },
+    g: { $numberDecimal: "12.34" },
+  });
+
+  for (const source of ["db.orders.find({a: Int32(2147483648)})", 'db.orders.find({a: Long("x")})', 'db.orders.find({a: Double("abc")})', "db.orders.find({a: Decimal128()})", "db.orders.find({a: myLong(1)})"]) {
+    assert.equal(parseMongoFindCommand(source), null, source);
+  }
+  assert.match(describeMongoCommandParseFailure("db.orders.find({a: myLong(1)})"), /Unsupported value myLong\(\.\.\.\)/);
+  assert.match(describeMongoCommandParseFailure("db.orders.find({a: Foo(1)})"), /Int32, Long, Double, Decimal128/);
+});
+
 test("parseMongoFindCommand rejects out-of-range integer constructor arguments", () => {
   assert.equal(parseMongoFindCommand("db.orders.find({a: NumberLong(9223372036854775808)})"), null);
   assert.equal(parseMongoFindCommand("db.orders.find({a: NumberLong(-9223372036854775809)})"), null);

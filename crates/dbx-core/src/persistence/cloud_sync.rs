@@ -134,6 +134,12 @@ pub struct SnippetTokenStatus {
     pub has_saved_token: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetPassphraseStatus {
+    pub has_saved_passphrase: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnippetSyncSettings {
@@ -788,6 +794,12 @@ pub struct SnippetSyncSummary {
     pub bytes: usize,
     pub exported_at: Option<String>,
     pub app_version: Option<String>,
+    /// SHA-256 of the encrypted remote file content. Used by the opt-in
+    /// automatic uploader to stop when another device has changed the snippet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_content_hash: Option<String>,
+    #[serde(default)]
+    pub unchanged: bool,
     /// A new encrypted snippet was created, but the old plaintext snippet
     /// could not be removed. The caller must surface this id for manual cleanup.
     #[serde(default)]
@@ -1669,6 +1681,47 @@ pub async fn forget_snippet_token(storage: &Storage, config: &SnippetSyncConfig)
     storage.delete_webdav_password_blob(&snippet_token_account(config)?).await
 }
 
+pub async fn snippet_saved_passphrase_status(
+    storage: &Storage,
+    config: &SnippetSyncConfig,
+) -> Result<SnippetPassphraseStatus, String> {
+    let account = snippet_passphrase_account(config)?;
+    Ok(SnippetPassphraseStatus { has_saved_passphrase: storage.load_webdav_password_blob(&account).await?.is_some() })
+}
+
+pub async fn save_snippet_passphrase(
+    storage: &Storage,
+    config: &SnippetSyncConfig,
+    passphrase: &str,
+) -> Result<(), String> {
+    let passphrase = normalized_passphrase(Some(passphrase))
+        .ok_or_else(|| "A snippet encryption password is required to save it.".to_string())?;
+    let secret = storage.load_or_create_local_device_secret().await?;
+    let blob = encrypt_text_with_secret(passphrase, &secret)?;
+    let value = serde_json::to_value(blob).map_err(|e| e.to_string())?;
+    storage.save_webdav_password_blob(&snippet_passphrase_account(config)?, &value).await
+}
+
+pub async fn forget_snippet_passphrase(storage: &Storage, config: &SnippetSyncConfig) -> Result<(), String> {
+    storage.delete_webdav_password_blob(&snippet_passphrase_account(config)?).await
+}
+
+pub async fn resolve_snippet_passphrase(
+    storage: &Storage,
+    config: &SnippetSyncConfig,
+    passphrase: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(passphrase) = normalized_passphrase(passphrase) {
+        return Ok(Some(passphrase.to_string()));
+    }
+    let Some(value) = storage.load_webdav_password_blob(&snippet_passphrase_account(config)?).await? else {
+        return Ok(None);
+    };
+    let blob: EncryptedSecretsBlob = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    let secret = storage.load_or_create_local_device_secret().await?;
+    Ok(Some(decrypt_text_with_secret(&blob, &secret)?))
+}
+
 pub async fn snippet_sync_settings(
     storage: &Storage,
     provider: SnippetProvider,
@@ -1977,12 +2030,43 @@ impl SnippetSyncClient {
         snippet_passphrase: Option<&str>,
         secrets_passphrase: Option<&str>,
     ) -> Result<SnippetSyncSummary, String> {
+        self.put_snapshot_with_expected_remote_hash(snapshot, snippet_passphrase, secrets_passphrase, None).await
+    }
+
+    pub async fn put_snapshot_with_expected_remote_hash(
+        &self,
+        snapshot: &SyncSnapshot,
+        snippet_passphrase: Option<&str>,
+        secrets_passphrase: Option<&str>,
+        expected_remote_content_hash: Option<&str>,
+    ) -> Result<SnippetSyncSummary, String> {
         self.require_token()?;
         let passphrase = required_snippet_passphrase(snippet_passphrase)?;
         let existing_id = normalized_snippet_id(self.config.snippet_id.as_deref());
+        if expected_remote_content_hash.is_some() && existing_id.is_none() {
+            return Err(
+                "Automatic snippet upload needs a snippet ID and a previous successful manual upload.".to_string()
+            );
+        }
+        if let Some(expected_hash) = expected_remote_content_hash {
+            if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(
+                    "Automatic snippet upload has an invalid saved remote version. Upload manually to reset it."
+                        .to_string(),
+                );
+            }
+        }
         let legacy_snapshot = if let Some(id) = existing_id {
             let existing_content = self.load_snippet_content(id).await?;
+            if expected_remote_content_hash
+                .is_some_and(|expected_hash| !content_hash(&existing_content).eq_ignore_ascii_case(expected_hash))
+            {
+                return Err("The remote snippet changed since the last successful upload. Automatic upload was paused to avoid overwriting newer changes. Download and review the latest snippet, then upload manually before re-enabling automatic upload.".to_string());
+            }
             if !is_encrypted_snippet_snapshot(&existing_content) {
+                if expected_remote_content_hash.is_some() && is_legacy_dbx_snapshot(&existing_content) {
+                    return Err("Automatic upload is paused because the remote snippet uses a legacy unencrypted snapshot. Migrate it manually before enabling automatic uploads.".to_string());
+                }
                 // Never delete an arbitrary snippet merely because it is not an
                 // encrypted DBX envelope. It must first prove to be a legacy DBX
                 // snapshot, and the caller must explicitly request migration.
@@ -2010,7 +2094,25 @@ impl SnippetSyncClient {
                 // password decrypts the currently stored envelope. Otherwise
                 // an accidental password change would silently lock out the
                 // user's other devices.
-                parse_snippet_snapshot(&existing_content, Some(passphrase))?;
+                let existing_snapshot = parse_snippet_snapshot(&existing_content, Some(passphrase))?;
+                if expected_remote_content_hash.is_some() {
+                    if existing_snapshot.encrypted_secrets.is_some() {
+                        return Err("Automatic upload is paused because this snippet includes encrypted credentials. Use manual upload to keep the credentials protected.".to_string());
+                    }
+                    if sync_snapshot_content_eq(&existing_snapshot, snapshot) {
+                        return Ok(SnippetSyncSummary {
+                            provider: self.config.provider,
+                            snippet_id: id.to_string(),
+                            bytes: existing_content.len(),
+                            exported_at: Some(existing_snapshot.exported_at),
+                            app_version: Some(existing_snapshot.app_version),
+                            remote_content_hash: Some(content_hash(&existing_content)),
+                            unchanged: true,
+                            legacy_cleanup_required_id: None,
+                            legacy_cleanup_expected_content_hash: None,
+                        });
+                    }
+                }
                 None
             }
         } else {
@@ -2024,6 +2126,7 @@ impl SnippetSyncClient {
         let encrypted = encrypt_snippet_snapshot(snapshot_to_upload, passphrase)?;
         let bytes = serde_json::to_vec_pretty(&encrypted).map_err(|e| e.to_string())?;
         let content = String::from_utf8(bytes.clone()).map_err(|e| e.to_string())?;
+        let remote_content_hash = content_hash(&content);
         // A migration must create a separate snippet. Updating the legacy
         // snippet would retain its plaintext revision history on the provider.
         let update_id = if legacy_snapshot.is_some() { None } else { existing_id };
@@ -2077,6 +2180,8 @@ impl SnippetSyncClient {
             bytes: bytes.len(),
             exported_at,
             app_version,
+            remote_content_hash: Some(remote_content_hash),
+            unchanged: false,
             legacy_cleanup_required_id,
             legacy_cleanup_expected_content_hash: legacy_snapshot.map(|(_, _, hash)| hash),
         })
@@ -2097,6 +2202,8 @@ impl SnippetSyncClient {
             bytes: content.len(),
             exported_at: Some(snapshot.exported_at.clone()),
             app_version: Some(snapshot.app_version.clone()),
+            remote_content_hash: Some(content_hash(&content)),
+            unchanged: false,
             legacy_cleanup_required_id: None,
             legacy_cleanup_expected_content_hash: None,
         };
@@ -3057,6 +3164,19 @@ fn content_hash(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn sync_snapshot_content_eq(left: &SyncSnapshot, right: &SyncSnapshot) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.exported_at.clear();
+    right.exported_at.clear();
+    left.app_version.clear();
+    right.app_version.clear();
+    match (serde_json::to_value(left), serde_json::to_value(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn snippet_pending_cleanup(summary: &SnippetSyncSummary) -> Result<Option<SnippetPendingCleanup>, String> {
     match (summary.legacy_cleanup_required_id.as_deref(), summary.legacy_cleanup_expected_content_hash.as_deref()) {
         (None, None) => Ok(None),
@@ -3119,6 +3239,10 @@ fn snippet_provider_storage_key(provider: SnippetProvider, instance_url: Option<
 
 fn snippet_token_account(config: &SnippetSyncConfig) -> Result<String, String> {
     Ok(format!("snippet-token:{}", snippet_provider_storage_key(config.provider, config.instance_url.as_deref())?))
+}
+
+fn snippet_passphrase_account(config: &SnippetSyncConfig) -> Result<String, String> {
+    Ok(format!("snippet-passphrase:{}", snippet_provider_storage_key(config.provider, config.instance_url.as_deref())?))
 }
 
 fn validate_snippet_id(provider: SnippetProvider, id: &str) -> Result<(), String> {
@@ -3548,6 +3672,7 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
             keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
@@ -3637,6 +3762,7 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
             keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
@@ -3950,6 +4076,7 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
             keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),

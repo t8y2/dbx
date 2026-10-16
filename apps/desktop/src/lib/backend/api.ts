@@ -388,6 +388,7 @@ export const setDefaultAiConfig = forward("setDefaultAiConfig");
 export const saveAiConfigItem = forward("saveAiConfigItem");
 export const deleteAiConfig = forward("deleteAiConfig");
 export const loadCcSwitchAiConfigs = forward("loadCcSwitchAiConfigs");
+export const loadMagpieAiConfigs = forward("loadMagpieAiConfigs");
 export const saveAiProviderConfig = forward("saveAiProviderConfig");
 export const loadAiProviderConfigs = forward("loadAiProviderConfigs");
 export const loadDesktopSettings = forward("loadDesktopSettings");
@@ -452,6 +453,9 @@ export const snippetSyncTest = forward("snippetSyncTest");
 export const snippetTokenStatus = forward("snippetTokenStatus");
 export const saveSnippetSavedToken = forward("saveSnippetSavedToken");
 export const forgetSnippetSavedToken = forward("forgetSnippetSavedToken");
+export const snippetPassphraseStatus = forward("snippetPassphraseStatus");
+export const saveSnippetSavedPassphrase = forward("saveSnippetSavedPassphrase");
+export const forgetSnippetSavedPassphrase = forward("forgetSnippetSavedPassphrase");
 export const snippetSyncSettings = forward("snippetSyncSettings");
 export const snippetSyncInspect = forward("snippetSyncInspect");
 export const saveSnippetSyncId = forward("saveSnippetSyncId");
@@ -1060,6 +1064,7 @@ export type {
   SnippetSyncSummary,
   SnippetDownloadResult,
   SnippetTokenStatus,
+  SnippetPassphraseStatus,
   McpServerStatus,
   McpHttpServerSettings,
   McpHttpServerStatus,

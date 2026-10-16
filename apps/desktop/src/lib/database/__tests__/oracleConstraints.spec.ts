@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/lib/backend/api";
-import { executeOracleConstraintPlan, oracleConstraintDefinitionFromInfo, OracleConstraintMetadataError, prepareOracleConstraintPlan } from "../oracleConstraints";
+import { executeOracleConstraintPlan, oracleConstraintDefinitionFromInfo, OracleConstraintMetadataError, prepareOracleConstraintPlan, readOracleConstraintSnapshot, readOracleIndexSnapshot } from "../oracleConstraints";
 import type { ConstraintInfo } from "@/types/database";
 import type { OracleConstraintChange } from "@/lib/table/tableStructureEditorSql";
 
@@ -89,7 +89,7 @@ beforeEach(() => {
   vi.mocked(api.executeQuery).mockImplementation(async (_connection, _database, sql) => {
     if (sql.includes("SYS_CONTEXT")) return result([["APP", "APP", "ORCL"]]) as never;
     if (sql.includes("SYS.ALL_OBJECTS")) return result([["APP", "CONTACTS", 77]]) as never;
-    if (sql.includes("SYS.ALL_TABLES")) return result([[null, "N"]]) as never;
+    if (sql.includes("SYS.ALL_TABLES")) return result([sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]]) as never;
     if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return result([]) as never;
     if (sql.includes("SYS.ALL_IND_COLUMNS"))
       return result([
@@ -111,6 +111,88 @@ beforeEach(() => {
 });
 
 describe("Oracle CHECK/UNIQUE constraint preflight", () => {
+  describe.each([
+    ["constraints", readOracleConstraintSnapshot],
+    ["indexes", readOracleIndexSnapshot],
+  ] as const)("OceanBase %s table safety", (_name, readSnapshot) => {
+    function mockOceanbaseTable(rows: unknown[][] = [[null, "N", "NO"]]) {
+      const execute = vi.mocked(api.executeQuery).getMockImplementation()!;
+      vi.mocked(api.executeQuery).mockImplementation(async (...args) => {
+        if (args[2].includes("SYS.ALL_EXTERNAL_TABLES")) throw new Error("ORA-00942: SYS.ALL_EXTERNAL_TABLES does not exist");
+        if (args[2].includes("SYS.ALL_TABLES")) return result(rows) as never;
+        return execute(...args);
+      });
+    }
+
+    it("reads an ordinary table without requiring Oracle's external-table view", async () => {
+      mockOceanbaseTable();
+      await expect(readSnapshot({ ...target, databaseType: "oceanbase-oracle" })).resolves.toMatchObject({ objectId: "77" });
+    });
+
+    it.each(
+      [
+        [[null, "N", "YES"]],
+        [[null, "N", null]],
+        [[null, "N", "UNKNOWN"]],
+        [[null, "N"]],
+        [],
+        [
+          [null, "N", "NO"],
+          [null, "N", "NO"],
+        ],
+      ].map((rows) => ({ rows })),
+    )("rejects external or incomplete table metadata: $rows", async ({ rows }) => {
+      mockOceanbaseTable(rows);
+      await expect(readSnapshot({ ...target, databaseType: "oceanbase-oracle" })).rejects.toMatchObject({ reason: "incomplete" });
+      expect(api.buildTableStructureChangeSql).not.toHaveBeenCalled();
+      expect(vi.mocked(api.executeQuery).mock.calls.some(([, , sql]) => /^(ALTER|CREATE|DROP)\b/.test(sql))).toBe(false);
+    });
+
+    it("propagates table dictionary errors before any DDL", async () => {
+      const execute = vi.mocked(api.executeQuery).getMockImplementation()!;
+      vi.mocked(api.executeQuery).mockImplementation(async (...args) => {
+        if (args[2].includes("SYS.ALL_TABLES")) throw new Error("dictionary unavailable");
+        return execute(...args);
+      });
+      await expect(readSnapshot({ ...target, databaseType: "oceanbase-oracle" })).rejects.toThrow("dictionary unavailable");
+      expect(api.buildTableStructureChangeSql).not.toHaveBeenCalled();
+    });
+  });
+
+  it("retains Oracle's external-table guard", async () => {
+    const execute = vi.mocked(api.executeQuery).getMockImplementation()!;
+    vi.mocked(api.executeQuery).mockImplementation(async (...args) => {
+      if (args[2].includes("SYS.ALL_EXTERNAL_TABLES")) return result([["APP", "CONTACTS"]]) as never;
+      return execute(...args);
+    });
+    await expect(prepareOracleConstraintPlan(target, { tableName: target.tableName, columns: [], indexes: [] }, makeChange())).rejects.toMatchObject({ reason: "incomplete" });
+    expect(api.buildTableStructureChangeSql).not.toHaveBeenCalled();
+  });
+
+  it.each(["YES", null, "UNKNOWN"])("rechecks OceanBase external-table status %s before executing a prepared plan", async (external) => {
+    let tableRows: unknown[][] = [[null, "N", "NO"]];
+    const execute = vi.mocked(api.executeQuery).getMockImplementation()!;
+    vi.mocked(api.executeQuery).mockImplementation(async (...args) => {
+      if (args[2].includes("SYS.ALL_TABLES")) return result(tableRows) as never;
+      if (args[2].includes("SYS.ALL_EXTERNAL_TABLES")) throw new Error("ORA-00942");
+      return execute(...args);
+    });
+    const plan = await prepareOracleConstraintPlan({ ...target, databaseType: "oceanbase-oracle" }, { tableName: target.tableName, columns: [], indexes: [] }, makeChange());
+    tableRows = [[null, "N", external]];
+    await expect(executeOracleConstraintPlan(plan, 30, () => true)).rejects.toMatchObject({ reason: "incomplete" });
+    expect(vi.mocked(api.executeQuery).mock.calls.some(([, , sql]) => /^(ALTER|CREATE|DROP)\b/.test(sql))).toBe(false);
+  });
+
+  it("does not turn Oracle external-table dictionary errors into an empty result", async () => {
+    const execute = vi.mocked(api.executeQuery).getMockImplementation()!;
+    vi.mocked(api.executeQuery).mockImplementation(async (...args) => {
+      if (args[2].includes("SYS.ALL_EXTERNAL_TABLES")) throw new Error("dictionary unavailable");
+      return execute(...args);
+    });
+    await expect(prepareOracleConstraintPlan(target, { tableName: target.tableName, columns: [], indexes: [] }, makeChange())).rejects.toThrow("dictionary unavailable");
+    expect(api.buildTableStructureChangeSql).not.toHaveBeenCalled();
+  });
+
   it("checks duplicate composite keys including partial NULL keys and excludes all-NULL keys", async () => {
     const change = makeChange();
     const plan = await prepareOracleConstraintPlan(target, { tableName: target.tableName, columns: [], indexes: [] }, change);
@@ -127,7 +209,7 @@ describe("Oracle CHECK/UNIQUE constraint preflight", () => {
     vi.mocked(api.executeQuery).mockImplementation(async (_connection, _database, sql) => {
       if (sql.includes("SYS_CONTEXT")) return result([["APP", "APP", "ORCL"]]) as never;
       if (sql.includes("SYS.ALL_OBJECTS")) return result([["APP", "CONTACTS", 77]]) as never;
-      if (sql.includes("SYS.ALL_TABLES")) return result([[null, "N"]]) as never;
+      if (sql.includes("SYS.ALL_TABLES")) return result([sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]]) as never;
       if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return result([]) as never;
       if (sql.includes("SYS.ALL_IND_COLUMNS"))
         return result([
@@ -217,7 +299,7 @@ describe("Oracle CHECK/UNIQUE constraint preflight", () => {
       }
       if (sql.includes("SYS_CONTEXT")) return result([["APP", "APP", "ORCL"]]) as never;
       if (sql.includes("SYS.ALL_OBJECTS")) return result([["APP", "CONTACTS", 77]]) as never;
-      if (sql.includes("SYS.ALL_TABLES")) return result([[null, "N"]]) as never;
+      if (sql.includes("SYS.ALL_TABLES")) return result([sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]]) as never;
       if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return result([]) as never;
       if (sql.includes("SYS.ALL_IND_COLUMNS"))
         return result([
@@ -335,7 +417,7 @@ describe("Oracle CHECK/UNIQUE constraint preflight", () => {
       }
       if (sql.includes("SYS_CONTEXT")) return result([["APP", "APP", "ORCL"]]) as never;
       if (sql.includes("SYS.ALL_OBJECTS")) return result([["APP", "CONTACTS", 77]]) as never;
-      if (sql.includes("SYS.ALL_TABLES")) return result([[null, "N"]]) as never;
+      if (sql.includes("SYS.ALL_TABLES")) return result([sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]]) as never;
       if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return result([]) as never;
       if (sql.includes("SYS.ALL_IND_COLUMNS")) return result([["APP", "UQ_NEW", "APP", "CONTACTS", "NORMAL", "UNIQUE", "VALID", "NO", "VISIBLE", "N", "A", "ASC", null]]) as never;
       if (sql.includes("SYS.ALL_TAB_COLS"))
@@ -398,7 +480,7 @@ describe("Oracle CHECK/UNIQUE constraint preflight", () => {
       }
       if (sql.includes("SYS_CONTEXT")) return result([["APP", "APP", ddlStarted ? databaseName : "ORCL"]]) as never;
       if (sql.includes("SYS.ALL_OBJECTS")) return result([["APP", "CONTACTS", ddlStarted ? objectId : 77]]) as never;
-      if (sql.includes("SYS.ALL_TABLES")) return result([[null, "N"]]) as never;
+      if (sql.includes("SYS.ALL_TABLES")) return result([sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]]) as never;
       if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return result([]) as never;
       if (sql.includes("SYS.ALL_IND_COLUMNS"))
         return result([
@@ -428,7 +510,7 @@ describe("Oracle CHECK/UNIQUE constraint preflight", () => {
       if (sql.startsWith("ALTER TABLE")) return { ...result([]), execution_error: true, error: { detail: "database rejected" } } as never;
       if (sql.includes("SYS_CONTEXT")) return result([["APP", "APP", "ORCL"]]) as never;
       if (sql.includes("SYS.ALL_OBJECTS")) return result([["APP", "CONTACTS", 77]]) as never;
-      if (sql.includes("SYS.ALL_TABLES")) return result([[null, "N"]]) as never;
+      if (sql.includes("SYS.ALL_TABLES")) return result([sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]]) as never;
       if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return result([]) as never;
       if (sql.includes("SYS.ALL_IND_COLUMNS"))
         return result([
@@ -510,7 +592,7 @@ describe("Oracle CHECK/UNIQUE constraint preflight", () => {
     vi.mocked(api.executeQuery).mockImplementation(async (_connection, _database, sql) => {
       if (sql.includes("SYS_CONTEXT")) return result([["APP", "APP", "ORCL"]]) as never;
       if (sql.includes("SYS.ALL_OBJECTS")) return result([["APP", "CONTACTS", 77]]) as never;
-      if (sql.includes("SYS.ALL_TABLES")) return result([[null, "N"]]) as never;
+      if (sql.includes("SYS.ALL_TABLES")) return result([sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]]) as never;
       if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return result([]) as never;
       if (sql.includes("SYS.ALL_IND_COLUMNS")) return result([["APP", "OLD_INDEX", "APP", "CONTACTS", "NORMAL", "UNIQUE", "VALID", "NO", "VISIBLE", "N", "A", "ASC", null]]) as never;
       if (sql.includes("SYS.ALL_TAB_COLS"))
@@ -576,7 +658,7 @@ describe("Oracle CHECK/UNIQUE constraint preflight", () => {
       }
       if (sql.includes("SYS_CONTEXT")) return result([["APP", "APP", "ORCL"]]) as never;
       if (sql.includes("SYS.ALL_OBJECTS")) return result([["APP", "CONTACTS", 77]]) as never;
-      if (sql.includes("SYS.ALL_TABLES")) return result([[null, "N"]]) as never;
+      if (sql.includes("SYS.ALL_TABLES")) return result([sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]]) as never;
       if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return result([]) as never;
       if (sql.includes("SYS.ALL_IND_COLUMNS"))
         return dropped
@@ -643,7 +725,7 @@ describe("Oracle CHECK/UNIQUE constraint preflight", () => {
       }
       if (sql.includes("SYS_CONTEXT")) return result([["APP", "APP", "ORCL"]]) as never;
       if (sql.includes("SYS.ALL_OBJECTS")) return result([["APP", "CONTACTS", 77]]) as never;
-      if (sql.includes("SYS.ALL_TABLES")) return result([[null, "N"]]) as never;
+      if (sql.includes("SYS.ALL_TABLES")) return result([sql.includes(", EXTERNAL") ? [null, "N", "NO"] : [null, "N"]]) as never;
       if (sql.includes("SYS.ALL_EXTERNAL_TABLES")) return result([]) as never;
       if (sql.includes("SYS.ALL_IND_COLUMNS"))
         return result([
@@ -700,5 +782,51 @@ describe("Oracle CHECK/UNIQUE constraint preflight", () => {
       expect(definition.definition.state.enabled).toBe(false);
       expect(definition.definition.index.name).toBe("");
     }
+  });
+
+  it.each([
+    { databaseType: "oceanbase-oracle", expression: '"A" >= 1', readback: '("A" >= 1)', matches: true, edit: false },
+    { databaseType: "oceanbase-oracle", expression: '"A" >= 1', readback: '(("A" >= 1))', matches: true, edit: true },
+    { databaseType: "oceanbase-oracle", expression: "\"A\" >= 1 AND 'x(y)' = 'x(y)'", readback: "((\"A\" >= 1 AND 'x(y)' = 'x(y)'))", matches: true, edit: false },
+    { databaseType: "oceanbase-oracle", expression: '("A" > 1 OR "B" > 1) AND "B" < 10', readback: '"A" > 1 OR ("B" > 1 AND "B" < 10)', matches: false, edit: false },
+    { databaseType: "oceanbase-oracle", expression: '"A" > 1 OR "B" > 1', readback: '("A" > 1) OR ("B" > 1)', matches: false, edit: false },
+    { databaseType: "oceanbase-oracle", expression: '"A" >= 1', readback: '("A" >= 1', matches: false, edit: false },
+    { databaseType: "oceanbase-oracle", expression: '"A" >= 1', readback: ')"A" >= 1(', matches: false, edit: false },
+    { databaseType: "oceanbase-oracle", expression: '"A" >= 1', readback: "", matches: false, edit: false },
+    { databaseType: "oceanbase-oracle", expression: '"A" >= 1', readback: "'unclosed", matches: false, edit: false },
+    { databaseType: "oracle", expression: '"A" >= 1', readback: '("A" >= 1)', matches: false, edit: false },
+  ] as const)("checks $databaseType CHECK readback $readback (edit=$edit)", async ({ databaseType, expression, readback, matches, edit }) => {
+    const activeTarget = { ...target, databaseType };
+    let stage = "before";
+    const info = (definition: string): ConstraintInfo => ({
+      name: "CK_POSITIVE",
+      constraint_type: "CHECK",
+      columns: [],
+      definition,
+      ref_columns: [],
+      enabled: true,
+      valid: true,
+      deferrable: false,
+      initially_deferred: false,
+      oracle_metadata: { metadataComplete: true, owner: "APP", constraintType: "C", status: "ENABLED", validated: "VALIDATED", deferrable: "NOT DEFERRABLE", deferred: "IMMEDIATE", rely: null, indexOwner: null, indexName: null, indexSharing: null, index: null },
+    });
+    vi.mocked(api.listConstraints).mockImplementation(async () => (stage === "created" ? [info(readback)] : stage === "before" && edit ? [info('"A" >= 0')] : []));
+    const add = 'ALTER TABLE "APP"."CONTACTS" ADD CONSTRAINT "CK_POSITIVE" CHECK ("A" >= 1);';
+    vi.mocked(api.buildTableStructureChangeSql).mockResolvedValue({ statements: edit ? ['ALTER TABLE "APP"."CONTACTS" DROP CONSTRAINT "CK_POSITIVE";', add] : [add], warnings: [] } as never);
+    const execute = vi.mocked(api.executeQuery).getMockImplementation()!;
+    vi.mocked(api.executeQuery).mockImplementation(async (...args) => {
+      if (args[2].startsWith("ALTER TABLE")) {
+        stage = args[2].includes("DROP CONSTRAINT") ? "dropped" : "created";
+        return result([]) as never;
+      }
+      return execute(...args);
+    });
+    const change: OracleConstraintChange = { original: edit ? oracleConstraintDefinitionFromInfo(info('"A" >= 0'), activeTarget) : null, target: { kind: "check", definition: { name: "CK_POSITIVE", expression, state } } };
+    const plan = await prepareOracleConstraintPlan(activeTarget, { tableName: target.tableName, columns: [], indexes: [] }, change);
+    const outcome = await executeOracleConstraintPlan(plan, 30, () => true);
+    expect(outcome?.steps.every((step) => step.state === "committed")).toBe(true);
+    if (matches) expect(outcome?.readbackError).toBeUndefined();
+    else if (readback) expect(outcome?.readbackError).toBe("Constraint readback differs from the submitted definition.");
+    else expect(outcome?.readbackError).toBeTruthy();
   });
 });

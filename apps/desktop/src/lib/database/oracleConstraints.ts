@@ -273,6 +273,7 @@ export async function readOracleIndexSnapshot(target: OracleConstraintTarget, st
 export async function readOracleConstraintSnapshot(target: OracleConstraintTarget, change?: OracleConstraintChange, indexesOnly = false, stillCurrent: () => boolean = () => true, requestedIndexNames: string[] = []): Promise<OracleConstraintSnapshot> {
   if (!stillCurrent()) invalid("changed");
   target = { ...target };
+  const oceanbase = target.databaseType === "oceanbase-oracle";
   if (change) change = JSON.parse(JSON.stringify(change)) as OracleConstraintChange;
   const baseColumnsSql = `SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE FROM SYS.ALL_TAB_COLS WHERE OWNER = ${literal(target.schema)} AND TABLE_NAME = ${literal(target.tableName)} ORDER BY COLUMN_NAME`;
   const enhancedColumnsSql = `SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE, CHAR_USED, CHAR_LENGTH, USER_GENERATED, HIDDEN_COLUMN FROM SYS.ALL_TAB_COLS WHERE OWNER = ${literal(target.schema)} AND TABLE_NAME = ${literal(target.tableName)}`;
@@ -299,8 +300,8 @@ export async function readOracleConstraintSnapshot(target: OracleConstraintTarge
   const [identity, objects, tableShapes, externalTables, columns, infos, names, indexNames, indexDetails, indexUsage] = await Promise.all([
     query(target, "SELECT USER, SYS_CONTEXT('USERENV','CURRENT_SCHEMA'), SYS_CONTEXT('USERENV','DB_NAME') FROM DUAL", stillCurrent),
     query(target, `SELECT OWNER, OBJECT_NAME, OBJECT_ID FROM SYS.ALL_OBJECTS WHERE OWNER = ${literal(target.schema)} AND OBJECT_NAME = ${literal(target.tableName)} AND OBJECT_TYPE = 'TABLE'`, stillCurrent),
-    query(target, `SELECT IOT_TYPE, TEMPORARY FROM SYS.ALL_TABLES WHERE OWNER = ${literal(target.schema)} AND TABLE_NAME = ${literal(target.tableName)}`, stillCurrent),
-    query(target, `SELECT OWNER, TABLE_NAME FROM SYS.ALL_EXTERNAL_TABLES WHERE OWNER = ${literal(target.schema)} AND TABLE_NAME = ${literal(target.tableName)}`, stillCurrent),
+    query(target, `SELECT IOT_TYPE, TEMPORARY${oceanbase ? ", EXTERNAL" : ""} FROM SYS.ALL_TABLES WHERE OWNER = ${literal(target.schema)} AND TABLE_NAME = ${literal(target.tableName)}`, stillCurrent),
+    oceanbase ? Promise.resolve([]) : query(target, `SELECT OWNER, TABLE_NAME FROM SYS.ALL_EXTERNAL_TABLES WHERE OWNER = ${literal(target.schema)} AND TABLE_NAME = ${literal(target.tableName)}`, stillCurrent),
     columnsQuery,
     indexesOnly ? Promise.resolve([]) : api.listConstraints(target.connectionId, target.database, target.schema, target.tableName, target.catalog),
     indexesOnly ? Promise.resolve([]) : query(target, `SELECT CONSTRAINT_NAME, TABLE_NAME FROM SYS.ALL_CONSTRAINTS WHERE OWNER = ${literal(target.schema)}${inList("CONSTRAINT_NAME", wantedConstraintNames)} ORDER BY CONSTRAINT_NAME`, stillCurrent),
@@ -315,7 +316,7 @@ export async function readOracleConstraintSnapshot(target: OracleConstraintTarge
   if (!stillCurrent()) invalid("changed");
   if (identity.length !== 1 || identity[0]?.length !== 3 || identity[0].some((value) => typeof value !== "string" || !value)) invalid();
   if (objects.length !== 1 || objects[0]?.length !== 3 || objects[0][0] !== target.schema || objects[0][1] !== target.tableName || !/^[1-9]\d*$/.test(String(objects[0][2]))) invalid();
-  if (tableShapes.length !== 1 || tableShapes[0]?.length !== 2 || (tableShapes[0][0] !== null && tableShapes[0][0] !== "") || tableShapes[0][1] !== "N") invalid();
+  if (tableShapes.length !== 1 || tableShapes[0]?.length !== (oceanbase ? 3 : 2) || (tableShapes[0][0] !== null && tableShapes[0][0] !== "") || tableShapes[0][1] !== "N" || (oceanbase && tableShapes[0][2] !== "NO")) invalid();
   if (externalTables.length !== 0) invalid();
   if (typeof objects[0][2] === "number" && !Number.isSafeInteger(objects[0][2])) invalid();
   const numeric = (value: unknown): string | null => {
@@ -602,9 +603,38 @@ async function prepareUniqueTargetIndex(snapshot: OracleConstraintSnapshot, targ
   return next;
 }
 
+function oceanbaseCheckTokens(expression: string): string[] {
+  let tokens = expressionTokens(expression);
+  let depth = 0;
+  for (const token of tokens) {
+    if (token === "(") depth++;
+    if (token === ")" && --depth < 0) return [];
+  }
+  if (depth !== 0) return [];
+  // OceanBase wraps CHECK dictionary expressions; preserve all internal grouping.
+  while (tokens[0] === "(" && tokens[tokens.length - 1] === ")") {
+    depth = 0;
+    const end = tokens.findIndex((token) => {
+      if (token === "(") depth++;
+      if (token === ")") depth--;
+      return depth === 0;
+    });
+    if (end !== tokens.length - 1) break;
+    tokens = tokens.slice(1, -1);
+  }
+  return tokens;
+}
+
 function readbackMatches(target: OracleConstraintTarget, actual: OracleConstraintDefinition | undefined, expected: OracleConstraintDefinition): boolean {
   if (!actual || actual.kind !== expected.kind || actual.definition.name !== expected.definition.name || sortedJson(actual.definition.state) !== sortedJson(expected.definition.state)) return false;
-  if (expected.kind === "check" && actual.kind === "check") return sortedJson(expressionTokens(actual.definition.expression)) === sortedJson(expressionTokens(expected.definition.expression));
+  if (expected.kind === "check" && actual.kind === "check") {
+    if (target.databaseType === "oceanbase-oracle") {
+      const actualTokens = oceanbaseCheckTokens(actual.definition.expression);
+      const expectedTokens = oceanbaseCheckTokens(expected.definition.expression);
+      return actualTokens.length > 0 && expectedTokens.length > 0 && sortedJson(actualTokens) === sortedJson(expectedTokens);
+    }
+    return sortedJson(expressionTokens(actual.definition.expression)) === sortedJson(expressionTokens(expected.definition.expression));
+  }
   if (expected.kind !== "unique" || actual.kind !== "unique") return false;
   if (sortedJson(actual.definition.columns) !== sortedJson(expected.definition.columns)) return false;
   const index = actual.definition.index;

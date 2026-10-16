@@ -1,6 +1,7 @@
+use dbx_sql_schema::models::connection::DatabaseType;
 use dbx_sql_schema::table_structure_sql::{
-    build_table_structure_change_sql, build_table_structure_change_sql_with_context, StarRocksAlterOptions,
-    TableStructureSqlOptions,
+    build_table_structure_change_sql, build_table_structure_change_sql_with_context, OracleConstraintDefinition,
+    StarRocksAlterOptions, TableStructureSqlOptions,
 };
 use serde_json::{json, Value};
 
@@ -64,6 +65,62 @@ fn unique_state_options() -> TableStructureSqlOptions {
             } }
         }]
     })).unwrap()
+}
+
+#[test]
+fn oceanbase_unique_add_and_rebuild_use_the_verified_default_state() {
+    for rebuild in [false, true] {
+        let mut options = unique_state_options();
+        options.database_type = Some(DatabaseType::OceanbaseOracle);
+        let change = &mut options.oracle_constraint_changes.as_mut().unwrap()[0];
+        change.index_policy = "none".into();
+        if let Some(OracleConstraintDefinition::Unique(original)) = change.original.as_mut() {
+            original.index.secondary = None;
+        }
+        let Some(OracleConstraintDefinition::Unique(target)) = change.target.as_mut() else { panic!() };
+        target.state.enabled = true;
+        target.index.secondary = None;
+        if rebuild {
+            target.columns.push("EMAIL".into());
+            target.index.columns = target.columns.clone();
+            target.index.directions.push("ASC".into());
+            target.index.key_is_expression.push(false);
+        } else {
+            target.index.name.clear();
+            target.index.metadata_complete = false;
+            change.original = None;
+        }
+        let result = build_table_structure_change_sql(options.clone());
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let columns = if rebuild { "\"ID\", \"EMAIL\"" } else { "\"ID\"" };
+        assert_eq!(
+            result.statements.last().unwrap(),
+            &format!("ALTER TABLE \"APP\".\"CONTACTS\" ADD CONSTRAINT \"UQ_CONTACTS\" UNIQUE ({columns});")
+        );
+        assert_eq!(result.statements.len(), if rebuild { 2 } else { 1 });
+
+        let Some(OracleConstraintDefinition::Unique(target)) =
+            options.oracle_constraint_changes.as_mut().unwrap()[0].target.as_mut()
+        else {
+            panic!()
+        };
+        target.state.validated = false;
+        let rejected = build_table_structure_change_sql(options);
+        assert!(rejected.statements.is_empty());
+        assert!(!rejected.warnings.is_empty());
+    }
+}
+
+#[test]
+fn oracle_unique_add_retains_explicit_state_clauses() {
+    let mut options = unique_state_options();
+    let change = &mut options.oracle_constraint_changes.as_mut().unwrap()[0];
+    change.original = None;
+    let Some(OracleConstraintDefinition::Unique(target)) = change.target.as_mut() else { panic!() };
+    target.state.enabled = true;
+    let result = build_table_structure_change_sql(options);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert!(result.statements[0].ends_with("USING INDEX \"APP\".\"UQ_CONTACTS\" ENABLE VALIDATE;"));
 }
 
 #[test]

@@ -653,6 +653,46 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Measure Agent RPC monomorphization
+        if: github.head_ref == 'perf/win7-agent-rpc-monomorphization'
+        shell: pwsh
+        run: |
+          $outputDir = Join-Path $env:RUNNER_TEMP "dbx-agent-rpc-mono"
+          New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+          $env:RUSTC_WRAPPER = ""
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          cargo -Z host-config -Z target-applies-to-host -Z build-std=std,panic_abort `
+            --config .github/fixtures/win7-host-repro-config.toml `
+            rustc --locked --package dbx --lib --release --features custom-protocol `
+            --target x86_64-win7-windows-msvc -- `
+            "-Zdump-mono-stats=$outputDir" "-Zdump-mono-stats-format=json"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $timer.Stop()
+          $monoFile = Get-ChildItem $outputDir -File -Filter "*.mono_items.json" | Select-Object -First 1
+          if (!$monoFile) {
+            throw "dbx_lib monomorphization data is missing."
+          }
+          $items = Get-Content $monoFile.FullName -Raw | ConvertFrom-Json
+          "dbx_lib profile: $([math]::Round($timer.Elapsed.TotalSeconds, 2)) seconds" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($symbol in @("AgentDriverClient::call_typed_with_timeout_and_cancel::{closure#0}", "AgentDriverClient::call_value_with_timeout_and_cancel::{closure#0}", "AgentRuntimeClient::call_typed::{closure#0}")) {
+            $item = $items | Where-Object { $_.name.EndsWith($symbol) } | Select-Object -First 1
+            if ($item) {
+              "$symbol`: $($item.instantiation_count) instances, estimate $($item.total_estimate)" >> $env:GITHUB_STEP_SUMMARY
+            }
+          }
+
+      - name: Upload Agent RPC monomorphization data
+        if: github.head_ref == 'perf/win7-agent-rpc-monomorphization'
+        uses: actions/upload-artifact@v6
+        with:
+          name: DBX-win7-agent-rpc-mono
+          path: ${{ runner.temp }}/dbx-agent-rpc-mono/*.mono_items.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Measure dbx library command registry expansion
         if: vars.WIN7_REGISTRY_AB == 'true'
         shell: pwsh

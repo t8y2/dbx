@@ -1841,6 +1841,36 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(editor.saveError.value).toBeFalsy();
   });
 
+  // A PostgreSQL preview addresses one selected row by its physical locator
+  // (tableoid/ctid/xmin) so exact duplicate rows stay distinguishable. That
+  // locator stops matching after another session updates the row, and the save
+  // must report the conflict instead of silently deleting nothing.
+  it("refuses a keyless save when the physical row locator no longer matches a row", async () => {
+    const staleLocatorGuard = {
+      sql: "SELECT COUNT(*) AS dbx_keyless_row_matches FROM orders_test WHERE (ctid = '(0,1)'::tid)",
+      maxMatchedRows: 1,
+      minMatchedRows: 1,
+      message: keylessGuard.message,
+      minMessage: "Cannot safely update or delete this PostgreSQL row: it no longer matches the physical row that was loaded.",
+    };
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["DELETE FROM orders_test WHERE ctid = '(0,1)'::tid"],
+      rollbackStatements: [],
+      keylessGuards: [staleLocatorGuard],
+    });
+    mocks.executeQuery.mockResolvedValue({ columns: ["dbx_keyless_row_matches"], rows: [[0]] });
+
+    const { editor } = createSaveTestEditor({ databaseType: "postgres", primaryKeys: [] });
+    editor.deletedRows.value.add(0);
+
+    await editor.saveChanges();
+
+    expect(mocks.executeQuery).toHaveBeenCalledWith("connection-1", "app", staleLocatorGuard.sql, undefined);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.saveError.value).toBe(staleLocatorGuard.minMessage);
+    expect(editor.deletedRows.value.size).toBe(1);
+  });
+
   it("refuses a keyless save when the guard cannot be counted on the server at all", async () => {
     const onExecuteSql = vi.fn().mockResolvedValue(undefined);
     mocks.prepareDataGridSave.mockResolvedValue({
@@ -2352,5 +2382,54 @@ describe("Mongo collection-grid clipboard round-trip", () => {
     } finally {
       clearDataGridClipboardCopy();
     }
+  });
+});
+
+describe("useDataGridEditor pending-row cancel and cell revert", () => {
+  it("reports whether restoreCellValue actually reverted something", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "original", "Lovelace"]]);
+
+    expect(editor.restoreCellValue(0, 1)).toBe(false);
+    editor.applyCellValue(0, 1, "edited");
+    expect(editor.restoreCellValue(0, 1)).toBe(true);
+    expect(editor.restoreCellValue(0, 1)).toBe(false);
+
+    editor.newRows.value = [];
+    editor.addRows(1);
+    // 未触碰的新行整行都是 NULL，没有可回退的内容
+    expect(editor.restoreCellValue(-1, 0)).toBe(false);
+    editor.applyCellValue(-1, 0, "typed");
+    expect(editor.restoreCellValue(-1, 0)).toBe(true);
+  });
+
+  it("cancels only untouched pending rows", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "original", "Lovelace"]]);
+    editor.newRows.value = [];
+    editor.addRows(2);
+
+    // 已落库的行不是「新增行」，取消新增不适用于它
+    expect(editor.cancelUntouchedPendingRow(0)).toBe(false);
+    expect(editor.cancelUntouchedPendingRow(-1)).toBe(true);
+    expect(editor.newRows.value).toHaveLength(1);
+
+    // 填写过再清空的行不再是「未触碰」，必须留在网格与保存预览里
+    editor.applyCellValue(-1, 0, "kept");
+    editor.restoreCellValue(-1, 0);
+    expect(editor.cancelUntouchedPendingRow(-1)).toBe(false);
+    expect(editor.newRows.value).toHaveLength(1);
+  });
+
+  it("keeps the cancelled pending row undoable", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "original", "Lovelace"]]);
+    editor.newRows.value = [];
+    editor.addRows(2);
+
+    expect(editor.cancelUntouchedPendingRow(-1)).toBe(true);
+    expect(editor.newRows.value).toHaveLength(1);
+    expect(editor.canUndoPendingChange.value).toBe(true);
+
+    editor.undoPendingChange();
+    expect(editor.newRows.value).toHaveLength(2);
+    expect(editor.newRowMeta.value[0]?.untouched).toBe(true);
   });
 });

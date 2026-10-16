@@ -473,7 +473,12 @@ fn add_unique(
         let kind = if unique.state.deferrable || !unique.state.validated { "INDEX" } else { "UNIQUE INDEX" };
         format!(" USING INDEX (CREATE {kind} {index_ref} ON {table} ({columns}))")
     };
-    let (before_index, after_index) = constraint_state_parts(&unique.state, database_type);
+    // OceanBase UNIQUE only supports the default state already enforced by validate_unique.
+    let (before_index, after_index) = if database_type == DatabaseType::OceanbaseOracle {
+        (String::new(), String::new())
+    } else {
+        constraint_state_parts(&unique.state, database_type)
+    };
     Some(format!(
         "ALTER TABLE {table} ADD CONSTRAINT {} UNIQUE ({columns}){before_index}{using_index}{after_index};",
         quote_ident(dialect, &unique.name),

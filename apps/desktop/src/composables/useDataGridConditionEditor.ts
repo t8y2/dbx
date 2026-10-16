@@ -478,9 +478,10 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       const providerValues = values ? [...new Set(values)] : undefined;
       suggestions.value = providerValues ? (providerValues.some((value) => value.toLowerCase() === target.token.toLowerCase()) ? [] : providerValues.slice(0, limit).map((suggestion) => ({ value: suggestion, kind: "column" }))) : defaultSuggestions(target).slice(0, limit);
       replacementRange.value = { from: target.from, to: target.to };
-      // WHERE 条件开头默认选中首个列名，支持直接回车补全（issue #7155）。
-      // 算术表达式、函数参数和关键字建议不默认选中，避免回车应用时改写条件（issue #10595）。
-      highlightedIndex.value = options.kind === "where" && (role === "field" || role === "after_not") && shouldPreselectWhereColumn(target) && suggestions.value[0]?.kind === "column" ? 0 : -1;
+      // WHERE 条件开头和 ORDER BY 排序列位置默认选中首个列名，支持直接回车补全（issue #7155）。
+      // 算术表达式、函数参数、排序方向和关键字建议不默认选中，避免回车应用时改写条件（issue #10595）。
+      const shouldPreselectColumn = suggestions.value[0]?.kind === "column" && (options.kind === "where" ? (role === "field" || role === "after_not") && shouldPreselectWhereColumn(target) : role === "field");
+      highlightedIndex.value = shouldPreselectColumn ? 0 : -1;
     } catch (error) {
       if (!controller.signal.aborted && requestId === suggestionRequestId) {
         suggestions.value = [];

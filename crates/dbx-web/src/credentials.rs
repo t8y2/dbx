@@ -160,6 +160,7 @@ fn credential_target(config: &ConnectionConfig) -> Value {
         "connect_timeout_secs",
         "query_timeout_secs",
         "idle_timeout_secs",
+        "manual_transaction_timeout_secs",
         "keepalive_interval_secs",
         "redis_key_separator",
         "redis_scan_page_size",

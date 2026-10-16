@@ -174,6 +174,8 @@ export interface ConnectionConfig {
   query_timeout_secs?: number;
   query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;
+  /** Seconds a manual transaction may sit idle before DBX rolls it back. */
+  manual_transaction_timeout_secs?: number;
   keepalive_interval_secs?: number;
   ssl?: boolean;
   ca_cert_path?: string;

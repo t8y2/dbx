@@ -1,47 +1,111 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+// @vitest-environment happy-dom
 
-/**
- * Source-level guard for the layout-style control in the SQL formatter panel.
- * Mounting the panel would pull in the CodeMirror JSON editor, so the one
- * contract that matters for issue #11228 — the style select changes only the
- * engine, never any other option — is pinned against the component source
- * instead.
- *
- * There is deliberately no "apply classic preset" action: the user's decision
- * was that choosing the classic mode is enough, and a second control that
- * writes only part of what the old style needs reads as a partial application
- * of it. Do not re-add one — the two option values v0.6.16 also changed are
- * documented, not applied for the user.
- *
- * This assertion reads the component as text, so it depends on its current
- * formatting: `functionBody` requires the closing brace at column 0 — re-run
- * this spec after any formatter run, and keep comments inside that function
- * free of a `word:` shape, which the key-set check also scans for.
- */
-const source = readFileSync(new URL("../SqlFormatterSettingsPanel.vue", import.meta.url), "utf8");
+import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_SQL_FORMATTER_SETTINGS } from "@/lib/sql/sqlFormatterConfig";
 
-function functionBody(name: string): string {
-  const body = source.match(new RegExp(String.raw`function ${name}\([^)]*\) \{\n([\s\S]*?)\n\}`))?.[1];
-  expect(body, `${name} not found in SqlFormatterSettingsPanel.vue`).toBeTruthy();
-  return body!;
-}
+vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: vi.fn() }));
+vi.mock("@/lib/export/saveTextFile", () => ({ saveTextFile: vi.fn() }));
+vi.mock("@/lib/editor/codemirrorSearchKeymap", () => ({ searchKeymapWithoutModD: vi.fn() }));
 
-describe("SQL formatter layout style panel wiring", () => {
-  it("writes only layoutStyle when the style select changes", () => {
-    const body = functionBody("onLayoutStyle");
+vi.mock("@lucide/vue", async () => {
+  const { createPassthroughStub } = await import("@/components/grid/__tests__/vueHostHarness");
+  const icon = createPassthroughStub("Icon", "i");
+  return { Upload: icon, Download: icon, RotateCcw: icon, WandSparkles: icon, Save: icon, Copy: icon };
+});
 
-    expect(body).toContain('updateOption("layoutStyle", value)');
-    expect(body).not.toContain("expressionWidth");
-    expect(body).not.toContain("fromClauseLayout");
+vi.mock("@/components/ui/button", async () => ({
+  Button: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("Button", "button"),
+}));
+vi.mock("@/components/ui/label", async () => ({
+  Label: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("Label", "label"),
+}));
+vi.mock("@/components/ui/select", async () => {
+  const { createPassthroughStub } = await import("@/components/grid/__tests__/vueHostHarness");
+  const Select = defineComponent({
+    name: "Select",
+    props: { modelValue: { type: [String, Number], default: "" } },
+    emits: ["update:modelValue"],
+    setup(props, { emit, slots }) {
+      return () =>
+        h(
+          "div",
+          {
+            "data-stub": "Select",
+            "data-model-value": String(props.modelValue),
+            onPick: (event: CustomEvent<{ value: string }>) => emit("update:modelValue", event.detail.value),
+          },
+          [slots.default?.()],
+        );
+    },
+  });
+  return {
+    Select,
+    SelectContent: createPassthroughStub("SelectContent"),
+    SelectItem: createPassthroughStub("SelectItem", "button"),
+    SelectTrigger: createPassthroughStub("SelectTrigger", "button"),
+    SelectValue: createPassthroughStub("SelectValue", "span"),
+  };
+});
+vi.mock("@/components/ui/switch", async () => ({
+  Switch: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("Switch", "input"),
+}));
+vi.mock("@/components/ui/tabs", async () => {
+  const { createPassthroughStub } = await import("@/components/grid/__tests__/vueHostHarness");
+  return {
+    Tabs: createPassthroughStub("Tabs"),
+    TabsContent: createPassthroughStub("TabsContent"),
+    TabsList: createPassthroughStub("TabsList"),
+    TabsTrigger: createPassthroughStub("TabsTrigger", "button"),
+  };
+});
+
+import SqlFormatterSettingsPanel from "@/components/editor/SqlFormatterSettingsPanel.vue";
+
+describe("SQL formatter layout style panel", () => {
+  let app: App<Element> | null = null;
+  let host: HTMLDivElement | null = null;
+
+  function mountPanel(modelValue: unknown, update: ReturnType<typeof vi.fn>) {
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp(SqlFormatterSettingsPanel, { modelValue, "onUpdate:modelValue": update });
+    app.mount(host);
+    return host;
+  }
+
+  afterEach(() => {
+    app?.unmount();
+    app = null;
+    host?.remove();
+    host = null;
   });
 
-  it("offers both layout styles and no preset action", () => {
-    expect(source).toContain('{ value: "dbx", labelKey: "settings.sqlFormatterLayoutStyleDbx" }');
-    expect(source).toContain('{ value: "classic", labelKey: "settings.sqlFormatterLayoutStyleClassic" }');
-    // One control only: the classic mode is chosen here, and nothing writes the
-    // option values it used to imply. DEFAULT_SQL_FORMATTER_SETTINGS already is
-    // the dbx end state, so Restore Defaults covers the other direction.
-    expect(source).not.toContain("ApplyClassicPreset");
+  it("selects the DBX layout by default and preserves other formatter settings", async () => {
+    const update = vi.fn();
+    const root = mountPanel(DEFAULT_SQL_FORMATTER_SETTINGS, update);
+
+    const styleSelect = root.querySelector('[data-model-value="dbx"]');
+    expect(styleSelect).not.toBeNull();
+    const layoutOptions = Array.from(styleSelect!.querySelectorAll('[data-stub="SelectItem"]')).map((node) => node.getAttribute("value"));
+    expect(layoutOptions).toEqual(["classic", "dbx"]);
+
+    styleSelect!.dispatchEvent(new CustomEvent("pick", { detail: { value: "classic" } }));
+    await nextTick();
+    expect(update).toHaveBeenLastCalledWith({ ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "classic" });
+  });
+
+  it("restores the current formatter defaults", async () => {
+    const update = vi.fn();
+    const root = mountPanel({ ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "dbx", expressionWidth: 50 }, update);
+
+    const restoreButton = Array.from(root.querySelectorAll("button")).find((node) => node.textContent?.includes("settings.sqlFormatterRestoreDefaults"));
+    expect(restoreButton).toBeDefined();
+    restoreButton!.click();
+    await nextTick();
+
+    expect(update).toHaveBeenCalledWith(DEFAULT_SQL_FORMATTER_SETTINGS);
   });
 });

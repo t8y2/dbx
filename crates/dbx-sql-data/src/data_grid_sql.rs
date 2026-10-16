@@ -30,7 +30,7 @@ use data_grid_salesforce_sql::{
 
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{
-    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id,
+    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id, uses_postgres_ctid,
     uses_single_row_insert_statements, uses_synthetic_row_id, uses_xugu_row_id, TablePaginationStrategy,
 };
 use crate::value_literals::{format_ch_array_sql_literal, format_pg_array_sql_literal};
@@ -45,6 +45,8 @@ const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
 const KEYLESS_GUARD_COUNT_ALIAS: &str = "dbx_keyless_row_matches";
 const KEYLESS_AMBIGUOUS_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, so the row is identified by matching every column value, and more than one row in the table matches that condition. Add a primary key or unique index, or make the rows distinguishable, before editing.";
 const KEYLESS_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key and none of the result columns map to a table column, so there is no condition that can target a single row. Add a primary key, or edit the table directly, before saving.";
+const POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row because its hidden row identifier is missing or invalid. Refresh the table data before saving.";
+const POSTGRES_CTID_STALE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row: it no longer matches the physical row that was loaded. Another session may have changed or deleted it. Refresh the table data and try again.";
 /// Dameng rejects every comparison against its binary LOB types with
 /// `Data type mismatch` (SQLSTATE 22000, code -6105), and spatial columns are
 /// BLOB-backed and behave the same, so a keyless row predicate — which matches
@@ -385,12 +387,21 @@ pub struct HiveTablePropertiesSqlOptions {
 /// `message` unless the returned count is at most `max_matched_rows`, and also
 /// refused when the count cannot be obtained at all — an unverified keyless
 /// write is exactly the ambiguous write this guard exists to prevent.
+///
+/// A predicate built from a physical row locator (PostgreSQL `tableoid`/`ctid`)
+/// also sets `min_matched_rows`: that locator only stays valid while the row is
+/// unchanged, so a count of zero means the row moved and must be reported with
+/// `min_message` instead of silently updating nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataGridSaveGuard {
     pub sql: String,
     pub max_matched_rows: u32,
+    #[serde(default)]
+    pub min_matched_rows: u32,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1365,6 +1376,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
     if let Some(error) = validate_existing_row_primary_keys(options) {
         return Some(error);
     }
+    if let Some(error) = validate_postgres_ctid_row_identifier(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_oracle_keyless_lob_predicate(options) {
         return Some(error);
     }
@@ -1507,6 +1521,31 @@ fn validate_existing_row_primary_keys(options: &DataGridSaveStatementOptions) ->
         }
     }
 
+    None
+}
+
+fn validate_postgres_ctid_row_identifier(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if !uses_postgres_ctid(options.database_type)
+        || !options.table_meta.primary_keys.is_empty()
+        || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty())
+    {
+        return None;
+    }
+
+    let save_columns = effective_columns(options);
+    // Without the hidden locator in the projection there is nothing to check;
+    // the save falls back to its previous keyless behaviour.
+    let row_id_index = find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN)?;
+    for row_index in
+        options.dirty_rows.iter().map(|(row_index, _)| *row_index).chain(options.deleted_rows.iter().copied())
+    {
+        let Some(row) = options.rows.get(row_index) else {
+            continue;
+        };
+        if row.get(row_id_index).and_then(parse_postgres_ctid_row_id).is_none() {
+            return Some(POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR.to_string());
+        }
+    }
     None
 }
 
@@ -1680,6 +1719,13 @@ fn validate_inserted_primary_keys(options: &DataGridSaveStatementOptions) -> Opt
     None
 }
 
+/// One predicate this save sends, plus whether it addresses a physical row
+/// locator that must still match a row rather than merely "at most one".
+struct GuardedPredicate {
+    sql: String,
+    requires_match: bool,
+}
+
 /// Builds the statements the save executes, and alongside them the server-side
 /// guards for every keyless predicate those statements actually send. The guard
 /// is derived from the same `where_clause` value the UPDATE/DELETE carries, so
@@ -1717,13 +1763,18 @@ fn build_data_grid_save_statements(
         options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
 
     let guards_keyless_predicates = primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type);
-    let mut guarded_predicates: Vec<String> = Vec::new();
-    let guard_predicate = |predicate: &str, guarded: &mut Vec<String>| {
+    // With the hidden locator present every generated predicate addresses one
+    // physical row, so its guard must match exactly one row rather than "at most one".
+    let postgres_ctid_locator = guards_keyless_predicates
+        && uses_postgres_ctid(options.database_type)
+        && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
+    let mut guarded_predicates: Vec<GuardedPredicate> = Vec::new();
+    let guard_predicate = |predicate: &str, guarded: &mut Vec<GuardedPredicate>| {
         if !guards_keyless_predicates || predicate.trim().is_empty() {
             return;
         }
-        if !guarded.iter().any(|existing| existing == predicate) {
-            guarded.push(predicate.to_string());
+        if !guarded.iter().any(|existing| existing.sql == predicate) {
+            guarded.push(GuardedPredicate { sql: predicate.to_string(), requires_match: postgres_ctid_locator });
         }
     };
 
@@ -1927,9 +1978,11 @@ fn build_data_grid_save_statements(
     }
 
     keyless_guards.extend(guarded_predicates.into_iter().map(|predicate| DataGridSaveGuard {
-        sql: format!("SELECT COUNT(*) AS {KEYLESS_GUARD_COUNT_ALIAS} FROM {table} WHERE ({predicate})"),
+        sql: format!("SELECT COUNT(*) AS {KEYLESS_GUARD_COUNT_ALIAS} FROM {table} WHERE ({})", predicate.sql),
         max_matched_rows: 1,
+        min_matched_rows: u32::from(predicate.requires_match),
         message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+        min_message: predicate.requires_match.then(|| POSTGRES_CTID_STALE_ROW_ERROR.to_string()),
     }));
 
     statements
@@ -1961,6 +2014,9 @@ fn build_data_grid_rollback_statements(
     );
     let table = data_grid_save_table_name(options, schema);
     let mut statements = Vec::new();
+    let postgres_ctid_identity = uses_postgres_ctid(options.database_type)
+        && options.table_meta.primary_keys.is_empty()
+        && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
 
     for row in &options.new_rows {
         // Server-generated keys are unknown; never invent an undo predicate from
@@ -2097,24 +2153,41 @@ fn build_data_grid_rollback_statements(
         if sets.is_empty() {
             continue;
         }
-        let mut predicates = vec![build_primary_key_where(
-            options.database_type,
-            &options.table_meta.primary_keys,
-            &save_columns,
-            &after_row,
-            column_info,
-            options.identifier_quote.as_deref(),
-        )];
-        predicates.extend(writable_changes.iter().map(|((_, value), column)| {
-            build_save_column_predicate(
+        let rollback_identity = if postgres_ctid_identity {
+            let row_predicate = build_save_row_where(
                 options.database_type,
-                column,
-                value,
-                column_info_for(column_info, column),
-                true,
+                &save_columns,
+                &after_row,
+                column_info,
+                options.identifier_quote.as_deref(),
+            );
+            if row_predicate.is_empty() {
+                continue;
+            }
+            format!("({row_predicate}) AND (SELECT COUNT(*) FROM {table} WHERE ({row_predicate})) = 1")
+        } else {
+            build_primary_key_where(
+                options.database_type,
+                &options.table_meta.primary_keys,
+                &save_columns,
+                &after_row,
+                column_info,
                 options.identifier_quote.as_deref(),
             )
-        }));
+        };
+        let mut predicates = vec![rollback_identity];
+        if !postgres_ctid_identity {
+            predicates.extend(writable_changes.iter().map(|((_, value), column)| {
+                build_save_column_predicate(
+                    options.database_type,
+                    column,
+                    value,
+                    column_info_for(column_info, column),
+                    true,
+                    options.identifier_quote.as_deref(),
+                )
+            }));
+        }
         statements.push(data_grid_statement(
             options.database_type,
             format!(
@@ -3514,6 +3587,21 @@ fn build_primary_key_predicate(
     identifier_quote: Option<&str>,
 ) -> MysqlKeyPredicate {
     if primary_keys.is_empty() && uses_keyless_row_predicate(database_type) {
+        if uses_postgres_ctid(database_type) {
+            if let Some(row_id_index) = find_column_index(database_type, columns, DBX_ROWID_COLUMN) {
+                // `validate_postgres_ctid_row_identifier` already refused every
+                // touched row whose locator does not parse, so this fallback only
+                // keeps a malformed caller from generating an unguarded write.
+                return MysqlKeyPredicate {
+                    sql: build_postgres_ctid_predicate(row.get(row_id_index).unwrap_or(&Value::Null))
+                        .unwrap_or_else(|| "FALSE".to_string()),
+                    // A physical row locator is a single equality set, not a
+                    // mergeable plain column equality, and PostgreSQL never
+                    // batches grid writes anyway.
+                    plain: None,
+                };
+            }
+        }
         // A keyless row predicate matches every column value: never one plain
         // equality, and never batched (`supports_mysql_data_grid_batch`).
         return MysqlKeyPredicate {
@@ -4146,6 +4234,37 @@ fn is_synthetic_row_id(database_type: Option<DatabaseType>, name: Option<&str>) 
     uses_synthetic_row_id(database_type) && name.is_some_and(|name| name.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
 }
 
+fn parse_postgres_ctid_row_id(value: &Value) -> Option<(u32, String, u32)> {
+    let value = value.as_str()?;
+    let (table_oid, rest) = value.split_once(':')?;
+    if table_oid.is_empty() || !table_oid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let table_oid = table_oid.parse::<u32>().ok()?;
+    let (ctid, xmin) = rest.split_once(':')?;
+    let ctid = ctid.strip_prefix('(')?.strip_suffix(')')?;
+    let (block, offset) = ctid.split_once(',')?;
+    if block.is_empty()
+        || offset.is_empty()
+        || !block.bytes().all(|byte| byte.is_ascii_digit())
+        || !offset.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let block = block.parse::<u32>().ok()?;
+    let offset = offset.parse::<u16>().ok()?;
+    if xmin.is_empty() || !xmin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let xmin = xmin.parse::<u32>().ok()?;
+    Some((table_oid, format!("({block},{offset})"), xmin))
+}
+
+fn build_postgres_ctid_predicate(value: &Value) -> Option<String> {
+    let (table_oid, ctid, xmin) = parse_postgres_ctid_row_id(value)?;
+    Some(format!("tableoid = '{table_oid}'::oid AND ctid = '{ctid}'::tid AND xmin = '{xmin}'::xid"))
+}
+
 pub fn is_neo4j_element_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
     database_type == Some(DatabaseType::Neo4j) && name == Some(DBX_NEO4J_ELEMENT_ID_COLUMN)
 }
@@ -4400,6 +4519,9 @@ fn clickhouse_no_mutable_columns_error() -> String {
 
 fn predicate_ident(database_type: Option<DatabaseType>, name: &str, identifier_quote: Option<&str>) -> String {
     if is_synthetic_row_id(database_type, Some(name)) {
+        if uses_postgres_ctid(database_type) {
+            return "(tableoid::text || ':' || ctid::text || ':' || xmin::text)".to_string();
+        }
         if uses_xugu_row_id(database_type) {
             return "ROWID".to_string();
         }
@@ -7010,6 +7132,25 @@ mod tests {
         assert_eq!(equals(Some(DatabaseType::Neo4j), "score", json!(7)), Some("n.`score` = 7".to_string()));
         assert_eq!(equals(None, DBX_ROWID_COLUMN, json!("row-id")), Some("\"__DBX_ROWID\" = 'row-id'".to_string()));
         assert_eq!(equals(Some(DatabaseType::VictoriaMetrics), DBX_ROWID_COLUMN, json!("row-id")), None);
+    }
+
+    #[test]
+    fn builds_postgres_ctid_context_filter_conditions() {
+        let condition = build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            column_name: DBX_ROWID_COLUMN.to_string(),
+            mode: DataGridContextFilterMode::Equals,
+            value: json!("16384:(0,1):742"),
+            values: Vec::new(),
+            end_value: None,
+            column_info: None,
+        });
+
+        assert_eq!(
+            condition.as_deref(),
+            Some("(tableoid::text || ':' || ctid::text || ':' || xmin::text) = '16384:(0,1):742'")
+        );
     }
 
     #[test]
@@ -9888,6 +10029,32 @@ mod tests {
         }
     }
 
+    fn postgres_ctid_options() -> DataGridSaveStatementOptions {
+        DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "duplicate_rows".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "integer", false, None), column("value", "text", true, None)]),
+            },
+            columns: vec![DBX_ROWID_COLUMN.to_string(), "id".to_string(), "value".to_string()],
+            source_columns: None,
+            rows: vec![
+                vec![json!("16384:(0,1):742"), json!(1), json!("same")],
+                vec![json!("16384:(0,2):743"), json!(1), json!("same")],
+            ],
+            dirty_rows: vec![(0, vec![(2, json!("updated"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        }
+    }
+
     /// The predicate a guard counts must be byte-identical to the one its
     /// statement carries, otherwise the safety decision is made against a
     /// different set of columns or values than the mutation actually uses.
@@ -9939,10 +10106,71 @@ mod tests {
                 sql: r#"SELECT COUNT(*) AS dbx_keyless_row_matches FROM "daily_stats" WHERE ("stat_date" = '2026-09-07' AND "period" IS NULL)"#
                     .to_string(),
                 max_matched_rows: 1,
+                min_matched_rows: 0,
                 message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+                min_message: None,
             }]
         );
         assert_guards_cover_statement_predicates(&result);
+    }
+
+    #[test]
+    fn uses_postgres_tableoid_and_ctid_to_edit_one_duplicate_row() {
+        let update = prepare_data_grid_save(postgres_ctid_options());
+
+        assert_eq!(update.validation_error, None);
+        assert_eq!(
+            update.statements,
+            vec![
+                r#"UPDATE "public"."duplicate_rows" SET "value" = 'updated' WHERE tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid;"#
+            ]
+        );
+        assert_eq!(update.keyless_guards.len(), 1);
+        assert_eq!(
+            update.keyless_guards[0].sql,
+            r#"SELECT COUNT(*) AS dbx_keyless_row_matches FROM "public"."duplicate_rows" WHERE (tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid)"#
+        );
+        // A physical locator must still address one row: zero matches means the
+        // row moved, which the frontend reports instead of "deleted successfully".
+        assert_eq!(update.keyless_guards[0].min_matched_rows, 1);
+        assert_eq!(update.keyless_guards[0].min_message.as_deref(), Some(POSTGRES_CTID_STALE_ROW_ERROR));
+        assert_guards_cover_statement_predicates(&update);
+
+        // CTID changes after UPDATE, so history rollback uses the new full-row
+        // values and only proceeds if that predicate still identifies one row.
+        assert_eq!(
+            update.rollback_statements,
+            vec![
+                r#"UPDATE "public"."duplicate_rows" SET "value" = 'same' WHERE ("id" = 1 AND "value" = 'updated') AND (SELECT COUNT(*) FROM "public"."duplicate_rows" WHERE ("id" = 1 AND "value" = 'updated')) = 1;"#
+            ]
+        );
+
+        let mut delete_options = postgres_ctid_options();
+        delete_options.dirty_rows.clear();
+        delete_options.deleted_rows = vec![0];
+        let delete = prepare_data_grid_save(delete_options);
+        assert_eq!(
+            delete.statements,
+            vec![
+                r#"DELETE FROM "public"."duplicate_rows" WHERE tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid;"#
+            ]
+        );
+        assert_eq!(delete.keyless_guards.len(), 1);
+        assert_eq!(delete.keyless_guards[0].min_matched_rows, 1);
+        assert_eq!(delete.keyless_guards[0].min_message.as_deref(), Some(POSTGRES_CTID_STALE_ROW_ERROR));
+        assert_guards_cover_statement_predicates(&delete);
+    }
+
+    #[test]
+    fn rejects_invalid_postgres_ctid_before_building_mutations() {
+        let mut options = postgres_ctid_options();
+        options.rows[0][0] = json!("not-a-ctid");
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error.as_deref(), Some(POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR));
+        assert!(result.statements.is_empty());
+        assert!(result.keyless_guards.is_empty());
     }
 
     #[test]

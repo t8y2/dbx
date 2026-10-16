@@ -1983,6 +1983,8 @@ export default withEnglishFallback({
     mongoTlsAllowInvalidCertificatesHint: "แมปไปยัง tlsAllowInvalidCertificates=true และปิดการตรวจสอบใบรับรองทั้งหมด ไม่ใช่แค่การตรวจสอบ Hostname ซึ่งเพิ่มความเสี่ยง MITM โดยทั่วไปจำเป็นสำหรับ AWS DocumentDB ผ่าน SSH Tunnel",
     mongoRetryWrites: "ลองเขียนอีกครั้ง",
     mongoRetryWritesHint: "แมปไปยัง retryWrites ปิดใช้สำหรับ AWS DocumentDB ซึ่งไม่รองรับการเขียนแบบลองใหม่ได้",
+    mongoSrvHostHint: "ดูเหมือนเป็นชื่อคลัสเตอร์ MongoDB Atlas ซึ่งมีเฉพาะระเบียน DNS แบบ SRV และเชื่อมต่อแบบ host:port ไม่ได้",
+    mongoUseSrvUrl: "ใช้ URL mongodb+srv://",
     color: "สี",
     colorNone: "ไม่มีสี",
     colorGreen: "เขียว",

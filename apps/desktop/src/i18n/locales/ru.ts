@@ -1784,6 +1784,8 @@ export default withEnglishFallback({
     mongoTlsAllowInvalidCertificatesHint: "Соответствует tlsAllowInvalidCertificates=true и отключает всю проверку сертификатов, а не только проверку имени хоста. Это повышает риск MITM. Часто требуется для AWS DocumentDB через SSH-туннель.",
     mongoRetryWrites: "Повторять записи",
     mongoRetryWritesHint: "Соответствует retryWrites. Отключите для AWS DocumentDB, который не поддерживает повторяемые записи.",
+    mongoSrvHostHint: "Похоже на имя кластера MongoDB Atlas: у него есть только DNS-записи SRV, и подключиться к нему как host:port нельзя.",
+    mongoUseSrvUrl: "Использовать URL mongodb+srv://",
     color: "Цвет",
     colorNone: "Без цвета",
     colorGreen: "Зелёный",

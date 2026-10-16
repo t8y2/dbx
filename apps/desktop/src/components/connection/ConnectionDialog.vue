@@ -88,7 +88,7 @@ import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/z
 import { setZooKeeperAuthScheme, zooKeeperAuthScheme as resolveZooKeeperAuthScheme, type ZooKeeperAuthScheme } from "@/lib/zookeeper/zookeeperConnectionOptions";
 import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mq/mqPinnedVersionOptions";
-import { mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
+import { looksLikeMongoSrvHost, mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoSrvConnectionString, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
@@ -4427,6 +4427,11 @@ const mongoTlsAllowInvalidCertificates = computed({
     form.value.url_params = next;
   },
 });
+const mongoSrvHostSuggested = computed(() => form.value.db_type === "mongodb" && !mongoUseUrl.value && looksLikeMongoSrvHost(form.value.host));
+function switchMongoFormToSrvUrl() {
+  form.value.connection_string = mongoSrvConnectionString(form.value);
+  mongoUseUrl.value = true;
+}
 const mongoRetryWrites = computed({
   get: () => mongoUrlParamIsTrue(form.value.url_params, "retryWrites", true),
   set: (value: boolean) => {
@@ -8400,6 +8405,12 @@ function openExternalUrl(url: string) {
                         <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                         <Input v-model="form.host" class="col-span-2" />
                         <Input v-model.number="form.port" type="number" class="col-span-1" />
+                      </div>
+                      <div v-if="mongoSrvHostSuggested" class="grid grid-cols-4 items-start gap-4">
+                        <div class="col-start-2 col-span-3 flex flex-col items-start gap-2 text-xs leading-5 text-muted-foreground">
+                          <span>{{ t("connection.mongoSrvHostHint") }}</span>
+                          <Button size="sm" variant="outline" @click="switchMongoFormToSrvUrl">{{ t("connection.mongoUseSrvUrl") }}</Button>
+                        </div>
                       </div>
                       <div class="grid grid-cols-4 items-center gap-4">
                         <span />

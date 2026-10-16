@@ -1648,6 +1648,8 @@ export default withEnglishFallback({
     mongoTlsAllowInvalidCertificatesHint: "Memetakan ke tlsAllowInvalidCertificates=true dan menonaktifkan semua validasi sertifikat, bukan hanya pemeriksaan hostname. Ini meningkatkan risiko MITM. Umumnya diperlukan untuk AWS DocumentDB melalui tunnel SSH.",
     mongoRetryWrites: "Coba ulang penulisan",
     mongoRetryWritesHint: "Memetakan ke retryWrites. Nonaktifkan untuk AWS DocumentDB, yang tidak mendukung retryable writes.",
+    mongoSrvHostHint: "Ini tampaknya nama cluster MongoDB Atlas, yang hanya memiliki catatan DNS SRV dan tidak dapat dijangkau sebagai host:port.",
+    mongoUseSrvUrl: "Gunakan URL mongodb+srv://",
     color: "Warna",
     colorNone: "Tanpa warna",
     colorGreen: "Hijau",

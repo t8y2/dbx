@@ -1684,6 +1684,8 @@ export default withEnglishFallback({
     mongoTlsAllowInvalidCertificatesHint: "tlsAllowInvalidCertificates=true에 매핑되며 호스트 이름 확인뿐만 아니라 모든 인증서 검증을 비활성화합니다. 이는 MITM 위험을 증가시킵니다. SSH 터널을 통한 AWS DocumentDB에 일반적으로 필요합니다.",
     mongoRetryWrites: "쓰기 재시도",
     mongoRetryWritesHint: "retryWrites에 매핑됩니다. 재시도 가능한 쓰기를 지원하지 않는 AWS DocumentDB의 경우 비활성화하세요.",
+    mongoSrvHostHint: "MongoDB Atlas 클러스터 이름으로 보입니다. SRV DNS 레코드만 있어 host:port로는 연결할 수 없습니다.",
+    mongoUseSrvUrl: "mongodb+srv:// URL 사용",
     color: "색상",
     colorNone: "색상 없음",
     colorGreen: "초록",

@@ -1522,6 +1522,8 @@ export default withEnglishFallback({
     mongoTlsAllowInvalidCertificatesHint: "對應 tlsAllowInvalidCertificates=true，會停用全部憑證校驗（不只是主機名），存在中間人攻擊風險。經 SSH 隧道存取 AWS DocumentDB 時通常需要開啟。",
     mongoRetryWrites: "重試寫入",
     mongoRetryWritesHint: "對應 retryWrites。AWS DocumentDB 不支援可重試寫入，請關閉。",
+    mongoSrvHostHint: "這看起來是 MongoDB Atlas 叢集名稱，它只有 SRV DNS 記錄，無法以 host:port 方式連線。",
+    mongoUseSrvUrl: "改用 mongodb+srv:// URL",
     color: "顏色",
     colorNone: "無顏色",
     colorGreen: "綠色",

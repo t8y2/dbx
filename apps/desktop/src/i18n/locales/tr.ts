@@ -1384,6 +1384,8 @@ export default withEnglishFallback({
     mongoTlsAllowInvalidCertificatesHint: "tlsAllowInvalidCertificates=true ayarına karşılık gelir ve yalnızca sunucu adı denetimini değil, tüm sertifika doğrulamasını kapatır. Bu, MITM riskini artırır. SSH tüneli üzerinden AWS DocumentDB için genellikle gereklidir.",
     mongoRetryWrites: "Yazmaları yeniden dene",
     mongoRetryWritesHint: "retryWrites ayarına karşılık gelir. Yeniden denenebilir yazmaları desteklemeyen AWS DocumentDB için kapatın.",
+    mongoSrvHostHint: "Bu bir MongoDB Atlas küme adına benziyor; yalnızca SRV DNS kayıtları olduğundan host:port olarak erişilemez.",
+    mongoUseSrvUrl: "mongodb+srv:// URL kullan",
     color: "Renk",
     colorNone: "Renk yok",
     colorGreen: "Yeşil",

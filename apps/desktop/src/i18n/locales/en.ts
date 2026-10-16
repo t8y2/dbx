@@ -2022,6 +2022,8 @@ export default {
     mongoTlsAllowInvalidCertificatesHint: "Maps to tlsAllowInvalidCertificates=true and disables all certificate validation, not just hostname checks. This increases MITM risk. Commonly required for AWS DocumentDB over an SSH tunnel.",
     mongoRetryWrites: "Retry writes",
     mongoRetryWritesHint: "Maps to retryWrites. Disable for AWS DocumentDB, which does not support retryable writes.",
+    mongoSrvHostHint: "This looks like a MongoDB Atlas cluster name, which only has SRV DNS records and cannot be reached as host:port.",
+    mongoUseSrvUrl: "Use mongodb+srv:// URL",
     color: "Color",
     colorNone: "No color",
     colorGreen: "Green",

@@ -1482,6 +1482,8 @@ export default withEnglishFallback({
     mongoTlsAllowInvalidCertificatesHint: "tlsAllowInvalidCertificates=true に対応し、ホスト名だけでなくすべての証明書検証を無効化します。MITM 攻撃のリスクが高まります。SSH トンネル経由の AWS DocumentDB では通常必要です。",
     mongoRetryWrites: "書き込み再試行",
     mongoRetryWritesHint: "retryWrites に対応します。AWS DocumentDB は再試行可能な書き込みをサポートしないため、無効にしてください。",
+    mongoSrvHostHint: "これは MongoDB Atlas のクラスター名のようです。SRV DNS レコードしかないため、host:port では接続できません。",
+    mongoUseSrvUrl: "mongodb+srv:// URL を使用",
     color: "色",
     colorNone: "色なし",
     colorGreen: "緑",

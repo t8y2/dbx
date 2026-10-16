@@ -1960,6 +1960,8 @@ export default withEnglishFallback({
     mongoTlsAllowInvalidCertificatesHint: "对应 tlsAllowInvalidCertificates=true，会禁用全部证书校验（不仅是主机名），存在中间人攻击风险。经 SSH 隧道访问 AWS DocumentDB 时通常需要开启。",
     mongoRetryWrites: "重试写入",
     mongoRetryWritesHint: "对应 retryWrites。AWS DocumentDB 不支持可重试写入，请关闭。",
+    mongoSrvHostHint: "这看起来是 MongoDB Atlas 集群名称，它只有 SRV DNS 记录，无法以 host:port 方式连接。",
+    mongoUseSrvUrl: "改用 mongodb+srv:// URL",
     color: "颜色",
     colorNone: "无颜色",
     colorGreen: "绿色",

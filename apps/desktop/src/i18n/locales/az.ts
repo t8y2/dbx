@@ -1384,6 +1384,8 @@ export default withEnglishFallback({
     mongoTlsAllowInvalidCertificatesHint: "tlsAllowInvalidCertificates=true parametrinə uyğundur və yalnız host adı yoxlamalarını deyil, bütün sertifikat yoxlamalarını deaktiv edir. Bu, MITM riskini artırır. SSH tuneli üzərindən AWS DocumentDB üçün adətən tələb olunur.",
     mongoRetryWrites: "Yazma əməliyyatlarına yenidən cəhd et",
     mongoRetryWritesHint: "retryWrites parametrinə uyğundur. Təkrar yazma cəhdlərini dəstəkləməyən AWS DocumentDB üçün deaktiv edin.",
+    mongoSrvHostHint: "Bu, yalnız SRV DNS qeydləri olan və host:port kimi qoşulmaq mümkün olmayan MongoDB Atlas klaster adına bənzəyir.",
+    mongoUseSrvUrl: "mongodb+srv:// URL istifadə et",
     color: "Rəng",
     colorNone: "Rəngsiz",
     colorGreen: "Yaşıl",

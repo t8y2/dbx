@@ -2384,3 +2384,52 @@ describe("Mongo collection-grid clipboard round-trip", () => {
     }
   });
 });
+
+describe("useDataGridEditor pending-row cancel and cell revert", () => {
+  it("reports whether restoreCellValue actually reverted something", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "original", "Lovelace"]]);
+
+    expect(editor.restoreCellValue(0, 1)).toBe(false);
+    editor.applyCellValue(0, 1, "edited");
+    expect(editor.restoreCellValue(0, 1)).toBe(true);
+    expect(editor.restoreCellValue(0, 1)).toBe(false);
+
+    editor.newRows.value = [];
+    editor.addRows(1);
+    // 未触碰的新行整行都是 NULL，没有可回退的内容
+    expect(editor.restoreCellValue(-1, 0)).toBe(false);
+    editor.applyCellValue(-1, 0, "typed");
+    expect(editor.restoreCellValue(-1, 0)).toBe(true);
+  });
+
+  it("cancels only untouched pending rows", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "original", "Lovelace"]]);
+    editor.newRows.value = [];
+    editor.addRows(2);
+
+    // 已落库的行不是「新增行」，取消新增不适用于它
+    expect(editor.cancelUntouchedPendingRow(0)).toBe(false);
+    expect(editor.cancelUntouchedPendingRow(-1)).toBe(true);
+    expect(editor.newRows.value).toHaveLength(1);
+
+    // 填写过再清空的行不再是「未触碰」，必须留在网格与保存预览里
+    editor.applyCellValue(-1, 0, "kept");
+    editor.restoreCellValue(-1, 0);
+    expect(editor.cancelUntouchedPendingRow(-1)).toBe(false);
+    expect(editor.newRows.value).toHaveLength(1);
+  });
+
+  it("keeps the cancelled pending row undoable", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "original", "Lovelace"]]);
+    editor.newRows.value = [];
+    editor.addRows(2);
+
+    expect(editor.cancelUntouchedPendingRow(-1)).toBe(true);
+    expect(editor.newRows.value).toHaveLength(1);
+    expect(editor.canUndoPendingChange.value).toBe(true);
+
+    editor.undoPendingChange();
+    expect(editor.newRows.value).toHaveLength(2);
+    expect(editor.newRowMeta.value[0]?.untouched).toBe(true);
+  });
+});

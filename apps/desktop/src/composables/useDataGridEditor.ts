@@ -1184,45 +1184,60 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
   }
 
-  function restoreCellValue(rowId: number, col: number) {
-    if (!canEditColumn(col)) return;
+  // 返回「是否真的回退了内容」。网格焦点下的 Esc（#11634）只有在确有改动被回退时才消费按键。
+  function restoreCellValue(rowId: number, col: number): boolean {
+    if (!canEditColumn(col)) return false;
     const item = getRowItem(rowId);
-    if (!item || item.isDeleted) return;
+    if (!item || item.isDeleted) return false;
 
     if (item.isDraft) {
       ensureQuickEntryDraftRow();
-      if (quickEntryDraftRow.value[col] === null) return;
+      if (quickEntryDraftRow.value[col] === null) return false;
       pushUndoSnapshot();
       const nextDraftRow = [...quickEntryDraftRow.value];
       nextDraftRow[col] = null;
       quickEntryDraftRow.value = draftRowHasValue(nextDraftRow) ? nextDraftRow : emptyDraftRow();
       touchPendingChanges();
-      return;
+      return true;
     }
 
     if (item.isNew && item.newIndex !== undefined) {
-      if (isSavingNewRow(item)) return;
+      if (isSavingNewRow(item)) return false;
       const row = newRows.value[item.newIndex];
-      if (!row || row[col] === null) return;
+      if (!row || row[col] === null) return false;
       pushUndoSnapshot();
       row[col] = null;
       updateNewRowEditedColumns(item.newIndex, col, null);
       newRows.value = [...newRows.value];
       newRowMeta.value = [...newRowMeta.value];
       touchPendingChanges();
-      return;
+      return true;
     }
 
-    if (item.sourceIndex === undefined) return;
-    if (!canEditExistingRows.value) return;
+    if (item.sourceIndex === undefined) return false;
+    if (!canEditExistingRows.value) return false;
     const rowChanges = dirtyRows.value.get(item.sourceIndex);
-    if (!rowChanges?.has(col)) return;
+    if (!rowChanges?.has(col)) return false;
     pushUndoSnapshot();
     rowChanges.delete(col);
     if (rowChanges.size === 0) dirtyRows.value.delete(item.sourceIndex);
     dirtyRows.value = new Map(dirtyRows.value);
     touchPendingChanges();
     onCellValueChanged?.(rowId, col);
+    return true;
+  }
+
+  // #11634：Esc 取消「刚新增且从未写入」的待插入行。这类行不进 INSERT 批次
+  // （snapshotPendingSaveChanges 会跳过 untouched 行），因此撤掉它等于整体取消这次新增。
+  // 「填写过再清空」的行在首次提交时就被 updateNewRowEditedColumns 摘掉了 untouched 标记，
+  // 不在取消之列——它们必须保留在保存预览里（useDataGridEditor.spec.ts 锁定了该语义）。
+  function cancelUntouchedPendingRow(rowId: number): boolean {
+    const item = getRowItem(rowId);
+    if (!item?.isNew || item.newIndex === undefined) return false;
+    if (isSavingNewRow(item) || !isUntouchedNewRow(item.data, item.newIndex)) return false;
+    // 走既有的未触碰行删除路径：免二次确认，且写入撤销栈
+    requestDeleteRows([rowId]);
+    return true;
   }
 
   function cancelEdit() {
@@ -1241,6 +1256,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     } else if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
+      // 只取消本次输入，绝不在这里顺手删掉刚新增的空行：新增行在网格里是「批量粘贴的目标」
+      // （batchAppendPaste 要求选中的是空白新增行），把「离开编辑器」和「取消新增」合并
+      // 会让习惯了 Esc 收尾的用户莫名丢掉那行。取消新增由网格焦点下的第二次 Esc 承担（#11634）。
       cancelEdit();
     }
   }
@@ -2563,6 +2581,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     commitEditFromBlur,
     applyCellValue,
     restoreCellValue,
+    cancelUntouchedPendingRow,
     cancelEdit,
     onEditKeydown,
     addRow,

@@ -270,7 +270,7 @@ import {
 } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { resolveDataGridRowNumberLabel } from "@/lib/dataGrid/dataGridRowNumber";
 import { resolveCrosshairTarget, type CrosshairTarget } from "@/lib/dataGrid/crosshairHighlight";
-import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
+import { DATA_GRID_DARK_NEW_ROW_BG, DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_NEW_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
 import { buildDataGridSavedRowRefreshPlan, dataGridSavedRowRefreshPatches } from "@/lib/dataGrid/dataGridSavedRowRefresh";
@@ -4609,6 +4609,7 @@ const {
   applyCellValue,
   stageCellReplacements,
   restoreCellValue,
+  cancelUntouchedPendingRow,
   cancelEdit,
   onEditKeydown,
   addRowsInBatches: addEditorRowsInBatches,
@@ -7765,22 +7766,25 @@ function rowCellsUseSelectionVisual(rowId: number): boolean {
 function dataGridRowStyle(item: RowItem): CSSProperties {
   const dark = isDark.value || (typeof document !== "undefined" && document.documentElement.classList.contains("dark"));
   const activeRowBg = dataGridActiveRowBackground(dark);
+  // 新增行/斑马纹行底色走 CSS 变量：DOM 与 Canvas（canvasDataGridRenderer 的 theme.rowNew /
+  // theme.rowMuted）共用同一色源，避免两侧各写一份字面色后悄悄漂移。
+  const newRowBg = `var(--data-grid-row-new-bg, ${dark ? DATA_GRID_DARK_NEW_ROW_BG : DATA_GRID_LIGHT_NEW_ROW_BG})`;
+  const mutedRowBg = `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`;
+  // 待插入行底色优先于活动行底色（isRowActive 会排除 isNew）：光标总落在刚新增的那一行上
+  // （新增后立即进入编辑），若让活动行底色盖掉它，「这行还没保存」恰好在这时看不见（#11634）。
+  // 光标位置仍由行号列的活动色与选中单元格表达。Canvas 侧同序（resolveCanvasDataGridRowFill）。
   const rowBg = item.isDeleted
     ? dark
       ? "rgb(55, 31, 32)"
       : "rgb(255, 244, 244)"
-    : isRowActive(item.displayIndex)
+    : isRowActive(item.displayIndex) && !item.isNew
       ? activeRowBg
       : item.isNew
-        ? dark
-          ? "rgb(51, 51, 55)"
-          : "rgb(243, 243, 243)"
+        ? newRowBg
         : item.isDraft
-          ? dark
-            ? "rgb(51, 51, 55)"
-            : "rgb(243, 243, 243)"
+          ? mutedRowBg
           : dataGridStripedRows.value && item.displayIndex % 2 === 1
-            ? settingsStore.editorSettings.dataGridZebraRowBg?.trim() || `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`
+            ? settingsStore.editorSettings.dataGridZebraRowBg?.trim() || mutedRowBg
             : "var(--data-grid-background)";
   const rowNumberBg =
     item.isNew && item.status === "clean"
@@ -10753,6 +10757,44 @@ function openCellDetailSearch(): boolean {
   return getDetailEditor()?.openSearch() || cellDetailPanelRef.value?.openSearch() || false;
 }
 
+// #11634：光标停在当前显示的最后一行时，再按一次下键 = 「新增行」（固定追加到结果末尾，
+// 不跟随工具栏的插入位置设置）。只有「本来就会被 clamp 成空操作」的那次下键会走到这里，
+// 所以已有的移动语义（含 Shift 扩展、转置、多格选区）完全不受影响。
+function addRowFromArrowDown(): boolean {
+  // gridClipboardActive 与 insertRows → prepareGridRows 的准入条件保持一致：网格非活动（KeepAlive 隐藏）
+  // 时不消费按键，避免出现「吃掉了下键却没有新增」的情况。
+  if (!canInsertRows.value || isSaving.value || isConditionalUpdateActive.value || rowPreparationController || !gridClipboardActive) return false;
+  if (isTransposeMode.value || editingCell.value) return false;
+  if (hasRowSelection.value || hasColumnSelection.value || selectedCellCount.value !== 1) return false;
+  const position = currentSelectedCellPosition();
+  if (!position || position.rowIndex !== displayRowCount.value - 1) return false;
+  // 快速录入的草稿行本身就在末尾，它已经是「待录入行」；再加一行会凭空多出第二个空行。
+  // 注意：草稿行不进 selectedCellCount（useDataGridSelection 的计数语义会跳过 draft 行），
+  // 所以上面「单格选中」的条件通常已经拦住了它；这里保留一次显式判定作为第二道保险，
+  // 避免将来放宽选择语义后下键突然在草稿行上追加 pending 行。
+  if (displayItemAt(position.rowIndex)?.isDraft) return false;
+  void insertRows(1, "end");
+  return true;
+}
+
+// #11634：网格焦点下的 Esc（单元格编辑器内的 Esc 由 cancelEdit 处理，两段式）。
+// 顺序对齐 DBeaver 的 ESC = Reset cell changes：先撤掉「刚新增且从未写入」的整行，
+// 再把单格的待保存改动回退为原值。多格 / 整行 / 整列选区不参与：一次 Esc 不应抹掉一整片改动。
+function cancelPendingRowOrRestoreCell(): boolean {
+  if (isTransposeMode.value || editingCell.value || !props.editable) return false;
+  // 保存进行中不得改动待提交状态：这一轮保存的快照已经捕获了当前值，此刻回退只会让用户以为
+  // 改动被撤销，数据库仍会写入（同层的 stageCellReplacements / rowPreparationIsCurrent 都做了
+  // 同样的 !isSaving 门槛）。
+  if (isSaving.value) return false;
+  if (hasRowSelection.value || hasColumnSelection.value || selectedCellCount.value !== 1) return false;
+  const position = currentSelectedCellPosition();
+  if (!position) return false;
+  const item = displayItemAt(position.rowIndex);
+  if (!item || item.isDeleted) return false;
+  if (cancelUntouchedPendingRow(item.id)) return true;
+  return restoreCellValue(item.id, actualColumnIndex(position.colIndex));
+}
+
 async function onGridKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
 
@@ -10850,6 +10892,18 @@ async function onGridKeydown(event: KeyboardEvent) {
       event.preventDefault();
       return;
     }
+  }
+  // 两者都只在该按键本来是空操作/无绑定时才消费（下键在最后一行被 clamp；Esc 在网格上原本无绑定），
+  // 因此不会与上面的可配置快捷键、转置分支以及下面的常规移动产生竞争。
+  if (event.key === "ArrowDown" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && addRowFromArrowDown()) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  if (event.key === "Escape" && cancelPendingRowOrRestoreCell()) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
   }
   if (event.key === "ArrowUp" && moveSelectedCell(-1, 0, event.shiftKey)) {
     event.preventDefault();
@@ -16391,7 +16445,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 [data-grid-root] {
   --data-grid-background: var(--background-solid, var(--background));
   --data-grid-row-muted-bg: rgb(240, 240, 240);
-  --data-grid-row-new-bg: rgb(243, 243, 243);
+  --data-grid-row-new-bg: rgb(231, 248, 242);
   --data-grid-row-deleted-bg: rgb(255, 244, 244);
   --data-grid-cell-active-bg: rgb(219, 234, 254);
   --data-grid-cell-crosshair-row-bg: rgb(174, 195, 224);
@@ -16425,7 +16479,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 [data-grid-root].data-grid--dark,
 :global(.dark) [data-grid-root] {
   --data-grid-row-muted-bg: rgb(40, 40, 43);
-  --data-grid-row-new-bg: rgb(51, 51, 55);
+  --data-grid-row-new-bg: rgb(19, 37, 33);
   --data-grid-row-deleted-bg: rgb(55, 31, 32);
   --data-grid-cell-active-bg: rgb(27, 46, 70);
   --data-grid-cell-crosshair-row-bg: rgb(75, 84, 98);
@@ -16460,7 +16514,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 @supports (background: color-mix(in oklab, white 50%, transparent)) {
   [data-grid-root] {
     --data-grid-row-muted-bg: color-mix(in oklab, var(--muted) 99%, var(--foreground));
-    --data-grid-row-new-bg: color-mix(in oklab, var(--primary) 5%, transparent);
+    --data-grid-row-new-bg: color-mix(in oklab, rgb(16 185 129) 10%, var(--background));
     --data-grid-row-deleted-bg: color-mix(in oklab, var(--destructive) 5%, transparent);
     --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(240 177 0) 10%, transparent);
     --data-grid-cell-crosshair-row-bg: color-mix(in srgb, var(--primary) 34%, var(--background));

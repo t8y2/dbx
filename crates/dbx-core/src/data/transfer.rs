@@ -4314,6 +4314,14 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
             DatabaseType::Mysql => "DATETIME".into(),
             DatabaseType::SqlServer => "DATETIME2".into(),
             DatabaseType::ClickHouse => "DateTime64(6)".into(),
+            // Dameng's TIMESTAMP WITH TIME ZONE preserves the offset (verified against
+            // DM8 8.1.5.8: `'2022-08-25 09:58:43.123456 +08:00'` reads back with the
+            // same +08:00, and every common offset spelling is accepted), whereas a
+            // plain TIMESTAMP silently drops it. The value path needs no change: the
+            // source string literal is accepted directly.
+            DatabaseType::Dameng if t.starts_with("timestamptz") || t.contains("with time zone") => {
+                "TIMESTAMP WITH TIME ZONE".into()
+            }
             _ => "TIMESTAMP".into(),
         },
         "longblob" => match target_db {
@@ -4350,6 +4358,19 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
         },
         "bit" => match target_db {
             target_db if is_postgres_transfer_dialect(target_db) => "BOOLEAN".into(),
+            // Dameng's BIT holds a single bit and silently truncates a longer bit
+            // string (`'1010'` reads back as `1`, verified against DM8 8.1.5.8), and
+            // Oracle has no BIT type at all, so a PostgreSQL bit string is kept
+            // verbatim in a VARCHAR instead. `bit varying(n)` reduces to `bit` above,
+            // so the declared width comes from the source spelling.
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => {
+                if t.contains('(') {
+                    let len_part = transfer_length_params(&t, source_db, target_db);
+                    format!("VARCHAR{len_part}")
+                } else {
+                    "VARCHAR(255 CHAR)".into()
+                }
+            }
             _ => "BIT".into(),
         },
         _ => target_text_type(target_db).into(),
@@ -21398,6 +21419,58 @@ SELECT 1 FROM dual"#
         assert_eq!(
             map_column_type("double precision", &DatabaseType::Postgres, &DatabaseType::Postgres),
             "double precision"
+        );
+    }
+
+    #[test]
+    fn map_column_type_keeps_postgres_bit_strings_verbatim_for_the_oracle_family() {
+        // Dameng's BIT holds a single bit and silently truncates a longer bit string
+        // (`'1010'` reads back as `1`), and Oracle has no BIT type at all, so the
+        // Oracle family keeps the PostgreSQL bit string in a VARCHAR instead.
+        // Verified against DM8 8.1.5.8.
+        for target in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            assert_eq!(map_column_type("bit(8)", &DatabaseType::Postgres, &target), "VARCHAR(8 CHAR)");
+            assert_eq!(map_column_type("bit varying(8)", &DatabaseType::Postgres, &target), "VARCHAR(8 CHAR)");
+            assert_eq!(map_column_type("bit(1)", &DatabaseType::Postgres, &target), "VARCHAR(1 CHAR)");
+            // An unbounded `bit varying` has no width to carry over.
+            assert_eq!(map_column_type("bit", &DatabaseType::Postgres, &target), "VARCHAR(255 CHAR)");
+        }
+
+        // PostgreSQL-family targets pass the spelling through; other targets keep BIT.
+        assert_eq!(map_column_type("bit(8)", &DatabaseType::Postgres, &DatabaseType::Postgres), "bit(8)");
+        assert_eq!(map_column_type("bit(8)", &DatabaseType::Postgres, &DatabaseType::Mysql), "BIT");
+    }
+
+    #[test]
+    fn map_column_type_keeps_the_offset_for_dameng_timestamptz() {
+        // Dameng's TIMESTAMP WITH TIME ZONE preserves the offset, whereas a plain
+        // TIMESTAMP silently drops it. Verified against DM8 8.1.5.8: every common
+        // offset spelling is accepted and `+08:00` survives the round trip.
+        assert_eq!(
+            map_column_type("timestamp with time zone", &DatabaseType::Postgres, &DatabaseType::Dameng),
+            "TIMESTAMP WITH TIME ZONE"
+        );
+        assert_eq!(
+            map_column_type("timestamptz", &DatabaseType::Postgres, &DatabaseType::Dameng),
+            "TIMESTAMP WITH TIME ZONE"
+        );
+
+        // A zone-less timestamp must stay a plain TIMESTAMP.
+        assert_eq!(
+            map_column_type("timestamp without time zone", &DatabaseType::Postgres, &DatabaseType::Dameng),
+            "TIMESTAMP"
+        );
+        assert_eq!(map_column_type("timestamp", &DatabaseType::Postgres, &DatabaseType::Dameng), "TIMESTAMP");
+
+        // Oracle / OceanBase and the other targets are unchanged: the zone-preserving
+        // DDL was only verified against Dameng.
+        assert_eq!(
+            map_column_type("timestamp with time zone", &DatabaseType::Postgres, &DatabaseType::Oracle),
+            "TIMESTAMP"
+        );
+        assert_eq!(
+            map_column_type("timestamp with time zone", &DatabaseType::Postgres, &DatabaseType::Mysql),
+            "DATETIME"
         );
     }
 

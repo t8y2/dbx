@@ -1644,6 +1644,7 @@ describe("marketplace detail update history", () => {
     const result = catalog("repo", ["a"]);
     const plugin = result.catalog!.plugins[0];
     plugin.latestVersion = "3.0.0";
+    plugin.source = "https://github.com/jinpy/dbx-ssh-plugin";
     const artifact = { target: "darwin-arm64", url: "https://example.invalid/plugin.dbxp", sha256: "a".repeat(64), signingKeyId: "test.key" };
     plugin.versions = [
       { version: "3.0.0", releasedAt: "2026-10-14T00:00:00.000Z", releaseNotes: "Third release notes", artifacts: [artifact] },
@@ -1683,6 +1684,21 @@ describe("marketplace detail update history", () => {
     await flushUi();
     expect(headers[0].getAttribute("aria-expanded")).toBe("false");
     expect(dialog.textContent).not.toContain("Third release notes");
+  });
+
+  it("links each expanded version to its GitHub release page", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    state.catalogResults = [multiVersionCatalog()];
+    await flushUi();
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    await flushUi();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const releaseButton = [...dialog.querySelectorAll("button")].find((element) => element.textContent?.includes("pluginPlatform.pluginDetailsOpenRelease"))!;
+    expect(releaseButton).toBeDefined();
+    releaseButton.click();
+    await flushUi();
+    expect(openSpy).toHaveBeenCalledWith("https://github.com/jinpy/dbx-ssh-plugin/releases/tag/v3.0.0", "_blank", "noopener,noreferrer");
+    openSpy.mockRestore();
   });
 });
 

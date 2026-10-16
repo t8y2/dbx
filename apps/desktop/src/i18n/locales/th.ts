@@ -531,6 +531,7 @@ export default withEnglishFallback({
     noVersionHistory: "ไม่มีประวัติเวอร์ชัน",
     noReleaseNotes: "ไม่มีบันทึกการเผยแพร่",
     pluginDetailsPublishedOn: "เผยแพร่เมื่อ {date}",
+    pluginDetailsOpenRelease: "รุ่น GitHub",
     noPermissions: "ไม่มีการประกาศสิทธิ์พิเศษ",
     pluginDetailsCompatibility: "ความเข้ากันได้",
     pluginDetailsCurrentTarget: "เป้าหมายปัจจุบัน",

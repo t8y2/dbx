@@ -330,6 +330,14 @@ function marketplaceVersionPublishedLabel(version: PluginMarketplaceVersion): st
   const date = formatMarketplaceReleasedDate(version.releasedAt, appLocale.value);
   return date ? t("pluginPlatform.pluginDetailsPublishedOn", { date }) : "";
 }
+// The expanded entry links to the release page for that exact version in the
+// plugin's source repository, mirroring the 更新管理 panel's GitHub Release button.
+function marketplaceVersionReleaseUrl(version: PluginMarketplaceVersion): string {
+  const source = selectedMarketplaceListing.value?.plugin.source?.trim();
+  if (!source) return "";
+  const tag = version.version.startsWith("v") ? version.version : `v${version.version}`;
+  return `${source.replace(/\/+$/, "")}/releases/tag/${encodeURIComponent(tag)}`;
+}
 const batchUpdatableListings = computed(() => filteredMarketplaceListings.value.filter((listing) => listing.status === "update"));
 const batchSelectedListings = computed(() => filteredMarketplaceListings.value.filter((listing) => isBatchSelectableListing(listing.status) && selectedListingKeys.value.has(listing.key)));
 const batchSelectedInstalled = computed(() => definitions.value.filter((definition) => selectedInstalledIds.value.has(definition.plugin.manifest.id)));
@@ -2171,6 +2179,10 @@ onBeforeUnmount(() => {
                     <div v-if="version.artifacts.length" class="mt-2 flex flex-wrap gap-1.5">
                       <Badge v-for="artifact in version.artifacts" :key="artifact.target" variant="secondary" class="font-mono text-[10px]">{{ artifact.target }}</Badge>
                     </div>
+                    <Button v-if="marketplaceVersionReleaseUrl(version)" type="button" variant="ghost" size="sm" class="mt-3 h-7 gap-1.5 px-2 text-xs" @click.stop="openExternal(marketplaceVersionReleaseUrl(version))">
+                      <ExternalLink class="size-3" />
+                      {{ t("pluginPlatform.pluginDetailsOpenRelease") }}
+                    </Button>
                   </div>
                 </div>
               </TabsContent>

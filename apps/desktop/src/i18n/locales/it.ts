@@ -422,6 +422,7 @@ export default withEnglishFallback({
     noVersionHistory: "No version history available.",
     noReleaseNotes: "No release notes provided.",
     pluginDetailsPublishedOn: "Released {date}",
+    pluginDetailsOpenRelease: "GitHub Release",
     noPermissions: "No special permissions declared.",
     pluginDetailsCompatibility: "Compatibility",
     pluginDetailsCurrentTarget: "Current target",

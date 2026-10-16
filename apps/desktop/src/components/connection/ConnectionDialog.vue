@@ -76,6 +76,7 @@ import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isWindows } from "@/lib/backend/platform";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { loadVisibleDatabasesPickerNames } from "@/lib/connection/visibleDatabasesPickerLoad";
 import { hasXuguConnectionDatabase } from "@/lib/connection/xuguDatabase";
 import {
   DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
@@ -5702,12 +5703,15 @@ async function preloadVisibleDatabaseNames() {
       id: draftId,
       one_time: true,
     };
-    await api.connectDb(draftConfig);
-    visibleDatabaseNames.value = await loadVisibleDatabaseNames(draftId, draftConfig);
+    visibleDatabaseNames.value = await loadVisibleDatabasesPickerNames({
+      connect: () => api.connectDb(draftConfig),
+      listNames: () => loadVisibleDatabaseNames(draftId, draftConfig),
+      disconnect: () => api.disconnectDb(draftId),
+      queryTimeoutSecs: form.value.query_timeout_secs,
+    });
   } catch {
     // silently fail
   } finally {
-    await api.disconnectDb(draftId).catch(() => undefined);
     isLoadingVisibleDatabases.value = false;
   }
 }
@@ -5727,8 +5731,12 @@ async function openVisibleDatabasesPicker() {
       id: draftId,
       one_time: true,
     };
-    await api.connectDb(draftConfig);
-    const names = await loadVisibleDatabaseNames(draftId, draftConfig);
+    const names = await loadVisibleDatabasesPickerNames({
+      connect: () => api.connectDb(draftConfig),
+      listNames: () => loadVisibleDatabaseNames(draftId, draftConfig),
+      disconnect: () => api.disconnectDb(draftId),
+      queryTimeoutSecs: form.value.query_timeout_secs,
+    });
     visibleDatabaseNames.value = names;
     visibleDatabaseShowSystem.value = false;
     const configuredSchemas = visibleSchemaObjectSelection.value;
@@ -5744,7 +5752,6 @@ async function openVisibleDatabasesPicker() {
     testResult.value = { ok: false, message: visibleDatabaseError.value };
     showVisibleDatabasesDialog.value = true;
   } finally {
-    await api.disconnectDb(draftId).catch(() => undefined);
     isLoadingVisibleDatabases.value = false;
   }
 }

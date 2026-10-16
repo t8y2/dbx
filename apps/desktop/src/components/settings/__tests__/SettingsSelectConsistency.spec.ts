@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const settingsSources = ["../../editor/EditorSettingsDialog.vue", "../../editor/SqlFormatterSettingsPanel.vue", "../McpAuthorizationStepper.vue", "../McpDatabaseScopePicker.vue", "../McpResourceScopePicker.vue", "../SettingsTransferPanel.vue"].map((path) => ({
+const settingsSources = ["../../editor/EditorSettingsDialog.vue", "../../editor/SqlFormatterSettingsPanel.vue", "../McpDatabaseScopePicker.vue", "../McpResourceScopePicker.vue", "../SettingsTransferPanel.vue"].map((path) => ({
   path,
   source: readFileSync(new URL(path, import.meta.url), "utf8"),
 }));

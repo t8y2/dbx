@@ -1201,6 +1201,7 @@ export type {
   GlobalSearchMatch,
   GlobalSearchSettings,
 } from "@/lib/backend/tauri";
+export type McpKeychainAccess = "authorized" | "needs_authorization" | "key_missing" | "unknown" | "not_applicable";
 
 // MQTT
 export const mqttGetBrokerInfo = forward("mqttGetBrokerInfo");

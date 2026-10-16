@@ -1,6 +1,36 @@
 <script setup lang="ts">
 import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref, watch, TransitionGroup } from "vue";
-import { ArrowUp, BadgeCheck, Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, Info, LayoutGrid, Link2, List, Loader2, PackageCheck, Pencil, Pin, PinOff, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2, X } from "@lucide/vue";
+import {
+  ArrowUp,
+  BadgeCheck,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+  Download,
+  ExternalLink,
+  FileUp,
+  FolderTree,
+  Globe,
+  Info,
+  LayoutGrid,
+  Link2,
+  List,
+  Loader2,
+  PackageCheck,
+  Pencil,
+  Pin,
+  PinOff,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings2,
+  ShieldCheck,
+  Store,
+  Trash2,
+  X,
+} from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { isSensitivePluginPermission } from "@/lib/plugins/pluginPermissions";
 import { Button } from "@/components/ui/button";
@@ -46,7 +76,7 @@ import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { ConnectionConfig, InstalledPlugin, PluginInstallResult, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
+import type { ConnectionConfig, InstalledPlugin, PluginInstallResult, PluginMarketplaceVersion, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
 import { useI18n } from "vue-i18n";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -276,6 +306,38 @@ const selectedMarketplaceVersions = computed(() => {
   const versions = selectedMarketplaceListing.value?.plugin.versions || [];
   return [...versions].sort((left, right) => compareVersions(right.version, left.version));
 });
+// Update history keeps every release collapsed by default so a long history stays
+// scannable: only the newest release starts expanded, and users can expand any
+// version's notes. Switching to another plugin re-expands that plugin's newest one.
+const expandedMarketplaceVersions = ref<Set<string>>(new Set());
+watch(
+  selectedMarketplaceVersions,
+  (versions) => {
+    expandedMarketplaceVersions.value = new Set(versions.length ? [versions[0].version] : []);
+  },
+  { immediate: true },
+);
+function isMarketplaceVersionExpanded(version: string): boolean {
+  return expandedMarketplaceVersions.value.has(version);
+}
+function toggleMarketplaceVersion(version: string): void {
+  const next = new Set(expandedMarketplaceVersions.value);
+  if (next.has(version)) next.delete(version);
+  else next.add(version);
+  expandedMarketplaceVersions.value = next;
+}
+function marketplaceVersionPublishedLabel(version: PluginMarketplaceVersion): string {
+  const date = formatMarketplaceReleasedDate(version.releasedAt, appLocale.value);
+  return date ? t("pluginPlatform.pluginDetailsPublishedOn", { date }) : "";
+}
+// The expanded entry links to the release page for that exact version in the
+// plugin's source repository, mirroring the 更新管理 panel's GitHub Release button.
+function marketplaceVersionReleaseUrl(version: PluginMarketplaceVersion): string {
+  const source = selectedMarketplaceListing.value?.plugin.source?.trim();
+  if (!source) return "";
+  const tag = version.version.startsWith("v") ? version.version : `v${version.version}`;
+  return `${source.replace(/\/+$/, "")}/releases/tag/${encodeURIComponent(tag)}`;
+}
 const batchUpdatableListings = computed(() => filteredMarketplaceListings.value.filter((listing) => listing.status === "update"));
 const batchSelectedListings = computed(() => filteredMarketplaceListings.value.filter((listing) => isBatchSelectableListing(listing.status) && selectedListingKeys.value.has(listing.key)));
 const batchSelectedInstalled = computed(() => definitions.value.filter((definition) => selectedInstalledIds.value.has(definition.plugin.manifest.id)));
@@ -2003,7 +2065,7 @@ onBeforeUnmount(() => {
     </Tabs>
 
     <Dialog :open="marketplaceDetailOpen" @update:open="(open: boolean) => (open ? (marketplaceDetailOpen = true) : closeMarketplaceDetails())">
-      <DialogContent class="max-h-[min(90vh,52rem)] max-w-3xl gap-0 overflow-hidden p-0" @close-auto-focus="restoreMarketplaceDetailFocus">
+      <DialogContent class="max-h-[min(90vh,52rem)] max-w-3xl gap-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0" @close-auto-focus="restoreMarketplaceDetailFocus">
         <template v-if="selectedMarketplaceListing">
           <DialogHeader class="@container border-b px-6 py-3 pr-14 text-left">
             <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-4 @min-[34rem]:grid-cols-[auto_minmax(0,1fr)_auto]">
@@ -2101,14 +2163,26 @@ onBeforeUnmount(() => {
 
               <TabsContent value="updates" class="mt-0 space-y-3">
                 <div v-if="!selectedMarketplaceVersions.length" class="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">{{ t("pluginPlatform.noVersionHistory") }}</div>
-                <div v-for="version in selectedMarketplaceVersions" :key="version.version" class="rounded-lg border p-3">
-                  <div class="flex flex-wrap items-baseline justify-between gap-2">
-                    <span class="font-medium">v{{ version.version }}</span
-                    ><span class="text-xs text-muted-foreground">{{ formatMarketplaceReleasedDate(version.releasedAt, appLocale) || "—" }}</span>
-                  </div>
-                  <p class="mt-2 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{{ version.releaseNotes || t("pluginPlatform.noReleaseNotes") }}</p>
-                  <div v-if="version.artifacts.length" class="mt-2 flex flex-wrap gap-1.5">
-                    <Badge v-for="artifact in version.artifacts" :key="artifact.target" variant="secondary" class="font-mono text-[10px]">{{ artifact.target }}</Badge>
+                <div v-for="version in selectedMarketplaceVersions" :key="version.version" class="overflow-hidden rounded-lg border">
+                  <button
+                    type="button"
+                    class="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    :aria-expanded="isMarketplaceVersionExpanded(version.version)"
+                    @click="toggleMarketplaceVersion(version.version)"
+                  >
+                    <span class="shrink-0 font-medium text-xs">v{{ version.version }}</span>
+                    <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">{{ marketplaceVersionPublishedLabel(version) || "—" }}</span>
+                    <ChevronDown class="size-4 shrink-0 text-muted-foreground transition-transform" :class="isMarketplaceVersionExpanded(version.version) ? 'rotate-180' : ''" />
+                  </button>
+                  <div v-if="isMarketplaceVersionExpanded(version.version)" class="border-t px-3 py-2.5">
+                    <p class="whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{{ version.releaseNotes || t("pluginPlatform.noReleaseNotes") }}</p>
+                    <div v-if="version.artifacts.length" class="mt-2 flex flex-wrap gap-1.5">
+                      <Badge v-for="artifact in version.artifacts" :key="artifact.target" variant="secondary" class="font-mono text-[10px]">{{ artifact.target }}</Badge>
+                    </div>
+                    <Button v-if="marketplaceVersionReleaseUrl(version)" type="button" variant="ghost" size="sm" class="mt-3 h-7 gap-1.5 px-2 text-xs" @click.stop="openExternal(marketplaceVersionReleaseUrl(version))">
+                      <ExternalLink class="size-3" />
+                      {{ t("pluginPlatform.pluginDetailsOpenRelease") }}
+                    </Button>
                   </div>
                 </div>
               </TabsContent>

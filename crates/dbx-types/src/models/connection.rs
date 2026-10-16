@@ -187,6 +187,8 @@ pub struct ConnectionConfig {
     pub query_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_manual_transaction_timeout_secs")]
+    pub manual_transaction_timeout_secs: u64,
     #[serde(default = "default_keepalive_interval_secs")]
     pub keepalive_interval_secs: u64,
     #[serde(default)]
@@ -593,6 +595,16 @@ pub fn default_idle_timeout_secs() -> u64 {
     60
 }
 
+/// Seconds a manual transaction may sit without executing a statement before DBX
+/// rolls it back.
+pub const DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS: u64 = 300;
+pub const MIN_MANUAL_TRANSACTION_TIMEOUT_SECS: u64 = 30;
+pub const MAX_MANUAL_TRANSACTION_TIMEOUT_SECS: u64 = 86_400;
+
+pub fn default_manual_transaction_timeout_secs() -> u64 {
+    DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS
+}
+
 pub fn default_keepalive_interval_secs() -> u64 {
     30
 }
@@ -674,6 +686,8 @@ struct ConnectionConfigData {
     pub query_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_manual_transaction_timeout_secs")]
+    pub manual_transaction_timeout_secs: u64,
     #[serde(default = "default_keepalive_interval_secs")]
     pub keepalive_interval_secs: u64,
     #[serde(default)]
@@ -787,6 +801,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
             idle_timeout_secs: data.idle_timeout_secs,
+            manual_transaction_timeout_secs: data.manual_transaction_timeout_secs,
             keepalive_interval_secs: data.keepalive_interval_secs,
             ssl: data.ssl,
             ca_cert_path: data.ca_cert_path,
@@ -993,6 +1008,17 @@ impl ConnectionConfig {
             default_connect_timeout_secs()
         } else {
             self.connect_timeout_secs.clamp(1, 300)
+        }
+    }
+
+    /// Idle window of a manual transaction. `0` (legacy or unset payloads) falls
+    /// back to the default instead of rolling back immediately.
+    pub fn effective_manual_transaction_timeout_secs(&self) -> u64 {
+        if self.manual_transaction_timeout_secs == 0 {
+            default_manual_transaction_timeout_secs()
+        } else {
+            self.manual_transaction_timeout_secs
+                .clamp(MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, MAX_MANUAL_TRANSACTION_TIMEOUT_SECS)
         }
     }
 
@@ -3188,6 +3214,7 @@ mod tests {
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
             idle_timeout_secs: super::default_idle_timeout_secs(),
+            manual_transaction_timeout_secs: super::default_manual_transaction_timeout_secs(),
             keepalive_interval_secs: super::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -3719,6 +3746,28 @@ mod tests {
         config.query_timeout_secs = 0;
 
         assert_eq!(config.effective_query_timeout_secs(), 0);
+    }
+
+    #[test]
+    fn manual_transaction_timeout_defaults_when_absent_or_zero_and_is_clamped() {
+        let mut config = mysql_config("root", "", None);
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), 300);
+
+        // Payloads saved before the setting existed deserialize to the default.
+        let mut json = serde_json::to_value(&config).unwrap();
+        json.as_object_mut().unwrap().remove("manual_transaction_timeout_secs");
+        let legacy: ConnectionConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.manual_transaction_timeout_secs, 300);
+
+        // 0 must never mean "roll back immediately".
+        config.manual_transaction_timeout_secs = 0;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), 300);
+        config.manual_transaction_timeout_secs = 1;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), super::MIN_MANUAL_TRANSACTION_TIMEOUT_SECS);
+        config.manual_transaction_timeout_secs = 1_800;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), 1_800);
+        config.manual_transaction_timeout_secs = u64::MAX;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), super::MAX_MANUAL_TRANSACTION_TIMEOUT_SECS);
     }
 
     #[test]

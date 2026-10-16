@@ -2644,12 +2644,12 @@ public final class DbxJdbcPlugin {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, true);
             } catch (SQLException | AbstractMethodError ignored) {
-                // Legacy/incomplete JDBC drivers (e.g. jTDS against SQL Server 2000, #11127)
-                // throw AbstractMethodError instead of a proper SQLException when their
-                // getSchemas(String, String) implementation is incomplete.
+                // Legacy/incomplete JDBC drivers reject the two-arg overload: jTDS against
+                // SQL Server 2000 throws AbstractMethodError (#11127); Informix/GBase 8s
+                // (IfxDatabaseMetaData) throws a plain SQLException("不支持方法") (#12213).
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, true);
-                } catch (AbstractMethodError ignored2) {
+                } catch (SQLException | AbstractMethodError ignored2) {
                 }
             }
             try (ResultSet rs = meta.getSchemas(null, null)) {
@@ -2659,11 +2659,12 @@ public final class DbxJdbcPlugin {
         } else {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, false);
-            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
-                // See the AbstractMethodError note above: same legacy-driver fallback.
+            } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
+                // See the SQLException/AbstractMethodError note above: same legacy-driver
+                // fallback (SQLFeatureNotSupportedException is a SQLException subclass).
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, false);
-                } catch (AbstractMethodError ignored2) {
+                } catch (SQLException | AbstractMethodError ignored2) {
                 }
             }
             if (quirks.mergeEmptyCatalogSchemas() && catalog != null && !catalog.isEmpty()) {
@@ -2675,7 +2676,7 @@ public final class DbxJdbcPlugin {
             if (result.isEmpty() && catalog != null) {
                 try (ResultSet rs = meta.getSchemas(null, null)) {
                     appendSchemas(result, rs, false);
-                } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
+                } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
                 }
             }
         }

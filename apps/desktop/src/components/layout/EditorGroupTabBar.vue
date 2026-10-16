@@ -84,12 +84,24 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { EditorSettings } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
+import { useTabTitleTruncation } from "@/composables/useTabTitleTruncation";
 import { useToast } from "@/composables/useToast";
 import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
-import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems, createReopenClosedTabMenuItem } from "@/lib/tabs/tabMenu";
+import {
+  createCloseAllTabMenuItem,
+  createCloseLeftTabMenuItem,
+  createCloseOtherTabMenuItem,
+  createCloseRightTabMenuItem,
+  createCloseTabMenuItem,
+  createLocateTabMenuItem,
+  createPinTabMenuItem,
+  createRenameDuplicateTabItems,
+  createReopenClosedTabMenuItem,
+  createSaveAllTabsMenuItem,
+} from "@/lib/tabs/tabMenu";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { findTabWithSameTitleSuffix, joinTabTitleParts, TAB_TITLE_SUFFIX_MAX_LENGTH, tabConnectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabDisplayTitleParts, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
@@ -126,6 +138,7 @@ const emit = defineEmits<{
   "close-driver-store": [];
   "activate-plugin-center": [];
   "close-plugin-center": [];
+  "save-all-tabs": [];
 }>();
 
 const { t } = useI18n();
@@ -137,6 +150,7 @@ const canNewQuery = computed(() => toolbar?.canNewQuery.value ?? false);
 const { toast } = useToast();
 const tabsContainerRef = ref<HTMLElement | null>(null);
 const { hasTabOverflow, scrollThumbLeftPercent, scrollThumbWidthPercent, isScrollbarDragging, updateScrollButtons, onTabsWheel, startScrollbarDrag } = useTabScroll(tabsContainerRef);
+const { hasTruncatedTabTitle } = useTabTitleTruncation(tabsContainerRef);
 const fixedTabsRowRef = ref<HTMLElement | null>(null);
 const regularTabsRowRef = ref<HTMLElement | null>(null);
 const fixedTabsScroll = useTabScroll(fixedTabsRowRef);
@@ -344,13 +358,25 @@ function revealActiveTabAfterLayout() {
 
 const showOverflowControl = computed(() => {
   void tabLayoutRevision.value;
-  const hasOverflow = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value || hasHorizontalRowOverflow() : hasTabOverflow.value;
-  return props.tabs.length > 0 && hasOverflow && !isWrapLayout.value && !isVerticalLayout.value;
+  // A single-row strip hides tabs in two ways: they scroll out of the viewport
+  // (real overflow) or they stay in it and ellipsize their labels, which the
+  // scroll box cannot see because a capped pill narrows itself instead of
+  // overflowing (useTabTitleTruncation). The two-row layout decides from its
+  // rows' scroll extents alone: its first row narrows itself by the arrow's
+  // reserved width (.tab-section-frame--with-overflow-control), so feeding
+  // clipping back into the arrow there would rebuild the loop that the constant
+  // reservation exists to break.
+  const hasHiddenTab = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value || hasHorizontalRowOverflow() : hasTabOverflow.value || hasTruncatedTabTitle.value;
+  return props.tabs.length > 0 && hasHiddenTab && !isWrapLayout.value && !isVerticalLayout.value;
 });
 const tabTailDragRegionClass = computed(() => {
   if (isWrapLayout.value || isVerticalLayout.value) return "w-0 flex-none self-stretch";
-  if (showOverflowControl.value) return "tab-tail-overflow-spacer flex-none self-stretch";
-  return "min-w-8 flex-1 self-stretch";
+  // Keep a constant footprint. Letting this spacer (and the strip's reserved
+  // padding) depend on showOverflowControl made the measured scroll viewport
+  // respond to its own measurement, flipping the overflow arrow every frame for
+  // a single near-full-width tab. Dropping the 32px minimum turns it into a
+  // pure filler: it grows into spare space but never manufactures overflow.
+  return "min-w-0 flex-1 self-stretch";
 });
 
 watch(
@@ -1395,6 +1421,10 @@ function hasTabsToLeft(tab: QueryTab) {
   return tabsToLeftInDisplayOrder(tab).length > 0;
 }
 
+function handleSaveAllTabs() {
+  emit("save-all-tabs");
+}
+
 function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
   const items: ContextMenuItem[] = [
     {
@@ -1503,6 +1533,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
     createCloseAllTabMenuItem({
       label: t("contextMenu.closeAllTabs"),
       onClose: () => queryStore.closeAllTabsInGroup(props.groupId, tab.id),
+    }),
+    createSaveAllTabsMenuItem({
+      label: t("contextMenu.saveAllTabs"),
+      disabled: !queryStore.hasDirtyTabs,
+      shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.saveAllTabs ?? ""),
+      onSaveAll: () => handleSaveAllTabs(),
     }),
     {
       label: t("contextMenu.closeTabGroup"),
@@ -1956,7 +1992,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             <span v-else-if="!isTabBarCollapsed" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
                               <span v-if="isDirtyTab(entry.tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                               <span class="flex min-w-0 flex-1 items-center overflow-hidden">
-                                <span class="min-w-0 truncate" :style="tabTitleStyle(entry.tab)">{{ tabTitleBase(entry.tab) }}</span>
+                                <span class="min-w-0 truncate" :style="tabTitleStyle(entry.tab)" data-tab-title-base>{{ tabTitleBase(entry.tab) }}</span>
                                 <span v-if="tabTitleSuffixText(entry.tab)" class="tab-title-suffix max-w-full shrink-0 overflow-hidden pl-1 text-ellipsis whitespace-nowrap" :style="tabTitleStyle(entry.tab)" data-tab-title-suffix>{{ tabTitleSuffixText(entry.tab) }}</span>
                               </span>
                             </span>

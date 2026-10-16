@@ -46,9 +46,7 @@ fn manual_transaction_command_error(error: String) -> ManualTransactionCommandEr
         return ManualTransactionCommandError::Structured(Box::new(error));
     }
     if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
-        ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
-            dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
-        )))
+        ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired()))
     } else {
         ManualTransactionCommandError::Legacy(error)
     }

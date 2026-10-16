@@ -547,9 +547,9 @@ func TestGetTableDDLFallbackPreservesQuotedColumnNames(t *testing.T) {
 			args:          []driver.Value{schema, table},
 			columns: []string{
 				"COLUMN_NAME", "DATA_TYPE", "NULLABLE", "DATA_DEFAULT", "IS_PRIMARY_KEY",
-				"COMMENTS", "DATA_PRECISION", "DATA_SCALE", "CHAR_LENGTH", "CHAR_USED",
+				"COMMENTS", "DATA_PRECISION", "DATA_SCALE", "DATA_LENGTH", "CHAR_LENGTH", "CHAR_USED",
 			},
-			rows: [][]driver.Value{{"FlowId", "VARCHAR2", "N", nil, int64(1), nil, nil, nil, int64(50), "C"}},
+			rows: [][]driver.Value{{"FlowId", "VARCHAR2", "N", nil, int64(1), nil, nil, nil, nil, int64(50), "C"}},
 		},
 	})
 	s := newServer()
@@ -876,14 +876,14 @@ func TestListIndexesSeparatesQuotedCloneTableNamesByCase(t *testing.T) {
 		{
 			queryContains: "FROM ALL_INDEXES",
 			args:          []driver.Value{schema, "ORDERS_COPY"},
-			columns:       []string{"INDEX_NAME", "COLUMN_NAME", "UNIQUENESS", "IS_PRIMARY", "INDEX_TYPE", "COLUMN_POSITION"},
-			rows:          [][]driver.Value{{"ORDERS_COPY_IDX1", "STATUS", "NONUNIQUE", int64(0), "NORMAL", int64(1)}},
+			columns:       []string{"INDEX_NAME", "COLUMN_NAME", "UNIQUENESS", "IS_PRIMARY", "INDEX_TYPE", "PARTITIONED", "VISIBILITY", "DESCEND", "COLUMN_EXPRESSION", "COLUMN_POSITION"},
+			rows:          [][]driver.Value{{"ORDERS_COPY_IDX1", "STATUS", "NONUNIQUE", int64(0), "NORMAL", "NO", "VISIBLE", "ASC", nil, int64(1)}},
 		},
 		{
 			queryContains: "FROM ALL_INDEXES",
 			args:          []driver.Value{schema, "ORDERS_copy"},
-			columns:       []string{"INDEX_NAME", "COLUMN_NAME", "UNIQUENESS", "IS_PRIMARY", "INDEX_TYPE", "COLUMN_POSITION"},
-			rows:          [][]driver.Value{{"ORDERS_copy_IDX1", "STATUS", "NONUNIQUE", int64(0), "NORMAL", int64(1)}},
+			columns:       []string{"INDEX_NAME", "COLUMN_NAME", "UNIQUENESS", "IS_PRIMARY", "INDEX_TYPE", "PARTITIONED", "VISIBILITY", "DESCEND", "COLUMN_EXPRESSION", "COLUMN_POSITION"},
+			rows:          [][]driver.Value{{"ORDERS_copy_IDX1", "STATUS", "NONUNIQUE", int64(0), "NORMAL", "NO", "VISIBLE", "ASC", nil, int64(1)}},
 		},
 	})
 	s := newServer()
@@ -905,6 +905,84 @@ func TestListIndexesSeparatesQuotedCloneTableNamesByCase(t *testing.T) {
 	}
 	if scripted.next != len(scripted.steps) {
 		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestListIndexesExposesExpressionDirectionAndVisibilityMetadata(t *testing.T) {
+	const schema = "APP"
+	const table = "EVENTS"
+	db, _ := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{{
+		queryContains: "FROM ALL_INDEXES",
+		args:          []driver.Value{schema, table},
+		columns:       []string{"INDEX_NAME", "COLUMN_NAME", "UNIQUENESS", "IS_PRIMARY", "INDEX_TYPE", "PARTITIONED", "VISIBILITY", "DESCEND", "COLUMN_EXPRESSION", "COLUMN_POSITION"},
+		rows: [][]driver.Value{
+			{"IX_EVENT_EXPR", "SYS_NC00001$", "NONUNIQUE", int64(0), "FUNCTION-BASED NORMAL", "NO", "INVISIBLE", "DESC", `LOWER("EVENT_NAME")`, int64(1)},
+			{"IX_EVENT_EXPR", "EVENT_TS", "NONUNIQUE", int64(0), "FUNCTION-BASED NORMAL", "NO", "INVISIBLE", "ASC", nil, int64(2)},
+		},
+	}})
+	s := newServer()
+	s.db = db
+
+	resp, shutdown := s.handleLine(`{"jsonrpc":"2.0","id":1,"method":"list_indexes","params":{"schema":"APP","table":"EVENTS"}}`)
+	if shutdown {
+		t.Fatal("list_indexes unexpectedly shut down the agent")
+	}
+	if resp.Error != nil {
+		t.Fatalf("list_indexes RPC failed: %s", resp.Error.Message)
+	}
+	indexes, ok := resp.Result.([]indexInfo)
+	if !ok || len(indexes) != 1 {
+		t.Fatalf("list_indexes RPC result = %#v, want one index", resp.Result)
+	}
+	payload, err := json.Marshal(indexes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{
+		"columns":               []any{`LOWER("EVENT_NAME")`, "EVENT_TS"},
+		"key_is_expression":     []any{true, false},
+		"key_directions":        []any{"DESC", "ASC"},
+		"visibility":            "INVISIBLE",
+		"key_metadata_complete": true,
+	} {
+		if !reflect.DeepEqual(got[key], want) {
+			t.Errorf("listIndexes JSON field %q = %#v, want %#v (payload %s)", key, got[key], want, payload)
+		}
+	}
+}
+
+func TestListIndexesMarksUnsupportedShapesIncompleteThroughRPC(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		indexType   string
+		partitioned string
+	}{
+		{name: "partitioned", indexType: "NORMAL", partitioned: "YES"},
+		{name: "bitmap", indexType: "FUNCTION-BASED BITMAP", partitioned: "NO"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, _ := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{{
+				queryContains: "FROM ALL_INDEXES",
+				args:          []driver.Value{"APP", "EVENTS"},
+				columns:       []string{"INDEX_NAME", "COLUMN_NAME", "UNIQUENESS", "IS_PRIMARY", "INDEX_TYPE", "PARTITIONED", "VISIBILITY", "DESCEND", "COLUMN_EXPRESSION", "COLUMN_POSITION"},
+				rows:          [][]driver.Value{{"IX_EVENT", "EVENT_TS", "NONUNIQUE", int64(0), test.indexType, test.partitioned, "VISIBLE", "ASC", nil, int64(1)}},
+			}})
+			s := newServer()
+			s.db = db
+
+			resp, shutdown := s.handleLine(`{"jsonrpc":"2.0","id":1,"method":"list_indexes","params":{"schema":"APP","table":"EVENTS"}}`)
+			if shutdown || resp.Error != nil {
+				t.Fatalf("list_indexes RPC failed: shutdown=%v error=%v", shutdown, resp.Error)
+			}
+			indexes, ok := resp.Result.([]indexInfo)
+			if !ok || len(indexes) != 1 || indexes[0].KeyMetadataComplete {
+				t.Fatalf("list_indexes returned unsupported shape as complete: %#v", resp.Result)
+			}
+		})
 	}
 }
 
@@ -1005,12 +1083,12 @@ func TestListConstraintsGroupsMultiColumnPrimaryKeyAndMapsTypes(t *testing.T) {
 		{
 			queryContains: "FROM ALL_CONSTRAINTS ac",
 			args:          []driver.Value{schema, table},
-			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "COLUMN_NAME", "POSITION", "NULLABLE"},
+			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "RELY", "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME", "POSITION", "NULLABLE"},
 			rows: [][]driver.Value{
-				{"PK_ORDERS", "P", nil, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "TENANT_ID", int64(1), "N"},
-				{"PK_ORDERS", "P", nil, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "ORDER_ID", int64(2), "N"},
-				{"UQ_ORDERS_CODE", "U", nil, "USER NAME", "ENABLED", "DEFERRABLE", "DEFERRED", "VALIDATED", "ORDER_CODE", int64(1), "Y"},
-				{"CK_ORDERS_AMOUNT", "C", "AMOUNT > 0", "USER NAME", "DISABLED", "NOT DEFERRABLE", "IMMEDIATE", "NOT VALIDATED", nil, nil, nil},
+				{"PK_ORDERS", "P", nil, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, nil, nil, "TENANT_ID", int64(1), "N"},
+				{"PK_ORDERS", "P", nil, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, nil, nil, "ORDER_ID", int64(2), "N"},
+				{"UQ_ORDERS_CODE", "U", nil, "USER NAME", "ENABLED", "DEFERRABLE", "DEFERRED", "VALIDATED", nil, nil, nil, "ORDER_CODE", int64(1), "Y"},
+				{"CK_ORDERS_AMOUNT", "C", "AMOUNT > 0", "USER NAME", "DISABLED", "NOT DEFERRABLE", "IMMEDIATE", "NOT VALIDATED", nil, nil, nil, nil, nil, nil},
 			},
 		},
 	})
@@ -1020,6 +1098,9 @@ func TestListConstraintsGroupsMultiColumnPrimaryKeyAndMapsTypes(t *testing.T) {
 	got, err := s.listConstraints(schema, table)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for i := range got {
+		got[i].OracleMetadata = nil // These assertions preserve the legacy display contract.
 	}
 	want := []constraintInfo{
 		{Name: "PK_ORDERS", ConstraintType: "PRIMARY KEY", Definition: "", Columns: []string{"TENANT_ID", "ORDER_ID"}, RefColumns: []string{}, Enabled: true, Valid: true},
@@ -1034,19 +1115,68 @@ func TestListConstraintsGroupsMultiColumnPrimaryKeyAndMapsTypes(t *testing.T) {
 	}
 }
 
-func TestListConstraintsExcludesGeneratedNotNullChecksButKeepsRealChecks(t *testing.T) {
+func TestListConstraintsReturnsExactUniqueIndexMetadata(t *testing.T) {
 	const schema = "HR"
-	const table = "ORDERS"
+	const table = "USERS"
 	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
 		{
 			queryContains: "FROM ALL_CONSTRAINTS ac",
 			args:          []driver.Value{schema, table},
-			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "COLUMN_NAME", "POSITION", "NULLABLE"},
+			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "RELY", "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME", "POSITION", "NULLABLE"},
+			rows:          [][]driver.Value{{"UQ_USERS_EMAIL", "U", nil, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, schema, "UQ_USERS_EMAIL", "EMAIL", int64(1), "Y"}},
+		},
+		{
+			queryContains: "FROM ALL_INDEXES i",
+			args:          []driver.Value{schema, "UQ_USERS_EMAIL", schema, table},
+			columns:       []string{"OWNER", "TABLE_OWNER", "TABLE_NAME", "INDEX_TYPE", "UNIQUENESS", "STATUS", "PARTITIONED", "VISIBILITY", "SECONDARY", "COLUMN_NAME", "DESCEND", "COLUMN_EXPRESSION", "COLUMN_POSITION"},
+			rows:          [][]driver.Value{{schema, schema, table, "NORMAL", "UNIQUE", "VALID", "NO", "VISIBLE", nil, "EMAIL", "ASC", nil, int64(1)}},
+		},
+		{
+			queryContains: "SELECT COUNT(*) FROM ALL_CONSTRAINTS",
+			args:          []driver.Value{schema, table, schema, "UQ_USERS_EMAIL"},
+			columns:       []string{"COUNT(*)"},
+			rows:          [][]driver.Value{{int64(1)}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.listConstraints(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].OracleMetadata == nil {
+		t.Fatalf("listConstraints() = %#v, want one item with Oracle metadata", got)
+	}
+	metadata := got[0].OracleMetadata
+	if !metadata.MetadataComplete || metadata.Rely != nil || metadata.IndexSharing == nil || *metadata.IndexSharing != "exclusive" {
+		t.Fatalf("constraint metadata = %#v, want complete metadata with NULL RELY and exclusive index", metadata)
+	}
+	if metadata.Index == nil || !metadata.Index.MetadataComplete || metadata.Index.Secondary != nil ||
+		!reflect.DeepEqual(metadata.Index.Columns, []string{"EMAIL"}) ||
+		!reflect.DeepEqual(metadata.Index.Directions, []string{"ASC"}) ||
+		!reflect.DeepEqual(metadata.Index.KeyIsExpression, []bool{false}) {
+		t.Fatalf("index metadata = %#v, want exact ordinary index shape", metadata.Index)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestListConstraintsDisabledUniqueWithoutIndexMaintainsCompleteMetadata(t *testing.T) {
+	const schema = "HR"
+	const table = "USERS"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_CONSTRAINTS ac",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "RELY", "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME", "POSITION", "NULLABLE"},
 			rows: [][]driver.Value{
-				{"SYS_C008648", "C", `"ORDER_CODE" IS NOT NULL`, "GENERATED NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "ORDER_CODE", int64(1), "N"},
-				{"SYS_C008649", "C", `"OPTIONAL_CODE" IS NOT NULL`, "GENERATED NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "OPTIONAL_CODE", int64(1), "Y"},
-				{"CK_REQUIRED_CODE", "C", `"REQUIRED_CODE" IS NOT NULL`, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", "REQUIRED_CODE", int64(1), "N"},
-				{"CK_ORDERS_AMOUNT", "C", "AMOUNT > 0", "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, nil, nil},
+				{"UQ_DISABLED_NO_IDX", "U", nil, "USER NAME", "DISABLED", "NOT DEFERRABLE", "IMMEDIATE", "NOT VALIDATED", nil, nil, nil, "EMAIL", int64(1), "Y"},
+				{"UQ_ENABLED_NO_IDX", "U", nil, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, nil, nil, "PHONE", int64(1), "Y"},
+				{"UQ_DISABLED_ONE_NULL", "U", nil, "USER NAME", "DISABLED", "NOT DEFERRABLE", "IMMEDIATE", "NOT VALIDATED", nil, schema, nil, "ADDRESS", int64(1), "Y"},
+				{"UQ_DISABLED_EMPTY_NAME", "U", nil, "USER NAME", "DISABLED", "NOT DEFERRABLE", "IMMEDIATE", "NOT VALIDATED", nil, schema, "", "CITY", int64(1), "Y"},
+				{"UQ_UNKNOWN_STATUS", "U", nil, "USER NAME", "UNKNOWN", "NOT DEFERRABLE", "IMMEDIATE", "NOT VALIDATED", nil, nil, nil, "ZIP", int64(1), "Y"},
 			},
 		},
 	})
@@ -1056,6 +1186,60 @@ func TestListConstraintsExcludesGeneratedNotNullChecksButKeepsRealChecks(t *test
 	got, err := s.listConstraints(schema, table)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("listConstraints() returned %d items, want 5", len(got))
+	}
+	// Case 1: DISABLED + double SQL NULL -> MetadataComplete == true
+	if meta := got[0].OracleMetadata; meta == nil || !meta.MetadataComplete || meta.Index != nil || meta.IndexSharing != nil {
+		t.Fatalf("UQ_DISABLED_NO_IDX metadata = %#v, want MetadataComplete == true and nil Index/IndexSharing", meta)
+	}
+	// Case 2: ENABLED + double SQL NULL -> MetadataComplete == false (ENABLED UNIQUE must have index)
+	if meta := got[1].OracleMetadata; meta == nil || meta.MetadataComplete {
+		t.Fatalf("UQ_ENABLED_NO_IDX metadata = %#v, want MetadataComplete == false for ENABLED without index", meta)
+	}
+	// Case 3: DISABLED + single null (IndexName is nil, IndexOwner is not) -> MetadataComplete == false
+	if meta := got[2].OracleMetadata; meta == nil || meta.MetadataComplete {
+		t.Fatalf("UQ_DISABLED_ONE_NULL metadata = %#v, want MetadataComplete == false for single null index", meta)
+	}
+	// Case 4: DISABLED + empty string -> MetadataComplete == false
+	if meta := got[3].OracleMetadata; meta == nil || meta.MetadataComplete {
+		t.Fatalf("UQ_DISABLED_EMPTY_NAME metadata = %#v, want MetadataComplete == false for empty string index name", meta)
+	}
+	// Case 5: UNKNOWN status -> MetadataComplete == false
+	if meta := got[4].OracleMetadata; meta == nil || meta.MetadataComplete {
+		t.Fatalf("UQ_UNKNOWN_STATUS metadata = %#v, want MetadataComplete == false for unknown status", meta)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestListConstraintsExcludesGeneratedNotNullChecksButKeepsRealChecks(t *testing.T) {
+	const schema = "HR"
+	const table = "ORDERS"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "FROM ALL_CONSTRAINTS ac",
+			args:          []driver.Value{schema, table},
+			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "RELY", "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME", "POSITION", "NULLABLE"},
+			rows: [][]driver.Value{
+				{"SYS_C008648", "C", `"ORDER_CODE" IS NOT NULL`, "GENERATED NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, nil, nil, "ORDER_CODE", int64(1), "N"},
+				{"SYS_C008649", "C", `"OPTIONAL_CODE" IS NOT NULL`, "GENERATED NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, nil, nil, "OPTIONAL_CODE", int64(1), "Y"},
+				{"CK_REQUIRED_CODE", "C", `"REQUIRED_CODE" IS NOT NULL`, "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, nil, nil, "REQUIRED_CODE", int64(1), "N"},
+				{"CK_ORDERS_AMOUNT", "C", "AMOUNT > 0", "USER NAME", "ENABLED", "NOT DEFERRABLE", "IMMEDIATE", "VALIDATED", nil, nil, nil, nil, nil, nil},
+			},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	got, err := s.listConstraints(schema, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range got {
+		got[i].OracleMetadata = nil // These assertions preserve the legacy display contract.
 	}
 	want := []constraintInfo{
 		{Name: "SYS_C008649", ConstraintType: "CHECK", Definition: `"OPTIONAL_CODE" IS NOT NULL`, Columns: []string{"OPTIONAL_CODE"}, RefColumns: []string{}, Enabled: true, Valid: true},
@@ -1077,7 +1261,7 @@ func TestListConstraintsPreservesQuotedMixedCaseSchema(t *testing.T) {
 		{
 			queryContains: "FROM ALL_CONSTRAINTS ac",
 			args:          []driver.Value{schema, table},
-			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "COLUMN_NAME", "POSITION", "NULLABLE"},
+			columns:       []string{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "GENERATED", "STATUS", "DEFERRABLE", "DEFERRED", "VALIDATED", "RELY", "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME", "POSITION", "NULLABLE"},
 			rows:          [][]driver.Value{},
 		},
 	})
@@ -1311,6 +1495,8 @@ func protocolContract(t *testing.T) struct {
 
 func TestOracleColumnTypeDDL(t *testing.T) {
 	charLen := 64
+	rawLen := 16
+	zeroLength := 0
 	precision := 10
 	scale := 2
 	zeroScale := 0
@@ -1326,6 +1512,10 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 		{name: "varchar", column: columnInfo{DataType: "VARCHAR2", CharacterMaximumLength: &charLen}, want: "VARCHAR2(64)"},
 		{name: "varchar byte semantics", column: columnInfo{DataType: "VARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &byteUnit}, want: "VARCHAR2(64 BYTE)"},
 		{name: "varchar char semantics", column: columnInfo{DataType: "VARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &charUnit}, want: "VARCHAR2(64 CHAR)"},
+		{name: "raw length", column: columnInfo{DataType: "RAW", DataLength: &rawLen}, want: "RAW(16)"},
+		{name: "raw unknown length", column: columnInfo{DataType: "RAW"}, want: "RAW"},
+		{name: "raw non-positive length", column: columnInfo{DataType: "RAW", DataLength: &zeroLength}, want: "RAW"},
+		{name: "raw explicit parameters", column: columnInfo{DataType: "RAW(8)", DataLength: &rawLen}, want: "RAW(8)"},
 		{name: "national character type ignores unit", column: columnInfo{DataType: "NVARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &charUnit}, want: "NVARCHAR2(64)"},
 		{name: "number scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &scale}, want: "NUMBER(10,2)"},
 		{name: "number zero scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &zeroScale}, want: "NUMBER(10)"},
@@ -1348,6 +1538,38 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 				t.Fatalf("oracleColumnTypeDDL() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetColumnsRPCFormatsRawLengthFromDataLength(t *testing.T) {
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{{
+		queryContains: "c.DATA_LENGTH",
+		args:          []driver.Value{"APP", "BINARY_DATA"},
+		columns:       []string{"COLUMN_NAME", "DATA_TYPE", "NULLABLE", "DATA_DEFAULT", "IS_PRIMARY_KEY", "COMMENTS", "DATA_PRECISION", "DATA_SCALE", "DATA_LENGTH", "CHAR_LENGTH", "CHAR_USED"},
+		rows:          [][]driver.Value{{"PAYLOAD", "RAW", "Y", nil, int64(0), nil, nil, nil, int64(16), int64(0), nil}},
+	}})
+	s := newServer()
+	s.db = db
+
+	resp, shutdown := s.handleLine(`{"jsonrpc":"2.0","id":1,"method":"get_columns","params":{"schema":"APP","table":"BINARY_DATA"}}`)
+	if shutdown {
+		t.Fatal("get_columns unexpectedly shut down the agent")
+	}
+	if resp.Error != nil {
+		t.Fatalf("get_columns RPC failed: %s", resp.Error.Message)
+	}
+	columns, ok := resp.Result.([]columnInfo)
+	if !ok || len(columns) != 1 {
+		t.Fatalf("get_columns RPC result = %#v, want one column", resp.Result)
+	}
+	if columns[0].DataType != "RAW(16)" {
+		t.Fatalf("get_columns data_type = %q, want RAW(16)", columns[0].DataType)
+	}
+	if columns[0].CharacterMaximumLength != nil && *columns[0].CharacterMaximumLength != 0 {
+		t.Fatalf("RAW character maximum length = %v, want null or zero", *columns[0].CharacterMaximumLength)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
 	}
 }
 

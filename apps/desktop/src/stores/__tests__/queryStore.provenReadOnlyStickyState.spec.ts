@@ -80,7 +80,7 @@ function expiredTransactionError() {
     version: 1 as const,
     code: "DBX-TXN-1001",
     messageKey: "backendErrors.transaction.sessionExpired",
-    messageParams: { timeoutSecs: 300 },
+    messageParams: {},
     source: "legacyBackend" as const,
     operationOutcome: "not_started" as const,
     origin: { subsystem: "database", adapter: "native" },
@@ -363,7 +363,7 @@ describe("queryStore Oracle/OceanBase manual-transaction sticky state (behavior 
     expect(tab.txnPossiblyDirty).toBe(true);
   });
 
-  it("resets the sticky state on session-expiry recovery and recomputes from the retry", async () => {
+  it("resets the sticky state when a dirty session expires and recomputes it on the next run", async () => {
     mocks.beginManualTransaction.mockResolvedValueOnce("txn-old").mockResolvedValueOnce("txn-new");
     mocks.executeInManualTransaction.mockResolvedValueOnce(dirtyUpdate()).mockRejectedValueOnce(expiredTransactionError()).mockResolvedValueOnce(cleanSelect());
 
@@ -375,8 +375,34 @@ describe("queryStore Oracle/OceanBase manual-transaction sticky state (behavior 
     await store.executeTabSql(tabId, "SELECT * FROM EMP");
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
+    // The dirty session lost its work: the SELECT is not replayed into a fresh transaction.
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledTimes(2);
+    expect(tab.txnSessionId).toBeUndefined();
+    expect(tab.txnPossiblyDirty).not.toBe(true);
+    expect(tab.txnAutoRolledBack).toBe(true);
+
+    await store.executeTabSql(tabId, "SELECT * FROM EMP");
+
     expect(tab.txnSessionId).toBe("txn-new");
     expect(tab.txnPossiblyDirty).not.toBe(true);
+  });
+
+  it("silently rebuilds a session that expired before running anything that could be dirty", async () => {
+    mocks.beginManualTransaction.mockResolvedValueOnce("txn-old").mockResolvedValueOnce("txn-new");
+    mocks.executeInManualTransaction.mockResolvedValueOnce(cleanSelect()).mockRejectedValueOnce(expiredTransactionError()).mockResolvedValueOnce(cleanSelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupManualTab(store);
+
+    await store.executeTabSql(tabId, "SELECT * FROM EMP");
+    await store.executeTabSql(tabId, "SELECT * FROM EMP");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledTimes(3);
+    expect(tab.txnSessionId).toBe("txn-new");
+    expect(tab.txnPossiblyDirty).not.toBe(true);
+    expect(tab.txnAutoRolledBack).not.toBe(true);
   });
 
   it("does not replay an expired transaction's SQL after its database changes during recovery", async () => {

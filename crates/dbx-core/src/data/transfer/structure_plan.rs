@@ -552,6 +552,9 @@ mod tests {
     #[test]
     fn structured_ddl_metadata_produces_operation_dtos() {
         let index = db::IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "idx_orders_created_at".into(),
             columns: vec!["lower(\"email\")".into()],
             is_unique: false,

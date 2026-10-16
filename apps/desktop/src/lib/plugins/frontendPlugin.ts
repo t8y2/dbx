@@ -18,6 +18,7 @@ import type {
   PluginUiContribution,
   PluginWorkbenchContribution,
 } from "@/types/database";
+import { DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import { uuid } from "@/lib/common/utils";
 import { clonePluginData } from "./pluginData";
 
@@ -279,6 +280,7 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     connect_timeout_secs: existing?.connect_timeout_secs || pluginConnectionConnectTimeoutDefault(contribution) || 10,
     query_timeout_secs: existing?.query_timeout_secs || 60,
     idle_timeout_secs: existing?.idle_timeout_secs || 60,
+    manual_transaction_timeout_secs: existing?.manual_transaction_timeout_secs || DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
     keepalive_interval_secs: existing?.keepalive_interval_secs || 30,
     read_only: existing?.read_only || false,
     save_password: existing?.save_password !== false,

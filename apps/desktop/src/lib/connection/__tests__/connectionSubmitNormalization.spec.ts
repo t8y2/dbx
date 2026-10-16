@@ -38,6 +38,24 @@ describe("connection submit normalization", () => {
     expect(invalid).toMatchObject({ query_timeout_secs: 60, idle_timeout_secs: 60, keepalive_interval_secs: 30 });
   });
 
+  it("clamps the manual transaction idle timeout and falls back to the default for unset values", () => {
+    const unset = config({});
+    normalizeConnectionTimeouts(unset, 12, 34);
+    expect(unset.manual_transaction_timeout_secs).toBe(300);
+
+    const tooSmall = config({ manual_transaction_timeout_secs: 5 });
+    normalizeConnectionTimeouts(tooSmall, 12, 34);
+    expect(tooSmall.manual_transaction_timeout_secs).toBe(30);
+
+    const tooLarge = config({ manual_transaction_timeout_secs: 999_999 });
+    normalizeConnectionTimeouts(tooLarge, 12, 34);
+    expect(tooLarge.manual_transaction_timeout_secs).toBe(86400);
+
+    const custom = config({ manual_transaction_timeout_secs: 1800 });
+    normalizeConnectionTimeouts(custom, 12, 34);
+    expect(custom.manual_transaction_timeout_secs).toBe(1800);
+  });
+
   it("canonicalizes scope flags and production database names", () => {
     const value = config({ db_type: "postgres", one_time: false, read_only: false, save_password: undefined, production_databases: [" app ", "app", ""] });
     normalizeConnectionScope(value);

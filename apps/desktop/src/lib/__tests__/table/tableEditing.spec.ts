@@ -20,6 +20,7 @@ import {
   parseSalesforceColumnExtra,
   supportsDataGridTransaction,
   shouldIncludeSyntheticRowId,
+  showsKeylessEditWarning,
   usesSyntheticRowIdKey,
 } from "@/lib/table/tableEditing";
 import type { ColumnInfo, IndexInfo } from "@/types/database";
@@ -63,6 +64,30 @@ describe("tableEditing", () => {
     expect(editablePrimaryKeys("oracle", [column("ID"), column("NAME")], "TABLE")).toEqual([DBX_ROWID_COLUMN]);
     expect(editablePrimaryKeys("oceanbase-oracle", [column("ID"), column("NAME")], "TABLE")).toEqual([DBX_ROWID_COLUMN]);
     expect(editablePrimaryKeys("oceanbase-oracle", [column("ID", true), column("NAME")], "TABLE")).toEqual(["ID"]);
+  });
+
+  it("requests PostgreSQL CTID only for known unkeyed base-table previews", () => {
+    const columns = [column("ID"), column("VALUE")];
+    expect(editablePrimaryKeys("postgres", columns, "TABLE")).toEqual([]);
+    expect(shouldIncludeSyntheticRowId("postgres", [], "TABLE")).toBe(true);
+    // The sidebar's listTables path reports relkind 'r' as `BASE TABLE`.
+    expect(shouldIncludeSyntheticRowId("postgres", [], "BASE TABLE")).toBe(true);
+    expect(shouldIncludeSyntheticRowId("postgres", ["ID"], "TABLE")).toBe(false);
+    expect(shouldIncludeSyntheticRowId("postgres", [], "PARTITIONED TABLE")).toBe(false);
+    expect(shouldIncludeSyntheticRowId("postgres", [], "VIEW")).toBe(false);
+    expect(shouldIncludeSyntheticRowId("postgres", [])).toBe(false);
+    expect(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "TABLE")).toBe(true);
+    expect(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "BASE TABLE")).toBe(true);
+    expect(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "PARTITIONED TABLE")).toBe(false);
+    expect(isHiddenGridColumn("postgres", DBX_ROWID_COLUMN, [], "TABLE")).toBe(true);
+    expect(isHiddenGridColumn("postgres", DBX_ROWID_COLUMN, [], "BASE TABLE")).toBe(true);
+    // The "no stable row identifier" badge must not contradict a preview that
+    // addresses the selected row through a hidden physical locator.
+    expect(showsKeylessEditWarning("postgres", [], "TABLE")).toBe(false);
+    expect(showsKeylessEditWarning("postgres", [], "BASE TABLE")).toBe(false);
+    expect(showsKeylessEditWarning("postgres", ["ID"], "TABLE")).toBe(false);
+    expect(showsKeylessEditWarning("postgres", [], "VIEW")).toBe(true);
+    expect(showsKeylessEditWarning("mysql", [], "TABLE")).toBe(true);
   });
 
   it("uses Xugu ROWID for ordinary, partitioned, and temporary tables but not views", () => {
@@ -164,6 +189,23 @@ describe("tableEditing", () => {
     expect(canEditExistingTableRows("clickhouse", undefined, [])).toBe(false);
   });
 
+  it("keeps Databend grid saves out of an explicit transaction", () => {
+    // The Databend JDBC driver reports supportsTransactions() == false, and the
+    // agent rejects an explicit transaction for that reason. A grid save that
+    // opted into executeInTransaction therefore always failed with
+    // "Transactions are not supported by this JDBC driver" (#12003).
+    expect(supportsDataGridTransaction("databend")).toBe(false);
+    // Everything else stays Navicat-style, so inserts and primary-key edits
+    // must keep working through the plain (non-transactional) batch path.
+    expect(isTableDataEditable("databend", ["id"], "TABLE")).toBe(true);
+    expect(canInsertTableRows("databend")).toBe(true);
+    // Navicat-style: update/delete do not require a primary key, and keyless
+    // rows can be addressed by a value predicate.
+    expect(canEditExistingTableRows("databend", undefined, ["id"])).toBe(true);
+    expect(canEditExistingTableRows("databend", undefined, [])).toBe(true);
+    expect(canUseKeylessRowPredicate("databend", [])).toBe(true);
+  });
+
   it("uses tbname only when editing TDengine stable rows", () => {
     const columns = [column("ts", true), column("seq", true), column("voltage")];
     expect(editablePrimaryKeys("tdengine", columns, "STABLE")).toEqual([DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"]);
@@ -262,5 +304,15 @@ describe("tableEditing", () => {
     expect(canEditExistingTableRows("iris")).toBe(true);
     expect(supportsDataGridTransaction("iris")).toBe(true);
     expect(canUseKeylessRowPredicate("iris", [])).toBe(true);
+  });
+
+  it("edits DuckDB table data row by row without a transaction (#12306)", () => {
+    expect(isTableDataEditable("duckdb", ["id"], "TABLE")).toBe(true);
+    expect(isTableDataEditable("duckdb", [], "TABLE")).toBe(true);
+    expect(isTableDataEditable("duckdb", ["id"], "VIEW")).toBe(false);
+    expect(canInsertTableRows("duckdb")).toBe(true);
+    expect(canEditExistingTableRows("duckdb")).toBe(true);
+    expect(supportsDataGridTransaction("duckdb")).toBe(false);
+    expect(canUseKeylessRowPredicate("duckdb", [])).toBe(true);
   });
 });

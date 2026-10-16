@@ -1,7 +1,8 @@
 use crate::models::connection::DatabaseType;
 
 use super::capabilities::{
-    firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, uses_xugu_row_id, TablePaginationStrategy,
+    firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, uses_postgres_ctid, uses_xugu_row_id,
+    TablePaginationStrategy,
 };
 use super::identifiers::{
     normalize_where_input, parse_sqlserver_linked_schema_ref, qualified_table_name, qualified_table_name_with_catalog,
@@ -311,9 +312,19 @@ pub fn build_table_data_select_sql_with_database(
         && is_oracle_base_table_type(options.table_type.as_deref());
     let include_xugu_row_id =
         options.include_row_id && uses_xugu_row_id(database_type) && !is_view_table_type(options.table_type.as_deref());
+    let include_postgres_ctid = options.include_row_id
+        && uses_postgres_ctid(database_type)
+        && is_postgres_base_table_type(options.table_type.as_deref())
+        && options.primary_keys.is_empty();
     let offset = options.offset.unwrap_or(0);
     let select_columns = if include_oracle_row_id {
         format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\", t.*")
+    } else if include_postgres_ctid {
+        // tableoid separates inherited relations; xmin keeps a recycled CTID from
+        // identifying a new tuple. The body stays `*` — the projection this engine
+        // already used for table data. Bounded large-value previews stay off here
+        // because they are keyed off a declared primary key, which this table lacks.
+        format!("tableoid::text || ':' || ctid::text || ':' || xmin::text AS \"{DBX_ROWID_COLUMN}\", *")
     } else if let Some(preview_columns) = build_large_value_preview_columns(&options) {
         preview_columns
     } else if include_xugu_row_id {
@@ -599,6 +610,17 @@ fn is_view_table_type(table_type: Option<&str>) -> bool {
 
 fn is_oracle_base_table_type(table_type: Option<&str>) -> bool {
     table_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("TABLE"))
+}
+
+fn is_postgres_base_table_type(table_type: Option<&str>) -> bool {
+    // The PostgreSQL driver reports `relkind = 'r'` as the information-schema
+    // spelling `BASE TABLE`, while other metadata paths (and the hand-written
+    // tests) use `TABLE`. Accept both so the locator is actually injected for a
+    // real sidebar preview.
+    table_type.is_some_and(|value| {
+        let value = value.trim();
+        value.eq_ignore_ascii_case("TABLE") || value.eq_ignore_ascii_case("BASE TABLE")
+    })
 }
 
 pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {

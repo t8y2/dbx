@@ -159,6 +159,7 @@ pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         connect_timeout_secs: 5,
         query_timeout_secs: 30,
         idle_timeout_secs: 60,
+        manual_transaction_timeout_secs: 300,
         keepalive_interval_secs: 0,
         ssl: false,
         ca_cert_path: String::new(),

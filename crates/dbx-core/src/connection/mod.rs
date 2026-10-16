@@ -297,6 +297,9 @@ pub struct TransactionSession {
     pub connection: Arc<Mutex<TxnConnection>>,
     pub pool_key: String,
     pub last_activity: std::time::Instant,
+    /// How long the session may go without a statement before it is rolled back.
+    /// Fixed at BEGIN from the connection's `manual_transaction_timeout_secs`.
+    pub idle_timeout: std::time::Duration,
     pub busy: bool,
     pub snapshot_rotation_safe: bool,
     pub connection_id: String,
@@ -7446,6 +7449,7 @@ mod tests {
             connect_timeout_secs: default_connect_timeout_secs(),
             query_timeout_secs: crate::models::connection::default_query_timeout_secs(),
             idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
+            manual_transaction_timeout_secs: crate::models::connection::default_manual_transaction_timeout_secs(),
             keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -9998,6 +10002,7 @@ sleep 30
             connect_timeout_secs: 1,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
             keepalive_interval_secs: interval_secs,
             ssl: false,
             ca_cert_path: String::new(),

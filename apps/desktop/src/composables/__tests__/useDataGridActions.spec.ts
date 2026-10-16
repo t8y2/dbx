@@ -1378,6 +1378,53 @@ describe("useDataGridActions", () => {
     expect(tab.orderByInput).toBeUndefined();
   });
 
+  it("adds the result's primary key as a tie-breaker when sorting a SQL query result in the database", async () => {
+    const tab = {
+      id: "tab-1",
+      connectionId: "postgres-1",
+      database: "app",
+      title: "Query",
+      sql: "SELECT * FROM sales ORDER BY id DESC",
+      resultBaseSql: "SELECT * FROM sales ORDER BY id DESC",
+      result: { columns: ["id", "kdrq", "spmc"], rows: [[1, "2026-10-01", "a"]], affected_rows: 0, execution_time_ms: 1 },
+      tableMeta: { schema: "public", tableName: "sales", columns: [], primaryKeys: ["id"] },
+      mode: "query",
+      isDirty: false,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+    } as unknown as QueryTab;
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort(tab.id, "kdrq", 1, "asc", undefined, "database");
+
+    expect(mocks.buildSortedQuerySql).toHaveBeenCalledWith(expect.objectContaining({ resultColumns: ["id", "kdrq", "spmc"], columnIndex: 1, tieBreakerColumnIndexes: [0] }));
+  });
+
+  it("does not add a tie-breaker when the result lacks part of the primary key", async () => {
+    const tab = {
+      id: "tab-1",
+      connectionId: "postgres-1",
+      database: "app",
+      title: "Query",
+      sql: "SELECT order_id, kdrq FROM order_lines",
+      resultBaseSql: "SELECT order_id, kdrq FROM order_lines",
+      result: { columns: ["order_id", "kdrq"], rows: [[1, "2026-10-01"]], affected_rows: 0, execution_time_ms: 1 },
+      querySourceColumns: ["order_id", "kdrq"],
+      tableMeta: { schema: "public", tableName: "order_lines", columns: [], primaryKeys: ["order_id", "line_no"] },
+      mode: "query",
+      isDirty: false,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+    } as unknown as QueryTab;
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort(tab.id, "kdrq", 1, "asc", undefined, "database");
+
+    expect(mocks.buildSortedQuerySql).toHaveBeenCalledWith(expect.objectContaining({ columnIndex: 1, tieBreakerColumnIndexes: [] }));
+  });
+
   it("keeps SQL query result database sorting on the first page when the result is paginated", async () => {
     const tab = {
       id: "tab-1",

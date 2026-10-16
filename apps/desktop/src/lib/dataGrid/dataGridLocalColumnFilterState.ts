@@ -53,12 +53,16 @@ export function buildDataGridLocalFilterOptions<TRow>({
   columnIndex,
   getRowData,
   formatValue,
+  includeRow,
+  includeNewRow,
 }: {
   rows: readonly TRow[];
   newRows: readonly (readonly CellValue[])[];
   columnIndex: number;
   getRowData: (row: TRow, sourceIndex: number) => readonly CellValue[];
   formatValue: (value: CellValue, columnIndex: number) => string;
+  includeRow?: (row: TRow, sourceIndex: number) => boolean;
+  includeNewRow?: (row: readonly CellValue[]) => boolean;
 }): DataGridLocalFilterOption[] {
   const byKey = new Map<string, DataGridLocalFilterOption>();
   const addValue = (value: CellValue) => {
@@ -77,9 +81,11 @@ export function buildDataGridLocalFilterOptions<TRow>({
   };
 
   for (const [sourceIndex, row] of rows.entries()) {
+    if (includeRow && !includeRow(row, sourceIndex)) continue;
     addValue(getRowData(row, sourceIndex)[columnIndex] ?? null);
   }
   for (const row of newRows) {
+    if (includeNewRow && !includeNewRow(row)) continue;
     addValue(row[columnIndex] ?? null);
   }
 

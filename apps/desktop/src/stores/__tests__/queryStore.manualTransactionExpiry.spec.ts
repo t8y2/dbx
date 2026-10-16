@@ -66,7 +66,7 @@ function expiredTransactionError() {
     version: 1 as const,
     code: "DBX-TXN-1001",
     messageKey: "backendErrors.transaction.sessionExpired",
-    messageParams: { timeoutSecs: 300 },
+    messageParams: {},
     source: "legacyBackend" as const,
     operationOutcome: "not_started" as const,
     origin: { subsystem: "database", adapter: "native" },
@@ -111,26 +111,35 @@ describe("queryStore manual transaction expiry recovery", () => {
     mocks.saveOpenTabsState.mockResolvedValue(undefined);
   });
 
-  it("restarts an expired transaction and retries the SQL exactly once", async () => {
+  it("stops at an expired transaction that held uncommitted work instead of replaying the SQL", async () => {
     mocks.beginManualTransaction.mockResolvedValueOnce("txn-old").mockResolvedValueOnce("txn-new");
     mocks.executeInManualTransaction.mockResolvedValueOnce(successfulUpdate()).mockRejectedValueOnce(expiredTransactionError()).mockResolvedValueOnce(successfulUpdate());
 
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
-    // Tabs default to auto-commit; the expiry recovery path only applies to manual transactions.
+    // Tabs default to auto-commit; the expiry handling only applies to manual transactions.
     store.setAutoCommit(tabId, false);
 
     await store.executeTabSql(tabId, "UPDATE USERS SET ACTIVE = 1");
-    await store.executeTabSql(tabId, "UPDATE USERS SET ACTIVE = 1");
+    await store.executeTabSql(tabId, "UPDATE USERS SET ACTIVE = 2");
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
+    // The first UPDATE was rolled back with the old session; running the second one in a
+    // fresh transaction would silently build on work that no longer exists.
+    expect(mocks.beginManualTransaction).toHaveBeenCalledOnce();
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledTimes(2);
+    expect(tab.txnSessionId).toBeUndefined();
+    expect(tab.txnAutoRolledBack).toBe(true);
+    expect(tab.result?.execution_error).toBe(true);
+
+    // The user re-runs explicitly and gets a brand new transaction.
+    await store.executeTabSql(tabId, "UPDATE USERS SET ACTIVE = 2");
+
     expect(mocks.beginManualTransaction).toHaveBeenCalledTimes(2);
     expect(mocks.executeInManualTransaction).toHaveBeenCalledTimes(3);
-    expect(mocks.executeInManualTransaction.mock.calls[1]?.[0]).toBe("txn-old");
     expect(mocks.executeInManualTransaction.mock.calls[2]?.[0]).toBe("txn-new");
     expect(tab.txnSessionId).toBe("txn-new");
-    expect(tab.txnAutoRolledBack).toBe(true);
     expect(tab.result?.execution_error).not.toBe(true);
     expect(tab.result?.affected_rows).toBe(1);
   });
@@ -154,7 +163,7 @@ describe("queryStore manual transaction expiry recovery", () => {
     expect(tab.txnAutoRolledBack).not.toBe(true);
   });
 
-  it("keeps the rollback notice for a manual dialect without sticky read-only tracking", async () => {
+  it("treats an expired transaction as dirty for a manual dialect without sticky read-only tracking", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "dameng-1",
       name: "DM",
@@ -162,8 +171,8 @@ describe("queryStore manual transaction expiry recovery", () => {
       database: "DMHR",
       query_timeout_secs: 30,
     });
-    mocks.beginManualTransaction.mockResolvedValueOnce("txn-old").mockResolvedValueOnce("txn-new");
-    mocks.executeInManualTransaction.mockResolvedValueOnce(successfulSelect()).mockRejectedValueOnce(expiredTransactionError()).mockResolvedValueOnce(successfulSelect());
+    mocks.beginManualTransaction.mockResolvedValueOnce("txn-old");
+    mocks.executeInManualTransaction.mockResolvedValueOnce(successfulSelect()).mockRejectedValueOnce(expiredTransactionError());
 
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -174,10 +183,13 @@ describe("queryStore manual transaction expiry recovery", () => {
     await store.executeTabSql(tabId, "SELECT 1 FROM DUAL");
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    expect(tab.txnSessionId).toBe("txn-new");
-    expect(tab.result?.rows).toEqual([[1]]);
-    // 不跟踪只读状态的方言无法判断会话是否干净，保留原有提示。
+    // Without read-only tracking a clean session cannot be told from a dirty one, so
+    // the statement is not replayed and the rollback is reported.
+    expect(mocks.beginManualTransaction).toHaveBeenCalledOnce();
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledTimes(2);
+    expect(tab.txnSessionId).toBeUndefined();
     expect(tab.txnAutoRolledBack).toBe(true);
+    expect(tab.result?.execution_error).toBe(true);
   });
 
   it("normalizes a stale manual tab for a non-transactional database before query dispatch", async () => {

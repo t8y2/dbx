@@ -73,6 +73,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
       "pinTab",
       "reopenClosedTab",
       "resetTabGroup",
+      "saveAllTabs",
       "splitDown",
       "splitRight",
       "unpinTab",

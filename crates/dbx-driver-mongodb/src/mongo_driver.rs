@@ -965,6 +965,9 @@ fn index_info_from_model(model: IndexModel) -> IndexInfo {
         .and_then(|options| options.partial_filter_expression.as_ref())
         .map(|filter| bson_to_json(&Bson::Document(filter.clone())).to_string());
     IndexInfo {
+        key_directions: Vec::new(),
+        visibility: None,
+        key_metadata_complete: false,
         is_unique: model.options.as_ref().and_then(|options| options.unique).unwrap_or(false),
         is_primary: name == "_id_",
         name,
@@ -4499,6 +4502,9 @@ mod tests {
     #[test]
     fn index_spec_from_index_info_marks_properties_as_incomplete() {
         let spec = index_spec_from_index_info(&IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "email_1".to_string(),
             columns: vec!["email".to_string()],
             is_unique: true,
@@ -4527,6 +4533,9 @@ mod tests {
     #[test]
     fn index_spec_from_index_info_falls_back_to_columns_without_an_index_type() {
         let spec = index_spec_from_index_info(&IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "compound".to_string(),
             columns: vec!["a".to_string(), "b".to_string()],
             is_unique: false,
@@ -4773,6 +4782,9 @@ mod tests {
     fn diff_dropped_index_names_reports_removed_indexes() {
         let before = vec![
             IndexInfo {
+                key_directions: Vec::new(),
+                visibility: None,
+                key_metadata_complete: false,
                 name: "_id_".to_string(),
                 columns: vec!["_id".to_string()],
                 is_unique: true,
@@ -4787,6 +4799,9 @@ mod tests {
                 constraint_backed: false,
             },
             IndexInfo {
+                key_directions: Vec::new(),
+                visibility: None,
+                key_metadata_complete: false,
                 name: "users_email_unique".to_string(),
                 columns: vec!["email".to_string()],
                 is_unique: true,
@@ -4801,6 +4816,9 @@ mod tests {
                 constraint_backed: false,
             },
             IndexInfo {
+                key_directions: Vec::new(),
+                visibility: None,
+                key_metadata_complete: false,
                 name: "users_status_idx".to_string(),
                 columns: vec!["status".to_string()],
                 is_unique: false,

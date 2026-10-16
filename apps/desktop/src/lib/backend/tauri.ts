@@ -497,6 +497,8 @@ export interface SnippetSyncSummary {
   bytes: number;
   exportedAt?: string;
   appVersion?: string;
+  remoteContentHash?: string;
+  unchanged: boolean;
   legacyCleanupRequiredId?: string;
 }
 
@@ -509,6 +511,10 @@ export interface SnippetDownloadResult {
 
 export interface SnippetTokenStatus {
   hasSavedToken: boolean;
+}
+
+export interface SnippetPassphraseStatus {
+  hasSavedPassphrase: boolean;
 }
 
 export interface AppSupportInfo {
@@ -536,6 +542,9 @@ export interface QueryPaginationExecutionPlanOptions {
   pagination: QueryPagination;
   useAgentCursor: boolean;
   firstPageUsesActualSql?: boolean;
+  /** Optimizer hint injected into the generated count (dbx_count) and page (dbx_page) SQL.
+   *  Example: GaussDB parallel execution hint: + set(query_dop 8). */
+  executionHint?: string;
 }
 
 export interface QueryPaginationExecutionPlan {
@@ -559,6 +568,7 @@ export interface SortedQuerySqlOptions {
   columnIndex: number;
   column: string;
   direction: QuerySortDirection;
+  tieBreakerColumnIndexes?: number[];
 }
 
 export interface QuerySqlBuildResult {
@@ -865,6 +875,10 @@ export async function deleteAiConfig(configId: string): Promise<void> {
 
 export async function loadCcSwitchAiConfigs(): Promise<CcSwitchImportResult> {
   return invoke("load_cc_switch_ai_configs");
+}
+
+export async function loadMagpieAiConfigs(): Promise<CcSwitchImportResult> {
+  return invoke("load_magpie_ai_configs");
 }
 
 export async function loadAiConfig(): Promise<AiConfig | null> {
@@ -1221,6 +1235,18 @@ export async function forgetSnippetSavedToken(config: SnippetSyncConfig): Promis
   return invoke("forget_snippet_saved_token", { config });
 }
 
+export async function snippetPassphraseStatus(config: SnippetSyncConfig): Promise<SnippetPassphraseStatus> {
+  return invoke("snippet_passphrase_status", { config });
+}
+
+export async function saveSnippetSavedPassphrase(config: SnippetSyncConfig, passphrase: string): Promise<void> {
+  return invoke("save_snippet_saved_passphrase", { config, passphrase });
+}
+
+export async function forgetSnippetSavedPassphrase(config: SnippetSyncConfig): Promise<void> {
+  return invoke("forget_snippet_saved_passphrase", { config });
+}
+
 export async function snippetSyncSettings(provider: SnippetProvider, instanceUrl?: string): Promise<SnippetSyncSettings> {
   return invoke("snippet_sync_settings", { provider, instanceUrl });
 }
@@ -1237,7 +1263,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return invoke("snippet_sync_inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
@@ -1245,6 +1271,7 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
+    expectedRemoteContentHash,
   });
 }
 
@@ -2481,7 +2508,10 @@ export async function analyzeEditableQueryEditability(sql: string): Promise<Quer
 export interface DataGridSaveGuard {
   sql: string;
   maxMatchedRows: number;
+  /** Set for predicates built from a physical row locator that must still match. */
+  minMatchedRows?: number;
   message: string;
+  minMessage?: string;
 }
 
 export interface BlobBoundStatement {
@@ -5681,7 +5711,10 @@ export async function deleteHistoryEntry(id: string): Promise<void> {
 // --- SQL File Execution ---
 export type SqlFileStatus = "started" | "running" | "statementDone" | "statementFailed" | "done" | "error" | "cancelled";
 
+export type SqlFileEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
+
 export interface SqlFileRequest {
+  encoding?: SqlFileEncoding;
   executionId: string;
   connectionId: string;
   database: string;
@@ -5699,8 +5732,8 @@ export interface SqlFileTable {
   name: string;
 }
 
-export async function inspectSqlFileTables(filePath: string): Promise<SqlFileTable[]> {
-  return invoke("inspect_sql_file_tables", { filePath });
+export async function inspectSqlFileTables(filePath: string, encoding?: SqlFileEncoding): Promise<SqlFileTable[]> {
+  return invoke("inspect_sql_file_tables", { filePath, encoding });
 }
 
 export interface SqlFilePreview {
@@ -5713,6 +5746,11 @@ export interface SqlFilePreview {
   packageFilePaths?: string[];
   packagePartCount?: number;
   cleanupToken?: string;
+}
+
+export async function refreshSqlFilePreview(filePath: string, encoding: SqlFileEncoding): Promise<Pick<SqlFilePreview, "preview" | "canExecuteWithoutSelectedDatabase" | "establishesDatabaseContext">> {
+  const result = await previewSqlFile(filePath, encoding);
+  return { preview: result.preview, canExecuteWithoutSelectedDatabase: result.canExecuteWithoutSelectedDatabase, establishesDatabaseContext: result.establishesDatabaseContext };
 }
 
 export async function releaseSqlFilePreview(_cleanupToken: string): Promise<void> {}
@@ -5734,8 +5772,8 @@ export interface SqlFileProgress {
   fileName?: string;
 }
 
-export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> {
-  return invoke("preview_sql_file", { filePath });
+export async function previewSqlFile(filePath: string, encoding?: SqlFileEncoding): Promise<SqlFilePreview> {
+  return invoke("preview_sql_file", { filePath, encoding });
 }
 
 export type SqlFileFailureLogStatus = "available" | "degraded" | "unavailable";

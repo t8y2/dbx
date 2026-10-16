@@ -105,9 +105,11 @@ test("base64Decode tolerates whitespace inside the alphabet", () => {
   assert.deepEqual(transformCellValue("5L2g\n 5aW9", { kind: "base64Decode" }), { ok: true, text: "你好" });
 });
 
-test("base64Decode rejects unpadded, url-safe, and non-UTF-8 input", () => {
+test("base64Decode normalizes url-safe input and rejects truncated or non-UTF-8 payloads", () => {
+  // The decoder auto-normalizes cell payloads: "-" and "_" map back to the standard alphabet, so this decodes.
+  assert.deepEqual(transformCellValue("5L2g5aW-", { kind: "base64Decode" }), { ok: true, text: "你奾" });
+  // Missing padding alone is accepted, but the padded bytes must still form valid UTF-8.
   assert.deepEqual(transformCellValue("5L2g5aW", { kind: "base64Decode" }), { ok: false, error: "invalidBase64" });
-  assert.deepEqual(transformCellValue("5L2g5aW-", { kind: "base64Decode" }), { ok: false, error: "invalidBase64" });
   assert.deepEqual(transformCellValue("5L2g5a_9", { kind: "base64Decode" }), { ok: false, error: "invalidBase64" });
   // "/w==" decodes to the single byte 0xFF, which is not valid UTF-8.
   assert.deepEqual(transformCellValue("/w==", { kind: "base64Decode" }), { ok: false, error: "invalidBase64" });

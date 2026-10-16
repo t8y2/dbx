@@ -3227,6 +3227,9 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
             let cols_str = row.get::<&str, _>(1).unwrap_or("");
             let inc_str = row.get::<&str, _>(5).unwrap_or("");
             IndexInfo {
+                key_directions: Vec::new(),
+                visibility: None,
+                key_metadata_complete: false,
                 name: row.get::<&str, _>(0).unwrap_or("").to_string(),
                 columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
                 is_unique: row.get::<bool, _>(2).unwrap_or(false),
@@ -3482,6 +3485,7 @@ pub async fn list_constraints(
                 initially_deferred: Some(false),
                 enabled: Some(row.get::<bool, _>(9).unwrap_or(true)),
                 valid: Some(row.get::<bool, _>(10).unwrap_or(true)),
+                oracle_metadata: None,
             }
         })
         .collect())

@@ -8377,6 +8377,7 @@ export const useQueryStore = defineStore("query", () => {
         hiddenPrimaryKeys = prepared.hiddenPrimaryKeys;
         useLargeValuePreview = prepared.largeValuePreview;
         if (options?.querySort) {
+          const visibleColumnCount = options.querySort.resultColumns.length;
           const sorted = await api.buildSortedQuerySql({
             originalSql: sqlToExecute,
             databaseType: effectiveDbType,
@@ -8384,6 +8385,7 @@ export const useQueryStore = defineStore("query", () => {
             columnIndex: options.querySort.columnIndex,
             column: options.querySort.column,
             direction: options.querySort.direction,
+            tieBreakerColumnIndexes: hiddenPrimaryKeys.map((_, index) => visibleColumnCount + index),
           });
           if (!sorted.ok || !sorted.sql) throw new Error("Unable to build sorted query SQL");
           sqlToExecute = sorted.sql;
@@ -8401,6 +8403,7 @@ export const useQueryStore = defineStore("query", () => {
           pagination,
           useAgentCursor,
           firstPageUsesActualSql: hiddenPrimaryKeys.length > 0,
+          executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
         });
         const canPaginateSqlServerUseScript = !!sqlServerUseScript && !!plan.pageSql && typeof plan.pageLimit === "number" && typeof plan.pageOffset === "number";
         if (plan.paginationError) throw new Error(plan.paginationError);
@@ -8650,15 +8653,20 @@ export const useQueryStore = defineStore("query", () => {
             } catch (error) {
               if (effectiveDbType === "sqlserver" || options?.pagination?.sessionId || manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
               if (tab.executionId !== executionId || tab.autoCommit !== false || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) throw error;
+              // Only a session that ran proven read-only statements lost nothing to
+              // the idle rollback and can be rebuilt transparently. Otherwise
+              // uncommitted work was discarded (or we cannot prove it was not), and
+              // replaying this statement into a fresh transaction would silently
+              // act on state that no longer exists. Stop here: the outer handler
+              // clears the dead session and shows the rollback notice, and the
+              // user decides whether to run the statement again.
+              if (manualTransactionRollbackNoticeRequired(tab, effectiveDbType)) throw error;
               manualTransactionRecoveryAttempted = true;
-              // A session that only ever ran proven read-only statements lost
-              // nothing to the idle rollback, so it restarts without the notice.
-              const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDbType);
               // The expired session was discarded by the backend; the replacement
               // session starts fresh, so the old sticky state resets with it.
               clearTxnPossiblyDirty(tab);
               tab.txnSessionId = undefined;
-              tab.txnAutoRolledBack = rollbackNoticeRequired;
+              tab.txnAutoRolledBack = false;
               queryExecutionLog("info", "manual-txn:expired-recover", { traceId, elapsed: elapsed() });
               const refreshedSessionId = await ensureManualTransactionSession(id, executionDatabase, executionSchema, executionCatalog);
               if (tab.executionId !== executionId || tab.autoCommit !== false || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) {
@@ -8978,7 +8986,7 @@ export const useQueryStore = defineStore("query", () => {
         reportSqlServerTransactionError(tab, e);
       } else if (tab.autoCommit === false) {
         const errMsg: string = e?.message ?? String(e);
-        const idleTimeout = /5 minutes of inactivity/i.test(errMsg) || errMsg.includes("5 分钟无操作") || errMsg.includes("已自动回滚");
+        const idleTimeout = isManualTransactionSessionExpired(e) || errMsg.includes("已自动回滚");
         if (idleTimeout) {
           // Backend session was removed and rolled back after idle expiry: clear
           // the sticky dirty state together with the session. Same rule as the
@@ -10236,6 +10244,7 @@ export const useQueryStore = defineStore("query", () => {
           pagination: { limit: effectivePageLimit, offset, sessionId },
           useAgentCursor,
           firstPageUsesActualSql: true,
+          executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
         });
         if (probeRowLimit && plan.paginationError) throw new Error(plan.paginationError);
         if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return cachedResultForExport();

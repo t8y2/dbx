@@ -1003,6 +1003,7 @@ export interface EditorSettings {
   welcomePageMode: WelcomePageMode;
   welcomePageModeDefaultVersion: number;
   compactTabTitle: boolean;
+  compactTabTitleDefaultVersion: number;
   tabLayout: TabLayoutMode;
   tabPlacement: TabPlacement;
   colorizeConnectionTabs: boolean;
@@ -1311,6 +1312,11 @@ export const SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION = 1;
 // v1: the welcome page default moved from "intro" back to "workspace"; persisted
 // blobs from the intro-default builds lack this marker and are migrated.
 export const WELCOME_PAGE_DEFAULT_VERSION = 1;
+// v1: compact tab titles became the default. A stored `compactTabTitle: false`
+// cannot be told apart from the old default, so this marker separates the two:
+// blobs written by the unwrapped-title builds lack it and migrate to the new
+// default, while an explicit toggle afterwards stamps the marker and wins.
+export const COMPACT_TAB_TITLE_DEFAULT_VERSION = 1;
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: DEFAULT_MONO_FONT_FAMILY,
@@ -1366,7 +1372,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   savedSqlOpenTargetMode: "saved",
   welcomePageMode: "workspace",
   welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
-  compactTabTitle: false,
+  compactTabTitle: true,
+  compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
   tabLayout: "scroll",
   tabPlacement: "top",
   colorizeConnectionTabs: true,
@@ -1903,6 +1910,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const savedWelcomePageDefaultVersion = settings.welcomePageModeDefaultVersion;
   const welcomePageModeDefaultVersion = typeof savedWelcomePageDefaultVersion === "number" && savedWelcomePageDefaultVersion >= WELCOME_PAGE_DEFAULT_VERSION ? savedWelcomePageDefaultVersion : WELCOME_PAGE_DEFAULT_VERSION;
   const hasCurrentWelcomePageDefault = welcomePageModeDefaultVersion === savedWelcomePageDefaultVersion;
+  const savedCompactTabTitleDefaultVersion = settings.compactTabTitleDefaultVersion;
+  const compactTabTitleDefaultVersion = typeof savedCompactTabTitleDefaultVersion === "number" && savedCompactTabTitleDefaultVersion >= COMPACT_TAB_TITLE_DEFAULT_VERSION ? savedCompactTabTitleDefaultVersion : COMPACT_TAB_TITLE_DEFAULT_VERSION;
+  const hasCurrentCompactTabTitleDefault = compactTabTitleDefaultVersion === savedCompactTabTitleDefaultVersion;
   // The active id can only be validated once the scheme list it points into is known.
   const dataGridTypeColorSchemes = normalizeDataGridTypeColorSchemes(settings.dataGridTypeColorSchemes);
   const savedExtractorMigrationVersion = settings.dataGridExtractorOptionsMigrationVersion;
@@ -2018,7 +2028,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     savedSqlOpenTargetMode: settings.savedSqlOpenTargetMode === "current" ? "current" : DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode,
     welcomePageMode: hasCurrentWelcomePageDefault && (settings.welcomePageMode === "intro" || settings.welcomePageMode === "workspace") ? settings.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode,
     welcomePageModeDefaultVersion,
-    compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
+    compactTabTitle: hasCurrentCompactTabTitleDefault ? settings.compactTabTitle === true : DEFAULT_EDITOR_SETTINGS.compactTabTitle,
+    compactTabTitleDefaultVersion,
     tabLayout: normalizeTabLayout(settings.tabLayout),
     tabPlacement: normalizeTabPlacement(settings.tabPlacement),
     colorizeConnectionTabs: typeof settings.colorizeConnectionTabs === "boolean" ? settings.colorizeConnectionTabs : DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs,
@@ -2446,6 +2457,7 @@ export const useSettingsStore = defineStore("settings", () => {
           };
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
           const needsWelcomePageDefaultMigration = typeof savedSettings.welcomePageModeDefaultVersion !== "number" || savedSettings.welcomePageModeDefaultVersion < WELCOME_PAGE_DEFAULT_VERSION;
+          const needsCompactTabTitleDefaultMigration = typeof savedSettings.compactTabTitleDefaultVersion !== "number" || savedSettings.compactTabTitleDefaultVersion < COMPACT_TAB_TITLE_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
           // v2 also resets a historically persisted includeDatabaseName=true, so
@@ -2455,7 +2467,7 @@ export const useSettingsStore = defineStore("settings", () => {
           const needsDataGridExtractorOptionsMigration =
             (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === true);
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
-          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
+          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsCompactTabTitleDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await enqueueEditorSettingsSave().catch(() => {});
           }
@@ -2903,7 +2915,12 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.appCloseUnsavedTabsMode !== undefined) editorSettings.value.appCloseUnsavedTabsMode = normalizeAppCloseUnsavedTabsMode(partial.appCloseUnsavedTabsMode);
     if (partial.savedSqlOpenTargetMode !== undefined) editorSettings.value.savedSqlOpenTargetMode = partial.savedSqlOpenTargetMode === "current" ? "current" : "saved";
     if (partial.welcomePageMode !== undefined) editorSettings.value.welcomePageMode = partial.welcomePageMode === "intro" || partial.welcomePageMode === "workspace" ? partial.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode;
-    if (partial.compactTabTitle !== undefined) editorSettings.value.compactTabTitle = partial.compactTabTitle;
+    if (partial.compactTabTitle !== undefined) {
+      editorSettings.value.compactTabTitle = partial.compactTabTitle;
+      // Stamping the current version marks this as a deliberate choice, so a
+      // later default change must not overwrite it (see normalizeEditorSettings).
+      editorSettings.value.compactTabTitleDefaultVersion = COMPACT_TAB_TITLE_DEFAULT_VERSION;
+    }
     if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
     if (partial.tabPlacement !== undefined) editorSettings.value.tabPlacement = normalizeTabPlacement(partial.tabPlacement);
     if (partial.colorizeConnectionTabs !== undefined) editorSettings.value.colorizeConnectionTabs = partial.colorizeConnectionTabs === true;

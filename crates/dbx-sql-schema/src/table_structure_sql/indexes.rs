@@ -18,6 +18,9 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
 
     for index in &options.indexes {
         if index.marked_for_drop {
+            if index.oracle_original_missing {
+                continue;
+            }
             let Some(original) = &index.original else {
                 continue;
             };
@@ -31,6 +34,10 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
             }
             if is_dameng_constraint_backed(options.database_type, original) {
                 statements.push(build_dameng_drop_constraint_sql(dialect, &table, &original.name));
+                continue;
+            }
+            if is_oceanbase_unique_constraint_index(options.database_type, original) {
+                warnings.push(format!("OceanBase Oracle unique index \"{}\" is paired with a UNIQUE constraint and must be changed through the constraint editor.", original.name));
                 continue;
             }
             statements.push(build_drop_index_sql(
@@ -68,9 +75,48 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 ));
                 continue;
             }
+            if is_oceanbase_unique_constraint_index(options.database_type, original) {
+                warnings.push(format!("OceanBase Oracle unique index \"{}\" is paired with a UNIQUE constraint and must be changed through the constraint editor.", original.name));
+                continue;
+            }
             let or_replace =
                 options.database_type == Some(DatabaseType::Dameng) && clean(&index.name) == clean(&original.name);
-            if !or_replace {
+            if dialect == StructureDialect::Oracle {
+                // Oracle-family index edits may require DROP/CREATE. Validate that the
+                // complete replacement plan can be built before exposing its destructive
+                // first step; an empty/invalid target must never become a DROP-only plan.
+                let mut create_warnings = Vec::new();
+                let create_statements = build_create_index_statements(
+                    options.database_type,
+                    dialect,
+                    &table,
+                    index,
+                    &mut create_warnings,
+                    options.schema.as_deref(),
+                    &options.table_name,
+                    or_replace,
+                    capabilities.index_concurrent,
+                    false,
+                    options.driver_profile.as_deref(),
+                );
+                if create_statements.is_empty() {
+                    warnings.extend(create_warnings);
+                    continue;
+                }
+                if !or_replace && !index.oracle_original_missing {
+                    statements.push(build_drop_index_sql(
+                        options.database_type,
+                        dialect,
+                        &table,
+                        options.schema.as_deref(),
+                        &original.name,
+                    ));
+                }
+                warnings.extend(create_warnings);
+                statements.extend(create_statements);
+                continue;
+            }
+            if !or_replace && !index.oracle_original_missing {
                 statements.push(build_drop_index_sql(
                     options.database_type,
                     dialect,
@@ -130,6 +176,10 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
 /// fail on it with "constraint does not exist".
 fn is_dameng_constraint_backed(database_type: Option<DatabaseType>, original: &IndexInfo) -> bool {
     database_type == Some(DatabaseType::Dameng) && original.constraint_backed
+}
+
+fn is_oceanbase_unique_constraint_index(database_type: Option<DatabaseType>, original: &IndexInfo) -> bool {
+    database_type == Some(DatabaseType::OceanbaseOracle) && original.is_unique
 }
 
 fn build_dameng_drop_constraint_sql(dialect: StructureDialect, table: &str, constraint_name: &str) -> String {
@@ -193,7 +243,8 @@ pub fn has_existing_index_change(index: &EditableStructureIndex) -> bool {
     let Some(original) = &index.original else {
         return false;
     };
-    clean(&index.name) != clean(&original.name)
+    index.oracle_original_missing
+        || clean(&index.name) != clean(&original.name)
         || index_list_changed(&index.columns, Some(&original.columns))
         || index.is_unique != original.is_unique
         || normalized_index_type(index) != clean(original.index_type.as_deref().unwrap_or("")).to_ascii_uppercase()
@@ -353,7 +404,7 @@ fn key_expression_flags(index: &EditableStructureIndex, columns: &[String]) -> V
                 .columns
                 .iter()
                 .enumerate()
-                .find(|(i, original_column)| !consumed[*i] && *original_column == column);
+                .find(|(i, original_column)| !consumed[*i] && clean(original_column) == clean(column));
             match claimed {
                 Some((i, _)) => {
                     consumed[i] = true;
@@ -363,6 +414,59 @@ fn key_expression_flags(index: &EditableStructureIndex, columns: &[String]) -> V
             }
         })
         .collect()
+}
+
+fn oracle_key_directions(
+    database_type: Option<DatabaseType>,
+    index: &EditableStructureIndex,
+    columns: &[String],
+    warnings: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    let Some(original) = &index.original else {
+        return Some(Vec::new());
+    };
+    if !original.key_metadata_complete
+        || original.key_is_expression.len() != original.columns.len()
+        || original.key_directions.len() != original.columns.len()
+        || !matches!(original.visibility.as_deref(), Some("VISIBLE" | "INVISIBLE"))
+        || original.columns.iter().any(|column| clean(column).is_empty())
+        || original.key_directions.iter().any(|direction| !matches!(direction.as_str(), "ASC" | "DESC"))
+    {
+        warnings.push(format!(
+            "Index \"{}\" cannot be rebuilt because its expression, direction, or visibility metadata is incomplete.",
+            original.name
+        ));
+        return None;
+    }
+
+    let mut consumed = vec![false; original.columns.len()];
+    let directions = columns
+        .iter()
+        .map(|column| {
+            original
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(position, original_column)| !consumed[*position] && clean(original_column) == clean(column))
+                .map(|(position, _)| {
+                    consumed[position] = true;
+                    original.key_directions[position].clone()
+                })
+                .unwrap_or_else(|| "ASC".to_string())
+        })
+        .collect::<Vec<_>>();
+
+    if database_type == Some(DatabaseType::OceanbaseOracle) {
+        if let Some((position, _)) = directions.iter().enumerate().find(|(_, direction)| *direction == "DESC") {
+            warnings.push(format!(
+                "OceanBase Oracle does not support descending index key {} on index \"{}\"; no DDL was generated.",
+                position + 1,
+                original.name
+            ));
+            return None;
+        }
+    }
+    Some(directions)
 }
 
 /// Per-key operator class provenance for `columns` (the edited/current key list).
@@ -460,6 +564,18 @@ pub(super) fn build_create_index_statements(
     if name.is_empty() || columns.is_empty() {
         return Vec::new();
     }
+    let oracle_directions = if matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) {
+        if index.original.as_ref().is_some_and(|_| columns.len() != index.columns.len()) {
+            warnings.push(format!("Index \"{}\" contains an empty key and cannot be rebuilt.", name));
+            return Vec::new();
+        }
+        match oracle_key_directions(database_type, index, &columns, warnings) {
+            Some(directions) => directions,
+            None => return Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
 
     // `CREATE INDEX CONCURRENTLY` is PostgreSQL-only: the flag is honored only when
     // the caller's real database type advertises the capability, so a stale or
@@ -477,16 +593,23 @@ pub(super) fn build_create_index_statements(
         .iter()
         .enumerate()
         .map(|(i, column)| {
-            if dialect == StructureDialect::Mysql {
+            let key = if dialect == StructureDialect::Mysql {
                 mysql_index_column_sql(column)
             } else if dialect == StructureDialect::GaussdbM {
                 gaussdbm_index_column_sql(column, key_is_expression[i])
             } else if dialect == StructureDialect::Postgres {
                 postgres_index_column_sql(column, key_is_expression[i], key_opclasses[i].as_deref())
+            } else if dialect == StructureDialect::Oracle && key_is_expression[i] {
+                column.trim().to_string()
             } else if for_new_table {
                 quote_new_ident(database_type, dialect, column)
             } else {
                 quote_ident(dialect, column)
+            };
+            if oracle_directions.is_empty() {
+                key
+            } else {
+                format!("{key} {}", oracle_directions[i])
             }
         })
         .collect::<Vec<_>>()
@@ -548,6 +671,13 @@ pub(super) fn build_create_index_statements(
     } else {
         String::new()
     };
+    let visibility_clause = if dialect == StructureDialect::Oracle
+        && index.original.as_ref().is_some_and(|original| original.visibility.as_deref() == Some("INVISIBLE"))
+    {
+        " INVISIBLE"
+    } else {
+        ""
+    };
     let filter = clean(&index.filter);
     let supports_where = capabilities.index_filter
         && matches!(dialect, StructureDialect::Postgres | StructureDialect::SqlServer | StructureDialect::Sqlite);
@@ -570,7 +700,7 @@ pub(super) fn build_create_index_statements(
         )
     } else {
         format!(
-            "CREATE {replace}{unique}{type_prefix}INDEX {index_name}{using_clause} ON {create_table} ({cols}){include_clause}{where_clause}{comment_clause};"
+            "CREATE {replace}{unique}{type_prefix}INDEX {index_name}{using_clause} ON {create_table} ({cols}){include_clause}{where_clause}{comment_clause}{visibility_clause};"
         )
     };
     let mut statements = vec![create_sql];

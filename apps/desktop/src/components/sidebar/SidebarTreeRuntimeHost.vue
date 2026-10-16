@@ -372,6 +372,8 @@ import {
   dropDatabaseLoading,
   showDropMongoCollectionConfirm,
   dropMongoCollectionLoading,
+  showClearMongoCollectionConfirm,
+  clearMongoCollectionLoading,
   showDropMongoIndexConfirm,
   dropMongoIndexLoading,
   showDropAllMongoIndexesConfirm,
@@ -629,6 +631,7 @@ const {
   canDropMongoDatabase,
   canDropMilvusDatabase,
   canDropMongoCollection,
+  canClearMongoCollection,
   canDropMilvusCollection,
   canRenameMongoCollection,
   canCloneMongoCollection,
@@ -683,6 +686,7 @@ const {
   openDeleteNacosNamespaceConfirm,
   confirmDeleteNacosNamespace,
   dropMongoCollection,
+  clearMongoCollection,
   dropMilvusCollection,
   dropMongoIndex,
   dropAllMongoIndexes,
@@ -699,11 +703,16 @@ const {
   confirmFlushRedisDb,
   confirmDropMongoDatabase,
   confirmDropMongoCollection,
+  confirmClearMongoCollection,
   confirmDropMilvusDatabase,
   confirmDropMilvusCollection,
   confirmDropMongoIndex,
   confirmDropAllMongoIndexes,
-} = useSidebarDatabaseSpecificMutationRuntime({ activeNode, connectionStore });
+} = useSidebarDatabaseSpecificMutationRuntime({
+  activeNode,
+  connectionStore,
+  refreshDataTabsForTable: (target) => queryStore.refreshDataTabsForTable(target),
+});
 
 const {
   isTableNotView,
@@ -6071,6 +6080,20 @@ routeDangerDialog(showDropMongoCollectionConfirm, () =>
   }),
 );
 
+routeDangerDialog(showClearMongoCollectionConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.clearCollectionTitle"),
+    message: t("contextMenu.clearCollectionMessage", { name: activeNode.value.label }),
+    detailsText: t("contextMenu.clearCollectionDetails"),
+    confirmLabel: t("contextMenu.clearCollection"),
+    get loading() {
+      return clearMongoCollectionLoading.value;
+    },
+    closeOnConfirm: false,
+    confirm: confirmClearMongoCollection,
+  }),
+);
+
 routeDangerDialog(showDropMongoIndexConfirm, () =>
   dangerRequest({
     title: t("contextMenu.confirmDropIndexTitle"),
@@ -7281,9 +7304,16 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         { label: "BSON dump (gzip)", action: () => void exportMongoCollection("bsonGzip") },
       ],
     });
+    const mongoDestructiveActions: ContextMenuItem[] = [];
+    if (canClearMongoCollection?.value) {
+      mongoDestructiveActions.push({ label: t("contextMenu.clearCollection"), action: clearMongoCollection, icon: Eraser, variant: "destructive" as const });
+    }
     if (canDropMongoCollection.value) {
+      mongoDestructiveActions.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
+    }
+    if (mongoDestructiveActions.length > 0) {
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
+      items.push(moreActionsSubmenu(mongoDestructiveActions));
     }
     return true;
   }

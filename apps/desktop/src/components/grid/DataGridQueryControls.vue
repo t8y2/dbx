@@ -85,6 +85,7 @@ const emit = defineEmits<{
   toggleValueSuggestion: [option: DataGridLocalFilterOption];
   toggleAllValueSuggestions: [];
   applyValueSuggestions: [];
+  customModeOrder: [];
   addSortRule: [];
   removeSortRule: [id: string];
   moveSortRule: [id: string, targetIndex: number];
@@ -294,6 +295,7 @@ onUnmounted(onResizeEnd);
               @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
               @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"
               @apply-value-suggestions="emit('applyValueSuggestions')"
+              @custom-mode-order="emit('customModeOrder')"
             />
           </PopoverContent>
         </Popover>

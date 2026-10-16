@@ -51,6 +51,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
@@ -1761,13 +1762,19 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String tableName = normalizeObjectName(table);
             String sql = """
                 SELECT i.INDEX_NAME, ic.COLUMN_NAME, ic.COLUMN_POSITION, i.UNIQUENESS,
-                    c.CONSTRAINT_TYPE, i.INDEX_TYPE
+                    c.CONSTRAINT_TYPE, i.INDEX_TYPE, i.PARTITIONED, i.VISIBILITY, ic.DESCEND, ie.COLUMN_EXPRESSION
                 FROM ALL_INDEXES i
                 JOIN ALL_IND_COLUMNS ic
                     ON i.INDEX_NAME = ic.INDEX_NAME
                     AND i.OWNER = ic.INDEX_OWNER
                     AND i.TABLE_OWNER = ic.TABLE_OWNER
                     AND i.TABLE_NAME = ic.TABLE_NAME
+                LEFT JOIN ALL_IND_EXPRESSIONS ie
+                    ON ie.INDEX_OWNER = ic.INDEX_OWNER
+                    AND ie.INDEX_NAME = ic.INDEX_NAME
+                    AND ie.TABLE_OWNER = ic.TABLE_OWNER
+                    AND ie.TABLE_NAME = ic.TABLE_NAME
+                    AND ie.COLUMN_POSITION = ic.COLUMN_POSITION
                 LEFT JOIN ALL_CONSTRAINTS c
                     ON i.INDEX_NAME = c.INDEX_NAME
                     AND i.TABLE_OWNER = c.OWNER
@@ -1777,39 +1784,51 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION
                 """.stripIndent().trim();
 
-            Map<String, List<String>> columnsByIndex = new LinkedHashMap<>();
-            Map<String, Boolean> uniqueByIndex = new LinkedHashMap<>();
-            Map<String, Boolean> primaryByIndex = new LinkedHashMap<>();
-            Map<String, String> typeByIndex = new LinkedHashMap<>();
+            Map<String, IndexInfo> indexesByName = new LinkedHashMap<>();
             try (var stmt = requireConnection().prepareStatement(sql)) {
                 stmt.setString(1, owner);
                 stmt.setString(2, tableName);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String indexName = rs.getString("INDEX_NAME");
-                        columnsByIndex.computeIfAbsent(indexName, ignored -> new ArrayList<>()).add(rs.getString("COLUMN_NAME"));
-                        uniqueByIndex.put(indexName, "UNIQUE".equalsIgnoreCase(rs.getString("UNIQUENESS")));
-                        primaryByIndex.put(indexName, "P".equalsIgnoreCase(rs.getString("CONSTRAINT_TYPE")));
-                        typeByIndex.put(indexName, rs.getString("INDEX_TYPE"));
+                        IndexInfo index = indexesByName.get(indexName);
+                        if (index == null) {
+                            IndexInfo item = new IndexInfo(indexName, new ArrayList<>(),
+                                "UNIQUE".equalsIgnoreCase(rs.getString("UNIQUENESS")),
+                                "P".equalsIgnoreCase(rs.getString("CONSTRAINT_TYPE")),
+                                null, rs.getString("INDEX_TYPE"), null, null);
+                            item.setKey_is_expression(new ArrayList<>());
+                            item.setKey_directions(new ArrayList<>());
+                            item.setKey_metadata_complete(true);
+                            item.setVisibility(rs.getString("VISIBILITY"));
+                            indexesByName.put(indexName, item);
+                            index = item;
+                        }
+                        String column = rs.getString("COLUMN_NAME");
+                        String expression = rs.getString("COLUMN_EXPRESSION");
+                        String indexType = rs.getString("INDEX_TYPE");
+                        String partitioned = rs.getString("PARTITIONED");
+                        boolean isExpression = expression != null && !expression.trim().isEmpty();
+                        int position = rs.getInt("COLUMN_POSITION");
+                        String direction = rs.getString("DESCEND");
+                        String visibility = rs.getString("VISIBILITY");
+                        if (position != index.getColumns().size() + 1
+                            || !("ASC".equals(direction) || "DESC".equals(direction))
+                            || !("VISIBLE".equals(visibility) || "INVISIBLE".equals(visibility))
+                            || !Objects.equals(index.getVisibility(), visibility)
+                            || !"NO".equals(partitioned)
+                            || !("NORMAL".equals(indexType) || "FUNCTION-BASED NORMAL".equals(indexType))
+                            || (!isExpression && column != null && column.startsWith("SYS_NC") && column.endsWith("$"))) {
+                            index.setKey_metadata_complete(false);
+                        }
+                        index.getColumns().add(isExpression ? expression : Objects.toString(column, ""));
+                        index.getKey_is_expression().add(isExpression);
+                        index.getKey_directions().add(Objects.toString(direction, ""));
                     }
                 }
             }
 
-            List<IndexInfo> result = new ArrayList<>();
-            for (Map.Entry<String, List<String>> entry : columnsByIndex.entrySet()) {
-                String name = entry.getKey();
-                result.add(new IndexInfo(
-                    name,
-                    entry.getValue(),
-                    Boolean.TRUE.equals(uniqueByIndex.get(name)),
-                    Boolean.TRUE.equals(primaryByIndex.get(name)),
-                    null,
-                    typeByIndex.get(name),
-                    null,
-                    null
-                ));
-            }
-            return result;
+            return new ArrayList<>(indexesByName.values());
         });
     }
 
@@ -1818,31 +1837,57 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return unchecked(() -> {
             String owner = normalizeSchema(schema);
             String tableName = normalizeObjectName(table);
-            String sql = """
-                SELECT c.CONSTRAINT_NAME, cc.COLUMN_NAME, rc.TABLE_NAME, rcc.COLUMN_NAME
-                FROM ALL_CONSTRAINTS c
-                JOIN ALL_CONS_COLUMNS cc ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME AND c.OWNER = cc.OWNER
-                JOIN ALL_CONSTRAINTS rc ON c.R_CONSTRAINT_NAME = rc.CONSTRAINT_NAME AND c.R_OWNER = rc.OWNER
-                JOIN ALL_CONS_COLUMNS rcc
-                    ON rc.CONSTRAINT_NAME = rcc.CONSTRAINT_NAME
-                    AND rc.OWNER = rcc.OWNER
-                    AND cc.POSITION = rcc.POSITION
-                WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER = ? AND c.TABLE_NAME = ?
-                ORDER BY c.CONSTRAINT_NAME, cc.POSITION
-                """.stripIndent().trim();
-
-            List<ForeignKeyInfo> result = new ArrayList<>();
-            try (var stmt = requireConnection().prepareStatement(sql)) {
+            try (var stmt = requireConnection().prepareStatement(
+                "SELECT TABLE_NAME FROM SYS.ALL_TABLES WHERE OWNER = ? AND TABLE_NAME = ?")) {
                 stmt.setString(1, owner);
                 stmt.setString(2, tableName);
                 try (ResultSet rs = stmt.executeQuery()) {
+                    if (!rs.next()) throw new SQLException("Table does not exist or is not accessible", "42000");
+                }
+            }
+            String user;
+            try (var stmt = requireConnection().prepareStatement("SELECT USER FROM DUAL");
+                 ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) throw new SQLException("Current user is unavailable", "42000");
+                user = rs.getString(1);
+                if (user == null || user.isEmpty() || rs.next()) throw new SQLException("Invalid current user metadata", "42000");
+            }
+            // Column-level REFERENCES may hide even the source FK from ALL_CONSTRAINTS.
+            boolean ownTable = owner.equals(user);
+            String sql = ownTable
+                ? "SELECT c.CONSTRAINT_NAME, c.R_OWNER, c.DELETE_RULE FROM SYS.USER_CONSTRAINTS c WHERE c.CONSTRAINT_TYPE = 'R' AND c.TABLE_NAME = ? ORDER BY c.CONSTRAINT_NAME"
+                : "SELECT c.CONSTRAINT_NAME, c.R_OWNER, c.DELETE_RULE FROM SYS.ALL_CONSTRAINTS c WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER = ? AND c.TABLE_NAME = ? ORDER BY c.CONSTRAINT_NAME";
+            record ForeignKeyReference(String name, String owner, String deleteRule) {}
+            List<ForeignKeyReference> references = new ArrayList<>();
+            var names = new java.util.HashSet<String>();
+            try (var stmt = requireConnection().prepareStatement(sql)) {
+                if (ownTable) {
+                    stmt.setString(1, tableName);
+                } else {
+                    stmt.setString(1, owner);
+                    stmt.setString(2, tableName);
+                }
+                try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new ForeignKeyInfo(
-                            rs.getString(1),
-                            rs.getString(2),
-                            rs.getString(3),
-                            rs.getString(4)
-                        ));
+                        String name = rs.getString(1);
+                        if (name == null || !names.add(name)) throw new SQLException("Invalid foreign key metadata", "42000");
+                        references.add(new ForeignKeyReference(name, rs.getString(2), rs.getString(3)));
+                    }
+                }
+            }
+            List<ForeignKeyInfo> result = new ArrayList<>();
+            // ALL_CONS_COLUMNS positions do not retain reordered referenced columns on OceanBase.
+            // Read the actual constraint definition rather than guessing pairs from the parent key.
+            for (var reference : references) {
+                try (var stmt = requireConnection().prepareStatement(
+                    "SELECT DBMS_METADATA.GET_DDL('REF_CONSTRAINT', ?, ?) FROM DUAL")) {
+                    stmt.setString(1, reference.name());
+                    stmt.setString(2, owner);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) throw new SQLException("Foreign key definition is unavailable", "42000");
+                        result.addAll(OracleForeignKeyDefinition.read(rs.getString(1), owner, tableName,
+                            reference.name(), reference.owner(), reference.deleteRule()));
+                        if (rs.next()) throw new SQLException("Foreign key definition is ambiguous", "42000");
                     }
                 }
             }
@@ -1858,6 +1903,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String sql = """
                 SELECT c.CONSTRAINT_NAME, c.CONSTRAINT_TYPE, c.SEARCH_CONDITION,
                        c.STATUS, c.VALIDATED, c.DEFERRABLE, c.DEFERRED, c.GENERATED,
+                       c.RELY, c.INDEX_OWNER, c.INDEX_NAME,
                        cc.COLUMN_NAME, tc.NULLABLE
                 FROM ALL_TABLES t
                 LEFT JOIN ALL_CONSTRAINTS c ON c.OWNER = t.OWNER AND c.TABLE_NAME = t.TABLE_NAME
@@ -1870,6 +1916,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 ORDER BY c.CONSTRAINT_NAME, cc.POSITION
                 """.stripIndent().trim();
             Map<String, ConstraintInfo> result = new LinkedHashMap<>();
+            Map<String, ConstraintInfo.OracleConstraintMetadata> oracleMetadata = new LinkedHashMap<>();
             try (var stmt = requireConnection().prepareStatement(sql)) {
                 stmt.setString(1, owner);
                 stmt.setString(2, tableName);
@@ -1890,6 +1937,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                                 + "\\s+(?i:IS\\s+NOT\\s+NULL)\\s*")) continue;
                         ConstraintInfo constraint = result.get(name);
                         if (constraint == null) {
+                            String constraintType = rs.getString("CONSTRAINT_TYPE");
                             String type = switch (rs.getString("CONSTRAINT_TYPE")) {
                                 case "P" -> "PRIMARY KEY";
                                 case "U" -> "UNIQUE";
@@ -1902,6 +1950,16 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                                 constraintState(rs.getString("STATUS"), "ENABLED", "DISABLED"),
                                 constraintState(rs.getString("VALIDATED"), "VALIDATED", "NOT VALIDATED"));
                             result.put(name, constraint);
+                            String status = rs.getString("STATUS");
+                            String validated = rs.getString("VALIDATED");
+                            String deferrable = rs.getString("DEFERRABLE");
+                            String deferred = rs.getString("DEFERRED");
+                            oracleMetadata.put(name, new ConstraintInfo.OracleConstraintMetadata(
+                                status != null && validated != null && deferrable != null && deferred != null
+                                    && constraintType != null && ("C".equals(constraintType) ? condition != null : true),
+                                owner, constraintType, status, validated, deferrable, deferred,
+                                rs.getString("RELY"), rs.getString("INDEX_OWNER"), rs.getString("INDEX_NAME"),
+                                null, null));
                         }
                         if (column != null) constraint.columns().add(column);
                     }
@@ -1915,11 +1973,108 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     definition = constraint.constraint_type() + " (" + String.join(", ",
                         constraint.columns().stream().map(OceanBaseOracleAgent::quoteIdentifier).toList()) + ")";
                 }
+                ConstraintInfo.OracleConstraintMetadata metadata = oracleMetadata.get(constraint.name());
+                if ("UNIQUE".equals(constraint.constraint_type()) && metadata != null) {
+                    ConstraintInfo.OracleConstraintIndexMetadata index = readOracleUniqueIndexMetadata(
+                        owner, tableName, metadata.indexOwner(), metadata.indexName());
+                    String sharing = index == null || !index.metadataComplete() ? null
+                        : readOracleIndexSharing(owner, tableName, metadata.indexOwner(), metadata.indexName());
+                    metadata = new ConstraintInfo.OracleConstraintMetadata(
+                        metadata.metadataComplete() && index != null && index.metadataComplete() && sharing != null,
+                        metadata.owner(), metadata.constraintType(), metadata.status(), metadata.validated(),
+                        metadata.deferrable(), metadata.deferred(), metadata.rely(), metadata.indexOwner(),
+                        metadata.indexName(), sharing, index);
+                }
                 return new ConstraintInfo(constraint.name(), constraint.constraint_type(), definition,
                     constraint.columns(), constraint.deferrable(), constraint.initially_deferred(),
-                    constraint.enabled(), constraint.valid());
+                    constraint.enabled(), constraint.valid(), metadata);
             }).toList();
         });
+    }
+
+    private ConstraintInfo.OracleConstraintIndexMetadata readOracleUniqueIndexMetadata(
+        String tableOwner, String tableName, String indexOwner, String indexName
+    ) {
+        var columns = new ArrayList<String>();
+        var directions = new ArrayList<String>();
+        var expressions = new ArrayList<Boolean>();
+        String actualOwner = null, actualTableOwner = null, actualTable = null;
+        String indexType = null, uniqueness = null, status = null, partitioned = null, visibility = null, secondary = null;
+        try (var statement = requireConnection().prepareStatement("""
+                 SELECT i.OWNER, i.TABLE_OWNER, i.TABLE_NAME, i.INDEX_TYPE, i.UNIQUENESS, i.STATUS,
+                        i.PARTITIONED, i.VISIBILITY, i.SECONDARY, ic.COLUMN_NAME, ic.DESCEND,
+                        ie.COLUMN_EXPRESSION, ic.COLUMN_POSITION
+                 FROM ALL_INDEXES i
+                 JOIN ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME
+                 LEFT JOIN ALL_IND_EXPRESSIONS ie ON ie.INDEX_OWNER = ic.INDEX_OWNER
+                     AND ie.INDEX_NAME = ic.INDEX_NAME AND ie.TABLE_OWNER = ic.TABLE_OWNER
+                     AND ie.TABLE_NAME = ic.TABLE_NAME AND ie.COLUMN_POSITION = ic.COLUMN_POSITION
+                 WHERE i.OWNER = ? AND i.INDEX_NAME = ? AND i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
+                 ORDER BY ic.COLUMN_POSITION
+                 """)) {
+            statement.setString(1, indexOwner);
+            statement.setString(2, indexName);
+            statement.setString(3, tableOwner);
+            statement.setString(4, tableName);
+            try (var rs = statement.executeQuery()) {
+                int expectedPosition = 1;
+                while (rs.next()) {
+                    actualOwner = rs.getString("OWNER");
+                    actualTableOwner = rs.getString("TABLE_OWNER");
+                    actualTable = rs.getString("TABLE_NAME");
+                    indexType = rs.getString("INDEX_TYPE");
+                    uniqueness = rs.getString("UNIQUENESS");
+                    status = rs.getString("STATUS");
+                    partitioned = rs.getString("PARTITIONED");
+                    visibility = rs.getString("VISIBILITY");
+                    secondary = rs.getString("SECONDARY");
+                    String column = rs.getString("COLUMN_NAME");
+                    String direction = rs.getString("DESCEND");
+                    String expression = rs.getString("COLUMN_EXPRESSION");
+                    int position = rs.getInt("COLUMN_POSITION");
+                    if (rs.wasNull() || position != expectedPosition++ || column == null || direction == null) return null;
+                    columns.add(column);
+                    directions.add(direction);
+                    expressions.add(expression != null && !expression.isBlank());
+                }
+            }
+        } catch (SQLException failure) {
+            return null;
+        }
+        boolean complete = actualOwner != null && actualTableOwner != null && actualTable != null
+            && indexType != null && uniqueness != null && status != null
+            && ("YES".equals(partitioned) || "NO".equals(partitioned)) && visibility != null
+            && !columns.isEmpty() && columns.size() == directions.size()
+            && columns.size() == expressions.size();
+        return new ConstraintInfo.OracleConstraintIndexMetadata(complete,
+            actualOwner == null ? indexOwner : actualOwner,
+            actualTableOwner == null ? tableOwner : actualTableOwner,
+            actualTable == null ? tableName : actualTable,
+            indexType == null ? "" : indexType, uniqueness == null ? "" : uniqueness,
+            status == null ? "" : status, "YES".equals(partitioned),
+            visibility == null ? "" : visibility, secondary,
+            List.copyOf(columns), List.copyOf(directions), List.copyOf(expressions), List.of());
+    }
+
+    private String readOracleIndexSharing(String tableOwner, String tableName, String indexOwner, String indexName) {
+        try (var statement = requireConnection().prepareStatement("""
+            SELECT COUNT(*) FROM ALL_CONSTRAINTS
+            WHERE OWNER = ? AND TABLE_NAME = ? AND INDEX_OWNER = ? AND INDEX_NAME = ?
+                AND CONSTRAINT_TYPE IN ('P', 'U')
+            """)) {
+            statement.setString(1, tableOwner);
+            statement.setString(2, tableName);
+            statement.setString(3, indexOwner);
+            statement.setString(4, indexName);
+            try (var rs = statement.executeQuery()) {
+                if (!rs.next()) return null;
+                int count = rs.getInt(1);
+                if (rs.wasNull() || rs.next() || count < 1) return null;
+                return count == 1 ? "exclusive" : "shared";
+            }
+        } catch (SQLException failure) {
+            return null;
+        }
     }
 
     private static Boolean constraintState(String value, String yes, String no) {

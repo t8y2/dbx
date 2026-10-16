@@ -123,7 +123,9 @@ pub(super) async fn prepare_table_ddl(
             match db::doris::get_catalog_table_ddl(&pool, catalog, &request.source_database, table).await {
                 Ok(ddl) => (ddl, true),
                 Err(err) => {
-                    log::warn!("[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL");
+                    log::warn!(
+                        "[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL"
+                    );
                     (
                         generate_create_table_ddl_with_column_quoting(
                             columns,
@@ -452,9 +454,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(prepared.deferred_fk_alters, vec![
-            "ALTER TABLE `resolved_child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
-        ]);
+        assert_eq!(
+            prepared.deferred_fk_alters,
+            vec![
+                "ALTER TABLE `resolved_child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
+            ]
+        );
         assert!(prepared.ddl.contains("`resolved_child`"), "{}", prepared.ddl);
     }
 

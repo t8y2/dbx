@@ -2516,6 +2516,9 @@ pub async fn list_indexes(pool: &SqliteHandle, schema: &str, table: &str) -> Res
                 })
                 .collect();
             indexes.push(IndexInfo {
+                key_directions: Vec::new(),
+                visibility: None,
+                key_metadata_complete: false,
                 name,
                 columns,
                 is_unique,
@@ -2572,6 +2575,9 @@ pub async fn list_indexes(pool: &SqliteHandle, schema: &str, table: &str) -> Res
                     .collect::<Vec<_>>();
 
                 indexes.push(IndexInfo {
+                    key_directions: Vec::new(),
+                    visibility: None,
+                    key_metadata_complete: false,
                     name,
                     columns,
                     is_unique,

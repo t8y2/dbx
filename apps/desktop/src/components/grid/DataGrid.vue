@@ -91,6 +91,7 @@ import DataGridExtractorDialog from "@/components/grid/DataGridExtractorDialog.v
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
+import DataGridFilterModeOrderDialog from "@/components/grid/DataGridFilterModeOrderDialog.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
 import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
@@ -133,6 +134,7 @@ import {
   isSalesforceNewRowReadonlyColumn,
   isTdengineExistingRowReadonlyColumn,
   shouldIncludeSyntheticRowId,
+  showsKeylessEditWarning,
 } from "@/lib/table/tableEditing";
 import { buildDataGridConditionalUpdateSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import { sumGridCountValues } from "@/lib/dataGrid/dataGridCountValue";
@@ -290,6 +292,7 @@ import {
   filterModeUsesRange,
   parseFilterValue,
   parseFilterValues,
+  removeColumnValueFilterCondition,
 } from "@/lib/dataGrid/dataGridColumnFilter";
 import { normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
 import { dataGridPageSizeSettingsPatch, preferredDataGridPageSize, resolveDataGridPageSizePreference, type DataGridPageSizePreference } from "@/lib/dataGrid/dataGridPageSizePreference";
@@ -400,11 +403,12 @@ import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
-import { buildColumnIndexMap, columnIndexColorClass, columnIndexNameKey, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
+import { buildColumnIndexMap, columnIndexCacheAction, columnIndexColorClass, columnIndexNameKey, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { isSchemaAware, supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { buildDataGridLocalFilterOptions, restoreDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint } from "@/lib/database/jdbcDialect";
+import { orderDataGridFilterModeOptions } from "@/lib/dataGrid/dataGridFilterModeOrder";
 import { mongoCollectionSupportsIndexes, supportsMongoIndexMutations } from "@/lib/mongo/mongoCapabilities";
 import { isProtectedMongoIndex, mongoDropAllIndexesPreview, mongoDropIndexFailureCount, mongoDropIndexPreview } from "@/lib/sidebar/mongoCollectionMutation";
 import { runMongoMutation } from "@/lib/sidebar/runMongoSidebarMutation";
@@ -1274,7 +1278,19 @@ const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "is-blank", labelKey: "grid.filterBuilderIsBlank" },
   { value: "is-not-blank", labelKey: "grid.filterBuilderIsNotBlank" },
 ];
-const filterModeOptions = computed(() => allFilterModeOptions.filter((option) => filterModeIsSupportedForDatabase(option.value, resolvedDatabaseType.value)));
+const supportedFilterModeOptions = computed(() => allFilterModeOptions.filter((option) => filterModeIsSupportedForDatabase(option.value, resolvedDatabaseType.value)));
+const filterModeOrderVersion = ref(0);
+const filterModeOptions = computed(() => {
+  void filterModeOrderVersion.value;
+  return orderDataGridFilterModeOptions(resolvedDatabaseType.value, supportedFilterModeOptions.value);
+});
+const filterModeOrderDialogOpen = ref(false);
+function openFilterModeOrderDialog() {
+  filterModeOrderDialogOpen.value = true;
+}
+function onFilterModeOrderSaved() {
+  filterModeOrderVersion.value += 1;
+}
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
 const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", props.tableMeta?.columns.map((column) => column.name).join("\0") ?? ""].join("\u0001"));
@@ -1483,6 +1499,11 @@ const localColumnFilterRuntime = useDataGridColumnFilters({
   getConnectionConfig: () => (props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined),
   getIdentifierQuote: () => connectionStore.connectionIdentifierQuote?.(props.connectionId),
   getGlobalQueryTimeoutSecs: () => settingsStore.editorSettings.globalQueryTimeoutSecs,
+  getDistinctWhereInput: (columnIndex) => {
+    const current = serverColumnFilters.value[columnIndex]?.condition;
+    const manualWhere = current ? removeColumnValueFilterCondition(whereFilterInput.value, current) : whereFilterInput.value;
+    return combineWhereInputs(manualWhere, appliedStructuredWhereInput.value);
+  },
   getNewRows: () => getGridNewRows(),
   getRowData: (row, sourceIndex) => getGridRowData(row, sourceIndex),
   formatValue: (value, columnIndex) => formatCell(value, columnIndex, undefined, false),
@@ -3530,6 +3551,9 @@ let infiniteScrollLoadAllPending = false;
 // row cap bounds each request, not the run — the run only stops when the server
 // runs out of rows, so a table larger than the cap does not silently stop halfway (#10752).
 let loadAllRowsLoopActive = false;
+// Set when a "load all" reloads a jumped-to discrete page from the first row;
+// the replacing result must still land the view on the last row (#11940).
+let loadAllRowsReloadPending = false;
 const loadAllRowsActive = ref(false);
 // Tracks whether the current loading cycle was triggered by a refresh/rollback
 // (as opposed to a normal paginate). Used to decide whether to auto-redirect
@@ -3618,7 +3642,7 @@ const pendingEsDeepPageJump = ref<{ targetPage: number; requestCount: number; up
 // large shot needs an explicit confirmation the way ES deep page jumps do.
 const LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD = 100_000;
 const loadAllRowsConfirmOpen = ref(false);
-const pendingLoadAllRows = ref<{ remaining: number }>();
+const pendingLoadAllRows = ref<{ remaining: number; reloadFromFirstRow?: boolean }>();
 watch(loadAllRowsConfirmOpen, (open) => {
   if (!open) pendingLoadAllRows.value = undefined;
 });
@@ -3797,7 +3821,7 @@ watch(
 );
 const showQueryEditReadOnlyBadge = computed(() => isResultsContext.value && hasData.value && !props.editable && !!props.queryEditabilityReason);
 const queryEditReadOnlyReason = computed(() => (props.queryEditabilityReason ? t(`grid.queryEditUnsupported.${props.queryEditabilityReason}`) : ""));
-const showKeylessEditWarning = computed(() => !!props.editable && !!props.tableMeta && canUseKeylessRowPredicate(props.databaseType, props.tableMeta.primaryKeys ?? []));
+const showKeylessEditWarning = computed(() => !!props.editable && !!props.tableMeta && showsKeylessEditWarning(props.databaseType, props.tableMeta.primaryKeys ?? [], props.tableMeta.tableType));
 type DataGridTableMeta = NonNullable<typeof props.tableMeta>;
 const hiveTableTransactional = ref<boolean | undefined>(undefined);
 const resultSourceColumns = computed(() => props.result.columns.map((column, index) => props.sourceColumns?.[index] ?? column));
@@ -4041,6 +4065,23 @@ function loadAllRowsAndGoToLast() {
   // against those cursors is untested, so ES/Easysearch grids keep the
   // reveal-only shortcut instead of loading everything.
   if (isResultsContext.value && (resolvedDatabaseType.value === "elasticsearch" || resolvedDatabaseType.value === "easysearch")) return;
+  // A result sitting on a jumped-to page is a discrete window, not a
+  // contiguous 0..rows.length prefix: continuing the run from rows.length
+  // would splice rows starting at the wrong offset (issue #11940 — jumping
+  // past the end left a stale page and "load all" then appended from that
+  // stale boundary, corrupting the row set). "Load all" from here means
+  // reloading every row from the first one in a single request.
+  if (!loadAllRowsLoopActive && (props.pageOffset ?? 0) > 0) {
+    const total = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
+    const reloadLimit = typeof total === "number" && Number.isFinite(total) && total > 0 ? total : infiniteScrollMaxRows.value;
+    if (reloadLimit > LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD) {
+      pendingLoadAllRows.value = { remaining: reloadLimit, reloadFromFirstRow: true };
+      loadAllRowsConfirmOpen.value = true;
+      return;
+    }
+    startLoadAllRows({ offset: 0, limit: reloadLimit }, true);
+    return;
+  }
   const segment = nextLoadAllSegment();
   if (!segment) {
     loadAllRowsActive.value = true;
@@ -4058,17 +4099,23 @@ function loadAllRowsAndGoToLast() {
   startLoadAllRows(segment);
 }
 
-function startLoadAllRows(segment: { offset: number; limit: number }) {
+function startLoadAllRows(segment: { offset: number; limit: number }, reloadFromFirstRow = false) {
   loadAllRowsActive.value = true;
-  loadAllRowsLoopActive = true;
+  loadAllRowsLoopActive = !reloadFromFirstRow;
+  loadAllRowsReloadPending = reloadFromFirstRow;
   infiniteScrollAllLoaded = false;
-  infiniteScrollLoadAllPending = true;
-  infiniteScrollLoading.value = true;
-  isInfiniteScrollPaginating.value = true;
-  infiniteScrollRequestedOffset = segment.offset;
-  infiniteScrollRequestedLimit = segment.limit;
-  currentPage.value++;
-  emit("paginate", segment.offset, segment.limit, currentWhereInput(), effectiveOrderBy(), true);
+  // A reload-from-first-row run replaces the page through the normal (non-
+  // append) execution path; the append watcher must not treat it as one of
+  // its own chunks.
+  infiniteScrollLoadAllPending = !reloadFromFirstRow;
+  infiniteScrollLoading.value = !reloadFromFirstRow;
+  isInfiniteScrollPaginating.value = !reloadFromFirstRow;
+  infiniteScrollRequestedOffset = reloadFromFirstRow ? undefined : segment.offset;
+  infiniteScrollRequestedLimit = reloadFromFirstRow ? undefined : segment.limit;
+  if (!reloadFromFirstRow) currentPage.value++;
+  // A reload-from-first-row run replaces the discrete page with the full
+  // result in one request (appendRequested=false); chunked runs append.
+  emit("paginate", segment.offset, segment.limit, currentWhereInput(), effectiveOrderBy(), !reloadFromFirstRow);
 }
 
 // Continues an explicit "load all" run chunk by chunk until the server runs
@@ -4115,6 +4162,12 @@ function confirmLoadAllRows() {
   if (!pending) return;
   pendingLoadAllRows.value = undefined;
   loadAllRowsConfirmOpen.value = false;
+  if (pending.reloadFromFirstRow) {
+    const total = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
+    const reloadLimit = typeof total === "number" && Number.isFinite(total) && total > 0 ? total : infiniteScrollMaxRows.value;
+    startLoadAllRows({ offset: 0, limit: reloadLimit }, true);
+    return;
+  }
   const segment = nextLoadAllSegment();
   if (segment) startLoadAllRows(segment);
 }
@@ -4141,6 +4194,7 @@ function changePageSize(size: number) {
   infiniteScrollAllLoaded = false;
   loadAllRowsActive.value = false;
   loadAllRowsLoopActive = false;
+  loadAllRowsReloadPending = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
   emit("paginate", 0, normalizedSize, currentWhereInput(), effectiveOrderBy());
@@ -4543,6 +4597,7 @@ const {
   transactionActive,
   isSaving,
   saveError,
+  previewValidationMessage,
   useTransaction,
   beginBatch,
   commitBatch,
@@ -4592,6 +4647,7 @@ const {
   recordScrollPosition,
   isPreviewLoading,
   previewChanges,
+  isUntouchedNewRow,
 } = editor;
 getGridNewRows = () => newRows.value;
 getGridRowData = rowDataWithChanges;
@@ -4673,7 +4729,7 @@ function schedulePreviewRefresh() {
 async function openSqlPreview() {
   const stmts = await previewChanges();
   previewSqlText.value = stmts.join("\n");
-  if (stmts.length > 0) {
+  if (stmts.length > 0 || previewValidationMessage.value) {
     showSqlPreview.value = true;
   }
 }
@@ -5076,6 +5132,7 @@ function resetInfiniteScrollState() {
   infiniteScrollLoadAllPending = false;
   loadAllRowsActive.value = false;
   loadAllRowsLoopActive = false;
+  loadAllRowsReloadPending = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
 }
@@ -5396,8 +5453,15 @@ const displayRowRefs = computed<DisplayRowRef[]>(() => {
       // Pending rows must remain visible while a column filter is active so
       // users can fill in and review newly inserted records before saving.
       if (!row) continue;
-      const status: RowStatus = "new";
-      if (!matchesRowStatusFilter(status, rowStatusFilter.value)) continue;
+      // A blank row created as a placeholder is not a pending INSERT. Keep it
+      // visible, but give it the clean row-number treatment so the green
+      // marker only identifies rows that will be submitted.
+      const isUntouched = isUntouchedNewRow(row, newIndex);
+      const status: RowStatus = isUntouched ? "clean" : "new";
+      // Placeholders remain discoverable under the "new" filter so adding a
+      // row does not hide the blank editor the user just created.
+      const filterStatus: RowStatus = isUntouched ? "new" : status;
+      if (!matchesRowStatusFilter(filterStatus, rowStatusFilter.value)) continue;
       refs.push({
         id: -(newIndex + 1),
         displayIndex: refs.length,
@@ -7453,8 +7517,11 @@ async function applyOrderBySearch(_value?: string, structuredOrderByOverride?: s
   // in its own tab field so store-side rebuilds keep the composite ORDER BY
   // while the manual input stays free of the structured terms.
   emit("update:structuredOrderByInput", structuredOrderBy ?? "");
-  const manualOrderByClause = orderByInput.value.trim();
-  if (manualOrderByClause) rememberDataGridConditionHistory("orderBy", conditionHistoryScope.value, manualOrderByClause);
+  // Record the clause that is actually applied, so sorts built with the sort
+  // builder (not only the manual ORDER BY input) are restorable from the ORDER BY
+  // history. This mirrors applyWhereFilter, which remembers currentWhereInput()
+  // and therefore already keeps structured filter rules in the WHERE history (#12224).
+  if (orderByClause) rememberDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByClause);
   isApplyingWhere.value = true;
   queryControlError.value = "";
   currentPage.value = 1;
@@ -7637,6 +7704,7 @@ function rowNumberPageOffset(): number {
 
 function rowNumberText(item: RowItem | undefined): string {
   if (!item) return "";
+  if (item.isNew && item.status === "clean") return "*";
   return resolveDataGridRowNumberLabel({
     displayIndex: item.displayIndex,
     sourceIndex: item.sourceIndex,
@@ -7715,23 +7783,25 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
             ? settingsStore.editorSettings.dataGridZebraRowBg?.trim() || `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`
             : "var(--data-grid-background)";
   const rowNumberBg =
-    item.status === "new"
-      ? dark
-        ? "rgb(33, 45, 40)"
-        : "rgb(219, 244, 233)"
-      : item.status === "edited"
+    item.isNew && item.status === "clean"
+      ? rowBg
+      : item.status === "new"
         ? dark
-          ? "rgb(48, 41, 28)"
-          : "rgb(253, 241, 219)"
-        : item.status === "deleted"
+          ? "rgb(33, 45, 40)"
+          : "rgb(219, 244, 233)"
+        : item.status === "edited"
           ? dark
-            ? "rgb(55, 31, 32)"
-            : "rgb(255, 244, 244)"
-          : isRowActive(item.displayIndex) && !item.isDeleted
-            ? activeRowBg
-            : dark
-              ? "rgb(35, 37, 42)"
-              : "rgb(255, 255, 255)";
+            ? "rgb(48, 41, 28)"
+            : "rgb(253, 241, 219)"
+          : item.status === "deleted"
+            ? dark
+              ? "rgb(55, 31, 32)"
+              : "rgb(255, 244, 244)"
+            : isRowActive(item.displayIndex) && !item.isDeleted
+              ? activeRowBg
+              : dark
+                ? "rgb(35, 37, 42)"
+                : "rgb(255, 255, 255)";
   return {
     "--data-grid-cell-bg": rowBg,
     "--data-grid-row-number-bg": rowNumberBg,
@@ -9052,6 +9122,7 @@ const pageSizeMenuItems = computed(() =>
 const exportMenuItems = computed(() => {
   const hasFullResultExport = !!props.fullExportResult;
   const canIncludeSql = props.context === "results" && !!(props.exportSql || props.sql)?.trim();
+  const canTransferToDatabase = props.context === "results" && !!props.transferQueryResult;
   const allResultItems =
     (props.allExportResults?.length ?? 0) > 1
       ? [
@@ -9104,7 +9175,6 @@ const exportMenuItems = computed(() => {
         {
           value: "selected-columns-csv",
           label: t("grid.exportSelectedColumnsCsv"),
-          separatorBefore: true,
         },
         { value: "selected-columns-xlsx", label: t("grid.exportSelectedColumnsXlsx") },
         ...(canIncludeSql
@@ -9160,8 +9230,9 @@ const exportMenuItems = computed(() => {
 
   if (!hasFullResultExport) {
     return [
-      ...(props.context === "results" && props.transferQueryResult ? [{ value: "database", label: t("grid.exportDatabase") }] : []),
-      { value: "csv", label: t("grid.exportCsv") },
+      ...selectedColumnsItems,
+      ...(canTransferToDatabase ? [{ value: "database", label: t("grid.exportDatabase"), separatorBefore: selectedColumnsItems.length > 0 }] : []),
+      { value: "csv", label: t("grid.exportCsv"), separatorBefore: selectedColumnsItems.length > 0 && !canTransferToDatabase },
       { value: "xlsx", label: t("grid.exportXlsx") },
       ...(canIncludeSql ? [{ value: "xlsx-with-sql", label: t("grid.exportXlsxWithSql") }] : []),
       { value: "json", label: t("grid.exportJson") },
@@ -9171,14 +9242,14 @@ const exportMenuItems = computed(() => {
       { value: "txt", label: t("grid.exportTxt") },
       ...allResultItems,
       ...selectedRowsItems,
-      ...selectedColumnsItems,
       ...selectedCellsItems,
     ];
   }
 
   return [
-    ...(props.context === "results" && props.transferQueryResult ? [{ value: "database", label: t("grid.exportDatabase"), separatorBefore: true }] : []),
-    { value: "page-csv", label: t("grid.exportCurrentPageCsv") },
+    ...selectedColumnsItems,
+    ...(canTransferToDatabase ? [{ value: "database", label: t("grid.exportDatabase"), separatorBefore: selectedColumnsItems.length > 0 }] : []),
+    { value: "page-csv", label: t("grid.exportCurrentPageCsv"), separatorBefore: selectedColumnsItems.length > 0 && !canTransferToDatabase },
     { value: "page-xlsx", label: t("grid.exportCurrentPageXlsx") },
     ...(canIncludeSql
       ? [
@@ -9214,7 +9285,6 @@ const exportMenuItems = computed(() => {
     { value: "txt", label: t("grid.exportCurrentResultTxt") },
     ...allResultItems,
     ...selectedRowsItems,
-    ...selectedColumnsItems,
     ...selectedCellsItems,
   ];
 });
@@ -9314,7 +9384,11 @@ function openColumnDetailDialog(columnIndex: number) {
 function openContextCellDetailDialog() {
   const cell = contextCell.value;
   if (!cell || cell.col < 0) return;
-  openCellDetailDialog(cell.rowIndex, cell.col);
+  if (cellDetailDialogDefault.value) {
+    openCellDetailDialog(cell.rowIndex, cell.col);
+  } else {
+    showCellDetails(cell.rowIndex, cell.col);
+  }
 }
 
 function openContextColumnDetailDialog() {
@@ -11708,12 +11782,24 @@ watch(
     resetDistinctValueCache();
     filterValueSuggestionLoader.reset({ clearCache: true });
     // A non-append result replaces the whole data set, so a running "load all" is over.
+    const reloadedFromFirstRow = loadAllRowsReloadPending;
+    loadAllRowsReloadPending = false;
     loadAllRowsActive.value = false;
     loadAllRowsLoopActive = false;
-    // The replacement also invalidates the all-loaded marker: a filter change or
-    // page jump swaps in a fresh first page whose remaining segments must be
-    // re-derived instead of being silently skipped.
-    infiniteScrollAllLoaded = false;
+    if (reloadedFromFirstRow) {
+      // A capped/truncated reload must not claim completeness — that would
+      // block the #10752 continuation past the cap; only an uncapped full
+      // reload marks the end (#11940).
+      if (!props.result.truncated && props.result.has_more !== true) {
+        infiniteScrollAllLoaded = true;
+      }
+      selectAndRevealLastLoadedRow();
+    } else {
+      // The replacement also invalidates the all-loaded marker: a filter change or
+      // page jump swaps in a fresh first page whose remaining segments must be
+      // re-derived instead of being silently skipped.
+      infiniteScrollAllLoaded = false;
+    }
     if (getResetScrollAfterResult()) {
       clearResetScrollAfterResult();
       resetGridVerticalScroll();
@@ -12586,6 +12672,10 @@ async function refreshActiveTableInfo() {
   }
 }
 
+// 手动刷新会重新发布 tableMeta（例如 catalog/database 从 undefined 变成具体值），
+// 但表身份没有变化。此时清空 indexes 会让表头索引标识闪断（#12093），所以同表刷新
+// 只把缓存标记为过期、保留当前标识直到新结果返回，只有真正切换表才清空。
+let lastMetadataIndexTableIdentity = currentIndexTableIdentity.value;
 watch(
   () => [props.connectionId, props.database, props.tableMeta?.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName],
   () => {
@@ -12602,11 +12692,18 @@ watch(
     tableOverviewLoaded.value = false;
     tableOverviewRequestGeneration.value += 1;
     rawDdlContent.value = "";
-    indexes.value = [];
-    indexesLoaded.value = false;
-    indexesLoading.value = false;
-    indexesError.value = "";
-    indexesRequestGeneration.value += 1;
+    const indexTableIdentity = currentIndexTableIdentity.value;
+    const indexCacheAction = columnIndexCacheAction(lastMetadataIndexTableIdentity, indexTableIdentity, indexesLoaded.value);
+    lastMetadataIndexTableIdentity = indexTableIdentity;
+    if (indexCacheAction === "reset") {
+      indexes.value = [];
+      indexesLoaded.value = false;
+      indexesLoading.value = false;
+      indexesError.value = "";
+      indexesRequestGeneration.value += 1;
+    } else if (indexCacheAction === "keep-refresh") {
+      indexesLoaded.value = false;
+    }
     foreignKeys.value = [];
     foreignKeysLoaded.value = false;
     foreignKeysLoading.value = false;
@@ -13601,8 +13698,7 @@ function exportSubmenu(): ContextMenuItem {
     );
   }
   if (hasSelectedColumns.value) {
-    items.push(
-      { label: "", separator: true },
+    items.unshift(
       { label: t("grid.exportSelectedColumnsCsv"), action: exportSelectedColumnsCsv },
       {
         label: t("grid.exportSelectedColumnsXlsx"),
@@ -13630,6 +13726,7 @@ function exportSubmenu(): ContextMenuItem {
       },
       { label: t("grid.exportSelectedColumnsSql"), action: exportSelectedColumnsSql },
       { label: t("grid.exportSelectedColumnsTxt"), action: exportSelectedColumnsTxt },
+      { label: "", separator: true },
     );
   }
   if (hasSelectedCells.value) {
@@ -14065,6 +14162,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   @toggle-value-suggestion="toggleFilterValueSuggestion"
                   @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
                   @apply-value-suggestions="applyFilterValueSuggestions"
+                  @custom-mode-order="openFilterModeOrderDialog"
                 />
               </template>
 
@@ -14173,6 +14271,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @toggle-value-suggestion="toggleFilterValueSuggestion"
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
           @apply-value-suggestions="applyFilterValueSuggestions"
+          @custom-mode-order="openFilterModeOrderDialog"
         />
         <DataGridTextFilterWorkbench
           v-if="canUseWhereSearch && filterEditorView === 'text' && filterBuilderOpen"
@@ -14206,6 +14305,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @toggle-value-suggestion="toggleFilterValueSuggestion"
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
           @apply-value-suggestions="applyFilterValueSuggestions"
+          @custom-mode-order="openFilterModeOrderDialog"
         />
         <DataGridSortWorkbench
           v-if="canUseWhereSearch && filterEditorView === 'conditions' && sortBuilderOpen"
@@ -15335,6 +15435,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           @mousedown="onRowNumberMouseDown(item, $event)"
                           @dblclick.stop="toggleTranspose(item.displayIndex)"
                           @contextmenu="onRowContext(item.id, item.displayIndex)"
+                          :title="item.isNew && item.status === 'clean' ? t('grid.uncommittedBlankRow') : undefined"
                         >
                           {{ rowNumberText(item) }}
                         </div>
@@ -15545,7 +15646,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             </template>
           </div>
           <!-- Column lookup panel -->
-          <div v-if="goToColumnOpen" data-column-lookup-panel class="column-lookup-panel relative col-start-2 row-start-1 z-30 flex min-w-0 max-w-full flex-col overflow-hidden border-l bg-background shadow-lg" @keydown="onGoToColumnKeydown">
+          <div v-if="goToColumnOpen" data-column-lookup-panel class="column-lookup-panel relative col-start-2 row-start-1 z-30 flex min-w-0 max-w-full flex-col overflow-hidden border-l bg-background shadow-lg" :class="{ 'row-span-2': cellDetailPanelIsBottom }" @keydown="onGoToColumnKeydown">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
               <Columns3 class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 truncate">{{ t("grid.goToColumn") }}</span>
@@ -15826,7 +15927,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               <DataGridCellDetailHexViewer v-if="activeCellDetailTabs.includes('hexViewer')" :rows="activeBinaryHexRows" :byte-count="activeBinaryHexByteCount" />
 
               <TabsContent v-if="activeCellDetailTabs.includes('valueEditor')" value="valueEditor" class="m-0 min-h-0 min-w-0 flex-1 flex flex-col p-3 text-xs">
-                <div class="min-w-0 flex min-h-0 flex-1 flex-col">
+                <div :style="detailTransformOpen ? { display: 'none' } : null" class="min-w-0 flex min-h-0 flex-1 flex-col">
                   <TemporalCellEditor
                     v-if="detailTemporalEditorConfig"
                     v-model="detailEditValue"
@@ -15847,6 +15948,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :identity="`${activeCellDetail.rowId}:${activeCellDetail.colIndex}:${activeCellDetailTab}`"
                     :incomplete="activeCellDetail.isSourceTruncated"
                     :unsafe-number="typeof activeCellDetail.value === 'number' && Number.isInteger(activeCellDetail.value) && !Number.isSafeInteger(activeCellDetail.value) && detailEditValue === activeCellDetail.rawValue"
+                    :column="activeCellDetail.column"
+                    :row-number="activeCellDetail.rowNumber"
                   />
                   <DropdownMenu v-if="activeCellDetail?.isEditable">
                     <DropdownMenuTrigger as-child>
@@ -16072,6 +16175,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             @move="(id, targetIndex) => conditionalBulkEditFilterBuilder.moveRule(id, targetIndex)"
             @update-rule="(id, patch) => conditionalBulkEditFilterBuilder.updateRule(id, patch)"
             @update:column-search="conditionalBulkEditColumnSearch = $event"
+            @custom-mode-order="openFilterModeOrderDialog"
           />
           <Button variant="outline" size="sm" :disabled="!filterBuilderColumnOptions.length" @click="addConditionalBulkEditRule">{{ t("grid.filterBuilderAddRule") }}</Button>
         </div>
@@ -16107,6 +16211,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     <DataGridExtractorDialog v-model:open="extractorConfigOpen" :preference="selectedCopyPreference" :options="settingsStore.editorSettings.dataGridExtractorOptions" :items="copyPreferenceMenuItems" :preview="previewWithPreference" @save="saveExtractorConfiguration" />
     <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />
     <GridSnapshotDialog v-model:open="gridSnapshotOpen" :source="gridSnapshotSource" />
+    <DataGridFilterModeOrderDialog v-model:open="filterModeOrderDialogOpen" :database-type="resolvedDatabaseType" :options="supportedFilterModeOptions" @saved="onFilterModeOrderSaved" />
 
     <Dialog v-model:open="esDeepPageJumpConfirmOpen">
       <DialogContent class="sm:max-w-[480px]">
@@ -16202,7 +16307,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         :title="t('grid.resizeSqlPreview')"
         @pointerdown.prevent="onSqlPreviewResizeStart"
       />
-      <SqlPreviewPanel :sql="previewSqlText" :loading="isPreviewLoading" :can-undo="canUndoPendingChange" :can-redo="canRedoPendingChange" @undo="undoGridChange" @redo="redoGridChange" @close="closeSqlPreview" />
+      <SqlPreviewPanel :sql="previewSqlText" :empty-message="previewValidationMessage || undefined" :loading="isPreviewLoading" :can-undo="canUndoPendingChange" :can-redo="canRedoPendingChange" @undo="undoGridChange" @redo="redoGridChange" @close="closeSqlPreview" />
     </div>
 
     <DangerConfirmDialog

@@ -24,7 +24,10 @@ fn build_trigger_sql_with_mode(
 
     let dialect = super::dialect::capabilities_for(options.database_type, options.driver_profile.as_deref()).dialect;
     let database_label = database_label(options.database_type);
-    if !matches!(dialect, StructureDialect::Mysql | StructureDialect::Oracle | StructureDialect::SqlServer) {
+    if !matches!(
+        dialect,
+        StructureDialect::Mysql | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::SqlServer
+    ) {
         if options.triggers.iter().any(has_trigger_edit) {
             warnings.push(format!("Editing triggers is not supported for {database_label} from this editor."));
         }
@@ -55,18 +58,22 @@ fn build_trigger_sql_with_mode(
             }
 
             if has_trigger_body_change(trigger, original) {
-                if dialect == StructureDialect::Oracle && !is_structured_oracle_trigger_source(original) {
+                if uses_replace_trigger_editing(dialect)
+                    && (!is_structured_oracle_trigger_source(original) || has_trigger_condition(original))
+                {
                     // The stored source carries clauses (WHEN, REFERENCING, FOLLOWS, ...) that the
                     // timing/event/body form cannot represent, so CREATE OR REPLACE would drop them.
                     warnings.push(format!(
-                        "Editing existing Oracle trigger \"{}\" requires its complete source definition.",
+                        "Editing existing {} trigger \"{}\" requires its complete source definition.",
+                        trigger_editing_dialect_label(dialect),
                         original.name
                     ));
                     continue;
                 }
                 needs_recreate = true;
-                // Oracle can replace a trigger in place; renames still require dropping the old object.
-                if dialect != StructureDialect::Oracle || clean(&trigger.name) != clean(&original.name) {
+                // Oracle-family servers can replace a trigger in place; renames still require
+                // dropping the old object.
+                if !uses_replace_trigger_editing(dialect) || clean(&trigger.name) != clean(&original.name) {
                     statements.push(drop_trigger_sql(dialect, options.schema.as_deref(), &original.name));
                 }
             } else if trigger.enabled.is_some() && trigger.enabled != original.enabled {
@@ -97,7 +104,7 @@ fn build_trigger_sql_with_mode(
                         let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);
                         statements.push(format!("DISABLE TRIGGER {trigger_name} ON {table};"));
                     }
-                } else if dialect == StructureDialect::Oracle {
+                } else if uses_replace_trigger_editing(dialect) {
                     let enabled = trigger
                         .enabled
                         .unwrap_or_else(|| trigger.original.as_ref().and_then(|o| o.enabled).unwrap_or(true));
@@ -109,7 +116,7 @@ fn build_trigger_sql_with_mode(
                 }
             }
         } else if needs_alter_enabled {
-            if dialect == StructureDialect::Oracle {
+            if uses_replace_trigger_editing(dialect) {
                 let schema = options.schema.as_deref();
                 let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);
                 let state = if trigger.enabled == Some(true) { "ENABLE" } else { "DISABLE" };
@@ -154,6 +161,25 @@ fn has_trigger_body_change(trigger: &EditableStructureTrigger, original: &Trigge
         || normalize_statement(&trigger.statement) != normalize_statement(original.statement.as_deref().unwrap_or(""))
 }
 
+/// Oracle-family dialects that rebuild triggers through `CREATE OR REPLACE TRIGGER` and toggle
+/// the state with `ALTER TRIGGER ... ENABLE/DISABLE`.
+fn uses_replace_trigger_editing(dialect: StructureDialect) -> bool {
+    matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng)
+}
+
+fn trigger_editing_dialect_label(dialect: StructureDialect) -> &'static str {
+    match dialect {
+        StructureDialect::Dameng => "Dameng",
+        _ => "Oracle",
+    }
+}
+
+/// A catalog-reported `WHEN` clause cannot be represented by the timing/event/body form, so the
+/// trigger has to keep its complete source definition instead of being rebuilt from the body.
+fn has_trigger_condition(original: &TriggerInfo) -> bool {
+    original.condition.as_deref().is_some_and(|condition| !clean(condition).is_empty())
+}
+
 fn drop_trigger_sql(dialect: StructureDialect, schema: Option<&str>, name: &str) -> String {
     let qualified_name = if schema.is_some_and(|schema| !schema.trim().is_empty()) {
         format!("{}.{}", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, name))
@@ -186,8 +212,9 @@ fn create_trigger_sql(
         StructureDialect::SqlServer => {
             create_sqlserver_trigger_sql(schema, table, &name, &timing, &event, &statement, warnings)
         }
-        StructureDialect::Oracle => create_oracle_trigger_sql(
+        StructureDialect::Oracle | StructureDialect::Dameng => create_oracle_trigger_sql(
             database_type,
+            dialect,
             schema,
             table,
             &name,
@@ -321,6 +348,7 @@ fn create_mysql_trigger_sql(
 
 fn create_oracle_trigger_sql(
     database_type: Option<crate::models::connection::DatabaseType>,
+    dialect: StructureDialect,
     schema: Option<&str>,
     table: &str,
     name: &str,
@@ -330,22 +358,23 @@ fn create_oracle_trigger_sql(
     warnings: &mut Vec<String>,
     for_new_table: bool,
 ) -> Option<String> {
-    let Some((timing_clause, row_level)) = oracle_trigger_timing(timing) else {
-        warnings.push(format!("Unsupported Oracle trigger timing \"{timing}\"."));
+    let Some((timing_clause, row_level)) = oracle_trigger_timing(dialect, timing) else {
+        warnings.push(format!("Unsupported {} trigger timing \"{timing}\".", trigger_editing_dialect_label(dialect)));
         return None;
     };
     if !is_supported_oracle_trigger_event(event) {
-        warnings.push(format!("Unsupported Oracle trigger event \"{}\".", clean(event)));
+        warnings.push(format!(
+            "Unsupported {} trigger event \"{}\".",
+            trigger_editing_dialect_label(dialect),
+            clean(event)
+        ));
         return None;
     }
 
-    let trigger_identifier = if for_new_table {
-        quote_new_ident(database_type, StructureDialect::Oracle, name)
-    } else {
-        quote_ident(StructureDialect::Oracle, name)
-    };
+    let trigger_identifier =
+        if for_new_table { quote_new_ident(database_type, dialect, name) } else { quote_ident(dialect, name) };
     let trigger_name = if schema.is_some_and(|schema| !schema.trim().is_empty()) {
-        format!("{}.{}", quote_ident(StructureDialect::Oracle, schema.unwrap()), trigger_identifier)
+        format!("{}.{}", quote_ident(dialect, schema.unwrap()), trigger_identifier)
     } else {
         trigger_identifier
     };
@@ -494,7 +523,19 @@ fn is_oracle_trigger_body_keyword(word: &str, seen_on: bool) -> bool {
             || word.eq_ignore_ascii_case("CALL"))
 }
 
-fn oracle_trigger_timing(timing: &str) -> Option<(&'static str, bool)> {
+fn oracle_trigger_timing(dialect: StructureDialect, timing: &str) -> Option<(&'static str, bool)> {
+    if dialect == StructureDialect::Dameng {
+        // 达梦描述里省略 FOR EACH 就是语句级；字典里的 TRIGGER_TYPE 也可能只给裸
+        // BEFORE/AFTER，此时必须按语句级处理，否则重建会平白把语句级触发器改成行级。
+        return match timing {
+            "BEFORE" | "BEFORE STATEMENT" => Some(("BEFORE", false)),
+            "AFTER" | "AFTER STATEMENT" => Some(("AFTER", false)),
+            "BEFORE ROW" | "BEFORE EACH ROW" => Some(("BEFORE", true)),
+            "AFTER ROW" | "AFTER EACH ROW" => Some(("AFTER", true)),
+            "INSTEAD OF" | "INSTEAD OF EACH ROW" => Some(("INSTEAD OF", true)),
+            _ => None,
+        };
+    }
     match timing {
         "BEFORE" | "BEFORE EACH ROW" => Some(("BEFORE", true)),
         "AFTER" | "AFTER EACH ROW" => Some(("AFTER", true)),

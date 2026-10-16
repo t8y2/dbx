@@ -75,6 +75,7 @@ import { disposeAllSqlServerActivityTraces } from "@/lib/sqlserver/sqlServerActi
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useExternalSqlFileChanges } from "@/composables/useExternalSqlFileChanges";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
+import { useSnippetAutoUpload } from "@/composables/useSnippetAutoUpload";
 import { readSyncMethod, readWebDavAutoUploadConfig, readWebDavBackupSelection, recordWebDavSyncSuccess } from "@/lib/webdav/webdavAutoUploadConfig";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { shouldDrawDesktopWindowFrame, shouldDrawLinuxFloatingFrame, useWindowControls } from "@/composables/useWindowControls";
@@ -123,6 +124,7 @@ import {
   isCaretBrowsingShortcut,
   shouldBlockCaretBrowsing,
   isCloseAllTabsShortcut,
+  isSaveAllTabsShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isReopenClosedTabShortcut,
@@ -495,6 +497,7 @@ provide(OPEN_PLUGIN_AI_CONVERSATION, (request) => {
 });
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
 const appTabBarRef = ref<InstanceType<typeof AppTabBar> | null>(null);
+const settingsPageRef = ref<InstanceType<typeof EditorSettingsPage> | null>(null);
 const contentAreaRef = ref<InstanceType<typeof SqlEditorWorkspace> | null>(null);
 const lastFocusedAuxiliarySurface = ref<AuxiliarySearchSurface>(null);
 const lastFocusedSidebarSurface = ref(false);
@@ -1151,6 +1154,7 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   compressSql: compressActiveSql,
   toggleSqlKeywordCase,
   saveSql: (tabId: string) => void openSaveSqlDialog(tabId),
+  saveAllTabs: (tabIds?: string[]) => void handleSaveAllTabs(tabIds),
   openSqlFile,
   importResultArchive,
   pasteSqlInCondition: pasteClipboardAsSqlInCondition,
@@ -1265,6 +1269,7 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
 const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
 useVisibilityChange();
 useWebDavAutoUpload();
+useSnippetAutoUpload();
 useScheduledDatabaseBackups({ scheduler: true });
 
 const appVersion = ref("");
@@ -1379,6 +1384,16 @@ function activateOpenSpecialPageFallback() {
 }
 
 function closeSettingsPage() {
+  if (settingsPageRef.value) {
+    activateSettingsPage();
+    settingsPageRef.value.requestClose();
+    return;
+  }
+  // An async settings page that has not mounted cannot have an edited draft.
+  finishCloseSettingsPage();
+}
+
+function finishCloseSettingsPage() {
   settingsPageTabOpen.value = false;
   if (settingsReturnSurface.value === "driverStore" && driverStoreTabOpen.value) {
     activateMainContentSurface("driverStore");
@@ -1473,7 +1488,7 @@ async function checkAllUpdates() {
 }
 
 function openDriverStoreFromUpdate(target?: DriverStoreTab) {
-  closeSettingsPage();
+  finishCloseSettingsPage();
   openDriverStorePage(target);
 }
 
@@ -2494,24 +2509,33 @@ async function saveTabForCloseAll(tabId: string): Promise<boolean> {
 
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   const target = savedSqlTargetForSave(tab);
-  try {
-    const saved = await savedSqlStore.saveFile({
-      id: existing?.id,
-      connectionId: target.connectionId,
-      folderId: existing?.folderId,
-      name: existing?.name || defaultSavedSqlName(tab.title),
-      database: target.database,
-      catalog: target.catalog,
-      schema: target.schema,
-      sql: await formattedSqlForSave(tab),
-    });
-    queryStore.linkSavedSql(tab.id, saved.id, saved.name);
-    queryStore.markTabClean(tab);
-    return true;
-  } catch (e: any) {
-    toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
-    return false;
+  let saveName = existing?.name || defaultSavedSqlName(tab.title);
+  for (let attempt = 0; attempt < SAVE_SQL_NAME_ATTEMPTS; attempt++) {
+    try {
+      const saved = await savedSqlStore.saveFile({
+        id: existing?.id,
+        connectionId: target.connectionId,
+        folderId: existing?.folderId,
+        name: saveName,
+        database: target.database,
+        catalog: target.catalog,
+        schema: target.schema,
+        sql: await formattedSqlForSave(tab),
+      });
+      queryStore.linkSavedSql(tab.id, saved.id, saved.name);
+      queryStore.markTabClean(tab);
+      return true;
+    } catch (e: any) {
+      const conflict = e as { code?: unknown; suggestedName?: unknown } | null;
+      if (conflict?.code === "SAVED_SQL_NAME_CONFLICT" && typeof conflict.suggestedName === "string" && conflict.suggestedName !== saveName && attempt < SAVE_SQL_NAME_ATTEMPTS - 1) {
+        saveName = conflict.suggestedName;
+        continue;
+      }
+      toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
+      return false;
+    }
   }
+  return false;
 }
 
 async function handleSaveAllPendingTabClose() {
@@ -2531,6 +2555,31 @@ async function handleSaveAllPendingTabClose() {
 
   const result = queryStore.completePendingCloseAfterSaveAll();
   if (result === "app") continuePendingAppCloseAfterSave();
+}
+
+async function handleSaveAllTabs(targetTabIds?: string[]) {
+  await queryStore.flushDefaultQueries();
+  const pool = targetTabIds ? queryStore.tabs.filter((t) => targetTabIds.includes(t.id)) : queryStore.tabs;
+  const dirtyTabs = pool.filter((t) => queryStore.isTabDirty(t));
+  if (!dirtyTabs.length) return;
+
+  const previousActiveTabId = queryStore.activeTabId;
+  let savedCount = 0;
+
+  for (const tab of dirtyTabs) {
+    const saved = await saveTabForCloseAll(tab.id);
+    if (!saved) break;
+    savedCount += 1;
+  }
+
+  if (previousActiveTabId && queryStore.tabs.some((t) => t.id === previousActiveTabId)) {
+    queryStore.activateTab(previousActiveTabId);
+  }
+
+  const hadLibrarySaves = dirtyTabs.some((t) => !t.externalSqlPath && !t.objectSource && t.mode !== "structure");
+  if (hadLibrarySaves && savedCount > 0) {
+    notifySqlLibrarySaved();
+  }
 }
 
 async function handleSaveTab(tabId: string) {
@@ -4626,6 +4675,12 @@ async function handleKeydown(e: KeyboardEvent) {
     appTabBarRef.value?.closeAllTabs();
     return;
   }
+  if (isSaveAllTabsShortcut(e, shortcuts)) {
+    e.preventDefault();
+    e.stopPropagation();
+    void handleSaveAllTabs();
+    return;
+  }
   if (isDisconnectAllActiveConnectionsShortcut(e, shortcuts)) {
     e.preventDefault();
     e.stopPropagation();
@@ -5216,6 +5271,7 @@ onUnmounted(() => {
                 <EditorSettingsPage
                   v-if="settingsPageTabOpen"
                   v-show="settingsStore.settingsPageActive"
+                  ref="settingsPageRef"
                   variant="page"
                   :open="settingsPageTabOpen"
                   :initial-tab="settingsInitialTab"
@@ -5233,13 +5289,13 @@ onUnmounted(() => {
                   :mcp-update-available="toolbarMcpUpdateAvailable"
                   :plugin-update-count="componentUpdates.pluginUpdateCount.value"
                   class="flex-1 min-h-0"
-                  @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"
+                  @update:open="(open: boolean) => (open ? activateSettingsPage() : finishCloseSettingsPage())"
                   @check-updates="checkAllUpdates"
                   @update-all="updateAllAvailable"
                   @open-update-center="handleToolbarUpdateClick"
                   @open-driver-store="openDriverStoreFromUpdate"
                   @open-plugin-center="
-                    closeSettingsPage();
+                    finishCloseSettingsPage();
                     openPluginCenterPage();
                   "
                   @open-cc-switch-plugin-center="

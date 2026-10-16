@@ -909,6 +909,28 @@ END;`;
     }
   });
 
+  it("keeps DECODE consecutive CASE expressions inside Oracle-family procedures", () => {
+    // Punctuation between `end` and the next `case` must not look like PL/SQL `END CASE`.
+    const procedure = `CREATE OR REPLACE PROCEDURE dm.sp_demo IS
+BEGIN
+  INSERT INTO t(c)
+  SELECT decode(
+    company_no,
+    'A', (case when x = 1 then 'one' else 'other' end),
+    'B', (case when y = 2 then 'two' else 'other' end)
+  ) as business_type_name
+  FROM src;
+  COMMIT;
+EXCEPTION
+  WHEN OTHERS THEN
+    NULL;
+END sp_demo;`;
+
+    for (const database of ["oracle", "oceanbase-oracle"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(procedure, database))).toEqual([procedure]);
+    }
+  });
+
   it("keeps SAP HANA DO blocks together", () => {
     const ranges = splitSqlStatementRanges(sapHanaDoBlockFixture, "saphana");
 
@@ -933,6 +955,26 @@ END;
 SELECT 2 FROM DUMMY;`;
 
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "saphana"))).toEqual([sql.slice(0, sql.indexOf("\nSELECT 2")), "SELECT 2 FROM DUMMY"]);
+  });
+
+  it("keeps nested CASE expressions in a SAP HANA procedure GROUP BY together", () => {
+    const sql = `ALTER PROCEDURE PUBLIC.P
+LANGUAGE SQLSCRIPT
+SQL SECURITY INVOKER
+AS
+BEGIN
+  T = SELECT 1 FROM DUMMY
+  GROUP BY
+    CASE WHEN KHLX='老客' THEN CASE WHEN SCYEAR='0000' THEN NULL ELSE SCYEAR END ELSE LEFT(CASE WHEN SCDAT_OLD='00000000' THEN NULL ELSE SCDAT_OLD END,4) END,
+    CASE WHEN KHLX='老客' THEN CASE WHEN SCDAT='00000000' THEN NULL ELSE SCDAT END ELSE (CASE WHEN SCDAT_OLD='00000000' THEN NULL ELSE SCDAT_OLD END)END;
+END;
+SELECT 2 FROM DUMMY;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "saphana"))).toEqual([sql.slice(0, sql.indexOf("\nSELECT 2")), "SELECT 2 FROM DUMMY"]);
+  });
+
+  it.each(["DO BEGIN T = SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END FROM DUMMY; END;", "do begin t = select 1 from dummy; end;"])("keeps single-line SAP HANA blocks together: %s", (sql) => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "saphana"))).toEqual([sql]);
   });
 
   it("still splits SAP HANA ALTER PROCEDURE metadata commands", () => {

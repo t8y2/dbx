@@ -27,7 +27,7 @@ use crate::query::{
 use crate::sql::{
     optimize_sql_file_import_statements, optimize_sql_file_import_statements_with_max_insert_batch_statements,
     prepare_sql_file_statement, split_sql_batches, starts_with_sqlserver_module_ddl, statement_summary,
-    SqlFileImportStatement, SqlFileImportStatementKind, SqlFilePhase, SqlFileProgress, SqlFileRequest,
+    SqlFileEncoding, SqlFileImportStatement, SqlFileImportStatementKind, SqlFilePhase, SqlFileProgress, SqlFileRequest,
     SqlFileStatementAction, SqlFileStatus, SqlParsingOptions, SqlStatementSplitter, SqlStatementWithControl,
 };
 use crate::types::QueryResult;
@@ -860,7 +860,7 @@ async fn execute_sql_file_paths_inner(
         let Some(selected) = &request.selected_tables else {
             return Ok(None);
         };
-        let (tables, views) = scan_sql_file_tables(file_paths[0], &token).await?;
+        let (tables, views) = scan_sql_file_tables(file_paths[0], &token, request.encoding).await?;
         validate_selected_tables(selected, &tables)?;
         Ok::<_, String>(Some(TableRestoreFilter::with_views(views)))
     }
@@ -945,10 +945,11 @@ async fn execute_sql_file_paths_inner(
             let normalize_mysql_binary_literals = import_target.as_ref().is_some_and(|target| {
                 crate::sql::is_mysql_compatible_import_target(&target.db_type, target.driver_profile.as_deref())
             });
-            let mut decoder = match SqlFileStreamDecoder::open_for_target_with_progress(
+            let mut decoder = match SqlFileStreamDecoder::open_for_import(
                 file_path,
+                request.encoding.to_encoding(),
                 normalize_mysql_binary_literals,
-                read_progress.bytes_read.clone(),
+                Some(read_progress.bytes_read.clone()),
             )
             .await
             {
@@ -1139,14 +1140,22 @@ async fn execute_sql_file_paths_inner(
 }
 
 pub async fn inspect_sql_file_tables(file_path: &Path) -> Result<Vec<SqlFileTable>, String> {
-    scan_sql_file_tables(file_path, &CancellationToken::new()).await.map(|(tables, _)| tables)
+    inspect_sql_file_tables_with_encoding(file_path, SqlFileEncoding::Auto).await
+}
+
+pub async fn inspect_sql_file_tables_with_encoding(
+    file_path: &Path,
+    encoding: SqlFileEncoding,
+) -> Result<Vec<SqlFileTable>, String> {
+    scan_sql_file_tables(file_path, &CancellationToken::new(), encoding).await.map(|(tables, _)| tables)
 }
 
 async fn scan_sql_file_tables(
     file_path: &Path,
     token: &CancellationToken,
+    encoding: SqlFileEncoding,
 ) -> Result<(Vec<SqlFileTable>, std::collections::BTreeSet<SqlFileTable>), String> {
-    let mut decoder = SqlFileStreamDecoder::open_for_target(file_path, true).await?;
+    let mut decoder = SqlFileStreamDecoder::open_for_import(file_path, encoding.to_encoding(), true, None).await?;
     let mut splitter =
         StreamingSqlFileSplitter::new(Some(DatabaseType::Mysql), SqlParsingOptions::mysql_compatible(), false);
     let mut scan = TableRestoreFilter::default();
@@ -1213,9 +1222,36 @@ fn filter_restore_statements(
 }
 
 pub async fn read_sql_file_preview(file_path: &Path, max_chars: usize) -> Result<String, String> {
-    let mut decoder =
-        SqlFileStreamDecoder::open_with_detection_limit(file_path, Some(SQL_FILE_PREVIEW_ENCODING_SAMPLE_BYTES))
-            .await?;
+    read_sql_file_preview_with_encoding(file_path, max_chars, SqlFileEncoding::Auto).await
+}
+
+pub async fn read_sql_file_preview_with_encoding(
+    file_path: &Path,
+    max_chars: usize,
+    encoding: SqlFileEncoding,
+) -> Result<String, String> {
+    let mut decoder = if encoding == SqlFileEncoding::Auto {
+        SqlFileStreamDecoder::open_with_detection_limit(file_path, Some(SQL_FILE_PREVIEW_ENCODING_SAMPLE_BYTES)).await?
+    } else {
+        SqlFileStreamDecoder::open_for_import(file_path, encoding.to_encoding(), false, None).await?
+    };
+    // Preview may run before a database is selected. Do not apply MySQL syntax
+    // rewriting to valid text (for example PostgreSQL dollar-quoted strings).
+    // Like automatic detection, recover raw mysqldump binary bytes only when
+    // ordinary UTF-8 decoding fails. Reopen so the preview cannot mix original
+    // text with normalized chunks. Honor BOM overrides and never change encoding.
+    let recover_mysql_binary = encoding != SqlFileEncoding::Auto && decoder.encoding() == encoding_rs::UTF_8;
+    match collect_sql_file_preview(&mut decoder, max_chars).await {
+        Err(error) if recover_mysql_binary && error == "Unsupported or invalid SQL file encoding" => {
+            let mut decoder =
+                SqlFileStreamDecoder::open_for_import(file_path, encoding.to_encoding(), true, None).await?;
+            collect_sql_file_preview(&mut decoder, max_chars).await
+        }
+        result => result,
+    }
+}
+
+async fn collect_sql_file_preview(decoder: &mut SqlFileStreamDecoder, max_chars: usize) -> Result<String, String> {
     let mut preview = String::new();
     while preview.chars().count() < max_chars {
         let Some(chunk) = decoder.next_chunk().await? else {
@@ -1330,10 +1366,12 @@ impl SqlFileStreamDecoder {
         Self::open_with_options(file_path, detection_limit, false, None).await
     }
 
+    #[cfg(test)]
     async fn open_for_target(file_path: &Path, normalize_mysql_binary_literals: bool) -> Result<Self, String> {
         Self::open_with_options(file_path, None, normalize_mysql_binary_literals, None).await
     }
 
+    #[cfg(test)]
     async fn open_for_target_with_progress(
         file_path: &Path,
         normalize_mysql_binary_literals: bool,
@@ -2899,6 +2937,7 @@ mod tests {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            encoding: Default::default(),
         };
         let mut events = Vec::new();
         let error = execute_sql_file_content(
@@ -3254,6 +3293,7 @@ mod tests {
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
                 failure_log_enabled: true,
+                encoding: Default::default(),
             };
             let token = CancellationToken::new();
             let mut events = Vec::new();
@@ -3578,6 +3618,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encoding_preview_preserves_postgres_dollar_quotes_like_execution() {
+        let sql = "SELECT $$ _binary ' $$;\nSELECT $tag$ _binary 'abc' $tag$;\n";
+        let mut bom_bytes = vec![0xEF, 0xBB, 0xBF];
+        bom_bytes.extend_from_slice(sql.as_bytes());
+        for (bytes, encoding) in [
+            (sql.as_bytes().to_vec(), SqlFileEncoding::Auto),
+            (sql.as_bytes().to_vec(), SqlFileEncoding::Utf8),
+            (bom_bytes, SqlFileEncoding::Gbk),
+        ] {
+            let path = temporary_sql_file(&bytes).await;
+            let preview = read_sql_file_preview_with_encoding(&path, 20_000, encoding).await.unwrap();
+            // PostgreSQL execution passes false for MySQL normalization.
+            let mut execution =
+                SqlFileStreamDecoder::open_for_import(&path, encoding.to_encoding(), false, None).await.unwrap();
+            assert_eq!(preview, sql);
+            assert_eq!(preview, collect_sql_file_preview(&mut execution, 20_000).await.unwrap());
+            tokio::fs::remove_file(path).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn encoding_preview_recovers_mysql_binary_without_mixing_chunks() {
+        // The failure is in a later chunk; recovery must discard the first pass.
+        let prefix = format!("SELECT _binary 'abc';\n-- {}\n", "x".repeat(SQL_FILE_READ_CHUNK_BYTES));
+        let mut bytes = prefix.as_bytes().to_vec();
+        bytes.extend_from_slice(b"INSERT INTO t VALUES (_binary '\xAC\\\xED\\0\x05', '");
+        bytes.extend_from_slice("中文');\n".as_bytes());
+        for path in [temporary_sql_file(&bytes).await, temporary_gzip_sql_file(&bytes).await] {
+            for encoding in [SqlFileEncoding::Auto, SqlFileEncoding::Utf8] {
+                let preview = read_sql_file_preview_with_encoding(&path, 1_000_000, encoding).await.unwrap();
+                let mut execution =
+                    SqlFileStreamDecoder::open_for_import(&path, encoding.to_encoding(), true, None).await.unwrap();
+                assert_eq!(preview, collect_sql_file_preview(&mut execution, 1_000_000).await.unwrap());
+                assert!(preview.starts_with("SELECT X'616263';"));
+                assert!(preview.ends_with("INSERT INTO t VALUES (X'ACED0005', '中文');\n"));
+                assert_eq!(preview.matches("SELECT").count(), 1);
+            }
+            tokio::fs::remove_file(path).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn encoding_preview_does_not_hide_invalid_utf8_outside_binary_literals() {
+        let path = temporary_sql_file(b"SELECT '\xFF';").await;
+        assert_eq!(
+            read_sql_file_preview_with_encoding(&path, 20_000, SqlFileEncoding::Utf8).await.unwrap_err(),
+            "Unsupported or invalid SQL file encoding",
+        );
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn streaming_decoder_detects_gbk_after_ascii_prefix() {
         let (encoded, _, _) = encoding_rs::GBK.encode("-- Navicat dump\nINSERT INTO t VALUES ('中文');");
         let path = temporary_sql_file(encoded.as_ref()).await;
@@ -3864,6 +3956,7 @@ mod tests {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            encoding: Default::default(),
         };
         let mut progress = Vec::new();
 

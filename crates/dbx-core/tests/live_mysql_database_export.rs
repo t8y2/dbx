@@ -79,6 +79,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
                 failure_log_enabled: true,
+                encoding: Default::default(),
             };
             execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |_| {}).await?;
             let rows = execute_sql_statement(&state, &connection_id, &database, "SELECT id, LENGTH(body) FROM chosen", None, None).await?;
@@ -97,6 +98,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            encoding: Default::default(),
         };
         let mut events = Vec::new();
         assert!(execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |event| events.push(event)).await.is_err());
@@ -186,6 +188,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            encoding: Default::default(),
         };
         execute_sql_file_path(
             &state,

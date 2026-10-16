@@ -1307,7 +1307,18 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
   }));
 }
 
-export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableStructureForeignKey[] {
+export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[], databaseType?: DatabaseType): EditableStructureForeignKey[] {
+  const oracle = databaseType === "oracle" || databaseType === "oceanbase-oracle";
+  if (oracle) {
+    const definitions = new Map<string, ForeignKeyInfo>();
+    for (const row of foreignKeys) {
+      const previous = definitions.get(row.name);
+      if (previous && (previous.ref_schema !== row.ref_schema || previous.ref_table !== row.ref_table || previous.on_delete !== row.on_delete || previous.on_update !== row.on_update)) {
+        throw new Error("Inconsistent foreign key metadata. Refresh the table definition.");
+      }
+      definitions.set(row.name, row);
+    }
+  }
   const groups = new Map<string, ForeignKeyInfo[]>();
   for (const foreignKey of foreignKeys) {
     const key = [foreignKey.name, foreignKey.ref_schema ?? "", foreignKey.ref_table, foreignKey.on_update ?? "", foreignKey.on_delete ?? ""].join("\u0000");
@@ -1328,6 +1339,7 @@ export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableS
       refSchema: first.ref_schema ?? "",
       refTable: first.ref_table,
       refColumn: original.ref_column,
+      ...(oracle ? { columns: group.map((row) => row.column), refColumns: group.map((row) => row.ref_column) } : {}),
       onUpdate: first.on_update ?? "",
       onDelete: first.on_delete ?? "",
       original,
@@ -1354,7 +1366,10 @@ export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undef
   if (databaseType === undefined) return false;
   // The Oracle driver keeps the `TRIGGER ...` declaration when the source has clauses (WHEN,
   // REFERENCING, FOLLOWS, ...) that the timing/event/body form would drop on CREATE OR REPLACE.
-  return databaseType !== "oracle" || isStructuredOracleTriggerSource(trigger.original.statement);
+  // Dameng reports a plain body plus a separate `WHEN` clause, so the same guard applies: the
+  // structured form can only rebuild triggers that have neither of those extra clauses.
+  if (databaseType !== "oracle" && databaseType !== "dameng") return true;
+  return isStructuredOracleTriggerSource(trigger.original.statement) && !trigger.original.condition?.trim();
 }
 
 function isStructuredOracleTriggerSource(statement: string | null | undefined): boolean {

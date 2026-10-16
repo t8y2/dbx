@@ -1,3 +1,4 @@
+import type { SqlFileEncoding } from "./tauri";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
@@ -2376,6 +2377,10 @@ export async function loadCcSwitchAiConfigs(): Promise<import("@/types/ai").CcSw
   throw new Error("ccSwitchImportDesktopOnly");
 }
 
+export async function loadMagpieAiConfigs(): Promise<import("@/types/ai").CcSwitchImportResult> {
+  throw new Error("magpieImportDesktopOnly");
+}
+
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
   try {
     const raw = safeLocalStorageGet(DESKTOP_SETTINGS_STORAGE_KEY);
@@ -2700,6 +2705,8 @@ export interface SnippetSyncSummary {
   bytes: number;
   exportedAt?: string;
   appVersion?: string;
+  remoteContentHash?: string;
+  unchanged: boolean;
   legacyCleanupRequiredId?: string;
 }
 
@@ -2712,6 +2719,10 @@ export interface SnippetDownloadResult {
 
 export interface SnippetTokenStatus {
   hasSavedToken: boolean;
+}
+
+export interface SnippetPassphraseStatus {
+  hasSavedPassphrase: boolean;
 }
 
 export async function webdavSyncTest(config: WebDavConfig): Promise<void> {
@@ -2795,6 +2806,18 @@ export async function forgetSnippetSavedToken(config: SnippetSyncConfig): Promis
   await post("/api/cloud-sync/snippet/forget-token", { config });
 }
 
+export async function snippetPassphraseStatus(config: SnippetSyncConfig): Promise<SnippetPassphraseStatus> {
+  return post("/api/cloud-sync/snippet/passphrase-status", { config });
+}
+
+export async function saveSnippetSavedPassphrase(config: SnippetSyncConfig, passphrase: string): Promise<void> {
+  await post("/api/cloud-sync/snippet/save-passphrase", { config, passphrase });
+}
+
+export async function forgetSnippetSavedPassphrase(config: SnippetSyncConfig): Promise<void> {
+  await post("/api/cloud-sync/snippet/forget-passphrase", { config });
+}
+
 export async function snippetSyncSettings(provider: SnippetProvider, instanceUrl?: string): Promise<SnippetSyncSettings> {
   return post("/api/cloud-sync/snippet/settings", { provider, instanceUrl });
 }
@@ -2811,7 +2834,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return post("/api/cloud-sync/snippet/inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
   return post("/api/cloud-sync/snippet/upload", {
     config,
     editorSettings,
@@ -2819,6 +2842,7 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
+    expectedRemoteContentHash,
   });
 }
 
@@ -2898,19 +2922,23 @@ export async function setAiGlobalCustomInstructions(content: string): Promise<vo
 // SQL File Execution
 // ---------------------------------------------------------------------------
 
-export async function previewSqlFile(fileOrPath: string | File): Promise<SqlFilePreview> {
+export async function previewSqlFile(fileOrPath: string | File, encoding?: SqlFileEncoding): Promise<SqlFilePreview> {
   if (typeof fileOrPath === "string") {
     // In web mode a raw path is not useful; throw a clear error
     throw new Error("previewSqlFile in web mode requires a File object, not a file path");
   }
   const formData = new FormData();
   formData.append("file", fileOrPath);
-  const res = await fetch(apiUrl("/api/sql-file/preview"), {
+  const res = await fetch(apiUrl(`/api/sql-file/preview${encoding ? `?encoding=${encodeURIComponent(encoding)}` : ""}`), {
     method: "POST",
     body: formData,
   });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();
+}
+
+export async function refreshSqlFilePreview(filePath: string, encoding: SqlFileEncoding): Promise<Pick<SqlFilePreview, "preview" | "canExecuteWithoutSelectedDatabase" | "establishesDatabaseContext">> {
+  return post("/api/sql-file/preview/refresh", { filePath, encoding });
 }
 
 export async function releaseSqlFilePreview(cleanupToken: string): Promise<void> {
@@ -2948,8 +2976,8 @@ export async function executeSqlFile(request: SqlFileRequest): Promise<void> {
   return post("/api/sql-file/execute", { request });
 }
 
-export async function inspectSqlFileTables(filePath: string): Promise<SqlFileTable[]> {
-  return post("/api/sql-file/tables", { filePath });
+export async function inspectSqlFileTables(filePath: string, encoding?: SqlFileEncoding): Promise<SqlFileTable[]> {
+  return post("/api/sql-file/tables", { filePath, encoding });
 }
 
 export async function executeSqlFiles(request: SqlFileRequest, filePaths: string[]): Promise<void> {

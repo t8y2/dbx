@@ -583,6 +583,54 @@ describe("useDataGridEditor result snapshots", () => {
 });
 
 describe("useDataGridEditor row deletion confirmation", () => {
+  it("removes untouched added rows immediately and supports undo and redo", () => {
+    const editor = createEditor(undefined, true);
+    editor.newRows.value = [];
+    editor.addRows(10);
+    editor.applyCellValue(-1, 0, "keep me");
+
+    editor.requestDeleteRows([-9, -10]);
+
+    expect(editor.showDeleteRowConfirm.value).toBe(false);
+    expect(editor.pendingDeleteRowIds.value).toEqual([]);
+    expect(editor.newRows.value).toHaveLength(8);
+    expect(editor.newRows.value[0]![0]).toBe("keep me");
+    expect(editor.deletedRows.value.size).toBe(0);
+    editor.undoPendingChange();
+    expect(editor.newRows.value).toHaveLength(10);
+    expect(editor.newRowMeta.value[9]?.untouched).toBe(true);
+    editor.redoPendingChange();
+    expect(editor.newRows.value).toHaveLength(8);
+  });
+
+  it("still confirms deletion of an edited row even after its values are cleared", () => {
+    const editor = createEditor(undefined, true);
+    editor.newRows.value = [];
+    editor.addRows(1);
+    editor.applyCellValue(-1, 0, "entered");
+    editor.restoreCellValue(-1, 0);
+
+    editor.requestDeleteRow(-1);
+
+    expect(editor.showDeleteRowConfirm.value).toBe(true);
+    expect(editor.newRows.value).toEqual([[null, null, null]]);
+  });
+
+  it("keeps mixed existing-row and untouched-row deletion pending until confirmation", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["existing", null, null]]);
+    editor.newRows.value = [];
+    editor.addRows(1);
+
+    editor.requestDeleteRows([0, -1]);
+
+    expect(editor.showDeleteRowConfirm.value).toBe(true);
+    expect(editor.newRows.value).toHaveLength(1);
+    expect(editor.deletedRows.value.size).toBe(0);
+    editor.confirmDeleteRow();
+    expect(editor.newRows.value).toEqual([]);
+    expect(editor.deletedRows.value).toEqual(new Set([0]));
+  });
+
   it("keeps the row pending until confirmation when confirmation is enabled", () => {
     const editor = createEditor(undefined, true);
 
@@ -1384,7 +1432,11 @@ describe("useDataGridEditor saveChanges reload", () => {
       pageSize: ref(100),
       currentPage,
       cacheKey: computed(() => undefined),
-      getRowItem: () => undefined,
+      getRowItem: (rowId) => {
+        const newIndex = -rowId - 1;
+        const data = rowId < 0 ? editor.newRows.value[newIndex] : undefined;
+        return data ? { id: rowId, newIndex, data, isNew: true, isDeleted: false, isDirtyCol: [false, false], status: "new" } : undefined;
+      },
       prepareFullReload: options.prepareFullReload,
       refreshSavedRows: options.refreshSavedRows,
       prepareSaveBaseline: options.prepareSaveBaseline,
@@ -1392,6 +1444,128 @@ describe("useDataGridEditor saveChanges reload", () => {
     });
     return { editor, emit, currentPage, ensureManualTransactionSession };
   }
+
+  it("previews and saves only the nine filled rows out of ten added rows", async () => {
+    mocks.prepareDataGridSave.mockImplementation(async (options) => ({
+      statements: options.newRows.map((row: CellValue[]) => `INSERT INTO orders_test VALUES (${row[0]}, 'filled')`),
+      rollbackStatements: [],
+      validationError: options.newRows.some((row: CellValue[]) => row[0] === null) ? 'Column "id" does not allow NULL.' : undefined,
+    }));
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 9 });
+    const { editor } = createSaveTestEditor();
+    editor.addRows(10);
+    for (let index = 0; index < 9; index++) editor.applyCellValue(-(index + 1), 0, String(index + 1));
+
+    expect(editor.newRowCount.value).toBe(9);
+    expect(editor.pendingChangeCount.value).toBe(9);
+    expect(await editor.previewChanges()).toHaveLength(9);
+    expect(editor.newRows.value).toHaveLength(10);
+    await editor.saveChanges();
+
+    expect(mocks.prepareDataGridSave).toHaveBeenCalledTimes(2);
+    for (const [options] of mocks.prepareDataGridSave.mock.calls) {
+      expect(options.newRows).toHaveLength(9);
+      expect(options.deletedRows).toEqual([]);
+    }
+    expect(mocks.executeInTransaction).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).toBe("");
+    expect(editor.newRows.value).toEqual([]);
+    expect(editor.newRowMeta.value).toEqual([]);
+    expect(editor.hasPendingChanges.value).toBe(false);
+  });
+
+  it("clears a batch of untouched rows without validation or database execution", async () => {
+    const { editor } = createSaveTestEditor();
+    editor.addRows(10);
+
+    expect(await editor.previewChanges()).toEqual([]);
+    await editor.saveChanges();
+
+    expect(mocks.prepareDataGridSave).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(mocks.executeInTransaction).not.toHaveBeenCalled();
+    expect(editor.newRows.value).toEqual([]);
+    expect(editor.hasPendingChanges.value).toBe(false);
+    expect(editor.transactionActive.value).toBe(false);
+  });
+
+  it("does not treat preview validation as a save error while a row is incomplete", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [], validationError: 'Column "status" does not allow NULL.' });
+    const { editor } = createSaveTestEditor();
+    editor.addRows(1);
+    editor.applyCellValue(-1, 0, "1");
+
+    await editor.previewChanges();
+
+    expect(editor.saveError.value).toBe("");
+    expect(editor.previewValidationMessage.value).toContain('Column "status"');
+    expect(editor.pendingChangeCount.value).toBe(1);
+    expect(editor.hasPendingChanges.value).toBe(true);
+  });
+
+  it("keeps an incomplete row staged when autosave encounters validation", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [], validationError: 'Column "status" does not allow NULL.' });
+    const { editor } = createSaveTestEditor();
+    editor.addRows(1);
+    editor.applyCellValue(-1, 0, "1");
+
+    await editor.saveChanges({ autoSave: true });
+
+    expect(editor.saveError.value).toBe("");
+    expect(editor.newRows.value).toHaveLength(1);
+    expect(editor.hasPendingChanges.value).toBe(true);
+  });
+
+  it("retains all filled rows after validation fails and still omits unused blanks on retry", async () => {
+    mocks.prepareDataGridSave.mockResolvedValueOnce({ statements: [], validationError: 'Column "status" does not allow NULL.' });
+    const { editor } = createSaveTestEditor();
+    editor.addRows(10);
+    for (let index = 0; index < 9; index++) editor.applyCellValue(-(index + 1), 0, String(index + 1));
+
+    await editor.saveChanges();
+
+    expect(editor.newRows.value).toHaveLength(10);
+    expect(editor.newRows.value[8]![0]).toBe(9);
+    expect(editor.saveError.value).toContain('Column "status"');
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["INSERT INTO orders_test VALUES (1, 'filled')"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 9 });
+    await editor.saveChanges();
+    expect(mocks.prepareDataGridSave.mock.lastCall?.[0].newRows).toHaveLength(9);
+    expect(editor.newRows.value).toEqual([]);
+  });
+
+  it("keeps deliberately cleared and pasted NULL rows in the save preview", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [], rollbackStatements: [] });
+    const { editor } = createSaveTestEditor();
+    editor.addRows(3);
+    editor.applyCellValue(-1, 0, "1");
+    editor.restoreCellValue(-1, 0);
+    editor.appendPastedRowsToNewRow(-2, [[null, null]], [0, 1]);
+
+    await editor.previewChanges();
+
+    expect(mocks.prepareDataGridSave.mock.lastCall?.[0].newRows).toEqual([
+      [null, null],
+      [null, null],
+    ]);
+  });
+
+  it("filters custom save previews and saves while keeping row metadata aligned", async () => {
+    const preview = vi.fn().mockResolvedValue(["insert filled"]);
+    const save = vi.fn().mockResolvedValue(undefined);
+    const { editor } = createSaveTestEditor({ customSaveHandler: { save, preview, canInsert: true } });
+    editor.addRows(3);
+    editor.applyCellValue(-2, 0, "2");
+    const token = editor.newRowMeta.value[1]!.token;
+
+    await editor.previewChanges();
+    await editor.saveChanges();
+
+    for (const callback of [preview, save]) {
+      expect(callback).toHaveBeenCalledWith(expect.objectContaining({ newRows: [[2, null]], newRowMeta: [expect.objectContaining({ token })] }));
+    }
+    expect(editor.newRows.value).toEqual([]);
+  });
 
   it.each(["batch", "transaction", "manual"] as const)("passes reviewed BLOB bindings through the %s save entrypoint", async (route) => {
     const statements = route === "transaction" ? ["reviewed BLOB save", "ordinary update"] : ["reviewed BLOB save"];
@@ -1667,6 +1841,36 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(editor.saveError.value).toBeFalsy();
   });
 
+  // A PostgreSQL preview addresses one selected row by its physical locator
+  // (tableoid/ctid/xmin) so exact duplicate rows stay distinguishable. That
+  // locator stops matching after another session updates the row, and the save
+  // must report the conflict instead of silently deleting nothing.
+  it("refuses a keyless save when the physical row locator no longer matches a row", async () => {
+    const staleLocatorGuard = {
+      sql: "SELECT COUNT(*) AS dbx_keyless_row_matches FROM orders_test WHERE (ctid = '(0,1)'::tid)",
+      maxMatchedRows: 1,
+      minMatchedRows: 1,
+      message: keylessGuard.message,
+      minMessage: "Cannot safely update or delete this PostgreSQL row: it no longer matches the physical row that was loaded.",
+    };
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["DELETE FROM orders_test WHERE ctid = '(0,1)'::tid"],
+      rollbackStatements: [],
+      keylessGuards: [staleLocatorGuard],
+    });
+    mocks.executeQuery.mockResolvedValue({ columns: ["dbx_keyless_row_matches"], rows: [[0]] });
+
+    const { editor } = createSaveTestEditor({ databaseType: "postgres", primaryKeys: [] });
+    editor.deletedRows.value.add(0);
+
+    await editor.saveChanges();
+
+    expect(mocks.executeQuery).toHaveBeenCalledWith("connection-1", "app", staleLocatorGuard.sql, undefined);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.saveError.value).toBe(staleLocatorGuard.minMessage);
+    expect(editor.deletedRows.value.size).toBe(1);
+  });
+
   it("refuses a keyless save when the guard cannot be counted on the server at all", async () => {
     const onExecuteSql = vi.fn().mockResolvedValue(undefined);
     mocks.prepareDataGridSave.mockResolvedValue({
@@ -1723,6 +1927,23 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
     expect(mocks.prepareDataGridSave.mock.calls[0]![0].dirtyRows).toEqual([[0, [[1, "new name"]]]]);
     expect(mocks.prepareDataGridSave.mock.calls[1]![0].dirtyRows).toEqual([[0, [[3, "new title"]]]]);
+  });
+
+  it("routes multi-statement edits through executeBatch for non-transactional DuckDB (#12306)", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE users SET name='alpha' WHERE id=1", "UPDATE users SET name='beta' WHERE id=2"],
+      rollbackStatements: [],
+    });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 2 });
+    const { editor } = createSaveTestEditor({ databaseType: "duckdb" });
+    expect(editor.useTransaction.value).toBe(false);
+    editor.dirtyRows.value.set(0, new Map([[1, "alpha"]]));
+    editor.dirtyRows.value.set(1, new Map([[1, "beta"]]));
+    await editor.saveChanges();
+    expect(mocks.executeInTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
+    expect(mocks.executeBatch).toHaveBeenCalledWith("connection-1", "app", ["UPDATE users SET name='alpha' WHERE id=1", "UPDATE users SET name='beta' WHERE id=2"], undefined);
+    expect(editor.saveError.value).toBe("");
   });
 
   it("keeps both joined edits pending if the transaction fails", async () => {
@@ -2070,6 +2291,7 @@ describe("useDataGridEditor saveChanges reload", () => {
     const { editor } = createSaveTestEditor({ confirmSaveRequest, databaseType: "salesforce" });
     editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
     editor.addRows(1);
+    editor.applyCellValue(-1, 0, "3");
     editor.deletedRows.value.add(1);
 
     await editor.saveChanges();

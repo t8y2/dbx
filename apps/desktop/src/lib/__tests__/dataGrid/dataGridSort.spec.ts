@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareDataGridValues, databaseSortSupportedForDatabase, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
+import { compareDataGridValues, databaseSortSupportedForDatabase, primaryKeyTieBreakerIndexes, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
 
 describe("databaseSortSupportedForDatabase", () => {
   it("keeps database-side sorting for databases that support ORDER BY", () => {
@@ -104,5 +104,18 @@ describe("compareDataGridValues datetime ordering", () => {
 
   it("keeps null values after populated datetime cells", () => {
     expect(compareDataGridValues(null, "2024-01-01 00:00:00")).toBeGreaterThan(0);
+  });
+});
+
+describe("primaryKeyTieBreakerIndexes", () => {
+  it("maps every primary key column to its result position", () => {
+    expect(primaryKeyTieBreakerIndexes(["kdrq", "line_no", "order_id"], ["order_id", "line_no"])).toEqual([2, 1]);
+  });
+
+  it("returns no tie-breaker when a key column is missing or ambiguous", () => {
+    expect(primaryKeyTieBreakerIndexes(["order_id", "kdrq"], ["order_id", "line_no"])).toEqual([]);
+    expect(primaryKeyTieBreakerIndexes(["id", "id"], ["id"])).toEqual([]);
+    expect(primaryKeyTieBreakerIndexes(["id", undefined], [])).toEqual([]);
+    expect(primaryKeyTieBreakerIndexes(undefined, ["id"])).toEqual([]);
   });
 });

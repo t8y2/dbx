@@ -195,6 +195,7 @@ const groupExecutableSql = computed(() => {
         @close-plugin-center="toolbar.closePluginCenter()"
         @activate-driver-store="toolbar.activateDriverStore()"
         @close-driver-store="toolbar.closeDriverStore()"
+        @save-all-tabs="toolbar.saveAllTabs()"
       />
     </Teleport>
     <!-- The toolbar stays at the top of the pane's content column in every

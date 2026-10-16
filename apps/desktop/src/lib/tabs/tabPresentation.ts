@@ -211,6 +211,13 @@ function tabTitleNumber(tab: QueryTab, title: string): number | undefined {
  * Tabs with a custom `titleSuffix` are skipped: they show that suffix instead of a
  * number and do not count towards the numbered group.
  *
+ * A collision between different tab modes numbers only the `query` tabs: with
+ * compact titles a data tab shows its bare table name and an objects tab the
+ * bare database name, so renaming a query tab onto one of those names must not
+ * retitle the object tab — it is not user-renameable and the number reads as
+ * the object itself having been renamed (#12478). Same-mode collisions keep
+ * numbering every member as before.
+ *
  * Callers own the tab list, so this runs from the store whenever the list or
  * any contributing title changes — never from a render/computed path.
  */
@@ -240,11 +247,15 @@ export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
   }
 
   for (const [title, group] of groups) {
-    const numbered = group.filter((tab) => tabTitleNumber(tab, title) !== undefined);
-    if (group.length < 2 && numbered.length === 0) {
+    // Renaming a query tab onto an object tab's name may not retitle the
+    // object tab; see the doc comment above.
+    const mixedMode = new Set(group.map((tab) => tab.mode)).size > 1;
+    const numberable = mixedMode ? group.filter((tab) => tab.mode === "query") : group;
+    const numbered = numberable.filter((tab) => tabTitleNumber(tab, title) !== undefined);
+    if (numberable.length < 2 && numbered.length === 0) {
       // A lone, never-numbered tab shows its plain title; drop a number that a
       // previous title left behind so state does not accumulate stale suffixes.
-      for (const tab of group) {
+      for (const tab of numberable) {
         if (tab.titleNumber !== undefined) {
           tab.titleNumber = undefined;
           tab.titleNumberKey = undefined;
@@ -253,7 +264,7 @@ export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
       continue;
     }
     let next = numbered.reduce((highest, tab) => Math.max(highest, tab.titleNumber ?? 0), 0) + 1;
-    for (const tab of group) {
+    for (const tab of numberable) {
       if (tabTitleNumber(tab, title) !== undefined) continue;
       while (customSuffixes.get(title)?.has(String(next))) next += 1;
       tab.titleNumber = next;

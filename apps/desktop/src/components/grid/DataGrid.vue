@@ -8552,6 +8552,12 @@ watch(showDataGridTopbar, () => nextTick(observeDataGridTopbarWidth), {
 });
 watch(columnAligns, () => scheduleCanvasDraw());
 watch(booleanDisplayMode, () => scheduleCanvasDraw());
+// The value style is baked into the cached cell text, so flipping it must drop
+// the cache as well as repaint; canvas otherwise keeps the stale TRUE/FALSE.
+watch(booleanCellValueStyle, () => {
+  clearCellFormatCache();
+  scheduleCanvasDraw();
+});
 watch(flatteningMultiLineEnabled, () => scheduleCanvasDraw());
 watch(showWhitespaceEnabled, () => scheduleCanvasDraw());
 watch(dataGridStripedRows, () => scheduleCanvasDraw());

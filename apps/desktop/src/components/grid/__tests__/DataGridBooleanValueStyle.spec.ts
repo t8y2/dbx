@@ -139,15 +139,28 @@ afterEach(() => {
 });
 
 describe("DataGrid boolean cell text style", () => {
-  it("shows true/false by default and 1/0 once the zero-one style is selected", async () => {
+  it("shows TRUE/FALSE by default and 1/0 once the zero-one style is selected", async () => {
     const { host, settingsStore } = mountGrid();
     await settle();
 
-    expect(flagColumnText(host)).toEqual(["true", "false"]);
+    expect(flagColumnText(host)).toEqual(["TRUE", "FALSE"]);
 
     settingsStore.updateEditorSettings({ dataGridBooleanValueStyle: "zero-one" });
     await settle();
 
     expect(flagColumnText(host)).toEqual(["1", "0"]);
+  });
+
+  it("repaints the cached cell text when the style is toggled back", async () => {
+    const { host, settingsStore } = mountGrid();
+    await settle();
+
+    settingsStore.updateEditorSettings({ dataGridBooleanValueStyle: "zero-one" });
+    await settle();
+    expect(flagColumnText(host)).toEqual(["1", "0"]);
+
+    settingsStore.updateEditorSettings({ dataGridBooleanValueStyle: "true-false" });
+    await settle();
+    expect(flagColumnText(host)).toEqual(["TRUE", "FALSE"]);
   });
 });

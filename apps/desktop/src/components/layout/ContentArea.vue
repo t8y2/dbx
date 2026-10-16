@@ -2472,7 +2472,8 @@ defineExpose({
                       <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                         <button
                           type="button"
-                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                          :disabled="booleanDisplayMode === 'checkbox'"
                           :class="booleanValueStyle === 'true-false' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
                           @click="setBooleanValueStyle('true-false')"
                         >
@@ -2480,7 +2481,8 @@ defineExpose({
                         </button>
                         <button
                           type="button"
-                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                          :disabled="booleanDisplayMode === 'checkbox'"
                           :class="booleanValueStyle === 'zero-one' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
                           @click="setBooleanValueStyle('zero-one')"
                         >
@@ -3199,7 +3201,8 @@ defineExpose({
                 <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                   <button
                     type="button"
-                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                    :disabled="booleanDisplayMode === 'checkbox'"
                     :class="booleanValueStyle === 'true-false' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
                     @click="setBooleanValueStyle('true-false')"
                   >
@@ -3207,7 +3210,8 @@ defineExpose({
                   </button>
                   <button
                     type="button"
-                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                    :disabled="booleanDisplayMode === 'checkbox'"
                     :class="booleanValueStyle === 'zero-one' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
                     @click="setBooleanValueStyle('zero-one')"
                   >

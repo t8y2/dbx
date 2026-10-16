@@ -55,15 +55,16 @@ export function booleanCellEditorValue(value: unknown): string {
 }
 
 /**
- * Text the grid shows for a boolean cell. `true-false` is the historical
- * rendering; `zero-one` matches the 1/0 form other database clients use for the
- * same column (#12187). Non-boolean values return `undefined` so callers can
- * fall through to the normal formatter.
+ * Text the grid shows for a boolean cell. `true-false` renders the uppercase
+ * TRUE/FALSE form the display-options label advertises and that DBeaver/Navicat
+ * use; `zero-one` matches the 1/0 form other database clients use for the same
+ * column (#12187). Non-boolean values return `undefined` so callers can fall
+ * through to the normal formatter.
  */
 export function booleanCellDisplayText(value: unknown, style: BooleanCellValueStyle): string | undefined {
   if (typeof value !== "boolean") return undefined;
   if (style === "zero-one") return value ? "1" : "0";
-  return value ? "true" : "false";
+  return value ? "TRUE" : "FALSE";
 }
 
 export function parseBooleanCellEditorValue(value: string | null): boolean | null | undefined {

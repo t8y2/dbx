@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { booleanCellDisplayText, normalizeBooleanCellValueStyle } from "@/lib/dataGrid/dataGridBooleanColumn";
 
 describe("booleanCellDisplayText", () => {
-  it("keeps the historical true/false text by default", () => {
-    expect(booleanCellDisplayText(true, "true-false")).toBe("true");
-    expect(booleanCellDisplayText(false, "true-false")).toBe("false");
+  it("renders the uppercase TRUE/FALSE text by default", () => {
+    expect(booleanCellDisplayText(true, "true-false")).toBe("TRUE");
+    expect(booleanCellDisplayText(false, "true-false")).toBe("FALSE");
   });
 
   it("renders 1/0 when the zero-one style is selected", () => {

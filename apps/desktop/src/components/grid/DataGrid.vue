@@ -839,10 +839,13 @@ const dataGridTopbarOverflowCompact = ref(false);
 const dataGridTopbarOverflowActionCount = ref(0);
 const dataGridTopbarExpandedRequiredWidth = ref(0);
 const dataGridFilterExpandedRequiredWidth = ref(0);
-const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
+const columnCommentsInInfoArea = computed(() => settingsStore.editorSettings.dataGridColumnCommentsInInfoArea);
+const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader && !columnCommentsInInfoArea.value);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const showColumnHeaderTooltips = computed(() => settingsStore.editorSettings.showColumnHeaderTooltips !== false);
-const showTransposeFieldMetadata = computed(() => settingsStore.editorSettings.dataGridShowTransposeFieldMetadata);
+const transposeMetadataInInfoColumn = computed(() => settingsStore.editorSettings.dataGridTransposeMetadataInInfoColumn);
+const showTransposeFieldMetadata = computed(() => settingsStore.editorSettings.dataGridShowTransposeFieldMetadata && !transposeMetadataInInfoColumn.value);
+const showTransposeColumnComments = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showIndexIndicatorsInHeader = computed(() => settingsStore.editorSettings.showIndexIndicatorsInHeader !== false);
 const indexes = ref<IndexInfo[]>([]);
 const indexesLoaded = ref(false);
@@ -6958,6 +6961,20 @@ const activeCellDetail = computed(() => {
   return cell ? cellDetailFor(cell.rowIndex, cell.col) : null;
 });
 
+function columnInfoText(actualColIdx: number, includeName = true): string {
+  const column = props.result.columns[actualColIdx];
+  if (column === undefined) return "";
+  const metadata = tableColumnForGridColumn(actualColIdx);
+  return [includeName ? column : undefined, allColumnTypes.value[actualColIdx], metadata ? `${t("structureEditor.nullable")}: ${t(metadata.is_nullable ? "structureEditor.yes" : "structureEditor.no")}` : undefined, resolvedColumnComment(column, actualColIdx)].filter(Boolean).join(" · ");
+}
+
+const selectedColumnInfo = computed(() => {
+  if (!columnCommentsInInfoArea.value || hasRowSelection.value) return "";
+  const visibleIndex = hasColumnSelection.value ? [...selectedColumnIndexes.value][0] : selectionFocus.value?.colIndex;
+  const actualIndex = visibleIndex === undefined ? undefined : visibleColumnIndexes.value[visibleIndex];
+  return actualIndex === undefined ? "" : columnInfoText(actualIndex);
+});
+
 const canShowMongoJsonPreview = computed(() => props.databaseType === "mongodb" && !!props.result.mongo_documents && props.result.mongo_documents.length === props.result.rows.length);
 const mongoJsonPreviewOpen = computed(() => showMongoJsonPreview.value && canShowMongoJsonPreview.value);
 const activeMongoJsonDocument = computed(() => {
@@ -11422,6 +11439,7 @@ const transposePinnedWidth = computed(
     }),
 );
 const transposeEndSpacerWidth = computed(() => {
+  if (transposeMetadataInInfoColumn.value) return 0;
   if (!transposeScopeRecordIndexes.value.length) return 0;
   return transposeEndAlignmentSpacerWidth({
     viewportWidth: transposeViewportWidth.value,
@@ -11465,10 +11483,11 @@ const transposeRows = computed(() => {
   });
 });
 const transposeReserveTypeLine = computed(() => showTransposeFieldMetadata.value && showColumnTypesInHeader.value && transposeRows.value.some((row) => row.type));
-const transposeReserveCommentLine = computed(() => showTransposeFieldMetadata.value && showColumnCommentsInHeader.value && transposeRows.value.some((row) => row.comment));
+const transposeReserveCommentLine = computed(() => showTransposeFieldMetadata.value && showTransposeColumnComments.value && transposeRows.value.some((row) => row.comment));
 const transposeRowHeight = computed(() => 30 + (transposeReserveTypeLine.value ? 14 : 0) + (transposeReserveCommentLine.value ? 14 : 0));
 const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
-const transposeTotalWidth = computed(() => transposePinnedWidth.value + transposeRecordOffsets.value[transposeRecordOffsets.value.length - 1] + transposeEndSpacerWidth.value);
+const transposeInfoWidth = computed(() => (transposeMetadataInInfoColumn.value ? 360 : 0));
+const transposeTotalWidth = computed(() => transposePinnedWidth.value + transposeRecordOffsets.value[transposeRecordOffsets.value.length - 1] + transposeEndSpacerWidth.value + transposeInfoWidth.value);
 
 function transposeScrollElement(): HTMLElement | undefined {
   const raw = transposeScrollRef.value;
@@ -11479,7 +11498,7 @@ function transposeScrollElement(): HTMLElement | undefined {
 function transposeFieldTitle(item: { column: string; type: string; comment?: string }): string {
   const details = [item.column];
   if (showTransposeFieldMetadata.value && showColumnTypesInHeader.value && item.type) details.push(`${t("grid.columnType")}: ${item.type}`);
-  if (showTransposeFieldMetadata.value && showColumnCommentsInHeader.value && item.comment) details.push(`${t("grid.columnComment")}: ${item.comment}`);
+  if (showTransposeFieldMetadata.value && showTransposeColumnComments.value && item.comment) details.push(`${t("grid.columnComment")}: ${item.comment}`);
   return details.join("\n");
 }
 
@@ -14540,6 +14559,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />
                       </div>
                       <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
+                      <div v-if="transposeMetadataInInfoColumn" class="data-grid-header-cell shrink-0 border-r border-border px-3 py-1.5" :style="{ width: `${transposeInfoWidth}px` }">
+                        {{ t("grid.columnInfo") }}
+                      </div>
                     </div>
                   </template>
                   <template #default="{ item }">
@@ -14572,7 +14594,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               {{ item.type }}
                             </span>
                           </template>
-                          <template v-if="showTransposeFieldMetadata && showColumnCommentsInHeader && item.comment">
+                          <template v-if="showTransposeFieldMetadata && showTransposeColumnComments && item.comment">
                             <span data-grid-transpose-comment-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground select-none" :title="item.comment">
                               {{ item.comment }}
                             </span>
@@ -14589,7 +14611,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               <span class="text-muted-foreground">{{ t("grid.columnType") }}</span>
                               <span class="min-w-0 break-all font-mono select-text" :class="typeColorClass(item.type)">{{ item.type }}</span>
                             </template>
-                            <template v-if="showTransposeFieldMetadata && showColumnCommentsInHeader && item.comment">
+                            <template v-if="showTransposeFieldMetadata && showTransposeColumnComments && item.comment">
                               <span class="text-muted-foreground">{{ t("grid.columnComment") }}</span>
                               <span class="min-w-0 whitespace-pre-wrap break-words select-text">{{ item.comment }}</span>
                             </template>
@@ -14755,6 +14777,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         </template>
                       </div>
                       <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
+                      <div v-if="transposeMetadataInInfoColumn" data-grid-transpose-column-info class="flex shrink-0 items-center overflow-hidden border-r border-border/70 px-3 text-muted-foreground" :style="{ width: `${transposeInfoWidth}px` }" :title="columnInfoText(item.columnIndex, false)">
+                        <span class="min-w-0 truncate select-text">{{ columnInfoText(item.columnIndex, false) }}</span>
+                      </div>
                     </div>
                   </template>
                 </RecycleScroller>
@@ -16087,7 +16112,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     <ErrorBanner v-if="saveError" variant="card" :title="t('grid.saveErrorTitle')" :message="saveError" copy-mode="label" dismissible @dismiss="saveError = ''" />
 
     <!-- Bottom status bar -->
-    <div v-if="!isErrorResult" class="grid grid-cols-[max-content_minmax(0,1fr)_max-content] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0">
+    <div v-if="!isErrorResult" class="grid grid-cols-[max-content_minmax(0,1fr)_max-content] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0" :class="{ 'relative max-sm:pt-7': selectedColumnInfo }">
       <div class="flex min-w-0 items-center gap-2 overflow-hidden">
         <span v-if="hasData" class="shrink-0">
           {{
@@ -16126,7 +16151,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         </template>
       </div>
 
-      <div v-if="sqlOneLiner" class="min-w-0 max-w-full justify-self-center">
+      <div v-if="selectedColumnInfo" data-grid-column-info class="min-w-0 max-w-full truncate select-text max-sm:absolute max-sm:left-3 max-sm:right-3 max-sm:top-1" :title="selectedColumnInfo">
+        {{ selectedColumnInfo }}
+      </div>
+      <div v-else-if="sqlOneLiner" class="min-w-0 max-w-full justify-self-center">
         <CustomContextMenu :items="statusSqlContextMenuItems" v-slot="{ onContextMenu }">
           <Tooltip>
             <TooltipTrigger as-child>

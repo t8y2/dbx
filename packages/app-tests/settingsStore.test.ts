@@ -636,6 +636,10 @@ test("defaults sidebar horizontal scroll to off", () => {
 });
 
 test("defaults data grid header display settings", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridTransposeMetadataInInfoColumn, false);
+  assert.equal(normalizeEditorSettings({}).dataGridTransposeMetadataInInfoColumn, false);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridColumnCommentsInInfoArea, false);
+  assert.equal(normalizeEditorSettings({}).dataGridColumnCommentsInInfoArea, false);
   assert.equal(DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader, true);
   assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata, false);
   assert.equal(DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions, true);
@@ -646,14 +650,32 @@ test("defaults data grid header display settings", () => {
 
 test("keeps saved data grid header display settings", () => {
   const settings = normalizeEditorSettings({
+    dataGridTransposeMetadataInInfoColumn: true,
+    dataGridColumnCommentsInInfoArea: true,
     showColumnCommentsInHeader: true,
     dataGridShowTransposeFieldMetadata: true,
     compactColumnHeaderActions: false,
   } as any);
 
   assert.equal(settings.showColumnCommentsInHeader, true);
+  assert.equal(settings.dataGridTransposeMetadataInInfoColumn, true);
+  assert.equal(settings.dataGridColumnCommentsInInfoArea, true);
   assert.equal(settings.dataGridShowTransposeFieldMetadata, true);
   assert.equal(settings.compactColumnHeaderActions, false);
+});
+
+test("updates column comment placement through the store", () => {
+  setActivePinia(createPinia());
+  const store = useSettingsStore();
+  store.updateEditorSettings({ dataGridColumnCommentsInInfoArea: true });
+  assert.equal(store.editorSettings.dataGridColumnCommentsInInfoArea, true);
+  store.updateEditorSettings({ dataGridColumnCommentsInInfoArea: false });
+  assert.equal(store.editorSettings.dataGridColumnCommentsInInfoArea, false);
+  store.updateEditorSettings({ dataGridTransposeMetadataInInfoColumn: true });
+  assert.equal(store.editorSettings.dataGridTransposeMetadataInInfoColumn, true);
+  assert.equal(store.editorSettings.dataGridColumnCommentsInInfoArea, false);
+  store.updateEditorSettings({ dataGridTransposeMetadataInInfoColumn: false });
+  assert.equal(store.editorSettings.dataGridTransposeMetadataInInfoColumn, false);
 });
 
 test("defaults column header hover tooltips to on", () => {

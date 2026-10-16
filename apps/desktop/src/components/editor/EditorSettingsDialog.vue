@@ -809,12 +809,14 @@ const editSidebarTablePageSize = ref(settingsStore.desktopSettings.sidebar_table
 const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
+const editDataGridColumnCommentsInInfoArea = ref(settingsStore.editorSettings.dataGridColumnCommentsInInfoArea);
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editShowColumnHeaderTooltips = ref(settingsStore.editorSettings.showColumnHeaderTooltips);
 const editShowResultSourceDatabase = ref(settingsStore.editorSettings.showResultSourceDatabase);
 const editResultTabNamingMode = ref<ResultTabNamingMode>(settingsStore.editorSettings.resultTabNamingMode);
 const editResultTabPreferComments = ref(settingsStore.editorSettings.resultTabPreferComments);
 const editDataGridShowTransposeFieldMetadata = ref(settingsStore.editorSettings.dataGridShowTransposeFieldMetadata);
+const editDataGridTransposeMetadataInInfoColumn = ref(settingsStore.editorSettings.dataGridTransposeMetadataInInfoColumn);
 const editColorizeDataGridCellTypes = ref(settingsStore.editorSettings.colorizeDataGridCellTypes);
 const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showIndexIndicatorsInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
@@ -1186,12 +1188,14 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     tabSortMode: editTabSortMode.value,
     tabMaxWidth: editTabMaxWidth.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
+    dataGridColumnCommentsInInfoArea: editDataGridColumnCommentsInInfoArea.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     showColumnHeaderTooltips: editShowColumnHeaderTooltips.value,
     showResultSourceDatabase: editShowResultSourceDatabase.value,
     resultTabNamingMode: editResultTabNamingMode.value,
     resultTabPreferComments: editResultTabPreferComments.value,
     dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata.value,
+    dataGridTransposeMetadataInInfoColumn: editDataGridTransposeMetadataInInfoColumn.value,
     colorizeDataGridCellTypes: editColorizeDataGridCellTypes.value,
     dataGridTypeColorSchemes: editDataGridTypeColorSchemes.value,
     activeDataGridTypeColorSchemeId: editActiveDataGridTypeColorSchemeId.value,
@@ -1877,12 +1881,14 @@ function syncEditorSettingsDraftFromStore() {
   editTabSortMode.value = settingsStore.editorSettings.tabSortMode;
   editTabMaxWidth.value = settingsStore.editorSettings.tabMaxWidth;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
+  editDataGridColumnCommentsInInfoArea.value = settingsStore.editorSettings.dataGridColumnCommentsInInfoArea;
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
   editShowColumnHeaderTooltips.value = settingsStore.editorSettings.showColumnHeaderTooltips;
   editShowResultSourceDatabase.value = settingsStore.editorSettings.showResultSourceDatabase;
   editResultTabNamingMode.value = settingsStore.editorSettings.resultTabNamingMode;
   editResultTabPreferComments.value = settingsStore.editorSettings.resultTabPreferComments;
   editDataGridShowTransposeFieldMetadata.value = settingsStore.editorSettings.dataGridShowTransposeFieldMetadata;
+  editDataGridTransposeMetadataInInfoColumn.value = settingsStore.editorSettings.dataGridTransposeMetadataInInfoColumn;
   editColorizeDataGridCellTypes.value = settingsStore.editorSettings.colorizeDataGridCellTypes;
   editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(settingsStore.editorSettings.dataGridTypeColorSchemes);
   editActiveDataGridTypeColorSchemeId.value = settingsStore.editorSettings.activeDataGridTypeColorSchemeId;
@@ -2042,12 +2048,14 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   tabSortMode: editTabSortMode,
   tabMaxWidth: editTabMaxWidth,
   showColumnCommentsInHeader: editShowColumnCommentsInHeader,
+  dataGridColumnCommentsInInfoArea: editDataGridColumnCommentsInInfoArea,
   showColumnTypesInHeader: editShowColumnTypesInHeader,
   showColumnHeaderTooltips: editShowColumnHeaderTooltips,
   showResultSourceDatabase: editShowResultSourceDatabase,
   resultTabNamingMode: editResultTabNamingMode,
   resultTabPreferComments: editResultTabPreferComments,
   dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata,
+  dataGridTransposeMetadataInInfoColumn: editDataGridTransposeMetadataInInfoColumn,
   colorizeDataGridCellTypes: editColorizeDataGridCellTypes,
   dataGridTypeColorSchemes: editDataGridTypeColorSchemes,
   activeDataGridTypeColorSchemeId: editActiveDataGridTypeColorSchemeId,
@@ -2682,12 +2690,14 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     historyRetention.reset();
     mcpHistoryRetention.reset();
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
+    editDataGridColumnCommentsInInfoArea.value = DEFAULT_EDITOR_SETTINGS.dataGridColumnCommentsInInfoArea;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editShowColumnHeaderTooltips.value = DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips;
     editShowResultSourceDatabase.value = DEFAULT_EDITOR_SETTINGS.showResultSourceDatabase;
     editResultTabNamingMode.value = DEFAULT_EDITOR_SETTINGS.resultTabNamingMode;
     editResultTabPreferComments.value = DEFAULT_EDITOR_SETTINGS.resultTabPreferComments;
     editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
+    editDataGridTransposeMetadataInInfoColumn.value = DEFAULT_EDITOR_SETTINGS.dataGridTransposeMetadataInInfoColumn;
     editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
     // Back to the built-in palette, but keep the user's saved schemes available.
     editActiveDataGridTypeColorSchemeId.value = DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId;
@@ -2815,9 +2825,11 @@ function resetAllDefaults() {
   editDuckDbWorkerMaxProcesses.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_max_processes;
   editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
+  editDataGridColumnCommentsInInfoArea.value = DEFAULT_EDITOR_SETTINGS.dataGridColumnCommentsInInfoArea;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editShowColumnHeaderTooltips.value = DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips;
   editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
+  editDataGridTransposeMetadataInInfoColumn.value = DEFAULT_EDITOR_SETTINGS.dataGridTransposeMetadataInInfoColumn;
   editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
   // Reset the selection only; saved schemes survive a full settings reset.
   editActiveDataGridTypeColorSchemeId.value = DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId;
@@ -9640,7 +9652,14 @@ onUnmounted(() => {
                       {{ t("settings.showColumnCommentsInHeaderDescription") }}
                     </p>
                   </div>
-                  <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" />
+                  <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" :disabled="editDataGridColumnCommentsInInfoArea" />
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="column-comments-in-info-area">{{ t("settings.dataGridColumnCommentsInInfoArea") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.dataGridColumnCommentsInInfoAreaDescription") }}</p>
+                  </div>
+                  <Switch id="column-comments-in-info-area" v-model="editDataGridColumnCommentsInInfoArea" class="shrink-0" />
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
@@ -9711,7 +9730,14 @@ onUnmounted(() => {
                       {{ t("settings.dataGridShowTransposeFieldMetadataDescription") }}
                     </p>
                   </div>
-                  <Switch id="data-grid-show-transpose-field-metadata" v-model="editDataGridShowTransposeFieldMetadata" />
+                  <Switch id="data-grid-show-transpose-field-metadata" v-model="editDataGridShowTransposeFieldMetadata" :disabled="editDataGridTransposeMetadataInInfoColumn" />
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="data-grid-transpose-metadata-in-info-column">{{ t("settings.dataGridTransposeMetadataInInfoColumn") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.dataGridTransposeMetadataInInfoColumnDescription") }}</p>
+                  </div>
+                  <Switch id="data-grid-transpose-metadata-in-info-column" v-model="editDataGridTransposeMetadataInInfoColumn" class="shrink-0" />
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">

@@ -128,6 +128,69 @@ describe("DataGrid cell editor and value editor word wrap (#10506)", () => {
     host.remove();
   });
 
+  it("auto-wraps a super long single-line value even when wordWrap is off (#12320)", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.wordWrap = false;
+
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    const editor = useCellDetailEditor({
+      editorTheme: () => "default",
+      appAppearance: () => "light",
+      appPalette: () => ({}) as any,
+      fontSize: () => 13,
+      fontFamily: () => "monospace",
+    });
+
+    await editor.create(host, "z".repeat(400));
+    const cmContent = host.querySelector(".cm-content");
+    expect(cmContent).not.toBeNull();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(true);
+
+    // Shortening the value below the threshold releases the automatic fold.
+    editor.setValue("z".repeat(40));
+    await nextTick();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(false);
+
+    // Growing it back into a super long single line folds it again.
+    editor.setValue("z".repeat(400));
+    await nextTick();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(true);
+
+    editor.destroy();
+    host.remove();
+  });
+
+  it("keeps multi-line documents under the user's wrap choice even when long", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.wordWrap = false;
+
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    const editor = useCellDetailEditor({
+      editorTheme: () => "default",
+      appAppearance: () => "light",
+      appPalette: () => ({}) as any,
+      fontSize: () => 13,
+      fontFamily: () => "monospace",
+    });
+
+    await editor.create(host, `{"payload":"${"v".repeat(300)}"}\ntrailing`);
+    const cmContent = host.querySelector(".cm-content");
+    expect(cmContent).not.toBeNull();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(false);
+
+    // Explicit toggle still wins for multi-line content.
+    settingsStore.editorSettings.wordWrap = true;
+    await nextTick();
+    expect(cmContent?.classList.contains("cm-lineWrapping")).toBe(true);
+
+    editor.destroy();
+    host.remove();
+  });
+
   it("renders word wrap toggle button in DataGridCellDetailHeader and updates settingsStore", async () => {
     const settingsStore = useSettingsStore();
     settingsStore.editorSettings.wordWrap = false;

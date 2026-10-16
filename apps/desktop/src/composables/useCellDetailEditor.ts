@@ -19,6 +19,7 @@ import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
 import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
 import { selectAllCellDetailText } from "@/lib/dataGrid/cellDetailSelection";
+import { shouldAutoWrapLongSingleLine } from "@/lib/dataGrid/cellDetailWordWrap";
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { preserveSourceHistory, rawSourceField, restoreRawSource } from "@/lib/editor/preserveTextLineEndings";
 
@@ -92,6 +93,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   let destroyed = false;
   let synchronizingValue = false;
   let currentIsJson = false;
+  let appliedLineWrapping: boolean | null = null;
   let liveFontSize = clampEditorFontSize(options.fontSize());
   let gestureStartFontSize = liveFontSize;
   let isGestureZooming = false;
@@ -119,6 +121,22 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
 
   function isLineWrapping(): boolean {
     return typeof options.lineWrapping === "function" ? options.lineWrapping() : settingsStore.editorSettings.wordWrap;
+  }
+
+  /**
+   * Effective wrapping for the current document: the caller's explicit wrap
+   * choice, plus automatic folding of super long single-line values (#12320)
+   * so they are readable without dragging the horizontal scrollbar.
+   */
+  function shouldWrapDoc(doc: string): boolean {
+    return isLineWrapping() || shouldAutoWrapLongSingleLine(doc);
+  }
+
+  function applyLineWrapping(doc: string): boolean {
+    const wrap = shouldWrapDoc(doc);
+    if (wrap === appliedLineWrapping) return false;
+    appliedLineWrapping = wrap;
+    return true;
   }
 
   function readOnlyExtensions(readOnly: boolean) {
@@ -188,10 +206,12 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
 
   watch(
     () => isLineWrapping(),
-    (lineWrapping) => {
+    () => {
       const editor = view.value;
       if (!editor || destroyed) return;
-      editor.dispatch({ effects: lineWrappingComp.reconfigure(lineWrapping ? EditorView.lineWrapping : []) });
+      const doc = editor.state.doc.toString();
+      if (!applyLineWrapping(doc)) return;
+      editor.dispatch({ effects: lineWrappingComp.reconfigure(appliedLineWrapping ? EditorView.lineWrapping : []) });
     },
   );
 
@@ -224,6 +244,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     liveFontSize = clampEditorFontSize(options.fontSize());
     const fontTheme = editorFontTheme(EditorView, liveFontSize, options.fontFamily(), { fixedHeight: true, scrollable: true });
     const shortcuts = settingsStore.editorSettings.shortcuts;
+    appliedLineWrapping = shouldWrapDoc(doc);
 
     const state = EditorState.create({
       doc,
@@ -274,7 +295,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
               ]),
         ]),
         languageComp.of(currentIsJson ? json() : []),
-        lineWrappingComp.of(isLineWrapping() ? EditorView.lineWrapping : []),
+        lineWrappingComp.of(shouldWrapDoc(doc) ? EditorView.lineWrapping : []),
         readOnlyComp.of(readOnlyExtensions(isReadOnly())),
         themeComp.of(theme),
         fontThemeComp.of(fontTheme),
@@ -295,11 +316,17 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         ]),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
+            const nextDoc = update.state.doc.toString();
+            // Auto-wrap (#12320) flips with the document itself: a single long
+            // line folds, then un-folds again as soon as the user breaks it up.
+            if (applyLineWrapping(nextDoc)) {
+              update.view.dispatch({ effects: lineWrappingComp.reconfigure(appliedLineWrapping ? EditorView.lineWrapping : []) });
+            }
             if (options.preserveLineEndings) {
               if (synchronizingValue) return;
               options.onChange?.(update.state.field(rawSourceField));
             } else {
-              options.onChange?.(update.state.doc.toString());
+              options.onChange?.(nextDoc);
             }
           }
         }),

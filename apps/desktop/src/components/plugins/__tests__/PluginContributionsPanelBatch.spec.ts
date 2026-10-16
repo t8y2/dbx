@@ -1639,6 +1639,53 @@ describe("marketplace detail launch", () => {
   });
 });
 
+describe("marketplace detail update history", () => {
+  function multiVersionCatalog(): PluginRepositoryCatalogResult {
+    const result = catalog("repo", ["a"]);
+    const plugin = result.catalog!.plugins[0];
+    plugin.latestVersion = "3.0.0";
+    const artifact = { target: "darwin-arm64", url: "https://example.invalid/plugin.dbxp", sha256: "a".repeat(64), signingKeyId: "test.key" };
+    plugin.versions = [
+      { version: "3.0.0", releasedAt: "2026-10-14T00:00:00.000Z", releaseNotes: "Third release notes", artifacts: [artifact] },
+      { version: "2.0.0", releasedAt: "2026-10-13T00:00:00.000Z", releaseNotes: "Second release notes", artifacts: [] },
+      { version: "1.0.0", releasedAt: "", releaseNotes: "", artifacts: [] },
+    ];
+    return result;
+  }
+
+  it("starts with only the newest release expanded and toggles notes per version", async () => {
+    state.catalogResults = [multiVersionCatalog()];
+    await flushUi();
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    await flushUi();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const headers = [...dialog.querySelectorAll("button[aria-expanded]")];
+    expect(headers.length).toBe(3);
+    // Newest release starts expanded; older versions stay collapsed so a long
+    // history remains scannable.
+    expect(headers.map((header) => header.getAttribute("aria-expanded"))).toEqual(["true", "false", "false"]);
+    expect(dialog.textContent).toContain("Third release notes");
+    expect(dialog.textContent).not.toContain("Second release notes");
+
+    // Expanding an older version reveals its notes; collapsing hides them again.
+    headers[1].click();
+    await flushUi();
+    expect(headers[1].getAttribute("aria-expanded")).toBe("true");
+    expect(dialog.textContent).toContain("Second release notes");
+
+    headers[1].click();
+    await flushUi();
+    expect(headers[1].getAttribute("aria-expanded")).toBe("false");
+    expect(dialog.textContent).not.toContain("Second release notes");
+
+    // The auto-expanded newest release can be collapsed too.
+    headers[0].click();
+    await flushUi();
+    expect(headers[0].getAttribute("aria-expanded")).toBe("false");
+    expect(dialog.textContent).not.toContain("Third release notes");
+  });
+});
+
 describe("marketplace author filtering", () => {
   it("shows exact author matches across repositories and clears prior filters", async () => {
     const first = catalog("first", ["a", "b", "c"]);

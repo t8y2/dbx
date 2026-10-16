@@ -530,6 +530,7 @@ export default withEnglishFallback({
     pluginDetailsReleaseDate: "วันที่เผยแพร่",
     noVersionHistory: "ไม่มีประวัติเวอร์ชัน",
     noReleaseNotes: "ไม่มีบันทึกการเผยแพร่",
+    pluginDetailsPublishedOn: "เผยแพร่เมื่อ {date}",
     noPermissions: "ไม่มีการประกาศสิทธิ์พิเศษ",
     pluginDetailsCompatibility: "ความเข้ากันได้",
     pluginDetailsCurrentTarget: "เป้าหมายปัจจุบัน",

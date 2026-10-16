@@ -720,7 +720,11 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         {
             db::dolt::list_databases(p).await
         }
-        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) => {
+        PoolKind::Mysql(p, _)
+            if db_config
+                .as_ref()
+                .is_some_and(|config| db::mysql_compatible::uses_show_metadata(config) || is_mycat_config(config)) =>
+        {
             db::mysql::list_databases_show_with_timeout(p, mysql_database_list_timeout)
                 .await
                 .map(|databases| filter_mysql_system_databases_for_config(databases, db_config.as_ref()))
@@ -744,10 +748,9 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
 
 async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
     let config = connection_config(state, connection_id).await;
-    if config
-        .as_ref()
-        .is_some_and(|config| db::dolt::is_config(config) || db::mysql_compatible::uses_show_metadata(config))
-    {
+    if config.as_ref().is_some_and(|config| {
+        db::dolt::is_config(config) || db::mysql_compatible::uses_show_metadata(config) || is_mycat_config(config)
+    }) {
         return list_databases_once(state, connection_id).await;
     }
     let pool_handle = state.pool_handle(connection_id).await;
@@ -3148,8 +3151,19 @@ fn is_shardingsphere_proxy_version(version: &str) -> bool {
     version.as_bytes().windows(MARKER.len()).any(|window| window.eq_ignore_ascii_case(MARKER))
 }
 
+pub(in crate::schema) fn is_mycat_version(version: &str) -> bool {
+    const MARKER: &[u8] = b"mycat";
+    version.as_bytes().windows(MARKER.len()).any(|window| window.eq_ignore_ascii_case(MARKER))
+}
+
+pub(in crate::schema) fn is_mycat_config(config: &ConnectionConfig) -> bool {
+    config.database_info.as_ref().and_then(|info| info.product_version.as_deref()).is_some_and(is_mycat_version)
+        || config.database_info.as_ref().and_then(|info| info.server_comment.as_deref()).is_some_and(is_mycat_version)
+}
+
 fn mysql_table_list_source_for_config(config: Option<&ConnectionConfig>) -> MysqlTableListSource {
     if config.is_some_and(db::tdsql_mysql::is_config)
+        || config.is_some_and(is_mycat_config)
         || config
             .and_then(|config| config.database_info.as_ref())
             .and_then(|info| info.product_version.as_deref())
@@ -5149,6 +5163,14 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn mycat_marker_is_ascii_case_insensitive_and_exact() {
+        assert!(super::is_mycat_version("5.6.29-mycat-1.6-RELEASE-20161028204710"));
+        assert!(super::is_mycat_version("5.6.29-mycat-1.6.7.6"));
+        assert!(super::is_mycat_version("5.7.22-MYCAT-1.6-RELEASE"));
+        assert!(!super::is_mycat_version("8.0.36-MySQL Community Server"));
+    }
+
+    #[test]
     fn mysql_table_list_source_uses_only_saved_shardingsphere_version() {
         let mut config = test_connection_config(DatabaseType::Mysql);
         assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::InformationSchema);
@@ -5162,6 +5184,27 @@ for line in sys.stdin:
         config.database_info.as_mut().unwrap().product_version = Some("8.0.36-MySQL Community Server".to_string());
         assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::InformationSchema);
         assert_eq!(mysql_table_list_source_for_config(None), MysqlTableListSource::InformationSchema);
+    }
+
+    #[test]
+    fn mysql_table_list_source_uses_mycat_version() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::InformationSchema);
+
+        config.database_info = Some(DatabaseConnectionInfo {
+            product_version: Some("5.6.29-mycat-1.6-RELEASE-20161028204710".to_string()),
+            ..DatabaseConnectionInfo::default()
+        });
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::ShowFullTables);
+        assert!(super::is_mycat_config(&config));
+
+        config.database_info = Some(DatabaseConnectionInfo {
+            product_version: None,
+            server_comment: Some("MyCat Server 1.6".to_string()),
+            ..DatabaseConnectionInfo::default()
+        });
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::ShowFullTables);
+        assert!(super::is_mycat_config(&config));
     }
 
     #[test]

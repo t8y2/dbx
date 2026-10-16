@@ -214,6 +214,116 @@ describe("connectionStore database info", () => {
     expect(listTables).toHaveBeenCalledTimes(2);
   });
 
+  it("refreshes physical table metadata after delayed Mycat detection", async () => {
+    const config = mysqlConnection();
+    let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;
+    const databaseInfo = new Promise<{ productName: string; productVersion: string }>((resolve) => {
+      resolveDatabaseInfo = resolve;
+    });
+    let useLogicalTables = false;
+    const listTables = vi.fn().mockImplementation(async () => [
+      {
+        name: useLogicalTables ? "order_info" : "order_info_0",
+        table_type: "BASE TABLE",
+        comment: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn(() => databaseInfo),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([{ name: "app" }]),
+      listObjects: vi.fn().mockResolvedValue([]),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnectionDatabaseInfo: vi.fn().mockImplementation(async () => {
+        useLogicalTables = true;
+      }),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    await store.addConnection(config);
+    await store.connect(config);
+    await store.loadDatabases(config.id, { force: true });
+    const databaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
+    expect(databaseNode).toBeDefined();
+    await store.loadTreeNodeChildren(databaseNode!, { force: true });
+    expect(databaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info_0"]);
+
+    resolveDatabaseInfo({ productName: "MySQL", productVersion: "5.6.29-mycat-1.6-RELEASE-20161028204710" });
+
+    await vi.waitFor(() => {
+      const refreshedDatabaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
+      expect(refreshedDatabaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info"]);
+    });
+    expect(listTables).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes physical table metadata after delayed Mycat detection via serverComment", async () => {
+    const config = mysqlConnection();
+    let resolveDatabaseInfo!: (value: { productName: string; productVersion?: string; serverComment?: string }) => void;
+    const databaseInfo = new Promise<{ productName: string; productVersion?: string; serverComment?: string }>((resolve) => {
+      resolveDatabaseInfo = resolve;
+    });
+    let useLogicalTables = false;
+    const listTables = vi.fn().mockImplementation(async () => [
+      {
+        name: useLogicalTables ? "order_info" : "order_info_0",
+        table_type: "BASE TABLE",
+        comment: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn(() => databaseInfo),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([{ name: "app" }]),
+      listObjects: vi.fn().mockResolvedValue([]),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnectionDatabaseInfo: vi.fn().mockImplementation(async () => {
+        useLogicalTables = true;
+      }),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    await store.addConnection(config);
+    await store.connect(config);
+    await store.loadDatabases(config.id, { force: true });
+    const databaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
+    expect(databaseNode).toBeDefined();
+    await store.loadTreeNodeChildren(databaseNode!, { force: true });
+    expect(databaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info_0"]);
+
+    resolveDatabaseInfo({ productName: "MySQL", serverComment: "Mycat Server 1.6" });
+
+    await vi.waitFor(() => {
+      const refreshedDatabaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
+      expect(refreshedDatabaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info"]);
+    });
+    expect(listTables).toHaveBeenCalledTimes(2);
+  });
+
   it("does not let a pre-detection table request overwrite the refreshed logical tables", async () => {
     const config = mysqlConnection();
     let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;

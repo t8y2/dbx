@@ -3368,6 +3368,7 @@ impl DbxMcpServer {
                 .collect(),
             None => self.tool_router.list_all(),
         };
+        tools.iter_mut().for_each(ensure_object_schema_properties);
         if self.plugin_tools_mode.advertise_flat() {
             tools.extend(self.plugin_tools_view(policy.as_ref()).await);
         }
@@ -4000,6 +4001,16 @@ impl ServerHandler for DbxMcpServer {
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult::with_all_items(self.policy_filtered_tools().await))
+    }
+}
+
+/// Parameterless tools (an empty request struct) get an object schema without
+/// `properties`, which strict OpenAI-compatible gateways such as DashScope
+/// reject — failing every request that carries the tool list (issue #12464).
+fn ensure_object_schema_properties(tool: &mut rmcp::model::Tool) {
+    let is_object = tool.input_schema.get("type").and_then(serde_json::Value::as_str) == Some("object");
+    if is_object && !tool.input_schema.contains_key("properties") {
+        Arc::make_mut(&mut tool.input_schema).insert("properties".to_string(), json!({}));
     }
 }
 
@@ -5925,6 +5936,26 @@ mod tests {
                 }
             ]
         })
+    }
+
+    #[tokio::test]
+    async fn every_listed_tool_advertises_object_schema_properties() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let tools = server.policy_filtered_tools().await;
+        let list_connections =
+            tools.iter().find(|tool| tool.name.as_ref() == "dbx_list_connections").expect("list connections tool");
+        assert_eq!(list_connections.input_schema.get("properties"), Some(&json!({})));
+        let missing: Vec<&str> = tools
+            .iter()
+            .filter(|tool| !tool.input_schema.get("properties").is_some_and(serde_json::Value::is_object))
+            .map(|tool| tool.name.as_ref())
+            .collect();
+        assert!(missing.is_empty(), "tools without object properties: {missing:?}");
     }
 
     #[tokio::test]

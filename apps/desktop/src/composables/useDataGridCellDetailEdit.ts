@@ -80,6 +80,17 @@ export function useDataGridCellDetailEdit(options: UseDataGridCellDetailEditOpti
     return editorText(detail.value, detail.colIndex);
   }
 
+  /**
+   * Structured values open in the value editor as a pretty-printed draft
+   * (issue #12416). The baseline is formatted too, so an untouched draft still
+   * commits the stored raw text — `commitDetailEdit` falls back to
+   * `detail.value` while the draft matches its baseline.
+   */
+  function autoFormattedEditorText(value: string, columnType?: string): string {
+    if (!canFormatCellDetailJson(value, columnType)) return value;
+    return formatJsonText(value) ?? value;
+  }
+
   function resetDetailEdit() {
     detailEditGeneration += 1;
     isEditingDetail.value = false;
@@ -111,7 +122,7 @@ export function useDataGridCellDetailEdit(options: UseDataGridCellDetailEditOpti
     lastSyncedDetailCellKey = cellKey;
     if (isSameCellStillEditing && !allowActiveCellDetailResync) return;
     allowActiveCellDetailResync = false;
-    const value = editorText(detail.value, detail.colIndex);
+    const value = autoFormattedEditorText(editorText(detail.value, detail.colIndex), detail.type);
     detailEditValue.value = value;
     detailEditOriginalValue.value = value;
     syncEditorFromDetailEdit();
@@ -127,7 +138,7 @@ export function useDataGridCellDetailEdit(options: UseDataGridCellDetailEditOpti
     const detail = options.activeDetail.value;
     if (!detail || !detail.isEditable || `${detail.rowId}:${detail.colIndex}` !== initialCellKey) return;
     options.warnFormattedJsonEdit(detail);
-    const value = activeDetailEditorText(detail);
+    const value = autoFormattedEditorText(activeDetailEditorText(detail), detail.type);
     detailEditValue.value = value;
     detailEditOriginalValue.value = value;
     syncEditorFromDetailEdit();

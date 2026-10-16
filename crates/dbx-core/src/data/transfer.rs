@@ -4226,6 +4226,13 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
         },
         "double" | "double precision" | "float8" => match target_db {
             target_db if is_postgres_transfer_dialect(target_db) => "DOUBLE PRECISION".into(),
+            // Oracle has no bare `DOUBLE` data type; the only accepted ANSI spelling is
+            // the two-word `DOUBLE PRECISION` (an alias for FLOAT(126)). Emitting
+            // `DOUBLE` failed `CREATE TABLE` with `ORA-00902: invalid datatype`, so a
+            // PostgreSQL `double precision` column could not be transferred to Oracle
+            // at all. OceanBase's Oracle mode follows Oracle's parser. Dameng does
+            // accept the bare spelling and keeps it.
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => "DOUBLE PRECISION".into(),
             _ => "DOUBLE".into(),
         },
         "decimal" | "numeric" | "number" => {
@@ -21360,6 +21367,38 @@ SELECT 1 FROM dual"#
         // taking the CHAR arm.
         assert_eq!(map_column_type("character(20)", &DatabaseType::Postgres, &DatabaseType::Dameng), "CHAR(20 CHAR)");
         assert_eq!(map_column_type("character", &DatabaseType::Postgres, &DatabaseType::Dameng), "CHAR(1)");
+    }
+
+    #[test]
+    fn map_column_type_uses_two_word_double_precision_for_oracle() {
+        // Oracle has no bare `DOUBLE` data type — the only accepted ANSI spelling is
+        // the two-word `DOUBLE PRECISION` — so a PostgreSQL `double precision` column
+        // used to build `DOUBLE` and fail CREATE TABLE with `ORA-00902: invalid
+        // datatype`. The base-name reduction also truncates the two-word spelling to
+        // `double` before the match, which is why the `"double precision"` alternative
+        // in the arm was never reachable.
+        for source in ["double precision", "double", "float8"] {
+            assert_eq!(map_column_type(source, &DatabaseType::Postgres, &DatabaseType::Oracle), "DOUBLE PRECISION");
+            assert_eq!(
+                map_column_type(source, &DatabaseType::Postgres, &DatabaseType::OceanbaseOracle),
+                "DOUBLE PRECISION"
+            );
+        }
+
+        // Dameng accepts the bare spelling, so it keeps the previous output.
+        assert_eq!(map_column_type("double precision", &DatabaseType::Postgres, &DatabaseType::Dameng), "DOUBLE");
+        // Non-Oracle-family targets are unchanged.
+        assert_eq!(map_column_type("double precision", &DatabaseType::Postgres, &DatabaseType::Mysql), "DOUBLE");
+        assert_eq!(map_column_type("double precision", &DatabaseType::Postgres, &DatabaseType::SqlServer), "DOUBLE");
+        assert_eq!(
+            map_column_type("double precision", &DatabaseType::Postgres, &DatabaseType::Kingbase),
+            "DOUBLE PRECISION"
+        );
+        // Identity transfers return the source spelling untouched.
+        assert_eq!(
+            map_column_type("double precision", &DatabaseType::Postgres, &DatabaseType::Postgres),
+            "double precision"
+        );
     }
 
     #[test]

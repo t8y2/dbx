@@ -4134,8 +4134,20 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
             _ => base,
         };
     }
-    // Extract basic type, `bigint unsigned` -> `bigint`
-    base = base.split(' ').next().unwrap_or(base).trim();
+    // Extract basic type, `bigint unsigned` -> `bigint`.
+    //
+    // `pg_catalog.format_type()` spells a PostgreSQL varying string as the two-word
+    // `character varying`, so the space-separated reduction has to run *after* the
+    // multi-word names this function recognises have been resolved. Reducing first
+    // left `character`, which the CHAR arm below happily accepted: a source
+    // `varchar(120)` became `CHAR(120 CHAR)` and an unbounded `varchar` became
+    // `CHAR(1)` — every transferred value was blank-padded to the declared width and
+    // anything longer than a single character was rejected outright. A real `char`
+    // column still reports `character`, so it keeps taking the CHAR arm.
+    base = match base {
+        "character varying" => "varchar",
+        _ => base.split(' ').next().unwrap_or(base).trim(),
+    };
 
     // SQLite has no integer widths: every column whose declared type carries the
     // `INT` substring — `INTEGER`, `INT`, `TINYINT`, `SMALLINT`, even the
@@ -21222,6 +21234,36 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn transfer_create_table_postgres_to_dameng_keeps_varying_strings_varying() {
+        // The PostgreSQL driver reports `format_type()` output, so a varchar column
+        // arrives as the two-word `character varying(n)`. Building the DDL used to
+        // collapse it to CHAR, which pads every value to n and turns an unbounded
+        // `varchar` into CHAR(1).
+        let columns = vec![
+            db::ColumnInfo { is_primary_key: true, ..test_column("ID", "bigint") },
+            test_column("NAME", "character varying(255)"),
+            test_column("NOTE", "character varying"),
+            test_column("CODE", "character(8)"),
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &columns,
+            "T_VARCHAR_PROBE",
+            "DBX_TEST",
+            "DBX_TEST",
+            &DatabaseType::Dameng,
+            &DatabaseType::Postgres,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("\"NAME\" VARCHAR(255 CHAR)"), "{ddl}");
+        assert!(ddl.contains("\"NOTE\" VARCHAR(255)"), "{ddl}");
+        // A real char column still builds a fixed-width CHAR.
+        assert!(ddl.contains("\"CODE\" CHAR(8 CHAR)"), "{ddl}");
+    }
+
+    #[test]
     fn escape_value_typed_writes_integer_booleans_for_oracle_family_targets() {
         // The DDL side maps boolean to NUMBER(1) for the Oracle family (#12453), so the
         // data side must write the integer spelling there or the insert fails on the
@@ -21282,6 +21324,42 @@ SELECT 1 FROM dual"#
             // pass through verbatim between Oracle-family databases.
             assert_eq!(map_column_type("VARCHAR2(20)", &source, &target), "VARCHAR(20)");
         }
+    }
+
+    #[test]
+    fn map_column_type_keeps_postgres_character_varying_a_varying_string() {
+        // `pg_catalog.format_type()` renders a PostgreSQL varchar as the two-word
+        // `character varying`, and the space-separated base reduction used to leave
+        // `character`, so every PostgreSQL varchar column was built as a fixed-width
+        // CHAR — blank-padded to the declared width — and an unbounded `varchar`
+        // (reported without a length) as CHAR(1), which rejects any longer value.
+        for target in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            assert_eq!(
+                map_column_type("character varying(120)", &DatabaseType::Postgres, &target),
+                "VARCHAR(120 CHAR)"
+            );
+            assert_eq!(map_column_type("character varying", &DatabaseType::Postgres, &target), "VARCHAR(255)");
+        }
+
+        // The same reduction affected every other target, not just the Oracle family.
+        assert_eq!(
+            map_column_type("character varying(120)", &DatabaseType::Postgres, &DatabaseType::Mysql),
+            "VARCHAR(120)"
+        );
+        assert_eq!(
+            map_column_type("character varying(120)", &DatabaseType::Postgres, &DatabaseType::SqlServer),
+            "NVARCHAR(120)"
+        );
+        // PostgreSQL-family targets still pass the source spelling through verbatim.
+        assert_eq!(
+            map_column_type("character varying(120)", &DatabaseType::Postgres, &DatabaseType::Postgres),
+            "character varying(120)"
+        );
+
+        // A real `char` column reports the single-word `character`, which must keep
+        // taking the CHAR arm.
+        assert_eq!(map_column_type("character(20)", &DatabaseType::Postgres, &DatabaseType::Dameng), "CHAR(20 CHAR)");
+        assert_eq!(map_column_type("character", &DatabaseType::Postgres, &DatabaseType::Dameng), "CHAR(1)");
     }
 
     #[test]

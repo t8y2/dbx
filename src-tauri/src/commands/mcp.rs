@@ -363,6 +363,31 @@ pub async fn check_mcp_server_status(app: AppHandle) -> Result<McpServerStatus, 
     })
 }
 
+/// Whether a background `dbx-mcp` launch can read the DBX encryption key.
+/// Kept apart from `check_mcp_server_status` so the frequent update-badge
+/// polling does not spawn a probe process.
+#[tauri::command]
+pub async fn check_mcp_keychain_access() -> Result<native_installation::KeychainAccess, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        native_installation::resolve()
+            .map_or(native_installation::KeychainAccess::NotApplicable, |native| native.keychain_access())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn authorize_mcp_keychain() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let native = native_installation::resolve().ok_or_else(|| {
+            "The native DBX MCP is not installed; install it before authorizing Keychain access.".to_string()
+        })?;
+        native.authorize_keychain()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn install_mcp_server() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(|| {

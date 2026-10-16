@@ -314,8 +314,9 @@ mod tests {
     use axum::response::IntoResponse;
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::{
-        default_connect_timeout_secs, default_idle_timeout_secs, default_keepalive_interval_secs,
-        default_manual_transaction_timeout_secs, default_query_timeout_secs, ConnectionConfig, DatabaseType,
+        default_connect_timeout_secs, default_idle_disconnect_secs, default_idle_timeout_secs,
+        default_keepalive_interval_secs, default_manual_transaction_timeout_secs, default_query_timeout_secs,
+        ConnectionConfig, DatabaseType,
     };
     use dbx_core::persistence::task_history::{TaskRunItemsQuery, TaskRunStatus, TransferObjectSelectionMode};
     use dbx_core::transfer::{
@@ -355,6 +356,7 @@ mod tests {
             query_timeout_secs: default_query_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
             manual_transaction_timeout_secs: default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: default_idle_disconnect_secs(),
             keepalive_interval_secs: default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),

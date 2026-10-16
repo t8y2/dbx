@@ -38,6 +38,7 @@ const LABEL_PALETTE = ["0e8a16", "1d76db", "5319e7", "c2e0c6", "bfd4f2", "d4c5f9
 const DRIVER_DATABASE_ALIASES = {
   "cassandra-go": "cassandra",
   gbase8a: "gbase",
+  gbase8c: "gbase",
   gbase8s: "gbase",
   "h2-legacy": "h2",
   kafka: "mq",

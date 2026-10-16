@@ -2841,3 +2841,61 @@ describe("useDataGridExport VARBINARY 文本复制 (#7471)", () => {
     ]);
   });
 });
+
+// issue #12413：MySQL BLOB 列在网格里已经以文本预览显示（AES_DECRYPT 这类表达式的
+// 结果列常被报成 BLOB），复制单元格/复制行/复制全部必须还原成同一份文本，否则用户看到
+// `secret` 却粘贴出 hex。不可严格解码的 bytes 仍保持 hex，非 MySQL 的二进制列不受影响。
+describe("useDataGridExport MySQL BLOB 文本复制 (#12413)", () => {
+  const blobTable: DataGridTableMeta = {
+    tableName: "test_blob",
+    primaryKeys: ["id"],
+    columns: [
+      { name: "id", data_type: "int", is_nullable: false, is_primary_key: true },
+      { name: "secret", data_type: "blob", is_nullable: false },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearDataGridClipboardCopy();
+  });
+
+  it("复制文本型 BLOB 单元格时把 0x<hex> 还原为原始字符串", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "abc", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(blobTable, ["id", "secret"], matrix, [1, "0x616263"]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["abc"]] }));
+    expect(copyToClipboard).toHaveBeenCalledWith("abc");
+    // OS 剪贴板是文本，DBX 内部剪贴板仍保留原 hex，粘回 BLOB 时不重编码、不丢字节。
+    expect(parseDataGridClipboard("abc")).toEqual([["0x616263"]]);
+  });
+
+  it("右键「复制单元格」对文本型 BLOB 直接写入原始字符串", async () => {
+    const state = createExportState(blobTable, ["id", "secret"], undefined, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+
+    await state.copyCell();
+
+    expect(copyToClipboard).toHaveBeenCalledWith("abc");
+  });
+
+  it("不可解码的 BLOB 保持 hex，非 MySQL 的二进制列不受影响", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x00fffe"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "0x00fffe", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(blobTable, ["id", "secret"], matrix, [1, "0x00fffe"]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["0x00fffe"]] }));
+
+    const textMatrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "0x616263", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const sqliteState = createExportState(blobTable, ["id", "secret"], textMatrix, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1, "sqlite");
+
+    await expect(sqliteState.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenLastCalledWith(expect.objectContaining({ extractor: "raw", rows: [["0x616263"]] }));
+  });
+});

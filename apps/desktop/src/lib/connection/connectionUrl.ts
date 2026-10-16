@@ -74,7 +74,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   gaussdb: { type: "gaussdb", profile: "gaussdb", label: "GaussDB", defaultPort: 5432 },
   kwdb: { type: "kwdb", profile: "kwdb", label: "KWDB", defaultPort: 26257 },
   gbase: { type: "gbase", profile: "gbase", label: "南大通用 GBase", defaultPort: 5258 },
-  "gbasedbt-sqli": { type: "gbase", profile: "gbase8s", label: "南大通用 GBase 8s", defaultPort: 9088 },
+  "gbasedbt-sqli": { type: "gbase8s", profile: "gbase8s", label: "南大通用 GBase 8s", defaultPort: 9088 },
   "informix-sqli": { type: "informix", profile: "informix", label: "Informix", defaultPort: 9088 },
   yashandb: { type: "yashandb", profile: "yashandb", label: "YashanDB", defaultPort: 1688 },
   opengauss: { type: "gaussdb", profile: "opengauss", label: "openGauss", defaultPort: 5432 },
@@ -599,7 +599,7 @@ function parseJdbcGbase8sUrl(source: string): ParsedConnectionUrl | null {
   const host = match.groups.host.replace(/^\[/, "").replace(/\]$/, "");
 
   return {
-    dbType: "gbase",
+    dbType: "gbase8s",
     driverProfile: "gbase8s",
     driverLabel: "南大通用 GBase 8s",
     host,

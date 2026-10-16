@@ -952,6 +952,7 @@ mod tests {
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),

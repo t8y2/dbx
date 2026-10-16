@@ -175,4 +175,32 @@ describe("useDataGridExport XLSX headers", () => {
       expect.any(Function),
     );
   });
+
+  it("passes DuckDB computed column types for backend full xlsx query result export (#12364)", async () => {
+    const options = createOptions();
+    options.allColumns = computed(() => ["金额"]);
+    options.allColumnTypes = computed(() => ["DECIMAL(18, 2)"]);
+    options.queryResultExportRequest = vi.fn(async (request) => ({
+      ...request,
+      connectionId: "conn",
+      database: "dbx",
+      databaseType: "duckdb",
+      sql: "SELECT (val + 1.10) AS 金额 FROM tab",
+      queryBaseSql: "SELECT (val + 1.10) AS 金额 FROM tab",
+      useAgentCursor: false,
+      pageSize: 1000,
+      keysetOptimizationEnabled: true,
+    }));
+    const state = useDataGridExport(options);
+
+    await state.exportXlsx();
+
+    expect(mocks.startQueryResultExport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format: "xlsx",
+        exportColumnTypes: ["DECIMAL(18, 2)"],
+      }),
+      expect.any(Function),
+    );
+  });
 });

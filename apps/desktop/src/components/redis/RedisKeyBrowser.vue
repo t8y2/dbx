@@ -246,6 +246,10 @@ let loadMoreOperationId = 0;
 // backend calls, without changing its return type.
 interface ScanIterationBudget {
   remaining: number;
+  // Current chain allowance. A fuzzy key search raises both fields together
+  // once DBSIZE is known (see `fetchScanPage`), so later pages observe an
+  // already-expanded budget instead of re-inflating it from scratch (#12412).
+  total: number;
 }
 // Automatic continuation (see `maybeAutoLoadMoreRedisKeys`) has no natural stop
 // condition when a search is sparse: unique visible keys barely grow, so the
@@ -262,9 +266,12 @@ interface ScanIterationBudget {
 // same retained operation. An explicit "Load more" click or a real scroll
 // event is a single user-triggered request and keeps its own uncapped
 // per-call budget (see `fetchScanPage`); only the automatic follow-up check
-// they hand off to afterward is constrained by this shared budget.
+// they hand off to afterward is constrained by this shared budget. A fuzzy
+// key search raises this allowance to its keyspace-aware budget once DBSIZE
+// is observed (see `fetchScanPage`); ordinary loads keep the conservative
+// default below.
 const AUTO_LOAD_TOTAL_SCAN_ITERATIONS = 50;
-let autoLoadBudget: ScanIterationBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
+let autoLoadBudget: ScanIterationBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS, total: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
 let redisBrowserIsActive = true;
 let reloadKeysOnActivation = false;
 let redisDbFlushedListenerRegistered = false;
@@ -1002,7 +1009,7 @@ function invalidateScanRequests(resetAutoLoadBudget = true): number {
   loadMoreOperationId++;
   loadingMore.value = false;
   subtreeFillOperations.clear();
-  if (resetAutoLoadBudget) autoLoadBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
+  if (resetAutoLoadBudget) autoLoadBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS, total: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
   return searchRequestId;
 }
 
@@ -1027,7 +1034,11 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
   // preserve the returned cursor, and let the existing "Load more" action
   // continue sparse searches without turning one request into a full scan.
   const isFuzzyKeySearch = searchMode.value === "key" && fuzzyKeySearch.value;
-  let scanCountBudget = redisFuzzySearchScanBudget(0);
+  // DBSIZE only travels with the cursor==0 batch; carry the last observed
+  // keyspace across continuation pages so their COUNT budget stays
+  // keyspace-aware instead of collapsing back to the 50k floor (#12412).
+  let totalKeys = isFuzzyKeySearch ? lastTotalKeys.value : 0;
+  let scanCountBudget = redisFuzzySearchScanBudget(totalKeys);
   const iterationsPerCall = 8;
   const perCallMaxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
   // When part of the automatic-fill chain, also cap this call to whatever is
@@ -1037,7 +1048,6 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
   let maxIterations = iterationBudget ? Math.max(0, Math.min(perCallMaxIterations, iterationBudget.remaining)) : perCallMaxIterations;
   let completedIterations = 0;
   let cursor = scanCursor.value;
-  let totalKeys = 0;
 
   while (completedIterations < maxIterations) {
     if (!isCurrentScanOperation(requestId, operationId)) break;
@@ -1049,6 +1059,18 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
     if (isFuzzyKeySearch && totalKeys > 0) {
       scanCountBudget = redisFuzzySearchScanBudget(totalKeys);
       const fuzzyMaxIterations = Math.ceil(scanCountBudget / Math.max(1, pageSize));
+      if (iterationBudget) {
+        // The shared automatic-fill budget starts at the conservative
+        // AUTO_LOAD_TOTAL_SCAN_ITERATIONS default, which suits ordinary loads
+        // but clamps a fuzzy search to a handful of SCAN pages no matter how
+        // large the keyspace is (#12412). Raise the chain allowance to the
+        // keyspace-aware total (never shrink it) so the `availableIterations`
+        // below can hand the grown budget to this page; iterations already
+        // spent still count against the raised total.
+        const expandedTotal = Math.max(iterationBudget.total, fuzzyMaxIterations);
+        iterationBudget.remaining += expandedTotal - iterationBudget.total;
+        iterationBudget.total = expandedTotal;
+      }
       const availableIterations = iterationBudget ? completedIterations + iterationBudget.remaining : fuzzyMaxIterations;
       maxIterations = Math.min(fuzzyMaxIterations, Math.max(maxIterations, availableIterations));
     }

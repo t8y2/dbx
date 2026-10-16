@@ -4607,6 +4607,7 @@ fn is_postgres_family_ddl(db_type: DatabaseType) -> bool {
             | DatabaseType::Vertica
             | DatabaseType::Exasol
             | DatabaseType::Uxdb
+            | DatabaseType::Gbase8c
     )
 }
 

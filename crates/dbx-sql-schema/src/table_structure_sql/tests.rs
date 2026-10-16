@@ -2809,8 +2809,8 @@ fn gbase8a_allows_mysql_style_column_reorder() {
 #[test]
 fn gbase8s_uses_informix_ddl_not_mysql() {
     let result = build_create_table_sql(TableStructureSqlOptions {
-        database_type: Some(DatabaseType::Gbase),
-        driver_profile: Some("gbase8s".to_string()),
+        database_type: Some(DatabaseType::Gbase8s),
+        driver_profile: None,
         schema: Some("gbasedbt".to_string()),
         table_name: "issue8003_repro".to_string(),
         columns: vec![

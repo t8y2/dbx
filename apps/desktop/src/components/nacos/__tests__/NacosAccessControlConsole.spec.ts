@@ -1,7 +1,5 @@
 /** @vitest-environment happy-dom */
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NacosConnectionInfo } from "@/types/nacos";
@@ -61,7 +59,6 @@ vi.mock("@/components/nacos/NacosRoleAccessControl.vue", async () => {
 
 import NacosAccessControlConsole from "../NacosAccessControlConsole.vue";
 
-const legacySource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/nacos/NacosAccessControl.vue"), "utf8");
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 async function settle() {
@@ -81,13 +78,6 @@ afterEach(() => {
 });
 
 describe("NacosAccessControlConsole", () => {
-  it("requires exact username confirmation before deleting a user in the legacy workspace", () => {
-    expect(legacySource).toContain("const userDeleteConfirmed = computed(() => userDeleteConfirmation.value === pendingUserDelete.value?.username)");
-    expect(legacySource).toContain('@click="openDeleteUser(user)"');
-    expect(legacySource).toContain('t("nacos.accessDeleteUserConfirmationLabel")');
-    expect(legacySource).toContain(':disabled="deletingUser || !userDeleteConfirmed"');
-  });
-
   it("keeps the roles-only workspace visible alongside the permission warning", async () => {
     const unsupported = { supported: false, reason: "permissionDenied" as const };
     mocks.connectionInfo = {

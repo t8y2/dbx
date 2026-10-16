@@ -371,6 +371,7 @@ mod tests {
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
             idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: dbx_core::models::connection::default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: dbx_core::models::connection::default_idle_disconnect_secs(),
             keepalive_interval_secs: dbx_core::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -2700,9 +2701,54 @@ pub fn install_connection_liveness_bridge(app: &tauri::AppHandle, state: Arc<App
     });
 }
 
+/// 「空闲自动断开」定时清扫与事件转发（issue #12112）。
+///
+/// 分两步，与 `install_connection_liveness_bridge` 同一分工（core 负责发布事件，各 shell
+/// 只负责自己的传输）：
+/// 1. 定时任务周期调用 `sweep_idle_connections` 触发清扫；
+/// 2. 订阅转发任务把 core 发布的 `ConnectionIdleClosedEvent` 以 `dbx:connection-idle-closed`
+///    事件发给前端；前端据此把该连接标记为未连接（保留已打开的查询页签与结果，且不写
+///    「用户已关闭」标记，便于自动重连）。
+///
+/// 间隔取 30 秒：该功能面向「分钟级」的长时间空闲，这个检测粒度足够；成本也很低——
+/// 未启用 `idle_disconnect_secs` 的连接在 core 的第一步就被过滤掉，不会有额外开销。
+pub fn install_connection_idle_closed_bridge(app: &tauri::AppHandle, state: Arc<AppState>) {
+    const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    let sweep_state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+        // 间隔型任务不需要「追赶」错过的 tick：若上一轮因为系统休眠等原因被推迟，
+        // 只需在下一轮正常执行，避免休眠唤醒后连续补跑多次清扫。
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            // 首次 tick 会立即就绪，此时通常还没有任何连接池，属于正常空跑。
+            ticker.tick().await;
+            sweep_state.sweep_idle_connections().await;
+        }
+    });
+
+    let app_handle = app.clone();
+    let mut events = state.subscribe_connection_idle_closed();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    let _ = app_handle.emit("dbx:connection-idle-closed", event);
+                }
+                // 丢弃事件不影响正确性：前端下次触发查询时会经 `ensureConnected` 自动重连，
+                // 侧边栏状态也会在下一次刷新时对齐，因此这里只记日志、不做补偿。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!("Desktop idle-closed bridge skipped {skipped} messages");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 /// Warm the driver and connection pool for a connection a tab is opening, so the
-/// first Run does not pay pool creation, tunnel setup, or external-driver (JDBC
-/// agent) startup while the user waits. Never removes an existing pool.
+/// first Run does not pay pool creation, tunnel setup, or external-driver (JDBC)
+/// agent startup while the user waits. Never removes an existing pool.
 #[tauri::command]
 pub async fn prewarm_connection(
     state: State<'_, Arc<AppState>>,

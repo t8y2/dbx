@@ -281,6 +281,8 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     query_timeout_secs: existing?.query_timeout_secs || 60,
     idle_timeout_secs: existing?.idle_timeout_secs || 60,
     manual_transaction_timeout_secs: existing?.manual_transaction_timeout_secs || DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS,
+    // 空闲自动断开默认不启用（0）；0 是合法值，故用 ?? 而非 ||。
+    idle_disconnect_secs: existing?.idle_disconnect_secs ?? 0,
     keepalive_interval_secs: existing?.keepalive_interval_secs || 30,
     read_only: existing?.read_only || false,
     save_password: existing?.save_password !== false,

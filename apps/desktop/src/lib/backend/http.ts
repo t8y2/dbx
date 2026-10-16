@@ -262,6 +262,7 @@ import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, Da
 import { apiUrl, apiWebSocketUrl } from "@/lib/common/webPath";
 import type {
   ActivePluginSession,
+  ConnectionIdleClosedEvent,
   ConnectionLivenessMessage,
   PluginBinaryEvent,
   PluginConnectionActionResult,
@@ -821,6 +822,19 @@ export async function subscribeConnectionLiveness(onEvent: (event: ConnectionLiv
   const source = new EventSource(apiUrl("/api/connection/liveness-events"));
   source.onmessage = (message) => {
     onEvent(JSON.parse(message.data) as ConnectionLivenessMessage);
+  };
+  return () => source.close();
+}
+
+/**
+ * 「空闲自动断开」事件（issue #12112）：后端在某个连接的连接池因空闲超过
+ * `idle_disconnect_secs` 被关闭时下发。与 liveness 一样走 SSE，载荷也是同一份
+ * `{ connectionId }`，因此前端在 desktop（Tauri 事件）与 web 两种传输上解析同一种结构。
+ */
+export async function subscribeConnectionIdleClosed(onEvent: (event: ConnectionIdleClosedEvent) => void): Promise<() => void> {
+  const source = new EventSource(apiUrl("/api/connection/idle-closed-events"));
+  source.onmessage = (message) => {
+    onEvent(JSON.parse(message.data) as ConnectionIdleClosedEvent);
   };
   return () => source.close();
 }
@@ -5611,6 +5625,14 @@ export async function checkMcpServerStatus(): Promise<import("@/lib/backend/taur
     uninstall_command: "npm uninstall -g @dbx-app/mcp-server",
     error: "MCP Server status is only available in the desktop app.",
   };
+}
+
+export async function checkMcpKeychainAccess(): Promise<import("@/lib/backend/tauri").McpKeychainAccess> {
+  return "not_applicable";
+}
+
+export async function authorizeMcpKeychain(): Promise<string> {
+  throw new Error("MCP Keychain authorization is only available in the desktop app.");
 }
 
 export async function installMcpServer(): Promise<string> {

@@ -1,5 +1,5 @@
 import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
-import { normalizeIdleTimeoutSecs, normalizeManualTransactionTimeoutSecs } from "@/lib/connection/timeoutLimits";
+import { normalizeIdleDisconnectSecs, normalizeIdleTimeoutSecs, normalizeManualTransactionTimeoutSecs } from "@/lib/connection/timeoutLimits";
 import { isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
@@ -10,6 +10,7 @@ export function normalizeConnectionTimeouts(config: ConnectionConfig, connectTim
   config.query_timeout_secs = config.query_timeout_inherit === true ? normalizeGlobalQueryTimeoutSecs(queryTimeoutSecs) : normalizeGlobalQueryTimeoutSecs(queryTimeout);
   config.idle_timeout_secs = normalizeIdleTimeoutSecs(config.idle_timeout_secs);
   config.manual_transaction_timeout_secs = normalizeManualTransactionTimeoutSecs(config.manual_transaction_timeout_secs);
+  config.idle_disconnect_secs = normalizeIdleDisconnectSecs(config.idle_disconnect_secs);
   const keepaliveInterval = Number(config.keepalive_interval_secs);
   config.keepalive_interval_secs = Number.isFinite(keepaliveInterval) && keepaliveInterval >= 0 ? keepaliveInterval : 30;
 }

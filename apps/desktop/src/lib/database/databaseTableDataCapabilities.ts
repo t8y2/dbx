@@ -78,6 +78,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "questdb",
   "oceanbase-oracle",
   "gbase",
+  "gbase8s",
   "access",
   "h2",
   "snowflake",

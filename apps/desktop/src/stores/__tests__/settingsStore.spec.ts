@@ -31,6 +31,11 @@ import { DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/da
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("preserves the compact object browser view and rejects unknown modes", () => {
+    expect(normalizeEditorSettings({ objectBrowserViewMode: "compact" }).objectBrowserViewMode).toBe("compact");
+    expect(normalizeEditorSettings({ objectBrowserViewMode: "unknown" as any }).objectBrowserViewMode).toBe(DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode);
+  });
+
   it("defaults tab titles to the compact presentation while preserving an explicit opt-out", () => {
     expect(DEFAULT_EDITOR_SETTINGS.compactTabTitle).toBe(true);
     expect(normalizeEditorSettings({}).compactTabTitle).toBe(true);

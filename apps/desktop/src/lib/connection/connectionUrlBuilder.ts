@@ -301,8 +301,10 @@ function jdbcPrefixFor(config: ConnectionUrlCopyConfig): string | null {
       return profile === GAUSSDB_M_JDBC_DRIVER_PROFILE ? "jdbc:gaussdb" : "jdbc:postgresql";
     case "iris":
       return profile === "cache" ? "jdbc:Cache" : "jdbc:IRIS";
+    case "gbase8s":
+      return "jdbc:gbasedbt-sqli";
     case "gbase":
-      return profile === "gbase8s" ? "jdbc:gbasedbt-sqli" : null;
+      return null;
     case "tdengine":
       return Number(config.port) === 6030 ? "jdbc:TAOS" : "jdbc:TAOS-RS";
     default:
@@ -426,6 +428,7 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
       return `jdbc:inceptor2://${formatHostForUrl(host)}${portPart}/${database || "default"}${props ? `;${props}` : ""}${ssl}`;
     }
     case "informix":
+    case "gbase8s":
     case "gbase": {
       const prefix = config.db_type === "informix" ? "jdbc:informix-sqli" : jdbcPrefixFor(config);
       if (!prefix) return config.db_type === "gbase" ? null : undefined;

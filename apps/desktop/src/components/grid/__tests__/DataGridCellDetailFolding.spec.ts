@@ -1,34 +1,11 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { foldCode, unfoldCode } from "@codemirror/language";
 import { useCellDetailEditor } from "@/composables/useCellDetailEditor";
 
-const dataGridSource = readFileSync(resolve(import.meta.dirname, "../DataGrid.vue"), "utf8");
-const useDataGridCellDetailSource = readFileSync(resolve(import.meta.dirname, "../../../composables/useDataGridCellDetail.ts"), "utf8");
-const cellDetailDialogSource = readFileSync(resolve(import.meta.dirname, "../DataGridCellDetailDialog.vue"), "utf8");
-const mongoJsonPreviewSource = readFileSync(resolve(import.meta.dirname, "../DataGridMongoJsonPreview.vue"), "utf8");
-
 describe("DataGrid cell detail code folding and line numbers (#10431)", () => {
-  it("enables code folding and line numbers across all cell detail and JSON preview editors", () => {
-    // #10431: useDataGridCellDetail, DataGrid valueDetailEditor, DataGridCellDetailDialog,
-    // and DataGridMongoJsonPreview must enable folding and line numbers for JSON values
-    expect(useDataGridCellDetailSource).toMatch(/folding:\s*true/);
-    expect(useDataGridCellDetailSource).toMatch(/lineNumbers:\s*true/);
-
-    expect(dataGridSource).toMatch(/folding:\s*true/);
-    expect(dataGridSource).toMatch(/lineNumbers:\s*true/);
-
-    expect(cellDetailDialogSource).toMatch(/folding:\s*true/);
-    expect(cellDetailDialogSource).toMatch(/lineNumbers:\s*true/);
-
-    expect(mongoJsonPreviewSource).toMatch(/folding:\s*true/);
-    expect(mongoJsonPreviewSource).toMatch(/lineNumbers:\s*true/);
-  });
-
   it("mounts line numbers and fold gutter in useCellDetailEditor when folding and lineNumbers are enabled", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);

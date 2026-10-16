@@ -84,6 +84,16 @@
       ],
       "enabled": false,
       "description": "Tauri npm packages must stay in lockstep with Rust crates; bump them manually with Cargo in one batch"
+    },
+    {
+      "matchFileNames": [
+        "docs/**"
+      ],
+      "matchManagers": [
+        "npm"
+      ],
+      "enabled": false,
+      "description": "Docs deps are pinned deliberately (fumadocs/lucide 2026-10-14 regression) and renovate's pnpm rewrites docs/pnpm-lock.yaml in a pre-10.34 patchedDependencies format that fails the frozen CI install; bump docs deps manually with pnpm 10.34.7 and a verified local build"
     }
   ]
 }

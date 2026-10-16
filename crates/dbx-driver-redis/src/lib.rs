@@ -10538,6 +10538,7 @@ mod tests {
             query_timeout_secs: dbx_types::models::connection::default_query_timeout_secs(),
             idle_timeout_secs: dbx_types::models::connection::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: dbx_types::models::connection::default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: dbx_types::models::connection::default_idle_disconnect_secs(),
             keepalive_interval_secs: dbx_types::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),

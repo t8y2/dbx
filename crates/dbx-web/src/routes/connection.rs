@@ -11,7 +11,8 @@ use dbx_core::connection::{
     connection_configs_pool_equivalent, connection_configs_session_credentials_compatible, AppState, PoolKind,
 };
 use dbx_core::models::connection::{
-    ConnectionConfig, ConnectionLivenessMessage, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType,
+    ConnectionConfig, ConnectionIdleClosedEvent, ConnectionLivenessMessage, ConnectionTestResult,
+    DatabaseConnectionInfo, DatabaseType,
 };
 use dbx_core::nacos::config::{
     take_transient_passwords, NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD,
@@ -735,6 +736,67 @@ pub async fn connection_liveness_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+/// Serialise one idle-closed message for the SSE stream, or `None` when serialisation fails.
+fn idle_closed_sse_event(event: &ConnectionIdleClosedEvent) -> Option<Event> {
+    match serde_json::to_string(event) {
+        Ok(payload) => Some(Event::default().data(payload)),
+        // The payload is a struct of plain fields, so this is unreachable in practice.
+        Err(error) => {
+            log::warn!("Connection idle-closed event could not be serialised: {error}");
+            None
+        }
+    }
+}
+
+/// Stream backend idle-closed notifications to the browser (#12112).
+///
+/// The payload is byte-identical to what the desktop shell emits as
+/// `dbx:connection-idle-closed`, so the frontend parses one shape on both transports.
+pub async fn connection_idle_closed_events(
+    State(state): State<Arc<WebState>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let mut events = state.app.subscribe_connection_idle_closed();
+    let stream = stream! {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    if let Some(event) = idle_closed_sse_event(&event) {
+                        yield Ok(event);
+                    }
+                }
+                // 丢弃事件不影响正确性：前端下次触发查询时会经 `ensureConnected` 自动重连，
+                // 侧边栏状态也会在下一次刷新时对齐，因此这里只记日志、不做 resync 补偿。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!("Web connection idle-closed stream skipped {skipped} messages");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// 启动「空闲自动断开」定时清扫（issue #12112）。
+///
+/// web shell 与 desktop shell 一样只负责传输：这里周期调用 core 的
+/// `sweep_idle_connections` 触发清扫，关闭结果由 core 发布到广播通道，再由
+/// [`connection_idle_closed_events`] 以 SSE 下发给浏览器。
+///
+/// 用 `Weak` 持有状态：前端 WebState 被销毁后任务在下一轮自行退出。间隔取 30 秒的理由
+/// 与 desktop 侧的 `install_connection_idle_closed_bridge` 相同（面向分钟级空闲，
+/// 未启用阈值的连接会被 core 直接过滤）。
+pub fn start_connection_idle_sweeper(state: &Arc<WebState>) {
+    let state = Arc::downgrade(state);
+    tokio::spawn(async move {
+        loop {
+            let Some(state) = state.upgrade() else { break };
+            state.app.sweep_idle_connections().await;
+            drop(state);
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+}
+
 pub async fn prewarm_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<PrewarmConnectionRequest>,
@@ -1157,6 +1219,7 @@ mod tests {
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
             idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: dbx_core::models::connection::default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: dbx_core::models::connection::default_idle_disconnect_secs(),
             keepalive_interval_secs: dbx_core::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),

@@ -29,13 +29,19 @@ describe("connection submit normalization", () => {
   });
 
   it("normalizes invalid timeout values and inherited global values", () => {
-    const inherited = config({ connect_timeout_inherit: true, query_timeout_inherit: true, idle_timeout_secs: -1, keepalive_interval_secs: Number.NaN });
+    const inherited = config({ connect_timeout_inherit: true, query_timeout_inherit: true, idle_timeout_secs: -1, idle_disconnect_secs: -1, keepalive_interval_secs: Number.NaN });
     normalizeConnectionTimeouts(inherited, 12, 34);
-    expect(inherited).toMatchObject({ connect_timeout_secs: 12, query_timeout_secs: 34, idle_timeout_secs: 60, keepalive_interval_secs: 30 });
+    expect(inherited).toMatchObject({ connect_timeout_secs: 12, query_timeout_secs: 34, idle_timeout_secs: 60, idle_disconnect_secs: 0, keepalive_interval_secs: 30 });
 
-    const invalid = config({ query_timeout_secs: Number.NaN, idle_timeout_secs: -1, keepalive_interval_secs: -2 });
+    const invalid = config({ query_timeout_secs: Number.NaN, idle_timeout_secs: -1, idle_disconnect_secs: 120, keepalive_interval_secs: -2 });
     normalizeConnectionTimeouts(invalid, 12, 34);
-    expect(invalid).toMatchObject({ query_timeout_secs: 60, idle_timeout_secs: 60, keepalive_interval_secs: 30 });
+    expect(invalid).toMatchObject({ query_timeout_secs: 60, idle_timeout_secs: 60, idle_disconnect_secs: 120, keepalive_interval_secs: 30 });
+  });
+
+  it("defaults auto-disconnect-when-idle to disabled when the field is absent", () => {
+    const value = config();
+    normalizeConnectionTimeouts(value, 12, 34);
+    expect(value.idle_disconnect_secs).toBe(0);
   });
 
   it("clamps the manual transaction idle timeout and falls back to the default for unset values", () => {

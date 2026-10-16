@@ -4440,7 +4440,7 @@ const canSetCreateDatabaseCharset = computed(() => {
 
 const canSetCreateDatabaseLocale = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return connectionNamespaceCreationTarget(config) === "database" && supportsCreateDatabaseLocale(config?.db_type, config?.driver_profile);
+  return connectionNamespaceCreationTarget(config) === "database" && supportsCreateDatabaseLocale(config?.db_type);
 });
 
 const canDropDatabase = computed(() => {

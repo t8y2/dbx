@@ -779,8 +779,9 @@ fn hive_parameters_use_zookeeper_discovery(source: &str) -> bool {
 mod tests {
     use super::*;
     use crate::models::connection::{
-        default_connect_timeout_secs, default_idle_timeout_secs, default_keepalive_interval_secs,
-        default_manual_transaction_timeout_secs, default_query_timeout_secs, default_redis_key_separator,
+        default_connect_timeout_secs, default_idle_disconnect_secs, default_idle_timeout_secs,
+        default_keepalive_interval_secs, default_manual_transaction_timeout_secs, default_query_timeout_secs,
+        default_redis_key_separator,
     };
 
     fn config(db_type: DatabaseType, database: Option<&str>) -> ConnectionConfig {
@@ -816,6 +817,7 @@ mod tests {
             query_timeout_secs: default_query_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
             manual_transaction_timeout_secs: default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: default_idle_disconnect_secs(),
             keepalive_interval_secs: default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),

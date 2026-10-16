@@ -201,8 +201,11 @@ pub fn table_data_schema<'a>(
     driver_profile: Option<&str>,
     schema: Option<&'a str>,
 ) -> Option<&'a str> {
-    if database_type == Some(DatabaseType::Informix)
-        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s"))
+    // The frontend reports GBase 8s through the Informix dialect (see `connectionSqlDialect`), so
+    // the owner-free rule applies to both the dialect-mapped and the native `gbase8s` type.
+    if database_type == Some(DatabaseType::Gbase8s)
+        || (database_type == Some(DatabaseType::Informix)
+            && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")))
     {
         None
     } else {
@@ -599,7 +602,7 @@ pub fn uses_connection_identifier_quote(database_type: Option<DatabaseType>, ide
         // Kyuubi normally uses Hive-family backticks, but a Trino-backed
         // session reports the ANSI double quote through connection info.
         || (database_type == Some(DatabaseType::Kyuubi) && identifier_quote.is_some())
-        || (database_type == Some(DatabaseType::Informix) && identifier_quote.is_some())
+        || (matches!(database_type, Some(DatabaseType::Informix | DatabaseType::Gbase8s)) && identifier_quote.is_some())
         || (matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres))
             && identifier_quote.is_some())
 }

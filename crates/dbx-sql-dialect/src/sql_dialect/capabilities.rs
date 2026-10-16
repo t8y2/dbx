@@ -35,6 +35,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
+            | DatabaseType::Gbase8c
             | DatabaseType::Vastbase
             | DatabaseType::Yashandb
             | DatabaseType::Oscar
@@ -46,6 +47,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::OpenGauss
             | DatabaseType::OceanbaseOracle
             | DatabaseType::Gbase
+            | DatabaseType::Gbase8s
             | DatabaseType::Databend
             | DatabaseType::Jdbc
             | DatabaseType::H2
@@ -133,7 +135,7 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
         Some(DatabaseType::Db2) => TablePaginationStrategy::Db2FetchFirst,
         Some(DatabaseType::SqlServer) => TablePaginationStrategy::SqlServerTop,
         Some(DatabaseType::Iris) => TablePaginationStrategy::IrisTop,
-        Some(DatabaseType::Informix) => TablePaginationStrategy::InformixFirst,
+        Some(DatabaseType::Informix | DatabaseType::Gbase8s) => TablePaginationStrategy::InformixFirst,
         Some(DatabaseType::Firebird) => TablePaginationStrategy::FirebirdRows,
         Some(DatabaseType::OceanbaseOracle) => TablePaginationStrategy::Rownum,
         Some(DatabaseType::Questdb) => TablePaginationStrategy::QuestDbLimit,

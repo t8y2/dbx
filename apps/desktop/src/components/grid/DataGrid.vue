@@ -118,7 +118,7 @@ import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentif
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind, type CellValueGenerationOptions } from "@/lib/dataGrid/cellValueGeneration";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridClipboardText, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridExternalValue, mongoDocumentGridInputValue, mongoDocumentGridNumericValue, mongoDocumentRelaxedExtendedJson } from "@/lib/mongo/mongoDocumentValues";
-import { compactHeaderColumnType, formatMetadataColumnTypeLabel, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
+import { compactHeaderColumnType, formatMetadataColumnTypeLabel, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType, shortHeaderTypeName } from "@/lib/dataGrid/dataGridColumnType";
 import { dataGridCellTextClass, dataGridTypeVisualClass } from "@/lib/dataGrid/dataGridCellTextVisual";
 import { DATA_GRID_TYPE_COLOR_KEYS, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import {
@@ -521,6 +521,11 @@ interface DataGridProps {
    */
   resultColumnComments?: Array<string | undefined>;
   /**
+   * Display-only type labels from multi-source enrichment (by result ordinal),
+   * carrying declared length/precision when ResultSet column_types omit them.
+   */
+  resultColumnTypeLabels?: Array<string | undefined>;
+  /**
    * Display-only result-column -> source mapping for multi-source results,
    * indexed by result-column ordinal; each entry carries the source identity
    * (sourceKey + canonical source column name). Used to resolve column
@@ -905,6 +910,7 @@ function headerColumnType(column: string, actualColIdx: number): string {
   if (!showColumnTypesInHeader.value) return "";
   const resolved = resolveHeaderColumnType({
     tableColumnType: columnTypeMap.value.get(column),
+    displayColumnType: props.resultColumnTypeLabels?.[actualColIdx],
     resultColumnTypes: props.result.column_types,
     actualColIdx,
   });
@@ -920,18 +926,6 @@ const reserveColumnTypeLine = computed(() => reserveDataGridHeaderLine(showColum
 const reserveColumnCommentLine = computed(() => reserveDataGridHeaderLine(showColumnCommentsInHeader.value, props.result.columns, (column, index) => headerColumnComment(column, index)));
 
 function shortTypeName(t: string): string {
-  const s = t.toLowerCase();
-  if (s === "character varying") return "varchar";
-  if (s === "character") return "char";
-  if (s === "double precision") return "double";
-  if (s === "timestamp without time zone") return "timestamp";
-  if (s === "timestamp with time zone") return "timestamptz";
-  if (s === "time without time zone") return "time";
-  if (s === "time with time zone") return "timetz";
-  if (s === "boolean") return "bool";
-  if (s === "integer") return "int";
-  if (s === "smallint") return "int2";
-  if (s === "real") return "float4";
   // GaussDB M mode uses MySQL-style type names
   if (resolvedDatabaseType.value === "gaussdb") {
     const conn = resolvedConnectionConfig.value;
@@ -939,7 +933,7 @@ function shortTypeName(t: string): string {
       return gaussdbMTypeDisplayName(t);
     }
   }
-  return t;
+  return shortHeaderTypeName(t);
 }
 
 function gaussdbMColumnType(dataType: string): string {
@@ -11965,6 +11959,35 @@ function copyHeaderColumnOrSelected() {
   void copyHeaderColumn();
 }
 
+// 「复制列注释」的目标列：显式多选时按选中列，否则用右键命中的那列。
+function contextCommentActualColumnIndexes(): number[] {
+  if (contextHeaderColumnIndex.value === null) return [];
+  const visibleIdx = contextHeaderVisibleColIdx.value;
+  if (visibleIdx !== null && selectedColumnIndexes.value.has(visibleIdx) && selectedColumnIndexes.value.size > 1) {
+    return [...selectedColumnIndexes.value].map(actualColumnIndex);
+  }
+  return [contextHeaderColumnIndex.value];
+}
+
+// 只有解析到非空注释才提供入口：无元数据或聚合/别名列的注释为空，给一个永远复制空的菜单项只会误导。
+const contextCopyableColumnComments = computed(() =>
+  contextCommentActualColumnIndexes()
+    .map((actualIdx) => resolvedColumnComment(props.result.columns[actualIdx] ?? "", actualIdx))
+    .filter((comment): comment is string => !!comment),
+);
+
+async function copyContextColumnComment() {
+  const comments = contextCopyableColumnComments.value;
+  if (comments.length === 0) return;
+  await copyText(comments.join("\n"));
+}
+
+async function copyColumnHeaderComment(column: string, actualIdx: number) {
+  const comment = resolvedColumnComment(column, actualIdx);
+  if (!comment) return;
+  await copyText(comment);
+}
+
 const canCopyAlterColumnSql = computed(() => {
   if (!contextHeaderColumn.value || !props.tableMeta?.columns) return false;
   if (tableStructureCapabilities.value.alterStrategy !== "direct") return false;
@@ -13896,6 +13919,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       headerColumn: !!contextHeaderColumn.value,
       contextColumn: !!contextColumn.value,
       canCopyAlterSql: canCopyAlterColumnSql.value,
+      canCopyComment: contextCopyableColumnComments.value.length > 0,
       canFilter: canUseWhereSearch.value,
       hasSort: !!sortCol.value,
       sortMode: localSortMode.value,
@@ -13914,6 +13938,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 count: selectedColumnNamesForCopy.value.length,
               })
             : t("grid.copyColumnName"),
+        copyComment: t("grid.copyColumnComment"),
         copyNames: t("grid.copyColumnNames"),
         details: t("grid.openColumnDetailsDialog"),
         copyAlterSql: t("grid.copyAlterColumnSql"),
@@ -13942,6 +13967,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       },
       actions: {
         copyName: copyHeaderColumnOrSelected,
+        copyComment: copyContextColumnComment,
         copyNames: openCopyAllColumnNamesDialog,
         details: openContextColumnDetailDialog,
         copyAlterSql: copyAlterColumnSql,
@@ -14824,6 +14850,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :drag-class="columnHeaderDragClass(col.visibleColIdx)"
                     :column-style="columnHeaderStyle(col.visibleColIdx)"
                     :copy-column-name-label="t('grid.copyColumnName')"
+                    :copy-column-comment-label="t('grid.copyColumnComment')"
                     :column-name-label="t('grid.columnName')"
                     :column-type-label="t('grid.columnType')"
                     :column-comment-label="t('grid.columnComment')"
@@ -14846,6 +14873,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     @resize-start="startColumnHeaderResize(col.visibleColIdx, $event)"
                     @auto-fit="autoFitColumn(col.visibleColIdx)"
                     @copy-name="copyText(col.name)"
+                    @copy-comment="copyColumnHeaderComment(col.name, col.actualColIdx)"
                   >
                     <template #actions>
                       <span

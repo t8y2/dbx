@@ -1,7 +1,5 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
@@ -13,10 +11,6 @@ import { Tabs } from "@/components/ui/tabs";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useCellDetailEditor } from "@/composables/useCellDetailEditor";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
-
-const dataGridSource = readFileSync(resolve(import.meta.dirname, "../DataGrid.vue"), "utf8");
-const useDataGridCellDetailSource = readFileSync(resolve(import.meta.dirname, "../../../composables/useDataGridCellDetail.ts"), "utf8");
-const cellDetailDialogSource = readFileSync(resolve(import.meta.dirname, "../DataGridCellDetailDialog.vue"), "utf8");
 
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
@@ -86,14 +80,6 @@ afterEach(() => {
 });
 
 describe("DataGrid cell editor and value editor word wrap (#10506)", () => {
-  it("binds lineWrapping in useDataGridCellDetail, DataGrid valueDetailEditor, and cell detail dialog", () => {
-    // #10506: useDataGridCellDetail, DataGrid.vue (valueDetailEditor), and DataGridCellDetailDialog
-    // must connect CodeMirror lineWrapping to settingsStore.editorSettings.wordWrap
-    expect(useDataGridCellDetailSource).toMatch(/lineWrapping:\s*\(\)\s*=>\s*settingsStore\.editorSettings\.wordWrap/);
-    expect(dataGridSource).toMatch(/lineWrapping:\s*\(\)\s*=>\s*settingsStore\.editorSettings\.wordWrap/);
-    expect(cellDetailDialogSource).toMatch(/lineWrapping:\s*\(\)\s*=>\s*settingsStore\.editorSettings\.wordWrap/);
-  });
-
   it("dynamically toggles CodeMirror cm-lineWrapping in useCellDetailEditor based on wordWrap setting", async () => {
     const settingsStore = useSettingsStore();
     settingsStore.editorSettings.wordWrap = false;

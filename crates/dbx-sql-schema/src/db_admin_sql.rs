@@ -298,12 +298,12 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
             quote_table_identifier(options.database_type, &options.name)
         ));
     }
-    if is_informix_family(options.database_type, options.driver_profile.as_deref()) {
+    if is_informix_family(options.database_type) {
         // Informix / GBase 8s accept only a bare `CREATE DATABASE <name>`. The new database
         // inherits the instance default locale, and the MySQL `CHARACTER SET`/`COLLATE`
         // clauses are invalid syntax here. Database names are ordinary identifiers, so quote
         // them with the Informix rule (unquoted for simple identifiers) rather than the
-        // default double-quote path that `DatabaseType::Gbase` would otherwise take.
+        // default double-quote path that other types would otherwise take.
         let name = quote_table_identifier(Some(DatabaseType::Informix), &options.name);
         let locale = clean_sql_option(options.charset.as_deref());
         if locale.is_empty() {
@@ -325,23 +325,18 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
     Ok(format!("CREATE DATABASE {name} CHARACTER SET {charset}{collate_clause};"))
 }
 
-/// Whether the connection belongs to the Informix family: standalone Informix, or GBase 8s
-/// (which shares `DatabaseType::Gbase` with the MySQL-based GBase 8a and is only distinguishable
-/// through the `gbase8s` driver profile). Informix-family servers accept `CREATE DATABASE` but
-/// have no `CREATE SCHEMA <name>` statement (a "schema" is the table owner), so the create
-/// targets differ from the rest of the `Gbase` family.
-fn is_informix_family(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
-    match database_type {
-        Some(DatabaseType::Informix) => true,
-        Some(DatabaseType::Gbase) => driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")),
-        _ => false,
-    }
+/// Whether the connection belongs to the Informix family: standalone Informix, or GBase 8s.
+/// Informix-family servers accept `CREATE DATABASE` but have no `CREATE SCHEMA <name>`
+/// statement (a "schema" is the table owner), so the create targets differ from the MySQL-based
+/// GBase 8a (`DatabaseType::Gbase`).
+fn is_informix_family(database_type: Option<DatabaseType>) -> bool {
+    matches!(database_type, Some(DatabaseType::Informix | DatabaseType::Gbase8s))
 }
 
 pub fn supports_create_database_target(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
     // Informix / GBase 8s create namespaces with `CREATE DATABASE`, so they are valid targets
     // even though they are absent from the explicit list below.
-    if is_informix_family(database_type, driver_profile) {
+    if is_informix_family(database_type) {
         return true;
     }
     matches!(
@@ -660,6 +655,7 @@ fn supports_vacuum_table(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
@@ -709,6 +705,7 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
@@ -1557,12 +1554,11 @@ mod tests {
 
     #[test]
     fn builds_informix_family_create_database_without_mysql_clause() {
-        // GBase 8s shares DatabaseType::Gbase with GBase 8a and is only identified by the
-        // gbase8s driver profile; with no locale chosen it emits a bare, unquoted CREATE DATABASE.
+        // With no locale chosen, GBase 8s emits a bare, unquoted CREATE DATABASE.
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {
-                database_type: Some(DatabaseType::Gbase),
-                driver_profile: Some("gbase8s".to_string()),
+                database_type: Some(DatabaseType::Gbase8s),
+                driver_profile: None,
                 target: None,
                 parent: None,
                 name: "app_db".to_string(),
@@ -1594,8 +1590,8 @@ mod tests {
         // because Informix cannot express a codeset in CREATE DATABASE.
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {
-                database_type: Some(DatabaseType::Gbase),
-                driver_profile: Some("gbase8s".to_string()),
+                database_type: Some(DatabaseType::Gbase8s),
+                driver_profile: None,
                 target: None,
                 parent: None,
                 name: "app_db".to_string(),
@@ -1635,8 +1631,8 @@ mod tests {
     }
 
     #[test]
-    fn create_database_target_distinguishes_gbase_profiles() {
-        assert!(supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8s")));
+    fn create_database_target_distinguishes_gbase_types() {
+        assert!(supports_create_database_target(Some(DatabaseType::Gbase8s), None));
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8a")));
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), None));
         assert!(supports_create_database_target(Some(DatabaseType::Informix), None));

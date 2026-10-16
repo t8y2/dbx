@@ -60,9 +60,9 @@ describe("dataGridContextMenu", () => {
       hasSort: true,
       sortMode: "database",
       databaseSortEnabled: false,
-      labels: { copyName: "copy name", copyNames: "copy names", details: "details", copyAlterSql: "alter", databaseAscending: "db asc", databaseDescending: "db desc", localAscending: "local asc", localDescending: "local desc", clearSort: "clear sort" },
+      labels: { copyName: "copy name", copyComment: "copy comment", copyNames: "copy names", details: "details", copyAlterSql: "alter", databaseAscending: "db asc", databaseDescending: "db desc", localAscending: "local asc", localDescending: "local desc", clearSort: "clear sort" },
       icons: { copy: icon, columnDetails: icon, database: icon, ascending: icon, descending: icon, clearSort: icon },
-      actions: { copyName: action, copyNames: action, details: action, copyAlterSql: action, sort: action },
+      actions: { copyName: action, copyComment: action, copyNames: action, details: action, copyAlterSql: action, sort: action },
       filterSubmenu: filter,
     });
     expect(items.map((item) => item.label)).toEqual(["local asc", "local desc", "clear sort", "", "filter"]);
@@ -111,9 +111,9 @@ describe("dataGridContextMenu", () => {
       canFilter: true,
       hasSort: true,
       sortMode: "database",
-      labels: { copyName: "copy name", copyNames: "copy names", details: "details", copyAlterSql: "alter", databaseAscending: "db asc", databaseDescending: "db desc", localAscending: "local asc", localDescending: "local desc", clearSort: "clear sort" },
+      labels: { copyName: "copy name", copyComment: "copy comment", copyNames: "copy names", details: "details", copyAlterSql: "alter", databaseAscending: "db asc", databaseDescending: "db desc", localAscending: "local asc", localDescending: "local desc", clearSort: "clear sort" },
       icons: { copy: icon, columnDetails: icon, database: icon, ascending: icon, descending: icon, clearSort: icon },
-      actions: { copyName: action, copyNames: action, details: action, copyAlterSql: action, sort: action },
+      actions: { copyName: action, copyComment: action, copyNames: action, details: action, copyAlterSql: action, sort: action },
       filterSubmenu: filter,
     });
     expect(columnItems.map((item) => item.label)).toContain("filter");
@@ -150,7 +150,17 @@ describe("dataGridContextMenu", () => {
     expect(rowItems.find((item) => item.label === "delete")?.variant).toBe("destructive");
   });
 
-  function columnMenuItems(overrides: { headerColumn?: boolean; contextColumn?: boolean; contextVisibleColIdx?: number; hasColumnSelection?: boolean; selectedColumnCount?: number; visibleColumnCount?: number; hiddenColumnCount?: number; canHideIdenticalColumns?: boolean }) {
+  function columnMenuItems(overrides: {
+    headerColumn?: boolean;
+    contextColumn?: boolean;
+    contextVisibleColIdx?: number;
+    hasColumnSelection?: boolean;
+    selectedColumnCount?: number;
+    visibleColumnCount?: number;
+    hiddenColumnCount?: number;
+    canHideIdenticalColumns?: boolean;
+    canCopyComment?: boolean;
+  }) {
     const action = vi.fn();
     const filter = createDataGridFilterSubmenu({
       label: "filter",
@@ -164,6 +174,7 @@ describe("dataGridContextMenu", () => {
       headerColumn: overrides.headerColumn ?? true,
       contextColumn: overrides.contextColumn ?? false,
       canCopyAlterSql: false,
+      canCopyComment: overrides.canCopyComment ?? false,
       canFilter: false,
       hasSort: false,
       sortMode: "database",
@@ -174,6 +185,7 @@ describe("dataGridContextMenu", () => {
       hiddenColumnCount: 0,
       labels: {
         copyName: "copy name",
+        copyComment: "copy comment",
         copyNames: "copy names",
         details: "details",
         copyAlterSql: "alter",
@@ -191,11 +203,32 @@ describe("dataGridContextMenu", () => {
         showAllColumnsMenu: "show all columns",
       },
       icons: { copy: icon, columnDetails: icon, database: icon, ascending: icon, descending: icon, clearSort: icon },
-      actions: { copyName: action, copyNames: action, details: action, copyAlterSql: action, sort: action, freezeToColumn: action, freezeSelectedColumns: action, unfreezeColumns: action, hideColumn: action, hideSelectedColumns: action, hideIdenticalColumns: action, showAllColumnsMenu: action },
+      actions: {
+        copyName: action,
+        copyComment: action,
+        copyNames: action,
+        details: action,
+        copyAlterSql: action,
+        sort: action,
+        freezeToColumn: action,
+        freezeSelectedColumns: action,
+        unfreezeColumns: action,
+        hideColumn: action,
+        hideSelectedColumns: action,
+        hideIdenticalColumns: action,
+        showAllColumnsMenu: action,
+      },
       filterSubmenu: filter,
       ...overrides,
     });
   }
+
+  it("offers copy-column-comment right below copy-column-name only when the column has a comment", () => {
+    expect(columnMenuItems({}).map((item) => item.label)).not.toContain("copy comment");
+
+    const labels = columnMenuItems({ canCopyComment: true }).map((item) => item.label);
+    expect(labels.indexOf("copy comment")).toBe(labels.indexOf("copy name") + 1);
+  });
 
   it("offers hide-this-column on a header and hides the recovery entry until a column is hidden", () => {
     const labels = columnMenuItems({}).map((item) => item.label);
@@ -346,6 +379,7 @@ describe("dataGridContextMenu", () => {
       sortMode: "database",
       labels: {
         copyName: "copy name",
+        copyComment: "copy comment",
         copyNames: "copy names",
         details: "details",
         copyAlterSql: "alter",
@@ -378,6 +412,7 @@ describe("dataGridContextMenu", () => {
       sortMode: "database",
       labels: {
         copyName: "copy name",
+        copyComment: "copy comment",
         copyNames: "copy names",
         details: "details",
         copyAlterSql: "alter",

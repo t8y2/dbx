@@ -3416,6 +3416,7 @@ mod tests {
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
             manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
@@ -7297,9 +7298,7 @@ async fn list_object_statistics_once(
             )
             .await;
         }
-        if db_config.as_ref().is_some_and(|config| {
-            config.db_type == DatabaseType::Gbase && config.driver_profile.as_deref() != Some("gbase8s")
-        }) {
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Gbase) {
             let sql = gbase8a_object_statistics_sql(database);
             return agent_list_object_statistics(
                 client,

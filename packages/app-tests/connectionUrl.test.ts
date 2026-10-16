@@ -416,7 +416,7 @@ test("parses Apache IoTDB JDBC URLs", () => {
 test("parses GBase 8s JDBC URLs", () => {
   const parsed = parseConnectionUrl("jdbc:gbasedbt-sqli://gbasedbt:secret@gbase.example.com:20013/testdb:GBASEDBTSERVER=gbase01;CLIENT_LOCALE=zh_cn.utf8");
 
-  assert.equal(parsed.dbType, "gbase");
+  assert.equal(parsed.dbType, "gbase8s");
   assert.equal(parsed.driverProfile, "gbase8s");
   assert.equal(parsed.driverLabel, "南大通用 GBase 8s");
   assert.equal(parsed.host, "gbase.example.com");

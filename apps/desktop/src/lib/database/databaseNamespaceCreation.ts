@@ -64,6 +64,11 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   "oceanbase-oracle": { deferred: "Oracle-mode schemas are users; use a dedicated user workflow" },
   questdb: { deferred: "single database model in DBX" },
   gbase: { database: "schema" },
+  // Informix-derived: no `CREATE SCHEMA <name>` (a schema is the table owner), but `CREATE DATABASE` works.
+  gbase8s: { connection: "database" },
+  // GBase 8c creates databases with an explicit DBCOMPATIBILITY mode that is fixed at
+  // creation time, so the generic PostgreSQL-shaped create path cannot pick a correct mode.
+  gbase8c: { deferred: "database creation needs an explicit DBCOMPATIBILITY mode fixed at creation time" },
   access: { deferred: "file-backed; create a new connection/file instead" },
   h2: { database: "schema" },
   snowflake: { connection: "database", database: "schema" },
@@ -105,13 +110,6 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
 } satisfies Record<DatabaseType, DatabaseNamespaceCreationMatrixEntry>;
 
 function namespaceCreationMatrixEntry(connection: NonNullable<CreationConnection>): DatabaseNamespaceCreationMatrixEntry {
-  // GBase 8s shares `db_type: "gbase"` with the MySQL-based GBase 8a but is Informix-derived:
-  // it has no `CREATE SCHEMA <name>` (a schema is the table owner) yet does support
-  // `CREATE DATABASE`. Route it to the Informix-family semantics instead of the shared `gbase`
-  // entry, which is written for GBase 8a.
-  if (connection.db_type === "gbase" && connection.driver_profile === "gbase8s") {
-    return { connection: "database" };
-  }
   return DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
 }
 

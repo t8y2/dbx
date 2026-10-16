@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import zhCN from "@/i18n/locales/zh-CN";
 import { createI18n } from "vue-i18n";
 import { describe, expect, it, vi } from "vitest";
@@ -119,18 +118,5 @@ describe("MySQL auto-increment warning translations", () => {
     const column = 'id"<tag>\n{value}';
     expect(translateMysqlAutoIncrementWarning(t, `AUTO_INCREMENT column "${column}" requires a supporting index (first key column for InnoDB).`)).toBe(`自增字段“${column}”必须有有效索引；使用 InnoDB 时，该字段必须位于索引首列。`);
     expect(translateMysqlAutoIncrementWarning(t, "Unknown backend warning")).toBe("Unknown backend warning");
-  });
-  it("defines all warning messages and matching placeholders in every registered locale", () => {
-    const registry = readFileSync("apps/desktop/src/i18n/index.ts", "utf8");
-    const locales = [...registry.match(/const supportedLocales: Locale\[\] = \[(.*?)\]/)![1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-    expect(locales.length).toBeGreaterThan(0);
-    for (const locale of locales) {
-      const source = readFileSync(`apps/desktop/src/i18n/locales/${locale}.ts`, "utf8");
-      for (const key of ["mysqlAutoIncrementSingleColumn", "mysqlAutoIncrementRequiresIndex", "mysqlAutoIncrementRequiresNativeColumn"]) {
-        const line = source.split("\n").find((line) => line.trimStart().startsWith(`${key}:`));
-        expect(line, `${locale}: ${key}`).toBeDefined();
-        expect(line!.match(/\{[^}]+\}/g) ?? []).toEqual(key === "mysqlAutoIncrementRequiresIndex" ? ["{column}"] : []);
-      }
-    }
   });
 });

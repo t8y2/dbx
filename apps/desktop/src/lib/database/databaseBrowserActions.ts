@@ -6,9 +6,7 @@ import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 
 export function canDropDatabaseNode(node: TreeNode, connection?: ConnectionConfig): boolean {
-  return (
-    node.type === "database" && !!node.connectionId && !!node.database && !node.catalog && !isSqlServerLinkedNode(node) && !connectionIsEffectivelyReadOnly(connection) && (supportsDatabaseCreation(connection?.db_type) || supportsCreateDatabaseLocale(connection?.db_type, connection?.driver_profile))
-  );
+  return node.type === "database" && !!node.connectionId && !!node.database && !node.catalog && !isSqlServerLinkedNode(node) && !connectionIsEffectivelyReadOnly(connection) && (supportsDatabaseCreation(connection?.db_type) || supportsCreateDatabaseLocale(connection?.db_type));
 }
 
 export interface DatabaseBrowserMutation {

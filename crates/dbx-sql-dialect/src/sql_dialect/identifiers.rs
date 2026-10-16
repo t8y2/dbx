@@ -189,7 +189,7 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
         Some(db_type) if uses_backtick_identifier_quoting(Some(db_type)) => {
             format!("`{}`", name.replace('`', "``"))
         }
-        Some(DatabaseType::Informix) if is_simple_informix_identifier(name) => name.to_string(),
+        Some(DatabaseType::Informix | DatabaseType::Gbase8s) if is_simple_informix_identifier(name) => name.to_string(),
         // SUNDB folds unquoted identifiers to uppercase (its JDBC driver reports
         // storesUpperCaseIdentifiers=true / supportsMixedCaseIdentifiers=false), so
         // `select * from rs_salest_budget` resolves to RS_SALEST_BUDGET. Quoting the

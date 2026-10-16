@@ -65,6 +65,8 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   "oceanbase-oracle": { deferred: "Oracle-mode schemas are users; use a dedicated user workflow" },
   questdb: { deferred: "single database model in DBX" },
   gbase: { deferred: "schema properties need product-specific handling" },
+  gbase8s: { deferred: "schema properties need product-specific handling" },
+  gbase8c: { deferred: "database and schema comment editing not verified for first pass" },
   access: { deferred: "file-backed database properties are not edited in-place" },
   h2: { deferred: "schema properties need product-specific handling" },
   snowflake: { deferred: "database/schema properties need Snowflake-specific options" },

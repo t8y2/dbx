@@ -149,7 +149,7 @@ function gbase8sConnection(): ConnectionConfig {
     ...informixConnection(),
     id: "gbase8s-1",
     name: "GBase 8s",
-    db_type: "gbase",
+    db_type: "gbase8s",
     driver_profile: "gbase8s",
     database: "dbx_test",
   } as ConnectionConfig;

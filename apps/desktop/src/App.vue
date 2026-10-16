@@ -76,7 +76,7 @@ import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import { useSnippetAutoUpload } from "@/composables/useSnippetAutoUpload";
 import { readSyncMethod, readWebDavAutoUploadConfig, readWebDavBackupSelection, recordWebDavSyncSuccess } from "@/lib/webdav/webdavAutoUploadConfig";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
-import { shouldDrawDesktopWindowFrame, shouldDrawLinuxFloatingFrame, useWindowControls } from "@/composables/useWindowControls";
+import { appShellMinSizeStyleForScale, shouldDrawDesktopWindowFrame, shouldDrawLinuxFloatingFrame, useWindowControls } from "@/composables/useWindowControls";
 import { createOpenTabsRestorationBarrier, initializeDesktopOpenTabs, initializeOpenTabs, type OpenTabsRestorationBarrier } from "@/lib/app/openTabsStartup";
 import { finishAppCloseWithRequiredPersist } from "@/lib/app/appClosePersistence";
 import { useSaveSqlFolderSelection } from "@/composables/useSaveSqlFolderSelection";
@@ -1693,12 +1693,18 @@ const saveSqlFolders = computed(() => {
   }));
 });
 
+/** 最近一次实际应用到 webview 的界面缩放（setZoom IPC 成功后才更新）。 */
+const appliedUiScale = ref(1);
+
 const uiScaleApplyQueue = createUiScaleApplyQueue(
   async (scale) => {
     const { getCurrentWebview } = await import("@tauri-apps/api/webview");
     await getCurrentWebview().setZoom(scale);
   },
   (scale) => {
+    // webview 缩放是重排式的（pageZoom / ZoomFactor）：倍率越大，CSS 视口越小。
+    // 记录实际倍率供应用外壳的最小尺寸换算，保证下限永远不超出视口。
+    appliedUiScale.value = scale;
     window.dispatchEvent(new CustomEvent("dbx:ui-scale-applied", { detail: { scale } }));
   },
   (scale, error) => {
@@ -1775,6 +1781,8 @@ const appUiFontFamilyStyle = computed<Record<string, string>>(() => {
     fontFamily: `var(${APP_FONT_SANS_CSS_VAR}, ${DEFAULT_UI_FONT_FAMILY})`,
   };
 });
+
+const appShellMinSizeStyle = computed(() => appShellMinSizeStyleForScale(appliedUiScale.value));
 
 function isGlobalUiZoomTarget(target: EventTarget | null): target is Element {
   if (!(target instanceof Element)) return false;
@@ -4980,7 +4988,45 @@ async function syncConnectionLivenessSubscription(active: boolean): Promise<void
   }
 }
 
-watch(appReady, (ready) => void syncConnectionLivenessSubscription(ready), { immediate: true });
+// Backend idle-closed notifications (#12112). Registered through the same `api` layer and the
+// same appReady gate as the liveness channel above, so neither transport opens a stream before
+// auth is settled.
+let connectionIdleClosedUnlisten: (() => void) | null = null;
+let connectionIdleClosedSubscribing = false;
+
+async function syncConnectionIdleClosedSubscription(active: boolean): Promise<void> {
+  if (!active) {
+    connectionIdleClosedUnlisten?.();
+    connectionIdleClosedUnlisten = null;
+    return;
+  }
+  if (connectionIdleClosedUnlisten || connectionIdleClosedSubscribing) return;
+  connectionIdleClosedSubscribing = true;
+  try {
+    const unlisten = await api.subscribeConnectionIdleClosed((payload) => {
+      void connectionStore.handleConnectionIdleClosed(payload);
+    });
+    if (!appReady.value) {
+      // Auth flipped off while the subscription was being established.
+      unlisten();
+      return;
+    }
+    connectionIdleClosedUnlisten = unlisten;
+  } catch (error) {
+    console.error("[DBX] subscribeConnectionIdleClosed error:", error);
+  } finally {
+    connectionIdleClosedSubscribing = false;
+  }
+}
+
+watch(
+  appReady,
+  (ready) => {
+    void syncConnectionLivenessSubscription(ready);
+    void syncConnectionIdleClosedSubscription(ready);
+  },
+  { immediate: true },
+);
 
 onMounted(async () => {
   clearStartupPreloadRetry();
@@ -5134,7 +5180,11 @@ onUnmounted(() => {
     <TooltipProvider :delay-duration="300">
       <SidebarDangerDialogHost />
       <LinuxResizeHandles v-if="drawLinuxFloatingFrame" />
-      <div data-app-shell class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-desktop-window-frame': drawDesktopWindowFrame }" :style="appUiFontFamilyStyle">
+      <!-- 外壳维持 760x600 的 *视觉* 像素最小可用尺寸（参见 fix(desktop): prevent scaled window clipping）。
+           webview 缩放是重排式的，最小尺寸必须除以实际倍率换算成 CSS 像素
+           （见 appShellMinSizeStyleForScale）——固定 CSS 下限在约 165% 以上缩放
+           时会超出视口，把应用底部（如设置页脚按钮）挤出窗口导致无法点击。 -->
+      <div data-app-shell class="h-screen w-screen max-w-full flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-desktop-window-frame': drawDesktopWindowFrame }" :style="[appUiFontFamilyStyle, appShellMinSizeStyle]">
         <AppToolbar
           v-if="!isDetachedWindowContext"
           :is-dark="isDark"

@@ -2003,7 +2003,7 @@ onBeforeUnmount(() => {
     </Tabs>
 
     <Dialog :open="marketplaceDetailOpen" @update:open="(open: boolean) => (open ? (marketplaceDetailOpen = true) : closeMarketplaceDetails())">
-      <DialogContent class="max-h-[min(90vh,52rem)] max-w-3xl gap-0 overflow-hidden p-0" @close-auto-focus="restoreMarketplaceDetailFocus">
+      <DialogContent class="max-h-[min(90vh,52rem)] max-w-3xl gap-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0" @close-auto-focus="restoreMarketplaceDetailFocus">
         <template v-if="selectedMarketplaceListing">
           <DialogHeader class="@container border-b px-6 py-3 pr-14 text-left">
             <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-4 @min-[34rem]:grid-cols-[auto_minmax(0,1fr)_auto]">

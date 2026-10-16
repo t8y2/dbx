@@ -100,3 +100,10 @@ test("only JavaScript that parses goes down the script path", () => {
 test("plain command splitting never runs scripts", () => {
   assert.deepEqual(splitMongoCommandRanges("for (;;) { db.items.insertOne({}); }"), []);
 });
+
+test("generates a UUID for UUID() without an argument", () => {
+  const [command] = expand(`db.events.insertOne({ token: UUID(), fixed: UUID("123e4567-e89b-12d3-a456-426614174000") });`);
+
+  assert.match(command!, /^db\.getCollection\("events"\)\.insertOne\(\{"token": UUID\("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"\), "fixed": UUID\("123e4567-e89b-12d3-a456-426614174000"\)\}\)$/);
+  assert.equal(parseMongoCommand(command!)?.command.kind, "insert");
+});

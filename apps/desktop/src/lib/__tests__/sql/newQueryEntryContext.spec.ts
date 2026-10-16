@@ -75,4 +75,12 @@ describe("new query entry context wiring", () => {
   it("clears lastFocusedSidebarSurface when editor content is clicked", () => {
     expect(appSource).toContain("rememberEditorContentSurface");
   });
+
+  it("initializes and updates schema for quick connection query entries (#11844)", () => {
+    const body = bodyOf("async function openConnectionQuery");
+    expect(body).toContain('const initialSchema = initialTarget.kind === "query" ? initialTarget.schema : undefined;');
+    expect(body).toContain('queryStore.createTab(connectionId, initialTarget.database, undefined, "query", initialSchema)');
+    expect(body).toContain("schemaAfterConnectionSwitch(connection.db_type, orderedSchemas, connection.default_schema)");
+    expect(body).toContain("queryStore.updateSchema(tabId, schema)");
+  });
 });

@@ -3302,7 +3302,25 @@ async function newQuery(options: NewQueryOptions = {}) {
     await connectionStore.ensureConnected(target.connectionId);
     if (target.shouldRefreshDefaultDatabase) {
       const options = await getDatabaseOptions(target.connectionId);
-      queryStore.updateDatabase(tabId, resolveDefaultDatabase(conn, options));
+      const nextDb = resolveDefaultDatabase(conn, options);
+      if (nextDb !== target.database) {
+        queryStore.updateDatabase(tabId, nextDb);
+        if (target.schema) {
+          queryStore.updateSchema(tabId, target.schema);
+        }
+      }
+      if (!target.schema && (conn.db_type === "oracle" || conn.db_type === "oceanbase-oracle")) {
+        try {
+          const orderedSchemas = await api.listSchemas(target.connectionId, nextDb);
+          const schema = schemaAfterConnectionSwitch(conn.db_type, orderedSchemas, conn.default_schema);
+          const latestTab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+          if (schema && latestTab && latestTab.connectionId === target.connectionId) {
+            queryStore.updateSchema(tabId, schema);
+          }
+        } catch {
+          // Schema metadata failure must not turn a successful connection into an error.
+        }
+      }
     }
   } catch (e: any) {
     toast(
@@ -3365,13 +3383,26 @@ async function openConnectionQuery(connectionId: string) {
     }
     return;
   }
-  const tabId = queryStore.createTab(connectionId, initialTarget.database);
+  const initialSchema = initialTarget.kind === "query" ? initialTarget.schema : undefined;
+  const tabId = queryStore.createTab(connectionId, initialTarget.database, undefined, "query", initialSchema);
   try {
     await connectionStore.ensureConnected(connectionId);
     const options = await getDatabaseOptions(connectionId);
     const target = quickConnectionOpenTarget(connection, options);
     if (target.kind === "query") {
       queryStore.updateDatabase(tabId, target.database);
+      if (connection.default_schema || connection.db_type === "oracle" || connection.db_type === "oceanbase-oracle") {
+        try {
+          const orderedSchemas = connection.default_schema ? [] : await api.listSchemas(connectionId, target.database);
+          const schema = schemaAfterConnectionSwitch(connection.db_type, orderedSchemas, connection.default_schema);
+          const latestTab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+          if (schema && latestTab && latestTab.connectionId === connectionId) {
+            queryStore.updateSchema(tabId, schema);
+          }
+        } catch {
+          // Schema metadata failure must not turn a successful connection into an error.
+        }
+      }
     }
   } catch (e: any) {
     toast(

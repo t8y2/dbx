@@ -34,6 +34,8 @@ import javax.net.ssl.X509TrustManager;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
+import java.util.LinkedHashMap;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.Config;
@@ -828,21 +830,21 @@ class KafkaAgentTest {
     @Test
     void offsetStartPositionAllowsAllPartitionsButRequiresANonNegativeOffset() {
         assertDoesNotThrow(() ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, null, 0L));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, null, 0L, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, -1, 0L));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, -1, 0L, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, -1L));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, -1L, null));
     }
 
     @Test
     void nonOffsetStartPositionsRejectAnOffset() {
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, 0, 7L));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, 0, 7L, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, 0, 7L));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, 0, 7L, null));
     }
 
     @Test
@@ -855,14 +857,14 @@ class KafkaAgentTest {
     @Test
     void everyStartPositionRejectsNegativePartitions() {
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, -1, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, -1, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, -1, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, -1, null, null));
     }
 
     @Test
     void legacyOffsetWithoutStartPositionKeepsTheExistingReadBehavior() {
-        KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, false, null, 7L);
+        KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, false, null, 7L, null);
         assertEquals(7L, KafkaAgent.requestedPeekOffset(
             KafkaAgent.PeekStartPosition.EARLIEST, 7L, true, 0L, 10L
         ));
@@ -1550,5 +1552,37 @@ class KafkaAgentTest {
                 System.setProperty(entry.getKey(), entry.getValue());
             }
         }
+    }
+
+    @Test
+    void peekAcceptsTimestampStartPosition() {
+        assertEquals(
+            KafkaAgent.PeekStartPosition.TIMESTAMP,
+            KafkaAgent.peekStartPosition(JsonParser.parseString("{\"startPosition\":\"timestamp\"}").getAsJsonObject())
+        );
+        assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, 1_700_000_000_000L));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, null));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, -1L));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null, 1_700_000_000_000L));
+    }
+
+    @Test
+    void peekTimestampOffsetsDropsPartitionsWithoutAMatch() {
+        // Kafka answers null for a partition whose newest record is older than the requested
+        // time. Dropping it keeps a time window from silently showing data from outside itself.
+        TopicPartition withData = new TopicPartition("t", 0);
+        TopicPartition tooOld = new TopicPartition("t", 1);
+        Map<TopicPartition, OffsetAndTimestamp> located = new LinkedHashMap<>();
+        located.put(withData, new OffsetAndTimestamp(42L, 1_700_000_000_000L));
+        located.put(tooOld, null);
+
+        Map<TopicPartition, Long> resolved = KafkaAgent.peekTimestampOffsets(located);
+
+        assertEquals(42L, resolved.get(withData));
+        assertFalse(resolved.containsKey(tooOld));
     }
 }

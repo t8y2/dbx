@@ -365,7 +365,9 @@ export interface PeekMessagesResult {
 
 export interface PeekMessagesOptions {
   /** Kafka only. Omitted starts at earliest unless a legacy caller supplies offset. */
-  startPosition?: "latest" | "earliest" | "offset";
+  startPosition?: "latest" | "earliest" | "offset" | "timestamp";
+  /** Epoch milliseconds; Kafka resolves the first record batch at or after this time per partition. */
+  timestamp?: number;
   partition?: number;
   offset?: number;
 }

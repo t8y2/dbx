@@ -1627,7 +1627,8 @@ public final class KafkaAgent {
         int count = validatedPeekCount(intOrDefault(params, "count", 10));
         PeekStartPosition startPosition = peekStartPosition(params);
         boolean explicitStartPosition = stringOrNull(params, "startPosition") != null;
-        validatePeekRequest(startPosition, explicitStartPosition, partition, offset);
+        Long startTimestamp = longOrNull(params, "timestamp");
+        validatePeekRequest(startPosition, explicitStartPosition, partition, offset, startTimestamp);
         boolean legacyOffsetRequest = !explicitStartPosition && offset != null;
 
         JsonObject conn = activeConnection;
@@ -1650,14 +1651,25 @@ public final class KafkaAgent {
             Map<TopicPartition, Long> endOffsets =
                 consumer.endOffsets(candidatePartitions, requestTimeout);
 
+            Map<TopicPartition, Long> timestampOffsets = Collections.emptyMap();
+            if (startPosition == PeekStartPosition.TIMESTAMP) {
+                Map<TopicPartition, Long> byTime = new LinkedHashMap<>();
+                for (TopicPartition tp : candidatePartitions) {
+                    byTime.put(tp, startTimestamp);
+                }
+                timestampOffsets = peekTimestampOffsets(consumer.offsetsForTimes(byTime, requestTimeout));
+            }
+
             List<TopicPartition> readablePartitions = new ArrayList<>();
             Map<TopicPartition, Long> seekOffsets = new LinkedHashMap<>();
             for (TopicPartition tp : candidatePartitions) {
                 long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
                 long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
-                Long requestedOffset = requestedPeekOffset(
-                    startPosition, offset, legacyOffsetRequest, beginningOffset, endOffset
-                );
+                Long requestedOffset = startPosition == PeekStartPosition.TIMESTAMP
+                    ? timestampOffsets.get(tp)
+                    : requestedPeekOffset(
+                        startPosition, offset, legacyOffsetRequest, beginningOffset, endOffset
+                    );
                 if (requestedOffset == null) {
                     continue;
                 }
@@ -2139,6 +2151,7 @@ public final class KafkaAgent {
         EARLIEST,
         LATEST,
         OFFSET,
+        TIMESTAMP,
     }
 
     /** Omitting startPosition preserves the old earliest default (or explicit legacy offset) behavior. */
@@ -2151,16 +2164,47 @@ public final class KafkaAgent {
             case "earliest" -> PeekStartPosition.EARLIEST;
             case "latest" -> PeekStartPosition.LATEST;
             case "offset" -> PeekStartPosition.OFFSET;
+            case "timestamp" -> PeekStartPosition.TIMESTAMP;
             default -> throw new IllegalArgumentException("Unsupported peek startPosition: " + value);
         };
+    }
+
+    /**
+     * First offset whose batch timestamp is &gt;= {@code timestamp}, per partition. Kafka
+     * answers null for a partition whose newest record is older than the requested time;
+     * that partition is simply left out of the read rather than silently falling back to
+     * its tail, so a time window never shows data from outside itself.
+     */
+    static Map<TopicPartition, Long> peekTimestampOffsets(
+        Map<TopicPartition, OffsetAndTimestamp> located
+    ) {
+        Map<TopicPartition, Long> resolved = new LinkedHashMap<>();
+        located.forEach((tp, offsetAndTimestamp) -> {
+            if (offsetAndTimestamp != null) {
+                resolved.put(tp, offsetAndTimestamp.offset());
+            }
+        });
+        return resolved;
     }
 
     static void validatePeekRequest(
         PeekStartPosition startPosition,
         boolean explicitStartPosition,
         Integer partition,
-        Long offset
+        Long offset,
+        Long timestamp
     ) {
+        if (startPosition != PeekStartPosition.TIMESTAMP && timestamp != null) {
+            throw new IllegalArgumentException("timestamp is only supported when startPosition is timestamp");
+        }
+        if (startPosition == PeekStartPosition.TIMESTAMP) {
+            if (timestamp == null) {
+                throw new IllegalArgumentException("timestamp is required when startPosition is timestamp");
+            }
+            if (timestamp < 0) {
+                throw new IllegalArgumentException("timestamp must be a non-negative epoch millisecond value");
+            }
+        }
         if (partition != null && partition < 0) {
             throw new IllegalArgumentException("partition must be non-negative");
         }
@@ -2195,6 +2239,8 @@ public final class KafkaAgent {
         return switch (startPosition) {
             case LATEST -> endOffset > beginningOffset ? beginningOffset : null;
             case OFFSET -> offset;
+            // Resolved per partition through offsetsForTimes before this is reached.
+            case TIMESTAMP -> null;
             case EARLIEST -> legacyOffsetRequest ? offset : beginningOffset;
         };
     }

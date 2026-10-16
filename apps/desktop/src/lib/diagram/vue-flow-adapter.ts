@@ -1,7 +1,6 @@
 import { diagramTableId, type DiagramTable, type DiagramRelationship } from "./erDiagram";
 import type { InferredRelationship, DiagramNode, DiagramEdge, DiagramLayer } from "@/types/diagram";
 import type { Node, Edge } from "@vue-flow/core";
-import { useLayerStore } from "./layer-store";
 import { CARD_WIDTH, tableCardHeight } from "./diagram-constants";
 import { handlesFromWaypoints, type Point } from "./edge-obstacle-router";
 
@@ -21,10 +20,7 @@ export function isTableCanvasVisible(tableName: string, layers: DiagramLayer[], 
 }
 
 /** positions are absolute canvas coordinates; converted to relative when parented to a visible layer */
-export function toVueFlowNodes(tables: DiagramTable[], positions?: Record<string, { x: number; y: number }>, isMultiSchema = false): Node<{ table: DiagramTable; isMultiSchema?: boolean }>[] {
-  const layerStore = useLayerStore();
-  const layers = layerStore.layers;
-
+export function toVueFlowNodes(tables: DiagramTable[], positions?: Record<string, { x: number; y: number }>, isMultiSchema = false, layers: DiagramLayer[] = []): Node<{ table: DiagramTable; isMultiSchema?: boolean }>[] {
   // Track raw name frequencies to avoid ambiguous fallback when multiple schemas have identical table names
   const rawNameCounts = new Map<string, number>();
   if (isMultiSchema) {
@@ -43,7 +39,7 @@ export function toVueFlowNodes(tables: DiagramTable[], positions?: Record<string
     .map((table) => {
       const tableId = diagramTableId(table, isMultiSchema);
       const allowRawFallback = !isMultiSchema || rawNameCounts.get(table.name) === 1;
-      const layer = layerStore.getLayerByTable(tableId) || (allowRawFallback ? layerStore.getLayerByTable(table.name) : undefined);
+      const layer = layers.find((l) => l.tableNames.includes(tableId)) || (allowRawFallback ? layers.find((l) => l.tableNames.includes(table.name)) : undefined);
       const absolute = positions?.[tableId] || (allowRawFallback ? positions?.[table.name] : undefined) || { x: 0, y: 0 };
       const visibleParent = layer?.visible ? layer : undefined;
       const layerPos = visibleParent?.position || { x: 0, y: 0 };
@@ -98,9 +94,8 @@ export function toVueFlowEdges(
   waypointsById?: Record<string, Point[]>,
   tableHeights?: Record<string, number>,
   handleHintsById?: Record<string, { sourceHandle?: string; targetHandle?: string }>,
+  layers: DiagramLayer[] = [],
 ): Edge<RelationshipEdgeData>[] {
-  const layers = useLayerStore().layers;
-
   return relationships
     .filter((rel) => isTableCanvasVisible(rel.sourceTable, layers) && isTableCanvasVisible(rel.targetTable, layers))
     .map((rel) => {

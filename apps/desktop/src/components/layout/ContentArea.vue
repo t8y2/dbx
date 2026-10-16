@@ -133,6 +133,17 @@ const NacosAccessControlConsole = defineAsyncComponent(() => import("@/component
 const NacosDashboard = defineAsyncComponent(() => import("@/components/nacos/NacosDashboard.vue"));
 const DoltVersionControl = defineAsyncComponent(() => import("@/components/dolt/DoltVersionControl.vue"));
 const DatabaseSearchPanel = defineAsyncComponent(() => import("@/components/search/DatabaseSearchPanel.vue"));
+const DataComparePanel = defineAsyncComponent(() => import("@/components/diff/DataComparePanel.vue"));
+const SchemaDiffPanel = defineAsyncComponent(() => import("@/components/diff/SchemaDiffPanel.vue"));
+const DataTransferPanel = defineAsyncComponent(() => import("@/components/transfer/DataTransferPanel.vue"));
+const FieldLineagePanel = defineAsyncComponent(() => import("@/components/lineage/FieldLineagePanel.vue"));
+const DataDictionaryPanel = defineAsyncComponent(() => import("@/components/docs/DataDictionaryPanel.vue"));
+const DatabaseDocsPanel = defineAsyncComponent(() => import("@/components/docs/DatabaseDocsPanel.vue"));
+const DatabaseExportPanel = defineAsyncComponent(() => import("@/components/export/DatabaseExportPanel.vue"));
+const DataGeneratePanel = defineAsyncComponent(() => import("@/components/generate/DataGeneratePanel.vue"));
+const MongoImportPanel = defineAsyncComponent(() => import("@/components/document/MongoImportPanel.vue"));
+const MongoDatabaseDumpPanel = defineAsyncComponent(() => import("@/components/document/MongoDatabaseDumpPanel.vue"));
+const SchemaDiagramPanel = defineAsyncComponent(() => import("@/components/diagram/SchemaDiagramPanel.vue"));
 const DatabaseBrowser = defineAsyncComponent(() => import("@/components/objects/DatabaseBrowser.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
@@ -280,6 +291,12 @@ const emit = defineEmits<ContentAreaSurfaceEmits>();
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
+
+/** Mirrors the panel's manual transaction session onto the tab so closeTab's rollback path can end it. */
+function syncDataCompareTransactionSession(sessionId: string | undefined) {
+  const tab = queryStore.tabs.find((candidate) => candidate.id === props.activeTab.id);
+  if (tab && tab.mode === "data-compare") tab.txnSessionId = sessionId;
+}
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
 /** Clear a consumed editor reveal request so a later normal tab re-visit doesn't re-jump. */
@@ -3522,6 +3539,78 @@ defineExpose({
           "
           @open-target="(target) => emit('openDatabaseSearchTarget', activeTab.id, target)"
         />
+      </div>
+    </template>
+    <!-- Data Compare mode -->
+    <template v-else-if="activeTab.mode === 'data-compare'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <DataComparePanel :key="activeTab.id" :in-dialog="false" :tab-id="activeTab.id" :initial-state="activeTab.dataCompareState" @update:state="(state) => queryStore.updateDataCompareState(activeTab.id, state)" @transaction-session-change="syncDataCompareTransactionSession" />
+      </div>
+    </template>
+    <!-- Schema Diff mode -->
+    <template v-else-if="activeTab.mode === 'schema-diff'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <SchemaDiffPanel :key="activeTab.id" :in-dialog="false" :initial-state="activeTab.schemaDiffState" @update:state="(state) => queryStore.updateSchemaDiffState(activeTab.id, state)" />
+      </div>
+    </template>
+    <!-- Data Transfer mode -->
+    <template v-else-if="activeTab.mode === 'data-transfer'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <DataTransferPanel :key="activeTab.id" :in-dialog="false" :task-id="activeTab.dataTransferState?.taskId ?? null" :initial-state="activeTab.dataTransferState" @update:state="(state) => queryStore.updateDataTransferState(activeTab.id, state)" />
+      </div>
+    </template>
+    <!-- Field Lineage mode -->
+    <template v-else-if="activeTab.mode === 'field-lineage'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <FieldLineagePanel :key="activeTab.id" :in-dialog="false" :initial-state="activeTab.fieldLineageState" @update:state="(state) => queryStore.updateFieldLineageState(activeTab.id, state)" @open-target="(target) => emit('openLineageTarget', activeTab.id, target)" />
+      </div>
+    </template>
+    <!-- Data Dictionary mode -->
+    <template v-else-if="activeTab.mode === 'data-dictionary'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <DataDictionaryPanel :key="activeTab.id" :in-dialog="false" :initial-state="activeTab.dataDictionaryState" @update:state="(state) => queryStore.updateDataDictionaryState(activeTab.id, state)" />
+      </div>
+    </template>
+    <!-- Database Docs mode -->
+    <template v-else-if="activeTab.mode === 'database-docs'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <DatabaseDocsPanel :key="activeTab.id" :in-dialog="false" :initial-state="activeTab.databaseDocsState" @update:state="(state) => queryStore.updateDatabaseDocsState(activeTab.id, state)" />
+      </div>
+    </template>
+    <!-- Database Export mode -->
+    <template v-else-if="activeTab.mode === 'database-export'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <DatabaseExportPanel
+          :key="activeTab.id"
+          :in-dialog="false"
+          :initial-state="activeTab.databaseExportState"
+          @update:state="(state) => queryStore.updateDatabaseExportState(activeTab.id, state)"
+          @open-connection-settings="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
+        />
+      </div>
+    </template>
+    <!-- Data Generate mode -->
+    <template v-else-if="activeTab.mode === 'data-generate'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <DataGeneratePanel :key="activeTab.id" :in-dialog="false" :initial-state="activeTab.dataGenerateState" @update:state="(state) => queryStore.updateDataGenerateState(activeTab.id, state)" />
+      </div>
+    </template>
+    <!-- Mongo Import mode -->
+    <template v-else-if="activeTab.mode === 'mongo-import'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <MongoImportPanel :key="activeTab.id" :in-dialog="false" :initial-state="activeTab.mongoImportState" @update:state="(state) => queryStore.updateMongoImportState(activeTab.id, state)" />
+      </div>
+    </template>
+    <!-- Mongo Dump / Restore mode -->
+    <template v-else-if="activeTab.mode === 'mongo-dump'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <MongoDatabaseDumpPanel :key="activeTab.id" :in-dialog="false" :initial-state="activeTab.mongoDumpState" @update:state="(state) => queryStore.updateMongoDumpState(activeTab.id, state)" />
+      </div>
+    </template>
+    <!-- Schema Diagram mode: the tab id is the store scope (isolated graph state). -->
+    <template v-else-if="activeTab.mode === 'schema-diagram'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <SchemaDiagramPanel :key="activeTab.id" :in-dialog="false" :scope-id="activeTab.id" :initial-state="activeTab.schemaDiagramState" @update:state="(state) => queryStore.updateSchemaDiagramState(activeTab.id, state)" />
       </div>
     </template>
     <template v-else-if="activeTab.mode === 'databases' && activeConnection">

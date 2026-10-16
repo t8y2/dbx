@@ -8651,6 +8651,15 @@ export default withEnglishFallback({
     truncatedHint: "行数超过单次比较上限的表只检查了部分数据，未检查范围内的新增、修改和删除不会被发现，因此不会生成或执行同步 SQL。建议缩小范围后分批完整比较。",
     truncatedTable: "{table}：源 {source} 行、目标 {target} 行，仅比较前 {budget} 行",
     truncatedBadge: "仅检查部分数据（单侧上限 {budget} 行），同步已禁用",
+    openInTab: "在标签页中打开",
+    convertToDialog: "转为弹窗",
+    transactionActiveHint: "事务进行中，请先提交或回滚",
+    transactionRolledBackOnClose: "页签已关闭，未提交的事务已回滚",
+  },
+  workspace: {
+    openInTab: "在标签页中打开",
+    convertToDialog: "转为弹窗",
+    runStateLockedHint: "当前操作尚未结束，请先完成或取消后再转换。",
   },
   settings: {
     historyRetentionLimit: "查询历史保留条数",

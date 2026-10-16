@@ -32,7 +32,8 @@ function getNextLayerName(existingNames: string[]): string {
   return `Layer ${maxIndex + 1}`;
 }
 
-export const useLayerStore = defineStore("diagram-layer", () => {
+/** Store factory body: shared by the default singleton id and per-scope dynamic ids. */
+export function layerStoreSetup() {
   const layers = ref<DiagramLayer[]>([]);
   const activeLayerId = ref<string | null>(null);
 
@@ -179,4 +180,6 @@ export const useLayerStore = defineStore("diagram-layer", () => {
     loadLayers,
     toJSON,
   };
-});
+}
+
+export const useLayerStore = defineStore("diagram-layer", layerStoreSetup);

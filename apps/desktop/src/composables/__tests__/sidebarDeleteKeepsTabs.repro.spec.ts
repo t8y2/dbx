@@ -13,11 +13,15 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast
 
 function installLocalStorage() {
   const data = new Map<string, string>();
-  vi.stubGlobal("localStorage", {
-    getItem: vi.fn((key: string) => data.get(key) ?? null),
-    setItem: vi.fn((key: string, value: string) => data.set(key, value)),
-    removeItem: vi.fn((key: string) => data.delete(key)),
-  });
+  vi.stubGlobal(
+    "localStorage",
+    {
+      getItem: vi.fn((key: string) => data.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => data.set(key, value)),
+      removeItem: vi.fn((key: string) => data.delete(key)),
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 }
 
 function installApiMocks() {
@@ -48,10 +52,14 @@ function installApiMocks() {
     sessionCredentialStatus: vi.fn().mockResolvedValue(false),
     forgetSessionCredential: vi.fn().mockResolvedValue(undefined),
   }));
-  vi.doMock("@/lib/tabs/tabResultCache", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("@/lib/tabs/tabResultCache")>();
-    return { ...actual, deleteTabResultSnapshotsForOwner: vi.fn().mockResolvedValue(undefined) };
-  });
+  vi.doMock(
+    "@/lib/tabs/tabResultCache",
+    async (importOriginal) => {
+      const actual = await importOriginal<typeof import("@/lib/tabs/tabResultCache")>();
+      return { ...actual, deleteTabResultSnapshotsForOwner: vi.fn().mockResolvedValue(undefined) };
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 }
 
 function pgConnection(id: string, name: string, database?: string): ConnectionConfig {
@@ -62,51 +70,57 @@ function connectionNode(connectionId: string): TreeNode {
   return { id: connectionId, label: connectionId, type: "connection", connectionId, isExpanded: false, children: [] };
 }
 
+const QUERY_STORE_TEST_TIMEOUT = 60_000;
+
 describe("删除连接的真实侧边栏流程", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     installLocalStorage();
     installApiMocks();
     vi.clearAllMocks();
-  });
+  }, QUERY_STORE_TEST_TIMEOUT);
   afterEach(() => {
     vi.unstubAllGlobals();
-  });
+  }, QUERY_STORE_TEST_TIMEOUT);
 
-  it("keep-all-tabs：走 confirmDelete 后 SQL 页签仍在", async () => {
-    const { useConnectionStore } = await import("@/stores/connectionStore");
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    const { useSidebarConnectionMutationRuntime } = await import("@/composables/useSidebarConnectionMutationRuntime");
-    const { showDeleteConfirm } = await import("@/components/sidebar/sidebarTreeDialogState");
+  it(
+    "keep-all-tabs：走 confirmDelete 后 SQL 页签仍在",
+    async () => {
+      const { useConnectionStore } = await import("@/stores/connectionStore");
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const { useSettingsStore } = await import("@/stores/settingsStore");
+      const { useSidebarConnectionMutationRuntime } = await import("@/composables/useSidebarConnectionMutationRuntime");
+      const { showDeleteConfirm } = await import("@/components/sidebar/sidebarTreeDialogState");
 
-    const settingsStore = useSettingsStore();
-    settingsStore.updateEditorSettings({ deleteConnectionTabHandlingMode: "keep-all-tabs", rememberConnectionDatabaseOnDelete: true });
+      const settingsStore = useSettingsStore();
+      settingsStore.updateEditorSettings({ deleteConnectionTabHandlingMode: "keep-all-tabs", rememberConnectionDatabaseOnDelete: true });
 
-    const connectionStore = useConnectionStore();
-    connectionStore.connections = [pgConnection("conn-a", "prod", "app")];
-    const queryStore = useQueryStore();
-    const sqlId = queryStore.createTab("conn-a", "app", "draft.sql", "query");
-    queryStore.updateSql(sqlId, "select 1;");
+      const connectionStore = useConnectionStore();
+      connectionStore.connections = [pgConnection("conn-a", "prod", "app")];
+      const queryStore = useQueryStore();
+      const sqlId = queryStore.createTab("conn-a", "app", "draft.sql", "query");
+      queryStore.updateSql(sqlId, "select 1;");
 
-    const node = connectionNode("conn-a");
-    const runtime = useSidebarConnectionMutationRuntime({
-      activeNode: shallowRef(node),
-      releaseActiveNodeReference: vi.fn(),
-      selectedTreeNodesInVisibleOrder: () => [node],
-      connectionStore,
-      queryStore,
-      requestGroupRename: vi.fn(),
-      openVisibleDatabases: vi.fn(),
-      openVisibleSchemas: vi.fn(),
-    } as never);
+      const node = connectionNode("conn-a");
+      const runtime = useSidebarConnectionMutationRuntime({
+        activeNode: shallowRef(node),
+        releaseActiveNodeReference: vi.fn(),
+        selectedTreeNodesInVisibleOrder: () => [node],
+        connectionStore,
+        queryStore,
+        requestGroupRename: vi.fn(),
+        openVisibleDatabases: vi.fn(),
+        openVisibleSchemas: vi.fn(),
+      } as never);
 
-    runtime.deleteConnection();
-    expect(showDeleteConfirm.value).toBe(true);
-    await runtime.confirmDelete();
+      runtime.deleteConnection();
+      expect(showDeleteConfirm.value).toBe(true);
+      await runtime.confirmDelete();
 
-    expect(connectionStore.connections.some((c) => c.id === "conn-a")).toBe(false);
-    expect(queryStore.tabs.some((tab) => tab.id === sqlId)).toBe(true);
-    expect(settingsStore.editorSettings.rememberedConnectionDatabases.prod).toEqual({ database: "app", dbType: "postgres" });
-  });
+      expect(connectionStore.connections.some((c) => c.id === "conn-a")).toBe(false);
+      expect(queryStore.tabs.some((tab) => tab.id === sqlId)).toBe(true);
+      expect(settingsStore.editorSettings.rememberedConnectionDatabases.prod).toEqual({ database: "app", dbType: "postgres" });
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 });

@@ -8669,6 +8669,15 @@ export default {
     truncatedHint: "Tables above the single-compare limit were inspected only over a subset, so changes outside it are not reported. Synchronization SQL is disabled for these results; narrow the range and run complete comparisons in batches.",
     truncatedTable: "{table}: {source} source rows, {target} target rows, compared the first {budget} rows only",
     truncatedBadge: "Inspected a subset (up to {budget} rows per side); synchronization disabled",
+    openInTab: "Open in Tab",
+    convertToDialog: "Convert to Dialog",
+    transactionActiveHint: "A manual transaction is active. Commit or roll back first.",
+    transactionRolledBackOnClose: "Tab closed; the pending transaction was rolled back",
+  },
+  workspace: {
+    openInTab: "Open in Tab",
+    convertToDialog: "Convert to Dialog",
+    runStateLockedHint: "An operation is still running. Finish or cancel it before converting.",
   },
   settings: {
     historyRetentionLimit: "Query history retention",

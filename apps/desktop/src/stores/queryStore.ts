@@ -3,7 +3,10 @@ import { createQueryRequestTiming } from "@/lib/queryRequestTiming";
 import { mergeQueryMessages, queryResultMessages } from "@/lib/query/queryResultMessages";
 import { appendNeo4jNodeCells, extractNeo4jNodeCells } from "@/lib/neo4j/neo4jNodeResult";
 import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/updatePreparation";
-import { defineStore } from "pinia";
+import { defineStore, getActivePinia } from "pinia";
+// Dispose-only import: keeps the elkjs-backed graph store out of this module's
+// import graph (node-environment store tests cannot construct its worker).
+import { disposeDiagramScope } from "@/lib/diagram/diagram-scope-dispose";
 import { isRedisMonitorCommand, startRedisMonitor } from "@/lib/redis/redisMonitor";
 import { uuid } from "@/lib/common/utils";
 import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, toRaw, watch } from "vue";
@@ -17,6 +20,17 @@ import type {
   BatchStatementExecutionItem,
   ConnectionConfig,
   DatabaseSearchTabState,
+  DataCompareTabState,
+  SchemaDiffTabState,
+  TransferTabState,
+  FieldLineageTabState,
+  DataDictionaryTabState,
+  DatabaseDocsTabState,
+  DatabaseExportTabState,
+  DataGenerateTabState,
+  MongoImportTabState,
+  MongoDumpTabState,
+  SchemaDiagramTabState,
   DatabaseType,
   IndexInfo,
   NacosConfigEditorViewport,
@@ -3559,6 +3573,387 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
+  function openDataCompare(state: DataCompareTabState) {
+    const { config } = state;
+    const matchesPair = (tab: QueryTab) => {
+      if (tab.mode !== "data-compare") return false;
+      const cfg = tab.dataCompareState?.config;
+      return (
+        !!cfg &&
+        cfg.sourceConnectionId === config.sourceConnectionId &&
+        cfg.sourceDatabase === config.sourceDatabase &&
+        (cfg.sourceSchema || "") === (config.sourceSchema || "") &&
+        cfg.targetConnectionId === config.targetConnectionId &&
+        cfg.targetDatabase === config.targetDatabase &&
+        (cfg.targetSchema || "") === (config.targetSchema || "")
+      );
+    };
+    const existing = tabs.value.find(matchesPair);
+    if (existing) {
+      if (existing.dataCompareState) existing.dataCompareState = { ...existing.dataCompareState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("dataCompare.title")} ${config.label}`.trim(),
+      connectionId: config.sourceConnectionId,
+      database: config.sourceDatabase,
+      schema: config.sourceSchema || undefined,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "data-compare",
+      dataCompareState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openSchemaDiff(state: SchemaDiffTabState) {
+    const { config } = state;
+    const matchesPair = (tab: QueryTab) => {
+      if (tab.mode !== "schema-diff") return false;
+      const cfg = tab.schemaDiffState?.config;
+      return (
+        !!cfg &&
+        cfg.sourceConnectionId === config.sourceConnectionId &&
+        cfg.sourceDatabase === config.sourceDatabase &&
+        (cfg.sourceSchema || "") === (config.sourceSchema || "") &&
+        cfg.targetConnectionId === config.targetConnectionId &&
+        cfg.targetDatabase === config.targetDatabase &&
+        (cfg.targetSchema || "") === (config.targetSchema || "")
+      );
+    };
+    const existing = tabs.value.find(matchesPair);
+    if (existing) {
+      if (existing.schemaDiffState) existing.schemaDiffState = { ...existing.schemaDiffState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("diff.title")} ${config.label ?? ""}`.trim(),
+      connectionId: config.sourceConnectionId,
+      database: config.sourceDatabase,
+      schema: config.sourceSchema || undefined,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "schema-diff",
+      schemaDiffState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openDataTransfer(state: TransferTabState) {
+    const { config } = state;
+    const matchesPair = (tab: QueryTab) => {
+      if (tab.mode !== "data-transfer") return false;
+      const cfg = tab.dataTransferState?.config;
+      return (
+        !!cfg &&
+        cfg.sourceConnectionId === config.sourceConnectionId &&
+        (cfg.sourceCatalog || "") === (config.sourceCatalog || "") &&
+        cfg.sourceDatabase === config.sourceDatabase &&
+        (cfg.sourceSchema || "") === (config.sourceSchema || "") &&
+        cfg.targetConnectionId === config.targetConnectionId &&
+        (cfg.targetCatalog || "") === (config.targetCatalog || "") &&
+        cfg.targetDatabase === config.targetDatabase &&
+        (cfg.targetSchema || "") === (config.targetSchema || "")
+      );
+    };
+    const existing = tabs.value.find(matchesPair);
+    if (existing) {
+      if (existing.dataTransferState) existing.dataTransferState = { ...existing.dataTransferState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    // Prefer database names for readability; connection ids only as fallback.
+    const paired = [config.sourceDatabase || config.sourceConnectionId, config.targetDatabase || config.targetConnectionId].filter(Boolean).join(" → ");
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("transfer.title")} ${paired}`.trim(),
+      connectionId: config.sourceConnectionId,
+      database: config.sourceDatabase,
+      schema: config.sourceSchema || undefined,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "data-transfer",
+      dataTransferState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openFieldLineage(state: FieldLineageTabState) {
+    const { config } = state;
+    const matchesTarget = (tab: QueryTab) => {
+      if (tab.mode !== "field-lineage") return false;
+      const cfg = tab.fieldLineageState?.config;
+      return !!cfg && cfg.connectionId === config.connectionId && cfg.database === config.database && (cfg.schema || "") === (config.schema || "") && cfg.table === config.table && cfg.column === config.column;
+    };
+    const existing = tabs.value.find(matchesTarget);
+    if (existing) {
+      if (existing.fieldLineageState) existing.fieldLineageState = { ...existing.fieldLineageState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const label = [config.schema ? `${config.schema}.${config.table}` : config.table, config.column].join(".");
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("lineage.title")} ${label}`.trim(),
+      connectionId: config.connectionId,
+      database: config.database,
+      schema: config.schema || undefined,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "field-lineage",
+      fieldLineageState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openDataDictionary(state: DataDictionaryTabState) {
+    const { config } = state;
+    const matchesScope = (tab: QueryTab) => {
+      if (tab.mode !== "data-dictionary") return false;
+      const cfg = tab.dataDictionaryState?.config;
+      return !!cfg && cfg.connectionId === config.connectionId && (cfg.database || "") === (config.database || "") && (cfg.schema || "") === (config.schema || "");
+    };
+    const existing = tabs.value.find(matchesScope);
+    if (existing) {
+      if (existing.dataDictionaryState) existing.dataDictionaryState = { ...existing.dataDictionaryState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const scope = [config.database, config.schema].filter(Boolean).join(" / ");
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("dataDictionary.title")} ${scope}`.trim(),
+      connectionId: config.connectionId,
+      database: config.database ?? "",
+      schema: config.schema || undefined,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "data-dictionary",
+      dataDictionaryState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openDatabaseDocs(state: DatabaseDocsTabState) {
+    const { config } = state;
+    const matchesScope = (tab: QueryTab) => {
+      if (tab.mode !== "database-docs") return false;
+      const cfg = tab.databaseDocsState?.config;
+      return !!cfg && cfg.connectionId === config.connectionId && cfg.database === config.database && (cfg.schema || "") === (config.schema || "");
+    };
+    const existing = tabs.value.find(matchesScope);
+    if (existing) {
+      if (existing.databaseDocsState) existing.databaseDocsState = { ...existing.databaseDocsState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const scope = [config.database, config.schema].filter(Boolean).join(" / ");
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("docs.title")} ${scope}`.trim(),
+      connectionId: config.connectionId,
+      database: config.database,
+      schema: config.schema || undefined,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "database-docs",
+      databaseDocsState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openDatabaseExport(state: DatabaseExportTabState) {
+    const { config } = state;
+    const matchesScope = (tab: QueryTab) => {
+      if (tab.mode !== "database-export") return false;
+      const cfg = tab.databaseExportState?.config;
+      return !!cfg && cfg.connectionId === config.connectionId && cfg.database === config.database;
+    };
+    const existing = tabs.value.find(matchesScope);
+    if (existing) {
+      if (existing.databaseExportState) existing.databaseExportState = { ...existing.databaseExportState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const scope = config.exportAllDatabases ? `${config.connectionId} *` : config.database || config.connectionId;
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("databaseExport.title")} ${scope}`.trim(),
+      connectionId: config.connectionId,
+      database: config.database,
+      schema: config.schema || undefined,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "database-export",
+      databaseExportState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openDataGenerate(state: DataGenerateTabState) {
+    const { config } = state;
+    const matchesTarget = (tab: QueryTab) => {
+      if (tab.mode !== "data-generate") return false;
+      const cfg = tab.dataGenerateState?.config;
+      return !!cfg && cfg.connectionId === config.connectionId && cfg.database === config.database && (cfg.schema || "") === (config.schema || "") && (cfg.table || "") === (config.table || "");
+    };
+    const existing = tabs.value.find(matchesTarget);
+    if (existing) {
+      if (existing.dataGenerateState) existing.dataGenerateState = { ...existing.dataGenerateState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const label = [config.schema ? `${config.schema}.${config.table ?? ""}` : (config.table ?? ""), config.database].filter(Boolean).join(" · ");
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("dataGenerate.title")} ${label}`.trim(),
+      connectionId: config.connectionId,
+      database: config.database,
+      schema: config.schema || undefined,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "data-generate",
+      dataGenerateState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openMongoImport(state: MongoImportTabState) {
+    const { config } = state;
+    const matchesTarget = (tab: QueryTab) => {
+      if (tab.mode !== "mongo-import") return false;
+      const cfg = tab.mongoImportState?.config;
+      return !!cfg && cfg.connectionId === config.connectionId && cfg.database === config.database && cfg.collection === config.collection;
+    };
+    const existing = tabs.value.find(matchesTarget);
+    if (existing) {
+      if (existing.mongoImportState) existing.mongoImportState = { ...existing.mongoImportState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("mongo.import.title")} ${config.database}.${config.collection}`.trim(),
+      connectionId: config.connectionId,
+      database: config.database,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mongo-import",
+      mongoImportState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openMongoDump(state: MongoDumpTabState) {
+    const { config } = state;
+    const matchesTarget = (tab: QueryTab) => {
+      if (tab.mode !== "mongo-dump") return false;
+      const cfg = tab.mongoDumpState?.config;
+      return !!cfg && cfg.connectionId === config.connectionId && cfg.database === config.database && cfg.mode === config.mode;
+    };
+    const existing = tabs.value.find(matchesTarget);
+    if (existing) {
+      if (existing.mongoDumpState) existing.mongoDumpState = { ...existing.mongoDumpState, ...state };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t(config.mode === "restore" ? "mongoDump.restoreTitle" : "mongoDump.dumpTitle")} ${config.database}`.trim(),
+      connectionId: config.connectionId,
+      database: config.database,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mongo-dump",
+      mongoDumpState: state,
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openSchemaDiagram(state: SchemaDiagramTabState) {
+    const { config } = state;
+    const matchesScope = (tab: QueryTab) => {
+      if (tab.mode !== "schema-diagram") return false;
+      const cfg = tab.schemaDiagramState?.config;
+      return !!cfg && cfg.connectionId === config.connectionId && cfg.database === config.database && (cfg.schema || "") === (config.schema || "");
+    };
+    const existing = tabs.value.find(matchesScope);
+    if (existing) {
+      if (existing.schemaDiagramState) existing.schemaDiagramState = { ...existing.schemaDiagramState, config };
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    // The tab id doubles as the diagram store scope: each diagram owns isolated
+    // nodes/edges/layers state (see lib/diagram/diagram-scope).
+    const id = uuid();
+    const scope = [config.database, config.schema].filter(Boolean).join(" / ");
+    const tab: QueryTab = {
+      id,
+      title: `${i18n.global.t("diagram.title")} ${scope}`.trim(),
+      connectionId: config.connectionId,
+      database: config.database,
+      schema: config.schema || undefined,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "schema-diagram",
+      schemaDiagramState: { config, scopeId: id },
+    };
+    return registerOpenTab(tab);
+  }
+
+  function updateSchemaDiagramState(id: string, state: SchemaDiagramTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "schema-diagram") return;
+    tab.schemaDiagramState = state;
+  }
+
   function openDatabaseBrowser(connectionId: string) {
     const existing = tabs.value.find((tab) => tab.mode === "databases" && tab.connectionId === connectionId);
     if (existing) {
@@ -4753,6 +5148,15 @@ export const useQueryStore = defineStore("query", () => {
     beginClosingBrowserState(id);
     clearDataGridStructuredFilterStatesForTab(id);
     clearDataGridSearchStatesForTab(id);
+    if (tabs.value[idx].mode === "data-compare" && tabs.value[idx].txnSessionId) {
+      useToast().toast(i18n.global.t("dataCompare.transactionRolledBackOnClose"));
+    }
+    // A diagram tab owns a scoped store domain (nodes/edges/layers); closing it
+    // must release the stores or the diagram state leaks in Pinia.
+    if (tabs.value[idx].mode === "schema-diagram" && tabs.value[idx].schemaDiagramState?.scopeId) {
+      const activePinia = getActivePinia();
+      if (activePinia) disposeDiagramScope(tabs.value[idx].schemaDiagramState.scopeId, activePinia);
+    }
     if (tabs.value[idx].txnSessionId) void rollbackTransaction(id);
     if (tabs.value[idx].isExecuting) void cancelTabExecution(id);
     if (tabs.value[idx].isExplaining) void cancelTabExplain(id);
@@ -5919,6 +6323,66 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.mode !== "database-search") return;
     tab.databaseSearchState = state;
+  }
+
+  function updateDataCompareState(id: string, state: DataCompareTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "data-compare") return;
+    tab.dataCompareState = state;
+  }
+
+  function updateSchemaDiffState(id: string, state: SchemaDiffTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "schema-diff") return;
+    tab.schemaDiffState = state;
+  }
+
+  function updateDataTransferState(id: string, state: TransferTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "data-transfer") return;
+    tab.dataTransferState = state;
+  }
+
+  function updateFieldLineageState(id: string, state: FieldLineageTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "field-lineage") return;
+    tab.fieldLineageState = state;
+  }
+
+  function updateDataDictionaryState(id: string, state: DataDictionaryTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "data-dictionary") return;
+    tab.dataDictionaryState = state;
+  }
+
+  function updateDatabaseDocsState(id: string, state: DatabaseDocsTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "database-docs") return;
+    tab.databaseDocsState = state;
+  }
+
+  function updateDatabaseExportState(id: string, state: DatabaseExportTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "database-export") return;
+    tab.databaseExportState = state;
+  }
+
+  function updateDataGenerateState(id: string, state: DataGenerateTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "data-generate") return;
+    tab.dataGenerateState = state;
+  }
+
+  function updateMongoImportState(id: string, state: MongoImportTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "mongo-import") return;
+    tab.mongoImportState = state;
+  }
+
+  function updateMongoDumpState(id: string, state: MongoDumpTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "mongo-dump") return;
+    tab.mongoDumpState = state;
   }
 
   function updateNacosConfigEditorViewport(connectionId: string, namespace: string, viewport: NacosConfigEditorViewport) {
@@ -10636,6 +11100,17 @@ export const useQueryStore = defineStore("query", () => {
     updateObjectBrowserSearch,
     updateObjectBrowserFilter,
     updateDatabaseSearchState,
+    updateDataCompareState,
+    updateSchemaDiffState,
+    updateDataTransferState,
+    updateFieldLineageState,
+    updateDataDictionaryState,
+    updateDatabaseDocsState,
+    updateDatabaseExportState,
+    updateDataGenerateState,
+    updateMongoImportState,
+    updateMongoDumpState,
+    updateSchemaDiagramState,
     updateNacosConfigEditorViewport,
     setAutoCommit,
     markManualTransactionDirty,
@@ -10646,6 +11121,17 @@ export const useQueryStore = defineStore("query", () => {
     setTabTitleSuffix,
     openDatabaseBrowser,
     openDatabaseSearch,
+    openDataCompare,
+    openSchemaDiff,
+    openDataTransfer,
+    openFieldLineage,
+    openDataDictionary,
+    openDatabaseDocs,
+    openDatabaseExport,
+    openDataGenerate,
+    openMongoImport,
+    openMongoDump,
+    openSchemaDiagram,
     openDriverProfileWorkspace,
     openObjectBrowser,
     openMongoGridFs,

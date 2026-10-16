@@ -69,6 +69,28 @@ export interface SavedOpenTab {
   structureTableName?: string;
   structureDraft?: QueryTab["structureDraft"];
   databaseSearchState?: QueryTab["databaseSearchState"];
+  /** Config only: compare results and sync plans stay in memory (design D3). */
+  dataCompareState?: { config: NonNullable<QueryTab["dataCompareState"]>["config"] };
+  /** Config only: the compare session id and deploy-review draft stay in memory. */
+  schemaDiffState?: { config: NonNullable<QueryTab["schemaDiffState"]>["config"] };
+  /** Config + task id: the task id is the backend-task reattach key for the resident progress face. */
+  dataTransferState?: QueryTab["dataTransferState"];
+  /** Config only: the analysis session id stays in memory. */
+  fieldLineageState?: { config: NonNullable<QueryTab["fieldLineageState"]>["config"] };
+  /** Config only: the wizard profile/step/snapshot stay in memory. */
+  dataDictionaryState?: { config: NonNullable<QueryTab["dataDictionaryState"]>["config"] };
+  /** Config only: the docs session is keyed by config and re-attached on restore. */
+  databaseDocsState?: { config: NonNullable<QueryTab["databaseDocsState"]>["config"] };
+  /** Config + task keys: exportId re-attaches the backend export's live progress after reload. */
+  databaseExportState?: QueryTab["databaseExportState"];
+  /** Config only: the wizard profile/step/session stay in memory. */
+  dataGenerateState?: { config: NonNullable<QueryTab["dataGenerateState"]>["config"] };
+  /** Config only: the Mongo import task registry re-attaches by taskId in memory. */
+  mongoImportState?: { config: NonNullable<QueryTab["mongoImportState"]>["config"] };
+  /** Config only: the Mongo dump task registry re-attaches by taskId in memory. */
+  mongoDumpState?: { config: NonNullable<QueryTab["mongoDumpState"]>["config"] };
+  /** Config only: the diagram graph state lives in a scoped store keyed by the tab id. */
+  schemaDiagramState?: { config: NonNullable<QueryTab["schemaDiagramState"]>["config"] };
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
   sourceView?: boolean;
@@ -219,6 +241,17 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
     ...(tab.structureDraft ? { structureDraft: JSON.parse(JSON.stringify(tab.structureDraft)) } : {}),
     ...(tab.databaseSearchState ? { databaseSearchState: tab.databaseSearchState } : {}),
+    ...(tab.dataCompareState ? { dataCompareState: { config: tab.dataCompareState.config } } : {}),
+    ...(tab.schemaDiffState ? { schemaDiffState: { config: tab.schemaDiffState.config } } : {}),
+    ...(tab.dataTransferState ? { dataTransferState: tab.dataTransferState } : {}),
+    ...(tab.fieldLineageState ? { fieldLineageState: { config: tab.fieldLineageState.config } } : {}),
+    ...(tab.dataDictionaryState ? { dataDictionaryState: { config: tab.dataDictionaryState.config } } : {}),
+    ...(tab.databaseDocsState ? { databaseDocsState: { config: tab.databaseDocsState.config } } : {}),
+    ...(tab.databaseExportState ? { databaseExportState: tab.databaseExportState } : {}),
+    ...(tab.dataGenerateState ? { dataGenerateState: { config: tab.dataGenerateState.config } } : {}),
+    ...(tab.mongoImportState ? { mongoImportState: { config: tab.mongoImportState.config } } : {}),
+    ...(tab.mongoDumpState ? { mongoDumpState: { config: tab.mongoDumpState.config } } : {}),
+    ...(tab.schemaDiagramState ? { schemaDiagramState: { config: tab.schemaDiagramState.config } } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
     ...(tab.sourceView ? { sourceView: true } : {}),

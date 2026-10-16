@@ -2,7 +2,7 @@
 import { ref, reactive, computed, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { Plus, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, Edit3, Check, X, CheckSquare, Square, Lock, Unlock } from "@lucide/vue";
-import { useLayerStore } from "@/lib/diagram/layer-store";
+import { useScopedLayerStore } from "@/lib/diagram/diagram-scope";
 import type { DiagramTable } from "@/lib/diagram/erDiagram";
 import { diagramTableId, filterAssignableDiagramTables } from "@/lib/diagram/erDiagram";
 import type { DiagramLayer, LayerLayoutMode } from "@/types/diagram";
@@ -23,7 +23,7 @@ const emit = defineEmits<{
   (e: "delete-table", tableName: string): void;
 }>();
 
-const store = useLayerStore();
+const store = useScopedLayerStore();
 const { toast } = useToast();
 const { t } = useI18n();
 

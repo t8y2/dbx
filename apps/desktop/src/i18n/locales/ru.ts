@@ -8878,6 +8878,10 @@ export default withEnglishFallback({
     truncatedHint: "Таблицы, в которых строк больше, чем может прочитать одно сравнение, сравнены только по первым строкам, поэтому добавленные, изменённые и удалённые строки после этого не обнаруживаются. Сузьте диапазон фильтром и сравнивайте по частям.",
     truncatedTable: "{table}: строк в источнике {source}, в приёмнике {target}; сравнены только первые {budget} строк",
     truncatedBadge: "Сравнены только первые {budget} строк",
+    openInTab: "Открыть во вкладке",
+    convertToDialog: "Преобразовать в диалог",
+    transactionActiveHint: "Выполняется ручная транзакция. Сначала зафиксируйте или откатите её.",
+    transactionRolledBackOnClose: "Вкладка закрыта; незавершённая транзакция была отменена",
   },
   settings: {
     historyRetentionLimit: "Хранение истории запросов",
@@ -12647,6 +12651,11 @@ export default withEnglishFallback({
     checking: "Проверка состояния защиты локальных данных…",
     authFailed: "Не удалось проверить аутентификацию DBX.",
     retry: "Повторить",
+  },
+  workspace: {
+    openInTab: "Открыть во вкладке",
+    convertToDialog: "Преобразовать в диалог",
+    runStateLockedHint: "Операция ещё выполняется. Завершите или отмените её перед преобразованием.",
   },
   starrocksStatus: {
     sql: "SQL задачи",

@@ -53,7 +53,7 @@ test("toVueFlowNodes filters tables on hidden layers", () => {
     users: { x: 10, y: 10 },
     orders: { x: 20, y: 20 },
     orphan: { x: 30, y: 30 },
-  });
+  }, false, store.layers);
   assert.deepEqual(nodes.map((n) => n.id).sort(), ["orders", "orphan"]);
 });
 
@@ -105,6 +105,6 @@ test("toVueFlowEdges filters when either endpoint layer is hidden", () => {
     },
   ];
 
-  const edges = toVueFlowEdges(relationships);
+  const edges = toVueFlowEdges(relationships, undefined, undefined, undefined, undefined, store.layers);
   assert.deepEqual(edges.map((e) => e.id), ["e2"]);
 });

@@ -7423,6 +7423,15 @@ export default withEnglishFallback({
     truncatedHint: "한 번의 비교로 읽을 수 있는 행 수를 초과한 테이블은 앞부분만 비교했기 때문에 그 이후의 추가·수정·삭제는 감지되지 않습니다. 필터로 범위를 좁혀 나누어 비교하세요.",
     truncatedTable: "{table}: 원본 {source}행, 대상 {target}행, 앞 {budget}행만 비교",
     truncatedBadge: "앞 {budget}행만 비교",
+    openInTab: "탭에서 열기",
+    convertToDialog: "대화상자로 변환",
+    transactionActiveHint: "수동 트랜잭션이 진행 중입니다. 먼저 커밋하거나 롤백하세요.",
+    transactionRolledBackOnClose: "탭이 닫혔습니다. 커밋되지 않은 트랜잭션이 롤백되었습니다.",
+  },
+  workspace: {
+    openInTab: "탭에서 열기",
+    convertToDialog: "대화상자로 변환",
+    runStateLockedHint: "작업이 아직 실행 중입니다. 변환하기 전에 완료하거나 취소하세요.",
   },
   settings: {
     historyRetentionLimit: "쿼리 기록 보관 개수",

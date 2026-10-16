@@ -7563,6 +7563,15 @@ export default withEnglishFallback({
     truncatedHint: "Tabelas com mais linhas do que uma única comparação consegue ler foram comparadas apenas nas primeiras linhas, então linhas adicionadas, modificadas ou excluídas depois disso não são detectadas. Restrinja o intervalo com um filtro e compare em lotes.",
     truncatedTable: "{table}: {source} linhas na origem, {target} no destino; apenas as primeiras {budget} linhas foram comparadas",
     truncatedBadge: "Apenas as primeiras {budget} linhas comparadas",
+    openInTab: "Abrir em aba",
+    convertToDialog: "Converter em diálogo",
+    transactionActiveHint: "Uma transação manual está ativa. Confirme ou reverta primeiro.",
+    transactionRolledBackOnClose: "Aba fechada; a transação pendente foi revertida",
+  },
+  workspace: {
+    openInTab: "Abrir em aba",
+    convertToDialog: "Converter em diálogo",
+    runStateLockedHint: "Uma operação ainda está em execução. Conclua ou cancele antes de converter.",
   },
   settings: {
     historyRetentionLimit: "Limite do histórico de consultas",

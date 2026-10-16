@@ -7592,6 +7592,15 @@ export default withEnglishFallback({
     truncatedHint: "1 回の比較で読み込める行数を超えたテーブルは先頭の行だけを比較しているため、それ以降の追加・変更・削除は検出されません。フィルターで範囲を絞り、分割して比較してください。",
     truncatedTable: "{table}：ソース {source} 行、ターゲット {target} 行、先頭 {budget} 行のみ比較",
     truncatedBadge: "先頭 {budget} 行のみ比較",
+    openInTab: "タブで開く",
+    convertToDialog: "ダイアログに変換",
+    transactionActiveHint: "手動トランザクションが進行中です。先にコミットまたはロールバックしてください。",
+    transactionRolledBackOnClose: "タブを閉じました。未コミットのトランザクションはロールバックされました",
+  },
+  workspace: {
+    openInTab: "タブで開く",
+    convertToDialog: "ダイアログに変換",
+    runStateLockedHint: "操作が実行中です。変換前に完了またはキャンセルしてください。",
   },
   settings: {
     historyRetentionLimit: "クエリ履歴の保持件数",

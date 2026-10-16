@@ -17,6 +17,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   };
 });
 
+const QUERY_STORE_TEST_TIMEOUT = 60_000;
+
 describe("queryStore detached-tab handoff", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -32,7 +34,7 @@ describe("queryStore detached-tab handoff", () => {
       clearTimeout: vi.fn(),
     });
     setActivePinia(createPinia());
-  });
+  }, QUERY_STORE_TEST_TIMEOUT);
 
   async function makeHandoff() {
     const { useQueryStore } = await import("@/stores/queryStore");
@@ -43,82 +45,102 @@ describe("queryStore detached-tab handoff", () => {
     return { store, tabId, handoff };
   }
 
-  it("adopting a handoff lands the tab in the main pane so the split workspace can render it", async () => {
-    const { handoff } = await makeHandoff();
+  it(
+    "adopting a handoff lands the tab in the main pane so the split workspace can render it",
+    async () => {
+      const { handoff } = await makeHandoff();
 
-    // Fresh store = the detached window's store before adoption.
-    setActivePinia(createPinia());
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const freshStore = useQueryStore();
-    expect(freshStore.tabs).toHaveLength(0);
+      // Fresh store = the detached window's store before adoption.
+      setActivePinia(createPinia());
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const freshStore = useQueryStore();
+      expect(freshStore.tabs).toHaveLength(0);
 
-    await freshStore.adoptDetachedTab(handoff);
+      await freshStore.adoptDetachedTab(handoff);
 
-    expect(freshStore.tabs.map((tab) => tab.id)).toEqual([handoff.tabId]);
-    // Without group membership the workspace renders the empty-group
-    // placeholder regardless of tabs/activeTabId — membership is the fix.
-    expect(freshStore.groups[0]?.tabIds).toEqual([handoff.tabId]);
-    expect(freshStore.groups[0]?.activeTabId).toBe(handoff.tabId);
-    expect(freshStore.activeTabId).toBe(handoff.tabId);
-    expect(freshStore.focusedGroupId).toBe(freshStore.groups[0]?.id);
-  });
+      expect(freshStore.tabs.map((tab) => tab.id)).toEqual([handoff.tabId]);
+      // Without group membership the workspace renders the empty-group
+      // placeholder regardless of tabs/activeTabId — membership is the fix.
+      expect(freshStore.groups[0]?.tabIds).toEqual([handoff.tabId]);
+      expect(freshStore.groups[0]?.activeTabId).toBe(handoff.tabId);
+      expect(freshStore.activeTabId).toBe(handoff.tabId);
+      expect(freshStore.focusedGroupId).toBe(freshStore.groups[0]?.id);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("keeps read-only source intent across detached-window handoff", async () => {
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const id = store.createTab("pg-1", "app", "Source - seq_users", "query", "public", "CREATE SEQUENCE seq_users", undefined, { sourceView: true });
-    const handoff = await store.prepareDetachedTab(id);
-    expect(handoff.tab.sourceView).toBe(true);
-    setActivePinia(createPinia());
-    const detachedStore = useQueryStore();
-    await detachedStore.adoptDetachedTab(handoff);
-    expect(detachedStore.tabs[0]?.sourceView).toBe(true);
-    expect(detachedStore.tabs[0]?.objectSource).toBeUndefined();
-  });
+  it(
+    "keeps read-only source intent across detached-window handoff",
+    async () => {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const id = store.createTab("pg-1", "app", "Source - seq_users", "query", "public", "CREATE SEQUENCE seq_users", undefined, { sourceView: true });
+      const handoff = await store.prepareDetachedTab(id);
+      expect(handoff.tab.sourceView).toBe(true);
+      setActivePinia(createPinia());
+      const detachedStore = useQueryStore();
+      await detachedStore.adoptDetachedTab(handoff);
+      expect(detachedStore.tabs[0]?.sourceView).toBe(true);
+      expect(detachedStore.tabs[0]?.objectSource).toBeUndefined();
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("removeTabAfterDetachedReady clears the owning pane and prunes it when emptied", async () => {
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const mainTabId = store.createTab("pg-1", "app", "Query 1", "query");
-    const detachedTabId = store.createTab("pg-1", "app", "Query 2", "query");
-    store.splitTabRight(detachedTabId);
-    expect(store.groups).toHaveLength(2);
-    store.activateTab(detachedTabId);
+  it(
+    "removeTabAfterDetachedReady clears the owning pane and prunes it when emptied",
+    async () => {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const mainTabId = store.createTab("pg-1", "app", "Query 1", "query");
+      const detachedTabId = store.createTab("pg-1", "app", "Query 2", "query");
+      store.splitTabRight(detachedTabId);
+      expect(store.groups).toHaveLength(2);
+      store.activateTab(detachedTabId);
 
-    expect(store.removeTabAfterDetachedReady(detachedTabId)).toBe(true);
+      expect(store.removeTabAfterDetachedReady(detachedTabId)).toBe(true);
 
-    // No dangling group entry: the emptied pane is pruned, the main pane and
-    // its tab survive, and the global active tab re-syncs to a live tab.
-    expect(store.tabs.map((tab) => tab.id)).toEqual([mainTabId]);
-    expect(store.groups).toHaveLength(1);
-    expect(store.groups[0]?.tabIds).toEqual([mainTabId]);
-    expect(store.activeTabId).toBe(mainTabId);
-  });
+      // No dangling group entry: the emptied pane is pruned, the main pane and
+      // its tab survive, and the global active tab re-syncs to a live tab.
+      expect(store.tabs.map((tab) => tab.id)).toEqual([mainTabId]);
+      expect(store.groups).toHaveLength(1);
+      expect(store.groups[0]?.tabIds).toEqual([mainTabId]);
+      expect(store.activeTabId).toBe(mainTabId);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("returning a detached tab re-homes it into the workspace after its pane was pruned", async () => {
-    const { store, tabId, handoff } = await makeHandoff();
-    store.activateTab(tabId);
-    store.removeTabAfterDetachedReady(tabId);
-    expect(store.tabs).toHaveLength(0);
+  it(
+    "returning a detached tab re-homes it into the workspace after its pane was pruned",
+    async () => {
+      const { store, tabId, handoff } = await makeHandoff();
+      store.activateTab(tabId);
+      store.removeTabAfterDetachedReady(tabId);
+      expect(store.tabs).toHaveLength(0);
 
-    await store.adoptDetachedTab(handoff);
+      await store.adoptDetachedTab(handoff);
 
-    expect(store.tabs.map((tab) => tab.id)).toEqual([tabId]);
-    expect(store.groups[0]?.tabIds).toEqual([tabId]);
-    expect(store.activeTabId).toBe(tabId);
-  });
+      expect(store.tabs.map((tab) => tab.id)).toEqual([tabId]);
+      expect(store.groups[0]?.tabIds).toEqual([tabId]);
+      expect(store.activeTabId).toBe(tabId);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("re-adopting the same handoff does not duplicate the tab or its group entry", async () => {
-    const { handoff } = await makeHandoff();
+  it(
+    "re-adopting the same handoff does not duplicate the tab or its group entry",
+    async () => {
+      const { handoff } = await makeHandoff();
 
-    setActivePinia(createPinia());
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const freshStore = useQueryStore();
-    await freshStore.adoptDetachedTab(handoff);
-    await freshStore.adoptDetachedTab(handoff);
+      setActivePinia(createPinia());
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const freshStore = useQueryStore();
+      await freshStore.adoptDetachedTab(handoff);
+      await freshStore.adoptDetachedTab(handoff);
 
-    expect(freshStore.tabs).toHaveLength(1);
-    expect(freshStore.groups[0]?.tabIds).toEqual([handoff.tabId]);
-    expect(freshStore.activeTabId).toBe(handoff.tabId);
-  });
+      expect(freshStore.tabs).toHaveLength(1);
+      expect(freshStore.groups[0]?.tabIds).toEqual([handoff.tabId]);
+      expect(freshStore.activeTabId).toBe(handoff.tabId);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 });

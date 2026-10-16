@@ -6,10 +6,29 @@ import { useToast } from "@/composables/useToast";
 import { rememberExportPassphrase } from "@/lib/backend/exportPassphraseSession";
 import { hasSidebarLayoutEntries } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
-import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/database";
+import type {
+  ConnectionConfig,
+  DataCompareTabState,
+  DataDictionaryTabState,
+  DataGenerateTabState,
+  DatabaseDocsTabState,
+  DatabaseExportTabState,
+  DatabaseType,
+  FieldLineageTabState,
+  MongoDumpTabState,
+  MongoImportTabState,
+  SchemaDiagramTabState,
+  SchemaDiffTabState,
+  SidebarLayout,
+  TransferTabState,
+} from "@/types/database";
 
 const showTransferDialog = ref(false);
 const transferTaskId = ref<string | null>(null);
+/** Snapshot injected by a converted data-transfer tab; consumed once the dialog restores it. */
+const transferInitialState = ref<TransferTabState>();
+/** Whether the data-transfer dialog singleton is busy submitting. */
+const transferDialogBusy = ref(false);
 const showSchemaDiffDialog = ref(false);
 const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
@@ -22,6 +41,8 @@ const showMongoDatabaseDumpDialog = ref(false);
 const mongoDatabaseDumpPrefillConnectionId = ref("");
 const mongoDatabaseDumpPrefillDatabase = ref("");
 const mongoDatabaseDumpMode = ref<"dump" | "restore">("dump");
+/** Snapshot injected by a converted mongo-dump tab; consumed once the dialog restores it. */
+const mongoDumpInitialState = ref<MongoDumpTabState>();
 const showDamengDumpDialog = ref(false);
 const damengDumpPrefillConnectionId = ref("");
 const damengDumpPrefillDatabase = ref("");
@@ -62,11 +83,19 @@ const schemaDiffPrefillSchema = ref("");
 const schemaDiffPrefillSelectedRoutines = ref<string[] | undefined>(undefined);
 const schemaDiffPrefillResultTab = ref<"tables" | "routines" | "">("");
 const schemaDiffSessionId = ref<string | null>(null);
+/** Snapshot injected by a converted schema-diff tab; consumed once the dialog restores it. */
+const schemaDiffInitialState = ref<SchemaDiffTabState>();
+/** Whether the schema-diff dialog singleton is busy (compare loading or deploy executing). */
+const schemaDiffDialogBusy = ref(false);
 const dataComparePrefillConnectionId = ref("");
 const dataComparePrefillDatabase = ref("");
 const dataComparePrefillSchema = ref("");
 const dataComparePrefillTable = ref("");
 const dataCompareSessionId = ref<string | null>(null);
+/** Snapshot injected by a converted data-compare tab; consumed once the dialog restores it. */
+const dataCompareInitialState = ref<DataCompareTabState>();
+/** Whether the data-compare dialog singleton currently holds an active transaction (blocks tab -> dialog conversion). */
+const dataCompareDialogTransactionActive = ref(false);
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
 const sqlFilePrefillSchema = ref<string>();
@@ -77,13 +106,19 @@ const diagramPrefillDatabase = ref("");
 const diagramPrefillSchema = ref("");
 const diagramFocusTableName = ref("");
 const diagramFocusTableNames = ref<string[]>([]);
+/** Snapshot injected by a converted schema-diagram tab; consumed once the dialog restores it. */
+const diagramInitialState = ref<SchemaDiagramTabState>();
 const docsPrefillConnectionId = ref("");
 const docsPrefillDatabase = ref("");
 const docsPrefillSchema = ref("");
+/** Snapshot injected by a converted database-docs tab; consumed once the dialog restores it. */
+const docsInitialState = ref<DatabaseDocsTabState>();
 const dataDictionaryPrefillConnectionId = ref("");
 const dataDictionaryPrefillDatabase = ref("");
 const dataDictionaryPrefillSchema = ref("");
 const dataDictionaryPrefillTableNames = ref<string[]>([]);
+/** Snapshot injected by a converted data-dictionary tab; consumed once the dialog restores it. */
+const dataDictionaryInitialState = ref<DataDictionaryTabState>();
 const tableImportPrefillConnectionId = ref("");
 const tableImportPrefillDatabase = ref("");
 const tableImportPrefillSchema = ref("");
@@ -91,16 +126,22 @@ const tableImportPrefillTable = ref("");
 const mongoImportPrefillConnectionId = ref("");
 const mongoImportPrefillDatabase = ref("");
 const mongoImportPrefillCollection = ref("");
+/** Snapshot injected by a converted mongo-import tab; consumed once the dialog restores it. */
+const mongoImportInitialState = ref<MongoImportTabState>();
 const tableDataGeneratePrefillConnectionId = ref("");
 const tableDataGeneratePrefillDatabase = ref("");
 const tableDataGeneratePrefillSchema = ref("");
 const tableDataGeneratePrefillTable = ref("");
+/** Snapshot injected by a converted data-generate tab; consumed once the dialog restores it. */
+const tableDataGenerateInitialState = ref<DataGenerateTabState>();
 const lineagePrefillConnectionId = ref("");
 const lineagePrefillDatabaseType = ref<DatabaseType>();
 const lineagePrefillDatabase = ref("");
 const lineagePrefillSchema = ref("");
 const lineagePrefillTable = ref("");
 const lineagePrefillColumn = ref("");
+/** Snapshot injected by a converted field-lineage tab; consumed once the dialog restores it. */
+const lineageInitialState = ref<FieldLineageTabState>();
 const databaseSearchPrefillConnectionId = ref("");
 const databaseSearchPrefillDatabase = ref("");
 const databaseSearchPrefillSchema = ref("");
@@ -110,6 +151,8 @@ const databaseExportPrefillSchema = ref("");
 const databaseExportPrefillTable = ref("");
 const databaseExportPrefillTables = ref<string[]>([]);
 const databaseExportAllDatabases = ref(false);
+/** Snapshot injected by a converted database-export tab; consumed once the dialog restores it. */
+const databaseExportInitialState = ref<DatabaseExportTabState>();
 
 let watchersRegistered = false;
 
@@ -129,14 +172,191 @@ export function openSchemaDiffSession(sessionId: string): void {
   showSchemaDiffDialog.value = true;
 }
 
+/** Converts a field-lineage tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openFieldLineageDialogWithState(state: FieldLineageTabState): void {
+  lineageInitialState.value = state;
+  lineagePrefillConnectionId.value = "";
+  lineagePrefillDatabase.value = "";
+  lineagePrefillSchema.value = "";
+  lineagePrefillTable.value = "";
+  lineagePrefillColumn.value = "";
+  lineagePrefillDatabaseType.value = undefined;
+  showFieldLineageDialog.value = true;
+}
+
+export function clearFieldLineageInitialState(): void {
+  lineageInitialState.value = undefined;
+}
+
+/** Converts a data-dictionary tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openDataDictionaryDialogWithState(state: DataDictionaryTabState): void {
+  dataDictionaryInitialState.value = state;
+  dataDictionaryPrefillConnectionId.value = "";
+  dataDictionaryPrefillDatabase.value = "";
+  dataDictionaryPrefillSchema.value = "";
+  dataDictionaryPrefillTableNames.value = [];
+  showDataDictionaryDialog.value = true;
+}
+
+export function clearDataDictionaryInitialState(): void {
+  dataDictionaryInitialState.value = undefined;
+}
+
+/** Converts a database-docs tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openDatabaseDocsDialogWithState(state: DatabaseDocsTabState): void {
+  docsInitialState.value = state;
+  docsPrefillConnectionId.value = "";
+  docsPrefillDatabase.value = "";
+  docsPrefillSchema.value = "";
+  showDocsDialog.value = true;
+}
+
+export function clearDatabaseDocsInitialState(): void {
+  docsInitialState.value = undefined;
+}
+
+/** Converts a database-export tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openDatabaseExportDialogWithState(state: DatabaseExportTabState): void {
+  databaseExportInitialState.value = state;
+  databaseExportPrefillConnectionId.value = "";
+  databaseExportPrefillDatabase.value = "";
+  databaseExportPrefillSchema.value = "";
+  databaseExportPrefillTable.value = "";
+  databaseExportPrefillTables.value = [];
+  databaseExportAllDatabases.value = false;
+  showDatabaseExportDialog.value = true;
+}
+
+export function clearDatabaseExportInitialState(): void {
+  databaseExportInitialState.value = undefined;
+}
+
+/** Converts a data-generate tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openDataGenerateDialogWithState(state: DataGenerateTabState): void {
+  tableDataGenerateInitialState.value = state;
+  tableDataGenerateSessionId.value = null;
+  tableDataGeneratePrefillConnectionId.value = "";
+  tableDataGeneratePrefillDatabase.value = "";
+  tableDataGeneratePrefillSchema.value = "";
+  tableDataGeneratePrefillTable.value = "";
+  showTableDataGenerateDialog.value = true;
+}
+
+export function clearDataGenerateInitialState(): void {
+  tableDataGenerateInitialState.value = undefined;
+}
+
+/** Converts a mongo-import tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openMongoImportDialogWithState(state: MongoImportTabState): void {
+  mongoImportInitialState.value = state;
+  mongoImportPrefillConnectionId.value = "";
+  mongoImportPrefillDatabase.value = "";
+  mongoImportPrefillCollection.value = "";
+  showMongoImportDialog.value = true;
+}
+
+export function clearMongoImportInitialState(): void {
+  mongoImportInitialState.value = undefined;
+}
+
+/** Converts a mongo-dump tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openMongoDumpDialogWithState(state: MongoDumpTabState): void {
+  mongoDumpInitialState.value = state;
+  mongoDatabaseDumpPrefillConnectionId.value = "";
+  mongoDatabaseDumpPrefillDatabase.value = "";
+  mongoDatabaseDumpMode.value = state.config.mode;
+  showMongoDatabaseDumpDialog.value = true;
+}
+
+export function clearMongoDumpInitialState(): void {
+  mongoDumpInitialState.value = undefined;
+}
+
+/** Converts a schema-diagram tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openSchemaDiagramDialogWithState(state: SchemaDiagramTabState): void {
+  diagramInitialState.value = state;
+  diagramPrefillConnectionId.value = "";
+  diagramPrefillDatabase.value = "";
+  diagramPrefillSchema.value = "";
+  diagramFocusTableName.value = "";
+  diagramFocusTableNames.value = [];
+  showDiagramDialog.value = true;
+}
+
+export function clearDiagramInitialState(): void {
+  diagramInitialState.value = undefined;
+}
+
+/** Converts a schema-diff tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openSchemaDiffDialogWithState(state: SchemaDiffTabState): void {
+  schemaDiffInitialState.value = state;
+  schemaDiffSessionId.value = null;
+  schemaDiffPrefillConnectionId.value = "";
+  schemaDiffPrefillDatabase.value = "";
+  schemaDiffPrefillSchema.value = "";
+  schemaDiffPrefillSelectedRoutines.value = undefined;
+  schemaDiffPrefillResultTab.value = "";
+  showSchemaDiffDialog.value = true;
+}
+
+export function clearSchemaDiffInitialState(): void {
+  schemaDiffInitialState.value = undefined;
+}
+
+export function setSchemaDiffDialogBusy(busy: boolean): void {
+  schemaDiffDialogBusy.value = busy;
+}
+
 export function openDataCompareSession(sessionId: string): void {
   dataCompareSessionId.value = sessionId;
   showDataCompareDialog.value = true;
 }
 
+/** Converts a data-compare tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openDataCompareDialogWithState(state: DataCompareTabState): void {
+  dataCompareInitialState.value = state;
+  dataCompareSessionId.value = null;
+  dataComparePrefillConnectionId.value = "";
+  dataComparePrefillDatabase.value = "";
+  dataComparePrefillSchema.value = "";
+  dataComparePrefillTable.value = "";
+  showDataCompareDialog.value = true;
+}
+
+export function clearDataCompareInitialState(): void {
+  dataCompareInitialState.value = undefined;
+}
+
+export function setDataCompareDialogTransactionActive(active: boolean): void {
+  dataCompareDialogTransactionActive.value = active;
+}
+
 export function openDataTransferTask(taskId: string): void {
   transferTaskId.value = taskId;
   showTransferDialog.value = true;
+}
+
+/** Converts a data-transfer tab back into the dialog: injects the snapshot and opens the singleton dialog. */
+export function openDataTransferDialogWithState(state: TransferTabState): void {
+  transferInitialState.value = state;
+  transferTaskId.value = null;
+  transferPrefillConnectionId.value = "";
+  transferPrefillDatabase.value = "";
+  transferPrefillCatalog.value = "";
+  transferPrefillSchema.value = "";
+  transferPrefillTables.value = [];
+  transferPrefillTargetConnectionId.value = "";
+  transferPrefillTargetDatabase.value = "";
+  transferPrefillTargetSchema.value = "";
+  showTransferDialog.value = true;
+}
+
+export function clearTransferInitialState(): void {
+  transferInitialState.value = undefined;
+}
+
+export function setDataTransferDialogBusy(busy: boolean): void {
+  transferDialogBusy.value = busy;
 }
 
 export function openDataGenerateSession(sessionId: string, target: { connectionId: string; database: string; schema?: string; tableName?: string }): void {
@@ -176,12 +396,19 @@ export function useDialogSources() {
       },
     );
 
-    watch(showTransferDialog, (open) => {
-      if (!open) {
-        transferTaskId.value = null;
-        clearTransferPrefill();
-      }
-    });
+    // Cleanup on close: sync flush so session/snapshot state is cleared before
+    // any dependent effect of the close (same reasoning as data-compare).
+    watch(
+      showTransferDialog,
+      (open) => {
+        if (!open) {
+          transferTaskId.value = null;
+          transferInitialState.value = undefined;
+          clearTransferPrefill();
+        }
+      },
+      { flush: "sync" },
+    );
 
     watch(
       () => connectionStore.schemaDiffSource,
@@ -214,13 +441,31 @@ export function useDialogSources() {
       },
     );
 
-    watch(showSchemaDiffDialog, (open) => {
-      if (!open) schemaDiffSessionId.value = null;
-    });
+    // Cleanup on close: sync flush so session/snapshot state is cleared before
+    // any dependent effect of the close (same reasoning as data-compare).
+    watch(
+      showSchemaDiffDialog,
+      (open) => {
+        if (!open) {
+          schemaDiffSessionId.value = null;
+          schemaDiffInitialState.value = undefined;
+        }
+      },
+      { flush: "sync" },
+    );
 
-    watch(showDataCompareDialog, (open) => {
-      if (!open) dataCompareSessionId.value = null;
-    });
+    // Cleanup on close: sync flush so session/snapshot state is cleared before
+    // any dependent effect of the close (also deterministic under test).
+    watch(
+      showDataCompareDialog,
+      (open) => {
+        if (!open) {
+          dataCompareSessionId.value = null;
+          dataCompareInitialState.value = undefined;
+        }
+      },
+      { flush: "sync" },
+    );
 
     watch(
       () => connectionStore.sqlFileSource,
@@ -360,9 +605,74 @@ export function useDialogSources() {
       },
     );
 
-    watch(showTableDataGenerateDialog, (open) => {
-      if (!open) tableDataGenerateSessionId.value = null;
-    });
+    // Cleanup on close: sync flush so the injected snapshot cannot leak into the next open.
+    watch(
+      showTableDataGenerateDialog,
+      (open) => {
+        if (!open) {
+          tableDataGenerateSessionId.value = null;
+          tableDataGenerateInitialState.value = undefined;
+        }
+      },
+      { flush: "sync" },
+    );
+
+    watch(
+      showMongoImportDialog,
+      (open) => {
+        if (!open) mongoImportInitialState.value = undefined;
+      },
+      { flush: "sync" },
+    );
+
+    watch(
+      showMongoDatabaseDumpDialog,
+      (open) => {
+        if (!open) mongoDumpInitialState.value = undefined;
+      },
+      { flush: "sync" },
+    );
+
+    watch(
+      showDiagramDialog,
+      (open) => {
+        if (!open) diagramInitialState.value = undefined;
+      },
+      { flush: "sync" },
+    );
+
+    // Cleanup on close: sync flush so the injected snapshot cannot leak into the next open.
+    watch(
+      showFieldLineageDialog,
+      (open) => {
+        if (!open) lineageInitialState.value = undefined;
+      },
+      { flush: "sync" },
+    );
+
+    watch(
+      showDataDictionaryDialog,
+      (open) => {
+        if (!open) dataDictionaryInitialState.value = undefined;
+      },
+      { flush: "sync" },
+    );
+
+    watch(
+      showDocsDialog,
+      (open) => {
+        if (!open) docsInitialState.value = undefined;
+      },
+      { flush: "sync" },
+    );
+
+    watch(
+      showDatabaseExportDialog,
+      (open) => {
+        if (!open) databaseExportInitialState.value = undefined;
+      },
+      { flush: "sync" },
+    );
 
     watch(
       () => connectionStore.fieldLineageSource,
@@ -607,6 +917,8 @@ export function useDialogSources() {
   return {
     showTransferDialog,
     transferTaskId,
+    transferInitialState,
+    transferDialogBusy,
     showSchemaDiffDialog,
     showDataCompareDialog,
     showSqlFileDialog,
@@ -617,6 +929,7 @@ export function useDialogSources() {
     showMongoImportDialog,
     showMongoDatabaseDumpDialog,
     mongoDatabaseDumpPrefillConnectionId,
+    mongoDumpInitialState,
     mongoDatabaseDumpPrefillDatabase,
     mongoDatabaseDumpMode,
     showDamengDumpDialog,
@@ -625,6 +938,7 @@ export function useDialogSources() {
     damengDumpMode,
     showTableDataGenerateDialog,
     tableDataGenerateSessionId,
+    tableDataGenerateInitialState,
     showFieldLineageDialog,
     showDatabaseSearchDialog,
     showDatabaseExportDialog,
@@ -655,11 +969,15 @@ export function useDialogSources() {
     schemaDiffPrefillSelectedRoutines,
     schemaDiffPrefillResultTab,
     schemaDiffSessionId,
+    schemaDiffInitialState,
+    schemaDiffDialogBusy,
     dataComparePrefillConnectionId,
     dataComparePrefillDatabase,
     dataComparePrefillSchema,
     dataComparePrefillTable,
     dataCompareSessionId,
+    dataCompareInitialState,
+    dataCompareDialogTransactionActive,
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
     sqlFilePrefillSchema,
@@ -670,6 +988,7 @@ export function useDialogSources() {
     diagramPrefillSchema,
     diagramFocusTableName,
     diagramFocusTableNames,
+    diagramInitialState,
     docsPrefillConnectionId,
     docsPrefillDatabase,
     docsPrefillSchema,
@@ -677,11 +996,14 @@ export function useDialogSources() {
     dataDictionaryPrefillDatabase,
     dataDictionaryPrefillSchema,
     dataDictionaryPrefillTableNames,
+    dataDictionaryInitialState,
+    docsInitialState,
     tableImportPrefillConnectionId,
     tableImportPrefillDatabase,
     tableImportPrefillSchema,
     tableImportPrefillTable,
     mongoImportPrefillConnectionId,
+    mongoImportInitialState,
     mongoImportPrefillDatabase,
     mongoImportPrefillCollection,
     tableDataGeneratePrefillConnectionId,
@@ -694,6 +1016,7 @@ export function useDialogSources() {
     lineagePrefillSchema,
     lineagePrefillTable,
     lineagePrefillColumn,
+    lineageInitialState,
     databaseSearchPrefillConnectionId,
     databaseSearchPrefillDatabase,
     databaseSearchPrefillSchema,
@@ -703,6 +1026,7 @@ export function useDialogSources() {
     databaseExportPrefillTable,
     databaseExportPrefillTables,
     databaseExportAllDatabases,
+    databaseExportInitialState,
     onExportClick,
     onExportConfirm,
     onRequestUnencryptedExport,

@@ -29,12 +29,12 @@ function functionBody(source: string, name: string): string {
 test("secondary write entrypoints use the shared production SQL guard", () => {
   const entrypoints = [
     {
-      path: "apps/desktop/src/components/diff/SchemaDiffDialog.vue",
-      executor: "api.executeScript",
+      path: "apps/desktop/src/components/diff/SchemaDiffPanel.vue",
+      executor: "api.executeScriptWith2pc",
       sourceKey: "production.sourceSchemaDiff",
     },
     {
-      path: "apps/desktop/src/components/diff/DataCompareDialog.vue",
+      path: "apps/desktop/src/components/diff/DataComparePanel.vue",
       executor: "api.executeBatch",
       sourceKey: "production.sourceDataCompare",
     },
@@ -69,7 +69,7 @@ test("secondary write entrypoints use the shared production SQL guard", () => {
       sourceKey: "production.sourceObjectBrowser",
     },
     {
-      path: "apps/desktop/src/components/generate/DataGenerateDialog.vue",
+      path: "apps/desktop/src/components/generate/DataGeneratePanel.vue",
       executor: "api.executeQuery",
       sourceKey: "production.sourceDataGenerate",
     },

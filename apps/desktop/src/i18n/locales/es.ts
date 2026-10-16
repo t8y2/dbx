@@ -7785,6 +7785,15 @@ export default withEnglishFallback({
     truncatedHint: "Las tablas con más filas de las que puede leer una sola comparación solo se compararon en sus primeras filas, por lo que las filas añadidas, modificadas o eliminadas a partir de ahí no se detectan. Acota el rango con un filtro y compara por lotes.",
     truncatedTable: "{table}: {source} filas de origen, {target} de destino; solo se compararon las primeras {budget} filas",
     truncatedBadge: "Solo se compararon las primeras {budget} filas",
+    openInTab: "Abrir en pestaña",
+    convertToDialog: "Convertir en diálogo",
+    transactionActiveHint: "Hay una transacción manual activa. Confírmala o reviértela primero.",
+    transactionRolledBackOnClose: "Pestaña cerrada; la transacción pendiente se revertió",
+  },
+  workspace: {
+    openInTab: "Abrir en pestaña",
+    convertToDialog: "Convertir en diálogo",
+    runStateLockedHint: "Hay una operación en curso. Termínala o cancélala antes de convertir.",
   },
   settings: {
     historyRetentionLimit: "Límite del historial de consultas",

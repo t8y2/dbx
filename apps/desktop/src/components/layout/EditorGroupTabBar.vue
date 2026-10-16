@@ -31,6 +31,7 @@ import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
+  AppWindow,
   ArrowDown,
   ArrowDownAZ,
   ArrowRight,
@@ -81,6 +82,19 @@ import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionContr
 import { EDITOR_TOOLBAR_ACTIONS } from "./editorToolbarActions";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import {
+  openDataCompareDialogWithState,
+  openDataDictionaryDialogWithState,
+  openDatabaseDocsDialogWithState,
+  openDatabaseExportDialogWithState,
+  openDataGenerateDialogWithState,
+  openDataTransferDialogWithState,
+  openFieldLineageDialogWithState,
+  openMongoDumpDialogWithState,
+  openMongoImportDialogWithState,
+  openSchemaDiagramDialogWithState,
+  openSchemaDiffDialogWithState,
+} from "@/composables/useDialogSources";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { EditorSettings } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
@@ -145,6 +159,63 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
+
+// Dialog <-> tab conversion on the tab pill itself: mirrors the dialog shells'
+// "open in tab" icon (left of their close button) so both directions of the
+// dual-form contract are reachable from the same affordance position.
+const DIALOG_BACK_TAB_MODES = new Set<QueryTab["mode"]>(["data-compare", "schema-diff", "data-transfer", "field-lineage", "data-dictionary", "database-docs", "database-export", "data-generate", "mongo-import", "mongo-dump", "schema-diagram"]);
+
+function isDialogBackTab(tab: QueryTab): boolean {
+  return DIALOG_BACK_TAB_MODES.has(tab.mode);
+}
+
+/** A pending manual transaction cannot travel in a snapshot (same rule as the panels). */
+function canConvertTabToDialog(tab: QueryTab): boolean {
+  if (tab.mode === "data-compare" && tab.txnSessionId) return false;
+  return true;
+}
+
+function convertTabToDialog(tab: QueryTab): void {
+  if (!isDialogBackTab(tab) || !canConvertTabToDialog(tab)) return;
+  switch (tab.mode) {
+    case "data-compare":
+      if (tab.dataCompareState) openDataCompareDialogWithState(tab.dataCompareState);
+      break;
+    case "schema-diff":
+      if (tab.schemaDiffState) openSchemaDiffDialogWithState(tab.schemaDiffState);
+      break;
+    case "data-transfer":
+      if (tab.dataTransferState) openDataTransferDialogWithState(tab.dataTransferState);
+      break;
+    case "field-lineage":
+      if (tab.fieldLineageState) openFieldLineageDialogWithState(tab.fieldLineageState);
+      break;
+    case "data-dictionary":
+      if (tab.dataDictionaryState) openDataDictionaryDialogWithState(tab.dataDictionaryState);
+      break;
+    case "database-docs":
+      if (tab.databaseDocsState) openDatabaseDocsDialogWithState(tab.databaseDocsState);
+      break;
+    case "database-export":
+      if (tab.databaseExportState) openDatabaseExportDialogWithState(tab.databaseExportState);
+      break;
+    case "data-generate":
+      if (tab.dataGenerateState) openDataGenerateDialogWithState(tab.dataGenerateState);
+      break;
+    case "mongo-import":
+      if (tab.mongoImportState) openMongoImportDialogWithState(tab.mongoImportState);
+      break;
+    case "mongo-dump":
+      if (tab.mongoDumpState) openMongoDumpDialogWithState(tab.mongoDumpState);
+      break;
+    case "schema-diagram":
+      // Only the config travels: the dialog owns its own diagram store scope.
+      if (tab.schemaDiagramState) openSchemaDiagramDialogWithState({ config: tab.schemaDiagramState.config });
+      break;
+  }
+  queryStore.closeTab(tab.id);
+}
+
 const toolbar = inject(EDITOR_TOOLBAR_ACTIONS, null);
 const canNewQuery = computed(() => toolbar?.canNewQuery.value ?? false);
 const { toast } = useToast();
@@ -2006,6 +2077,17 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                               @click.stop="queryStore.togglePinnedTab(entry.tab.id)"
                             >
                               <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
+                            </button>
+                            <button
+                              v-if="isDialogBackTab(entry.tab) && !isTabBarCollapsed"
+                              class="rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground shrink-0"
+                              :disabled="!canConvertTabToDialog(entry.tab)"
+                              :aria-label="t('workspace.convertToDialog')"
+                              :title="canConvertTabToDialog(entry.tab) ? t('workspace.convertToDialog') : t('workspace.runStateLockedHint')"
+                              @pointerdown.stop
+                              @click.stop="convertTabToDialog(entry.tab)"
+                            >
+                              <AppWindow class="h-3 w-3" />
                             </button>
                             <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
                               <X class="h-3 w-3" />

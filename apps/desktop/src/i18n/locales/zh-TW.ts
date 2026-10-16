@@ -6912,6 +6912,15 @@ export default withEnglishFallback({
     truncatedHint: "資料筆數超過單次比較上限的表只比較了前幾筆，超出部分的新增、修改與刪除不會被發現。建議加上篩選條件縮小範圍後分批比較。",
     truncatedTable: "{table}：來源 {source} 筆、目標 {target} 筆，僅比較前 {budget} 筆",
     truncatedBadge: "僅比較前 {budget} 筆",
+    openInTab: "在分頁中開啟",
+    convertToDialog: "轉為彈窗",
+    transactionActiveHint: "交易進行中，請先提交或回滾",
+    transactionRolledBackOnClose: "分頁已關閉，未提交的交易已回滾",
+  },
+  workspace: {
+    openInTab: "在分頁中開啟",
+    convertToDialog: "轉為彈窗",
+    runStateLockedHint: "目前操作尚未結束，請先完成或取消後再轉換。",
   },
   settings: {
     historyRetentionLimit: "查詢歷史保留筆數",

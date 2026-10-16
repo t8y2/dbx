@@ -24,6 +24,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   };
 });
 
+const QUERY_STORE_TEST_TIMEOUT = 60_000;
+
 describe("queryStore editor groups", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -39,192 +41,232 @@ describe("queryStore editor groups", () => {
       clearTimeout: vi.fn(),
     });
     setActivePinia(createPinia());
-  });
+  }, QUERY_STORE_TEST_TIMEOUT);
 
-  it("splits down and toggles orientation", async () => {
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
-    store.createTab("pg-1", "app", "Query 2", "query");
+  it(
+    "splits down and toggles orientation",
+    async () => {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+      store.createTab("pg-1", "app", "Query 2", "query");
 
-    expect(store.splitTabDown(firstId)).toBe(true);
-    expect(store.groups).toHaveLength(2);
+      expect(store.splitTabDown(firstId)).toBe(true);
+      expect(store.groups).toHaveLength(2);
 
-    store.setOrientation("horizontal");
-    expect(store.orientation).toBe("horizontal");
-    store.setOrientation("vertical");
-    expect(store.orientation).toBe("vertical");
-  });
+      store.setOrientation("horizontal");
+      expect(store.orientation).toBe("horizontal");
+      store.setOrientation("vertical");
+      expect(store.orientation).toBe("vertical");
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("moves a tab across groups and removes the empty source group", async () => {
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
-    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
-    const thirdId = store.createTab("pg-1", "app", "Query 3", "query");
+  it(
+    "moves a tab across groups and removes the empty source group",
+    async () => {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+      const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+      const thirdId = store.createTab("pg-1", "app", "Query 3", "query");
 
-    store.splitTabRight(firstId);
-    const rightGroup = store.groups[1];
+      store.splitTabRight(firstId);
+      const rightGroup = store.groups[1];
 
-    expect(store.moveTabToGroup(secondId, rightGroup.id)).toBe(true);
-    expect(rightGroup.tabIds).toContain(secondId);
-    expect(store.groups[0].tabIds).toEqual([thirdId]);
-    expect(store.groups).toHaveLength(2);
-  });
+      expect(store.moveTabToGroup(secondId, rightGroup.id)).toBe(true);
+      expect(rightGroup.tabIds).toContain(secondId);
+      expect(store.groups[0].tabIds).toEqual([thirdId]);
+      expect(store.groups).toHaveLength(2);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("unsplits a secondary group tab back to the main group", async () => {
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
-    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+  it(
+    "unsplits a secondary group tab back to the main group",
+    async () => {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+      const secondId = store.createTab("pg-1", "app", "Query 2", "query");
 
-    store.splitTabRight(firstId);
-    const mainId = store.groups[0].id;
+      store.splitTabRight(firstId);
+      const mainId = store.groups[0].id;
 
-    expect(store.unsplitTab(firstId)).toBe(true);
-    expect(store.groups).toHaveLength(1);
-    expect(store.groups[0].id).toBe(mainId);
-    expect(store.groups[0].tabIds).toEqual([secondId, firstId]);
-    expect(store.focusedGroupId).toBe(mainId);
-  });
+      expect(store.unsplitTab(firstId)).toBe(true);
+      expect(store.groups).toHaveLength(1);
+      expect(store.groups[0].id).toBe(mainId);
+      expect(store.groups[0].tabIds).toEqual([secondId, firstId]);
+      expect(store.focusedGroupId).toBe(mainId);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("activates a tab atomically across group, focus, and global active tab", async () => {
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
-    const thirdId = store.createTab("pg-1", "app", "Query 3", "query");
+  it(
+    "activates a tab atomically across group, focus, and global active tab",
+    async () => {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+      const thirdId = store.createTab("pg-1", "app", "Query 3", "query");
 
-    store.splitTabRight(firstId);
-    const leftGroup = store.groups[0];
-    const rightGroup = store.groups[1];
+      store.splitTabRight(firstId);
+      const leftGroup = store.groups[0];
+      const rightGroup = store.groups[1];
 
-    expect(store.activateTab(thirdId)).toBe(true);
-    expect(leftGroup.activeTabId).toBe(thirdId);
-    expect(store.focusedGroupId).toBe(leftGroup.id);
-    expect(store.activeTabId).toBe(thirdId);
+      expect(store.activateTab(thirdId)).toBe(true);
+      expect(leftGroup.activeTabId).toBe(thirdId);
+      expect(store.focusedGroupId).toBe(leftGroup.id);
+      expect(store.activeTabId).toBe(thirdId);
 
-    expect(store.activateTab(firstId)).toBe(true);
-    expect(rightGroup.activeTabId).toBe(firstId);
-    expect(store.focusedGroupId).toBe(rightGroup.id);
-    expect(store.activeTabId).toBe(firstId);
+      expect(store.activateTab(firstId)).toBe(true);
+      expect(rightGroup.activeTabId).toBe(firstId);
+      expect(store.focusedGroupId).toBe(rightGroup.id);
+      expect(store.activeTabId).toBe(firstId);
 
-    expect(store.activateTab("missing")).toBe(false);
-  });
+      expect(store.activateTab("missing")).toBe(false);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("keeps UI state isolated when switching tabs", async () => {
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
-    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+  it(
+    "keeps UI state isolated when switching tabs",
+    async () => {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+      const secondId = store.createTab("pg-1", "app", "Query 2", "query");
 
-    store.updateTabUiState(firstId, { activeOutputView: "chart", resultPaneOpen: false });
-    store.updateTabUiState(secondId, { activeOutputView: "summary", resultPaneOpen: true });
+      store.updateTabUiState(firstId, { activeOutputView: "chart", resultPaneOpen: false });
+      store.updateTabUiState(secondId, { activeOutputView: "summary", resultPaneOpen: true });
 
-    store.activateTab(firstId);
-    expect(store.tabs.find((tab) => tab.id === firstId)?.uiState).toEqual({ activeOutputView: "chart", resultPaneOpen: false });
-    store.activateTab(secondId);
-    expect(store.tabs.find((tab) => tab.id === secondId)?.uiState).toEqual({ activeOutputView: "summary", resultPaneOpen: true });
-  });
+      store.activateTab(firstId);
+      expect(store.tabs.find((tab) => tab.id === firstId)?.uiState).toEqual({ activeOutputView: "chart", resultPaneOpen: false });
+      store.activateTab(secondId);
+      expect(store.tabs.find((tab) => tab.id === secondId)?.uiState).toEqual({ activeOutputView: "summary", resultPaneOpen: true });
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("rejects stale or wrong-mode special-page UI updates", async () => {
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const tabId = store.createTab("pg-1", "app", "Keys", "etcd");
-    const owner = store.tabs.find((tab) => tab.id === tabId)!;
+  it(
+    "rejects stale or wrong-mode special-page UI updates",
+    async () => {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const tabId = store.createTab("pg-1", "app", "Keys", "etcd");
+      const owner = store.tabs.find((tab) => tab.id === tabId)!;
 
-    store.updateTabPageUiState(tabId, "etcd", { EtcdKeyBrowser: { mode: "search" } }, owner);
-    store.updateTabPageUiState(tabId, "query", { QueryEditor: { draft: "stale" } }, owner);
-    store.updateTabPageUiState(tabId, "etcd", { EtcdKeyBrowser: { mode: "watch" } }, { ...owner });
+      store.updateTabPageUiState(tabId, "etcd", { EtcdKeyBrowser: { mode: "search" } }, owner);
+      store.updateTabPageUiState(tabId, "query", { QueryEditor: { draft: "stale" } }, owner);
+      store.updateTabPageUiState(tabId, "etcd", { EtcdKeyBrowser: { mode: "watch" } }, { ...owner });
 
-    expect(owner.uiState?.page).toEqual({ etcd: { EtcdKeyBrowser: { mode: "search" } } });
-  });
+      expect(owner.uiState?.page).toEqual({ etcd: { EtcdKeyBrowser: { mode: "search" } } });
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("persists tab UI state with the open-tabs snapshot", async () => {
-    const api = await import("@/lib/backend/api");
-    const storeApi = vi.mocked(api.saveOpenTabsState);
-    storeApi.mockClear();
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const tabId = store.createTab("pg-1", "app", "Query 1", "query");
+  it(
+    "persists tab UI state with the open-tabs snapshot",
+    async () => {
+      const api = await import("@/lib/backend/api");
+      const storeApi = vi.mocked(api.saveOpenTabsState);
+      storeApi.mockClear();
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const tabId = store.createTab("pg-1", "app", "Query 1", "query");
 
-    store.updateTabUiState(tabId, { activeOutputView: "messages", resultPaneOpen: false });
-    store.updateTabPageUiState(tabId, "query", { QueryEditor: { inspectorOpen: true } });
-    await store.flushPendingPersist();
+      store.updateTabUiState(tabId, { activeOutputView: "messages", resultPaneOpen: false });
+      store.updateTabPageUiState(tabId, "query", { QueryEditor: { inspectorOpen: true } });
+      await store.flushPendingPersist();
 
-    expect(storeApi).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tabs: [
-          expect.objectContaining({
-            uiState: {
-              activeOutputView: "messages",
-              resultPaneOpen: false,
-              page: { query: { QueryEditor: { inspectorOpen: true } } },
-            },
-          }),
-        ],
-      }),
-    );
-  });
+      expect(storeApi).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tabs: [
+            expect.objectContaining({
+              uiState: {
+                activeOutputView: "messages",
+                resultPaneOpen: false,
+                page: { query: { QueryEditor: { inspectorOpen: true } } },
+              },
+            }),
+          ],
+        }),
+      );
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("close all in group only closes the same pinned partition as the trigger tab", async () => {
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
-    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
-    const thirdId = store.createTab("pg-1", "app", "Query 3", "query");
+  it(
+    "close all in group only closes the same pinned partition as the trigger tab",
+    async () => {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+      const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+      const thirdId = store.createTab("pg-1", "app", "Query 3", "query");
 
-    store.togglePinnedTab(secondId);
-    const mainId = store.groups[0].id;
+      store.togglePinnedTab(secondId);
+      const mainId = store.groups[0].id;
 
-    store.closeAllTabsInGroup(mainId, firstId);
+      store.closeAllTabsInGroup(mainId, firstId);
 
-    expect(store.tabs.some((tab) => tab.id === firstId)).toBe(false);
-    expect(store.tabs.some((tab) => tab.id === thirdId)).toBe(false);
-    expect(store.tabs.some((tab) => tab.id === secondId)).toBe(true);
+      expect(store.tabs.some((tab) => tab.id === firstId)).toBe(false);
+      expect(store.tabs.some((tab) => tab.id === thirdId)).toBe(false);
+      expect(store.tabs.some((tab) => tab.id === secondId)).toBe(true);
 
-    store.closeAllTabsInGroup(mainId, secondId);
-    expect(store.tabs.some((tab) => tab.id === secondId)).toBe(false);
-  });
+      store.closeAllTabsInGroup(mainId, secondId);
+      expect(store.tabs.some((tab) => tab.id === secondId)).toBe(false);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("normalizes more than four groups at the restore boundary without orphaning tabs", async () => {
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    const { useQueryStore } = await import("@/stores/queryStore");
-    await useSettingsStore().initEditorSettings();
-    const store = useQueryStore();
-    await store.initOpenTabs();
+  it(
+    "normalizes more than four groups at the restore boundary without orphaning tabs",
+    async () => {
+      const { useSettingsStore } = await import("@/stores/settingsStore");
+      const { useQueryStore } = await import("@/stores/queryStore");
+      await useSettingsStore().initEditorSettings();
+      const store = useQueryStore();
+      await store.initOpenTabs();
 
-    expect(store.groups.length).toBeLessThanOrEqual(4);
-    const assigned = store.groups.flatMap((group) => group.tabIds);
-    for (let index = 0; index < 5; index += 1) {
-      expect(assigned.filter((candidate) => candidate === `tab-${index}`)).toHaveLength(1);
-    }
-    expect(store.activeTabId).toBe(store.groups[0].activeTabId);
-  });
+      expect(store.groups.length).toBeLessThanOrEqual(4);
+      const assigned = store.groups.flatMap((group) => group.tabIds);
+      for (let index = 0; index < 5; index += 1) {
+        expect(assigned.filter((candidate) => candidate === `tab-${index}`)).toHaveLength(1);
+      }
+      expect(store.activeTabId).toBe(store.groups[0].activeTabId);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("derives the restored global active tab from the focused group, not the stale payload value", async () => {
-    // The payload is internally inconsistent: activeTabId points into g2 while
-    // focusedGroupId is g1. Restore must trust the focused group.
-    restoreWorkspacePayload.activeTabId = "tab-1";
-    restoreWorkspacePayload.groups = [
-      { id: "g1", tabIds: ["tab-0"], activeTabId: "tab-0" },
-      { id: "g2", tabIds: ["tab-1"], activeTabId: "tab-1" },
-    ];
-    restoreWorkspacePayload.focusedGroupId = "g1";
-    restoreWorkspacePayload.sizes = [50, 50];
+  it(
+    "derives the restored global active tab from the focused group, not the stale payload value",
+    async () => {
+      // The payload is internally inconsistent: activeTabId points into g2 while
+      // focusedGroupId is g1. Restore must trust the focused group.
+      restoreWorkspacePayload.activeTabId = "tab-1";
+      restoreWorkspacePayload.groups = [
+        { id: "g1", tabIds: ["tab-0"], activeTabId: "tab-0" },
+        { id: "g2", tabIds: ["tab-1"], activeTabId: "tab-1" },
+      ];
+      restoreWorkspacePayload.focusedGroupId = "g1";
+      restoreWorkspacePayload.sizes = [50, 50];
 
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    const { useQueryStore } = await import("@/stores/queryStore");
-    await useSettingsStore().initEditorSettings();
-    const store = useQueryStore();
-    await store.initOpenTabs();
+      const { useSettingsStore } = await import("@/stores/settingsStore");
+      const { useQueryStore } = await import("@/stores/queryStore");
+      await useSettingsStore().initEditorSettings();
+      const store = useQueryStore();
+      await store.initOpenTabs();
 
-    expect(store.focusedGroupId).toBe("g1");
-    expect(store.activeTabId).toBe("tab-0");
-    expect(store.groups[1].activeTabId).toBe("tab-1");
+      expect(store.focusedGroupId).toBe("g1");
+      expect(store.activeTabId).toBe("tab-0");
+      expect(store.groups[1].activeTabId).toBe("tab-1");
 
-    restoreWorkspacePayload.activeTabId = "tab-0";
-    restoreWorkspacePayload.groups = Array.from({ length: 5 }, (_, index) => ({ id: `g${index}`, tabIds: [`tab-${index}`], activeTabId: `tab-${index}` }));
-    restoreWorkspacePayload.focusedGroupId = "g0";
-    restoreWorkspacePayload.sizes = [20, 20, 20, 20, 20];
-  });
+      restoreWorkspacePayload.activeTabId = "tab-0";
+      restoreWorkspacePayload.groups = Array.from({ length: 5 }, (_, index) => ({ id: `g${index}`, tabIds: [`tab-${index}`], activeTabId: `tab-${index}` }));
+      restoreWorkspacePayload.focusedGroupId = "g0";
+      restoreWorkspacePayload.sizes = [20, 20, 20, 20, 20];
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 });

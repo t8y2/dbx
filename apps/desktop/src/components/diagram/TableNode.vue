@@ -6,10 +6,10 @@ import { Badge } from "@/components/ui/badge";
 import type { DiagramTable, DiagramRelationship } from "@/lib/diagram/erDiagram";
 import { isDraftTable } from "@/lib/diagram/erDiagram";
 import type { InferredRelationship } from "@/types/diagram";
-import { useLayerStore } from "@/lib/diagram/layer-store";
+import { useScopedLayerStore } from "@/lib/diagram/diagram-scope";
 import { CARD_WIDTH, COLUMN_TYPE_WIDTH, COLUMN_NAME_MAX_CHARS, COLUMN_TYPE_MAX_CHARS, TABLE_NAME_MAX_CHARS, EDGE_HANDLE_OUTSET, diagramVisibleColumns } from "@/lib/diagram/diagram-constants";
 
-const layerStore = useLayerStore();
+const layerStore = useScopedLayerStore();
 
 const props = defineProps<{
   data: {

@@ -360,6 +360,99 @@ describe("openTabsPersistence originalSql round-trip", () => {
       ],
     });
   });
+
+  it("persists only the data-compare config and strips results across a round-trip", () => {
+    const config = {
+      sourceConnectionId: "conn-src",
+      sourceDatabase: "srcdb",
+      sourceSchema: "public",
+      sourceDatabases: ["srcdb"],
+      sourceSchemas: ["public"],
+      sourceTables: ["users"],
+      selectedSourceTables: ["users"],
+      targetConnectionId: "conn-tgt",
+      targetDatabase: "tgtdb",
+      targetSchema: "public",
+      targetDatabases: ["tgtdb"],
+      targetSchemas: ["public"],
+      targetTables: ["users"],
+      targetTable: "users",
+      keyColumnsByTable: { users: ["id"] },
+      label: "src -> tgt",
+    };
+    const results = [
+      {
+        sourceTable: "users",
+        targetTable: "users",
+        keyColumns: ["id"],
+        columns: ["id"],
+        columnInfo: [],
+        status: "different" as const,
+        added: 1,
+        removed: 0,
+        modified: 0,
+        sourceRowCount: 1,
+        targetRowCount: 0,
+        sourceTruncated: false,
+        targetTruncated: false,
+        rowBudget: 1000,
+        diff: { added: [], removed: [], modified: [] },
+        expanded: false,
+        showAll: { added: false, removed: false, modified: false },
+      },
+    ];
+
+    const [restored] = roundTrip([
+      queryTab({
+        id: "compare-tab",
+        title: "Compare Data src -> tgt",
+        connectionId: "conn-src",
+        database: "srcdb",
+        schema: "public",
+        mode: "data-compare",
+        dataCompareState: {
+          config,
+          results,
+          syncPlan: { insertCount: 1, updateCount: 0, deleteCount: 0, statementCount: 1, syncStatements: ["INSERT 1"], syncSql: "INSERT 1;" },
+        },
+      }),
+    ]);
+
+    expect(restored.mode).toBe("data-compare");
+    expect(restored.dataCompareState).toEqual({ config });
+  });
+
+  it("persists the data-transfer config and task id across a round-trip", () => {
+    const transferConfig = {
+      sourceConnectionId: "conn-src",
+      sourceDatabase: "srcdb",
+      targetConnectionId: "conn-tgt",
+      targetDatabase: "tgtdb",
+      objects: { TABLE: ["users"] },
+      content: "structureAndData",
+      strategy: "append",
+      targetTableNameCase: "preserve",
+      quoteTargetColumnNames: true,
+      batchSize: 1000,
+      dropTargetConfirmed: false,
+    };
+
+    const [restored] = roundTrip([
+      queryTab({
+        id: "transfer-tab",
+        title: "Data Transfer conn-src → conn-tgt",
+        connectionId: "conn-src",
+        database: "srcdb",
+        mode: "data-transfer",
+        dataTransferState: { config: transferConfig as never, taskId: "txn-1" },
+      }),
+    ]);
+
+    expect(restored.mode).toBe("data-transfer");
+    expect(restored.dataTransferState?.taskId).toBe("txn-1");
+    expect(restored.dataTransferState?.config.sourceConnectionId).toBe("conn-src");
+    expect(restored.dataTransferState?.config.targetDatabase).toBe("tgtdb");
+  });
 });
 
 describe("openTabsPersistence detached connection tabs", () => {

@@ -21,7 +21,8 @@ function emptySnapshotExtras(): Pick<HistorySnapshot, "positions" | "layers" | "
   };
 }
 
-export const useGraphStore = defineStore("diagram-graph", () => {
+/** Store factory body: shared by the default singleton id and per-scope dynamic ids. */
+export function graphStoreSetup() {
   const nodes = ref<DiagramNode[]>([]);
   const edges = ref<DiagramEdge[]>([]);
   const layerLayouts = ref<LayerLayoutInfo[]>([]);
@@ -133,4 +134,6 @@ export const useGraphStore = defineStore("diagram-graph", () => {
     applyGridLayout,
     clearHistory,
   };
-});
+}
+
+export const useGraphStore = defineStore("diagram-graph", graphStoreSetup);

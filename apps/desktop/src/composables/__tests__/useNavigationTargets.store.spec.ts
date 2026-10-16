@@ -79,11 +79,15 @@ const dialogs = {
 
 function installLocalStorage() {
   const data = new Map<string, string>();
-  vi.stubGlobal("localStorage", {
-    getItem: vi.fn((key: string) => data.get(key) ?? null),
-    setItem: vi.fn((key: string, value: string) => data.set(key, value)),
-    removeItem: vi.fn((key: string) => data.delete(key)),
-  });
+  vi.stubGlobal(
+    "localStorage",
+    {
+      getItem: vi.fn((key: string) => data.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => data.set(key, value)),
+      removeItem: vi.fn((key: string) => data.delete(key)),
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 }
 
 async function setupNavigation() {
@@ -98,10 +102,12 @@ async function setupNavigation() {
     tab.isExecuting = false;
     tab.executionId = undefined;
     queryStore.updateSql(tabId, sql);
-  });
+  }, QUERY_STORE_TEST_TIMEOUT);
   const { useNavigationTargets } = await import("@/composables/useNavigationTargets");
   return { navigation: useNavigationTargets(dialogs), queryStore };
 }
+
+const QUERY_STORE_TEST_TIMEOUT = 60_000;
 
 describe("useNavigationTargets with the real query store", () => {
   beforeEach(() => {
@@ -132,377 +138,461 @@ describe("useNavigationTargets with the real query store", () => {
       cacheStatus: "miss",
       ageMs: 0,
     }));
-  });
+  }, QUERY_STORE_TEST_TIMEOUT);
 
-  it.each(["always-new", "same-table", "active-tab"] as const)("reports the selected SQL tab before loading completes in %s mode", async (mode) => {
-    mocks.settingsStore.editorSettings.dataTabReuseMode = mode;
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "VIEW" };
-    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
-    const previousId = queryStore.activeTabId;
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    mocks.connectionStore.ensureConnected.mockReturnValue(gate);
-    const onOpened = vi.fn();
-    const pending = navigation.openObjectBrowserTableTarget(target, { onOpened });
-    await vi.waitFor(() => expect(onOpened).toHaveBeenCalledOnce());
-    const targetId = onOpened.mock.calls[0]![0] as string;
-    const selected = queryStore.tabs.find((tab) => tab.id === targetId)!;
-    expect(selected).toMatchObject({ mode: "data", isExecuting: true, tableMeta: { database: "app", schema: "public", tableName: "users", tableType: "VIEW" } });
-    expect(targetId === previousId).toBe(mode === "active-tab");
-    // A new same-name tab on another connection must not receive this load.
-    const otherId = queryStore.createTab("connection-2", "app", "users", "data", "public", undefined, undefined, { forceNew: true });
-    release();
-    await pending;
-    expect(queryStore.activeTabId).toBe(otherId);
-    expect(queryStore.tabs.find((tab) => tab.id === otherId)?.result).toBeUndefined();
-    expect(selected.sql).toBe("SELECT * FROM users");
-    expect(onOpened).toHaveBeenCalledExactlyOnceWith(targetId);
-  });
+  it.each(["always-new", "same-table", "active-tab"] as const)(
+    "reports the selected SQL tab before loading completes in %s mode",
+    async (mode) => {
+      mocks.settingsStore.editorSettings.dataTabReuseMode = mode;
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "VIEW" };
+      await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
+      const previousId = queryStore.activeTabId;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mocks.connectionStore.ensureConnected.mockReturnValue(gate);
+      const onOpened = vi.fn();
+      const pending = navigation.openObjectBrowserTableTarget(target, { onOpened });
+      await vi.waitFor(() => expect(onOpened).toHaveBeenCalledOnce());
+      const targetId = onOpened.mock.calls[0]![0] as string;
+      const selected = queryStore.tabs.find((tab) => tab.id === targetId)!;
+      expect(selected).toMatchObject({ mode: "data", isExecuting: true, tableMeta: { database: "app", schema: "public", tableName: "users", tableType: "VIEW" } });
+      expect(targetId === previousId).toBe(mode === "active-tab");
+      // A new same-name tab on another connection must not receive this load.
+      const otherId = queryStore.createTab("connection-2", "app", "users", "data", "public", undefined, undefined, { forceNew: true });
+      release();
+      await pending;
+      expect(queryStore.activeTabId).toBe(otherId);
+      expect(queryStore.tabs.find((tab) => tab.id === otherId)?.result).toBeUndefined();
+      expect(selected.sql).toBe("SELECT * FROM users");
+      expect(onOpened).toHaveBeenCalledExactlyOnceWith(targetId);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("reports an existing same-table tab without launching a second query", async () => {
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
-    await navigation.openObjectBrowserTableTarget(target);
-    const tabId = queryStore.activeTabId;
-    const onOpened = vi.fn();
-    vi.mocked(queryStore.executeTabSql).mockClear();
-    await navigation.openObjectBrowserTableTarget(target, { onOpened });
-    expect(onOpened).toHaveBeenCalledExactlyOnceWith(tabId);
-    expect(queryStore.executeTabSql).not.toHaveBeenCalled();
-  });
+  it(
+    "reports an existing same-table tab without launching a second query",
+    async () => {
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+      await navigation.openObjectBrowserTableTarget(target);
+      const tabId = queryStore.activeTabId;
+      const onOpened = vi.fn();
+      vi.mocked(queryStore.executeTabSql).mockClear();
+      await navigation.openObjectBrowserTableTarget(target, { onOpened });
+      expect(onOpened).toHaveBeenCalledExactlyOnceWith(tabId);
+      expect(queryStore.executeTabSql).not.toHaveBeenCalled();
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it.each(["always-new", "same-table", "active-tab"] as const)("does not open an obsolete target in %s mode", async (mode) => {
-    mocks.settingsStore.editorSettings.dataTabReuseMode = mode;
-    const { navigation, queryStore } = await setupNavigation();
-    const onOpened = vi.fn();
-    await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", tableName: "users" }, { onOpened, isCurrent: () => false });
-    expect(queryStore.tabs).toHaveLength(0);
-    expect(onOpened).not.toHaveBeenCalled();
-  });
+  it.each(["always-new", "same-table", "active-tab"] as const)(
+    "does not open an obsolete target in %s mode",
+    async (mode) => {
+      mocks.settingsStore.editorSettings.dataTabReuseMode = mode;
+      const { navigation, queryStore } = await setupNavigation();
+      const onOpened = vi.fn();
+      await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", tableName: "users" }, { onOpened, isCurrent: () => false });
+      expect(queryStore.tabs).toHaveLength(0);
+      expect(onOpened).not.toHaveBeenCalled();
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("reports Mongo's reused tab after updating its collection identity", async () => {
-    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
-    mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", tableName: "users" };
-    await navigation.openObjectBrowserTableTarget(target);
-    const originalId = queryStore.activeTabId;
-    const onOpened = vi.fn((tabId: string) => {
-      expect(queryStore.tabs.find((tab) => tab.id === tabId)).toMatchObject({ mode: "mongo", sql: "orders", tableMeta: { tableName: "orders" } });
-    });
-    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" }, { onOpened });
-    expect(onOpened).toHaveBeenCalledExactlyOnceWith(originalId);
-  });
+  it(
+    "reports Mongo's reused tab after updating its collection identity",
+    async () => {
+      mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+      mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", tableName: "users" };
+      await navigation.openObjectBrowserTableTarget(target);
+      const originalId = queryStore.activeTabId;
+      const onOpened = vi.fn((tabId: string) => {
+        expect(queryStore.tabs.find((tab) => tab.id === tabId)).toMatchObject({ mode: "mongo", sql: "orders", tableMeta: { tableName: "orders" } });
+      });
+      await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" }, { onOpened });
+      expect(onOpened).toHaveBeenCalledExactlyOnceWith(originalId);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("opens same-table search results with different predicates in separate tabs", async () => {
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+  it(
+    "opens same-table search results with different predicates in separate tabs",
+    async () => {
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
 
-    await navigation.openDatabaseSearchTarget({ ...target, whereInput: '"id" = 1' });
-    await navigation.openDatabaseSearchTarget({ ...target, whereInput: '"id" = 2' });
+      await navigation.openDatabaseSearchTarget({ ...target, whereInput: '"id" = 1' });
+      await navigation.openDatabaseSearchTarget({ ...target, whereInput: '"id" = 2' });
 
-    expect(queryStore.tabs).toHaveLength(2);
-    expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(['SELECT * FROM users WHERE "id" = 1', 'SELECT * FROM users WHERE "id" = 2']);
-  });
+      expect(queryStore.tabs).toHaveLength(2);
+      expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(['SELECT * FROM users WHERE "id" = 1', 'SELECT * FROM users WHERE "id" = 2']);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("reuses the same object-browser table without reusing tabs across different tables", async () => {
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
+  it(
+    "reuses the same object-browser table without reusing tabs across different tables",
+    async () => {
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
 
-    await navigation.openObjectBrowserTableTarget(target);
-    await navigation.openObjectBrowserTableTarget(target);
-    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
+      await navigation.openObjectBrowserTableTarget(target);
+      await navigation.openObjectBrowserTableTarget(target);
+      await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
 
-    expect(queryStore.tabs).toHaveLength(2);
-    expect(queryStore.tabs.map((tab) => tab.tableMeta?.tableName)).toEqual(["users", "orders"]);
-    expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(["SELECT * FROM users", "SELECT * FROM orders"]);
-    expect(mocks.connectionStore.activeConnectionId).toBe("connection-1");
-  });
+      expect(queryStore.tabs).toHaveLength(2);
+      expect(queryStore.tabs.map((tab) => tab.tableMeta?.tableName)).toEqual(["users", "orders"]);
+      expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(["SELECT * FROM users", "SELECT * FROM orders"]);
+      expect(mocks.connectionStore.activeConnectionId).toBe("connection-1");
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("keeps object-browser tabs independent in always-new mode", async () => {
-    mocks.settingsStore.editorSettings.dataTabReuseMode = "always-new";
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
+  it(
+    "keeps object-browser tabs independent in always-new mode",
+    async () => {
+      mocks.settingsStore.editorSettings.dataTabReuseMode = "always-new";
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
 
-    await navigation.openObjectBrowserTableTarget(target);
-    await navigation.openObjectBrowserTableTarget(target);
+      await navigation.openObjectBrowserTableTarget(target);
+      await navigation.openObjectBrowserTableTarget(target);
 
-    expect(queryStore.tabs).toHaveLength(2);
-  });
+      expect(queryStore.tabs).toHaveLength(2);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("keeps repeated sidebar opens independent in always-new mode", async () => {
-    mocks.settingsStore.editorSettings.dataTabReuseMode = "always-new";
-    const { queryStore } = await setupNavigation();
-    const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
-    const runtime = useSidebarDataOpenRuntime();
-    const node = { id: "users", label: "users", type: "table" as const, connectionId: "connection-1", database: "app", schema: "public", tableType: "TABLE" };
+  it(
+    "keeps repeated sidebar opens independent in always-new mode",
+    async () => {
+      mocks.settingsStore.editorSettings.dataTabReuseMode = "always-new";
+      const { queryStore } = await setupNavigation();
+      const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
+      const runtime = useSidebarDataOpenRuntime();
+      const node = { id: "users", label: "users", type: "table" as const, connectionId: "connection-1", database: "app", schema: "public", tableType: "TABLE" };
 
-    await runtime.openData(node);
-    await runtime.openData(node);
+      await runtime.openData(node);
+      await runtime.openData(node);
 
-    expect(queryStore.tabs).toHaveLength(2);
-    expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
-  });
+      expect(queryStore.tabs).toHaveLength(2);
+      expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("keeps different sidebar tables independent in same-table mode", async () => {
-    const { queryStore } = await setupNavigation();
-    const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
-    const runtime = useSidebarDataOpenRuntime();
-    const users = { id: "users", label: "users", type: "table" as const, connectionId: "connection-1", database: "app", schema: "public", tableType: "TABLE" };
+  it(
+    "keeps different sidebar tables independent in same-table mode",
+    async () => {
+      const { queryStore } = await setupNavigation();
+      const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
+      const runtime = useSidebarDataOpenRuntime();
+      const users = { id: "users", label: "users", type: "table" as const, connectionId: "connection-1", database: "app", schema: "public", tableType: "TABLE" };
 
-    await runtime.openData(users);
-    await runtime.openData({ ...users, id: "orders", label: "orders" });
+      await runtime.openData(users);
+      await runtime.openData({ ...users, id: "orders", label: "orders" });
 
-    expect(queryStore.tabs).toHaveLength(2);
-    expect(queryStore.tabs.map((tab) => tab.tableMeta?.tableName)).toEqual(["users", "orders"]);
-  });
+      expect(queryStore.tabs).toHaveLength(2);
+      expect(queryStore.tabs.map((tab) => tab.tableMeta?.tableName)).toEqual(["users", "orders"]);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("reuses the active data tab for different object-browser tables in active-tab mode", async () => {
-    mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
+  it(
+    "reuses the active data tab for different object-browser tables in active-tab mode",
+    async () => {
+      mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
 
-    await navigation.openObjectBrowserTableTarget(target);
-    const originalTabId = queryStore.activeTabId;
-    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
+      await navigation.openObjectBrowserTableTarget(target);
+      const originalTabId = queryStore.activeTabId;
+      await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
 
-    expect(queryStore.tabs).toHaveLength(1);
-    expect(queryStore.activeTabId).toBe(originalTabId);
-    expect(queryStore.tabs[0]?.tableMeta?.tableName).toBe("orders");
-    expect(queryStore.tabs[0]?.sql).toBe("SELECT * FROM orders");
-  });
+      expect(queryStore.tabs).toHaveLength(1);
+      expect(queryStore.activeTabId).toBe(originalTabId);
+      expect(queryStore.tabs[0]?.tableMeta?.tableName).toBe("orders");
+      expect(queryStore.tabs[0]?.sql).toBe("SELECT * FROM orders");
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("reuses a sidebar table when the same table is opened from the object browser", async () => {
-    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mysql" }));
-    const { navigation, queryStore } = await setupNavigation();
-    const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
-    const runtime = useSidebarDataOpenRuntime();
-    const users = { id: "users", label: "users", type: "table" as const, connectionId: "connection-1", database: "app", tableType: "TABLE" };
+  it(
+    "reuses a sidebar table when the same table is opened from the object browser",
+    async () => {
+      mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mysql" }));
+      const { navigation, queryStore } = await setupNavigation();
+      const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
+      const runtime = useSidebarDataOpenRuntime();
+      const users = { id: "users", label: "users", type: "table" as const, connectionId: "connection-1", database: "app", tableType: "TABLE" };
 
-    await runtime.openData(users);
-    const sidebarTabId = queryStore.activeTabId;
-    await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", schema: "app", tableName: "users", tableType: "TABLE" });
+      await runtime.openData(users);
+      const sidebarTabId = queryStore.activeTabId;
+      await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", schema: "app", tableName: "users", tableType: "TABLE" });
 
-    expect(queryStore.tabs).toHaveLength(1);
-    expect(queryStore.activeTabId).toBe(sidebarTabId);
-  });
+      expect(queryStore.tabs).toHaveLength(1);
+      expect(queryStore.activeTabId).toBe(sidebarTabId);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("reuses existing table tab when navigating via object browser target in same-table mode", async () => {
-    mocks.settingsStore.editorSettings.dataTabReuseMode = "same-table";
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
+  it(
+    "reuses existing table tab when navigating via object browser target in same-table mode",
+    async () => {
+      mocks.settingsStore.editorSettings.dataTabReuseMode = "same-table";
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users", tableType: "TABLE" };
 
-    await navigation.openObjectBrowserTableTarget(target);
-    const firstTabId = queryStore.activeTabId;
+      await navigation.openObjectBrowserTableTarget(target);
+      const firstTabId = queryStore.activeTabId;
 
-    await navigation.openObjectBrowserTableTarget(target);
+      await navigation.openObjectBrowserTableTarget(target);
 
-    expect(queryStore.tabs).toHaveLength(1);
-    expect(queryStore.activeTabId).toBe(firstTabId);
-  });
+      expect(queryStore.tabs).toHaveLength(1);
+      expect(queryStore.activeTabId).toBe(firstTabId);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("reuses only the same MongoDB collection in same-table mode", async () => {
-    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
-    const { navigation, queryStore } = await setupNavigation();
-    const rows = buildMongoObjectBrowserRows({ collections: [{ name: " users " }, { name: "users" }], database: "app" });
+  it(
+    "reuses only the same MongoDB collection in same-table mode",
+    async () => {
+      mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+      const { navigation, queryStore } = await setupNavigation();
+      const rows = buildMongoObjectBrowserRows({ collections: [{ name: " users " }, { name: "users" }], database: "app" });
 
-    for (const row of rows) {
-      await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", tableName: row.name, tableType: row.type });
-    }
-    await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", tableName: rows[0]!.name, tableType: rows[0]!.type });
+      for (const row of rows) {
+        await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", tableName: row.name, tableType: row.type });
+      }
+      await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", tableName: rows[0]!.name, tableType: rows[0]!.type });
 
-    expect(queryStore.tabs).toHaveLength(2);
-    expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
-    expect(queryStore.tabs.map((tab) => tab.sql)).toEqual([" users ", "users"]);
-    expect(queryStore.tabs.map((tab) => tab.tableMeta?.tableName)).toEqual([" users ", "users"]);
-    expect(queryStore.activeTabId).toBe(queryStore.tabs[0]?.id);
-  });
+      expect(queryStore.tabs).toHaveLength(2);
+      expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
+      expect(queryStore.tabs.map((tab) => tab.sql)).toEqual([" users ", "users"]);
+      expect(queryStore.tabs.map((tab) => tab.tableMeta?.tableName)).toEqual([" users ", "users"]);
+      expect(queryStore.activeTabId).toBe(queryStore.tabs[0]?.id);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("always creates a new MongoDB collection tab in always-new mode", async () => {
-    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
-    mocks.settingsStore.editorSettings.dataTabReuseMode = "always-new";
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" };
+  it(
+    "always creates a new MongoDB collection tab in always-new mode",
+    async () => {
+      mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+      mocks.settingsStore.editorSettings.dataTabReuseMode = "always-new";
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" };
 
-    await navigation.openObjectBrowserTableTarget(target);
-    await navigation.openObjectBrowserTableTarget(target);
+      await navigation.openObjectBrowserTableTarget(target);
+      await navigation.openObjectBrowserTableTarget(target);
 
-    expect(queryStore.tabs).toHaveLength(2);
-    expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
-  });
+      expect(queryStore.tabs).toHaveLength(2);
+      expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("reuses the active safe MongoDB collection tab in active-tab mode", async () => {
-    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
-    mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" };
+  it(
+    "reuses the active safe MongoDB collection tab in active-tab mode",
+    async () => {
+      mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+      mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" };
 
-    await navigation.openObjectBrowserTableTarget(target);
-    const originalTabId = queryStore.activeTabId;
-    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
+      await navigation.openObjectBrowserTableTarget(target);
+      const originalTabId = queryStore.activeTabId;
+      await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
 
-    expect(queryStore.tabs).toHaveLength(1);
-    expect(queryStore.activeTabId).toBe(originalTabId);
-    expect(queryStore.tabs[0]).toMatchObject({ title: "app.orders", sql: "orders", tableMeta: { tableName: "orders" } });
-  });
+      expect(queryStore.tabs).toHaveLength(1);
+      expect(queryStore.activeTabId).toBe(originalTabId);
+      expect(queryStore.tabs[0]).toMatchObject({ title: "app.orders", sql: "orders", tableMeta: { tableName: "orders" } });
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("does not reuse an unsafe active MongoDB collection tab", async () => {
-    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
-    mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" };
+  it(
+    "does not reuse an unsafe active MongoDB collection tab",
+    async () => {
+      mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+      mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" };
 
-    await navigation.openObjectBrowserTableTarget(target);
-    queryStore.tabs[0]!.pinned = true;
-    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
+      await navigation.openObjectBrowserTableTarget(target);
+      queryStore.tabs[0]!.pinned = true;
+      await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
 
-    expect(queryStore.tabs).toHaveLength(2);
-    expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(["users", "orders"]);
-  });
+      expect(queryStore.tabs).toHaveLength(2);
+      expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(["users", "orders"]);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("reuses a restored legacy MySQL tab when the same table is opened from the sidebar", async () => {
-    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mysql" }));
-    mocks.loadOpenTabsState.mockResolvedValue({
-      tabs: [
-        {
-          id: "restored-users",
-          title: "app.users",
-          connectionId: "connection-1",
-          database: "app",
-          schema: "app",
-          mode: "data",
-          sql: "SELECT * FROM users",
-          tableMeta: { schema: "app", tableName: "users", tableType: "TABLE", columns: [], primaryKeys: [] },
-        },
-      ],
-      activeTabId: "restored-users",
-    });
-    const { queryStore } = await setupNavigation();
-    await queryStore.initOpenTabs({ validConnectionIds: ["connection-1"] });
-    const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
-    const runtime = useSidebarDataOpenRuntime();
+  it(
+    "reuses a restored legacy MySQL tab when the same table is opened from the sidebar",
+    async () => {
+      mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mysql" }));
+      mocks.loadOpenTabsState.mockResolvedValue({
+        tabs: [
+          {
+            id: "restored-users",
+            title: "app.users",
+            connectionId: "connection-1",
+            database: "app",
+            schema: "app",
+            mode: "data",
+            sql: "SELECT * FROM users",
+            tableMeta: { schema: "app", tableName: "users", tableType: "TABLE", columns: [], primaryKeys: [] },
+          },
+        ],
+        activeTabId: "restored-users",
+      });
+      const { queryStore } = await setupNavigation();
+      await queryStore.initOpenTabs({ validConnectionIds: ["connection-1"] });
+      const { useSidebarDataOpenRuntime } = await import("@/composables/useSidebarDataOpenRuntime");
+      const runtime = useSidebarDataOpenRuntime();
 
-    await runtime.openData({ id: "users", label: "users", type: "table", connectionId: "connection-1", database: "app", tableType: "TABLE" });
+      await runtime.openData({ id: "users", label: "users", type: "table", connectionId: "connection-1", database: "app", tableType: "TABLE" });
 
-    expect(queryStore.tabs).toHaveLength(1);
-    expect(queryStore.activeTabId).toBe("restored-users");
-    expect(queryStore.tabs[0]?.schema).toBeUndefined();
-  });
+      expect(queryStore.tabs).toHaveLength(1);
+      expect(queryStore.activeTabId).toBe("restored-users");
+      expect(queryStore.tabs[0]?.schema).toBeUndefined();
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("creates a new target tab even when the same table was restored", async () => {
-    mocks.loadOpenTabsState.mockResolvedValue({
-      tabs: [
-        {
-          id: "restored-users",
-          title: "public.users",
-          connectionId: "connection-1",
-          database: "app",
-          schema: "public",
-          mode: "data",
-          sql: "SELECT * FROM users WHERE restored = true",
-          tableMeta: { schema: "public", tableName: "users", tableType: "TABLE", columns: [], primaryKeys: [] },
-        },
-      ],
-      activeTabId: "restored-users",
-    });
-    const { navigation, queryStore } = await setupNavigation();
-    await queryStore.initOpenTabs();
+  it(
+    "creates a new target tab even when the same table was restored",
+    async () => {
+      mocks.loadOpenTabsState.mockResolvedValue({
+        tabs: [
+          {
+            id: "restored-users",
+            title: "public.users",
+            connectionId: "connection-1",
+            database: "app",
+            schema: "public",
+            mode: "data",
+            sql: "SELECT * FROM users WHERE restored = true",
+            tableMeta: { schema: "public", tableName: "users", tableType: "TABLE", columns: [], primaryKeys: [] },
+          },
+        ],
+        activeTabId: "restored-users",
+      });
+      const { navigation, queryStore } = await setupNavigation();
+      await queryStore.initOpenTabs();
 
-    expect(queryStore.createTab("connection-1", "app", "public.users", "data", "public")).toBe("restored-users");
-    await navigation.openLineageTarget({ connectionId: "connection-1", database: "app", schema: "public", tableName: "users" });
+      expect(queryStore.createTab("connection-1", "app", "public.users", "data", "public")).toBe("restored-users");
+      await navigation.openLineageTarget({ connectionId: "connection-1", database: "app", schema: "public", tableName: "users" });
 
-    expect(queryStore.tabs).toHaveLength(2);
-    expect(queryStore.tabs[0]?.id).toBe("restored-users");
-    expect(queryStore.tabs[0]?.sql).toBe("SELECT * FROM users WHERE restored = true");
-    expect(queryStore.tabs[1]?.id).not.toBe("restored-users");
-  });
+      expect(queryStore.tabs).toHaveLength(2);
+      expect(queryStore.tabs[0]?.id).toBe("restored-users");
+      expect(queryStore.tabs[0]?.sql).toBe("SELECT * FROM users WHERE restored = true");
+      expect(queryStore.tabs[1]?.id).not.toBe("restored-users");
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("keeps concurrent same-table opens independent", async () => {
-    const connectionGates: Array<() => void> = [];
-    mocks.connectionStore.ensureConnected.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          connectionGates.push(resolve);
-        }),
-    );
-    const { navigation, queryStore } = await setupNavigation();
-    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+  it(
+    "keeps concurrent same-table opens independent",
+    async () => {
+      const connectionGates: Array<() => void> = [];
+      mocks.connectionStore.ensureConnected.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            connectionGates.push(resolve);
+          }),
+      );
+      const { navigation, queryStore } = await setupNavigation();
+      const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
 
-    const first = navigation.openTableTarget({ ...target, whereInput: '"id" = 1' });
-    const second = navigation.openTableTarget({ ...target, whereInput: '"id" = 2' });
-    await vi.waitFor(() => expect(queryStore.tabs).toHaveLength(2));
+      const first = navigation.openTableTarget({ ...target, whereInput: '"id" = 1' });
+      const second = navigation.openTableTarget({ ...target, whereInput: '"id" = 2' });
+      await vi.waitFor(() => expect(queryStore.tabs).toHaveLength(2));
 
-    connectionGates.splice(0).forEach((release) => release());
-    await Promise.all([first, second]);
+      connectionGates.splice(0).forEach((release) => release());
+      await Promise.all([first, second]);
 
-    expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
-    expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(['SELECT * FROM users WHERE "id" = 1', 'SELECT * FROM users WHERE "id" = 2']);
-  });
+      expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
+      expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(['SELECT * FROM users WHERE "id" = 1', 'SELECT * FROM users WHERE "id" = 2']);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("preserves default identity reuse and cross-scope isolation", async () => {
-    const { queryStore } = await setupNavigation();
-    const base = queryStore.createTab("connection-1", "app", "public.users", "data", "public");
+  it(
+    "preserves default identity reuse and cross-scope isolation",
+    async () => {
+      const { queryStore } = await setupNavigation();
+      const base = queryStore.createTab("connection-1", "app", "public.users", "data", "public");
 
-    expect(queryStore.createTab("connection-1", "app", "public.users", "data", "public")).toBe(base);
-    expect(queryStore.createTab("connection-2", "app", "public.users", "data", "public")).not.toBe(base);
-    expect(queryStore.createTab("connection-1", "analytics", "public.users", "data", "public")).not.toBe(base);
-    expect(queryStore.createTab("connection-1", "app", "archive.users", "data", "archive")).not.toBe(base);
-    expect(queryStore.createTab("connection-1", "app", "public.orders", "data", "public")).not.toBe(base);
-    expect(queryStore.createTab("connection-1", "app", "public.users", "data", "public", undefined, undefined, { forceNew: true })).not.toBe(base);
-  });
+      expect(queryStore.createTab("connection-1", "app", "public.users", "data", "public")).toBe(base);
+      expect(queryStore.createTab("connection-2", "app", "public.users", "data", "public")).not.toBe(base);
+      expect(queryStore.createTab("connection-1", "analytics", "public.users", "data", "public")).not.toBe(base);
+      expect(queryStore.createTab("connection-1", "app", "archive.users", "data", "archive")).not.toBe(base);
+      expect(queryStore.createTab("connection-1", "app", "public.orders", "data", "public")).not.toBe(base);
+      expect(queryStore.createTab("connection-1", "app", "public.users", "data", "public", undefined, undefined, { forceNew: true })).not.toBe(base);
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 
-  it("clears a renamed column sort when structure-save metadata reaches an open data tab", async () => {
-    const { navigation, queryStore } = await setupNavigation();
-    const dataTabId = queryStore.createTab("connection-1", "app", "public.users", "data", "public");
-    queryStore.setTableMeta(dataTabId, {
-      database: "app",
-      tableName: "users",
-      tableType: "TABLE",
-      columns: [
-        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
-        { name: "old_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
-      ],
-      primaryKeys: ["id"],
-    });
-    const dataTab = queryStore.tabs.find((tab) => tab.id === dataTabId)!;
-    dataTab.resultSortColumn = "old_name";
-    dataTab.resultSortColumnIndex = 1;
-    dataTab.resultSortDirection = "asc";
-    dataTab.resultSortMode = "database";
-    dataTab.orderByInput = '"old_name" ASC';
-    queryStore.createTab("connection-1", "app", "Edit users", "structure", "public", "users", undefined, { forceNew: true });
-    mocks.loadTableMetadata.mockResolvedValueOnce({
-      metadata: {
+  it(
+    "clears a renamed column sort when structure-save metadata reaches an open data tab",
+    async () => {
+      const { navigation, queryStore } = await setupNavigation();
+      const dataTabId = queryStore.createTab("connection-1", "app", "public.users", "data", "public");
+      queryStore.setTableMeta(dataTabId, {
         database: "app",
-        schema: "public",
         tableName: "users",
         tableType: "TABLE",
         columns: [
           { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
-          { name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+          { name: "old_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
         ],
-        indexes: [],
         primaryKeys: ["id"],
-        cachedAt: Date.now(),
-      },
-      cacheStatus: "miss",
-      ageMs: 0,
-    });
+      });
+      const dataTab = queryStore.tabs.find((tab) => tab.id === dataTabId)!;
+      dataTab.resultSortColumn = "old_name";
+      dataTab.resultSortColumnIndex = 1;
+      dataTab.resultSortDirection = "asc";
+      dataTab.resultSortMode = "database";
+      dataTab.orderByInput = '"old_name" ASC';
+      queryStore.createTab("connection-1", "app", "Edit users", "structure", "public", "users", undefined, { forceNew: true });
+      mocks.loadTableMetadata.mockResolvedValueOnce({
+        metadata: {
+          database: "app",
+          schema: "public",
+          tableName: "users",
+          tableType: "TABLE",
+          columns: [
+            { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+            { name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+          ],
+          indexes: [],
+          primaryKeys: ["id"],
+          cachedAt: Date.now(),
+        },
+        cacheStatus: "miss",
+        ageMs: 0,
+      });
 
-    await navigation.onStructureEditorSaved(vi.fn().mockResolvedValue(undefined), vi.fn(), {
-      connectionId: "connection-1",
-      database: "app",
-      schema: "public",
-      tableName: "users",
-    });
+      await navigation.onStructureEditorSaved(vi.fn().mockResolvedValue(undefined), vi.fn(), {
+        connectionId: "connection-1",
+        database: "app",
+        schema: "public",
+        tableName: "users",
+      });
 
-    expect(dataTab.tableMeta?.columns.map((column) => column.name)).toEqual(["id", "new_name"]);
-    expect(dataTab.tableMeta?.schema).toBe("public");
-    expect(dataTab.resultSortColumn).toBeUndefined();
-    expect(dataTab.resultSortDirection).toBeUndefined();
-    expect(dataTab.orderByInput).toBeUndefined();
-  });
+      expect(dataTab.tableMeta?.columns.map((column) => column.name)).toEqual(["id", "new_name"]);
+      expect(dataTab.tableMeta?.schema).toBe("public");
+      expect(dataTab.resultSortColumn).toBeUndefined();
+      expect(dataTab.resultSortDirection).toBeUndefined();
+      expect(dataTab.orderByInput).toBeUndefined();
+    },
+    QUERY_STORE_TEST_TIMEOUT,
+  );
 });

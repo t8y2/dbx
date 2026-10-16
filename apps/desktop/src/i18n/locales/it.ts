@@ -7564,6 +7564,15 @@ export default withEnglishFallback({
     truncatedHint: "Le tabelle con più righe di quante ne possa leggere un singolo confronto sono state confrontate solo sulle prime righe, quindi le righe aggiunte, modificate o eliminate oltre quel punto non vengono rilevate. Restringi l'intervallo con un filtro e confronta a blocchi.",
     truncatedTable: "{table}: {source} righe nell'origine, {target} nella destinazione; confrontate solo le prime {budget} righe",
     truncatedBadge: "Confrontate solo le prime {budget} righe",
+    openInTab: "Apri in scheda",
+    convertToDialog: "Converti in finestra di dialogo",
+    transactionActiveHint: "Una transazione manuale è attiva. Eseguine il commit o il rollback prima.",
+    transactionRolledBackOnClose: "Scheda chiusa; la transazione in sospeso è stata annullata",
+  },
+  workspace: {
+    openInTab: "Apri in scheda",
+    convertToDialog: "Converti in finestra di dialogo",
+    runStateLockedHint: "Un'operazione è ancora in corso. Completala o annullala prima di convertire.",
   },
   settings: {
     historyRetentionLimit: "Limite della cronologia query",

@@ -5,6 +5,12 @@ import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import type { GraphResult } from "@/lib/graph/graphResult";
+import type { DataCompareSessionConfig, DataCompareTableResult } from "@/composables/useDataCompareSession";
+import type { DataCompareSyncPlan } from "@/lib/dataGrid/dataCompare";
+import type { SchemaDiffCompareOptions } from "@/types/schemaDiff";
+import type { DictionaryProfile } from "@/lib/docs/dataDictionary";
+import type { SchemaSnapshot } from "@/docs/types";
+import type { TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
@@ -2115,6 +2121,177 @@ export interface DatabaseSearchTabState {
   activePerTableLimit: number;
 }
 
+/**
+ * 数据比较页签的可序列化快照。config 在形态转换与持久化两层共用；
+ * results 与 syncPlan 仅在弹窗/页签形态转换时内存传递，持久化前会被剥除。
+ * 手动事务与执行中的运行态（txnSessionId、executing 等）永远不入快照。
+ */
+export interface DataCompareTabState {
+  config: DataCompareSessionConfig;
+  results?: DataCompareTableResult[];
+  syncPlan?: DataCompareSyncPlan;
+}
+
+/**
+ * 比较架构页签的可序列化快照。config 在形态转换与持久化两层共用；
+ * sessionId/step/deploySql 仅形态转换时内存传递（会话与部署审阅现场），
+ * 持久化前会被剥除，恢复后停留在配置态。
+ */
+export interface SchemaDiffTabState {
+  config: {
+    sourceConnectionId: string;
+    sourceDatabase: string;
+    sourceSchema: string;
+    targetConnectionId: string;
+    targetDatabase: string;
+    targetSchema: string;
+    options?: SchemaDiffCompareOptions;
+    ignoreComments?: boolean;
+    label?: string;
+  };
+  /** Compare session to reattach on conversion (in-memory only). */
+  sessionId?: string | null;
+  step?: "config" | "result" | "deploy-review";
+  deploySql?: string;
+  deploySqlMode?: "forward" | "rollback";
+}
+
+/**
+ * 数据传输页签的可序列化快照。config 复用已保存任务的配置形状（表单 → 可序列化配置的既有产物）；
+ * taskId 是后端任务的重挂键——页签切走再切回时经它恢复"配置+进度合一"的驻留面。
+ */
+export interface TransferTabState {
+  config: TransferTaskConfig;
+  taskId?: string | null;
+}
+
+/**
+ * 字段血缘页签的可序列化快照。config 为五元组内容键（连接+库+schema+表+字段），持久化仅保留它；
+ * sessionId 是分析会话的重挂键（内存层），切走再切回经它续上运行中的分析。
+ */
+export interface FieldLineageTabState {
+  config: {
+    connectionId: string;
+    database: string;
+    schema?: string;
+    table: string;
+    column: string;
+  };
+  sessionId?: string | null;
+}
+
+/**
+ * 数据字典页签的可序列化快照。config 为内容键（连接+库+schema），持久化仅保留它；
+ * profile/step/snapshot 为向导进度与快照数据（内存层），转换时保留、持久化时剥除。
+ */
+export interface DataDictionaryTabState {
+  config: {
+    connectionId: string;
+    database?: string;
+    schema?: string;
+    tableNames?: string[];
+  };
+  profile?: DictionaryProfile;
+  step?: number;
+  snapshot?: SchemaSnapshot;
+}
+
+/**
+ * 数据库文档页签的可序列化快照。文档会话按（连接+库+schema）键在组件外归并，
+ * 因此快照仅需 config——切走再切回按同一 config 重挂已完成/进行中的文档会话。
+ */
+export interface DatabaseDocsTabState {
+  config: {
+    connectionId: string;
+    database: string;
+    schema?: string;
+  };
+}
+
+/**
+ * 导出数据库页签的可序列化快照。config 为内容键（连接+库）与选择；exportId 是后端导出任务的
+ * 重挂键（页签切回时经它从任务跟踪器恢复实时进度视图），filePath 供"打开文件夹"。
+ */
+export interface DatabaseExportTabState {
+  config: {
+    connectionId: string;
+    database: string;
+    schema: string;
+    exportAllDatabases?: boolean;
+    selectedDatabases?: string[];
+    selectedTables?: string[];
+  };
+  exportId?: string | null;
+  filePath?: string | null;
+}
+
+/**
+ * 数据生成页签的可序列化快照。config 为内容键（连接+库+schema+表），持久化仅保留它；
+ * profile（向导配置/勾选/展开/顺序的既有序列化产物）与 sessionId/step 为内存层转换现场。
+ */
+export interface DataGenerateTabState {
+  config: {
+    connectionId: string;
+    database: string;
+    schema?: string;
+    table?: string;
+  };
+  sessionId?: string | null;
+  step?: "config" | "preview" | "result";
+  profile?: {
+    version: 1;
+    connectionId?: string;
+    database?: string;
+    savedAt: string;
+    configs: Record<string, TableGenerateConfig>;
+    checkedTables: Record<string, boolean>;
+    checkedColumns: Record<string, boolean>;
+    expandedTables: Record<string, boolean>;
+    expandedSchemas: Record<string, boolean>;
+    tableOrder: string[];
+  };
+}
+
+/**
+ * Mongo 导入页签的可序列化快照。config 为内容键（连接+库+collection），持久化仅保留它；
+ * taskId 是导入任务的重挂键（Mongo 任务注册表），source 仅在源为路径字符串时可随快照迁移。
+ */
+export interface MongoImportTabState {
+  config: {
+    connectionId: string;
+    database: string;
+    collection: string;
+  };
+  taskId?: string | null;
+  source?: string | null;
+}
+
+/** Mongo dump / restore 页签的可序列化快照（单一 mode，payload 以 mode 判别 dump 与 restore）。 */
+export interface MongoDumpTabState {
+  config: {
+    connectionId: string;
+    database: string;
+    mode: "dump" | "restore";
+  };
+  taskId?: string | null;
+}
+
+/**
+ * 关系图页签的可序列化快照。config 为内容键（连接+库+schema）兼持久化层；
+ * scopeId 是图状态 store 域的键——图（节点/边/图层/撤销历史）活在 scoped store 里，
+ * 页签切走再切回按 scopeId 重挂即恢复（store 不持久化，重启后重新布局）。
+ */
+export interface SchemaDiagramTabState {
+  config: {
+    connectionId: string;
+    database: string;
+    schema: string;
+    tableSearch?: string;
+    showAllTables?: boolean;
+  };
+  scopeId?: string;
+}
+
 export interface QueryTab {
   isDefaultQuery?: boolean;
   id: string;
@@ -2299,7 +2476,18 @@ export interface QueryTab {
     | "dolt-version-control"
     | "plugin-workbench"
     | "plugin-filesystem"
-    | "database-search";
+    | "database-search"
+    | "data-compare"
+    | "schema-diff"
+    | "data-transfer"
+    | "field-lineage"
+    | "data-dictionary"
+    | "database-docs"
+    | "database-export"
+    | "data-generate"
+    | "mongo-import"
+    | "mongo-dump"
+    | "schema-diagram";
   pluginWorkbench?: {
     /** Host command that created this tab; distinct commands can share a workbench. */
     commandId?: string;
@@ -2333,6 +2521,17 @@ export interface QueryTab {
   structureInitialTarget?: TableStructureEditorTarget;
   structureDraft?: TableStructureEditorDraft;
   databaseSearchState?: DatabaseSearchTabState;
+  dataCompareState?: DataCompareTabState;
+  schemaDiffState?: SchemaDiffTabState;
+  dataTransferState?: TransferTabState;
+  fieldLineageState?: FieldLineageTabState;
+  dataDictionaryState?: DataDictionaryTabState;
+  databaseDocsState?: DatabaseDocsTabState;
+  databaseExportState?: DatabaseExportTabState;
+  dataGenerateState?: DataGenerateTabState;
+  mongoImportState?: MongoImportTabState;
+  mongoDumpState?: MongoDumpTabState;
+  schemaDiagramState?: SchemaDiagramTabState;
   objectBrowser?: {
     catalog?: string;
     schema?: string;

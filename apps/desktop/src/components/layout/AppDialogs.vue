@@ -245,6 +245,8 @@ watch(
     :prefill-target-connection-id="dialogs.transferPrefillTargetConnectionId.value"
     :prefill-target-database="dialogs.transferPrefillTargetDatabase.value"
     :prefill-target-schema="dialogs.transferPrefillTargetSchema.value"
+    :initial-state="dialogs.transferInitialState.value"
+    @update:initial-state="dialogs.transferInitialState.value = undefined"
   />
   <SchemaDiffDialog
     v-if="dialogs.showSchemaDiffDialog.value"
@@ -255,6 +257,8 @@ watch(
     :prefill-selected-routines="dialogs.schemaDiffPrefillSelectedRoutines.value"
     :prefill-result-tab="dialogs.schemaDiffPrefillResultTab.value || undefined"
     :session-id="dialogs.schemaDiffSessionId.value"
+    :initial-state="dialogs.schemaDiffInitialState.value"
+    @update:initial-state="dialogs.schemaDiffInitialState.value = undefined"
   />
   <DataCompareDialog
     v-if="dialogs.showDataCompareDialog.value"
@@ -264,6 +268,8 @@ watch(
     :prefill-schema="dialogs.dataComparePrefillSchema.value"
     :prefill-table="dialogs.dataComparePrefillTable.value"
     :session-id="dialogs.dataCompareSessionId.value"
+    :initial-state="dialogs.dataCompareInitialState.value"
+    @update:initial-state="dialogs.dataCompareInitialState.value = undefined"
   />
   <SqlFileExecutionDialog
     v-model:open="dialogs.showSqlFileDialog.value"
@@ -281,9 +287,19 @@ watch(
     :prefill-schema="dialogs.diagramPrefillSchema.value"
     :focus-table-name="dialogs.diagramFocusTableName.value"
     :focus-table-names="dialogs.diagramFocusTableNames.value"
+    :initial-state="dialogs.diagramInitialState.value"
+    @update:initial-state="dialogs.diagramInitialState.value = undefined"
     @open-target="emit('openDiagramTarget', $event)"
   />
-  <DatabaseDocsDialog v-if="dialogs.showDocsDialog.value" v-model:open="dialogs.showDocsDialog.value" :prefill-connection-id="dialogs.docsPrefillConnectionId.value" :prefill-database="dialogs.docsPrefillDatabase.value" :prefill-schema="dialogs.docsPrefillSchema.value" />
+  <DatabaseDocsDialog
+    v-if="dialogs.showDocsDialog.value"
+    v-model:open="dialogs.showDocsDialog.value"
+    :prefill-connection-id="dialogs.docsPrefillConnectionId.value"
+    :prefill-database="dialogs.docsPrefillDatabase.value"
+    :prefill-schema="dialogs.docsPrefillSchema.value"
+    :initial-state="dialogs.docsInitialState.value"
+    @update:initial-state="dialogs.docsInitialState.value = undefined"
+  />
   <DataDictionaryDialog
     v-if="dialogs.showDataDictionaryDialog.value"
     v-model:open="dialogs.showDataDictionaryDialog.value"
@@ -291,6 +307,8 @@ watch(
     :prefill-database="dialogs.dataDictionaryPrefillDatabase.value"
     :prefill-schema="dialogs.dataDictionaryPrefillSchema.value"
     :prefill-table-names="dialogs.dataDictionaryPrefillTableNames.value"
+    :initial-state="dialogs.dataDictionaryInitialState.value"
+    @update:initial-state="dialogs.dataDictionaryInitialState.value = undefined"
   />
   <TableImportDialog
     v-if="dialogs.showTableImportDialog.value"
@@ -300,13 +318,22 @@ watch(
     :prefill-schema="dialogs.tableImportPrefillSchema.value"
     :prefill-table="dialogs.tableImportPrefillTable.value"
   />
-  <MongoImportDialog v-model:open="dialogs.showMongoImportDialog.value" :connection-id="dialogs.mongoImportPrefillConnectionId.value" :database="dialogs.mongoImportPrefillDatabase.value" :collection="dialogs.mongoImportPrefillCollection.value" />
+  <MongoImportDialog
+    v-model:open="dialogs.showMongoImportDialog.value"
+    :connection-id="dialogs.mongoImportPrefillConnectionId.value"
+    :database="dialogs.mongoImportPrefillDatabase.value"
+    :collection="dialogs.mongoImportPrefillCollection.value"
+    :initial-state="dialogs.mongoImportInitialState.value"
+    @update:initial-state="dialogs.mongoImportInitialState.value = undefined"
+  />
   <MongoDatabaseDumpDialog
     v-if="dialogs.showMongoDatabaseDumpDialog.value"
     v-model:open="dialogs.showMongoDatabaseDumpDialog.value"
     :connection-id="dialogs.mongoDatabaseDumpPrefillConnectionId.value"
     :database="dialogs.mongoDatabaseDumpPrefillDatabase.value"
     :mode="dialogs.mongoDatabaseDumpMode.value"
+    :initial-state="dialogs.mongoDumpInitialState.value"
+    @update:initial-state="dialogs.mongoDumpInitialState.value = undefined"
   />
   <DamengDumpDialog v-if="dialogs.showDamengDumpDialog.value" v-model:open="dialogs.showDamengDumpDialog.value" :connection-id="dialogs.damengDumpPrefillConnectionId.value" :database="dialogs.damengDumpPrefillDatabase.value" :mode="dialogs.damengDumpMode.value" />
   <DataGenerateDialog
@@ -317,6 +344,8 @@ watch(
     :prefill-database="dialogs.tableDataGeneratePrefillDatabase.value"
     :prefill-schema="dialogs.tableDataGeneratePrefillSchema.value"
     :prefill-table="dialogs.tableDataGeneratePrefillTable.value"
+    :initial-state="dialogs.tableDataGenerateInitialState.value"
+    @update:initial-state="dialogs.tableDataGenerateInitialState.value = undefined"
   />
   <FieldLineageDialog
     v-if="dialogs.showFieldLineageDialog.value"
@@ -327,6 +356,8 @@ watch(
     :prefill-schema="dialogs.lineagePrefillSchema.value"
     :prefill-table="dialogs.lineagePrefillTable.value"
     :prefill-column="dialogs.lineagePrefillColumn.value"
+    :initial-state="dialogs.lineageInitialState.value"
+    @update:initial-state="dialogs.lineageInitialState.value = undefined"
     @open-target="emit('openLineageTarget', $event)"
   />
   <DatabaseSearchDialog
@@ -346,6 +377,8 @@ watch(
     :prefill-table="dialogs.databaseExportPrefillTable.value"
     :prefill-tables="dialogs.databaseExportPrefillTables.value"
     :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
+    :initial-state="dialogs.databaseExportInitialState.value"
+    @update:initial-state="dialogs.databaseExportInitialState.value = undefined"
     @open-connection-settings="emit('openConnectionSettings', $event, 'advanced')"
   />
   <ConfigConnectionSelectDialog

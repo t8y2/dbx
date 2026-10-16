@@ -2492,6 +2492,62 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listSchemasFallsBackWhenInformixStyleGetSchemasOverloadThrowsSqlException() throws Exception {
+        // #12213: IfxDatabaseMetaData.getSchemas(String, String) rejects the two-arg overload
+        // with a plain SQLException("不支持方法 ...") rather than AbstractMethodError.
+        String url = "jdbc:gbasedbt-sqli://gbase8s-mock.example.test:9088/sysmaster:GBASEDBTSERVER=gbase8s";
+        List<String> calls = new ArrayList<>();
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getSchemas".equals(method.getName())) {
+                    if (args != null && args.length == 2) {
+                        calls.add("getSchemas(" + args[0] + ", " + args[1] + ")");
+                        throw new SQLException("不支持方法 : IfxDatabaseMetaData.getSchemas(String, String)");
+                    }
+                    calls.add("getSchemas()");
+                    return rowsResultSet(
+                        new String[] { "TABLE_SCHEM" },
+                        new Object[][] { { "informix" }, { "appuser" } }
+                    );
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        Connection jdbcConnection = (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "getAutoCommit" -> true;
+                case "isClosed" -> false;
+                case "getSchema" -> "informix";
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        Driver driver = testDriver(url, jdbcConnection);
+        String connection = """
+            { "connection_string": "%s" }
+            """.formatted(url);
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("listSchemas", """
+                {
+                  "connection": %s,
+                  "database": "sysmaster"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(MAPPER.readTree("[\"informix\", \"appuser\"]"), response.path("result"));
+            assertEquals(List.of("getSchemas(sysmaster, null)", "getSchemas()"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
     void connectUsesRegisteredDriverWhenOtherDriversThrowUnsupportedOperationException() throws Exception {
         String url = "jdbc:hive2://hive2-connect-test:10000/default";
         String driverClass = Hive2ConnectGoodDriver.class.getName();

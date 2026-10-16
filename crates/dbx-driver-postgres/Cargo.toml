@@ -15,9 +15,7 @@ deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 encoding_rs = "0.8"
 futures = "0.3"
 log = "0.4"
-openssl = { version = "0.10", features = ["vendored"] }
 percent-encoding = "2"
-postgres-openssl = "0.5"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2"
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
@@ -32,4 +30,6 @@ webpki-roots = "0.26"
 [dev-dependencies]
 portpicker = "0.1.1"
 tempfile = "3"
+# 测试模块仍在用 OpenSSL 起 TLS 服务端，故仅作为开发依赖保留
+openssl = { version = "0.10", features = ["vendored"] }
 tokio-openssl = "0.6"

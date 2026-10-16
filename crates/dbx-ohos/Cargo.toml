@@ -1,0 +1,14 @@
+[package]
+name = "dbx-ohos"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "dbx_ohos"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+dbx-web = { path = "../dbx-web", default-features = false, features = ["sqlite-bundled", "embed-static"] }
+uuid = { version = "1", features = ["v4"] }

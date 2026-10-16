@@ -4,6 +4,10 @@ version = "0.6.45"
 edition = "2021"
 license = "Apache-2.0"
 
+[lib]
+name = "dbx_web"
+path = "src/lib.rs"
+
 [[bin]]
 name = "dbx-web"
 path = "src/main.rs"
@@ -14,6 +18,8 @@ duckdb-sidecar = ["dbx-core/duckdb-sidecar", "dbx-mcp/duckdb-sidecar"]
 dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin", "dbx-mcp/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
+# Bundled SQLite without SQLCipher/OpenSSL; portable builds use this instead of sqlite-sqlcipher.
+sqlite-bundled = ["dbx-core/sqlite-bundled", "dbx-mcp/sqlite-bundled"]
 system-fonts = ["dbx-core/system-fonts"]
 # Pass-through so CI feature lanes can compile-check the vendored ATTENTION
 # path; the web server never executes manual transactions, so it stays off by

@@ -1,0 +1,2032 @@
+mod auth;
+mod credentials;
+mod demo;
+mod error;
+mod routes;
+mod sse;
+mod ssh_prompt;
+mod state;
+mod web_mcp;
+
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::SaltString;
+use argon2::{Argon2, PasswordHasher};
+use axum::extract::DefaultBodyLimit;
+
+/// Login/setup payloads are one password field; 64 KiB is generous.
+const AUTH_BODY_LIMIT_BYTES: usize = 64 * 1024;
+use axum::http::{Request, StatusCode, Uri};
+use axum::middleware;
+use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::{delete, get, post, put};
+use axum::Router;
+use dbx_core::connection::AppState;
+use dbx_core::persistence::secret_codec::SecretKeyPolicy;
+use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
+use dbx_core::sql_dialect::hot_reload::DialectHotReload;
+use dbx_core::storage::Storage;
+use dbx_mcp::{streamable_http_router, DbxBackend, LocalBackend};
+use state::WebState;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::RwLock;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+use tower_http::compression::CompressionLayer;
+use utoipa::OpenApi;
+use web_mcp::WebMcpRuntime;
+
+const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+const NON_WINDOWS_HELP_TEXT: &str = r#"Usage: dbx-web [OPTION]
+
+Start the DBX Web browser service.
+
+Options:
+  -h, --help, /help  Show this help message and exit.
+
+Environment variables:
+  DBX_PORT              Listen port (default: 4224)
+  DBX_DATA_DIR          Data directory (default: ~/.dbx-web)
+  DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+  DBX_PASSWORD          Set the Web login password
+  DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+  DBX_STATIC_DIR        Serve frontend assets from this directory
+  RUST_LOG              Configure backend log filtering
+  RUST_BACKTRACE        Set to 1 to include Rust backtraces
+
+Examples:
+  DBX_PORT=8080 dbx-web
+  RUST_LOG=dbx_web=debug,tower_http=info dbx-web
+  RUST_BACKTRACE=1 RUST_LOG=dbx_web=debug dbx-web
+"#;
+const WINDOWS_HELP_TEXT: &str = r#"Usage: dbx-web [OPTION]
+
+Start the DBX Web browser service.
+
+Options:
+  -h, --help, /help  Show this help message and exit.
+
+Environment variables:
+  DBX_PORT              Listen port (default: 4224)
+  DBX_DATA_DIR          Data directory (default: %HOME%\.dbx-web; .\.dbx-web if HOME is unset)
+  DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+  DBX_PASSWORD          Set the Web login password
+  DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+  DBX_STATIC_DIR        Serve frontend assets from this directory
+  RUST_LOG              Configure backend log filtering
+  RUST_BACKTRACE        Set to 1 to include Rust backtraces
+
+Examples:
+  set "DBX_PORT=8080" && dbx-web.exe
+  set "RUST_LOG=dbx_web=debug,tower_http=info" && dbx-web.exe
+  set "RUST_BACKTRACE=1" && set "RUST_LOG=dbx_web=debug" && dbx-web.exe
+"#;
+const HELP_TEXT: &str = if cfg!(windows) { WINDOWS_HELP_TEXT } else { NON_WINDOWS_HELP_TEXT };
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "DBX Data Grid Extractor API", description = "HTTP contract for data-grid clipboard extraction."),
+    paths(routes::query::extract_data_grid_selection),
+    tags((name = "data-grid", description = "Data grid extraction and clipboard formats"))
+)]
+struct ApiDoc;
+
+async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
+    axum::Json(ApiDoc::openapi())
+}
+
+#[cfg(test)]
+mod data_grid_extractor_openapi_tests {
+    use super::*;
+
+    #[test]
+    fn help_flags_are_detected_without_starting_the_server() {
+        for flag in ["-h", "--help", "/help"] {
+            assert!(help_requested(&[flag.to_string()]));
+        }
+        assert!(help_requested(&["extra".to_string(), "--help".to_string()]));
+        assert!(!help_requested(&["--helpful".to_string()]));
+    }
+
+    #[test]
+    fn native_help_matches_the_target_shell() {
+        assert!(WINDOWS_HELP_TEXT.contains(r".\.dbx-web if HOME is unset"));
+        assert!(WINDOWS_HELP_TEXT.contains(r#"set "DBX_PORT=8080" && dbx-web.exe"#));
+        assert!(!WINDOWS_HELP_TEXT.contains("DBX_PORT=8080 dbx-web\n"));
+        if cfg!(windows) {
+            assert!(HELP_TEXT.contains(r#"set "DBX_PORT=8080" && dbx-web.exe"#));
+            assert!(!HELP_TEXT.contains("DBX_PORT=8080 dbx-web\n"));
+        } else {
+            assert!(HELP_TEXT.contains("DBX_PORT=8080 dbx-web\n"));
+            assert!(!HELP_TEXT.contains("dbx-web.exe"));
+        }
+    }
+
+    #[test]
+    fn extractor_openapi_contains_the_versioned_request_and_error_responses() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize extractor OpenAPI document");
+        let operation = &document["paths"]["/api/query/extract-data-grid-selection"]["post"];
+
+        assert_eq!(operation["requestBody"]["required"], true);
+        assert!(operation["responses"].get("200").is_some());
+        assert!(operation["responses"].get("400").is_some());
+        assert!(operation["responses"].get("413").is_some());
+        assert!(operation["responses"].get("422").is_some());
+        assert!(operation["responses"].get("500").is_some());
+    }
+}
+
+fn web_compression_predicate() -> impl Predicate {
+    // XLSX exports are already compressed ZIP archives, so gzip would only add CPU overhead.
+    DefaultPredicate::new().and(NotForContentType::const_new(XLSX_CONTENT_TYPE))
+}
+
+fn password_viewer_enabled_from_env(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn web_body_limit_bytes() -> usize {
+    let value = std::env::var("DBX_MAX_UPLOAD_MB").ok();
+    web_body_limit_bytes_from_value(value.as_deref())
+}
+
+fn web_body_limit_bytes_from_value(value: Option<&str>) -> usize {
+    const DEFAULT_MB: usize = 1024;
+    let mb = value.and_then(|value| value.parse::<usize>().ok()).filter(|value| *value > 0).unwrap_or(DEFAULT_MB);
+    mb.saturating_mul(1024 * 1024)
+}
+
+async fn migration_gate(
+    state: axum::extract::State<Arc<WebState>>,
+    request: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let suffix = auth::middleware_api_path_suffix(request.uri().path(), &state.public_base_path);
+    let allowed = suffix.is_some_and(|path| {
+        matches!(
+            path,
+            "migration/status" | "migration/start" | "migration/retry" | "migration/cleanup-backups" | "ping"
+        ) || path.starts_with("auth/")
+    });
+    if !allowed && !state.migration_ready.load(Ordering::Acquire) {
+        return (
+            StatusCode::LOCKED,
+            axum::Json(serde_json::json!({
+                "code": "DATA_MIGRATION_REQUIRED",
+                "message": "Complete the data security migration before using DBX"
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+async fn web_mcp_demo_gate(
+    state: axum::extract::State<Arc<WebState>>,
+    request: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    if state.demo_mode {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
+}
+
+async fn storage_migration_ready(app: &Arc<AppState>) -> bool {
+    app.storage.inspect_data_migration().await.map(|status| status.is_ready()).unwrap_or(false)
+}
+
+fn web_agent_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    web_agent_dir_from_env(data_dir, std::env::var("DBX_AGENT_DIR").ok())
+}
+
+fn web_agent_dir_from_env(data_dir: &std::path::Path, agent_dir: Option<String>) -> std::path::PathBuf {
+    agent_dir.map(std::path::PathBuf::from).unwrap_or_else(|| data_dir.join("agents"))
+}
+
+fn normalize_public_base_path(value: Option<String>) -> String {
+    let trimmed = value
+        .unwrap_or_else(|| "/".to_string())
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("/")
+        .trim()
+        .trim_matches('/')
+        .to_string();
+    if trimmed.chars().any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace() || matches!(ch, ';' | ',')) {
+        panic!("DBX_PUBLIC_BASE_PATH contains invalid characters");
+    }
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
+/// Only directory-backed frontend responses pass through this middleware.
+/// ServeDir's not-found service returns index.html with 404 for SPA routes;
+/// revalidate that HTML too, without changing its existing status code. Other
+/// paths follow serve_embedded_asset's existing assets/ cache policy.
+async fn directory_static_cache_policy(request: Request<axum::body::Body>, next: middleware::Next) -> Response {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+
+    let path = request.uri().path().to_owned();
+    let mut response = next.run(request).await;
+    let is_html = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
+    let cache_control = if is_html
+        && (path.ends_with('/') || path.ends_with("/index.html") || response.status() == StatusCode::NOT_FOUND)
+    {
+        Some("no-cache")
+    } else if response.status().is_success() && path.starts_with("/assets/") {
+        Some("public, max-age=31536000, immutable")
+    } else {
+        None
+    };
+    if let Some(value) = cache_control {
+        response.headers_mut().insert(CACHE_CONTROL, value.parse().expect("valid static cache policy"));
+    }
+    response
+}
+
+fn add_public_base_path_redirect<S>(app: Router<S>, public_base_path: &str) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    if public_base_path == "/" {
+        return app;
+    }
+
+    // Derive the target from the configured base path so single- and multi-segment prefixes both work.
+    let redirect_target = format!("{public_base_path}/");
+    app.route(
+        public_base_path,
+        get(move |uri: Uri| {
+            let redirect_target = redirect_target.clone();
+            async move {
+                let location = uri.query().map(|query| format!("{redirect_target}?{query}")).unwrap_or(redirect_target);
+                Redirect::permanent(&location)
+            }
+        }),
+    )
+}
+
+fn help_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| matches!(arg.as_str(), "-h" | "--help" | "/help"))
+}
+
+/// Frontend build output compiled into the binary by the `embed-static` feature.
+/// The folder is relative to this crate's manifest (crates/dbx-web) and points
+/// at the workspace root `dist` directory produced by the frontend build.
+#[cfg(feature = "embed-static")]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../dist"]
+struct EmbeddedStaticAssets;
+
+/// Serves an embedded static asset, falling back to `index.html` so that
+/// client-side (SPA) routes resolve like they do with the disk-based ServeDir.
+#[cfg(feature = "embed-static")]
+async fn serve_embedded_asset(uri: Uri) -> axum::response::Response {
+    use axum::http::header;
+
+    let path = uri.path().trim_start_matches('/');
+    if let Some(asset) = EmbeddedStaticAssets::get(path) {
+        let content_type = mime_guess::from_path(path).first_or_octet_stream();
+        let mut response = axum::response::Response::builder()
+            .header(header::CONTENT_TYPE, content_type.as_ref())
+            .body(axum::body::Body::from(asset.data.into_owned()))
+            .expect("valid embedded asset response");
+        // Vite emits content-hashed, immutable files under assets/. The HTML
+        // entry point must always revalidate so binary upgrades take effect;
+        // other files (favicon, fonts) keep browser heuristic caching, which
+        // matches tower-http's ServeDir behaviour.
+        let cache_control = if path.starts_with("assets/") {
+            Some("public, max-age=31536000, immutable")
+        } else if path == "index.html" {
+            Some("no-cache")
+        } else {
+            None
+        };
+        if let Some(cache_control) = cache_control {
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                header::HeaderValue::from_str(cache_control).expect("valid cache-control"),
+            );
+        }
+        response
+    } else {
+        serve_embedded_index().await
+    }
+}
+
+/// Serves the embedded SPA entry point. It must never be cached aggressively so
+/// that upgraded binaries are not shadowed by an old index referencing removed
+/// hashed assets.
+#[cfg(feature = "embed-static")]
+async fn serve_embedded_index() -> axum::response::Response {
+    use axum::http::header;
+
+    let Some(index) = EmbeddedStaticAssets::get("index.html") else {
+        // Mirrors the disk-based variant, where a missing index.html surfaces
+        // as a 404 from the not-found service instead of crashing the handler.
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(axum::body::Body::from("embedded dist does not contain index.html"))
+            .expect("valid missing index response");
+    };
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(axum::body::Body::from(index.data.into_owned()))
+        .expect("valid embedded index response")
+}
+
+/// Selects where the static frontend files are served from.
+#[derive(Clone, Copy)]
+enum StaticSource<'a> {
+    /// Serve files from a directory on disk (DBX_STATIC_DIR).
+    Dir(&'a std::path::Path),
+    /// Serve the dist files compiled into the binary (`embed-static` feature).
+    #[cfg(feature = "embed-static")]
+    Embedded,
+}
+
+fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<StaticSource<'_>>) -> Router {
+    match source {
+        Some(StaticSource::Dir(static_dir)) => {
+            use tower_http::services::{ServeDir, ServeFile};
+            let index_path = static_dir.join("index.html");
+            let serve_dir = ServeDir::new(static_dir).not_found_service(ServeFile::new(index_path));
+            let static_router =
+                Router::new().fallback_service(serve_dir).layer(middleware::from_fn(directory_static_cache_policy));
+            app = app.fallback_service(static_router);
+        }
+        #[cfg(feature = "embed-static")]
+        Some(StaticSource::Embedded) => {
+            app = app.fallback(serve_embedded_asset);
+        }
+        None => {}
+    }
+
+    if public_base_path == "/" {
+        return app;
+    }
+
+    app = Router::new().nest(public_base_path, app);
+    app = add_public_base_path_redirect(app, public_base_path);
+    match source {
+        Some(StaticSource::Dir(static_dir)) => {
+            use tower_http::services::ServeFile;
+            let index_service = axum::routing::get_service(ServeFile::new(static_dir.join("index.html")))
+                .layer(middleware::from_fn(directory_static_cache_policy));
+            app = app.route(&format!("{public_base_path}/"), index_service);
+        }
+        #[cfg(feature = "embed-static")]
+        Some(StaticSource::Embedded) => {
+            app = app.route(&format!("{public_base_path}/"), get(serve_embedded_index));
+        }
+        None => {}
+    }
+    app
+}
+
+/// Builds the native Web MCP endpoint. The route remains mounted while the
+/// feature is disabled so an authenticated settings action can enable it
+/// without restarting the Web process; the shared auth middleware returns 404
+/// until a token is configured.
+fn web_mcp_router(web_state: &Arc<WebState>) -> Result<Router, String> {
+    let auth = web_state.web_mcp.auth();
+    let backend: Arc<dyn DbxBackend> =
+        Arc::new(LocalBackend::from_app_state(web_state.app.clone(), web_state.data_dir.clone()));
+
+    streamable_http_router(backend, "/mcp", auth, web_state.web_mcp.allowed_hosts(), true)
+}
+
+#[cfg(feature = "mq-admin")]
+fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
+    router
+        .route("/mq/test-connection", post(routes::mq::test_connection))
+        .route("/mq/tenants/list", post(routes::mq::list_tenants))
+        .route("/mq/tenants/get", post(routes::mq::get_tenant))
+        .route("/mq/tenants/create", post(routes::mq::create_tenant))
+        .route("/mq/tenants/update", post(routes::mq::update_tenant))
+        .route("/mq/tenants/delete", post(routes::mq::delete_tenant))
+        .route("/mq/namespaces/list", post(routes::mq::list_namespaces))
+        .route("/mq/namespaces/create", post(routes::mq::create_namespace))
+        .route("/mq/namespaces/delete", post(routes::mq::delete_namespace))
+        .route("/mq/namespaces/policies", post(routes::mq::get_namespace_policies))
+        .route("/mq/topics/list", post(routes::mq::list_topics))
+        .route("/mq/topics/list-page", post(routes::mq::list_topics_page))
+        .route("/mq/topics/create", post(routes::mq::create_topic))
+        .route("/mq/topics/delete", post(routes::mq::delete_topic))
+        .route("/mq/topics/update-partitions", post(routes::mq::update_partitions))
+        .route("/mq/topics/stats", post(routes::mq::get_topic_stats))
+        .route("/mq/topics/internal-stats", post(routes::mq::get_topic_internal_stats))
+        .route("/mq/topics/route", post(routes::mq::get_topic_route))
+        .route("/mq/topics/alter-config", post(routes::mq::alter_topic_config))
+        .route("/mq/topics/skip-accumulation", post(routes::mq::skip_topic_accumulation))
+        .route("/mq/exchanges/list", post(routes::mq::list_exchanges))
+        .route("/mq/exchanges/list-page", post(routes::mq::list_exchanges_page))
+        .route("/mq/exchanges/create", post(routes::mq::create_exchange))
+        .route("/mq/exchanges/delete", post(routes::mq::delete_exchange))
+        .route("/mq/bindings/list", post(routes::mq::list_bindings))
+        .route("/mq/bindings/bind", post(routes::mq::bind_queue))
+        .route("/mq/bindings/unbind", post(routes::mq::unbind_queue))
+        .route("/mq/messages/view", post(routes::mq::view_message))
+        .route("/mq/messages/query-by-key", post(routes::mq::query_messages_by_key))
+        .route("/mq/messages/query-by-topic", post(routes::mq::query_messages_by_topic))
+        .route("/mq/messages/trace", post(routes::mq::query_message_trace))
+        .route("/mq/subscriptions/list", post(routes::mq::list_subscriptions))
+        .route("/mq/subscriptions/enrich", post(routes::mq::enrich_subscriptions))
+        .route("/mq/kafka/consumer-groups", post(routes::mq::get_kafka_consumer_group_snapshot))
+        .route("/mq/subscriptions/create", post(routes::mq::create_subscription))
+        .route("/mq/subscriptions/delete", post(routes::mq::delete_subscription))
+        .route("/mq/subscriptions/skip-messages", post(routes::mq::skip_messages))
+        .route("/mq/subscriptions/reset-cursor", post(routes::mq::reset_cursor))
+        .route("/mq/subscriptions/clear-backlog", post(routes::mq::clear_backlog))
+        .route("/mq/consumers/group-config/get", post(routes::mq::get_consumer_group_config))
+        .route("/mq/consumers/group-config/alter", post(routes::mq::alter_consumer_group_config))
+        .route("/mq/subscriptions/peek-messages", post(routes::mq::peek_messages))
+        .route("/mq/subscriptions/expire-messages", post(routes::mq::expire_messages))
+        .route("/mq/producers/list", post(routes::mq::list_producers))
+        .route("/mq/consumers/list", post(routes::mq::list_consumers))
+        .route("/mq/topics/unload", post(routes::mq::unload_topic))
+        .route("/mq/client-connections/list", post(routes::mq::list_client_connections))
+        .route("/mq/client-connections/close", post(routes::mq::close_client_connection))
+        .route("/mq/channels/list", post(routes::mq::list_client_channels))
+        .route("/mq/policies/publish-rate", post(routes::mq::set_publish_rate))
+        .route("/mq/policies/dispatch-rate", post(routes::mq::set_dispatch_rate))
+        .route("/mq/policies/subscribe-rate", post(routes::mq::set_subscribe_rate))
+        .route("/mq/policies/backlog-quota", post(routes::mq::set_backlog_quota))
+        .route("/mq/policies/retention", post(routes::mq::set_retention))
+        .route("/mq/policies/effective", post(routes::mq::get_effective_policies))
+        .route("/mq/policies/list", post(routes::mq::list_policies))
+        .route("/mq/policies/set", post(routes::mq::set_policy))
+        .route("/mq/policies/delete", post(routes::mq::delete_policy))
+        .route("/mq/permissions/grant", post(routes::mq::grant_permission))
+        .route("/mq/permissions/revoke", post(routes::mq::revoke_permission))
+        .route("/mq/permissions/list", post(routes::mq::list_permissions))
+        .route("/mq/users/list", post(routes::mq::list_users))
+        .route("/mq/users/create", post(routes::mq::create_user))
+        .route("/mq/users/delete", post(routes::mq::delete_user))
+        .route("/mq/user-permissions/list", post(routes::mq::list_user_permissions))
+        .route("/mq/user-permissions/grant", post(routes::mq::grant_user_permission))
+        .route("/mq/user-permissions/revoke", post(routes::mq::revoke_user_permission))
+        .route("/mq/tokens/issue", post(routes::mq::issue_token))
+        .route("/mq/tokens/list", post(routes::mq::list_token_records))
+        .route("/mq/monitoring/backlog", post(routes::mq::get_backlog))
+        .route("/mq/monitoring/cluster-info", post(routes::mq::get_cluster_info))
+        .route("/mq/overview", post(routes::mq::get_overview))
+        .route("/mq/nodes", post(routes::mq::list_nodes))
+        .route("/mq/raw", post(routes::mq::raw_request))
+        .route("/mq/send-message", post(routes::mq::send_message))
+}
+
+#[cfg(not(feature = "mq-admin"))]
+fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
+    router
+}
+
+pub fn run_server() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if help_requested(&args) {
+        print!("{HELP_TEXT}");
+        return ExitCode::SUCCESS;
+    }
+
+    let runtime = dbx_core::scheduled_backup::worker_runtime().expect("Failed to build tokio runtime");
+    match runtime.block_on(serve()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn web_mcp_startup_error(error: String) -> String {
+    format!("Failed to start DBX Web: invalid Web MCP configuration: {error}")
+}
+
+async fn serve() -> Result<(), String> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "dbx_web=info,tower_http=info".parse().unwrap()),
+        )
+        .init();
+
+    rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
+
+    // Data directory
+    let data_dir = std::env::var("DBX_DATA_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(home).join(".dbx-web")
+    });
+    std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
+
+    let app_state = {
+        let db_path = data_dir.join("dbx.db");
+        let storage = Storage::open_unmigrated(&db_path)
+            .await
+            .expect("Failed to open storage")
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+
+        // Initialize core dialect registry and load external plugin dialects
+        register_core_dialects();
+        let registry = DialectRegistry::global();
+        let plugin_dirs = vec![data_dir.join("plugins").join("dialects")];
+        let load_result = DialectPluginLoader::scan_and_load(registry, &plugin_dirs);
+        log::info!(
+            "Dialect plugins loaded: {} success, {} errors, {} skipped",
+            load_result.loaded.len(),
+            load_result.errors.len(),
+            load_result.skipped.len()
+        );
+
+        // Start dialect YAML hot-reload watcher
+        let watch_dirs = plugin_dirs.clone();
+        tokio::spawn(async move {
+            if let Err(e) = DialectHotReload::run_forever(watch_dirs, DialectRegistry::global()).await {
+                log::error!("Dialect hot-reload watcher exited: {e}");
+            }
+        });
+        log::info!("Dialect hot-reload watcher started");
+
+        Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            data_dir.join("plugins"),
+            web_agent_dir(&data_dir),
+            env!("CARGO_PKG_VERSION"),
+        ))
+    };
+
+    // Password hash: env var takes priority, then database
+    let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let password_viewer_enabled =
+        password_viewer_enabled_from_env(std::env::var("DBX_DISABLE_PASSWORD_VIEWER").ok().as_deref());
+
+    let password_hash = if password_disabled {
+        None
+    } else if let Ok(pw) = std::env::var("DBX_PASSWORD") {
+        let salt = SaltString::generate(&mut OsRng);
+        Some(Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string())
+    } else {
+        app_state.storage.load_password_hash().await.unwrap_or(None)
+    };
+
+    let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
+
+    let demo_mode = demo::demo_mode_from_env();
+
+    let migration_ready = storage_migration_ready(&app_state).await;
+    let web_mcp = Arc::new(if migration_ready {
+        WebMcpRuntime::load(&app_state.storage, !password_disabled && password_hash.is_some())
+            .await
+            .map_err(web_mcp_startup_error)?
+    } else {
+        WebMcpRuntime::disabled()
+    });
+    let web_state = Arc::new(WebState {
+        app: app_state,
+        data_dir,
+        notes_roots: routes::docs::notes_roots_from_env(std::env::var_os("DBX_DOCS_NOTES_ROOTS").as_deref()),
+        public_base_path: public_base_path.clone(),
+        demo_mode,
+        password_disabled,
+        password_viewer_enabled,
+        password_hash: RwLock::new(password_hash),
+        sessions: RwLock::new(HashSet::new()),
+        sse_channels: RwLock::new(HashMap::new()),
+        transfer_progress_channels: RwLock::new(HashMap::new()),
+        table_import_channels: RwLock::new(HashMap::new()),
+        sql_file_executions: RwLock::new(HashMap::new()),
+        sql_file_failure_logs: Default::default(),
+        managed_sql_previews: Default::default(),
+        nacos_imports: RwLock::new(HashMap::new()),
+        login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        export_files: RwLock::new(HashMap::new()),
+        ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
+        migration_ready: Arc::new(AtomicBool::new(migration_ready)),
+        web_mcp,
+    });
+
+    ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
+    routes::sql_file::start_sql_file_cleanup(&web_state);
+    routes::connection::start_connection_idle_sweeper(&web_state);
+
+    let backup_root = std::env::var_os("DBX_BACKUP_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| web_state.data_dir.join("backups"));
+    std::fs::create_dir_all(&backup_root).expect("Failed to create server backup root");
+    let backup_service = routes::scheduled_backup::service(&web_state).expect("Failed to resolve server backup root");
+    let backup_stop = tokio_util::sync::CancellationToken::new();
+    let backup_worker = backup_service.start(backup_stop.clone());
+
+    // API routes
+    let api = Router::new()
+        .route("/migration/status", get(routes::migration::status))
+        .route("/migration/start", post(routes::migration::start))
+        .route("/migration/retry", post(routes::migration::retry))
+        .route("/migration/cleanup-backups", post(routes::migration::cleanup_backups))
+        .route("/database-backups", post(routes::scheduled_backup::command))
+        .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
+        .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
+        // Auth
+        // Auth payloads are tiny password strings: cap them far below the
+        // global limit so the extractor cannot buffer an unauthenticated DoS
+        // body before any rate limiting runs.
+        .route("/auth/login", post(auth::login).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/check", get(auth::check))
+        .route("/auth/setup", post(auth::setup).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/change-password", post(auth::change_password).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/logout", post(auth::logout))
+        // Connection
+        .route("/connection/test", post(routes::connection::test_connection))
+        .route("/connection/test-info", post(routes::connection::test_connection_with_info))
+        .route("/connection/test-ssh-tunnel", post(routes::connection::test_ssh_tunnel))
+        .route("/connection/connect", post(routes::connection::connect_db))
+        .route("/connection/database-info", post(routes::connection::connected_database_info))
+        .route("/connection/database-info/save", post(routes::connection::save_connection_database_info))
+        .route("/connection/write-unlock", post(routes::connection::unlock_connection_writes))
+        .route("/connection/write-unlock/lock", post(routes::connection::lock_connection_writes))
+        .route("/connection/write-unlock/state", post(routes::connection::connection_write_unlock_state))
+        .route("/connection/final-proxy-port", post(routes::connection::connection_final_proxy_port))
+        .route("/connection/disconnect", post(routes::connection::disconnect_db))
+        .route("/connection/check-health", post(routes::connection::check_connection_health))
+        .route("/connection/is-open", post(routes::connection::connection_is_open))
+        .route("/connection/liveness-events", get(routes::connection::connection_liveness_events))
+        .route("/connection/idle-closed-events", get(routes::connection::connection_idle_closed_events))
+        .route("/connection/prewarm", post(routes::connection::prewarm_connection))
+        .route("/connection/session-credential-status", post(routes::connection::session_credential_status))
+        .route("/connection/forget-session-credential", post(routes::connection::forget_session_credential))
+        .route(
+            "/connection/replace-nacos-session-credential",
+            post(routes::connection::replace_nacos_session_credential),
+        )
+        .route("/connection/identifier-quote", post(routes::connection::connection_identifier_quote))
+        .route("/connection/close-database", post(routes::connection::close_database_connection))
+        .route("/connection/save", post(routes::connection::save_connections))
+        .route("/connection/list", get(routes::connection::load_connections))
+        .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
+        .route("/connection/mcp/duplicate", post(routes::connection::mcp_duplicate_connection))
+        .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
+        .route(
+            "/connection/salesforce-oauth-browser-authorize",
+            post(routes::connection::salesforce_oauth_browser_authorize),
+        )
+        .route("/connection/salesforce-oauth-device-start", post(routes::connection::salesforce_oauth_device_start))
+        .route("/connection/salesforce-oauth-device-poll", post(routes::connection::salesforce_oauth_device_poll))
+        .route("/connection/salesforce-oauth-refresh", post(routes::connection::salesforce_oauth_refresh))
+        .route("/connection/salesforce-oauth-password-login", post(routes::connection::salesforce_oauth_password_login))
+        .route("/salesforce/current-user", get(routes::connection::salesforce_current_user))
+        .route("/plugins", get(routes::plugins::list_plugins))
+        .route("/plugins/trusted-keys", get(routes::plugins::list_plugin_trusted_keys))
+        .route("/plugins/trusted-keys/save", post(routes::plugins::save_plugin_trusted_key))
+        .route("/plugins/trusted-keys/remove", post(routes::plugins::remove_plugin_trusted_key))
+        .route("/plugins/repositories", get(routes::plugins::list_plugin_repositories))
+        .route("/plugins/repositories/save", post(routes::plugins::save_plugin_repository))
+        .route("/plugins/repositories/remove", post(routes::plugins::remove_plugin_repository))
+        .route("/plugins/marketplace/catalogs", get(routes::plugins::fetch_plugin_marketplace_catalogs))
+        .route("/plugins/marketplace/install", post(routes::plugins::install_marketplace_plugin))
+        .route(
+            "/plugins/install",
+            post(routes::plugins::install_plugin).layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
+        )
+        .route("/plugins/rollback", post(routes::plugins::rollback_plugin))
+        .route("/plugins/uninstall", post(routes::plugins::uninstall_plugin))
+        .route("/plugins/activate", post(routes::plugins::activate_plugin))
+        .route("/plugins/active", get(routes::plugins::list_active_plugins))
+        .route("/plugins/stop", post(routes::plugins::stop_plugin))
+        .route("/plugins/invoke", post(routes::plugins::invoke_plugin))
+        .route("/plugins/connection-action", post(routes::plugins::invoke_plugin_connection_action))
+        .route("/plugins/notify", post(routes::plugins::notify_plugin))
+        .route("/plugins/binary", post(routes::plugins::send_plugin_binary))
+        .route("/plugins/filesystem/list", post(routes::plugins::list_plugin_filesystem_entries))
+        .route("/plugins/filesystem/read", post(routes::plugins::read_plugin_filesystem_file))
+        .route("/plugins/filesystem/write", post(routes::plugins::write_plugin_filesystem_file))
+        .route("/plugins/filesystem/create-directory", post(routes::plugins::create_plugin_filesystem_directory))
+        .route("/plugins/filesystem/delete", post(routes::plugins::delete_plugin_filesystem_entry))
+        .route("/plugins/filesystem/rename", post(routes::plugins::rename_plugin_filesystem_entry))
+        .route("/plugins/events", get(routes::plugins::plugin_events))
+        .route("/plugins/{pluginId}/assets/{*path}", get(routes::plugins::plugin_asset))
+        .route("/plugins/{pluginId}/ui", get(routes::plugins::plugin_ui_entry))
+        .route("/plugins/{pluginId}/ui/{*path}", get(routes::plugins::plugin_ui_asset))
+        // JDBC
+        .route("/jdbc/drivers", get(routes::jdbc::list_jdbc_drivers).post(routes::jdbc::import_jdbc_drivers))
+        .route(
+            "/jdbc/drivers/maven",
+            get(routes::jdbc::list_jdbc_maven_bundles).post(routes::jdbc::install_jdbc_driver_from_maven),
+        )
+        .route("/jdbc/drivers/local", get(routes::jdbc::list_jdbc_local_bundles))
+        .route("/jdbc/drivers/prestosql", post(routes::jdbc::install_prestosql_jdbc_driver))
+        .route("/jdbc/drivers/maven/{bundle_id}", delete(routes::jdbc::delete_jdbc_maven_bundle))
+        .route("/jdbc/drivers/local/{bundle_id}", delete(routes::jdbc::delete_jdbc_local_bundle))
+        .route("/jdbc/drivers/{name}", delete(routes::jdbc::delete_jdbc_driver))
+        .route("/jdbc/plugin/status", get(routes::jdbc::get_jdbc_plugin_status))
+        .route("/jdbc/plugin/install", post(routes::jdbc::install_jdbc_plugin))
+        .route("/jdbc/plugin/install-local", post(routes::jdbc::install_jdbc_plugin_local))
+        .route("/jdbc/plugin/uninstall", post(routes::jdbc::uninstall_jdbc_plugin))
+        // System
+        .route("/system/fonts", get(routes::jdbc::list_system_fonts))
+        .route("/ssh/config-hosts", get(routes::ssh_config::list_ssh_config_hosts))
+        .route("/ssh/prompts", get(routes::ssh_prompt::stream_ssh_prompts))
+        .route("/ssh/prompts/pending", get(routes::ssh_prompt::list_pending_ssh_prompts))
+        .route("/ssh/prompts/resolve", post(routes::ssh_prompt::resolve_ssh_prompt))
+        // Tunnel profiles
+        .route("/tunnel-profiles/list", get(routes::tunnel_profiles::load_tunnel_profiles))
+        .route("/tunnel-profiles/save", post(routes::tunnel_profiles::save_tunnel_profiles))
+        .route("/tunnel-profiles/test", post(routes::tunnel_profiles::test_tunnel_profile))
+        // Agent drivers
+        .route("/agents/installed-local", get(routes::agents::list_installed_agents_local))
+        .route("/agents/installed", get(routes::agents::list_installed_agents))
+        .route("/agents/installed/{dbType}", get(routes::agents::is_agent_installed))
+        .route("/agents/storage-usage", get(routes::agents::get_driver_store_usage))
+        .route("/agents/download-cache", delete(routes::agents::clear_driver_download_cache))
+        .route("/agents/runtime", get(routes::agents::get_driver_runtime_summary))
+        .route("/agents/runtime/stop", post(routes::agents::stop_driver_runtime))
+        .route("/agents/runtime/restart", post(routes::agents::restart_driver_runtime))
+        .route("/agents/install", post(routes::agents::install_agent))
+        .route("/agents/cancel-install", post(routes::agents::cancel_install))
+        .route("/agents/upgrade-all", post(routes::agents::upgrade_all_agents))
+        .route("/agents/cancel-upgrade-all", post(routes::agents::cancel_upgrade_all))
+        .route("/agents/update-blockers", post(routes::agents::check_agent_update_blockers))
+        .route("/agents/uninstall", post(routes::agents::uninstall_agent))
+        .route("/agents/import-offline", post(routes::agents::import_agents_from_zip))
+        .route("/agents/import-driver", post(routes::agents::import_agent_driver_file))
+        .route("/agents/import-jar", post(routes::agents::import_agent_driver_file))
+        .route(
+            "/agents/java-runtime",
+            get(routes::agents::get_agent_java_runtime_config).post(routes::agents::set_agent_java_runtime_config),
+        )
+        .route("/agents/invalidate-registry-cache", post(routes::agents::invalidate_agent_registry_cache))
+        .route("/agents/reinstall-jre", post(routes::agents::reinstall_jre))
+        .route("/agents/uninstall-jre", post(routes::agents::uninstall_jre))
+        .route("/agents/progress/{operationId}", get(routes::agents::agent_progress))
+        // Schema
+        .route("/schema/databases", get(routes::schema::list_databases))
+        .route("/schema/database-metadata", get(routes::schema::list_database_metadata))
+        .route("/schema/database-storage", post(routes::schema::list_database_storage))
+        .route("/schema/xugu/tablespaces", get(routes::schema::list_xugu_tablespaces))
+        .route("/schema/sqlserver/completion-context", get(routes::schema::get_sqlserver_completion_context))
+        .route("/schema/doris/catalogs", get(routes::schema::list_doris_catalogs))
+        .route("/schema/doris/catalog-databases", get(routes::schema::list_doris_catalog_databases))
+        .route("/schema/sqlserver/linked-servers", get(routes::schema::list_sqlserver_linked_servers))
+        .route("/schema/sqlserver/linked-server-catalogs", get(routes::schema::list_sqlserver_linked_server_catalogs))
+        .route("/schema/sqlserver/linked-server-schemas", get(routes::schema::list_sqlserver_linked_server_schemas))
+        .route("/schema/sqlserver/linked-server-tables", get(routes::schema::list_sqlserver_linked_server_tables))
+        .route("/schema/sqlserver/column-metadata", get(routes::schema::get_sqlserver_column_metadata))
+        .route("/schema/mysql/auto-increment", get(routes::schema::get_mysql_table_auto_increment))
+        .route("/schema/schemas", get(routes::schema::list_schemas))
+        .route("/schema/tables", get(routes::schema::list_tables))
+        .route("/schema/objects", get(routes::schema::list_objects))
+        .route("/schema/object-statistics", get(routes::schema::list_object_statistics))
+        .route("/schema/completion-objects", get(routes::schema::list_completion_objects))
+        .route("/schema/completion-assistant", post(routes::schema::completion_assistant_search))
+        .route("/schema/object-source", get(routes::schema::get_object_source))
+        .route("/schema/event-info", get(routes::schema::get_event_info))
+        .route("/schema/custom-type-details", get(routes::schema::get_custom_type_details))
+        .route("/schema/columns", get(routes::schema::list_columns))
+        .route("/plugin/table-metadata", post(routes::schema::get_plugin_table_metadata))
+        .route("/schema/all-columns", get(routes::schema::get_all_columns))
+        .route("/schema/data-types", get(routes::schema::list_data_types))
+        .route("/schema/indexes", get(routes::schema::list_indexes))
+        .route("/schema/reference-key-columns", get(routes::schema::list_reference_key_columns))
+        .route("/schema/reference-keys", get(routes::schema::list_reference_keys))
+        .route("/schema/foreign-keys", get(routes::schema::list_foreign_keys))
+        .route("/schema/foreign-keys-for-database", get(routes::schema::list_foreign_keys_for_database))
+        .route("/schema/triggers", get(routes::schema::list_triggers))
+        .route("/schema/constraints", get(routes::schema::list_constraints))
+        .route("/schema/partitions", get(routes::schema::list_partitions))
+        .route("/schema/table-partition-status", get(routes::schema::get_table_partition_status))
+        .route("/schema/table-partitioning", get(routes::schema::get_table_partitioning))
+        .route("/schema/invalid-indexes", get(routes::schema::list_invalid_indexes))
+        .route("/schema/subpartitions", get(routes::schema::list_subpartitions))
+        .route("/schema/functions", get(routes::schema::list_functions))
+        .route("/schema/sequences", get(routes::schema::list_sequences))
+        .route("/schema/rules", get(routes::schema::list_rules))
+        .route("/schema/owners", get(routes::schema::list_owners))
+        .route("/schema/table-owner", get(routes::schema::get_table_owner))
+        .route("/schema/extensions", get(routes::schema::list_extensions))
+        .route("/schema/available-extensions", get(routes::schema::list_available_extensions))
+        .route("/schema/event-triggers", get(routes::schema::list_event_triggers))
+        .route("/schema/ddl", get(routes::schema::get_ddl))
+        .route("/docs/snapshot", post(routes::docs::collect_snapshot))
+        .route("/docs/annotations/load", post(routes::docs::load_annotations))
+        .route("/docs/annotations/apply", post(routes::docs::apply_annotations))
+        .route("/docs/annotations/save", post(routes::docs::save_annotations))
+        .route("/docs/export", post(routes::docs::export_html))
+        .route("/dialect/data-types", get(routes::dialect::list_data_types))
+        .route("/schema-diff/prepare", post(routes::schema_diff::prepare_schema_diff))
+        .route("/schema-diff/generate-sync-sql", post(routes::schema_diff::generate_schema_sync_sql))
+        .route("/schema-diff/generate-sync-plan", post(routes::schema_diff::generate_schema_sync_plan))
+        .route(
+            "/schema/cache",
+            post(routes::schema_cache::save_schema_cache).get(routes::schema_cache::load_schema_cache),
+        )
+        .route("/schema/cache-prefix", delete(routes::schema_cache::delete_schema_cache_prefix))
+        .route(
+            "/tab-runtime-cache",
+            post(routes::tab_runtime_cache::save_tab_runtime_cache)
+                .get(routes::tab_runtime_cache::load_tab_runtime_cache)
+                .delete(routes::tab_runtime_cache::delete_tab_runtime_cache),
+        )
+        .route("/tab-runtime-cache/metadata", get(routes::tab_runtime_cache::list_tab_runtime_cache_metadata))
+        .route("/tab-runtime-cache/prune", post(routes::tab_runtime_cache::prune_tab_runtime_cache))
+        .route("/tab-runtime-cache/owner", delete(routes::tab_runtime_cache::delete_tab_runtime_cache_owner))
+        // Query
+        .route("/query/execute", post(routes::query::execute_query))
+        .route("/query/execute-conditional-update", post(routes::query::execute_conditional_update))
+        .route("/query/execute-multi", post(routes::query::execute_multi))
+        .route("/query/execute-batch", post(routes::query::execute_batch))
+        .route("/query/execute-script", post(routes::query::execute_script))
+        .route("/query/execute-in-transaction", post(routes::query::execute_in_transaction))
+        .route("/query/execute-script-2pc", post(routes::query::execute_script_with_2pc))
+        .route("/query/analyze-sql-references", post(routes::query::analyze_sql_references))
+        .route("/query/find-statement-at-cursor", post(routes::query::find_statement_at_cursor))
+        .route("/query/prepare-pagination-plan", post(routes::query::prepare_query_pagination_execution_plan))
+        .route("/query/build-sorted-sql", post(routes::query::build_sorted_query_sql))
+        .route("/query/build-explain-sql", post(routes::query::build_explain_sql))
+        .route("/query/build-dropped-file-preview-sql", post(routes::query::build_dropped_file_preview_sql))
+        .route("/query/get-explain-info", post(routes::query::get_explain_info))
+        .route("/query/plugin-plan-capabilities", post(routes::query::get_plugin_plan_capabilities))
+        .route("/query/plugin-estimated-plan", post(routes::query::get_plugin_estimated_plan))
+        .route("/plugin/data/query", post(routes::query::query_plugin_data))
+        .route("/plugin/data/grants", post(routes::query::get_plugin_data_grants))
+        .route("/plugin/data/grant", post(routes::query::set_plugin_data_grant))
+        .route("/query/build-create-user-sql", post(routes::query::build_create_user_sql))
+        .route("/query/build-table-select-sql", post(routes::query::build_table_select_sql))
+        .route("/query/build-database-search-sql", post(routes::query::build_database_search_sql))
+        .route("/query/build-database-structure-search-sql", post(routes::query::build_database_structure_search_sql))
+        .route("/query/supports-database-structure-search", post(routes::query::supports_database_structure_search))
+        .route("/query/build-search-result-where", post(routes::query::build_search_result_where))
+        .route("/query/build-rename-object-sql", post(routes::query::build_rename_object_sql))
+        .route("/query/build-rename-database-sql", post(routes::query::build_rename_database_sql))
+        .route("/query/build-rename-database-preflight-sql", post(routes::query::build_rename_database_preflight_sql))
+        .route("/query/build-create-database-sql", post(routes::query::build_create_database_sql))
+        .route("/query/build-sqlite-attach-database-sql", post(routes::query::build_sqlite_attach_database_sql))
+        .route("/query/build-drop-object-sql", post(routes::query::build_drop_object_sql))
+        .route("/query/build-drop-table-sql", post(routes::query::build_drop_table_sql))
+        .route("/query/build-drop-table-child-object-sql", post(routes::query::build_drop_table_child_object_sql))
+        .route("/query/build-empty-table-sql", post(routes::query::build_empty_table_sql))
+        .route("/query/build-truncate-table-sql", post(routes::query::build_truncate_table_sql))
+        .route("/query/build-vacuum-table-sql", post(routes::query::build_vacuum_table_sql))
+        .route("/query/build-mysql-auto-increment-sql", post(routes::query::build_mysql_auto_increment_sql))
+        .route("/query/build-drop-database-sql", post(routes::query::build_drop_database_sql))
+        .route("/query/build-create-schema-sql", post(routes::query::build_create_schema_sql))
+        .route("/query/build-update-database-properties-sql", post(routes::query::build_update_database_properties_sql))
+        .route("/query/build-drop-schema-sql", post(routes::query::build_drop_schema_sql))
+        .route("/query/build-duplicate-table-structure-sql", post(routes::query::build_duplicate_table_structure_sql))
+        .route("/query/build-copy-table-data-sql", post(routes::query::build_copy_table_data_sql))
+        .route(
+            "/query/build-executable-object-source-statements",
+            post(routes::query::build_executable_object_source_statements),
+        )
+        .route(
+            "/query/validate-oracle-executable-object-source",
+            post(routes::query::validate_oracle_executable_object_source),
+        )
+        .route(
+            "/query/fingerprint-oracle-routine-object-source",
+            post(routes::query::fingerprint_oracle_routine_object_source),
+        )
+        .route("/query/build-executable-object-source-sql", post(routes::query::build_executable_object_source_sql))
+        .route("/query/build-editable-object-source", post(routes::query::build_editable_object_source))
+        .route(
+            "/query/build-routine-rename-object-source-statements",
+            post(routes::query::build_routine_rename_object_source_statements),
+        )
+        .route("/query/rewrite-oracle-routine-references", post(routes::query::rewrite_oracle_routine_references))
+        .route("/query/rewrite-oracle-table-references", post(routes::query::rewrite_oracle_table_references))
+        .route("/query/build-view-ddl-sql", post(routes::query::build_view_ddl_sql))
+        .route("/query/parse-oracle-object-name", post(routes::query::parse_oracle_object_name))
+        .route("/query/build-oracle-view-rename-source", post(routes::query::build_oracle_view_rename_source))
+        .route("/query/review-oracle-view-rename-source", post(routes::query::review_oracle_view_rename_source))
+        .route("/query/build-table-structure-change-sql", post(routes::query::build_table_structure_change_sql))
+        .route("/query/build-table-owner-change-sql", post(routes::query::build_table_owner_change_sql))
+        .route("/query/build-table-partition-operation-sql", post(routes::query::build_table_partition_operation_sql))
+        .route("/query/build-create-partitioned-table-sql", post(routes::query::build_create_partitioned_table_sql))
+        .route(
+            "/query/preview-sqlite-table-structure-change",
+            post(routes::query::preview_sqlite_table_structure_change),
+        )
+        .route("/query/apply-sqlite-table-structure-change", post(routes::query::apply_sqlite_table_structure_change))
+        .route("/query/build-create-table-sql", post(routes::query::build_create_table_sql))
+        .route("/query/build-single-column-alter-sql", post(routes::query::build_single_column_alter_sql))
+        .route("/query/analyze-editability", post(routes::query::analyze_editable_query_editability))
+        .route("/query/prepare-data-grid-save", post(routes::query::prepare_data_grid_save))
+        .route("/query/data-grid-extractor-openapi.json", get(openapi_json))
+        .route(
+            "/query/extract-data-grid-selection",
+            post(routes::query::extract_data_grid_selection)
+                .layer(DefaultBodyLimit::max(DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/query/build-data-grid-copy-update-statements",
+            post(routes::query::build_data_grid_copy_update_statements),
+        )
+        .route(
+            "/query/build-data-grid-copy-insert-statement",
+            post(routes::query::build_data_grid_copy_insert_statement),
+        )
+        .route("/query/build-dml-change-preview-sql", post(routes::query::build_dml_change_preview_sql))
+        .route(
+            "/query/build-data-grid-context-filter-condition",
+            post(routes::query::build_data_grid_context_filter_condition),
+        )
+        .route(
+            "/query/build-data-grid-column-value-filter-condition",
+            post(routes::query::build_data_grid_column_value_filter_condition),
+        )
+        .route(
+            "/query/build-data-grid-column-values-filter-condition",
+            post(routes::query::build_data_grid_column_values_filter_condition),
+        )
+        .route(
+            "/query/build-data-grid-column-distinct-values-sql",
+            post(routes::query::build_data_grid_column_distinct_values_sql),
+        )
+        .route("/query/build-data-grid-count-sql", post(routes::query::build_data_grid_count_sql))
+        .route(
+            "/query/build-data-grid-conditional-update-sql",
+            post(routes::query::build_data_grid_conditional_update_sql),
+        )
+        .route("/query/build-hive-table-properties-sql", post(routes::query::build_hive_table_properties_sql))
+        .route("/query/build-export-insert-statements", post(routes::query::build_export_insert_statements))
+        .route("/query/build-export-sql-insert", post(routes::query::build_export_sql_insert))
+        .route("/query/build-database-sql-export", post(routes::query::build_database_sql_export))
+        .route("/data-compare/prepare", post(routes::data_compare::prepare_data_compare))
+        .route("/data-compare/prepare-from-tables", post(routes::data_compare::prepare_data_compare_from_tables))
+        .route("/data-compare/prepare-missing-target", post(routes::data_compare::prepare_data_compare_missing_target))
+        .route("/data-compare/build-sync-plan", post(routes::data_compare::build_data_compare_sync_plan))
+        .route("/query/cancel", post(routes::query::cancel_query))
+        .route("/query/cancel-conditional-update", post(routes::query::cancel_conditional_update))
+        .route("/query/close-session", post(routes::query::close_query_session))
+        .route("/query/large-value/chunk", post(routes::query::read_large_value_chunk))
+        .route("/query/large-value/release", post(routes::query::release_large_value))
+        .route("/query/large-value/download", post(routes::query::prepare_large_value_download))
+        .route("/query/large-value/export", post(routes::query::prepare_snapshot_export))
+        .route("/query/large-value/download/{id}", get(routes::query::download_large_value))
+        .route("/query/close-client-session", post(routes::query::close_client_connection_session))
+        .route("/export/query-result-json", post(routes::text_export::export_query_result_json))
+        .route("/export/query-result-markdown", post(routes::text_export::export_query_result_markdown))
+        .route("/export/query-result-html", post(routes::text_export::export_query_result_html))
+        // Redis
+        .route("/redis/list-databases", post(routes::redis::list_databases))
+        .route("/redis/scan-keys", post(routes::redis::scan_keys))
+        .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
+        .route("/redis/scan-values", post(routes::redis::scan_values))
+        .route("/redis/get-value", post(routes::redis::get_value))
+        .route("/redis/get-raw-value", post(routes::redis::get_raw_value))
+        .route("/redis/get-ttl", post(routes::redis::get_ttl))
+        .route("/redis/get-stream-entries", post(routes::redis::get_stream_entries))
+        .route("/redis/get-stream-groups", post(routes::redis::get_stream_groups))
+        .route("/redis/get-stream-consumers", post(routes::redis::get_stream_consumers))
+        .route("/redis/get-stream-pending", post(routes::redis::get_stream_pending))
+        .route("/redis/load-more", post(routes::redis::load_more))
+        .route("/redis/set-string", post(routes::redis::set_string))
+        .route("/redis/delete-key", post(routes::redis::delete_key))
+        .route("/redis/rename-key", post(routes::redis::rename_key))
+        .route("/redis/hash-set", post(routes::redis::hash_set))
+        .route("/redis/hash-del", post(routes::redis::hash_del))
+        .route("/redis/hash-field-update", post(routes::redis::hash_field_update))
+        .route("/redis/hash-field-set-ttl", post(routes::redis::hash_field_set_ttl))
+        .route("/redis/hash-field-set-expire-at", post(routes::redis::hash_field_set_expire_at))
+        .route("/redis/list-push", post(routes::redis::list_push))
+        .route("/redis/list-set", post(routes::redis::list_set))
+        .route("/redis/list-remove", post(routes::redis::list_remove))
+        .route("/redis/set-add", post(routes::redis::set_add))
+        .route("/redis/set-remove", post(routes::redis::set_remove))
+        .route("/redis/zadd", post(routes::redis::zadd))
+        .route("/redis/zset-update", post(routes::redis::zset_update))
+        .route("/redis/stream-add", post(routes::redis::stream_add))
+        .route("/redis/json-set", post(routes::redis::json_set))
+        .route("/redis/check-json-module", post(routes::redis::check_json_module))
+        .route("/redis/set-ttl", post(routes::redis::set_ttl))
+        .route("/redis/set-expire-at", post(routes::redis::set_expire_at))
+        .route("/redis/set-keys-ttl", post(routes::redis::set_keys_ttl))
+        .route("/redis/set-keys-expire-at", post(routes::redis::set_keys_expire_at))
+        .route("/redis/delete-keys", post(routes::redis::delete_keys))
+        .route("/redis/delete-keys-by-pattern", post(routes::redis::delete_keys_by_pattern))
+        .route("/redis/flush-db", post(routes::redis::flush_db))
+        .route("/redis/execute-command", post(routes::redis::execute_command))
+        .route("/redis/pubsub/publish", post(routes::redis::publish_message))
+        .route("/redis/pubsub/ws", get(routes::redis_pubsub_ws::ws_handler))
+        // Redis Slowlog
+        .route("/redis/slowlog-get", post(routes::redis::slowlog_get))
+        .route("/redis/cluster-master-nodes", post(routes::redis::cluster_master_nodes))
+        // etcd
+        .route("/etcd/supports-ttl", post(routes::etcd::supports_ttl))
+        .route("/etcd/list-prefix", post(routes::etcd::list_prefix))
+        .route("/etcd/get", post(routes::etcd::get))
+        .route("/etcd/put", post(routes::etcd::put))
+        .route("/etcd/delete", post(routes::etcd::delete))
+        .route("/etcd/rename", post(routes::etcd::rename))
+        .route("/etcd/history", post(routes::etcd::history))
+        .route("/etcd/status", post(routes::etcd::status))
+        .route("/etcd/preflight", post(routes::etcd::preflight))
+        .route("/etcd/compact", post(routes::etcd::compact))
+        .route("/etcd/defrag", post(routes::etcd::defrag))
+        .route("/etcd/watch/start", post(routes::etcd::watch_start))
+        .route("/etcd/watch/poll", post(routes::etcd::watch_poll))
+        .route("/etcd/watch/stop", post(routes::etcd::watch_stop))
+        .route("/etcd/lease/list", post(routes::etcd::lease_list))
+        .route("/etcd/lease/call", post(routes::etcd::lease_call))
+        .route("/etcd/auth/call", post(routes::etcd::auth_call))
+        // ZooKeeper
+        .route("/zookeeper/list-prefix", post(routes::zookeeper::list_prefix))
+        .route("/zookeeper/get", post(routes::zookeeper::get))
+        .route("/zookeeper/put", post(routes::zookeeper::put))
+        .route("/zookeeper/delete", post(routes::zookeeper::delete))
+        // Consul
+        .route("/consul/capabilities", post(routes::consul::capabilities))
+        .route("/consul/txn", post(routes::consul::txn))
+        .route("/consul/rename-key", post(routes::consul::rename_key))
+        .route("/consul/blocking-query", post(routes::consul::blocking_query))
+        .route("/consul/domain-watch", post(routes::consul::domain_watch))
+        .route("/consul/cancel-blocking", post(routes::consul::cancel_blocking))
+        .route("/consul/list-prefix", post(routes::consul::list_prefix))
+        .route("/consul/list-recursive", post(routes::consul::list_recursive))
+        .route("/consul/search", post(routes::consul::search))
+        .route("/consul/search-progress", post(routes::consul::search_progress))
+        .route("/consul/cancel-search", post(routes::consul::cancel_search))
+        .route("/consul/export-bundle", post(routes::consul::export_bundle))
+        .route("/consul/import-preview", post(routes::consul::import_preview))
+        .route("/consul/import-execute", post(routes::consul::import_execute))
+        .route("/consul/delete-prefix-preview", post(routes::consul::delete_prefix_preview))
+        .route("/consul/delete-prefix-execute", post(routes::consul::delete_prefix_execute))
+        .route("/consul/get", post(routes::consul::get))
+        .route("/consul/put", post(routes::consul::put))
+        .route("/consul/delete", post(routes::consul::delete))
+        .route("/consul/prepared-query/list", post(routes::consul::prepared_query_list))
+        .route("/consul/prepared-query/read", post(routes::consul::prepared_query_read))
+        .route("/consul/prepared-query/create", post(routes::consul::prepared_query_create))
+        .route("/consul/prepared-query/update", post(routes::consul::prepared_query_update))
+        .route("/consul/prepared-query/delete", post(routes::consul::prepared_query_delete))
+        .route("/consul/prepared-query/execute", post(routes::consul::prepared_query_execute))
+        .route("/consul/prepared-query/explain", post(routes::consul::prepared_query_explain))
+        .route("/consul/event/list", post(routes::consul::event_list))
+        .route("/consul/event/fire", post(routes::consul::event_fire).layer(DefaultBodyLimit::max(16 * 1024)))
+        .route("/consul/coordinate/nodes", post(routes::consul::coordinate_nodes))
+        .route("/consul/operator/read", post(routes::consul::operator_read))
+        .route("/consul/operator/snapshot/generate", post(routes::consul::snapshot_generate))
+        .route("/consul/operator/snapshot/restore", post(routes::consul::snapshot_restore))
+        .route("/consul/operator/autopilot/update", post(routes::consul::autopilot_update))
+        .route("/consul/operator/raft/transfer", post(routes::consul::raft_transfer))
+        .route("/consul/operator/raft/remove", post(routes::consul::raft_remove))
+        .route("/consul/operator/keyring/write", post(routes::consul::keyring_write))
+        .route("/consul/operator/license/write", post(routes::consul::license_write))
+        .route("/consul/status/leader", post(routes::consul::status_leader))
+        .route("/consul/status/peers", post(routes::consul::status_peers))
+        .route("/consul/agent/self", post(routes::consul::agent_self))
+        .route("/consul/agent/members", post(routes::consul::agent_members))
+        .route("/consul/agent/metrics", post(routes::consul::agent_metrics))
+        .route("/consul/catalog/datacenters", post(routes::consul::catalog_datacenters))
+        .route("/consul/catalog/nodes", post(routes::consul::catalog_nodes))
+        .route("/consul/catalog/services", post(routes::consul::catalog_services))
+        .route("/consul/catalog/service-nodes", post(routes::consul::catalog_service_nodes))
+        .route("/consul/catalog/node-services", post(routes::consul::catalog_node_services))
+        .route("/consul/health/node", post(routes::consul::health_node))
+        .route("/consul/health/checks", post(routes::consul::health_checks))
+        .route("/consul/health/service", post(routes::consul::health_service))
+        .route("/consul/health/state", post(routes::consul::health_state))
+        .route("/consul/agent/services", post(routes::consul::agent_services))
+        .route("/consul/agent/service", post(routes::consul::agent_service))
+        .route("/consul/agent/checks", post(routes::consul::agent_checks))
+        .route("/consul/agent/service/register", post(routes::consul::agent_register_service))
+        .route("/consul/agent/service/deregister", post(routes::consul::agent_deregister_service))
+        .route("/consul/agent/service/maintenance", post(routes::consul::agent_service_maintenance))
+        .route("/consul/agent/check/register", post(routes::consul::agent_register_check))
+        .route("/consul/agent/check/deregister", post(routes::consul::agent_deregister_check))
+        .route("/consul/agent/check/ttl", post(routes::consul::agent_update_ttl))
+        .route("/consul/sessions", post(routes::consul::sessions))
+        .route("/consul/sessions/node", post(routes::consul::node_sessions))
+        .route("/consul/session", post(routes::consul::session))
+        .route("/consul/session/keys", post(routes::consul::session_keys))
+        .route("/consul/session/destroy-impact", post(routes::consul::session_destroy_impact))
+        .route("/consul/session/create", post(routes::consul::create_session))
+        .route("/consul/session/renew", post(routes::consul::renew_session))
+        .route("/consul/session/destroy", post(routes::consul::destroy_session))
+        .route("/consul/lock/acquire", post(routes::consul::acquire_lock))
+        .route("/consul/lock/release", post(routes::consul::release_lock))
+        .route("/consul/acl/list", post(routes::consul::acl_list))
+        .route("/consul/acl/token/self", post(routes::consul::acl_token_self))
+        .route("/consul/acl/token/clone", post(routes::consul::acl_token_clone))
+        .route("/consul/acl/get", post(routes::consul::acl_get))
+        .route("/consul/acl/apply", post(routes::consul::acl_apply))
+        .route("/consul/acl/references", post(routes::consul::acl_references))
+        .route("/consul/acl/delete", post(routes::consul::acl_delete))
+        .route("/consul/enterprise/list", post(routes::consul::enterprise_list))
+        .route("/consul/enterprise/get", post(routes::consul::enterprise_get))
+        .route("/consul/enterprise/apply", post(routes::consul::enterprise_apply))
+        .route("/consul/enterprise/impact", post(routes::consul::enterprise_impact))
+        .route("/consul/enterprise/delete", post(routes::consul::enterprise_delete))
+        .route("/consul/mesh/config/list", post(routes::consul::mesh_config_list))
+        .route("/consul/mesh/config/get", post(routes::consul::mesh_config_get))
+        .route("/consul/mesh/config/apply", post(routes::consul::mesh_config_apply))
+        .route("/consul/mesh/config/delete", post(routes::consul::mesh_config_delete))
+        .route("/consul/mesh/intentions/list", post(routes::consul::mesh_intentions_list))
+        .route("/consul/mesh/intentions/get", post(routes::consul::mesh_intention_get))
+        .route("/consul/mesh/intentions/get-exact", post(routes::consul::mesh_intention_get_exact))
+        .route("/consul/mesh/intentions/upsert", post(routes::consul::mesh_intention_upsert))
+        .route("/consul/mesh/intentions/delete", post(routes::consul::mesh_intention_delete))
+        .route("/consul/mesh/intentions/delete-exact", post(routes::consul::mesh_intention_delete_exact))
+        .route("/consul/mesh/intentions/match", post(routes::consul::mesh_intention_match))
+        .route("/consul/mesh/intentions/check", post(routes::consul::mesh_intention_check))
+        .route("/consul/mesh/discovery-chain", post(routes::consul::mesh_discovery_chain))
+        .route("/consul/mesh/peerings/list", post(routes::consul::mesh_peering_list))
+        .route("/consul/mesh/peerings/get", post(routes::consul::mesh_peering_get))
+        .route("/consul/mesh/peerings/generate-token", post(routes::consul::mesh_peering_generate_token))
+        .route("/consul/mesh/peerings/establish", post(routes::consul::mesh_peering_establish))
+        .route("/consul/mesh/peerings/delete", post(routes::consul::mesh_peering_delete))
+        .route("/consul/mesh/exported-services/list", post(routes::consul::mesh_exported_services_list))
+        .route("/consul/mesh/exported-services/apply", post(routes::consul::mesh_exported_services_apply))
+        // HBase REST
+        .route("/hbase/table-schema", post(routes::hbase::get_table_schema))
+        .route("/hbase/scan-rows", post(routes::hbase::scan_rows))
+        .route("/hbase/get-row", post(routes::hbase::get_row))
+        .route("/hbase/put-row", post(routes::hbase::put_row))
+        .route("/hbase/delete-row", post(routes::hbase::delete_row))
+        .route("/hbase/create-table", post(routes::hbase::create_table))
+        .route("/hbase/delete-table", post(routes::hbase::delete_table))
+        // Nacos
+        .route("/nacos/test-connection", post(routes::nacos::test_connection))
+        .route("/nacos/namespaces/list", post(routes::nacos::list_namespaces))
+        .route("/nacos/sidebar/snapshot", post(routes::nacos::sidebar_snapshot))
+        .route("/nacos/namespaces/create", post(routes::nacos::create_namespace))
+        .route("/nacos/namespaces/update", post(routes::nacos::update_namespace))
+        .route("/nacos/namespaces/delete", post(routes::nacos::delete_namespace))
+        .route("/nacos/configs/list", post(routes::nacos::list_configs))
+        .route("/nacos/configs/get", post(routes::nacos::get_config))
+        .route("/nacos/configs/publish", post(routes::nacos::publish_config))
+        .route("/nacos/configs/delete", post(routes::nacos::delete_config))
+        .route("/nacos/configs/history/list", post(routes::nacos::list_config_history))
+        .route("/nacos/configs/history/get", post(routes::nacos::get_config_history))
+        .route("/nacos/configs/history/rollback", post(routes::nacos::rollback_config))
+        .route("/nacos/rnacos-console/captcha", post(routes::nacos::get_rnacos_console_captcha))
+        .route("/nacos/rnacos-console/login", post(routes::nacos::login_rnacos_console))
+        .route("/nacos/users/list", post(routes::nacos::list_users))
+        .route("/nacos/users/create", post(routes::nacos::create_user))
+        .route("/nacos/users/update", post(routes::nacos::update_user))
+        .route("/nacos/users/delete", post(routes::nacos::delete_user))
+        .route("/nacos/roles/list", post(routes::nacos::list_role_bindings))
+        .route("/nacos/roles/assign", post(routes::nacos::assign_role))
+        .route("/nacos/roles/remove", post(routes::nacos::remove_role))
+        .route("/nacos/access/snapshot", post(routes::nacos::access_snapshot))
+        .route("/nacos/access/operations/start", post(routes::nacos::start_access_operation))
+        .route("/nacos/access/operations/get", post(routes::nacos::get_access_operation))
+        .route("/nacos/access/operations/retry", post(routes::nacos::retry_access_operation))
+        .route("/nacos/access/operations/undo", post(routes::nacos::undo_access_operation))
+        .route("/nacos/services/list", post(routes::nacos::list_services))
+        .route("/nacos/services/get", post(routes::nacos::get_service))
+        .route("/nacos/services/create", post(routes::nacos::create_service))
+        .route("/nacos/services/update", post(routes::nacos::update_service))
+        .route("/nacos/services/delete", post(routes::nacos::delete_service))
+        .route("/nacos/instances/list", post(routes::nacos::list_instances))
+        .route("/nacos/instances/update", post(routes::nacos::update_instance))
+        .route("/nacos/instances/register", post(routes::nacos::register_instance))
+        .route("/nacos/instances/deregister", post(routes::nacos::deregister_instance))
+        .route("/nacos/dashboard", post(routes::nacos::get_dashboard))
+        .route("/nacos/raw", post(routes::nacos::raw_request))
+        .route("/nacos/configs/search", post(routes::nacos::search_config_content))
+        .route("/nacos/configs/search/cancel", post(routes::nacos::cancel_operation))
+        .route("/nacos/configs/export", post(routes::nacos::export_configs))
+        .route("/nacos/configs/import/preview", post(routes::nacos::preview_config_import))
+        .route("/nacos/configs/import/apply", post(routes::nacos::apply_config_import))
+        .route("/nacos/configs/copy/preview", post(routes::nacos::preview_config_transfer))
+        .route("/nacos/configs/copy/apply", post(routes::nacos::apply_config_transfer))
+        // MongoDB
+        .route("/mongo/list-databases", post(routes::mongo::list_databases))
+        .route("/mongo/list-collections", post(routes::mongo::list_collections))
+        .route("/mongo/vector-collection-detail", post(routes::vector::collection_detail))
+        .route("/vector/collection-detail", post(routes::vector::collection_detail))
+        .route("/vector/drop-database", post(routes::vector::drop_database))
+        .route("/vector/drop-collection", post(routes::vector::drop_collection))
+        .route("/vector/rename-collection", post(routes::vector::rename_collection))
+        .route("/mongo/create-database", post(routes::mongo::create_database))
+        .route("/mongo/drop-database", post(routes::mongo::drop_database))
+        .route("/mongo/drop-collection", post(routes::mongo::drop_collection))
+        .route("/mongo/rename-collection", post(routes::mongo::rename_collection))
+        .route("/mongo/clone-collection", post(routes::mongo::clone_collection))
+        .route("/document-store/list-databases", post(routes::document_store::list_databases))
+        .route("/document-store/list-collections", post(routes::document_store::list_collections))
+        .route("/document-store/find-documents", post(routes::document_store::find_documents))
+        .route("/document-store/count-documents", post(routes::document_store::count_documents))
+        .route("/document-store/dynamodb-describe-table", post(routes::document_store::describe_dynamodb_table))
+        .route(
+            "/document-store/elasticsearch-count-documents",
+            post(routes::document_store::elasticsearch_count_documents),
+        )
+        .route(
+            "/document-store/elasticsearch/index-metadata",
+            post(routes::document_store::elasticsearch_get_index_metadata),
+        )
+        .route(
+            "/document-store/elasticsearch/documents/delete-all",
+            post(routes::document_store::elasticsearch_delete_all_documents),
+        )
+        .route("/document-store/list-gridfs-buckets", post(routes::document_store::list_gridfs_buckets))
+        .route("/document-store/create-gridfs-bucket", post(routes::document_store::create_gridfs_bucket))
+        .route("/document-store/delete-gridfs-bucket", post(routes::document_store::delete_gridfs_bucket))
+        .route("/document-store/list-gridfs-files", post(routes::document_store::list_gridfs_files))
+        .route("/document-store/download-gridfs-file", post(routes::document_store::download_gridfs_file))
+        .route("/document-store/upload-gridfs-file", post(routes::document_store::upload_gridfs_file))
+        .route("/document-store/delete-gridfs-file", post(routes::document_store::delete_gridfs_file))
+        .route("/document-store/insert-document", post(routes::document_store::insert_document))
+        .route("/document-store/update-document", post(routes::document_store::update_document))
+        .route("/document-store/delete-document", post(routes::document_store::delete_document))
+        .route("/document-store/save-meilisearch-batch", post(routes::document_store::save_meilisearch_batch))
+        .route("/document-store/meilisearch/search", post(routes::document_store::meilisearch_search))
+        .route("/document-store/meilisearch/documents/fetch", post(routes::document_store::meilisearch_fetch_documents))
+        .route("/document-store/meilisearch/documents/get", post(routes::document_store::meilisearch_get_document))
+        .route("/document-store/meilisearch/settings/get", post(routes::document_store::meilisearch_get_settings))
+        .route("/document-store/meilisearch/settings/update", post(routes::document_store::meilisearch_update_settings))
+        .route("/document-store/meilisearch/stats", post(routes::document_store::meilisearch_get_stats))
+        .route("/document-store/meilisearch/overview", post(routes::document_store::meilisearch_get_overview))
+        .route("/document-store/meilisearch/index/create", post(routes::document_store::meilisearch_create_index))
+        .route("/document-store/meilisearch/index/delete", post(routes::document_store::meilisearch_delete_index))
+        .route(
+            "/document-store/meilisearch/system/overview",
+            post(routes::document_store::meilisearch_get_system_overview),
+        )
+        .route("/document-store/meilisearch/keys/list", post(routes::document_store::meilisearch_list_keys))
+        .route("/document-store/meilisearch/keys/get", post(routes::document_store::meilisearch_get_key))
+        .route("/document-store/meilisearch/keys/create", post(routes::document_store::meilisearch_create_key))
+        .route("/document-store/meilisearch/keys/update", post(routes::document_store::meilisearch_update_key))
+        .route("/document-store/meilisearch/keys/delete", post(routes::document_store::meilisearch_delete_key))
+        .route("/document-store/meilisearch/tasks/list", post(routes::document_store::meilisearch_get_tasks))
+        .route("/document-store/meilisearch/tasks/get", post(routes::document_store::meilisearch_get_task))
+        .route("/document-store/meilisearch/tasks/cancel", post(routes::document_store::meilisearch_cancel_tasks))
+        .route("/document-store/meilisearch/tasks/delete", post(routes::document_store::meilisearch_delete_tasks))
+        .route(
+            "/document-store/meilisearch/documents/delete-all",
+            post(routes::document_store::meilisearch_delete_all_documents),
+        )
+        .route("/mongo/find-documents", post(routes::mongo::find_documents))
+        .route("/mongo/parse-shell-command", post(routes::mongo::parse_shell_command))
+        .route("/mongo/explain-find", post(routes::mongo::explain_find))
+        .route("/mongo/find-one", post(routes::mongo::find_one))
+        .route("/mongo/count-documents", post(routes::mongo::count_documents))
+        .route("/mongo/server-version", post(routes::mongo::server_version))
+        .route("/mongo/collection-stats", post(routes::mongo::collection_stats))
+        .route("/mongo/aggregate-documents", post(routes::mongo::aggregate_documents))
+        .route("/mongo/distinct", post(routes::mongo::distinct))
+        .route("/mongo/list-index-specs", post(routes::mongo::list_index_specs))
+        .route("/mongo/create-index", post(routes::mongo::create_index))
+        .route("/mongo/create-user", post(routes::mongo::create_user))
+        .route("/mongo/run-command", post(routes::mongo::run_command))
+        .route("/mongo/drop-indexes", post(routes::mongo::drop_indexes))
+        .route("/mongo/insert-document", post(routes::mongo::insert_document))
+        .route("/mongo/insert-documents", post(routes::mongo::insert_documents))
+        .route("/mongo/update-document", post(routes::mongo::update_document))
+        .route("/mongo/update-documents", post(routes::mongo::update_documents))
+        .route("/mongo/replace-document", post(routes::mongo::replace_document))
+        .route("/mongo/bulk-write", post(routes::mongo::bulk_write))
+        .route("/mongo/delete-document", post(routes::mongo::delete_document))
+        .route("/mongo/delete-documents", post(routes::mongo::delete_documents))
+        .route("/mongo/find-one-and-update", post(routes::mongo::find_one_and_update))
+        .route("/mongo/find-one-and-replace", post(routes::mongo::find_one_and_replace))
+        .route("/mongo/find-one-and-delete", post(routes::mongo::find_one_and_delete))
+        .route(
+            "/mongo/import/preview",
+            post(routes::mongodb_import_export::preview_import).layer(DefaultBodyLimit::max(
+                routes::table_import::import_request_body_limit_for_upload(web_body_limit_bytes()),
+            )),
+        )
+        .route("/mongo/import/preview-source", post(routes::mongodb_import_export::preview_uploaded_import))
+        .route("/mongo/import/source/release", post(routes::mongodb_import_export::release_import_source))
+        .route("/mongo/import/execute", post(routes::mongodb_import_export::execute_import))
+        .route("/mongo/import/progress/{importId}", get(routes::mongodb_import_export::import_progress))
+        .route("/mongo/import/cancel", post(routes::mongodb_import_export::cancel_import))
+        .route("/mongo/export", post(routes::mongodb_import_export::start_export))
+        .route("/mongo/export/progress/{exportId}", get(routes::mongodb_import_export::export_progress))
+        .route("/mongo/export/download/{exportId}", get(routes::mongodb_import_export::export_download))
+        .route("/mongo/export/cancel", post(routes::mongodb_import_export::cancel_export))
+        .route("/mongo/dump/catalog", post(routes::mongodb_dump::catalog))
+        .route(
+            "/mongo/dump/source",
+            post(routes::mongodb_dump::prepare_source).layer(DefaultBodyLimit::max(
+                routes::table_import::import_request_body_limit_for_upload(web_body_limit_bytes()),
+            )),
+        )
+        .route("/mongo/dump/source/release", post(routes::mongodb_dump::release_source))
+        .route("/mongo/dump/upload-limit", get(routes::mongodb_dump::upload_limit))
+        .route(
+            "/mongo/dump/source/upload",
+            post(routes::mongodb_dump::upload_restore_source).layer(DefaultBodyLimit::max(
+                routes::table_import::import_request_body_limit_for_upload(web_body_limit_bytes()),
+            )),
+        )
+        .route("/mongo/dump/export", post(routes::mongodb_dump::start_dump))
+        .route("/mongo/dump/restore", post(routes::mongodb_dump::start_restore))
+        .route("/mongo/dump/progress/{taskId}", get(routes::mongodb_dump::progress))
+        .route("/mongo/dump/cancel", post(routes::mongodb_dump::cancel))
+        // History
+        .route("/history", get(routes::history::load_history).delete(routes::history::clear_history))
+        .route("/history/save", post(routes::history::save_history))
+        .route("/history/search", post(routes::history::search_history))
+        .route("/history/options", get(routes::history::load_history_connection_options))
+        .route("/history/{id}", delete(routes::history::delete_history_entry))
+        // Saved SQL
+        .route(
+            "/saved-sql",
+            get(routes::saved_sql::load_saved_sql_library).post(routes::saved_sql::save_saved_sql_file),
+        )
+        .route(
+            "/saved-sql/{id}",
+            get(routes::saved_sql::load_saved_sql_file).delete(routes::saved_sql::delete_saved_sql_file),
+        )
+        .route("/saved-sql/{id}/default-content", post(routes::saved_sql::save_default_query_content))
+        .route("/saved-sql/folders", post(routes::saved_sql::save_saved_sql_folder))
+        .route("/saved-sql/folders/{id}", delete(routes::saved_sql::delete_saved_sql_folder))
+        // AI
+        .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
+        .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))
+        .route("/ai/provider-configs", get(routes::ai::load_ai_provider_configs))
+        .route("/ai/chat-selection", post(routes::ai::save_ai_chat_selection).get(routes::ai::load_ai_chat_selection))
+        .route("/ai/configs", post(routes::ai::save_ai_configs).get(routes::ai::load_ai_configs))
+        .route("/ai/default-config", post(routes::ai::set_default_ai_config))
+        .route("/ai/config-item", post(routes::ai::save_ai_config_item))
+        .route("/ai/config/{config_id}", delete(routes::ai::delete_ai_config))
+        .route("/ai/conversation", post(routes::ai::save_ai_conversation))
+        .route("/ai/conversations", get(routes::ai::load_ai_conversations))
+        .route("/ai/conversation/{id}", delete(routes::ai::delete_ai_conversation))
+        .route("/ai/complete", post(routes::ai::ai_complete))
+        .route("/ai/stream", post(routes::ai::ai_stream))
+        .route("/ai/agent-stream", post(routes::ai::ai_agent_stream))
+        .route("/ai/cancel-stream", post(routes::ai::ai_cancel_stream))
+        .route("/ai/tool-approval", post(routes::ai::ai_resolve_tool_approval))
+        .route(
+            "/ai/plugin-tools/plugins",
+            get(routes::ai::get_ai_plugin_tool_plugins).post(routes::ai::set_ai_plugin_tool_plugin_enabled),
+        )
+        .route("/ai/plugin-tools/preview", post(routes::ai::preview_plugin_ai_tools))
+        .route("/ai/test-connection", post(routes::ai::ai_test_connection))
+        .route("/ai/models", post(routes::ai::ai_list_models))
+        .route("/ai/model-effort", post(routes::ai::ai_resolve_model_effort))
+        // Prompt templates
+        .route(
+            "/prompt-templates",
+            get(routes::prompt_template::load_prompt_templates).post(routes::prompt_template::save_prompt_template),
+        )
+        .route("/prompt-templates/{id}", delete(routes::prompt_template::delete_prompt_template))
+        .route(
+            "/prompt-templates/global-instructions",
+            get(routes::prompt_template::get_global_instructions).put(routes::prompt_template::set_global_instructions),
+        )
+        // Transfer
+        .route("/transfer/start", post(routes::transfer::start_transfer))
+        .route("/transfer/ownership-preview", post(routes::transfer::preview_transfer_ownership))
+        .route("/task-runs", get(routes::task_history::list_task_runs))
+        .route("/task-runs/{run_id}", get(routes::task_history::get_task_run))
+        .route("/task-runs/{run_id}/items", get(routes::task_history::list_task_run_items))
+        .route("/transfer/progress/{transferId}", get(routes::transfer::transfer_progress))
+        .route("/transfer/cancel", post(routes::transfer::cancel_transfer))
+        .route("/transfer/sort-tables-by-fk", post(routes::transfer::sort_tables_by_fk_dependency))
+        // Database export
+        .route("/export/database", post(routes::database_export::start_database_export))
+        .route("/export/database/progress/{exportId}", get(routes::database_export::database_export_progress))
+        .route("/export/database/cancel", post(routes::database_export::cancel_database_export))
+        .route("/export/database/download/{exportId}", get(routes::database_export::database_export_download))
+        // Table export
+        .route("/export/table", post(routes::table_export::start_table_export))
+        .route("/export/table/progress/{exportId}", get(routes::table_export::table_export_progress))
+        .route("/export/table/download/{exportId}", get(routes::table_export::table_export_download))
+        .route("/export/table/cancel", post(routes::table_export::cancel_table_export))
+        // Query result export
+        .route("/export/query-result", post(routes::query_result_export::start_query_result_export))
+        .route(
+            "/export/query-result/progress/{exportId}",
+            get(routes::query_result_export::query_result_export_progress),
+        )
+        .route(
+            "/export/query-result/download/{exportId}",
+            get(routes::query_result_export::query_result_export_download),
+        )
+        .route("/export/query-result/cancel", post(routes::query_result_export::cancel_query_result_export))
+        // SQL file
+        .route(
+            "/sql-file/preview",
+            post(routes::sql_file::preview_sql_file)
+                // Upper bound only; the effective (possibly lower) limit configured via
+                // Settings > SQL File Size is enforced inside the handler at request time.
+                .layer(DefaultBodyLimit::max(routes::sql_file::sql_file_upload_hard_cap_bytes())),
+        )
+        .route("/sql-file/execute", post(routes::sql_file::execute_sql_file))
+        .route("/sql-file/preview/refresh", post(routes::sql_file::refresh_sql_file_preview))
+        .route("/sql-file/preview/release", post(routes::sql_file::release_sql_file_preview))
+        .route("/sql-file/tables", post(routes::sql_file::inspect_sql_file_tables))
+        .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
+        .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))
+        .route("/sql-file/failure-log/text", post(routes::sql_file::sql_file_failure_log_text))
+        .route("/sql-file/failure-log/{executionId}", get(routes::sql_file::sql_file_failure_log_download))
+        .route("/sql-file/failure-log/{executionId}/info", get(routes::sql_file::sql_file_failure_log_info))
+        // Table import
+        .route(
+            "/import/preview",
+            post(routes::table_import::preview_import).layer(DefaultBodyLimit::max(
+                routes::table_import::import_request_body_limit_for_upload(web_body_limit_bytes()),
+            )),
+        )
+        .route("/import/preview-source", post(routes::table_import::preview_uploaded_import))
+        .route("/import/source/release", post(routes::table_import::release_import_source))
+        .route("/import/execute", post(routes::table_import::execute_import))
+        .route("/import/progress/{importId}", get(routes::table_import::import_progress))
+        .route("/import/cancel", post(routes::table_import::cancel_import))
+        // Update
+        .route("/version", get(routes::update::get_version))
+        .route("/update/check", get(routes::update::check_for_updates))
+        .route("/changelog", get(routes::update::fetch_changelog))
+        // Layout
+        .route("/layout/sidebar", post(routes::layout::save_sidebar_layout).get(routes::layout::load_sidebar_layout))
+        .route(
+            "/layout/table-vgroups",
+            post(routes::layout::save_table_vgroups).get(routes::layout::load_table_vgroups),
+        )
+        .route(
+            "/layout/table-vgroups/connection/{connection_id}",
+            delete(routes::layout::delete_table_vgroups_for_connection),
+        )
+        // App settings
+        .route(
+            "/app-settings/pinned-tree-node-ids",
+            get(routes::app_settings::load_pinned_tree_node_ids).post(routes::app_settings::save_pinned_tree_node_ids),
+        )
+        .route(
+            "/app-settings/mcp-policy",
+            get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
+        )
+        .route("/app-settings/mcp-http-status", get(routes::app_settings::load_web_mcp_http_status))
+        .route("/app-settings/mcp-http", put(routes::app_settings::save_web_mcp_http_settings))
+        .route("/app-settings/mcp-http/rotate-token", post(routes::app_settings::rotate_web_mcp_token))
+        .route("/app-settings/web-capabilities", get(routes::app_settings::load_web_capabilities))
+        .route(
+            "/app-settings/max-agent-turns",
+            get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
+        )
+        .route(
+            "/app-settings/history-retention-limit",
+            get(routes::app_settings::load_history_retention_limit)
+                .put(routes::app_settings::save_history_retention_limit),
+        )
+        .route(
+            "/app-settings/mcp-history-retention-limit",
+            get(routes::app_settings::load_mcp_history_retention_limit)
+                .put(routes::app_settings::save_mcp_history_retention_limit),
+        )
+        .route("/app-settings/mcp-history-retention-cleanup", post(routes::app_settings::cleanup_mcp_history_retention))
+        .route(
+            "/app-settings/max-retries",
+            get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
+        )
+        .route(
+            "/app-settings/sql-file-upload-max-bytes",
+            get(routes::app_settings::load_sql_file_upload_max_bytes)
+                .put(routes::app_settings::save_sql_file_upload_max_mb),
+        )
+        .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
+        // Cloud sync
+        .route("/cloud-sync/webdav/test", post(routes::cloud_sync::webdav_sync_test))
+        .route("/cloud-sync/webdav/password-status", post(routes::cloud_sync::webdav_password_status))
+        .route("/cloud-sync/webdav/save-password", post(routes::cloud_sync::save_webdav_saved_password))
+        .route("/cloud-sync/webdav/forget-password", post(routes::cloud_sync::forget_webdav_saved_password))
+        .route("/cloud-sync/webdav/sync-secrets-status", post(routes::cloud_sync::webdav_sync_secrets_status))
+        .route(
+            "/cloud-sync/webdav/save-sync-secrets-preference",
+            post(routes::cloud_sync::save_webdav_sync_secrets_preference),
+        )
+        .route(
+            "/cloud-sync/webdav/forget-sync-secrets-passphrase",
+            post(routes::cloud_sync::forget_webdav_sync_secrets_passphrase),
+        )
+        .route("/cloud-sync/webdav/upload", post(routes::cloud_sync::webdav_sync_upload))
+        .route("/cloud-sync/catalog/local", post(routes::cloud_sync::cloud_sync_local_catalog))
+        .route("/cloud-sync/webdav/inspect", post(routes::cloud_sync::webdav_sync_inspect))
+        .route("/cloud-sync/webdav/download", post(routes::cloud_sync::webdav_sync_download))
+        .route("/cloud-sync/snippet/test", post(routes::cloud_sync::snippet_sync_test))
+        .route("/cloud-sync/snippet/token-status", post(routes::cloud_sync::snippet_token_status))
+        .route("/cloud-sync/snippet/save-token", post(routes::cloud_sync::save_snippet_saved_token))
+        .route("/cloud-sync/snippet/forget-token", post(routes::cloud_sync::forget_snippet_saved_token))
+        .route("/cloud-sync/snippet/passphrase-status", post(routes::cloud_sync::snippet_passphrase_status))
+        .route("/cloud-sync/snippet/save-passphrase", post(routes::cloud_sync::save_snippet_saved_passphrase))
+        .route("/cloud-sync/snippet/forget-passphrase", post(routes::cloud_sync::forget_snippet_saved_passphrase))
+        .route("/cloud-sync/snippet/settings", post(routes::cloud_sync::snippet_sync_settings))
+        .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
+        .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))
+        .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
+        .route("/cloud-sync/snippet/inspect", post(routes::cloud_sync::snippet_sync_inspect))
+        .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
+
+    // Do not expose DuckDB-only handlers from builds that omit DuckDB sidecar support.
+    #[cfg(feature = "duckdb-sidecar")]
+    let api =
+        api.route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql));
+
+    let api = add_mq_routes(api)
+        .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate))
+        .layer(middleware::from_fn_with_state(web_state.clone(), demo::demo_mode_gate))
+        .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
+        .with_state(web_state.clone());
+
+    // Build app
+    let mut app = Router::new()
+        .nest("/api", api)
+        .layer(DefaultBodyLimit::max(web_body_limit_bytes()))
+        .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
+        .layer(tower_http::trace::TraceLayer::new_for_http());
+
+    let mcp_router = web_mcp_router(&web_state).map_err(web_mcp_startup_error)?;
+    app = app.merge(
+        mcp_router
+            .layer(middleware::from_fn_with_state(web_state.clone(), web_mcp_demo_gate))
+            .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate)),
+    );
+    tracing::info!("DBX Web MCP endpoint is available at /mcp when enabled");
+
+    let static_dir = std::env::var_os("DBX_STATIC_DIR").map(std::path::PathBuf::from);
+    // DBX_STATIC_DIR always wins (frontend development); otherwise serve the
+    // assets embedded into the binary when the embed-static feature is enabled.
+    let static_source = {
+        let dir_source = static_dir.as_deref().map(StaticSource::Dir);
+        #[cfg(feature = "embed-static")]
+        {
+            dir_source.or_else(|| {
+                tracing::info!("Serving embedded frontend assets (DBX_STATIC_DIR not set)");
+                Some(StaticSource::Embedded)
+            })
+        }
+        #[cfg(not(feature = "embed-static"))]
+        {
+            dir_source
+        }
+    };
+    app = mount_static_assets(app, &public_base_path, static_source);
+
+    // Bind address
+    let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
+    // Defaults to all interfaces for container deployments; operators who
+    // expose the service through a local reverse proxy can pin the listener
+    // (DBX_BIND_ADDR=127.0.0.1) without a firewall change. The value is an
+    // IP only — the port always comes from DBX_PORT so the HTTP listener and
+    // the Redis PubSub server (which reads DBX_PORT independently) stay in
+    // sync.
+    let ip = match std::env::var("DBX_BIND_ADDR").ok().as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            value.parse::<IpAddr>().unwrap_or_else(|error| panic!("invalid DBX_BIND_ADDR \"{value}\": {error}"))
+        }
+        None => IpAddr::from([0, 0, 0, 0]),
+    };
+    let addr = SocketAddr::new(ip, port);
+
+    tracing::info!("DBX Web server starting on http://{}", addr);
+    if public_base_path != "/" {
+        tracing::info!("Serving DBX Web under context path {}", public_base_path);
+    }
+    if password_disabled {
+        tracing::info!("Password protection is disabled");
+    } else if std::env::var("DBX_PASSWORD").is_ok() {
+        tracing::info!("Password protection is enabled");
+    }
+    if !password_viewer_enabled {
+        tracing::info!("Saved connection password viewing is disabled");
+    }
+    if demo_mode {
+        tracing::info!("Demo mode is enabled: connection/plugin/AI mutations are blocked");
+    }
+
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
+    let shutdown_state = web_state.app.clone();
+    let server_shutdown = tokio_util::sync::CancellationToken::new();
+    let server_shutdown_trigger = server_shutdown.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            let mut terminate: Option<tokio::signal::unix::Signal> =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::error!("Failed to install SIGTERM handler: {e}; continuing with Ctrl+C only");
+                        None
+                    }
+                };
+            tokio::select! {
+                res = tokio::signal::ctrl_c() => {
+                    if let Err(e) = res {
+                        tracing::error!("Failed to listen for Ctrl+C: {e}");
+                    } else {
+                        tracing::info!("Shutdown signal received (Ctrl+C)");
+                    }
+                }
+                _ = async {
+                    match terminate.as_mut() {
+                        Some(signal) => {
+                            signal.recv().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    tracing::info!("Shutdown signal received (SIGTERM)");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::error!("Failed to listen for Ctrl+C: {e}");
+            } else {
+                tracing::info!("Shutdown signal received (Ctrl+C)");
+            }
+        }
+        backup_stop.cancel();
+        server_shutdown_trigger.cancel();
+    });
+
+    let shutdown_wait = server_shutdown.clone();
+    let serve_future = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_wait.cancelled().await;
+    });
+
+    // If graceful shutdown of HTTP connections takes longer than 5 seconds, abort to ensure prompt termination on Ctrl+C.
+    // Non-zero exit codes keep systemd's Restart=on-failure meaningful: a serve error or an
+    // undrained backup worker must not look like a clean stop.
+    let mut exit_code = 0i32;
+    tokio::select! {
+        res = serve_future => {
+            if let Err(e) = res {
+                tracing::error!("Server error: {e}");
+                exit_code = 1;
+            }
+        }
+        _ = async {
+            server_shutdown.cancelled().await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        } => {
+            tracing::warn!("Graceful HTTP shutdown timed out after 5s; proceeding with teardown");
+        }
+    }
+    if tokio::time::timeout(std::time::Duration::from_secs(5), backup_worker).await.is_err() {
+        tracing::warn!("Scheduled backup worker did not drain within 5s; exiting with failure status");
+        exit_code = 1;
+    }
+    shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;
+    std::process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        mount_static_assets, normalize_public_base_path, password_viewer_enabled_from_env, web_agent_dir_from_env,
+        web_body_limit_bytes_from_value, web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
+    };
+    use crate::routes::table_import;
+    use axum::body::Body;
+    use axum::extract::{DefaultBodyLimit, Multipart};
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+    use axum::http::{Response, StatusCode};
+    use axum::routing::{get, post};
+    use axum::Router;
+    use tower_http::compression::predicate::Predicate;
+
+    #[tokio::test]
+    async fn migration_http_gate_blocks_business_until_ready_but_allows_cleanup_handler() {
+        use std::sync::{atomic::Ordering, Arc};
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            dbx_core::persistence::test_storage::open_unmigrated(&directory.path().join("dbx.db")).await.unwrap();
+        let app = Arc::new(dbx_core::connection::AppState::new(storage));
+        let state = Arc::new(crate::state::WebState::for_tests(app, directory.path().to_path_buf()));
+        state.migration_ready.store(false, Ordering::Release);
+        let router = Router::new()
+            .route("/api/migration/status", get(|| async { "status" }))
+            .route("/api/migration/cleanup-backups", post(|| async { "cleanup" }))
+            .route("/api/connection/list", get(|| async { "connections" }))
+            .route("/mcp", post(|| async { "mcp" }))
+            .layer(axum::middleware::from_fn_with_state(state.clone(), super::migration_gate));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+        assert_eq!(
+            client.get(format!("http://{address}/api/migration/status")).send().await.unwrap().status(),
+            StatusCode::OK
+        );
+        for (method, path) in [(reqwest::Method::GET, "/api/connection/list"), (reqwest::Method::POST, "/mcp")] {
+            let response = client.request(method, format!("http://{address}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::LOCKED);
+            assert_eq!(response.json::<serde_json::Value>().await.unwrap()["code"], "DATA_MIGRATION_REQUIRED");
+        }
+        assert_eq!(
+            client.post(format!("http://{address}/api/migration/cleanup-backups")).send().await.unwrap().status(),
+            StatusCode::OK
+        );
+        state.migration_ready.store(true, Ordering::Release);
+        assert_eq!(
+            client.get(format!("http://{address}/api/connection/list")).send().await.unwrap().status(),
+            StatusCode::OK
+        );
+        server.abort();
+    }
+
+    fn compression_response(content_type: &str) -> Response<Body> {
+        Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()
+    }
+
+    #[test]
+    fn web_compression_skips_streams_and_precompressed_exports() {
+        let predicate = web_compression_predicate();
+
+        assert!(predicate.should_compress(&compression_response("application/json")));
+        assert!(!predicate.should_compress(&compression_response("text/event-stream")));
+        assert!(!predicate.should_compress(&compression_response(XLSX_CONTENT_TYPE)));
+    }
+
+    #[test]
+    fn normalize_public_base_path_defaults_to_root() {
+        assert_eq!(normalize_public_base_path(None), "/");
+        assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
+        assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
+    }
+
+    #[test]
+    fn password_viewer_enabled_defaults_to_true_and_accepts_truthy_disable_values() {
+        assert!(password_viewer_enabled_from_env(None));
+        assert!(password_viewer_enabled_from_env(Some("false")));
+        for value in ["1", "true", "yes", "on", " TRUE "] {
+            assert!(!password_viewer_enabled_from_env(Some(value)), "{value}");
+        }
+    }
+
+    #[test]
+    fn normalize_public_base_path_trims_and_preserves_segments() {
+        assert_eq!(normalize_public_base_path(Some("dbx".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/dbx/".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/tools/dbx/?v=1".to_string())), "/tools/dbx");
+    }
+
+    #[test]
+    #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
+    fn normalize_public_base_path_rejects_invalid_characters() {
+        normalize_public_base_path(Some("/dbx admin".to_string()));
+    }
+
+    #[test]
+    fn web_agent_dir_defaults_under_data_dir() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(web_agent_dir_from_env(&data_dir, None), data_dir.join("agents"));
+    }
+
+    #[test]
+    fn web_agent_dir_uses_explicit_env_override() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(
+            web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
+            std::path::PathBuf::from("/custom/agents")
+        );
+    }
+
+    #[test]
+    fn web_upload_limit_parses_valid_values_and_preserves_safe_fallbacks() {
+        const MIB: usize = 1024 * 1024;
+
+        assert_eq!(web_body_limit_bytes_from_value(None), 1024 * MIB);
+        assert_eq!(web_body_limit_bytes_from_value(Some("")), 1024 * MIB);
+        assert_eq!(web_body_limit_bytes_from_value(Some("0")), 1024 * MIB);
+        assert_eq!(web_body_limit_bytes_from_value(Some("invalid")), 1024 * MIB);
+        assert_eq!(web_body_limit_bytes_from_value(Some("4096")), 4096usize.saturating_mul(MIB));
+        assert_eq!(web_body_limit_bytes_from_value(Some(&usize::MAX.to_string())), usize::MAX);
+    }
+
+    #[tokio::test]
+    async fn import_route_reserves_multipart_framing_above_the_file_limit() {
+        const FILE_LIMIT: usize = 8;
+
+        async fn uploaded_file_size(mut multipart: Multipart) -> Result<String, StatusCode> {
+            let field =
+                multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)?.ok_or(StatusCode::BAD_REQUEST)?;
+            let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            Ok(bytes.len().to_string())
+        }
+
+        let router = Router::new()
+            .route("/general", post(uploaded_file_size))
+            .route(
+                "/import",
+                post(uploaded_file_size)
+                    .layer(DefaultBodyLimit::max(table_import::import_request_body_limit_for_upload(FILE_LIMIT))),
+            )
+            .layer(DefaultBodyLimit::max(FILE_LIMIT));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let address = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve test router");
+        });
+        let boundary = "dbx-import-boundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"data.csv\"\r\n\r\n12345678\r\n--{boundary}--\r\n"
+        );
+        let client = reqwest::Client::new();
+
+        let general_response = client
+            .post(format!("http://{address}/general"))
+            .header(CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+            .body(body.clone())
+            .send()
+            .await
+            .expect("send request through general limit");
+        assert_eq!(general_response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let import_response = client
+            .post(format!("http://{address}/import"))
+            .header(CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+            .body(body)
+            .send()
+            .await
+            .expect("send request through import limit");
+        assert_eq!(import_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(import_response.text().await.expect("read import response"), FILE_LIMIT.to_string());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn public_base_path_routes_preserve_redirect_query_static_files_and_api() {
+        let client =
+            reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("build test client");
+        let static_dir = std::env::temp_dir().join(format!("dbx-web-public-base-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&static_dir).expect("create static directory");
+        std::fs::write(static_dir.join("index.html"), "subpath index").expect("write index");
+        std::fs::write(static_dir.join("app.js"), "subpath asset").expect("write asset");
+        std::fs::create_dir_all(static_dir.join("assets")).expect("create assets directory");
+        std::fs::write(static_dir.join("assets/app-12136abc.js"), "hashed asset").expect("write hashed asset");
+        std::fs::write(static_dir.join("assets/plain.js"), "unversioned asset").expect("write plain asset");
+
+        for public_base_path in ["/dbx", "/xxxx/rsu"] {
+            let router = mount_static_assets(
+                Router::new().route("/api/ping", get(|| async { "pong" })),
+                public_base_path,
+                Some(StaticSource::Dir(&static_dir)),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+            let address = listener.local_addr().expect("test listener address");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.expect("serve test router");
+            });
+
+            let expected_target = format!("{public_base_path}/");
+            let response =
+                client.get(format!("http://{address}{public_base_path}")).send().await.expect("GET bare base path");
+
+            assert_eq!(response.status(), reqwest::StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(
+                response.headers().get(reqwest::header::LOCATION).and_then(|value| value.to_str().ok()),
+                Some(expected_target.as_str())
+            );
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}?next=%2Fworkspace&theme=dark"))
+                .send()
+                .await
+                .expect("GET bare base path with query");
+            let expected_target_with_query = format!("{public_base_path}/?next=%2Fworkspace&theme=dark");
+            assert_eq!(response.status(), reqwest::StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(
+                response.headers().get(reqwest::header::LOCATION).and_then(|value| value.to_str().ok()),
+                Some(expected_target_with_query.as_str())
+            );
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/?next=%2Fworkspace"))
+                .send()
+                .await
+                .expect("GET trailing slash base path");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read index response"), "subpath index");
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/index.html"))
+                .send()
+                .await
+                .expect("GET explicit index");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read explicit index"), "subpath index");
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/route/within/app"))
+                .send()
+                .await
+                .expect("GET SPA fallback");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read fallback response"), "subpath index");
+
+            for asset in ["app-12136abc.js", "plain.js"] {
+                let response = client
+                    .get(format!("http://{address}{public_base_path}/assets/{asset}"))
+                    .send()
+                    .await
+                    .expect("GET asset");
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(
+                    response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+                    Some("public, max-age=31536000, immutable")
+                );
+            }
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/assets/missing.js"))
+                .send()
+                .await
+                .expect("GET missing asset");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+            assert_ne!(
+                response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+                Some("public, max-age=31536000, immutable")
+            );
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/app.js"))
+                .send()
+                .await
+                .expect("GET static asset");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert!(response.headers().get(CACHE_CONTROL).is_none());
+            assert_eq!(response.text().await.expect("read asset response"), "subpath asset");
+
+            let response =
+                client.get(format!("http://{address}{public_base_path}/api/ping")).send().await.expect("GET API route");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert!(response.headers().get(CACHE_CONTROL).is_none());
+            assert_eq!(response.text().await.expect("read API response"), "pong");
+
+            server.abort();
+        }
+
+        std::fs::remove_dir_all(static_dir).expect("remove static directory");
+    }
+
+    #[tokio::test]
+    async fn root_public_base_path_preserves_static_files_and_api() {
+        let static_dir = std::env::temp_dir().join(format!("dbx-web-root-base-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&static_dir).expect("create static directory");
+        std::fs::write(static_dir.join("index.html"), "root index").expect("write index");
+        std::fs::write(static_dir.join("app.js"), "root asset").expect("write asset");
+        std::fs::create_dir_all(static_dir.join("assets")).expect("create assets directory");
+        std::fs::write(static_dir.join("assets/app-12136abc.js"), "hashed asset").expect("write hashed asset");
+        let router = mount_static_assets(
+            Router::new().route("/api/ping", get(|| async { "pong" })),
+            "/",
+            Some(StaticSource::Dir(&static_dir)),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let address = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve test router");
+        });
+        let client = reqwest::Client::new();
+
+        for (request_path, expected_body) in [("/", "root index"), ("/app.js", "root asset"), ("/api/ping", "pong")] {
+            let response = client.get(format!("http://{address}{request_path}")).send().await.expect("GET root route");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            if request_path == "/" {
+                assert_eq!(
+                    response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+                    Some("no-cache")
+                );
+            } else {
+                assert!(response.headers().get(CACHE_CONTROL).is_none());
+            }
+            assert_eq!(response.text().await.expect("read root response"), expected_body);
+        }
+
+        for request_path in ["/index.html", "/route/within/app"] {
+            let response = client.get(format!("http://{address}{request_path}")).send().await.expect("GET index");
+            assert_eq!(
+                response.status(),
+                if request_path == "/index.html" { reqwest::StatusCode::OK } else { reqwest::StatusCode::NOT_FOUND }
+            );
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read index response"), "root index");
+        }
+
+        let response = client.get(format!("http://{address}/assets/app-12136abc.js")).send().await.expect("GET asset");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+            Some("public, max-age=31536000, immutable")
+        );
+
+        server.abort();
+        std::fs::remove_dir_all(static_dir).expect("remove static directory");
+    }

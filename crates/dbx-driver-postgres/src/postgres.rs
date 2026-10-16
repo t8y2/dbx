@@ -2,7 +2,6 @@ use crate::text_encoding::{Client as EncodingClient, PgError, Row, RowStream, Te
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use deadpool_postgres::{ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime};
 use futures::{SinkExt, StreamExt};
-use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
 use percent_encoding::percent_decode_str;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::verify_server_cert_signed_by_trust_anchor;
@@ -3156,27 +3155,20 @@ async fn connect_postgres_pool_attempt(
         // executor's ReconnectAndRetry path (see pool_error_action / do_execute
         // in query.rs).
         let mgr_config = ManagerConfig { recycling_method: RecyclingMethod::Fast };
-        let mgr = if postgres_url.legacy_tls {
-            log::info!("PostgreSQL legacy TLS compatibility enabled");
-            let tls = postgres_openssl_connector(
-                &postgres_url.ssl_files,
-                postgres_url.accepts_invalid_certs,
-                postgres_url.verifies_hostname,
-            )?;
-            deadpool_postgres::Manager::from_connect(pg_config.clone(), NoticeCapturingConnect { tls }, mgr_config)
-        } else {
-            let tls_config = postgres_tls_config(
-                &pg_config,
-                &postgres_url.ssl_files,
-                postgres_url.accepts_invalid_certs,
-                postgres_url.verifies_hostname,
-            )?;
-            deadpool_postgres::Manager::from_connect(
-                pg_config.clone(),
-                NoticeCapturingConnect { tls: tokio_postgres_rustls::MakeRustlsConnect::new(tls_config) },
-                mgr_config,
-            )
-        };
+        if postgres_url.legacy_tls {
+            log::warn!("PostgreSQL legacy TLS (OpenSSL) unavailable in this build; falling back to rustls");
+        }
+        let tls_config = postgres_tls_config(
+            &pg_config,
+            &postgres_url.ssl_files,
+            postgres_url.accepts_invalid_certs,
+            postgres_url.verifies_hostname,
+        )?;
+        let mgr = deadpool_postgres::Manager::from_connect(
+            pg_config.clone(),
+            NoticeCapturingConnect { tls: tokio_postgres_rustls::MakeRustlsConnect::new(tls_config) },
+            mgr_config,
+        );
         let text_encoding = postgres_url.text_encoding;
         let pool = Pool::builder(mgr)
             .post_create(deadpool_postgres::Hook::async_fn(move |client, _| {
@@ -3380,11 +3372,6 @@ fn make_rustls_connect_from_context(
     Ok(tokio_postgres_rustls::MakeRustlsConnect::new(tls_config))
 }
 
-fn make_openssl_connect_from_context(
-    ctx: &PostgresCancelContext,
-) -> Result<postgres_openssl::MakeTlsConnector, String> {
-    postgres_openssl_connector(&ctx.ssl_files, ctx.accepts_invalid_certs, ctx.verifies_hostname)
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PostgresConnectionUrl {
@@ -3537,47 +3524,6 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
     })
 }
 
-fn postgres_openssl_connector(
-    ssl_files: &PostgresSslFiles,
-    accepts_invalid_certs: bool,
-    verifies_hostname: bool,
-) -> Result<postgres_openssl::MakeTlsConnector, String> {
-    let mut builder = SslConnector::builder(SslMethod::tls_client())
-        .map_err(|e| format!("Failed to initialize PostgreSQL legacy TLS: {e}"))?;
-
-    if accepts_invalid_certs {
-        builder.set_verify(SslVerifyMode::NONE);
-    } else {
-        builder.set_verify(SslVerifyMode::PEER);
-        if let Some(path) = ssl_files.sslrootcert.as_deref() {
-            builder
-                .set_ca_file(path)
-                .map_err(|e| format!("sslrootcert: failed to load CA certificate from {path}: {e}"))?;
-        }
-    }
-
-    match (ssl_files.sslcert.as_deref(), ssl_files.sslkey.as_deref()) {
-        (Some(cert_path), Some(key_path)) => {
-            builder
-                .set_certificate_chain_file(cert_path)
-                .map_err(|e| format!("sslcert: failed to load certificate from {cert_path}: {e}"))?;
-            builder
-                .set_private_key_file(key_path, SslFiletype::PEM)
-                .map_err(|e| format!("sslkey: failed to load private key from {key_path}: {e}"))?;
-            builder.check_private_key().map_err(|e| format!("sslkey: private key does not match sslcert: {e}"))?;
-        }
-        (Some(_), None) => return Err("PostgreSQL sslcert requires sslkey".to_string()),
-        (None, Some(_)) => return Err("PostgreSQL sslkey requires sslcert".to_string()),
-        (None, None) => {}
-    }
-
-    let mut connector = postgres_openssl::MakeTlsConnector::new(builder.build());
-    connector.set_callback(move |config, _| {
-        config.set_verify_hostname(verifies_hostname);
-        Ok(())
-    });
-    Ok(connector)
-}
 
 fn postgres_tls_config(
     pg_config: &tokio_postgres::Config,
@@ -9549,21 +9495,14 @@ async fn cancel_postgres_query(
 ) {
     let cancel_timeout = postgres_cancel_attempt_timeout(cancel_timeout, cancel_context);
     if let Some(ctx) = cancel_context {
-        let tls_result = if ctx.legacy_tls {
-            match make_openssl_connect_from_context(ctx) {
-                Ok(tls) => Some(tokio::time::timeout(cancel_timeout, pg_cancel_token.cancel_query(tls)).await),
-                Err(err) => {
-                    log::warn!("Failed to build legacy TLS connector for cancel: {err}; falling back to NoTls cancel");
-                    None
-                }
-            }
-        } else {
-            match make_rustls_connect_from_context(ctx) {
-                Ok(tls) => Some(tokio::time::timeout(cancel_timeout, pg_cancel_token.cancel_query(tls)).await),
-                Err(err) => {
-                    log::warn!("Failed to build TLS connector for cancel: {err}; falling back to NoTls cancel");
-                    None
-                }
+        if ctx.legacy_tls {
+            log::warn!("PostgreSQL legacy TLS (OpenSSL) unavailable in this build; using rustls for cancel");
+        }
+        let tls_result = match make_rustls_connect_from_context(ctx) {
+            Ok(tls) => Some(tokio::time::timeout(cancel_timeout, pg_cancel_token.cancel_query(tls)).await),
+            Err(err) => {
+                log::warn!("Failed to build TLS connector for cancel: {err}; falling back to NoTls cancel");
+                None
             }
         };
         if let Some(result) = tls_result {

@@ -6026,6 +6026,8 @@ export interface TableImportPreview {
   sizeBytes: number;
   columns: string[];
   rows: unknown[][];
+  blankCells?: number[][];
+  rowNumbers?: number[];
   totalRows: number;
   totalRowsExact?: boolean;
   sourceFingerprint: string;

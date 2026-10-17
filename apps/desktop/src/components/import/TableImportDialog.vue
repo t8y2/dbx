@@ -18,6 +18,7 @@ import {
   autoMapImportColumns,
   buildTableImportParseOptions,
   defaultTableImportEmptyStringAsNull,
+  excelImportCellAction,
   formatTableImportElapsed,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
@@ -241,8 +242,34 @@ const requiredUnmappedColumns = computed(() =>
   requiredImportTargetColumns(
     targetColumns.value,
     mappedColumns.value.map((mapping) => mapping.targetColumn),
+    structureDatabaseType.value,
   ),
 );
+function previewCellAction(value: unknown, rowIndex: number, columnIndex: number) {
+  if (sourceFormat.value !== "excel" || targetMode.value !== "existing" || !preview.value?.blankCells) return "value";
+  const sourceColumn = preview.value.columns[columnIndex];
+  const targetName = columnMapping.value[sourceColumn ?? ""];
+  const column = targetColumns.value.find((column) => column.name.toLowerCase() === targetName?.toLowerCase());
+  return excelImportCellAction(value, preview.value.blankCells[rowIndex]?.includes(columnIndex) ?? false, column, structureDatabaseType.value);
+}
+const excelPreviewError = computed(() => {
+  if (!preview.value) return "";
+  if (sourceFormat.value === "excel" && targetMode.value === "existing" && requiredUnmappedColumns.value.length) {
+    return t("tableImport.requiredUnmapped", { columns: requiredUnmappedColumns.value.join(", ") });
+  }
+  for (const [rowIndex, row] of preview.value.rows.entries()) {
+    for (const [columnIndex, value] of row.entries()) {
+      const action = previewCellAction(value, rowIndex, columnIndex);
+      if (action === "missing" || action === "explicitNull") {
+        return t(action === "missing" ? "tableImport.excelMissingValue" : "tableImport.excelExplicitNull", {
+          row: preview.value.rowNumbers?.[rowIndex] ?? rowIndex + dataStartRow.value,
+          column: columnMapping.value[preview.value.columns[columnIndex] ?? ""],
+        });
+      }
+    }
+  }
+  return "";
+});
 const isBatchImport = computed(() => targetMode.value === "create" && batchTasks.value.length > 1);
 const selectedBatchTasks = computed(() => batchTasks.value.filter((task) => task.selected));
 const batchTargetNamesValid = computed(() => {
@@ -250,7 +277,7 @@ const batchTargetNamesValid = computed(() => {
   return tableNames.length > 0 && tableNames.every(Boolean) && new Set(tableNames).size === tableNames.length;
 });
 const canImport = computed(() => {
-  if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value || conflictPolicyError.value) return false;
+  if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value || conflictPolicyError.value || excelPreviewError.value) return false;
   if (!isBatchImport.value) return !!preview.value && !!targetTableName.value && mappingValidation.value.valid;
   if (!batchTargetNamesValid.value) return false;
   return selectedBatchTasks.value.every((task) => {
@@ -266,7 +293,7 @@ const canGoNext = computed(() => {
     if (wizardStep.value === "mapping") return canImport.value;
   }
   if (wizardStep.value === "options") return !!preview.value && !!targetTableName.value && existingTargetMetadataReady.value;
-  if (wizardStep.value === "mapping") return existingTargetMetadataReady.value && mappingValidation.value.valid && !conflictPolicyError.value;
+  if (wizardStep.value === "mapping") return existingTargetMetadataReady.value && mappingValidation.value.valid && !conflictPolicyError.value && !excelPreviewError.value;
   return false;
 });
 const rawProgressPercent = computed(() => tableImportProgressPercent(progress.value));
@@ -968,7 +995,8 @@ function updateColumnDataType(sourceColumn: string, value: any) {
   };
 }
 
-function formatCell(value: unknown) {
+function formatCell(value: unknown, rowIndex: number, columnIndex: number) {
+  if (previewCellAction(value, rowIndex, columnIndex) === "default") return t("tableImport.useDefaultValue");
   if (value === null) return "NULL";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
@@ -1674,6 +1702,7 @@ watch(rawProgressPercent, (percent) => {
           </div>
 
           <div v-else-if="sourceFormat === 'excel'" class="grid grid-cols-4 gap-3 rounded-md border p-3">
+            <p class="col-span-full text-xs text-muted-foreground">{{ t("tableImport.excelBlankPolicy") }}</p>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.sheet") }}</Label>
               <Input v-if="isBatchImport" :model-value="selectedSheet || preview?.sheets?.[0] || t('tableImport.firstSheet')" :aria-label="t('tableImport.sheet')" readonly class="h-8 text-xs" />
@@ -1831,7 +1860,7 @@ watch(rawProgressPercent, (percent) => {
                   <tbody>
                     <tr v-for="(row, rowIndex) in preview.rows" :key="rowIndex">
                       <td v-for="(cell, colIndex) in row" :key="colIndex" class="max-w-[180px] border-b border-r px-2 py-1.5 font-mono" :class="{ 'text-muted-foreground': cell === null }">
-                        <span class="block truncate">{{ formatCell(cell) }}</span>
+                        <span class="block truncate" :title="formatCell(cell, rowIndex, colIndex)">{{ formatCell(cell, rowIndex, colIndex) }}</span>
                       </td>
                     </tr>
                   </tbody>
@@ -1845,6 +1874,9 @@ watch(rawProgressPercent, (percent) => {
           </div>
           <div v-else-if="conflictPolicyError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {{ conflictPolicyError }}
+          </div>
+          <div v-else-if="excelPreviewError" role="alert" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {{ excelPreviewError }}
           </div>
           <div v-else-if="requiredUnmappedColumns.length" class="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
             <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />

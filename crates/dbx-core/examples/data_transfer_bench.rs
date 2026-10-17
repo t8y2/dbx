@@ -72,6 +72,7 @@ fn run() -> Result<(), String> {
         rows: rows.clone(),
         total_rows: rows.len(),
         effective_encoding: None,
+        excel_metadata: None,
     };
 
     let import_started = Instant::now();

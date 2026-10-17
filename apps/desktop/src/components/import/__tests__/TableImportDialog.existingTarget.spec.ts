@@ -13,8 +13,8 @@ const mocks = vi.hoisted(() => ({
     { name: "archived_target", table_type: "TABLE" },
   ]),
   getColumns: vi.fn().mockResolvedValue([
-    { name: "id", data_type: "INTEGER", nullable: false, is_primary_key: true },
-    { name: "name", data_type: "TEXT", nullable: true, is_primary_key: false },
+    { name: "id", data_type: "INTEGER", is_nullable: false, is_primary_key: true },
+    { name: "name", data_type: "TEXT", is_nullable: true, is_primary_key: false },
   ]),
   listDataTypes: vi.fn().mockResolvedValue(["INTEGER", "TEXT"]),
   previewTableImportFile: vi.fn().mockResolvedValue({
@@ -24,6 +24,8 @@ const mocks = vi.hoisted(() => ({
     sizeBytes: 24,
     columns: ["id", "name"],
     rows: [[1, "Alice"]],
+    blankCells: [] as number[][],
+    rowNumbers: [] as number[],
     totalRows: 1,
     sourceFingerprint: "rows-xlsx",
     sheets: ["Data"],
@@ -255,11 +257,23 @@ beforeEach(() => {
     { name: "archived_target", table_type: "TABLE" },
   ]);
   mocks.getColumns.mockReset().mockResolvedValue([
-    { name: "id", data_type: "INTEGER", nullable: false, is_primary_key: true },
-    { name: "name", data_type: "TEXT", nullable: true, is_primary_key: false },
+    { name: "id", data_type: "INTEGER", is_nullable: false, is_primary_key: true },
+    { name: "name", data_type: "TEXT", is_nullable: true, is_primary_key: false },
   ]);
   mocks.listDataTypes.mockClear();
-  mocks.previewTableImportFile.mockClear();
+  mocks.previewTableImportFile.mockReset().mockResolvedValue({
+    fileName: "rows.xlsx",
+    filePath: "/tmp/rows.xlsx",
+    fileType: "excel",
+    sizeBytes: 24,
+    columns: ["id", "name"],
+    rows: [[1, "Alice"]],
+    blankCells: [],
+    rowNumbers: [],
+    totalRows: 1,
+    sourceFingerprint: "rows-xlsx",
+    sheets: ["Data"],
+  });
   mocks.importTableFile.mockReset().mockImplementation(async (request, onProgress) => {
     onProgress({ importId: request.importId, status: "done", rowsImported: 1, totalRows: 1, elapsedMs: 1 });
     return { importId: request.importId, rowsImported: 1, totalRows: 1, elapsedMs: 1 };
@@ -366,11 +380,11 @@ describe("TableImportDialog existing targets", () => {
 
     await selectExistingTarget("archived_target");
     await vi.waitFor(() => expect(mocks.getColumns).toHaveBeenCalledWith("connection-1", "main", "main", "archived_target"));
-    resolveArchived([{ name: "name", data_type: "TEXT", nullable: true }]);
+    resolveArchived([{ name: "name", data_type: "TEXT", is_nullable: true }]);
     await flushAsyncUpdates();
     expect(buttonContaining("Next")?.disabled).toBe(false);
 
-    resolveExisting([{ name: "id", data_type: "INTEGER", nullable: false }]);
+    resolveExisting([{ name: "id", data_type: "INTEGER", is_nullable: false }]);
     await flushAsyncUpdates();
     buttonContaining("Next")?.click();
     await flushAsyncUpdates();
@@ -452,8 +466,8 @@ describe("TableImportDialog existing targets", () => {
 
   it("disables update when target primary-key metadata is absent", async () => {
     mocks.getColumns.mockResolvedValueOnce([
-      { name: "id", data_type: "INTEGER", nullable: false, is_primary_key: false },
-      { name: "name", data_type: "TEXT", nullable: true, is_primary_key: false },
+      { name: "id", data_type: "INTEGER", is_nullable: false, is_primary_key: false },
+      { name: "name", data_type: "TEXT", is_nullable: true, is_primary_key: false },
     ]);
     i18n.global.locale.value = "en";
     await mountDialog({ schema: "main" });
@@ -622,5 +636,40 @@ describe("TableImportDialog existing targets", () => {
     await flushAsyncUpdates();
     const nameSelects = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
     expect(nameSelects.map((s) => s.value)).toEqual(["__skip__", "__skip__"]);
+  });
+
+  it.each([
+    { defaultValue: "", blank: true, expected: "Use default value", blocked: false },
+    { defaultValue: null, blank: true, expected: 'Excel row 7, column "name" is blank', blocked: true },
+    { defaultValue: "", blank: false, expected: 'Excel row 7, column "name" contains NULL', blocked: true },
+  ])("previews Excel blank-cell policy: $expected", async ({ defaultValue, blank, expected, blocked }) => {
+    i18n.global.locale.value = "en";
+    mocks.getColumns.mockResolvedValue([
+      { name: "id", data_type: "INTEGER", is_nullable: false, is_primary_key: true },
+      { name: "name", data_type: "TEXT", is_nullable: false, is_primary_key: false, column_default: defaultValue },
+    ]);
+    mocks.previewTableImportFile.mockResolvedValue({
+      fileName: "rows.xlsx",
+      filePath: "/tmp/rows.xlsx",
+      fileType: "excel",
+      sizeBytes: 24,
+      columns: ["id", "name"],
+      rows: [[1, null]],
+      blankCells: [blank ? [1] : []],
+      rowNumbers: [7],
+      totalRows: 1,
+      sourceFingerprint: "rows-xlsx",
+      sheets: ["Data"],
+    });
+    await mountDialog({ prefillTable: "existing_target", schema: "main" });
+    await selectWorkbook();
+    buttonContaining("Load Preview")?.click();
+    await vi.waitFor(() => expect(buttonContaining("Reload Preview")).toBeTruthy());
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    await vi.waitFor(() => expect(document.body.textContent).toContain(expected));
+    expect(buttonContaining("Next")?.disabled).toBe(blocked);
+    expect(mocks.importTableFile).not.toHaveBeenCalled();
   });
 });

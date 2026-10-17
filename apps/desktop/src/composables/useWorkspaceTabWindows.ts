@@ -1,4 +1,4 @@
-import { computed, onScopeDispose, provide, ref, type InjectionKey } from "vue";
+import { computed, onScopeDispose, provide, ref, watch, type InjectionKey } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
 import { useQueryStore } from "@/stores/queryStore";
@@ -61,6 +61,26 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
   let previewTimer: ReturnType<typeof setInterval> | undefined;
   let remoteTimer: ReturnType<typeof setTimeout> | undefined;
   let previewBusy = false;
+  let windowTitleRevision = 0;
+
+  async function updateWorkspaceWindowTitle() {
+    if (!isTauriRuntime() || context.kind !== "workspace") return;
+    const revision = ++windowTitleRevision;
+    const firstTab = queryStore.tabs[0];
+    const title = firstTab?.title.trim() || "DBX";
+    try {
+      const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+      if (disposed || revision !== windowTitleRevision) return;
+      await getCurrentWebviewWindow().setTitle(title);
+    } catch {
+      // Window titles are only a convenience for identifying sibling tabs.
+    }
+  }
+
+  watch(
+    () => queryStore.tabs.map((tab) => `${tab.id}\u0000${tab.title}`).join("\u0000"),
+    () => void updateWorkspaceWindowTitle(),
+  );
 
   function errorToast(error: unknown) {
     toast(`${t("tabs.openInNewWindowFailed")} ${error instanceof Error ? error.message : String(error)}`, 7000);
@@ -88,9 +108,15 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
     const y = (point.y - position.y) / scale;
     const element = document.elementFromPoint(x, y);
     const bar = element?.closest<HTMLElement>("[data-main-tab-bar][data-group-id]");
-    if (!bar?.dataset.groupId) return null;
+    // An empty workspace has no tab-bar hit area to land on. Still accept a
+    // transfer anywhere inside that window and place it in its focused group.
+    if (!bar?.dataset.groupId) {
+      return queryStore.tabs.length === 0 && queryStore.focusedGroupId ? { groupId: queryStore.focusedGroupId } : null;
+    }
     const group = queryStore.groups.find((group) => group.id === bar.dataset.groupId);
-    if (!group) return null;
+    if (!group) {
+      return queryStore.tabs.length === 0 && queryStore.focusedGroupId ? { groupId: queryStore.focusedGroupId } : null;
+    }
     const tab = element?.closest<HTMLElement>("[data-tab-id]");
     const tabId = tab?.dataset.tabId;
     let index: number | undefined;
@@ -479,6 +505,7 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
         window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
       }
     }
+    await updateWorkspaceWindowTitle();
   }
 
   async function prepareAppClose(): Promise<() => void> {

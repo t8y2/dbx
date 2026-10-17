@@ -2045,7 +2045,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                                 />
                               </template>
                               <template v-else-if="!isTabBarCollapsed" #title>
-                                <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
+                                <span data-tab-label-part="title" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
                                   <span v-if="isDirtyTab(entry.tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                                   <span class="flex min-w-0 flex-1 items-center overflow-hidden">
                                     <span class="min-w-0 truncate" :style="tabTitleStyle(entry.tab)" data-tab-title-base>{{ tabTitleBase(entry.tab) }}</span>

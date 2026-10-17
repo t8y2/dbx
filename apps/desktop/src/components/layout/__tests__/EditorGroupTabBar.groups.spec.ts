@@ -753,6 +753,19 @@ describe("EditorGroupTabBar group behavior", () => {
     app.unmount();
     host.remove();
   });
+
+  it("marks the slotted tab title so the drag preview captures its text", async () => {
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Orders query", "query");
+    const { app, host } = mountBar(store.groups[0].id, store.tabs.slice(), tabId, pinia);
+    await settle();
+
+    const title = host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"] [data-tab-label-part="title"]`);
+    expect(title?.textContent).toContain("Orders query");
+
+    app.unmount();
+    host.remove();
+  });
 });
 
 describe("EditorGroupTabBar special page navigation", () => {

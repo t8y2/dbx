@@ -82,6 +82,10 @@ fn build_create_table_sql_impl(
         options.table_name = clean(&options.table_name);
     }
     strip_inherited_mysql_column_charsets(&mut options);
+    let ordered_foreign_keys = match super::oracle_foreign_keys::build_new_table_keys(&options) {
+        Ok(statements) => statements,
+        Err(message) => return TableStructureSqlResult { statements: Vec::new(), warnings: vec![message.into()] },
+    };
     let mut warnings = Vec::new();
     warnings.extend(validate_mysql_engine(&options));
     if let Some(value) = &options.mysql_auto_increment_value {
@@ -100,7 +104,7 @@ fn build_create_table_sql_impl(
                 !column.marked_for_drop && column.extra.as_ref().is_some_and(|extra| extra.auto_increment == Some(true))
             })
         {
-            warnings.push("AUTO_INCREMENT requires a native MySQL auto-increment column.".to_string());
+            warnings.push("AUTO_INCREMENT requires an auto-increment column.".to_string());
         }
     }
     // Fail closed: a concurrent-index request on a partitioned parent (or on an
@@ -457,7 +461,11 @@ fn build_create_table_sql_impl(
         ));
     }
 
-    statements.extend(build_foreign_key_sql_for_new_table(&options, &mut warnings));
+    if options.oracle_foreign_key_changes.is_some() {
+        statements.extend(ordered_foreign_keys);
+    } else {
+        statements.extend(build_foreign_key_sql_for_new_table(&options, &mut warnings));
+    }
     statements.extend(build_trigger_sql_for_new_table(&options, &mut warnings));
 
     TableStructureSqlResult { statements, warnings }

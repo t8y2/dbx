@@ -3,7 +3,7 @@ import { formatSqlText } from "@/lib/sql/sqlFormatter";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 
 /**
- * Golden tests for the layout engine behind DBX's default formatting style.
+ * Golden tests for DBX's default layout.
  * The expectations for the queries in issues #827, #4850 and #5170 pin the
  * real-world shapes those reports asked for; the rest pin the rules those
  * examples exercise — the collapse of short statements, the wrap of long ones,
@@ -210,6 +210,39 @@ describe("sql layout", () => {
     // The alignment column comes from the aliased expressions only, so the
     // bare field stays untouched beside the padded aliases.
     expect(await format("SELECT a, bb AS x, c AS yyy FROM t;")).toBe(lines("SELECT a,", "       bb AS x,", "       c  AS yyy", "FROM t;"));
+  });
+
+  it("keeps DBX JOIN and condition layout while aligning aliases and FROM", async () => {
+    const sql = lines(
+      "SELECT js.start_time AS jobslipstarttime, js.end_time AS jobslipendtime, js.job_area_ids AS jobareaids, jsm.job_slip_id, jsm.flag, upi.worker_basic_info_id AS workerid",
+      "FROM loc_job_slip js LEFT JOIN loc_job_slip_audit jsa ON js.id = jsa.job_slip_id LEFT JOIN loc_job_slip_manager jsm ON js.id = jsm.job_slip_id LEFT JOIN loc_user_proj_info upi ON upi.bp_user_id = jsm.user_id",
+      "WHERE js.deleted = 0 AND jsa.deleted = 0 AND jsm.deleted = 0;",
+    );
+
+    const expected = lines(
+      "SELECT js.start_time            AS jobslipstarttime,",
+      "       js.end_time              AS jobslipendtime,",
+      "       js.job_area_ids          AS jobareaids,",
+      "       jsm.job_slip_id,",
+      "       jsm.flag,",
+      "       upi.worker_basic_info_id AS workerid",
+      "FROM loc_job_slip js",
+      "    LEFT JOIN loc_job_slip_audit jsa ON js.id = jsa.job_slip_id",
+      "    LEFT JOIN loc_job_slip_manager jsm ON js.id = jsm.job_slip_id",
+      "    LEFT JOIN loc_user_proj_info upi ON upi.bp_user_id = jsm.user_id",
+      "WHERE js.deleted = 0",
+      "      AND jsa.deleted = 0",
+      "      AND jsm.deleted = 0;",
+    );
+
+    const formatted = await format(sql);
+    expect(formatted).toBe(expected);
+    expect(await formatSqlText(sql, "mysql")).toBe(expected);
+
+    const projection = formatted.split("\n").slice(0, 6);
+    const fieldStartColumns = projection.map((line, index) => (index === 0 ? line.indexOf("js.start_time") : line.search(/\S/)));
+    expect(new Set(fieldStartColumns)).toEqual(new Set([7]));
+    expect(new Set(projection.filter((line) => line.includes(" AS ")).map((line) => line.indexOf("AS"))).size).toBe(1);
   });
 
   it("preserves comments and width wrapping inside CASE expressions", async () => {

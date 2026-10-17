@@ -834,6 +834,7 @@ fn is_postgresql_family_database(database_type: DatabaseType) -> bool {
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
             | DatabaseType::Vastbase
+            | DatabaseType::Gbase8c
             | DatabaseType::Kwdb
     )
 }

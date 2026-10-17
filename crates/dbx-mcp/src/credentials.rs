@@ -1,3 +1,6 @@
+/// Hidden child entry point of `--authorize-keychain`; not for MCP client arguments.
+pub const VERIFY_ARGUMENT: &str = "--verify-keychain-access";
+
 pub struct BackgroundCredentialGuard {
     #[cfg(all(target_os = "macos", feature = "os-keyring"))]
     _interaction: security_framework::os::macos::keychain::KeychainUserInteractionLock,
@@ -32,11 +35,7 @@ pub fn authorize_keychain() -> Result<(), String> {
 
 #[cfg(all(target_os = "macos", feature = "os-keyring"))]
 pub fn authorize_keychain() -> Result<(), String> {
-    use security_framework::os::macos::{
-        code_signing::{Flags, SecCode, SecRequirement},
-        keychain::{SecKeychain, SecPreferencesDomain},
-        passwords::find_generic_password,
-    };
+    use security_framework::os::macos::code_signing::{Flags, SecCode, SecRequirement};
 
     let untrusted = |error| format!("KEYCHAIN_AUTHORIZATION_UNTRUSTED: {error}");
     let requirement: SecRequirement = RELEASE_REQUIREMENT.parse().map_err(|error| untrusted(format!("{error}")))?;
@@ -47,7 +46,7 @@ pub fn authorize_keychain() -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|error| untrusted(format!("{error}")))?;
     let signature = std::process::Command::new("/usr/bin/codesign")
         .args(["--display", "--verbose=4", "--requirements", "-"])
-        .arg(executable)
+        .arg(&executable)
         .output()
         .map_err(|error| untrusted(format!("cannot inspect signing identity: {error}")))?;
     if !signature.status.success() {
@@ -56,6 +55,45 @@ pub fn authorize_keychain() -> Result<(), String> {
     let info =
         format!("{}\n{}", String::from_utf8_lossy(&signature.stdout), String::from_utf8_lossy(&signature.stderr));
     validate_signature_info(&info).map_err(|error| untrusted(error.to_string()))?;
+
+    read_existing_key()?;
+    // "Allow" (once) satisfies the read above without persisting an ACL entry,
+    // and a granted request may be reused inside this process. Only a fresh
+    // background process proves what the MCP client will actually experience.
+    let verification = std::process::Command::new(executable)
+        .arg(VERIFY_ARGUMENT)
+        .output()
+        .map_err(|error| format!("KEYRING_ACCESS_FAILED: cannot verify background Keychain access: {error}"))?;
+    if !verification.status.success() {
+        return Err(format!(
+            "KEYRING_ACCESS_FAILED: authorization was not retained for background use ({}). \
+             Run --authorize-keychain again and choose Always Allow when macOS asks.",
+            String::from_utf8_lossy(&verification.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Internal child of `--authorize-keychain`: one non-interactive read, exactly
+/// what an MCP client's background launch performs.
+#[cfg(not(all(target_os = "macos", feature = "os-keyring")))]
+pub fn verify_background_access() -> Result<(), String> {
+    Err("KEYCHAIN_AUTHORIZATION_UNSUPPORTED: this command requires an official macOS build with OS keyring support"
+        .to_string())
+}
+
+#[cfg(all(target_os = "macos", feature = "os-keyring"))]
+pub fn verify_background_access() -> Result<(), String> {
+    let _guard = disable_background_interaction()?;
+    read_existing_key()
+}
+
+#[cfg(all(target_os = "macos", feature = "os-keyring"))]
+fn read_existing_key() -> Result<(), String> {
+    use security_framework::os::macos::{
+        keychain::{SecKeychain, SecPreferencesDomain},
+        passwords::find_generic_password,
+    };
 
     // Match keyring's User-domain lookup exactly; never authorize a same-name
     // item from another keychain, provision a new key, or rewrite an ACL.

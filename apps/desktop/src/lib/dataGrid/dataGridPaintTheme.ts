@@ -61,6 +61,12 @@ export const DATA_GRID_DARK_CROSSHAIR_ROW_BG = "rgb(75, 84, 98)";
 export const DATA_GRID_DARK_CROSSHAIR_COL_BG = "rgb(98, 111, 130)";
 export const DATA_GRID_LIGHT_STRIPED_ROW_BG = "rgb(240, 240, 240)";
 export const DATA_GRID_DARK_STRIPED_ROW_BG = "rgb(40, 40, 43)";
+// 新增行（未落库的待插入行）整行底色，必须与普通行、斑马纹行「一眼可辨」（#11634）：
+// 用与行号列 --data-grid-row-number-new-bg 同族的 emerald，但强度更低（10% vs 15%），
+// 使整行有绿调的同时，行号标记（填写后才出现）仍然比行底色更醒目。取值与网格组件的
+// --data-grid-row-new-bg（含 color-mix 变体）保持一致。
+export const DATA_GRID_LIGHT_NEW_ROW_BG = "rgb(231, 248, 242)";
+export const DATA_GRID_DARK_NEW_ROW_BG = "rgb(19, 37, 33)";
 export const DATA_GRID_DARK_ROW_NUMBER_BG = "rgb(35, 37, 42)";
 const DATA_GRID_DARK_ROW_NUMBER_NEW_BG = "rgb(33, 45, 40)";
 const DATA_GRID_DARK_ROW_NUMBER_EDITED_BG = "rgb(48, 41, 28)";
@@ -273,7 +279,7 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const accent = cssVarColor(getVar, "--accent", isDark ? "rgb(46, 47, 51)" : "rgb(245, 245, 245)");
   const activeSurface = dataGridActiveRowBackground(isDark);
   const rowMuted = isDark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG;
-  const rowNew = isDark ? "rgb(51, 51, 55)" : "rgb(243, 243, 243)";
+  const rowNew = isDark ? DATA_GRID_DARK_NEW_ROW_BG : DATA_GRID_LIGHT_NEW_ROW_BG;
   const rowDeleted = isDark ? "rgb(55, 31, 32)" : "rgb(255, 244, 244)";
   const cellActive = activeSurface;
   // 浅/深都读 CSS 变量（--data-grid-cell-crosshair-*-bg 从 --primary 派生），保证 DOM 与

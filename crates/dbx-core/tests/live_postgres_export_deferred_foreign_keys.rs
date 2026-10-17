@@ -189,6 +189,7 @@ async fn live_postgres_export_with_foreign_key_cycle_restores_into_empty_databas
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            encoding: Default::default(),
         },
         &export_path,
         tokio_util::sync::CancellationToken::new(),

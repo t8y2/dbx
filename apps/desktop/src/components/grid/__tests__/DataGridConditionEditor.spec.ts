@@ -293,7 +293,7 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(input.selectionEnd).toBe(26);
   });
 
-  it("starts without an active suggestion and selects the first item on ArrowDown", async () => {
+  it("starts with the first suggestion selected and moves to the second item on ArrowDown", async () => {
     const { value, input } = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
     input.focus();
     input.value = "na";
@@ -301,7 +301,7 @@ describe("DataGridConditionEditor quote completion", () => {
     input.dispatchEvent(new Event("input", { bubbles: true }));
 
     await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
-    expect(document.querySelector('[role="option"][aria-selected="true"]')).toBeNull();
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("name");
     expect(value.value).toBe("na");
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
@@ -310,7 +310,7 @@ describe("DataGridConditionEditor quote completion", () => {
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await nextTick();
-    expect(value.value).toBe("name");
+    expect(value.value).toBe("namespace");
   });
 
   it("selects the first WHERE field suggestion with Enter", async () => {
@@ -337,16 +337,17 @@ describe("DataGridConditionEditor quote completion", () => {
     input.dispatchEvent(new Event("input", { bubbles: true }));
 
     await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("name");
     const firstOption = document.querySelector('[role="option"]') as HTMLElement;
     firstOption.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true }));
     await nextTick();
-    expect(document.querySelector('[role="option"][aria-selected="true"]')).toBeNull();
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("name");
     expect(firstOption.className).not.toContain("bg-gray-200");
-    expect(firstOption.className).not.toContain("bg-accent");
+    expect(firstOption.className).toContain("bg-accent");
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await nextTick();
-    expect(value.value).toBe("na");
+    expect(value.value).toBe("name");
 
     const secondEditor = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
     secondEditor.input.focus();

@@ -591,6 +591,9 @@ mod tests {
     #[test]
     fn renders_an_indexes_block() {
         let index = IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "idx_orders_user_placed".to_string(),
             columns: vec!["user_id".to_string(), "placed_at".to_string()],
             is_unique: false,
@@ -617,6 +620,9 @@ mod tests {
     #[test]
     fn a_unique_index_carries_the_unique_setting() {
         let index = IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "uq_orders_ref".to_string(),
             columns: vec!["reference".to_string()],
             is_unique: true,
@@ -639,6 +645,9 @@ mod tests {
     #[test]
     fn the_primary_key_index_is_skipped_because_columns_already_carry_pk() {
         let index = IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "orders_pkey".to_string(),
             columns: vec!["id".to_string()],
             is_unique: true,
@@ -664,6 +673,9 @@ mod tests {
     #[test]
     fn a_filtered_index_is_omitted_and_warned_about() {
         let index = IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "idx_orders_open".to_string(),
             columns: vec!["status".to_string()],
             is_unique: false,
@@ -869,6 +881,9 @@ mod tests {
     #[test]
     fn warnings_from_table_rendering_reach_the_output() {
         let index = IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "idx_partial".to_string(),
             columns: vec!["status".to_string()],
             is_unique: false,

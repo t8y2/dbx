@@ -171,6 +171,20 @@ Redis connections use a read-only command tool instead of SQL. The assistant can
 
 <Callout type="info">AI Agent never receives “write from now on” permission and cannot bypass MCP policy, connection read-only protection, or database privileges. See [Production Safety](/en/docs/production-safety) for the complete boundary.</Callout>
 
+## SQL Block Actions
+
+Each SQL block in a reply offers **Temp run**, **Execute**, and **Apply to editor**. All three target the query tab that belongs to the conversation's own connection, database, and schema — the connection the conversation is bound to, never whichever editor happens to be in front.
+
+That tab is created in the background when it does not exist yet, and the action never moves your workspace: an AI action does not switch, select, or open tabs on its own.
+
+Because the result therefore does not always land where you are looking, the block reports its own outcome:
+
+* The block shows **Executing…**, then the row count (returned or affected) or the database's error text.
+* When the target tab is not on screen, a notification names that tab and offers **View**; only clicking **View** brings it to the front.
+* Requests that never reached the database say why in the block instead: no available connection, an editor tab still busy with another request, or nothing to execute.
+
+Dangerous-SQL, production, parameter, and read-only confirmations keep their own dialogs; those are not repeated in the block or as a notification.
+
 ## Reasoning Effort and Thinking
 
 Providers expose different mechanisms: enumerated effort, reasoning levels, boolean thinking, integer budgets, or free-text options. DBX shows controls from the active model capability and remembers the selection per configuration and model.

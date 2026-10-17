@@ -73,7 +73,7 @@ const queryOnActivationNodeTypes = new Set<TreeNodeType>(["connection", "databas
 /**
  * Whether activating this row should open (or focus) the connection's query
  * page for the "open query on connection open" preference. Specialized
- * workbench connections (nacos, consul, hbase, zookeeper, plugin, mq, mqtt,
+ * workbench connections (nacos, consul, hbase, etcd, zookeeper, plugin, mq, mqtt,
  * meilisearch, salesforce) keep their dedicated surfaces instead — the same
  * `supportsConnectionQueryActions` gate the context menu applies to its
  * "New Query" entry.

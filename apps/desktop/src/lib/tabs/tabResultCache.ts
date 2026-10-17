@@ -42,6 +42,7 @@ export interface TabResultSnapshot {
   querySourceColumns?: QueryTab["querySourceColumns"];
   queryWriteTargets?: QueryTab["queryWriteTargets"];
   resultColumnComments?: QueryTab["resultColumnComments"];
+  resultColumnTypeLabels?: QueryTab["resultColumnTypeLabels"];
   queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
@@ -81,6 +82,7 @@ interface ColumnarQueryResult {
   timing_page_count?: number;
   truncated?: boolean;
   has_more?: boolean;
+  page_has_more?: boolean;
   sourceLabel?: string;
   sourceLabelKind?: QueryResult["sourceLabelKind"];
   sourceQualifier?: string;
@@ -379,6 +381,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
+    page_has_more: result.page_has_more,
     sourceLabel: result.sourceLabel,
     sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
@@ -444,6 +447,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     has_more: result.has_more,
+    page_has_more: result.page_has_more,
     sourceLabel: result.sourceLabel,
     sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
@@ -483,6 +487,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
+    page_has_more: result.page_has_more,
     sourceLabel: result.sourceLabel,
     sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
@@ -814,6 +819,7 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     querySourceColumns: tab.querySourceColumns ? [...tab.querySourceColumns] : undefined,
     queryWriteTargets: tab.queryWriteTargets?.map((target) => ({ ...target, sourceColumns: [...target.sourceColumns] })),
     resultColumnComments: tab.resultColumnComments ? clonePlain(tab.resultColumnComments) : undefined,
+    resultColumnTypeLabels: tab.resultColumnTypeLabels ? clonePlain(tab.resultColumnTypeLabels) : undefined,
     queryDisplaySourceColumns: tab.queryDisplaySourceColumns ? [...tab.queryDisplaySourceColumns] : undefined,
     queryEditabilityReason: tab.queryEditabilityReason,
     mongoEditTarget: tab.mongoEditTarget ? clonePlain(tab.mongoEditTarget) : undefined,

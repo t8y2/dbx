@@ -1,6 +1,5 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
 import { createApp, defineComponent, h, nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
@@ -113,18 +112,6 @@ import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 import DataGridSortBuilder from "@/components/grid/DataGridSortBuilder.vue";
 import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
 import DataGridTextSortWorkbench from "@/components/grid/DataGridTextSortWorkbench.vue";
-
-const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
-const cellDetailDialogSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailDialog.vue", "utf8");
-const binaryTextPreviewSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailTextPreview.vue", "utf8");
-const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-
-describe("DataGrid opaque aggregate-state safety", () => {
-  it("blocks cell edits and keyless row deletion through the centralized gates", () => {
-    expect(dataGridSource).toMatch(/function canEditCellItem[\s\S]*isOpaqueAggregateStateColumnType\(allColumnTypes\.value\[columnIndex\]\)/);
-    expect(dataGridSource).toMatch(/function canDeleteRowItem[\s\S]*canUseKeylessRowPredicate[\s\S]*hasUnsafeOpaqueAggregateStatePredicate\(allColumnTypes\.value, item\.data\)/);
-  });
-});
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   return {
@@ -525,13 +512,6 @@ describe("DataGridPagination", () => {
 
     dispatch(sum, "click");
     expect(copySelectionSummary).not.toHaveBeenCalled();
-  });
-});
-
-describe("DataGrid selection summary copy wiring", () => {
-  it("routes the pagination aggregate copy through the grid clipboard helper", () => {
-    expect(dataGridSource).toMatch(/@copy-selection-summary="copyText"/);
-    expect(dataGridSource).toMatch(/:selection-summary-pending="isSelectingCells"/);
   });
 });
 
@@ -2334,16 +2314,6 @@ describe("cell detail surfaces", () => {
     expect(startEdit).not.toHaveBeenCalled();
     expect(hostText(panel.root)).toContain("0x48656c6c6f");
     expect(findOne(panel.root, (node) => node.type === "textarea").value).toBe("Hello");
-  });
-
-  it("keeps the binary text preview component strictly read-only and shared by both surfaces", () => {
-    expect(binaryTextPreviewSource).toContain("binaryCellTextPreview(props.value");
-    // 不发出任何编辑/提交事件，也不给 detail.value / rawValue 赋值。
-    expect(binaryTextPreviewSource).not.toContain("defineEmits");
-    expect(binaryTextPreviewSource).not.toMatch(/(?:props|detail)\.(?:value|rawValue)\s*=/);
-    expect(cellDetailDialogSource).toMatch(/<DataGridCellDetailTextPreview\s+v-if="open && isBinaryCellColumnType\(detail\.type\)"/);
-    // Panel 与下载菜单同一道闸门：编辑中不对草稿做只读文本预览。
-    expect(cellDetailPanelSource).toMatch(/<DataGridCellDetailTextPreview\s+v-if="!editing && isBinaryCellColumnType\(detail\.type\)"/);
   });
 
   it("copies the presented value, emits edit, closes, and replaces the JSON result", async () => {

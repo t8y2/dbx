@@ -27,7 +27,7 @@ describe("connectionStore sidebar table storage", () => {
     setActivePinia(createPinia());
   });
 
-  it("reloads table sizes after refreshing an object list with a newly created table", async () => {
+  it.each(["size", "comment-and-size"] as const)("%s: reloads table sizes after refreshing an object list with a newly created table", async (mode) => {
     const listTables = vi.fn().mockResolvedValue([
       { name: "EXISTING_TABLE", table_type: "BASE TABLE", comment: null },
       { name: "NEW_TABLE", table_type: "BASE TABLE", comment: null },
@@ -54,7 +54,7 @@ describe("connectionStore sidebar table storage", () => {
     const store = useConnectionStore();
     const settingsStore = useSettingsStore();
     settingsStore.editorSettings.sidebarObjectDisplay = "simple";
-    settingsStore.editorSettings.sidebarObjectInfoMode = "size";
+    settingsStore.editorSettings.sidebarObjectInfoMode = mode;
 
     const connection = {
       id: "oracle-1",
@@ -108,7 +108,7 @@ describe("connectionStore sidebar table storage", () => {
     expect(newTable?.sizeBytes).toBe(16384);
   });
 
-  it("does not cache a table-size request that finishes after the connection is lost", async () => {
+  it.each(["size", "comment-and-size"] as const)("%s: does not cache a table-size request that finishes after the connection is lost", async (mode) => {
     const staleStatistics = deferred<Array<{ name: string; schema: string; total_bytes: number }>>();
     const listObjectStatistics = vi
       .fn()
@@ -126,7 +126,7 @@ describe("connectionStore sidebar table storage", () => {
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useConnectionStore();
-    useSettingsStore().editorSettings.sidebarObjectInfoMode = "size";
+    useSettingsStore().editorSettings.sidebarObjectInfoMode = mode;
     const connection = { id: "oracle-1", name: "Oracle", db_type: "oracle", host: "127.0.0.1", port: 1521, username: "APP", password: "", database: "ORCL" } as ConnectionConfig;
     const tableNode = (): TreeNode => ({ id: "oracle-1:ORCL:APP:USERS", label: "USERS", type: "table", connectionId: connection.id, database: connection.database, schema: "APP" });
     const setLiveTree = () => {
@@ -148,7 +148,7 @@ describe("connectionStore sidebar table storage", () => {
     expect(store.treeNodes[0]?.children?.[0]?.sizeBytes).toBe(8192);
   });
 
-  it("does not cache a database-size request that finishes after the connection is lost", async () => {
+  it.each(["size", "comment-and-size"] as const)("%s: does not cache a database-size request that finishes after the connection is lost", async (mode) => {
     const staleStorage = deferred<Array<{ name: string; size_bytes: number }>>();
     const listDatabaseStorage = vi
       .fn()
@@ -166,7 +166,7 @@ describe("connectionStore sidebar table storage", () => {
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useConnectionStore();
-    useSettingsStore().editorSettings.sidebarObjectInfoMode = "size";
+    useSettingsStore().editorSettings.sidebarObjectInfoMode = mode;
     const connection = { id: "pg-1", name: "PostgreSQL", db_type: "postgres", host: "127.0.0.1", port: 5432, username: "postgres", password: "" } as ConnectionConfig;
     const setLiveTree = () => {
       store.connectedIds.add(connection.id);

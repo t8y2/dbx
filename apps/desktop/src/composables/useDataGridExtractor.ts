@@ -188,7 +188,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // INSERT and UPDATE need the complete record to retain key columns and
     // writable values. Other extractors should respect the actual cell range
     // that a right-click creates, just like keyboard copy does.
-    const requiresFullRowContext = extractor === "sql-inserts" || (extractor === "sql-updates" && options.databaseType.value !== "mongodb");
+    const requiresFullRowContext = extractor === "sql-inserts" || extractor === "sql-deletes-inserts" || (extractor === "sql-updates" && options.databaseType.value !== "mongodb");
 
     if (contextPredicateCell) {
       const item = fullItemsById.get(contextPredicateCell.rowId);
@@ -237,7 +237,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const hasCompleteIdentity = primaryKeys.length > 0 && identityIndexes.every((index) => index >= 0) && sourceRows.every((row) => identityIndexes.every((index) => row[index] !== null && row[index] !== undefined));
       selectedSourceIndexes = hasCompleteIdentity ? identityIndexes : [...fullColumns.keys()];
       requiredSourceIndexes.splice(0, requiredSourceIndexes.length, ...selectedSourceIndexes);
-    } else if (extractor === "sql-updates") {
+    } else if (extractor === "sql-updates" || extractor === "sql-deletes-inserts") {
       for (const primaryKey of options.tableMeta.value?.primaryKeys ?? []) {
         const primaryKeyIndex = fullColumns.findIndex((displayName, index) => normalizeName(sourceNames?.[index] ?? displayName) === normalizeName(primaryKey));
         if (primaryKeyIndex >= 0 && !requiredSourceIndexes.includes(primaryKeyIndex)) requiredSourceIndexes.push(primaryKeyIndex);
@@ -367,6 +367,15 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     if (extractor === "sql-inserts") {
       const request = buildRequest(extractor, extractorOptions);
       return request !== null && options.canCopySqlInsert(request);
+    }
+    if (extractor === "sql-deletes-inserts") {
+      const request = buildRequest(extractor, extractorOptions);
+      const primaryKeys = request?.tableMeta?.primaryKeys ?? [];
+      if (!request || primaryKeys.length === 0 || !options.canCopySqlInsert(request)) return false;
+      return primaryKeys.every((primaryKey) => {
+        const column = request.columns.find((candidate) => normalizeName(candidate.sourceName ?? candidate.displayName) === normalizeName(primaryKey));
+        return !!column && request.rows.every((row) => row[column.sourceIndex] !== null && row[column.sourceIndex] !== undefined);
+      });
     }
     if (extractor === "sql-updates") {
       // Mongo has a dedicated updateOne path that doesn't need SQL primary keys.

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Check, Copy, Database, GripVertical, LayoutGrid, List, Loader2, RefreshCw, Search, TerminalSquare, X } from "@lucide/vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
+import { ArrowDown, ArrowUp, Check, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
@@ -24,6 +24,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type DatabaseRow = {
   name: string;
@@ -55,6 +56,8 @@ interface DatabaseBrowserTabUiState {
   sortKey?: DatabaseBrowserSortKey;
   sortDirection?: SortDirection;
   columnWidths?: Partial<Record<DatabaseBrowserColumnKey, number>>;
+  scrollTop?: number;
+  scrollLeft?: number;
 }
 
 const props = defineProps<{
@@ -82,13 +85,27 @@ const columnWidths = ref<Record<DatabaseBrowserColumnKey, number>>(
     }),
   ) as Record<DatabaseBrowserColumnKey, number>,
 );
+const scrollTop = ref(typeof restoredUiState.scrollTop === "number" && Number.isFinite(restoredUiState.scrollTop) ? Math.max(0, restoredUiState.scrollTop) : 0);
+const scrollLeft = ref(typeof restoredUiState.scrollLeft === "number" && Number.isFinite(restoredUiState.scrollLeft) ? Math.max(0, restoredUiState.scrollLeft) : 0);
+const listScrollerRef = ref<HTMLElement | null>(null);
+const listOuterRef = ref<HTMLElement | null>(null);
+const gridScrollerRef = ref<HTMLElement | null>(null);
 let stopColumnResize: (() => void) | null = null;
 let refreshGeneration = 0;
+let restoreScrollFrame = 0;
+let isRestoringScroll = false;
 const sidebarRuntimeHost = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
 const sidebarRuntimeNode: TreeNode = { id: "__database-browser-runtime__", label: "", type: "connection-group" };
 const sidebarDialogController = ref<Record<string, any> | null>(null);
 
-trackUiState(() => ({ search: search.value, sortKey: sortKey.value, sortDirection: sortDirection.value, columnWidths: columnWidths.value }));
+trackUiState(() => ({
+  search: search.value,
+  sortKey: sortKey.value,
+  sortDirection: sortDirection.value,
+  columnWidths: columnWidths.value,
+  scrollTop: scrollTop.value,
+  scrollLeft: scrollLeft.value,
+}));
 
 const hasSize = computed(() => rows.value.some((row) => row.sizeBytes != null));
 const hasCreatedAt = computed(() => rows.value.some((row) => !!row.createdAt?.trim()));
@@ -96,7 +113,10 @@ const hasUpdatedAt = computed(() => rows.value.some((row) => !!row.updatedAt?.tr
 const hasComment = computed(() => rows.value.some((row) => !!row.comment?.trim()));
 const hasDefaultCharset = computed(() => rows.value.some((row) => !!row.defaultCharset?.trim()));
 const hasDefaultCollation = computed(() => rows.value.some((row) => !!row.defaultCollation?.trim()));
-const isListView = computed(() => settingsStore.editorSettings.objectBrowserViewMode !== "grid");
+const viewMode = computed(() => settingsStore.editorSettings.objectBrowserViewMode);
+const isListView = computed(() => viewMode.value === "list");
+const isGridView = computed(() => viewMode.value === "grid");
+const isCompactView = computed(() => viewMode.value === "compact");
 // Measured condensation for the header row: tier 1 moves the sort/view
 // controls into the overflow menu, tier 2 drops the connection chip (the tab
 // title already carries it). See useToolbarOverflow for the tier contract.
@@ -116,9 +136,30 @@ const columns = computed<DatabaseBrowserColumnKey[]>(() => {
   if (hasComment.value) next.push("comment");
   return next;
 });
+const columnVisibility = ref<Partial<Record<DatabaseBrowserColumnKey, boolean>>>({});
+const columnVisibilityStorageKey = computed(() => `dbx-database-browser-columns:v1:${props.connection.id}`);
+const columnDefinitions = computed(() => columns.value.map((key) => ({ key, label: columnLabel(key) })));
+function isColumnVisible(key: DatabaseBrowserColumnKey) {
+  return key === "name" || columnVisibility.value[key] !== false;
+}
+function toggleColumnVisibility(key: DatabaseBrowserColumnKey) {
+  if (key === "name") return;
+  columnVisibility.value = { ...columnVisibility.value, [key]: !isColumnVisible(key) };
+  localStorage.setItem(columnVisibilityStorageKey.value, JSON.stringify(columnVisibility.value));
+}
+function loadColumnVisibility() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(columnVisibilityStorageKey.value) || "{}");
+    if (saved && typeof saved === "object") columnVisibility.value = saved;
+  } catch {
+    columnVisibility.value = {};
+  }
+}
+watch(columnVisibilityStorageKey, loadColumnVisibility, { immediate: true });
 
-const gridTemplateColumns = computed(() => columns.value.map((key, index) => (index === columns.value.length - 1 ? `minmax(${columnWidths.value[key]}px, 1fr)` : `${columnWidths.value[key]}px`)).join(" "));
-const gridMinWidth = computed(() => columns.value.reduce((total, key) => total + columnWidths.value[key], 0) + Math.max(0, columns.value.length - 1) * 12 + 24);
+const visibleColumns = computed(() => columns.value.filter(isColumnVisible));
+const gridTemplateColumns = computed(() => visibleColumns.value.map((key, index) => (index === visibleColumns.value.length - 1 ? `minmax(${columnWidths.value[key]}px, 1fr)` : `${columnWidths.value[key]}px`)).join(" "));
+const gridMinWidth = computed(() => visibleColumns.value.reduce((total, key) => total + columnWidths.value[key], 0) + Math.max(0, visibleColumns.value.length - 1) * 12 + 24);
 const sortKeyOptions = computed(() => columns.value);
 
 const visibleRows = computed(() => {
@@ -231,8 +272,9 @@ function toggleSort(key: DatabaseBrowserSortKey) {
   sortDirection.value = initialSortDirection(key);
 }
 
-function setViewMode(mode: "list" | "grid") {
+function setViewMode(mode: "list" | "grid" | "compact") {
   settingsStore.updateEditorSettings({ objectBrowserViewMode: mode });
+  scrollToTop();
 }
 
 function minimumColumnWidth(key: DatabaseBrowserColumnKey): number {
@@ -267,6 +309,88 @@ function resetColumnWidth(key: DatabaseBrowserColumnKey, width: number, event: M
   columnWidths.value = { ...columnWidths.value, [key]: width };
 }
 
+function onListVerticalScroll(event: Event) {
+  if (isRestoringScroll) return;
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  scrollTop.value = Math.max(0, Math.round(target.scrollTop));
+  if (target.scrollLeft > 0) {
+    scrollLeft.value = Math.max(0, Math.round(target.scrollLeft));
+  }
+}
+
+function onListHorizontalScroll(event: Event) {
+  if (isRestoringScroll) return;
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  scrollLeft.value = Math.max(0, Math.round(target.scrollLeft));
+}
+
+function onGridScroll(event: Event) {
+  if (isRestoringScroll) return;
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  scrollTop.value = Math.max(0, Math.round(target.scrollTop));
+  scrollLeft.value = Math.max(0, Math.round(target.scrollLeft));
+}
+
+function applyScrollPosition() {
+  const targetTop = scrollTop.value;
+  const targetLeft = scrollLeft.value;
+  if (!targetTop && !targetLeft) return;
+  if (isListView.value) {
+    if (listScrollerRef.value) {
+      if (targetTop) listScrollerRef.value.scrollTop = targetTop;
+      if (targetLeft) listScrollerRef.value.scrollLeft = targetLeft;
+    }
+    if (listOuterRef.value && targetLeft) {
+      listOuterRef.value.scrollLeft = targetLeft;
+    }
+  } else if (gridScrollerRef.value) {
+    if (targetTop) gridScrollerRef.value.scrollTop = targetTop;
+    if (targetLeft) gridScrollerRef.value.scrollLeft = targetLeft;
+  }
+}
+
+function restoreScrollPosition() {
+  const targetTop = scrollTop.value;
+  const targetLeft = scrollLeft.value;
+  if (!targetTop && !targetLeft) return;
+  if (restoreScrollFrame) window.cancelAnimationFrame(restoreScrollFrame);
+  isRestoringScroll = true;
+  void nextTick(() => {
+    applyScrollPosition();
+    restoreScrollFrame = window.requestAnimationFrame(() => {
+      restoreScrollFrame = 0;
+      applyScrollPosition();
+      window.requestAnimationFrame(() => {
+        isRestoringScroll = false;
+      });
+    });
+  });
+}
+
+function scrollToTop() {
+  if (restoreScrollFrame) {
+    window.cancelAnimationFrame(restoreScrollFrame);
+    restoreScrollFrame = 0;
+  }
+  isRestoringScroll = false;
+  scrollTop.value = 0;
+  scrollLeft.value = 0;
+  if (listScrollerRef.value) {
+    listScrollerRef.value.scrollTop = 0;
+    listScrollerRef.value.scrollLeft = 0;
+  }
+  if (listOuterRef.value) {
+    listOuterRef.value.scrollLeft = 0;
+  }
+  if (gridScrollerRef.value) {
+    gridScrollerRef.value.scrollTop = 0;
+    gridScrollerRef.value.scrollLeft = 0;
+  }
+}
+
 async function refresh(): Promise<boolean> {
   const generation = ++refreshGeneration;
   loading.value = true;
@@ -291,6 +415,7 @@ async function refresh(): Promise<boolean> {
         defaultCollation: database.default_collation ?? null,
       }));
     loading.value = false;
+    restoreScrollPosition();
 
     // Name enumeration is cheap and should render immediately. Enrich the
     // rows separately because MySQL metadata calculates sizes by aggregating
@@ -333,6 +458,7 @@ function focusSearch(): boolean {
 
 function clearDatabaseSearch() {
   search.value = "";
+  scrollToTop();
   searchInput.value?.$el?.focus();
 }
 
@@ -343,12 +469,33 @@ watch(sortKeyOptions, (options) => {
   }
 });
 
+watch(
+  [listScrollerRef, gridScrollerRef, isListView],
+  () => {
+    restoreScrollPosition();
+  },
+  { flush: "post" },
+);
+
+watch(search, (next, prev) => {
+  if (next !== prev) {
+    scrollToTop();
+  }
+});
+
+watch([sortKey, sortDirection], () => {
+  scrollToTop();
+});
+
 let initialConnectionWatch = true;
 watch(
   () => props.connection.id,
   () => {
     if (initialConnectionWatch) initialConnectionWatch = false;
-    else search.value = "";
+    else {
+      search.value = "";
+      scrollToTop();
+    }
     void refresh();
   },
   { immediate: true },
@@ -358,7 +505,14 @@ useDatabaseBrowserMutation(({ connectionId }) => {
   if (connectionId === props.connection.id) void refresh();
 });
 
-onBeforeUnmount(() => stopColumnResize?.());
+onActivated(() => {
+  restoreScrollPosition();
+});
+
+onBeforeUnmount(() => {
+  stopColumnResize?.();
+  if (restoreScrollFrame) window.cancelAnimationFrame(restoreScrollFrame);
+});
 
 defineExpose({ focusSearch, refresh });
 </script>
@@ -394,8 +548,11 @@ defineExpose({ focusSearch, refresh });
         <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': isListView }" :title="t('objects.viewList')" @click="setViewMode('list')">
           <List class="h-3.5 w-3.5" />
         </button>
-        <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': !isListView }" :title="t('objects.viewGrid')" @click="setViewMode('grid')">
+        <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': isGridView }" :title="t('objects.viewGrid')" @click="setViewMode('grid')">
           <LayoutGrid class="h-3.5 w-3.5" />
+        </button>
+        <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': isCompactView }" :title="t('objects.viewCompact')" @click="setViewMode('compact')">
+          <Grid3X3 class="h-3.5 w-3.5" />
         </button>
       </div>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('contextMenu.refreshTab')" :disabled="loading" @click="refresh">
@@ -428,6 +585,10 @@ defineExpose({ focusSearch, refresh });
           <LayoutGrid class="h-3.5 w-3.5" />
           {{ t("objects.viewGrid") }}
         </DropdownMenuItem>
+        <DropdownMenuItem @select="setViewMode('compact')">
+          <Grid3X3 class="h-3.5 w-3.5" />
+          {{ t("objects.viewCompact") }}
+        </DropdownMenuItem>
       </ToolbarOverflowMenu>
     </div>
 
@@ -435,14 +596,16 @@ defineExpose({ focusSearch, refresh });
     <div v-else-if="error" class="flex flex-1 items-center justify-center px-6 text-center text-sm text-destructive">{{ t("databaseBrowser.loadFailed", { message: error }) }}</div>
     <div v-else-if="visibleRows.length === 0" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">{{ t("databaseBrowser.empty") }}</div>
     <div v-else class="flex min-h-0 min-w-0 flex-1">
-      <div v-if="isListView" class="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
-        <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${gridMinWidth}px` }">
-          <div v-for="key in columns" :key="key" class="relative flex min-w-0 items-center">
+      <div v-if="isListView" ref="listOuterRef" class="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden" @scroll.passive="onListHorizontalScroll">
+        <div class="relative grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${gridMinWidth}px` }">
+          <div v-for="key in visibleColumns" :key="key" class="relative flex min-w-0 items-center">
             <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort(key)">
               <span class="truncate">{{ columnLabel(key) }}</span
               ><component :is="sortIconFor(key)" v-if="sortIconFor(key)" class="h-3 w-3 shrink-0" />
             </button>
             <div
+              v-if="visibleColumns[visibleColumns.length - 1] !== key"
+              :data-database-column-resize="key"
               class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
               @mousedown="onColumnResizeStart(key, $event)"
               @dblclick="resetColumnWidth(key, key === 'name' || key === 'comment' ? 260 : key === 'defaultCollation' ? 170 : key === 'defaultCharset' ? 130 : key === 'sizeBytes' ? 100 : 150, $event)"
@@ -450,8 +613,22 @@ defineExpose({ focusSearch, refresh });
               <GripVertical class="h-3 w-3" />
             </div>
           </div>
+          <Popover>
+            <PopoverTrigger as-child>
+              <button type="button" class="absolute right-1 top-1/2 z-10 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.configureColumns')" :aria-label="t('objects.configureColumns')">
+                <Settings2 class="h-3.5 w-3.5" />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="end" class="w-52 p-1">
+              <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.configureColumns") }}</div>
+              <button v-for="column in columnDefinitions" :key="column.key" type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleColumnVisibility(column.key)">
+                <span class="flex h-4 w-4 items-center justify-center rounded border" :class="isColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
+                <span class="truncate">{{ column.label }}</span>
+              </button>
+            </PopoverContent>
+          </Popover>
         </div>
-        <div class="min-h-0 flex-1 overflow-auto">
+        <div ref="listScrollerRef" class="min-h-0 flex-1 overflow-auto" @scroll.passive="onListVerticalScroll">
           <div
             v-for="row in visibleRows"
             :key="row.name"
@@ -464,7 +641,7 @@ defineExpose({ focusSearch, refresh });
             <CustomContextMenu :items="() => databaseContextMenuItems(row)" v-slot="{ onContextMenu }">
               <div class="contents" @contextmenu="onContextMenu">
                 <div
-                  v-for="key in columns"
+                  v-for="key in visibleColumns"
                   :key="key"
                   class="min-w-0 truncate text-xs text-muted-foreground"
                   :class="{ 'flex items-center gap-2 text-[13px] font-medium text-foreground': key === 'name', 'tabular-nums': key === 'sizeBytes' || key === 'createdAt' || key === 'updatedAt' }"
@@ -478,24 +655,34 @@ defineExpose({ focusSearch, refresh });
           </div>
         </div>
       </div>
-      <div v-else class="grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(160px,1fr))] content-start gap-3 overflow-auto p-3">
+      <div v-else ref="gridScrollerRef" class="grid min-h-0 flex-1 content-start overflow-auto" :class="isCompactView ? 'grid-cols-[repeat(auto-fill,minmax(128px,1fr))] gap-1 p-1' : 'grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-3 p-3'" @scroll.passive="onGridScroll">
         <div
           v-for="row in visibleRows"
           :key="row.name"
           tabindex="0"
-          class="flex min-h-28 cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center outline-none transition-all hover:border-primary/40 hover:shadow-sm focus-visible:border-primary"
+          :class="
+            isCompactView
+              ? 'flex h-7 min-w-0 cursor-pointer items-center gap-1 rounded border bg-card px-1.5 text-[11px] outline-none transition-all hover:border-primary/40 hover:bg-accent/40 focus-visible:border-primary'
+              : 'flex min-h-28 cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center outline-none transition-all hover:border-primary/40 hover:shadow-sm focus-visible:border-primary'
+          "
           @dblclick="openDatabase(row.name)"
           @keydown.enter.prevent="openDatabase(row.name)"
         >
           <CustomContextMenu :items="() => databaseContextMenuItems(row)" v-slot="{ onContextMenu }">
             <div class="contents" @contextmenu="onContextMenu">
-              <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 shadow-sm"><Database class="h-6 w-6 text-emerald-600 dark:text-emerald-400" /></div>
-              <span class="w-full truncate text-sm font-medium text-foreground" :title="row.name">{{ row.name }}</span>
-              <div class="flex min-h-[15px] items-center gap-1 text-[10px] leading-[15px] text-muted-foreground">
-                <span v-if="row.sizeBytes != null">{{ formatObjectBrowserBytes(row.sizeBytes) }}</span
-                ><span v-if="row.createdAt && row.sizeBytes != null">·</span><span v-if="row.createdAt">{{ formatObjectBrowserTimestamp(row.createdAt) }}</span>
-              </div>
-              <div v-if="hasComment" class="w-full truncate text-[10px] leading-[15px] text-muted-foreground/60" :title="row.comment || ''">{{ row.comment || "\u00A0" }}</div>
+              <template v-if="isCompactView">
+                <Database class="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                <span class="min-w-0 truncate font-medium text-foreground" :title="row.name">{{ row.name }}</span>
+              </template>
+              <template v-else>
+                <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 shadow-sm"><Database class="h-6 w-6 text-emerald-600 dark:text-emerald-400" /></div>
+                <span class="w-full truncate text-sm font-medium text-foreground" :title="row.name">{{ row.name }}</span>
+                <div class="flex min-h-[15px] items-center gap-1 text-[10px] leading-[15px] text-muted-foreground">
+                  <span v-if="row.sizeBytes != null">{{ formatObjectBrowserBytes(row.sizeBytes) }}</span
+                  ><span v-if="row.createdAt && row.sizeBytes != null">·</span><span v-if="row.createdAt">{{ formatObjectBrowserTimestamp(row.createdAt) }}</span>
+                </div>
+                <div v-if="hasComment" class="w-full truncate text-[10px] leading-[15px] text-muted-foreground/60" :title="row.comment || ''">{{ row.comment || "\u00A0" }}</div>
+              </template>
             </div>
           </CustomContextMenu>
         </div>

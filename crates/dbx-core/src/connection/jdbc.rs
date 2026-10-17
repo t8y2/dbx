@@ -397,6 +397,8 @@ pub async fn install_jdbc_plugin_with_progress(
     let plugin_dir = plugins_root.join("jdbc");
     let status_dir = plugin_dir.clone();
     progress(AgentProgressEvent::transfer("jdbc-plugin-extract", 0, 0));
+    // Blocking on purpose: extraction, process scanning, and the kill-wait loop
+    // all sleep on the thread; see stop_jdbc_plugin_processes (#12004).
     tokio::task::spawn_blocking(move || install_jdbc_plugin_zip(&bytes, &plugin_dir))
         .await
         .map_err(|err| err.to_string())??;
@@ -409,6 +411,8 @@ pub async fn install_jdbc_plugin_from_file(plugins_root: &Path, file_path: &str)
     let plugin_dir = plugins_root.join("jdbc");
     let status_dir = plugin_dir.clone();
     let file_path = file_path.to_string();
+    // Blocking on purpose: file read, extraction, and process kill-wait all
+    // sleep on the thread; see stop_jdbc_plugin_processes (#12004).
     tokio::task::spawn_blocking(move || {
         let bytes = std::fs::read(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
         install_jdbc_plugin_zip(&bytes, &plugin_dir)
@@ -422,6 +426,9 @@ pub async fn install_jdbc_plugin_from_file(plugins_root: &Path, file_path: &str)
 
 pub fn uninstall_jdbc_plugin(plugins_root: &Path) -> Result<JdbcPluginStatus, String> {
     let plugin_dir = plugins_root.join("jdbc");
+    // Same file-holding problem as the update path (#12004): a live sidecar
+    // java.exe keeps bin/ undeletable. Callers run this on the blocking pool.
+    stop_jdbc_plugin_processes(&plugin_dir)?;
     for entry in ["manifest.json", "bin", "lib"] {
         let path = plugin_dir.join(entry);
         if !path.exists() {
@@ -588,6 +595,90 @@ async fn download_jdbc_plugin_zip_with_progress(progress: &impl Fn(AgentProgress
     Ok(bytes)
 }
 
+/// Processes whose executable or any command-line argument points inside the
+/// JDBC plugin directory. The Java sidecar runs `-jar <plugin_dir>\lib\dbx-jdbc-plugin.jar`,
+/// and its cmd.exe launcher runs the `.bat` inside the same directory. Path
+/// normalization is shared with the agent-driver process matcher
+/// (`agent_service::normalized_process_path`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn jdbc_process_uses_plugin_dir(
+    executable: Option<&std::path::Path>,
+    command: &[std::ffi::OsString],
+    plugin_dir: &Path,
+) -> bool {
+    let normalized_dir = crate::agent_service::normalized_process_path(plugin_dir);
+    if let Some(executable) = executable {
+        if crate::agent_service::process_path_is_within(
+            &crate::agent_service::normalized_process_path(executable),
+            &normalized_dir,
+        ) {
+            return true;
+        }
+    }
+    command.iter().any(|argument| {
+        crate::agent_service::process_path_is_within(
+            &crate::agent_service::normalized_process_path(std::path::Path::new(argument)),
+            &normalized_dir,
+        )
+    })
+}
+
+/// Stop every process holding files inside the JDBC plugin directory before
+/// the directory is replaced. A `dbx-mcp.exe` spawned by an external AI tool
+/// probes `mcp/tools` on this plugin, which leaves a `java.exe` running with
+/// `dbx-jdbc-plugin.jar` open; that process belongs to no session this host
+/// can reach, so updates fail with access denied until it is killed (#12004).
+/// POSIX replaces in-use files anyway, so this is a no-op there; on Windows
+/// the kill mirrors what `stop_driver_processes_before_replacement` does for
+/// managed agent drivers. Callers run this on the blocking pool.
+fn stop_jdbc_plugin_processes(plugin_dir: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use sysinfo::{get_current_pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+        let refresh = ProcessRefreshKind::new().with_cmd(UpdateKind::Always).with_exe(UpdateKind::Always);
+        let mut system = System::new_with_specifics(RefreshKind::new().with_processes(refresh));
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+        let current_pid = get_current_pid().ok();
+        let mut matched = Vec::new();
+        for (pid, process) in system.processes() {
+            if current_pid == Some(*pid) || !jdbc_process_uses_plugin_dir(process.exe(), process.cmd(), plugin_dir) {
+                continue;
+            }
+            let name = process.name().to_string_lossy().into_owned();
+            let sent = process.kill();
+            log::info!(
+                "Stopping external JDBC plugin process before replacing {}: pid={}, name={}, kill_sent={sent}",
+                plugin_dir.display(),
+                pid.as_u32(),
+                name
+            );
+            matched.push((*pid, name));
+        }
+        if matched.is_empty() {
+            return Ok(());
+        }
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+            matched.retain(|(pid, _)| system.process(*pid).is_some());
+            if matched.is_empty() {
+                return Ok(());
+            }
+        }
+        let remaining = matched
+            .into_iter()
+            .map(|(pid, name)| format!("{name} (PID {})", pid.as_u32()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(format!("Failed to stop JDBC plugin process(es) holding {}: {remaining}", plugin_dir.display()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = plugin_dir;
+        Ok(())
+    }
+}
+
 fn install_jdbc_plugin_zip(bytes: &[u8], plugin_dir: &Path) -> Result<(), String> {
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|err| err.to_string())?;
@@ -646,8 +737,19 @@ fn install_jdbc_plugin_zip(bytes: &[u8], plugin_dir: &Path) -> Result<(), String
     if drivers_dir.exists() && !temp_drivers_dir.exists() {
         copy_dir_all(&drivers_dir, &temp_drivers_dir)?;
     }
+    // Stop every process running from the plugin directory — including
+    // sidecars started by other DBX processes (dbx-mcp.exe, dbx.exe) that this
+    // process cannot reach through any session handle — before its files are
+    // replaced: on Windows a live java.exe holds dbx-jdbc-plugin.jar open and
+    // `remove_dir_all` fails with access denied (#12004). A kill failure is
+    // appended to the removal error below so the user sees both the surviving
+    // holder process and the OS reason.
+    let stop_error = stop_jdbc_plugin_processes(plugin_dir).err();
     if plugin_dir.exists() {
-        std::fs::remove_dir_all(plugin_dir).map_err(|err| err.to_string())?;
+        std::fs::remove_dir_all(plugin_dir).map_err(|err| match &stop_error {
+            Some(stop_error) => format!("{stop_error}; additionally failed to remove {}: {err}", plugin_dir.display()),
+            None => err.to_string(),
+        })?;
     }
     std::fs::rename(&temp_dir, plugin_dir).map_err(|err| err.to_string())?;
 
@@ -1298,6 +1400,52 @@ mod tests {
         );
         assert!(is_safe_bundle_id("org.apache.hive_hive-jdbc_4.0.1_standalone"));
         assert!(!is_safe_bundle_id("../hive"));
+    }
+
+    #[test]
+    fn jdbc_process_matches_java_sidecar_from_plugin_dir() {
+        let plugin_dir = std::path::PathBuf::from(r"C:\Users\alice\AppData\Roaming\com.dbx.app\plugins\jdbc");
+        let jar_argument = std::ffi::OsString::from(
+            r"c:\users\alice\appdata\roaming\com.dbx.app\plugins\jdbc\bin\..\lib\dbx-jdbc-plugin.jar",
+        );
+
+        // The MCP-spawned java.exe holds the plugin jar open via its command line.
+        assert!(jdbc_process_uses_plugin_dir(
+            Some(std::path::Path::new(r"C:\Program Files\Java\bin\java.exe")),
+            &[std::ffi::OsString::from("-jar"), jar_argument.clone()],
+            &plugin_dir
+        ));
+        // The cmd.exe launcher runs the .bat inside the plugin directory.
+        assert!(jdbc_process_uses_plugin_dir(
+            Some(std::path::Path::new(r"C:\Windows\System32\cmd.exe")),
+            &[
+                std::ffi::OsString::from("/e:ON"),
+                std::ffi::OsString::from(
+                    r#""C:\Users\alice\AppData\Roaming\com.dbx.app\plugins\jdbc\bin\dbx-jdbc-plugin.bat""#
+                ),
+            ],
+            &plugin_dir
+        ));
+        // A `\\?\`-prefixed executable inside the directory still matches.
+        assert!(jdbc_process_uses_plugin_dir(
+            Some(std::path::Path::new(
+                r"\\?\C:\Users\alice\AppData\Roaming\com.dbx.app\plugins\jdbc\bin\dbx-jdbc-plugin.exe"
+            )),
+            &[],
+            &plugin_dir
+        ));
+        // An unrelated java process must be left alone.
+        assert!(!jdbc_process_uses_plugin_dir(
+            Some(std::path::Path::new(r"C:\Program Files\Java\bin\java.exe")),
+            &[std::ffi::OsString::from("-jar"), std::ffi::OsString::from(r"C:\other\agent.jar")],
+            &plugin_dir
+        ));
+        // A sibling directory (jdbc-2) must not match the jdbc prefix.
+        assert!(!jdbc_process_uses_plugin_dir(
+            Some(std::path::Path::new(r"C:\Users\alice\AppData\Roaming\com.dbx.app\plugins\jdbc-2\bin\run.exe")),
+            &[],
+            &plugin_dir
+        ));
     }
 
     fn resolved_artifact(group_id: &str, artifact_id: &str, version: &str) -> MavenResolvedArtifact {

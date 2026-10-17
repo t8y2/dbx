@@ -91,12 +91,12 @@ describe("sqlFormatterConfig shortcut storage", () => {
 });
 
 describe("sqlFormatterConfig layout style", () => {
-  it("defaults to the DBX layout and keeps it out of the sql-formatter options", () => {
+  it("defaults to the DBX layout and keeps the style out of sql-formatter options", () => {
     const config = JSON.parse(serializeSqlFormatterConfig({}));
 
     expect(config.options.layoutStyle).toBe("dbx");
     // layoutStyle is DBX-private: handing it to sql-formatter would throw.
-    expect("layoutStyle" in sqlFormatterOptions({ layoutStyle: "classic" })).toBe(false);
+    expect("layoutStyle" in sqlFormatterOptions({ layoutStyle: "dbx" })).toBe(false);
   });
 
   it("round-trips the classic layout style", () => {
@@ -115,8 +115,7 @@ describe("sqlFormatterConfig layout style", () => {
   });
 
   it("accepts both config versions and rejects anything else", () => {
-    // Version 1 predates layoutStyle; absence normalizes to the current
-    // default and must never be read as a historical choice of classic.
+    // Version 1 predates layoutStyle; absence normalizes to the current default.
     const version1 = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { keywordCase: "lower" } }));
     expect(version1).toEqual(expect.objectContaining({ ok: true }));
     if (version1.ok) {

@@ -151,18 +151,23 @@ function applyTheme() {
   // to light, so only skip the native system-theme write and keep explicit modes.
   if (isLinuxTauriRuntime() && tauriTheme == null) return;
 
-  if (cachedTauriWindow) {
-    cachedTauriWindow
-      .getCurrentWindow()
-      .setTheme(tauriTheme)
-      .catch(() => {});
-  } else {
-    import("@tauri-apps/api/window").then((mod) => {
-      cachedTauriWindow = mod;
+  const applyTauriTheme = (mod: typeof import("@tauri-apps/api/window")) => {
+    try {
       mod
         .getCurrentWindow()
         .setTheme(tauriTheme)
         .catch(() => {});
+    } catch {
+      // The Tauri window API can throw synchronously when no native window exists.
+    }
+  };
+
+  if (cachedTauriWindow) {
+    applyTauriTheme(cachedTauriWindow);
+  } else {
+    import("@tauri-apps/api/window").then((mod) => {
+      cachedTauriWindow = mod;
+      applyTauriTheme(mod);
     });
   }
 }

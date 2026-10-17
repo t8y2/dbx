@@ -237,4 +237,48 @@ describe("TreeItem connection quick rename", () => {
     expect(host.handleRowKeydown).not.toHaveBeenCalled();
     expect(setTableSearchQuery).not.toHaveBeenCalled();
   });
+
+  it("lets Cmd+Enter bubble from the table-search input for the default-query shortcut", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    let bubbledKeydowns = 0;
+    container.addEventListener("keydown", () => {
+      bubbledKeydowns += 1;
+    });
+    const host = runtimeHost();
+    const runtime = createSidebarTreeRuntime();
+    runtime.bindHost(host);
+    const setTableSearchQuery = vi.fn();
+    const node: TreeNode = {
+      id: "connection-1:app:__table_search",
+      label: "sidebar.searchTablesInCurrentScope",
+      type: "table-search-control",
+      connectionId: connection.id,
+      database: "app",
+      tableSearchParentId: "connection-1:app",
+    };
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(TreeItem, { node, depth: 2 }),
+      }),
+    );
+    app.use(i18n);
+    app.provide(sidebarTreeRuntimeKey, runtime);
+    app.provide(sidebarTreeContextKey, {
+      getVisibleNodes: () => [],
+      getVisibleNodeIndex: () => -1,
+      setTableSearchQuery,
+    });
+    app.mount(container);
+    mountedApps.push(app);
+    await nextTick();
+
+    const input = container.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
+    expect(input).toBeTruthy();
+    input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
+
+    expect(bubbledKeydowns).toBe(1);
+    expect(host.handleRowKeydown).not.toHaveBeenCalled();
+    expect(setTableSearchQuery).not.toHaveBeenCalled();
+  });
 });

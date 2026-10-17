@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	rmq "github.com/apache/rocketmq-clients/golang/v5"
 )
 
 const maxRPCMessageBytes = 32 * 1024 * 1024
@@ -29,6 +31,9 @@ type rpcResponse struct {
 }
 
 func main() {
+	// stdout carries JSON-RPC exclusively, regardless of the parent environment.
+	_ = os.Setenv(rmq.ENABLE_CONSOLE_APPENDER, "false")
+	rmq.ResetLogger()
 	agent := newRocketMQAgent()
 	defer agent.close()
 

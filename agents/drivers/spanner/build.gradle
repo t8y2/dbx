@@ -4,7 +4,7 @@ dependencies {
     // META-INF/services conflicts a plain dependency tree would introduce. The transitive tree is
     // dropped because the bundle already contains it, and resolving it would both duplicate every
     // shaded class and upgrade the Gson version the shared agent runtime is built against.
-    implementation('com.google.cloud:google-cloud-spanner-jdbc:2.42.0:single-jar-with-dependencies') {
+    implementation('com.google.cloud:google-cloud-spanner-jdbc:2.46.0:single-jar-with-dependencies') {
         transitive = false
     }
 }

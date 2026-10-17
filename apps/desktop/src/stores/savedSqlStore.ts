@@ -20,6 +20,7 @@ interface SavedSqlState {
 }
 
 interface SaveFileInput {
+  isDefaultQuery?: boolean;
   id?: string;
   connectionId: string;
   folderId?: string;
@@ -250,7 +251,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       await api.saveSavedSqlFolder(folder);
     }
     for (const file of legacy.files) {
-      await api.saveSavedSqlFile(file);
+      await persistFile(file);
     }
     localStorage.removeItem(LEGACY_STORAGE_KEY);
   }
@@ -294,6 +295,115 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
 
   function getFile(id: string) {
     return files.value.find((file) => file.id === id);
+  }
+
+  // Serialize content and metadata writes for a file, including deletion. A
+  // rename/usage update must never write an older SQL snapshot over autosave.
+  const fileWrites = new Map<string, Promise<unknown>>();
+  const deletingFiles = new Set<string>();
+  function enqueueFileWrite<T>(id: string, write: () => Promise<T>): Promise<T> {
+    const pending = (fileWrites.get(id) ?? Promise.resolve()).catch(() => undefined).then(write);
+    fileWrites.set(id, pending);
+    const cleanup = () => {
+      if (fileWrites.get(id) === pending) fileWrites.delete(id);
+    };
+    void pending.then(cleanup, cleanup);
+    return pending;
+  }
+
+  function persistFile(file: SavedSqlFile, mode: "all" | "metadata" | "content" = "all"): Promise<SavedSqlFile> {
+    return enqueueFileWrite(file.id, async () => {
+      if (deletingFiles.has(file.id)) throw new Error("SQL file is being deleted");
+      const current = getFile(file.id);
+      if (mode === "content" && (!current || !current.isDefaultQuery)) throw new Error("Default query no longer exists");
+      if (mode === "content") {
+        await api.saveDefaultQueryContent(file.id, file.sql, file.updatedAt);
+        return { ...current!, sql: file.sql, sqlLoaded: true, updatedAt: file.updatedAt };
+      }
+      const candidate = mode === "metadata" ? { ...file, sqlLoaded: false } : file;
+      const saved = normalizeSavedSqlFile(await api.saveSavedSqlFile(candidate));
+      if (mode === "metadata") return { ...saved, sql: current?.sql ?? file.sql, sqlLoaded: current?.sqlLoaded ?? file.sqlLoaded };
+      return saved;
+    });
+  }
+
+  const defaultQueryCreates = new Map<string, Promise<SavedSqlFile>>();
+
+  function getDefaultQuery(scope: SavedSqlExecutionTargetInput) {
+    const key = savedSqlDatabaseScopeKey(scope);
+    return files.value.find((file) => file.isDefaultQuery && savedSqlDatabaseScopeKey(file) === key);
+  }
+
+  async function ensureDefaultQuery(scope: SavedSqlExecutionTargetInput): Promise<SavedSqlFile> {
+    await initFromStorage();
+    // The default query is database-scoped. A schema selected in the sidebar
+    // must not become sticky state for the shared database default.
+    const defaultScope = { ...scope, schema: undefined };
+    const key = savedSqlDatabaseScopeKey(defaultScope);
+    const pending = defaultQueryCreates.get(key);
+    if (pending) return pending;
+    const create = (async () => {
+      const existing = getDefaultQuery(defaultScope);
+      if (existing) {
+        const loaded = await api.loadSavedSqlFile(existing.id);
+        if (loaded) {
+          const normalized = normalizeSavedSqlFile(loaded);
+          const file =
+            normalized.schema === undefined
+              ? { ...normalized, sqlLoaded: true }
+              : await saveFile({
+                  id: normalized.id,
+                  isDefaultQuery: true,
+                  connectionId: normalized.connectionId,
+                  folderId: normalized.folderId,
+                  name: normalized.name,
+                  database: normalized.database,
+                  catalog: normalized.catalog,
+                  schema: undefined,
+                  sql: normalized.sql,
+                });
+          files.value = files.value.map((item) => (item.id === file.id ? file : item));
+          bumpVersion({ tree: true });
+          return file;
+        }
+        files.value = files.value.filter((file) => file.id !== existing.id);
+      }
+      try {
+        return await saveFile({
+          ...defaultScope,
+          folderId: undefined,
+          name: nextAvailableSqlName("default.sql", takenFileNames({ ...defaultScope, folderId: undefined })),
+          sql: "",
+          isDefaultQuery: true,
+        });
+      } catch (error) {
+        // The unique scope constraint also protects creation from another window.
+        const library = await api.loadSavedSqlLibrary();
+        const winner = library.files.find((file) => file.isDefaultQuery && savedSqlDatabaseScopeKey(file) === key);
+        if (!winner) throw error;
+        files.value = [...files.value.filter((file) => file.id !== winner.id), normalizeSavedSqlFile(winner)];
+        bumpVersion({ tree: true });
+        const loaded = await ensureFileContent(winner.id);
+        if (!loaded) throw error;
+        return loaded;
+      }
+    })();
+    defaultQueryCreates.set(key, create);
+    try {
+      return await create;
+    } finally {
+      if (defaultQueryCreates.get(key) === create) defaultQueryCreates.delete(key);
+    }
+  }
+
+  async function saveDefaultQueryContent(id: string, sql: string): Promise<void> {
+    await initFromStorage();
+    const file = getFile(id);
+    if (!file?.isDefaultQuery) throw new Error("Default query no longer exists");
+    const saved = await persistFile({ ...file, sql, updatedAt: nowIso() }, "content");
+    files.value = files.value.map((item) => (item.id === id ? { ...item, sql: saved.sql, sqlLoaded: true, updatedAt: saved.updatedAt } : item));
+    bumpVersion();
+    await syncToLocalDirectory();
   }
 
   function reserveFileName(file: SavedSqlNameScope, options: { allowExisting?: boolean } = {}): () => void {
@@ -407,8 +517,24 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
 
   async function deleteFolder(id: string) {
     const removedIds = descendantFolderIds(id);
-    const removesFiles = files.value.some((file) => !!file.folderId && removedIds.has(file.folderId));
-    await api.deleteSavedSqlFolder(id);
+    const removedFiles = files.value.filter((file) => !!file.folderId && removedIds.has(file.folderId));
+    const removesFiles = removedFiles.length > 0;
+    for (const file of removedFiles) deletingFiles.add(file.id);
+    await Promise.allSettled(removedFiles.map((file) => fileWrites.get(file.id)));
+    try {
+      await api.deleteSavedSqlFolder(id);
+    } catch (error) {
+      for (const file of removedFiles) deletingFiles.delete(file.id);
+      throw error;
+    }
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    for (const tab of queryStore.tabs) {
+      if (removedFiles.some((file) => file.id === tab.savedSqlId) && tab.isDefaultQuery) {
+        tab.isDefaultQuery = false;
+        queryStore.closeTab(tab.id, { force: true });
+      }
+    }
     folders.value = folders.value.filter((folder) => !removedIds.has(folder.id));
     files.value = files.value.filter((file) => !file.folderId || !removedIds.has(file.folderId));
     bumpVersion({ tree: removesFiles });
@@ -437,6 +563,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
         }
       : {
           id: uuid(),
+          isDefaultQuery: input.isDefaultQuery === true,
           connectionId: input.connectionId,
           catalog,
           folderId: input.folderId || undefined,
@@ -452,7 +579,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     const nameIdentityChanged = !existing || savedSqlNameIdentity(existing) !== savedSqlNameIdentity(file);
     const releaseName = nameIdentityChanged ? reserveFileName(file) : undefined;
     try {
-      const saved = normalizeSavedSqlFile(await api.saveSavedSqlFile(file));
+      const saved = normalizeSavedSqlFile(await persistFile(file));
       files.value = [...files.value.filter((item) => item.id !== saved.id), { ...saved, sqlLoaded: true }];
       bumpVersion({ tree: !existing || savedSqlTreeIdentity(existing) !== savedSqlTreeIdentity(saved) });
       await syncToLocalDirectory();
@@ -481,6 +608,9 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     const existing = getFile(id);
     if (!existing) return Promise.resolve(undefined);
     const normalizedTarget = { ...target, catalog: normalizedCatalog(target.catalog) };
+    if (existing.isDefaultQuery && savedSqlDatabaseScopeKey(existing) !== savedSqlDatabaseScopeKey(normalizedTarget)) {
+      return copyFilesToDatabase([id], normalizedTarget).then((copies) => copies[0]);
+    }
     const folderId = options.updateFolder ? options.folderId || undefined : existing.folderId;
     const orderIndex = options.updateFolder ? options.orderIndex : existing.orderIndex;
     if (
@@ -534,7 +664,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
               })
             : savedSqlNameIdentity(candidate);
           if (persistedNameIdentity !== savedSqlNameIdentity(candidate)) releaseName = reserveFileName(candidate);
-          const saved = normalizeSavedSqlFile(await api.saveSavedSqlFile(candidate));
+          const saved = normalizeSavedSqlFile(await persistFile(candidate, "metadata"));
           setPersistedFileTarget(saved);
           if (fileTargetRevisions.get(id) !== revision) return getFile(id);
           const latest = getFile(id);
@@ -637,7 +767,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     const candidate = { ...existing, name: normalizedName, updatedAt: nowIso() };
     const releaseName = reserveFileName(candidate);
     try {
-      const saved = normalizeSavedSqlFile(await api.saveSavedSqlFile(candidate));
+      const saved = normalizeSavedSqlFile(await persistFile(candidate, "metadata"));
       files.value = files.value.map((file) => (file.id === id ? { ...saved, sql: file.sql, sqlLoaded: file.sqlLoaded } : file));
       bumpVersion({ tree: true });
 
@@ -690,11 +820,14 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     const existing = getFile(id);
     if (!existing) return;
     try {
-      const saved = await api.saveSavedSqlFile({
-        ...existing,
-        openCount: (existing.openCount ?? 0) + 1,
-        openedAt: nowIso(),
-      });
+      const saved = await persistFile(
+        {
+          ...existing,
+          openCount: (existing.openCount ?? 0) + 1,
+          openedAt: nowIso(),
+        },
+        "metadata",
+      );
       files.value = files.value.map((file) => (file.id === id ? { ...saved, sql: file.sql, sqlLoaded: file.sqlLoaded } : file));
       bumpVersion();
       return saved;
@@ -705,19 +838,26 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   }
 
   async function deleteFile(id: string) {
-    await api.deleteSavedSqlFile(id);
+    deletingFiles.add(id);
+    try {
+      await enqueueFileWrite(id, () => api.deleteSavedSqlFile(id));
+    } catch (error) {
+      deletingFiles.delete(id);
+      throw error;
+    }
     files.value = files.value.filter((file) => file.id !== id);
     bumpVersion({ tree: true });
-    await syncToLocalDirectory();
 
     // Close all tabs that reference this saved SQL file
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
     const tabsToClose = queryStore.tabs.filter((tab) => tab.savedSqlId === id);
     for (const tab of tabsToClose) {
+      tab.isDefaultQuery = false;
       queryStore.closeTab(tab.id, { force: true });
     }
     forgetSavedSqlEditorPosition(id);
+    await syncToLocalDirectory();
   }
 
   async function persistFolders(nextFolders: SavedSqlFolder[]) {
@@ -736,7 +876,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       for (const file of nextFiles) {
         if (previousNameIdentities.get(file.id) !== savedSqlNameIdentity(file)) releaseNames.push(reserveFileName(file));
       }
-      const savedFiles = await Promise.all(nextFiles.map((file) => api.saveSavedSqlFile(file)));
+      const savedFiles = await Promise.all(nextFiles.map((file) => persistFile(file, "metadata")));
       files.value = savedFiles.map((saved) => {
         const existing = files.value.find((file) => file.id === saved.id);
         return { ...normalizeSavedSqlFile(saved), sql: existing?.sql ?? saved.sql, sqlLoaded: existing?.sqlLoaded ?? saved.sqlLoaded };
@@ -1053,6 +1193,9 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     listChildFolders,
     listFiles,
     getFile,
+    getDefaultQuery,
+    ensureDefaultQuery,
+    saveDefaultQueryContent,
     ensureFileContent,
     ensureAllFilesLoaded,
     createFolder,

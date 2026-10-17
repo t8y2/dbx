@@ -3,6 +3,11 @@ use std::fs;
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
+/// Must match `minWidth`/`minHeight` and `width`/`height` of the main window in
+/// `tauri.conf.json`. Logical pixels.
+const MIN_WINDOW_SIZE: (u32, u32) = (900, 600);
+const DEFAULT_WINDOW_SIZE: (u32, u32) = (1280, 800);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PhysicalWindowRect {
     pub(crate) x: i32,
@@ -45,6 +50,19 @@ pub(crate) fn corrected_window_rect(
     (corrected != window).then_some(corrected)
 }
 
+/// The window-state plugin caches `Resized` events without a non-zero check, so
+/// a transient 0x0 or minimized-sized event can end up in the state file, and
+/// `set_size` does not enforce the window's minimum size. Resizing is capped
+/// below by the minimum, so a persisted size under it (at 1x scale, the lowest
+/// physical size that minimum can have) is corrupt and falls back to the default.
+pub(crate) fn sane_window_size(saved: (u32, u32), default_scale: f64) -> (u32, u32) {
+    if saved.0 >= MIN_WINDOW_SIZE.0 && saved.1 >= MIN_WINDOW_SIZE.1 {
+        return saved;
+    }
+    let scale = if default_scale.is_finite() && default_scale >= 1.0 { default_scale } else { 1.0 };
+    ((DEFAULT_WINDOW_SIZE.0 as f64 * scale).round() as u32, (DEFAULT_WINDOW_SIZE.1 as f64 * scale).round() as u32)
+}
+
 pub(crate) fn enforce_main_window_bounds<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         if enforce_window_bounds(&window) {
@@ -61,7 +79,10 @@ pub(crate) fn restore_main_window_state<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
 
-    let saved_rect = persisted_window_rect(state);
+    let persisted_rect = persisted_window_rect(state);
+    let (width, height) =
+        sane_window_size((persisted_rect.width, persisted_rect.height), window.scale_factor().unwrap_or(1.0));
+    let saved_rect = PhysicalWindowRect { width, height, ..persisted_rect };
     let monitors = window
         .available_monitors()
         .unwrap_or_default()
@@ -91,7 +112,7 @@ pub(crate) fn restore_main_window_state<R: Runtime>(app: &AppHandle<R>) {
         .and_then(|_| window.set_position(PhysicalPosition::new(restored_rect.x, restored_rect.y)))
         .is_ok();
 
-    if restored && restored_rect != saved_rect {
+    if restored && restored_rect != persisted_rect {
         let _ = app.save_window_state(persisted_main_window_state_flags());
     }
     if state.maximized {
@@ -205,8 +226,8 @@ fn centered_axis_position(window_start: i32, window_length: u32, monitor_start: 
 #[cfg(test)]
 mod tests {
     use super::{
-        corrected_window_rect, matching_monitor, persisted_window_rect, PersistedWindowState, PhysicalMonitorRect,
-        PhysicalWindowRect,
+        corrected_window_rect, matching_monitor, persisted_window_rect, sane_window_size, PersistedWindowState,
+        PhysicalMonitorRect, PhysicalWindowRect,
     };
     use tauri_plugin_window_state::StateFlags;
 
@@ -280,5 +301,21 @@ mod tests {
         ];
 
         assert_eq!(matching_monitor(window, &monitors), Some(monitors[1]));
+    }
+
+    #[test]
+    fn keeps_persisted_size_at_or_above_the_minimum() {
+        assert_eq!(sane_window_size((1280, 800), 1.0), (1280, 800));
+        assert_eq!(sane_window_size((900, 600), 2.0), (900, 600));
+    }
+
+    #[test]
+    fn replaces_corrupt_persisted_size_with_the_scaled_default() {
+        for corrupt in [(0, 0), (160, 28), (440, 68), (1280, 0), (0, 800), (899, 800), (1280, 599)] {
+            assert_eq!(sane_window_size(corrupt, 1.0), (1280, 800), "{corrupt:?}");
+            assert_eq!(sane_window_size(corrupt, 2.0), (2560, 1600), "{corrupt:?}");
+        }
+        assert_eq!(sane_window_size((0, 0), f64::NAN), (1280, 800));
+        assert_eq!(sane_window_size((0, 0), 0.0), (1280, 800));
     }
 }

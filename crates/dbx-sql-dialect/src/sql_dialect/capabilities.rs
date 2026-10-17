@@ -35,6 +35,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
+            | DatabaseType::Gbase8c
             | DatabaseType::Vastbase
             | DatabaseType::Yashandb
             | DatabaseType::Oscar
@@ -46,6 +47,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::OpenGauss
             | DatabaseType::OceanbaseOracle
             | DatabaseType::Gbase
+            | DatabaseType::Gbase8s
             | DatabaseType::Databend
             | DatabaseType::Jdbc
             | DatabaseType::H2
@@ -89,8 +91,14 @@ pub fn uses_xugu_row_id(database_type: Option<DatabaseType>) -> bool {
     database_type == Some(DatabaseType::Xugu)
 }
 
+/// PostgreSQL exposes `ctid` on ordinary tables. Pair it with `tableoid` to
+/// distinguish inherited relations and `xmin` to reject a recycled tuple location.
+pub fn uses_postgres_ctid(database_type: Option<DatabaseType>) -> bool {
+    database_type == Some(DatabaseType::Postgres)
+}
+
 pub fn uses_synthetic_row_id(database_type: Option<DatabaseType>) -> bool {
-    uses_oracle_row_id(database_type) || uses_xugu_row_id(database_type)
+    uses_oracle_row_id(database_type) || uses_xugu_row_id(database_type) || uses_postgres_ctid(database_type)
 }
 
 /// Oracle 系方言不支持 `INSERT ... VALUES (...), (...)` 多行语法，
@@ -127,7 +135,7 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
         Some(DatabaseType::Db2) => TablePaginationStrategy::Db2FetchFirst,
         Some(DatabaseType::SqlServer) => TablePaginationStrategy::SqlServerTop,
         Some(DatabaseType::Iris) => TablePaginationStrategy::IrisTop,
-        Some(DatabaseType::Informix) => TablePaginationStrategy::InformixFirst,
+        Some(DatabaseType::Informix | DatabaseType::Gbase8s) => TablePaginationStrategy::InformixFirst,
         Some(DatabaseType::Firebird) => TablePaginationStrategy::FirebirdRows,
         Some(DatabaseType::OceanbaseOracle) => TablePaginationStrategy::Rownum,
         Some(DatabaseType::Questdb) => TablePaginationStrategy::QuestDbLimit,

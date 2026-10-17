@@ -238,7 +238,7 @@ export function filterDatabaseNamesForConnection(databaseNames: string[], connec
 }
 
 export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {
-  if (connection?.db_type === "gbase" && connection.driver_profile === "gbase8s") {
+  if (connection?.db_type === "gbase8s") {
     return databaseNames;
   }
   return databaseNames.filter((name) => !isSystemDatabaseName(effectiveDatabaseTypeForConnection(connection), name));

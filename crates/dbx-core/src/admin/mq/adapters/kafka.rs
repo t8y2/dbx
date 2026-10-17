@@ -24,6 +24,12 @@ use crate::mq::types::*;
 /// Kafka capabilities - no tenants/namespaces, supports topics, consumer groups,
 /// ACLs, retention, and message production.
 const KAFKA_CAPABILITIES: MqCapabilities = MqCapabilities {
+    supports_list_topics: true,
+    supports_create_topic: true,
+    supports_delete_topic: true,
+    supports_topic_stats: true,
+    supports_broker_admin: true,
+    supports_producer_listing: true,
     supports_tenants: false,
     supports_namespaces: false,
     supports_partitioned_topics: true,
@@ -586,7 +592,7 @@ impl MessageQueueAdmin for KafkaAdmin {
 
         Ok(SendMessageResponse {
             topic: result.get("topic").and_then(|v| v.as_str()).unwrap_or(&req.topic).to_string(),
-            partition: result.get("partition").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            partition: Some(result.get("partition").and_then(|v| v.as_i64()).unwrap_or(0) as i32),
             offset: result.get("offset").and_then(|v| v.as_i64()).unwrap_or(0),
             timestamp: result.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
         })

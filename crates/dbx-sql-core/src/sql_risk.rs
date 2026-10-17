@@ -834,6 +834,7 @@ fn supports_select_into_table_creation(database_type: DatabaseType) -> bool {
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
             | DatabaseType::Vastbase
+            | DatabaseType::Gbase8c
             | DatabaseType::Kwdb
             | DatabaseType::SqlServer
     )

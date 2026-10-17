@@ -60,7 +60,18 @@ vi.mock("vue-virtual-scroller", () => ({
     },
   }),
 }));
-vi.mock("@/components/ui/searchable-select", () => ({ SearchableSelect: { render: () => null } }));
+vi.mock("@/components/ui/searchable-select", () => ({
+  SearchableSelect: defineComponent({
+    props: {
+      modelValue: { type: String, default: "" },
+      options: { type: Array, default: () => [] },
+    },
+    emits: ["update:modelValue"],
+    setup(props, { emit }) {
+      return () => h("button", { "data-schema-select": true, onClick: () => emit("update:modelValue", props.options[1] ?? "") }, props.modelValue);
+    },
+  }),
+}));
 vi.mock("@/components/ui/ToolbarOverflowMenu.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/editor/DangerConfirmDialog.vue", () => ({ default: { render: () => null } }));
@@ -102,6 +113,7 @@ beforeEach(() => {
   ]);
   mocks.ensureConnected.mockResolvedValue(undefined);
   invalidateObjectBrowserRowsCache({});
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -110,6 +122,7 @@ afterEach(() => {
     host.remove();
   }
   invalidateObjectBrowserRowsCache({});
+  localStorage.clear();
   gridStyle.remove();
 });
 
@@ -143,9 +156,41 @@ function menuButton(label: string): HTMLButtonElement {
   return buttons[0]!;
 }
 
-describe.each(["list", "grid"] as const)("ObjectBrowser locate in sidebar (%s)", (viewMode) => {
+describe.each(["list", "grid", "compact"] as const)("ObjectBrowser locate in sidebar (%s)", (viewMode) => {
   beforeEach(() => {
     mocks.viewMode = viewMode;
+  });
+
+  it("reloads list column visibility when the selected schema changes", async () => {
+    if (viewMode !== "list") return;
+    localStorage.setItem("dbx-object-browser-columns:v1:locate-connection:browser_database:browser_schema", JSON.stringify({ comment: false }));
+    localStorage.setItem("dbx-object-browser-columns:v1:locate-connection:browser_database:row_schema", JSON.stringify({ comment: true }));
+
+    const host = await mountBrowser({ schema: "browser_schema" });
+    const table = () => host.querySelector<HTMLElement>(".object-browser-table");
+    expect(table()?.textContent).not.toContain("objects.comment");
+
+    host.querySelector<HTMLButtonElement>("[data-schema-select]")?.click();
+    await vi.waitFor(() => expect(table()?.textContent).toContain("objects.comment"));
+  });
+
+  it("keeps the column picker clear of the trailing resize handle", async () => {
+    if (viewMode !== "list") return;
+    localStorage.setItem("dbx-object-browser-columns:v1:locate-connection:browser_database:browser_schema", JSON.stringify({ type: false }));
+
+    const host = await mountBrowser({ schema: "browser_schema" });
+    expect(host.querySelector('[title="objects.configureColumns"]')).not.toBeNull();
+    expect(host.querySelector('[data-object-column-resize="name"]')).not.toBeNull();
+    expect(host.querySelector('[data-object-column-resize="comment"]')).toBeNull();
+  });
+
+  it("keeps the compact card icon and full-name tooltip", async () => {
+    if (viewMode !== "compact") return;
+    const host = await mountBrowser();
+    const card = host.querySelector<HTMLElement>('[data-object-compact-card][title="orders"]');
+    expect(card).not.toBeNull();
+    expect(card?.querySelector("svg")).not.toBeNull();
+    expect(card?.textContent).toContain("orders");
   });
 
   it.each([
@@ -154,7 +199,7 @@ describe.each(["list", "grid"] as const)("ObjectBrowser locate in sidebar (%s)",
     ["order_totals", "MATERIALIZED_VIEW"],
   ])("locates %s with the exact row identity without opening a tab", async (tableName, tableType) => {
     const host = await mountBrowser();
-    expect(host.querySelector(viewMode === "grid" ? ".object-browser-grid-scroller" : ".object-browser-scroller")).not.toBeNull();
+    expect(host.querySelector(viewMode === "list" ? ".object-browser-scroller" : ".object-browser-grid-scroller")).not.toBeNull();
     await openMenu(host, tableName);
     expect(mocks.locateTable).not.toHaveBeenCalled();
     mocks.ensureConnected.mockClear();

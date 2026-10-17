@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, resolveDataGridCopyPreference, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, extractorUnavailableForDatabase, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, resolveDataGridCopyPreference, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 describe("data-grid extractor options", () => {
   it("preserves native SQL defaults and normalizes portable INSERT options", () => {
@@ -110,5 +110,16 @@ describe("data-grid extractor options", () => {
     options.dsv.quote = '"';
     options.dsv.nullText = "x".repeat(65);
     expect(validateDataGridExtractorOptions("dsv", options)).toBe("null-text-too-long");
+  });
+
+  it("handles sql-deletes-inserts copy preference and database availability", () => {
+    expect(normalizeDataGridCopyPreference("sql-deletes-inserts")).toBe("sql-deletes-inserts");
+    expect(resolveDataGridCopyPreference("sql-deletes-inserts", 1)).toBe("sql-deletes-inserts");
+    expect(extractorUnavailableForDatabase("sql-deletes-inserts", "postgres")).toBe(false);
+    expect(extractorUnavailableForDatabase("sql-deletes-inserts", "mysql")).toBe(false);
+    expect(extractorUnavailableForDatabase("sql-deletes-inserts", "sqlserver")).toBe(false);
+    expect(extractorUnavailableForDatabase("sql-deletes-inserts", "mongodb")).toBe(true);
+    expect(extractorUnavailableForDatabase("sql-deletes-inserts", "neo4j")).toBe(true);
+    expect(extractorUnavailableForDatabase("sql-deletes-inserts", "tdengine")).toBe(true);
   });
 });

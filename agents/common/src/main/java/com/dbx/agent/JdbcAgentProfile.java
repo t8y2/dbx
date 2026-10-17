@@ -162,6 +162,17 @@ public class JdbcAgentProfile {
         return catalogFallbackEnabled;
     }
 
+    /**
+     * Whether table metadata lookups should retry with a unique case-insensitive table name match.
+     *
+     * <p>Most JDBC drivers treat the table pattern passed to {@code DatabaseMetaData} as a
+     * pattern with driver-defined case rules. Drivers that expose case-insensitive SQL name
+     * resolution but case-sensitive metadata patterns can opt into this fallback.</p>
+     */
+    public boolean getCaseInsensitiveTableMetadata() {
+        return false;
+    }
+
     public boolean getNativeTableDdlSupported() {
         return nativeTableDdlSupported;
     }

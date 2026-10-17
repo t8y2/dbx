@@ -24,9 +24,10 @@ use crate::ai::{
     AiRunStatus,
 };
 use crate::connection_secrets::{
-    plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TLS_SECRET_PREFIX,
-    CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQTT_AUTH_PASSWORD_KEY, MQTT_AUTH_SECRET_PREFIX, MQ_AUTH_API_KEY_VALUE_KEY,
-    MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
+    is_rocketmq_connection, normalize_rocketmq_credentials, plugin_connection_secret_key,
+    CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TLS_SECRET_PREFIX, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
+    MQTT_AUTH_PASSWORD_KEY, MQTT_AUTH_SECRET_PREFIX, MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY,
+    MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
     MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY, NACOS_AUTH_SECRET_PREFIX,
     NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX, SALESFORCE_AUTH_CLIENT_SECRET_KEY,
     SALESFORCE_AUTH_PASSWORD_KEY, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, SALESFORCE_AUTH_SECRET_PREFIX,
@@ -1245,6 +1246,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         updated_at TEXT NOT NULL DEFAULT ''
     )",
     "CREATE TABLE IF NOT EXISTS saved_sql_files (
+        is_default_query INTEGER NOT NULL DEFAULT 0,
         id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL,
         folder_id TEXT,
@@ -2760,6 +2762,9 @@ fn connection_secret_in_tx_exists(
 }
 
 fn connection_config_has_inline_secrets(config: &ConnectionConfig) -> bool {
+    let mut normalized = config.clone();
+    normalize_rocketmq_credentials(&mut normalized);
+    let config = &normalized;
     if !config.password.is_empty()
         || config.url_params.as_deref().is_some_and(|value| !value.is_empty())
         || config.init_script.as_deref().is_some_and(|value| !value.is_empty())
@@ -3185,6 +3190,7 @@ fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
     const FOLDER_COLUMNS: &[(&str, &str)] =
         &[("parent_folder_id", "TEXT"), ("order_index", "INTEGER NOT NULL DEFAULT 0")];
     const FILE_COLUMNS: &[(&str, &str)] = &[
+        ("is_default_query", "INTEGER NOT NULL DEFAULT 0"),
         ("catalog_name", "TEXT"),
         ("order_index", "INTEGER NOT NULL DEFAULT 0"),
         ("open_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -3193,6 +3199,12 @@ fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
 
     ensure_table_columns(conn, "saved_sql_folders", FOLDER_COLUMNS)?;
     ensure_table_columns(conn, "saved_sql_files", FILE_COLUMNS)?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_sql_default_scope
+         ON saved_sql_files(connection_id, COALESCE(catalog_name, ''), database_name)
+         WHERE is_default_query = 1;",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -6598,6 +6610,7 @@ fn ensure_mcp_connection_change_allowed_in_tx(
 /// Connection metadata with every field managed by the secret store removed.
 pub fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
     let mut sanitized = config.clone().canonicalized();
+    normalize_rocketmq_credentials(&mut sanitized);
     sanitized.password = String::new();
     sanitized.url_params = None;
     scrub_transport_layer_secrets(&mut sanitized);
@@ -6619,7 +6632,8 @@ fn persist_connection_in_tx(
     codec: &SecretCodec,
     config: &ConnectionConfig,
 ) -> Result<(), String> {
-    let config = config.clone().canonicalized();
+    let mut config = config.clone().canonicalized();
+    normalize_rocketmq_credentials(&mut config);
     let config_id = config.id.clone();
     let sanitized = sanitized_connection_config(&config);
     let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
@@ -6993,20 +7007,13 @@ impl Storage {
                     persist_secret_in_tx(&tx, &codec, &config.id, "password", "")?;
                     delete_secret_prefix_in_tx(&tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
                 }
-                let mut sanitized = config;
-                sanitized.password = String::new();
-                sanitized.url_params = None;
-                scrub_transport_layer_secrets(&mut sanitized);
-                sanitized.redis_sentinel_password = String::new();
-                sanitized.connection_string = None;
-                sanitized.init_script = None;
-                scrub_mq_auth_secrets(&mut sanitized);
-                scrub_mqtt_auth_secrets(&mut sanitized);
-                scrub_mq_token_signing_secret(&mut sanitized);
-                scrub_nacos_auth_secrets(&mut sanitized);
-                scrub_cassandra_tls_secrets(&mut sanitized);
-                scrub_salesforce_auth_secrets(&mut sanitized);
-                sanitized.connection_secrets.clear();
+                if is_rocketmq_connection(&config)
+                    && (!config.save_password
+                        || mq_auth_object(config.external_config.as_ref()).and_then(mq_auth_kind) == Some("none"))
+                {
+                    delete_secret_prefix_in_tx(&tx, &config.id, MQ_AUTH_SECRET_PREFIX)?;
+                }
+                let sanitized = sanitized_connection_config(&config);
                 let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
                 tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
@@ -7604,6 +7611,7 @@ impl Storage {
             if !stored_plugin_secrets.is_empty() {
                 config.connection_secrets = stored_plugin_secrets;
             }
+            let needs_rocketmq_rewrite = normalize_rocketmq_credentials(&mut config);
             let needs_mq_auth_rewrite = self.hydrate_mq_auth_secrets(&id, &mut config).await?;
             let needs_mqtt_auth_rewrite = self.hydrate_mqtt_auth_secret(&id, &mut config).await?;
             let needs_mq_token_signing_rewrite = self.hydrate_mq_token_signing_secret(&id, &mut config).await?;
@@ -7624,7 +7632,8 @@ impl Storage {
                     needs_plugin_secret_rewrite = true;
                 }
             }
-            let needs_external_secret_rewrite = needs_mq_auth_rewrite
+            let needs_external_secret_rewrite = needs_rocketmq_rewrite
+                || needs_mq_auth_rewrite
                 || needs_mqtt_auth_rewrite
                 || needs_mq_token_signing_rewrite
                 || needs_nacos_auth_rewrite
@@ -7659,6 +7668,24 @@ impl Storage {
         connection_id: &str,
         config: &mut ConnectionConfig,
     ) -> Result<bool, String> {
+        if is_rocketmq_connection(config) && !config.save_password {
+            let had_inline = mq_auth_object(config.external_config.as_ref())
+                .and_then(|auth| auth.get("password"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|password| !password.is_empty());
+            scrub_mq_auth_secrets(config);
+            let connection_id = connection_id.to_string();
+            self.with_conn(move |conn| {
+                conn.execute(
+                    "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key LIKE ?2",
+                    params![connection_id, format!("{MQ_AUTH_SECRET_PREFIX}%")],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })
+            .await?;
+            return Ok(had_inline);
+        }
         if config.db_type != DatabaseType::MessageQueue {
             return Ok(false);
         }
@@ -7841,8 +7868,8 @@ impl Storage {
             for file in &library.files {
                 tx.execute(
                     "INSERT INTO saved_sql_files \
-                     (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         file.id,
                         file.connection_id,
@@ -7856,7 +7883,8 @@ impl Storage {
                         file.open_count,
                         file.opened_at,
                         file.created_at,
-                        file.updated_at
+                        file.updated_at,
+                        file.is_default_query
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -7893,7 +7921,7 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7914,6 +7942,7 @@ impl Storage {
                         opened_at: row.get(10)?,
                         created_at: row.get(11)?,
                         updated_at: row.get(12)?,
+                        is_default_query: row.get(13)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7929,7 +7958,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7950,6 +7979,7 @@ impl Storage {
                         opened_at: row.get(10)?,
                         created_at: row.get(11)?,
                         updated_at: row.get(12)?,
+                        is_default_query: row.get(13)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7986,7 +8016,7 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -8007,6 +8037,7 @@ impl Storage {
                         opened_at: row.get(9)?,
                         created_at: row.get(10)?,
                         updated_at: row.get(11)?,
+                        is_default_query: row.get(12)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -8023,7 +8054,7 @@ impl Storage {
         self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files WHERE id = ?1",
                 )
                 .map_err(|e| e.to_string())?;
@@ -8043,6 +8074,7 @@ impl Storage {
                     opened_at: row.get(10)?,
                     created_at: row.get(11)?,
                     updated_at: row.get(12)?,
+                    is_default_query: row.get(13)?,
                 })
             }) {
                 Ok(file) => Ok(Some(file)),
@@ -8116,8 +8148,8 @@ impl Storage {
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO saved_sql_files \
-                 (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  folder_id = excluded.folder_id, \
@@ -8125,11 +8157,12 @@ impl Storage {
                  database_name = excluded.database_name, \
                  catalog_name = excluded.catalog_name, \
                  schema_name = excluded.schema_name, \
-                 sql_text = CASE WHEN ?14 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
+                 sql_text = CASE WHEN ?15 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
                  order_index = excluded.order_index, \
                  open_count = excluded.open_count, \
                  opened_at = excluded.opened_at, \
-                 updated_at = excluded.updated_at",
+                 updated_at = excluded.updated_at, \
+                 is_default_query = excluded.is_default_query",
                 params![
                     file.id,
                     file.connection_id,
@@ -8144,11 +8177,31 @@ impl Storage {
                     file.opened_at,
                     file.created_at,
                     file.updated_at,
+                    file.is_default_query,
                     file.sql_loaded
                 ],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Autosave only the document body: concurrent metadata writes must not be
+    /// overwritten, and a deleted default query must never be recreated here.
+    pub async fn save_default_query_content(&self, id: &str, sql: &str, updated_at: &str) -> Result<(), String> {
+        let (id, sql, updated_at) = (id.to_string(), sql.to_string(), updated_at.to_string());
+        self.with_conn(move |conn| {
+            let changed = conn
+                .execute(
+                    "UPDATE saved_sql_files SET sql_text = ?2, updated_at = ?3 WHERE id = ?1 AND is_default_query = 1",
+                    params![id, sql, updated_at],
+                )
+                .map_err(|e| e.to_string())?;
+            if changed == 0 {
+                return Err("Default query no longer exists".to_string());
+            }
+            Ok(())
         })
         .await
     }
@@ -9109,6 +9162,12 @@ fn apply_sync_connections_in_tx(
     };
     for config in configs {
         let config = config.canonicalized();
+        if is_rocketmq_connection(&config)
+            && (!config.save_password
+                || mq_auth_object(config.external_config.as_ref()).and_then(mq_auth_kind) == Some("none"))
+        {
+            delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX)?;
+        }
         if !config.save_password && !merge_existing {
             persist_secret_in_tx(tx, codec, &config.id, "password", "")?;
             delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
@@ -9511,8 +9570,8 @@ fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary, merge_
     }
     for file in &library.files {
         tx.execute(
-            "INSERT OR REPLACE INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![file.id, file.connection_id, file.folder_id, file.name, file.database, file.catalog, file.schema, file.sql, file.order_index, file.open_count, file.opened_at, file.created_at, file.updated_at],
+            "INSERT INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET connection_id=excluded.connection_id, folder_id=excluded.folder_id, name=excluded.name, database_name=excluded.database_name, catalog_name=excluded.catalog_name, schema_name=excluded.schema_name, sql_text=excluded.sql_text, order_index=excluded.order_index, open_count=excluded.open_count, opened_at=excluded.opened_at, created_at=excluded.created_at, updated_at=excluded.updated_at, is_default_query=excluded.is_default_query",
+            params![file.id, file.connection_id, file.folder_id, file.name, file.database, file.catalog, file.schema, file.sql, file.order_index, file.open_count, file.opened_at, file.created_at, file.updated_at, file.is_default_query],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -9524,6 +9583,9 @@ fn persist_mq_auth_secrets_in_tx(
     codec: &SecretCodec,
     config: &ConnectionConfig,
 ) -> Result<(), String> {
+    if is_rocketmq_connection(config) && !config.save_password {
+        return delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX);
+    }
     if config.db_type != DatabaseType::MessageQueue {
         delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX)?;
         return Ok(());
@@ -12023,6 +12085,8 @@ mod tests {
             connect_timeout_secs: 30,
             query_timeout_secs: 300,
             idle_timeout_secs: 600,
+            manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -12103,6 +12167,8 @@ mod tests {
             connect_timeout_secs: 30,
             query_timeout_secs: 300,
             idle_timeout_secs: 600,
+            manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -12525,6 +12591,70 @@ mod tests {
         assert_eq!(loaded, vec![replacement]);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rocketmq_sqlite_load_migrates_legacy_and_rewrites_metadata() {
+        let path = temp_db_path("rocketmq-legacy-load");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut config = mq_connection("rocket", "");
+        config.external_config =
+            Some(serde_json::json!({"systemKind":"rocketmq", "extra":{"access_key":"ak", "secret_key":"legacy-sk"}}));
+        let json = serde_json::to_string(&config).unwrap();
+        storage
+            .with_conn(move |conn| {
+                conn.execute("INSERT INTO connections (id, config_json) VALUES ('rocket', ?1)", [json])
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(
+            loaded[0].external_config.as_ref().unwrap()["auth"],
+            serde_json::json!({"kind":"basic", "username":"ak", "password":"legacy-sk"})
+        );
+        assert_eq!(
+            storage.get_secret("rocket", super::MQ_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("legacy-sk")
+        );
+        let raw = raw_connection_json(&storage, "rocket").await;
+        assert!(!raw.contains("legacy-sk"));
+        assert!(!raw.contains("secret_key"));
+        assert_eq!(storage.load_connections().await.unwrap(), loaded);
+    }
+
+    #[tokio::test]
+    async fn rocketmq_sqlite_save_normalizes_and_drops_transient_secrets() {
+        let path = temp_db_path("rocketmq-save");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut config = mq_connection("rocket", "");
+        config.external_config =
+            Some(serde_json::json!({"systemKind":"rocketmq", "extra":{"accessKey":"ak", "secretKey":"sk"}}));
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        assert_eq!(storage.get_secret("rocket", super::MQ_AUTH_PASSWORD_KEY).await.unwrap().as_deref(), Some("sk"));
+        let raw = raw_connection_json(&storage, "rocket").await;
+        assert!(!raw.contains("secretKey"));
+        config.save_password = false;
+        storage.save_connections(&[config]).await.unwrap();
+        assert!(storage.get_secret("rocket", super::MQ_AUTH_PASSWORD_KEY).await.unwrap().is_none());
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].external_config.as_ref().unwrap()["auth"]["password"], "");
+    }
+
+    #[tokio::test]
+    async fn rocketmq_sqlite_explicit_none_discards_legacy_copies() {
+        let path = temp_db_path("rocketmq-none");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut config = mq_connection("rocket", "");
+        config.external_config =
+            Some(serde_json::json!({"systemKind":"rocketmq", "auth":{"kind":"none"}, "extra":{"secretKey":"old"}}));
+        storage.set_secret("rocket", super::MQ_AUTH_PASSWORD_KEY, "stale").await.unwrap();
+        storage.save_connections(&[config]).await.unwrap();
+        assert!(storage.get_secret("rocket", super::MQ_AUTH_PASSWORD_KEY).await.unwrap().is_none());
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].external_config.as_ref().unwrap()["auth"], serde_json::json!({"kind":"none"}));
+        assert!(!raw_connection_json(&storage, "rocket").await.contains("secretKey"));
     }
 
     #[tokio::test]
@@ -13999,6 +14129,7 @@ mod tests {
         let path = temp_db_path("saved-sql-summary");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let file = SavedSqlFile {
+            is_default_query: false,
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
             folder_id: None,
@@ -14040,6 +14171,7 @@ mod tests {
         let path = temp_db_path("saved-sql-preserve-unloaded-text");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut file = SavedSqlFile {
+            is_default_query: false,
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
             folder_id: None,
@@ -14108,6 +14240,7 @@ mod tests {
         assert_eq!(legacy.catalog, None);
 
         let external = SavedSqlFile {
+            is_default_query: false,
             id: "external".to_string(),
             connection_id: "conn-1".to_string(),
             catalog: Some("iceberg_catalog".to_string()),

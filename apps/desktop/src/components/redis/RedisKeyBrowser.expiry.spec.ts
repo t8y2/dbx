@@ -1347,7 +1347,7 @@ describe("RedisKeyBrowser expiry creation", () => {
     await submitCreate();
 
     expectWriterBefore(mocks.redisSetString, mocks.redisSetTtl);
-    expect(mocks.redisGetValue).toHaveBeenCalledWith("connection", 0, KEY_RAW);
+    expect(mocks.redisGetValue).toHaveBeenCalledWith("connection", 0, KEY_RAW, 65536);
     expect(mocks.redisDeleteKey).not.toHaveBeenCalled();
     expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
     expect(mocks.toast).toHaveBeenCalledWith("TTL command failed", 5000);
@@ -1638,7 +1638,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(mocks.toast).toHaveBeenCalledWith("deleted 3001", 3000);
   });
 
-  it("preserves the cursor and finds a sparse fuzzy match after a bounded continuation", async () => {
+  it("finds a sparse fuzzy match within the keyspace-aware budget without manual load-more (#12412)", async () => {
     mocks.redisScanPageSize = 1_000;
     mountBrowser();
     await settle();
@@ -1654,15 +1654,17 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
       return Promise.resolve({ cursor: batch * 100, keys: [], total_keys: batch === 1 ? 200_000 : 0 });
     });
 
+    // DBSIZE 200k → 200 SCAN iterations of keyspace-aware budget: the
+    // automatic first page keeps scanning (8 backend calls) until the sparse
+    // match at iteration 64 instead of stopping after the old 50-iteration
+    // shared-budget slice (7 calls), so the match surfaces without a manual
+    // load-more click (#12412).
     await submitKeySearch("issue5012:target");
-    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
-    await settle();
-    expect(document.body.textContent).not.toContain("target");
-    expect(document.body.textContent).toContain("redis.noKeysInScanHint");
-
-    clickButtonWithText("redis.loadMoreKeys");
     await vi.waitFor(() => expect(groupRowOrUndefined("issue5012")).toBeDefined());
-    expect(Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent)).not.toContain("target");
+    await settle();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(8);
+    expect(document.body.textContent).not.toContain("target");
+
     groupRow("issue5012").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     await settle();
     await vi.waitFor(() => {
@@ -1670,7 +1672,14 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
       expect(labels).toContain("target");
     });
 
-    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(8);
+    // The cursor handed back with the matching page is preserved: the manual
+    // continuation resumes from cursor 801 and scans its own keyspace-aware
+    // page (200 iterations = 25 backend calls) past the end of the mock.
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(33));
+    await settle();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(33);
+    expect(mocks.redisScanKeysBatch.mock.calls[8]?.[2]).toBe(801);
     expect(mocks.redisScanKeysBatch.mock.calls.every((call) => call[3] === "*issue5012:target*")).toBe(true);
   });
 
@@ -1688,20 +1697,27 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
       return Promise.resolve({ cursor: batch, keys: [], total_keys: batch === 1 ? 5_000_000 : 0 });
     });
 
+    // DBSIZE 5M → keyspace-aware budget = 1M COUNT = 1000 SCAN iterations, so
+    // the automatic first page spends up to 1000 iterations (125 backend calls
+    // at 8 iterations each) instead of the old shared 50-iteration slice (7
+    // calls), then stops with the cursor saved (#12412).
     await submitKeySearch("missing-key");
-    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(125));
     await settle();
 
-    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7);
-    expect(mocks.redisScanKeysBatch.mock.calls[mocks.redisScanKeysBatch.mock.calls.length - 1]?.[2]).toBe(6);
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(125);
+    expect(mocks.redisScanKeysBatch.mock.calls[124]?.[2]).toBe(124);
     expect(document.body.textContent).toContain("redis.noKeysInScanHint");
     expect(Array.from(document.querySelectorAll("button")).some((button) => button.textContent?.includes("redis.loadMoreKeys"))).toBe(true);
 
+    // The manual continuation resumes from the saved cursor with the same
+    // keyspace-aware per-page budget (another 1000 iterations) instead of
+    // falling back to the old 50k COUNT floor.
     clickButtonWithText("redis.loadMoreKeys");
-    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(14));
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(250));
 
-    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(14);
-    expect(mocks.redisScanKeysBatch.mock.calls[7]?.[2]).toBe(7);
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(250);
+    expect(mocks.redisScanKeysBatch.mock.calls[125]?.[2]).toBe(125);
     expect(document.body.textContent).toContain("redis.noKeysInScanHint");
   });
 
@@ -1731,11 +1747,10 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain("first"));
     expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("1+ keys");
 
-    clickButtonWithText("redis.loadMoreKeys");
-    await vi.waitFor(() => expect(continuationBatch).toBe(7));
-    expect(document.body.textContent).toContain("first");
-    expect(document.body.textContent).not.toContain("next");
-
+    // One continuation click now scans the keyspace-aware budget (200k keys →
+    // 200 iterations) and reaches the next sparse match while keeping the
+    // already found key; previously the same click was cut off at the old
+    // 50-iteration slice just short of the match and needed a second click (#12412).
     clickButtonWithText("redis.loadMoreKeys");
     await vi.waitFor(() => expect(document.body.textContent).toContain("next"));
 

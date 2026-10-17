@@ -8,6 +8,12 @@ vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
   default: {
     name: "CustomContextMenuStub",
     props: ["items"],
+    mounted() {
+      (this.$el as any).__ctxMenuItems = this.items;
+    },
+    updated() {
+      (this.$el as any).__ctxMenuItems = this.items;
+    },
     template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify(items.map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
   },
 }));
@@ -67,6 +73,7 @@ function mountBar(
   onActivateTab?: (tabId: string) => void,
   specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; pluginCenterOpen: boolean; pluginCenterActive: boolean; driverUpdateCount: number },
   toolbarActions?: EditorToolbarActions,
+  onSaveAllTabs?: () => void,
 ): Mounted {
   const store = useQueryStore();
   const host = createHost();
@@ -75,6 +82,7 @@ function mountBar(
     tabs: tabs.map((id) => store.tabs.find((candidate) => candidate.id === id)!),
     activeTabId,
     "onActivate-tab": onActivateTab,
+    "onSave-all-tabs": onSaveAllTabs,
     specialPageTabs,
   });
   // Reuse the active pinia so the component's internal store is the same
@@ -110,6 +118,7 @@ function mountBar(
             closeLeftTabs: "Close left tabs",
             closeRightTabs: "Close right tabs",
             closeAllTabs: "Close all tabs",
+            saveAllTabs: "Save all tabs",
             pinTab: "Pin",
             unpinTab: "Unpin",
             fullTabTitle: "Full title",
@@ -647,6 +656,48 @@ describe("EditorGroupTabBar behavior", () => {
 
     // Second tab: a tab exists to its left — the action becomes enabled.
     expect(menuFor(secondId).find((item: { label: string }) => item.label === "Close left tabs")).toMatchObject({ disabled: false });
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("offers save all tabs in tab context menu, disabled when clean and enabled when dirty", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const mainGroup = store.groups[0];
+    const actions = createNoopEditorToolbarActions();
+    actions.saveAllTabs = vi.fn();
+    const onSaveAllTabs = vi.fn(() => actions.saveAllTabs());
+    const { app, host } = mountBar(mainGroup.id, [firstId], firstId, pinia, undefined, undefined, actions, onSaveAllTabs);
+    await settle();
+
+    const menuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub");
+      return JSON.parse(stub!.dataset.menuItems ?? "[]");
+    };
+
+    const rawMenuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub") as any;
+      return (stub?.__ctxMenuItems ?? []) as Array<{ label: string; action?: () => void; disabled?: boolean }>;
+    };
+
+    // Clean tab -> save all tabs is disabled
+    expect(menuFor(firstId).find((item: { label: string }) => item.label === "Save all tabs")).toMatchObject({ disabled: true });
+
+    // Mark tab dirty -> save all tabs is enabled
+    store.tabs[0].sql = "SELECT 1;";
+    await settle();
+    expect(menuFor(firstId).find((item: { label: string }) => item.label === "Save all tabs")).toMatchObject({ disabled: false });
+
+    // Clicking save all tabs menu item emits save-all-tabs once and forwards to toolbar.saveAllTabs once
+    const saveAllItem = rawMenuFor(firstId).find((item) => item.label === "Save all tabs");
+    expect(saveAllItem).toBeDefined();
+    saveAllItem?.action?.();
+
+    expect(onSaveAllTabs).toHaveBeenCalledTimes(1);
+    expect(actions.saveAllTabs).toHaveBeenCalledTimes(1);
 
     app.unmount();
     host.remove();

@@ -6,8 +6,10 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind } from "@/types/database";
 import ObjectSourceDialog from "../ObjectSourceDialog.vue";
+import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 
 const ddl = 'CREATE SEQUENCE "APP"."SEQ" START WITH 40 INCREMENT BY 1 NOCACHE;';
 const alter = 'ALTER SEQUENCE "APP"."SEQ" INCREMENT BY 1 NOCACHE;';
@@ -28,7 +30,7 @@ function editor() {
   const root = document.querySelector<HTMLElement>('[role="dialog"] .cm-editor');
   return root ? EditorView.findFromDOM(root) : null;
 }
-async function mount(options: { databaseType?: DatabaseType; initialEditing?: boolean; editable?: boolean; type?: ObjectSourceKind; source?: string } = {}) {
+async function mount(options: { databaseType?: DatabaseType; initialEditing?: boolean; editable?: boolean; type?: ObjectSourceKind; source?: string; production?: boolean } = {}) {
   const databaseType = options.databaseType ?? "oceanbase-oracle",
     objectType = options.type ?? "SEQUENCE",
     source = options.source ?? ddl;
@@ -36,7 +38,7 @@ async function mount(options: { databaseType?: DatabaseType; initialEditing?: bo
   setActivePinia(pinia);
   const store = useConnectionStore();
   vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
-  vi.spyOn(store, "getConfig").mockReturnValue({ id: "ob", name: "test", db_type: databaseType } as ConnectionConfig);
+  vi.spyOn(store, "getConfig").mockReturnValue({ id: "ob", name: "test", db_type: databaseType, is_production: options.production } as ConnectionConfig);
   mocks.getObjectSource.mockResolvedValue({ name: "SEQ", schema: "APP", object_type: objectType, source, editable: options.editable !== false });
   mocks.buildEditableObjectSource.mockResolvedValue(objectType === "SEQUENCE" && databaseType === "oceanbase-oracle" ? alter : source);
   mocks.buildExecutableObjectSourceStatements.mockResolvedValue([objectType === "SEQUENCE" ? alter : source]);
@@ -58,6 +60,60 @@ async function mount(options: { databaseType?: DatabaseType; initialEditing?: bo
 }
 
 describe("OceanBase sequence source through the shared Oracle object dialog", () => {
+  it("rechecks identity after the real production confirmation waits", async () => {
+    const source = 'CREATE OR REPLACE VIEW "APP"."SEQ" AS SELECT 3 FROM DUAL';
+    const { saved } = await mount({ type: "VIEW", source, initialEditing: true, production: true });
+    const safety = useProductionSafetyStore();
+    button("objects.saveSource")!.click();
+    await vi.waitFor(() => expect(safety.pending).toBeDefined());
+    const migration = freezeSourceIdentities([{ connectionId: "ob", database: "service", schema: "APP", objectType: "VIEW", name: "SEQ" }]);
+    migration.markDispatched();
+    migration.finish();
+    safety.confirm();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("reload"));
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
+    expect(editor()!.state.doc.toString()).toBe(source);
+  });
+  it("blocks migration while a real save is in flight and releases it afterwards", async () => {
+    const source = 'CREATE OR REPLACE VIEW "APP"."SEQ" AS SELECT 4 FROM DUAL';
+    const { saved } = await mount({ type: "VIEW", source, initialEditing: true });
+    let complete!: (value: unknown) => void;
+    mocks.executeQuery.mockReturnValueOnce(
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+    );
+    button("objects.saveSource")!.click();
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledOnce());
+    const identity = { connectionId: "ob", database: "service", schema: "APP", objectType: "VIEW", name: "SEQ" };
+    expect(() => freezeSourceIdentities([identity])).toThrow("saved");
+    complete({ columns: [], rows: [], affected_rows: 0 });
+    await vi.waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    const migration = freezeSourceIdentities([identity]);
+    migration.cancel();
+  });
+  it("keeps the draft and refuses a late save after its view is renamed", async () => {
+    const source = 'CREATE OR REPLACE VIEW "APP"."SEQ" AS SELECT 1 FROM DUAL';
+    const { saved } = await mount({ type: "VIEW", source, initialEditing: true });
+    let complete!: (value: string[]) => void;
+    mocks.buildExecutableObjectSourceStatements.mockReturnValueOnce(
+      new Promise<string[]>((resolve) => {
+        complete = resolve;
+      }),
+    );
+    button("objects.saveSource")!.click();
+    await vi.waitFor(() => expect(mocks.buildExecutableObjectSourceStatements).toHaveBeenCalledOnce());
+    const migration = freezeSourceIdentities([{ connectionId: "ob", database: "service", schema: "APP", objectType: "VIEW", name: "SEQ" }]);
+    migration.markDispatched();
+    migration.finish();
+    complete([source]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
+    expect(editor()!.state.doc.toString()).toBe(source);
+    expect(document.body.textContent).toContain("reload");
+  });
   it("previews the CREATE DDL read-only and switches to the backend ALTER draft only on edit", async () => {
     await mount();
     expect(editor()!.state.facet(EditorState.readOnly)).toBe(true);

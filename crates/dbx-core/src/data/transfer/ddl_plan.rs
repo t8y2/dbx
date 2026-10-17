@@ -123,7 +123,9 @@ pub(super) async fn prepare_table_ddl(
             match db::doris::get_catalog_table_ddl(&pool, catalog, &request.source_database, table).await {
                 Ok(ddl) => (ddl, true),
                 Err(err) => {
-                    log::warn!("[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL");
+                    log::warn!(
+                        "[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL"
+                    );
                     (
                         generate_create_table_ddl_with_column_quoting(
                             columns,
@@ -211,7 +213,17 @@ pub(super) async fn prepare_table_ddl(
             target_table,
         ) {
             reused_source_ddl = source_ddl_was_read;
-            rewritten
+            // openGauss's `pg_get_tabledef()` DDL carries storage options the PG-compatible
+            // targets reject (`WITH (orientation=row, compression=no)` → #9037). The profiles
+            // are passed in because a plain PostgreSQL connection profiled as openGauss reads
+            // that same DDL.
+            normalize_reused_opengauss_table_ddl(
+                &rewritten,
+                source_db_type,
+                source_driver_profile.as_deref(),
+                target_db_type,
+                target_driver_profile.as_deref(),
+            )
         } else {
             // The reused DDL's CREATE TABLE head could not be renamed safely; fall back
             // to the generated DDL rather than creating the table under the wrong name.
@@ -452,9 +464,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(prepared.deferred_fk_alters, vec![
-            "ALTER TABLE `resolved_child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
-        ]);
+        assert_eq!(
+            prepared.deferred_fk_alters,
+            vec![
+                "ALTER TABLE `resolved_child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
+            ]
+        );
         assert!(prepared.ddl.contains("`resolved_child`"), "{}", prepared.ddl);
     }
 

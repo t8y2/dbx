@@ -520,6 +520,7 @@ fn wrap_conditional_check(sql: &str, db_type: DatabaseType) -> String {
             | DatabaseType::Highgo
             | DatabaseType::Vastbase
             | DatabaseType::Uxdb
+            | DatabaseType::Gbase8c
             | DatabaseType::Redshift => {
                 let (schema_name, table_name) = postgres_table_identity(table_identifier);
                 let schema_predicate = schema_name.map_or_else(

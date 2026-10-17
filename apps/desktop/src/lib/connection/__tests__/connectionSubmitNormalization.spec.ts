@@ -29,13 +29,37 @@ describe("connection submit normalization", () => {
   });
 
   it("normalizes invalid timeout values and inherited global values", () => {
-    const inherited = config({ connect_timeout_inherit: true, query_timeout_inherit: true, idle_timeout_secs: -1, keepalive_interval_secs: Number.NaN });
+    const inherited = config({ connect_timeout_inherit: true, query_timeout_inherit: true, idle_timeout_secs: -1, idle_disconnect_secs: -1, keepalive_interval_secs: Number.NaN });
     normalizeConnectionTimeouts(inherited, 12, 34);
-    expect(inherited).toMatchObject({ connect_timeout_secs: 12, query_timeout_secs: 34, idle_timeout_secs: 60, keepalive_interval_secs: 30 });
+    expect(inherited).toMatchObject({ connect_timeout_secs: 12, query_timeout_secs: 34, idle_timeout_secs: 60, idle_disconnect_secs: 0, keepalive_interval_secs: 30 });
 
-    const invalid = config({ query_timeout_secs: Number.NaN, idle_timeout_secs: -1, keepalive_interval_secs: -2 });
+    const invalid = config({ query_timeout_secs: Number.NaN, idle_timeout_secs: -1, idle_disconnect_secs: 120, keepalive_interval_secs: -2 });
     normalizeConnectionTimeouts(invalid, 12, 34);
-    expect(invalid).toMatchObject({ query_timeout_secs: 60, idle_timeout_secs: 60, keepalive_interval_secs: 30 });
+    expect(invalid).toMatchObject({ query_timeout_secs: 60, idle_timeout_secs: 60, idle_disconnect_secs: 120, keepalive_interval_secs: 30 });
+  });
+
+  it("defaults auto-disconnect-when-idle to disabled when the field is absent", () => {
+    const value = config();
+    normalizeConnectionTimeouts(value, 12, 34);
+    expect(value.idle_disconnect_secs).toBe(0);
+  });
+
+  it("clamps the manual transaction idle timeout and falls back to the default for unset values", () => {
+    const unset = config({});
+    normalizeConnectionTimeouts(unset, 12, 34);
+    expect(unset.manual_transaction_timeout_secs).toBe(300);
+
+    const tooSmall = config({ manual_transaction_timeout_secs: 5 });
+    normalizeConnectionTimeouts(tooSmall, 12, 34);
+    expect(tooSmall.manual_transaction_timeout_secs).toBe(30);
+
+    const tooLarge = config({ manual_transaction_timeout_secs: 999_999 });
+    normalizeConnectionTimeouts(tooLarge, 12, 34);
+    expect(tooLarge.manual_transaction_timeout_secs).toBe(86400);
+
+    const custom = config({ manual_transaction_timeout_secs: 1800 });
+    normalizeConnectionTimeouts(custom, 12, 34);
+    expect(custom.manual_transaction_timeout_secs).toBe(1800);
   });
 
   it("canonicalizes scope flags and production database names", () => {

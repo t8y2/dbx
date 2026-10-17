@@ -92,7 +92,7 @@ export function jdbcConnectionUsesDriverRowOffset(connection: JdbcDialectConnect
 
 export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection) return undefined;
-  if (connection.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return "informix";
+  if (connection.db_type === "gbase8s") return "informix";
   if (connection.db_type === "gbase") return "mysql";
   // MySQL-protocol connections to Doris/StarRocks (db_type=mysql with a
   // starrocks/doris driver_profile) must use the Doris/StarRocks SQL dialect so
@@ -123,7 +123,7 @@ export function transferDatabaseTypeForConnection(connection?: JdbcDialectConnec
   // the GBase driver manifest explicitly disables data transfer. Keep that
   // capability restriction attached to the raw connection type instead of
   // exposing the mapped MySQL type to transfer callers.
-  if (connection?.db_type === "gbase") return undefined;
+  if (connection?.db_type === "gbase" || connection?.db_type === "gbase8s") return undefined;
   const effective = effectiveDatabaseTypeForConnection(connection);
   if (effective === "doris" || effective === "starrocks") return connection?.db_type;
   return effective;
@@ -136,7 +136,7 @@ export function connectionUsesConnectionRootSchemaMode(connection?: JdbcDialectC
 
 export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConnection | undefined): boolean {
   if (!connection) return false;
-  if (connection.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return true;
+  if (connection.db_type === "gbase8s") return true;
   if (connection.db_type === "kingbase") return true;
   if (connection.db_type === "kyuubi") return true;
   // Cloud Spanner is dual-dialect: the agent reports a backtick for GoogleSQL and
@@ -233,7 +233,7 @@ export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConn
 
 export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection) return undefined;
-  if (connection.db_type === "gbase" && !isGbase8sProfile(connection.driver_profile)) return "gbase";
+  if (connection.db_type === "gbase") return "gbase";
   return effectiveDatabaseTypeForConnection(connection);
 }
 
@@ -253,7 +253,7 @@ export function connectionUsesDatabaseObjectTreeMode(connection?: JdbcDialectCon
 export function connectionShouldDiscoverJdbcSchemas(connection?: JdbcDialectConnection): boolean {
   // GBase 8s exposes owner schemas only when the current database can use them
   // in DML; non-ANSI databases fall back to the flat table tree.
-  if (connection?.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return true;
+  if (connection?.db_type === "gbase8s") return true;
   return connection?.db_type === "jdbc" && !inferJdbcDialect(connection);
 }
 
@@ -348,7 +348,7 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
 
 /** GBase 8s reports the table owner as a schema, but does not accept it in table DML/DDL names. */
 export function connectionTableSqlSchema(connection: JdbcDialectConnection | undefined, schema?: string): string | undefined {
-  if (connection?.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return undefined;
+  if (connection?.db_type === "gbase8s") return undefined;
   return schema;
 }
 

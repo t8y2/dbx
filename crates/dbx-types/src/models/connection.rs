@@ -41,6 +41,25 @@ pub enum ConnectionLivenessMessage {
     Resync,
 }
 
+/// A message on the connection-idle-closed channel (#12112).
+///
+/// Published when a connection's pools were closed because the connection stayed idle
+/// longer than its own `idle_disconnect_secs`. One shape for both shells and both
+/// transports, so the frontend parses the same payload everywhere: the desktop shell
+/// forwards it as the `dbx:connection-idle-closed` event, the web shell streams it over
+/// SSE. `connectionId` is camelCase in JSON to match the frontend type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionIdleClosedEvent {
+    pub connection_id: String,
+    /// 关闭发生的墙钟时间（Unix 毫秒）。
+    ///
+    /// 前端用它识别「迟到事件」：SSE / 事件通道都有缓冲，事件可能在本连接已经重新建立
+    /// 之后才到达；此时这次断开描述的已经是上一个会话，前端应忽略，否则会连带关掉刚建好
+    /// 的新会话。用墙钟而非 `Instant` 是因为要跨进程（web 端是浏览器与服务端）比较。
+    pub closed_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseConnectionInfo {
@@ -187,6 +206,14 @@ pub struct ConnectionConfig {
     pub query_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_manual_transaction_timeout_secs")]
+    pub manual_transaction_timeout_secs: u64,
+    /// 连接空闲自动断开阈值（秒）：该连接连续多少秒没有任何查询活动，就关闭其名下
+    /// 全部连接池。0 表示不启用（opt-in），旧配置缺字段时反序列化即为 0，行为不变。
+    /// 注意：与上面的 `idle_timeout_secs`（连接池内空闲物理连接的回收）语义不同，
+    /// 两者并存但互不影响。
+    #[serde(default = "default_idle_disconnect_secs")]
+    pub idle_disconnect_secs: u64,
     #[serde(default = "default_keepalive_interval_secs")]
     pub keepalive_interval_secs: u64,
     #[serde(default)]
@@ -593,6 +620,22 @@ pub fn default_idle_timeout_secs() -> u64 {
     60
 }
 
+/// Seconds a manual transaction may sit without executing a statement before DBX
+/// rolls it back.
+pub const DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS: u64 = 300;
+pub const MIN_MANUAL_TRANSACTION_TIMEOUT_SECS: u64 = 30;
+pub const MAX_MANUAL_TRANSACTION_TIMEOUT_SECS: u64 = 86_400;
+
+pub fn default_manual_transaction_timeout_secs() -> u64 {
+    DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS
+}
+
+/// 「连接空闲自动断开」阈值的默认值：0 表示默认不启用（opt-in）。
+/// 独立于 `default_idle_timeout_secs`，避免老配置被赋予超时关闭语义。
+pub fn default_idle_disconnect_secs() -> u64 {
+    0
+}
+
 pub fn default_keepalive_interval_secs() -> u64 {
     30
 }
@@ -674,6 +717,10 @@ struct ConnectionConfigData {
     pub query_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_manual_transaction_timeout_secs")]
+    pub manual_transaction_timeout_secs: u64,
+    #[serde(default = "default_idle_disconnect_secs")]
+    pub idle_disconnect_secs: u64,
     #[serde(default = "default_keepalive_interval_secs")]
     pub keepalive_interval_secs: u64,
     #[serde(default)]
@@ -787,6 +834,8 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
             idle_timeout_secs: data.idle_timeout_secs,
+            manual_transaction_timeout_secs: data.manual_transaction_timeout_secs,
+            idle_disconnect_secs: data.idle_disconnect_secs,
             keepalive_interval_secs: data.keepalive_interval_secs,
             ssl: data.ssl,
             ca_cert_path: data.ca_cert_path,
@@ -838,6 +887,7 @@ impl<'de> Deserialize<'de> for ConnectionConfig {
     {
         let mut value = Value::deserialize(deserializer)?;
         migrate_legacy_transport_layers(&mut value);
+        migrate_legacy_gbase8s_profile(&mut value);
         let data = ConnectionConfigData::deserialize(value).map_err(serde::de::Error::custom)?;
         if let Some(grouping) = &data.redis_key_grouping {
             let mut ids = std::collections::HashSet::new();
@@ -857,6 +907,20 @@ impl<'de> Deserialize<'de> for ConnectionConfig {
             }
         }
         Ok(data.into())
+    }
+}
+
+/// GBase 8s used to be the `gbase8s` driver profile of the MySQL-based `gbase` type. It is its own
+/// `gbase8s` type now (Informix dialect), so saved and in-flight configs are rewritten on load.
+fn migrate_legacy_gbase8s_profile(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let is_gbase = object.get("db_type").and_then(Value::as_str) == Some("gbase");
+    let is_8s_profile =
+        object.get("driver_profile").and_then(Value::as_str).is_some_and(|p| p.eq_ignore_ascii_case("gbase8s"));
+    if is_gbase && is_8s_profile {
+        object.insert("db_type".to_string(), Value::String("gbase8s".to_string()));
     }
 }
 
@@ -996,6 +1060,17 @@ impl ConnectionConfig {
         }
     }
 
+    /// Idle window of a manual transaction. `0` (legacy or unset payloads) falls
+    /// back to the default instead of rolling back immediately.
+    pub fn effective_manual_transaction_timeout_secs(&self) -> u64 {
+        if self.manual_transaction_timeout_secs == 0 {
+            default_manual_transaction_timeout_secs()
+        } else {
+            self.manual_transaction_timeout_secs
+                .clamp(MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, MAX_MANUAL_TRANSACTION_TIMEOUT_SECS)
+        }
+    }
+
     pub fn effective_query_timeout_secs(&self) -> u64 {
         if self.query_timeout_secs == 0 {
             // An explicit 0 is the UI's "no limit"; a floor must not impose one.
@@ -1026,6 +1101,9 @@ impl ConnectionConfig {
             DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Uxdb => Some("uxdb"),
+            // GBase 8c keeps the PostgreSQL-shaped `postgres` maintenance database
+            // (measured on GBase8cV6 1.0.0B20), so an empty database field resolves to it.
+            DatabaseType::Gbase8c => Some("postgres"),
             DatabaseType::Yashandb => Some("yasdb"),
             DatabaseType::Oracle
                 if !self.oracle_connection_type.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("tns")) =>
@@ -1230,6 +1308,7 @@ impl ConnectionConfig {
             DatabaseType::Highgo => format!("highgo://{host}:{port}{db_part}"),
             DatabaseType::Uxdb => format!("uxdb://{host}:{port}{db_part}"),
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
+            DatabaseType::Gbase8c => format!("gbase8c://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
             DatabaseType::Gaussdb => {
                 if is_multi_host(raw_host) {
@@ -1260,6 +1339,7 @@ impl ConnectionConfig {
             DatabaseType::Ignite => format!("ignite://{host}:{port}{db_part}"),
             DatabaseType::Ignite3 => format!("ignite3://{host}:{port}{db_part}"),
             DatabaseType::Gbase => format!("gbase://{host}:{port}{db_part}"),
+            DatabaseType::Gbase8s => format!("gbase8s://{host}:{port}{db_part}"),
             DatabaseType::H2 => format!("h2://{host}:{port}{db_part}"),
             DatabaseType::Snowflake => format!("snowflake://{host}/{db_part}"),
             DatabaseType::Trino => format!("trino://{host}:{port}{db_part}"),
@@ -1429,6 +1509,9 @@ impl ConnectionConfig {
             DatabaseType::Vastbase => {
                 format!("vastbase://{}:{}@{host}:{port}{db_part}", username, password)
             }
+            DatabaseType::Gbase8c => {
+                format!("gbase8c://{}:{}@{host}:{port}{db_part}", username, password)
+            }
             DatabaseType::Goldendb => {
                 format!("goldendb://{}:{}@{host}:{port}{db_part}", username, password)
             }
@@ -1487,6 +1570,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Gbase => {
                 format!("gbase://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Gbase8s => {
+                format!("gbase8s://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::H2 => {
                 format!("h2://{}:{}@{host}:{port}{db_part}", username, password)
@@ -3065,6 +3151,33 @@ mod tests {
     }
 
     #[test]
+    fn legacy_gbase8s_profile_connections_load_as_the_gbase8s_type() {
+        let config = |db_type: &str, driver_profile: Option<&str>| {
+            let mut value = serde_json::json!({
+                "id": "id",
+                "name": "GBase",
+                "db_type": db_type,
+                "host": "localhost",
+                "port": 9088,
+                "username": "gbasedbt",
+                "password": "",
+                "database": "app"
+            });
+            if let Some(profile) = driver_profile {
+                value["driver_profile"] = serde_json::json!(profile);
+            }
+            serde_json::from_value::<ConnectionConfig>(value).unwrap()
+        };
+
+        assert_eq!(config("gbase", Some("gbase8s")).db_type, DatabaseType::Gbase8s);
+        assert_eq!(config("gbase", Some("GBASE8S")).db_type, DatabaseType::Gbase8s);
+        assert_eq!(config("gbase8s", Some("gbase8s")).db_type, DatabaseType::Gbase8s);
+        assert_eq!(config("gbase", Some("gbase8a")).db_type, DatabaseType::Gbase);
+        assert_eq!(config("gbase", None).db_type, DatabaseType::Gbase);
+        assert_eq!(config("informix", Some("gbase8s")).db_type, DatabaseType::Informix);
+    }
+
+    #[test]
     fn default_schema_is_optional_and_round_trips() {
         let base = serde_json::json!({
             "id": "id",
@@ -3188,6 +3301,8 @@ mod tests {
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
             idle_timeout_secs: super::default_idle_timeout_secs(),
+            manual_transaction_timeout_secs: super::default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: super::default_idle_disconnect_secs(),
             keepalive_interval_secs: super::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -3573,6 +3688,31 @@ mod tests {
     }
 
     #[test]
+    fn missing_idle_disconnect_defaults_to_zero() {
+        // 老配置没有 idle_disconnect_secs 字段时，必须反序列化为 0（不启用），
+        // 保证既有连接不会被赋予空闲超时自动关闭的行为。
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "db_type": "mysql",
+            "host": "10.1.2.3",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null
+        }))
+        .unwrap();
+
+        assert_eq!(config.idle_disconnect_secs, 0);
+        // 显式配置后能正常往返，且不影响并存的 idle_timeout_secs。
+        let mut value = serde_json::to_value(&config).unwrap();
+        value["idle_disconnect_secs"] = serde_json::json!(120);
+        let configured: ConnectionConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(configured.idle_disconnect_secs, 120);
+        assert_eq!(configured.idle_timeout_secs, super::default_idle_timeout_secs());
+    }
+
+    #[test]
     fn legacy_ssh_tunnels_migrate_to_ordered_transport_layers() {
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "id",
@@ -3719,6 +3859,28 @@ mod tests {
         config.query_timeout_secs = 0;
 
         assert_eq!(config.effective_query_timeout_secs(), 0);
+    }
+
+    #[test]
+    fn manual_transaction_timeout_defaults_when_absent_or_zero_and_is_clamped() {
+        let mut config = mysql_config("root", "", None);
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), 300);
+
+        // Payloads saved before the setting existed deserialize to the default.
+        let mut json = serde_json::to_value(&config).unwrap();
+        json.as_object_mut().unwrap().remove("manual_transaction_timeout_secs");
+        let legacy: ConnectionConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.manual_transaction_timeout_secs, 300);
+
+        // 0 must never mean "roll back immediately".
+        config.manual_transaction_timeout_secs = 0;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), 300);
+        config.manual_transaction_timeout_secs = 1;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), super::MIN_MANUAL_TRANSACTION_TIMEOUT_SECS);
+        config.manual_transaction_timeout_secs = 1_800;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), 1_800);
+        config.manual_transaction_timeout_secs = u64::MAX;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), super::MAX_MANUAL_TRANSACTION_TIMEOUT_SECS);
     }
 
     #[test]

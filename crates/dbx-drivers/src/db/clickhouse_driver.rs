@@ -556,6 +556,9 @@ fn clickhouse_index_from_skipping_row(row: &[serde_json::Value]) -> IndexInfo {
         included_columns: None,
         comment: None,
         key_is_expression: Vec::new(),
+        key_directions: Vec::new(),
+        visibility: None,
+        key_metadata_complete: false,
         column_opclasses: vec![],
         key_options: Vec::new(),
         constraint_backed: false,
@@ -805,6 +808,9 @@ pub async fn list_indexes(client: &ChClient, database: &str, table: &str) -> Res
         .filter(|value| !value.trim().is_empty())
     {
         indexes.push(IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "PRIMARY".to_string(),
             columns: split_clickhouse_expression_list(primary_key),
             is_unique: false,

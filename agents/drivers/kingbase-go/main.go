@@ -1688,6 +1688,12 @@ func normalizeValue(value any, columnTypeName string) any {
 		}
 		return map[string]string{"$binary": base64.StdEncoding.EncodeToString(typed)}
 	case time.Time:
+		// A "time" column holds a time of day and no date. gokb decodes one into a
+		// time.Time on Go's zero date, so formatting a date part shows every time of
+		// day as 0000-01-01T<time> (issue #12188).
+		if isKingbaseTimeOnlyType(columnTypeName) {
+			return typed.Format("15:04:05.999999999")
+		}
 		// KingBase "timestamp"/"date" columns are wall-clock values with no timezone
 		// meaning; the gokb driver decodes them into a time.Time labeled with the
 		// process-local zone, which is not a real UTC instant. Formatting those with
@@ -1710,13 +1716,27 @@ func normalizeValue(value any, columnTypeName string) any {
 }
 
 func isKingbaseTimezoneLessDateTime(columnTypeName string) bool {
-	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
-	switch normalized {
-	case "DATE", "TIMESTAMP", "TIME":
+	switch normalizedKingbaseColumnType(columnTypeName) {
+	case "DATE", "TIMESTAMP":
 		return true
 	default:
 		return false
 	}
+}
+
+// isKingbaseTimeOnlyType matches the type names a "time" column can carry: the
+// driver's own name (`DatabaseTypeName`) and the information_schema spelling.
+func isKingbaseTimeOnlyType(columnTypeName string) bool {
+	switch normalizedKingbaseColumnType(columnTypeName) {
+	case "TIME", "TIMEWITHOUTTIMEZONE":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedKingbaseColumnType(columnTypeName string) string {
+	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
 }
 
 func isTextBytes(value []byte) bool {

@@ -8,6 +8,50 @@ import type { GraphResult } from "@/lib/graph/graphResult";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
+export interface OracleViewRenameSourceInput {
+  source: string;
+  owner: string;
+  viewName: string;
+  oldName: string;
+  newName: string;
+  targetViewName?: string;
+}
+
+export interface OracleViewRenameSource {
+  source: string;
+  fingerprint: string;
+  references: OracleViewRenameReference[];
+}
+
+export interface OracleViewRenameReference {
+  owner: string;
+  name: string;
+}
+
+export interface OracleViewRenameIssue {
+  code: string;
+  message: string;
+  viewName?: string;
+  hintText?: string | null;
+  location?: { line: number; column: number; endLine?: number; endColumn?: number } | null;
+  repairable: boolean;
+}
+
+export interface OracleViewRenameSourceReview {
+  source: OracleViewRenameSource | null;
+  references: OracleViewRenameReference[];
+  issues: OracleViewRenameIssue[];
+}
+
+export interface OracleTableReferenceRewriteInput {
+  databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">;
+  objectType: "PROCEDURE" | "FUNCTION" | "TRIGGER";
+  schema: string;
+  oldName: string;
+  newName: string;
+  source: string;
+}
+
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
 }
@@ -130,6 +174,16 @@ export interface ConnectionConfig {
   query_timeout_secs?: number;
   query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;
+  /** Seconds a manual transaction may sit idle before DBX rolls it back. */
+  manual_transaction_timeout_secs?: number;
+  /**
+   * 空闲自动断开阈值（秒）：后端在连接池层面实现，连接在此秒数内无任何查询活动时自动关闭其
+   * 连接池；前端据此把连接标记为未连接并保留已打开的页签与结果，供用户下次操作时自动重连。
+   *
+   * 0（默认）表示不启用。与 `idle_timeout_secs` 语义不同：后者只回收连接池内的空闲物理连接，
+   * 不会关闭整个连接池；本字段关闭的是整个连接池。所有方言均适用（与方言无关）。
+   */
+  idle_disconnect_secs?: number;
   keepalive_interval_secs?: number;
   ssl?: boolean;
   ca_cert_path?: string;
@@ -230,6 +284,15 @@ export type ConnectionLivenessFailureKind = "probe_failed" | "timed_out";
  * sidebar green indefinitely.
  */
 export type ConnectionLivenessMessage = { kind: "lost"; connectionId: string; failureKind: ConnectionLivenessFailureKind } | { kind: "resync" };
+
+/**
+ * 后端「空闲自动断开」事件（`dbx:connection-idle-closed`）的载荷：某个连接的连接池因空闲
+ * 超过 `idle_disconnect_secs` 被后端自动关闭。前端收到后把该连接标记为未连接并保留页签。
+ *
+ * `closedAtMs` 是后端关闭时的墙钟时间（Unix 毫秒）：事件通道可能有缓冲，若本连接在事件
+ * 到达之前已经重新建立，说明这次断开描述的是上一个会话，前端必须忽略，否则会关掉新会话。
+ */
+export type ConnectionIdleClosedEvent = { connectionId: string; closedAtMs?: number };
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig) | ({ type: "http_tunnel" } & HttpTunnelConfig);
 
@@ -1182,6 +1245,12 @@ export interface IndexInfo {
   comment?: string | null;
   /** Parallel to `columns`: true at index i means columns[i] is a raw expression, not a plain column name. */
   key_is_expression?: boolean[] | null;
+  /** Parallel to `columns`: Oracle-family key ordering (`ASC` or `DESC`). */
+  key_directions?: string[] | null;
+  /** Oracle-family index visibility (`VISIBLE` or `INVISIBLE`). */
+  visibility?: string | null;
+  /** True only when expression, direction and visibility metadata are aligned and complete. */
+  key_metadata_complete?: boolean;
   /** Parallel to `columns`: operator class name for each key column (PostgreSQL), if non-default. */
   column_opclasses?: (string | null)[] | null;
   /**
@@ -1235,6 +1304,39 @@ export interface ConstraintInfo {
   initially_deferred?: boolean | null;
   enabled?: boolean | null;
   valid?: boolean | null;
+  oracle_metadata?: OracleConstraintMetadata | null;
+}
+
+export interface OracleConstraintMetadata {
+  metadataComplete: boolean;
+  owner: string;
+  constraintType: string | null;
+  status: string | null;
+  validated: string | null;
+  deferrable: string | null;
+  deferred: string | null;
+  rely: string | null;
+  indexOwner: string | null;
+  indexName: string | null;
+  indexSharing: string | null;
+  index: OracleConstraintIndexMetadata | null;
+}
+
+export interface OracleConstraintIndexMetadata {
+  metadataComplete: boolean;
+  owner: string;
+  tableOwner: string;
+  tableName: string;
+  indexType: string;
+  uniqueness: string;
+  status: string;
+  partitioned: boolean;
+  visibility: string;
+  secondary: string | null;
+  columns: string[];
+  directions: string[];
+  keyIsExpression: boolean[];
+  includedColumns: string[];
 }
 
 export interface PartitionInfo {
@@ -1410,6 +1512,8 @@ export interface QueryResult {
   large_value_refs?: string[];
   session_id?: string | null;
   has_more?: boolean;
+  /** Frontend-only SQL page lookahead, independent of the driver's cursor has_more. */
+  page_has_more?: boolean;
   /** For Elasticsearch REST search results parsed into a _source table,
    *  this carries the raw HTTP response body so the UI can toggle between
    *  the tabular view and the original JSON. */
@@ -1546,6 +1650,7 @@ export interface QueryResultRun {
   querySourceColumns?: QueryTab["querySourceColumns"];
   queryWriteTargets?: QueryTab["queryWriteTargets"];
   resultColumnComments?: QueryTab["resultColumnComments"];
+  resultColumnTypeLabels?: QueryTab["resultColumnTypeLabels"];
   queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
@@ -1898,6 +2003,15 @@ export interface TableStructureEditorDraft {
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   constraints?: ConstraintInfo[];
+  existingPrimaryKey?: NonNullable<import("@/lib/table/tableStructureEditorSql").BuildTableStructureChangeSqlOptions["primaryKeyChange"]>;
+  oracleConstraintChange?: import("@/lib/table/tableStructureEditorSql").OracleConstraintChange;
+  oracleForeignKeyCreateRecovery?: {
+    tableName: string;
+    tableExists: boolean;
+    details: string;
+    remaining: import("@/lib/table/tableStructureEditorSql").OracleForeignKeyDefinition[];
+    uncertainSteps: string[];
+  };
   constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
@@ -1920,7 +2034,7 @@ export interface TableStructureEditorViewport {
   scrollLeft: number;
 }
 
-export type ObjectBrowserViewMode = "list" | "grid";
+export type ObjectBrowserViewMode = "list" | "grid" | "compact";
 
 export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "events" | "sequences" | "packages" | "types";
 
@@ -1980,7 +2094,7 @@ export interface DatabaseSearchResultItem {
   searchScope?: DatabaseSearchScope;
   columnName?: string;
   columnComment?: string;
-  structureMatchIn?: Array<"name" | "comment">;
+  structureMatchIn?: Array<"name" | "comment" | "tableComment">;
 }
 
 export interface DatabaseSearchTableTask {
@@ -2004,6 +2118,7 @@ export interface DatabaseSearchTabState {
 }
 
 export interface QueryTab {
+  isDefaultQuery?: boolean;
   id: string;
   /** Stable creation time used when tabs are displayed in creation order. */
   createdAt?: number;
@@ -2372,6 +2487,14 @@ export interface QueryTab {
    */
   resultColumnComments?: Array<string | undefined>;
   /**
+   * Display-only column type labels for multi-source (or otherwise enriched)
+   * query results, indexed by result-column ordinal. Built from resolved base
+   * column metadata so headers can show declared length/precision (e.g.
+   * `varchar(50)`) even when ResultSet `column_types` only carry bare type
+   * names. `undefined` entries fall back to ResultSet / single-table metadata.
+   */
+  resultColumnTypeLabels?: Array<string | undefined>;
+  /**
    * Display-only result-column to source mapping for multi-source results,
    * indexed by result-column ordinal. Each entry carries the source identity
    * (sourceKey + canonical source column name), so comments resolve per source
@@ -2439,6 +2562,8 @@ export interface SavedSqlFolder {
 }
 
 export interface SavedSqlFile {
+  /** The persistent, autosaved query for this connection/catalog/database. */
+  isDefaultQuery?: boolean;
   id: string;
   connectionId: string;
   folderId?: string;
@@ -2479,6 +2604,8 @@ export interface TransferTaskConfig {
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
   batchSize: number;
+  /** Per-operation timeout for this task. Undefined inherits each connection; 0 disables the limit. */
+  operationTimeoutSecs?: number;
   /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
   tableFilters?: Record<string, string>;
   /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */

@@ -250,6 +250,8 @@ pub struct CopyTableDataSqlOptions {
 
 const MYSQL_COMPATIBLE_PROFILES: &[&str] = &["mysql", "mariadb", "tidb", "oceanbase", "custom_mysql"];
 const CREATE_DATABASE_CHARSET_UNSUPPORTED_PROFILES: &[&str] = &["doris", "selectdb", "starrocks"];
+const MYSQL_AUTO_INCREMENT_PROFILES: &[&str] =
+    &["mysql", "mariadb", "tidb", "oceanbase", "tdsql", "polardb", "greatsql", "custom_mysql", "dolt", "goldendb"];
 
 pub fn supports_create_database_charset(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
     let normalized_profile = driver_profile.map(str::to_ascii_lowercase);
@@ -261,6 +263,17 @@ pub fn supports_create_database_charset(database_type: Option<DatabaseType>, dri
     }
     matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb))
         || normalized_profile.as_deref().is_some_and(|profile| MYSQL_COMPATIBLE_PROFILES.contains(&profile))
+}
+
+pub fn supports_mysql_auto_increment(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
+    if database_type == Some(DatabaseType::Goldendb) {
+        return true;
+    }
+    if database_type != Some(DatabaseType::Mysql) {
+        return false;
+    }
+    let profile = driver_profile.map(str::trim).unwrap_or_default();
+    profile.is_empty() || MYSQL_AUTO_INCREMENT_PROFILES.iter().any(|candidate| profile.eq_ignore_ascii_case(candidate))
 }
 
 pub fn build_create_database_sql(options: CreateDatabaseSqlOptions) -> Result<String, String> {
@@ -285,12 +298,12 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
             quote_table_identifier(options.database_type, &options.name)
         ));
     }
-    if is_informix_family(options.database_type, options.driver_profile.as_deref()) {
+    if is_informix_family(options.database_type) {
         // Informix / GBase 8s accept only a bare `CREATE DATABASE <name>`. The new database
         // inherits the instance default locale, and the MySQL `CHARACTER SET`/`COLLATE`
         // clauses are invalid syntax here. Database names are ordinary identifiers, so quote
         // them with the Informix rule (unquoted for simple identifiers) rather than the
-        // default double-quote path that `DatabaseType::Gbase` would otherwise take.
+        // default double-quote path that other types would otherwise take.
         let name = quote_table_identifier(Some(DatabaseType::Informix), &options.name);
         let locale = clean_sql_option(options.charset.as_deref());
         if locale.is_empty() {
@@ -312,23 +325,18 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
     Ok(format!("CREATE DATABASE {name} CHARACTER SET {charset}{collate_clause};"))
 }
 
-/// Whether the connection belongs to the Informix family: standalone Informix, or GBase 8s
-/// (which shares `DatabaseType::Gbase` with the MySQL-based GBase 8a and is only distinguishable
-/// through the `gbase8s` driver profile). Informix-family servers accept `CREATE DATABASE` but
-/// have no `CREATE SCHEMA <name>` statement (a "schema" is the table owner), so the create
-/// targets differ from the rest of the `Gbase` family.
-fn is_informix_family(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
-    match database_type {
-        Some(DatabaseType::Informix) => true,
-        Some(DatabaseType::Gbase) => driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")),
-        _ => false,
-    }
+/// Whether the connection belongs to the Informix family: standalone Informix, or GBase 8s.
+/// Informix-family servers accept `CREATE DATABASE` but have no `CREATE SCHEMA <name>`
+/// statement (a "schema" is the table owner), so the create targets differ from the MySQL-based
+/// GBase 8a (`DatabaseType::Gbase`).
+fn is_informix_family(database_type: Option<DatabaseType>) -> bool {
+    matches!(database_type, Some(DatabaseType::Informix | DatabaseType::Gbase8s))
 }
 
-pub fn supports_create_database_target(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
+pub fn supports_create_database_target(database_type: Option<DatabaseType>, _driver_profile: Option<&str>) -> bool {
     // Informix / GBase 8s create namespaces with `CREATE DATABASE`, so they are valid targets
     // even though they are absent from the explicit list below.
-    if is_informix_family(database_type, driver_profile) {
+    if is_informix_family(database_type) {
         return true;
     }
     matches!(
@@ -647,17 +655,15 @@ fn supports_vacuum_table(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
 }
 
 pub(crate) fn validate_mysql_auto_increment_options(options: &MysqlAutoIncrementSqlOptions) -> Result<(), String> {
-    let profile = options.driver_profile.as_deref().map(str::trim).unwrap_or_default();
-    if options.database_type != Some(DatabaseType::Mysql)
-        || (!profile.is_empty() && !profile.eq_ignore_ascii_case("mysql"))
-    {
-        return Err("Setting AUTO_INCREMENT is supported only for native MySQL connections.".to_string());
+    if !supports_mysql_auto_increment(options.database_type, options.driver_profile.as_deref()) {
+        return Err("Setting AUTO_INCREMENT is supported only for compatible MySQL-family connections.".to_string());
     }
 
     let value = options.value.as_str();
@@ -699,6 +705,7 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
@@ -841,7 +848,9 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
             ));
         }
     }
-    if let Some(database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase)) = options.database_type {
+    if let Some(database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase | DatabaseType::Oscar)) =
+        options.database_type
+    {
         comment_sql.extend(options.column_comments.iter().filter_map(|column| {
             if column.comment.trim().is_empty() {
                 return None;
@@ -1205,6 +1214,7 @@ fn supports_duplicate_table_comment(database_type: DatabaseType) -> bool {
             | DatabaseType::OpenGauss
             | DatabaseType::Dameng
             | DatabaseType::Vastbase
+            | DatabaseType::Oscar
     )
 }
 
@@ -1318,9 +1328,9 @@ fn quote_sql_string(value: &str) -> String {
 }
 
 fn quote_duplicate_table_comment(database_type: DatabaseType, value: &str) -> String {
-    // Dameng rejects Postgres E'...' escape strings; keep standard '' escaping
-    // (same as DamengAgent COMMENT ON / COMMENT ON COLUMN generation).
-    if database_type == DatabaseType::Dameng {
+    // Dameng and Oscar reject Postgres E'...' escape strings; keep standard '' escaping
+    // (same as DamengAgent/Oscar COMMENT ON / COMMENT ON COLUMN generation).
+    if matches!(database_type, DatabaseType::Dameng | DatabaseType::Oscar) {
         return quote_sql_string(value);
     }
     if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
@@ -1547,12 +1557,11 @@ mod tests {
 
     #[test]
     fn builds_informix_family_create_database_without_mysql_clause() {
-        // GBase 8s shares DatabaseType::Gbase with GBase 8a and is only identified by the
-        // gbase8s driver profile; with no locale chosen it emits a bare, unquoted CREATE DATABASE.
+        // With no locale chosen, GBase 8s emits a bare, unquoted CREATE DATABASE.
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {
-                database_type: Some(DatabaseType::Gbase),
-                driver_profile: Some("gbase8s".to_string()),
+                database_type: Some(DatabaseType::Gbase8s),
+                driver_profile: None,
                 target: None,
                 parent: None,
                 name: "app_db".to_string(),
@@ -1584,8 +1593,8 @@ mod tests {
         // because Informix cannot express a codeset in CREATE DATABASE.
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {
-                database_type: Some(DatabaseType::Gbase),
-                driver_profile: Some("gbase8s".to_string()),
+                database_type: Some(DatabaseType::Gbase8s),
+                driver_profile: None,
                 target: None,
                 parent: None,
                 name: "app_db".to_string(),
@@ -1625,8 +1634,8 @@ mod tests {
     }
 
     #[test]
-    fn create_database_target_distinguishes_gbase_profiles() {
-        assert!(supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8s")));
+    fn create_database_target_distinguishes_gbase_types() {
+        assert!(supports_create_database_target(Some(DatabaseType::Gbase8s), None));
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8a")));
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), None));
         assert!(supports_create_database_target(Some(DatabaseType::Informix), None));
@@ -2169,6 +2178,31 @@ mod tests {
             );
         }
 
+        for (database_type, driver_profile) in [
+            (Some(DatabaseType::Mysql), None),
+            (Some(DatabaseType::Mysql), Some("mariadb".to_string())),
+            (Some(DatabaseType::Mysql), Some("tidb".to_string())),
+            (Some(DatabaseType::Mysql), Some("oceanbase".to_string())),
+            (Some(DatabaseType::Mysql), Some("tdsql".to_string())),
+            (Some(DatabaseType::Mysql), Some("polardb".to_string())),
+            (Some(DatabaseType::Mysql), Some("greatsql".to_string())),
+            (Some(DatabaseType::Mysql), Some("custom_mysql".to_string())),
+            (Some(DatabaseType::Mysql), Some("dolt".to_string())),
+            (Some(DatabaseType::Mysql), Some("goldendb".to_string())),
+            (Some(DatabaseType::Goldendb), Some("goldendb".to_string())),
+        ] {
+            assert_eq!(
+                build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
+                    database_type,
+                    driver_profile,
+                    schema: Some("sales".to_string()),
+                    table_name: "events".to_string(),
+                    value: "42".to_string(),
+                }),
+                Ok("ALTER TABLE `sales`.`events` AUTO_INCREMENT = 42;".to_string())
+            );
+        }
+
         for value in
             ["", "0", "01", " 1", "1 ", "+1", "-1", "1.0", "1e3", "1; DROP TABLE users", "18446744073709551616"]
         {
@@ -2188,12 +2222,12 @@ mod tests {
         for (database_type, driver_profile) in [
             (Some(DatabaseType::Postgres), None),
             (Some(DatabaseType::Jdbc), Some("mysql".to_string())),
-            (Some(DatabaseType::Mysql), Some("mariadb".to_string())),
-            (Some(DatabaseType::Mysql), Some("tidb".to_string())),
-            (Some(DatabaseType::Mysql), Some("oceanbase".to_string())),
-            (Some(DatabaseType::Mysql), Some("dolt".to_string())),
-            (Some(DatabaseType::Goldendb), Some("goldendb".to_string())),
-            (Some(DatabaseType::Doris), Some("selectdb".to_string())),
+            (Some(DatabaseType::Mysql), Some("unknown".to_string())),
+            (Some(DatabaseType::Mysql), Some("doris".to_string())),
+            (Some(DatabaseType::Mysql), Some("selectdb".to_string())),
+            (Some(DatabaseType::Mysql), Some("starrocks".to_string())),
+            (Some(DatabaseType::Mysql), Some("manticoresearch".to_string())),
+            (Some(DatabaseType::Doris), Some("doris".to_string())),
             (Some(DatabaseType::StarRocks), Some("starrocks".to_string())),
         ] {
             assert!(build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
@@ -2553,6 +2587,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn duplicate_table_structure_oscar_includes_table_and_column_comments() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Oscar),
+            schema: Some("SYSDBA".to_string()),
+            source_name: "USERS".to_string(),
+            target_name: "USERS_COPY".to_string(),
+            table_comment: Some("用户表'测试".to_string()),
+            column_comments: vec![
+                DuplicateTableColumnComment { name: "NAME".to_string(), comment: "姓名'测试".to_string() },
+                DuplicateTableColumnComment { name: "AGE".to_string(), comment: "年龄".to_string() },
+                DuplicateTableColumnComment { name: "EMPTY".to_string(), comment: " \t\n".to_string() },
+            ],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: Some("\"".to_string()),
+        });
+        let expected_statements = vec![
+            "CREATE TABLE \"SYSDBA\".\"USERS_COPY\" AS SELECT * FROM \"SYSDBA\".\"USERS\" WHERE 1=0",
+            "COMMENT ON TABLE \"SYSDBA\".\"USERS_COPY\" IS '用户表''测试'",
+            "COMMENT ON COLUMN \"SYSDBA\".\"USERS_COPY\".\"NAME\" IS '姓名''测试'",
+            "COMMENT ON COLUMN \"SYSDBA\".\"USERS_COPY\".\"AGE\" IS '年龄'",
+        ];
+        assert_eq!(sql, format!("{};", expected_statements.join(";\n")));
+        assert_eq!(crate::sql::split_sql_statements_for_database(&sql, DatabaseType::Oscar), expected_statements);
+
+        // Control chars / backslashes must keep standard '' escaping for Oscar (no Postgres E'...' literals).
+        let oscar_escape_sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Oscar),
+            schema: Some("SYSDBA".to_string()),
+            source_name: "ORDERS".to_string(),
+            target_name: "ORDERS_COPY".to_string(),
+            table_comment: Some("line1\\path\nline2".to_string()),
+            column_comments: vec![DuplicateTableColumnComment {
+                name: "PATH".to_string(),
+                comment: "C:\\data\t'file'".to_string(),
+            }],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: None,
+        });
+        assert_eq!(
+            oscar_escape_sql,
+            "CREATE TABLE \"SYSDBA\".\"ORDERS_COPY\" AS SELECT * FROM \"SYSDBA\".\"ORDERS\" WHERE 1=0;\nCOMMENT ON TABLE \"SYSDBA\".\"ORDERS_COPY\" IS 'line1\\path\nline2';\nCOMMENT ON COLUMN \"SYSDBA\".\"ORDERS_COPY\".\"PATH\" IS 'C:\\data\t''file''';"
+        );
     }
 
     #[test]
@@ -3149,6 +3230,9 @@ mod tests {
                 is_gaussdb_m_mode: false,
                 table_collation: None,
                 primary_key_name: None,
+                primary_key_change: None,
+                oracle_foreign_key_changes: None,
+                oracle_constraint_changes: None,
             });
         assert_eq!(create.warnings, Vec::<String>::new());
         assert_eq!(

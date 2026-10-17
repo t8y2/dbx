@@ -79,6 +79,15 @@ pub struct RedisKeyRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisValueRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub preview_limit_bytes: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisRenameKeyRequest {
     pub connection_id: String,
     pub db: u32,
@@ -404,11 +413,17 @@ pub async fn scan_values(
 
 pub async fn get_value(
     State(state): State<Arc<WebState>>,
-    Json(req): Json<RedisKeyRequest>,
+    Json(req): Json<RedisValueRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let result = dbx_core::redis_ops::redis_get_value_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
-        .await
-        .map_err(AppError::from)?;
+    let result = dbx_core::redis_ops::redis_get_value_in_db_with_preview_limit_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        req.preview_limit_bytes,
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 

@@ -291,7 +291,13 @@ export function binaryCellTextPreview(value: unknown, encoding: BinaryCellTextEn
 // VARBINARY，避免改变 MySQL BINARY/BLOB、SQL Server VARBINARY、PostgreSQL BYTEA、
 // Oracle RAW 等现有语义。
 export function binaryCellClipboardText(value: unknown, columnType?: string, databaseType?: DatabaseType): string | null {
-  if (databaseType !== "mysql" || !VARBINARY_TYPE_RE.test((columnType ?? "").trim())) return null;
+  // 覆盖上方注释里「严格限于 VARBINARY」的旧范围（#12413）：网格已经对文本型 MySQL
+  // BLOB 显示文本预览（AES_DECRYPT 这类表达式的结果列常报成 BLOB），显示 `secret`
+  // 却复制出 hex 与预览自相矛盾，因此 BLOB 家族并入同一闸门；严格往返校验与 hex
+  // 回退保持不变，MySQL BINARY、非 MySQL 的 blob/bytea 等现有语义不受影响。
+  const blobColumn = isBlobCellColumnType(columnType);
+  const decodableType = VARBINARY_TYPE_RE.test((columnType ?? "").trim()) || blobColumn;
+  if (databaseType !== "mysql" || !decodableType) return null;
   // MySQL QueryResult 的 binary canonical form 是 `0x<hex>`；不要把普通的偶数长度
   // 文本（例如 "abcd"）猜测成 hex bytes。
   const bytes = typeof value === "string" ? parseBinaryCellHexValue(value) : null;
@@ -303,6 +309,8 @@ export function binaryCellClipboardText(value: unknown, columnType?: string, dat
     // 与 GBK 回退无关，沿用 hex。
     return encoded.length === bytes.length && encoded.every((byte, index) => byte === bytes[index]) ? text : null;
   }
+  // BLOB 家族与显示/编辑路径共用同一闸门：只解严格 UTF-8，不参与 GBK 回退。
+  if (blobColumn) return null;
   return printableGbkText(binaryPreviewBytes(bytes, columnType));
 }
 

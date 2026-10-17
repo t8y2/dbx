@@ -478,6 +478,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     keywordCase: normalizedSettings.keywordCase,
     logicalOperatorNewline: normalizedSettings.logicalOperatorNewline,
     commaPosition: normalizedSettings.commaPosition,
+    newlineBeforeSemicolon: normalizedSettings.newlineBeforeSemicolon,
   };
   const usesDefaultStyle = normalizedSettings.layoutStyle === "dbx" && normalizedSettings.indentStyle === "standard";
 

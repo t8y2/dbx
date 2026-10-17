@@ -18,12 +18,13 @@ interface Props {
   mqSystemKind?: MqSystemKind;
   isFlatMqCluster?: boolean;
   supportsPeekMessages?: boolean;
+  supportsListTopics?: boolean;
   fixedTopic?: boolean;
   /** Hide outer toolbar when embedded in a dialog. */
   embedded?: boolean;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), { supportsListTopics: undefined });
 const { t } = useI18n();
 const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
@@ -94,6 +95,7 @@ async function guardWritable() {
 }
 
 async function loadTopics() {
+  if (props.supportsListTopics === false) return;
   if (props.fixedTopic) {
     availableTopics.value = props.topic ? [props.topic] : [];
     topicName.value = props.topic?.shortName ?? "";
@@ -259,12 +261,13 @@ watch(
       <div v-if="error" class="panel-error">{{ error }}</div>
       <div v-if="success" class="panel-success">
         <span class="success-icon">✓</span>
-        <span>{{ t("mqMessages.sendSuccess", { partition: success.partition, offset: success.offset }) }}</span>
+        <span>{{ isRocketMqCluster ? t("mqMessages.sendSuccessRocketmq") : t("mqMessages.sendSuccess", { partition: success.partition ?? "-", offset: success.partition == null ? "-" : success.offset }) }}</span>
       </div>
 
       <div class="form-group">
         <label>{{ t("mqMessages.targetTopic") }} <span class="required">*</span></label>
         <input v-if="fixedTopic" :value="topicName" type="text" class="topic-input" disabled />
+        <input v-else-if="supportsListTopics === false" v-model="topicName" type="text" class="topic-input" :disabled="readOnly" :placeholder="t('mqMessages.topicSearchPlaceholder')" />
         <RocketMqTopicSelect v-else-if="isRocketMqCluster" ref="rocketMqTopicSelectRef" v-model="topicName" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" grouping="business" :show-type-filter="false" :disabled="readOnly" @loaded="handleRocketMqTopicsLoaded" />
         <template v-else>
           <div class="topic-select-row">

@@ -175,12 +175,6 @@
   flex: 0 0 0;
 }
 
-.horizontal-fixed-tabs-scroll .tab-section--horizontal > .tab-tail-overflow-spacer[data-tauri-drag-region] {
-  width: 1px;
-  min-width: 1px;
-  flex-basis: 1px;
-}
-
 /* Keep the overflow affordance out of the measurement box. Otherwise its own
  * width reduces the scroll viewport and can create a false overflow state. */
 .tab-overflow-control {
@@ -192,7 +186,16 @@
   justify-content: flex-end;
 }
 
-.has-tab-overflow-control .app-tab-strip {
+/* The single-row layouts reserve the overflow affordance's width at all times.
+ * Deriving it from showOverflowControl tied the scroll viewport to its own
+ * measurement: a single near-full-width tab showed the arrow, the arrow
+ * narrowed the strip, the narrower strip re-measured as "fits", the arrow hid,
+ * the strip re-widened — an endless per-frame flicker. A constant reservation
+ * keeps hasTabOverflow stable, so the arrow becomes a pure overlay that never
+ * alters the layout it is measured from. Keep the value in step with the
+ * arrow's own offset (`.tab-overflow-control`'s `right-[…]` classes), which is
+ * what clears the last tab. */
+.app-tab-bar:not(.horizontal-fixed-tabs):not(.vertical-tab-layout):not(.tab-wrap-mode) .app-tab-strip {
   padding-inline-end: 2.5rem;
 }
 

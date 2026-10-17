@@ -184,6 +184,8 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         connect_timeout_secs: 15,
         query_timeout_secs: 120,
         idle_timeout_secs: 60,
+        manual_transaction_timeout_secs: 300,
+        idle_disconnect_secs: 0,
         keepalive_interval_secs: 0,
         ssl: std::env::var("DBX_BENCH_SSL").is_ok_and(|value| value.eq_ignore_ascii_case("true")),
         ca_cert_path: String::new(),

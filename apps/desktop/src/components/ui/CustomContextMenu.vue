@@ -3,6 +3,7 @@ import { ref, watch, onBeforeUnmount, onMounted, nextTick } from "vue";
 import { Check, ChevronRight } from "@lucide/vue";
 import { shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
 import { registerGlobalContextMenu, type ContextMenuRegistration, type ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
+import { buildSubmenuGraceArea, isPointerInGraceArea, type GraceAreaPoint } from "@/lib/ui/pointerGraceArea";
 
 export type { ContextMenuItem };
 
@@ -34,6 +35,10 @@ const subX = ref(0);
 const subY = ref(0);
 let subCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let subAnchorRect: { left: number; right: number; top: number; bottom: number } | null = null;
+// The wedge between the trigger row and the submenu panel, rebuilt each time the
+// pointer leaves a trigger. While the pointer stays inside it the submenu is
+// treated as hovered, so a diagonal move towards the panel does not close it.
+let subGraceArea: GraceAreaPoint[] | null = null;
 let contextMenuRegistration: ContextMenuRegistration | null = null;
 let menuRevision = 0;
 
@@ -42,6 +47,7 @@ function close() {
   menuRevision += 1;
   activeSubIndex.value = null;
   subAnchorRect = null;
+  subGraceArea = null;
   activeItems.value = [];
   show.value = false;
   emit("close");
@@ -94,11 +100,15 @@ watch(show, (val) => {
     document.addEventListener("pointerdown", onPointerDownOutside, true);
     document.addEventListener("keydown", onKeydown, true);
     document.addEventListener("scroll", onScroll, true);
+    // Tracked on the document, in the capture phase, so the trigger-to-submenu
+    // journey is observed even where neither panel is under the cursor.
+    document.addEventListener("pointermove", onDocumentPointerMove, true);
     window.addEventListener("resize", onResize);
   } else {
     document.removeEventListener("pointerdown", onPointerDownOutside, true);
     document.removeEventListener("keydown", onKeydown, true);
     document.removeEventListener("scroll", onScroll, true);
+    document.removeEventListener("pointermove", onDocumentPointerMove, true);
     window.removeEventListener("resize", onResize);
   }
 });
@@ -180,6 +190,7 @@ function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
 function onItemMouseEnter(index: number, event: MouseEvent) {
   lastMouseX = event.clientX;
   lastMouseY = event.clientY;
+  subGraceArea = null;
   const item = activeItems.value[index];
   if (!item?.children?.length || itemIsDisabled(item)) {
     // Moving to an item without children — close submenu immediately, no delay needed
@@ -199,15 +210,33 @@ function onItemMouseEnter(index: number, event: MouseEvent) {
   nextTick(() => adjustSubPosition());
 }
 
-function onItemMouseLeave() {
-  if (activeSubIndex.value !== null) {
-    scheduleSubClose();
-  }
+function onItemMouseLeave(event: MouseEvent) {
+  if (activeSubIndex.value === null) return;
+  subGraceArea = buildSubmenuGraceAreaForPointer(event.clientX, event.clientY);
+  scheduleSubClose();
 }
 
-// Last known mouse position (from hover events, without a global mousemove listener)
+// Last known pointer position. Updated by a document-level pointermove while the
+// menu is open; hover events alone are not enough, because the pointer spends the
+// trigger-to-submenu journey in the gap between the two panels, where nothing
+// fires.
 let lastMouseX = 0;
 let lastMouseY = 0;
+
+function buildSubmenuGraceAreaForPointer(x: number, y: number): GraceAreaPoint[] | null {
+  const sub = subRef.value?.getBoundingClientRect();
+  if (!sub) return null;
+  // The submenu's edge facing the trigger is its left edge when the panel opens
+  // to the right, and its right edge when it flips to the left. Comparing with
+  // the pointer picks the correct one without tracking the flip separately.
+  const nearEdgeX = x <= sub.left ? sub.left : sub.right;
+  return buildSubmenuGraceArea({
+    origin: { x, y },
+    nearEdgeX,
+    top: sub.top,
+    bottom: sub.bottom,
+  });
+}
 
 function isMouseOverSub(): boolean {
   if (!subRef.value) return false;
@@ -215,11 +244,28 @@ function isMouseOverSub(): boolean {
   return lastMouseX >= rect.left && lastMouseX <= rect.right && lastMouseY >= rect.top && lastMouseY <= rect.bottom;
 }
 
+function pointerIsHeadingToSubmenu(): boolean {
+  return isMouseOverSub() || isPointerInGraceArea({ x: lastMouseX, y: lastMouseY }, subGraceArea);
+}
+
+function onDocumentPointerMove(event: PointerEvent) {
+  lastMouseX = event.clientX;
+  lastMouseY = event.clientY;
+  // Cancel a pending close as soon as the pointer proves it is moving towards the
+  // submenu, rather than waiting for the timer and re-checking its position.
+  if (subCloseTimer && pointerIsHeadingToSubmenu()) {
+    clearTimeout(subCloseTimer);
+    subCloseTimer = null;
+  }
+}
+
 function scheduleSubClose() {
   if (subCloseTimer) clearTimeout(subCloseTimer);
   subCloseTimer = setTimeout(() => {
-    if (!isMouseOverSub()) {
+    subCloseTimer = null;
+    if (!pointerIsHeadingToSubmenu()) {
       activeSubIndex.value = null;
+      subGraceArea = null;
     }
   }, 150);
 }
@@ -233,6 +279,7 @@ function onSubMouseEnter() {
 
 function onSubMouseLeave() {
   activeSubIndex.value = null;
+  subGraceArea = null;
 }
 
 function adjustSubPosition() {
@@ -297,6 +344,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onPointerDownOutside, true);
   document.removeEventListener("keydown", onKeydown, true);
   document.removeEventListener("scroll", onScroll, true);
+  document.removeEventListener("pointermove", onDocumentPointerMove, true);
   window.removeEventListener("resize", onResize);
 });
 </script>

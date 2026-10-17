@@ -789,6 +789,16 @@ pub struct IndexInfo {
     /// introspection source doesn't track this (provenance unknown for that dialect/path).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_is_expression: Vec<bool>,
+    /// Parallel to `columns`: Oracle-family key order (`ASC` or `DESC`). Empty when
+    /// the source does not expose direction metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_directions: Vec<String>,
+    /// Oracle-family index visibility (`VISIBLE` or `INVISIBLE`), when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    /// True only when the source returned aligned expression, direction and visibility metadata.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub key_metadata_complete: bool,
     /// Parallel to `columns`: operator class name for each key column, if non-default.
     /// For example, a GIN trigram index on a varchar column will have `"gin_trgm_ops"`.
     /// `None` means the default operator class is used (can be omitted in DDL).
@@ -873,6 +883,44 @@ pub struct ConstraintInfo {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_metadata: Option<OracleConstraintMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintMetadata {
+    pub metadata_complete: bool,
+    pub owner: String,
+    pub constraint_type: Option<String>,
+    pub status: Option<String>,
+    pub validated: Option<String>,
+    pub deferrable: Option<String>,
+    pub deferred: Option<String>,
+    pub rely: Option<String>,
+    pub index_owner: Option<String>,
+    pub index_name: Option<String>,
+    pub index_sharing: Option<String>,
+    pub index: Option<OracleConstraintIndexMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintIndexMetadata {
+    pub metadata_complete: bool,
+    pub owner: String,
+    pub table_owner: String,
+    pub table_name: String,
+    pub index_type: String,
+    pub uniqueness: String,
+    pub status: String,
+    pub partitioned: bool,
+    pub visibility: String,
+    pub secondary: Option<String>,
+    pub columns: Vec<String>,
+    pub directions: Vec<String>,
+    pub key_is_expression: Vec<bool>,
+    pub included_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

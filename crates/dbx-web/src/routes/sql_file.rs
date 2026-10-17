@@ -9,7 +9,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::Response;
 use axum::Json;
-use dbx_core::sql::{self, SqlFileProgress, SqlFileRequest, SqlFileStatus};
+use dbx_core::sql::{SqlFileEncoding, SqlFileProgress, SqlFileRequest, SqlFileStatus};
 use dbx_core::sql_file_import::{
     execute_sql_file_paths, execute_sql_file_zip_package_paths, export_sql_file_failure_log as derive_failure_log_file,
     prune_sql_file_failure_logs, sql_file_error_progress, sql_file_failure_log_text as derive_failure_log_text,
@@ -192,6 +192,8 @@ pub struct CancelSqlFileRequest {
 #[serde(rename_all = "camelCase")]
 pub struct InspectSqlFileTablesRequest {
     pub file_path: String,
+    #[serde(default)]
+    pub encoding: SqlFileEncoding,
 }
 
 pub async fn inspect_sql_file_tables(
@@ -199,11 +201,38 @@ pub async fn inspect_sql_file_tables(
     Json(body): Json<InspectSqlFileTablesRequest>,
 ) -> Result<Json<Vec<dbx_core::sql_file_import::SqlFileTable>>, AppError> {
     let path = validated_uploaded_sql_path(&state.data_dir, &body.file_path)?;
-    Ok(Json(dbx_core::sql_file_import::inspect_sql_file_tables(&path).await.map_err(AppError::from)?))
+    Ok(Json(
+        dbx_core::sql_file_import::inspect_sql_file_tables_with_encoding(&path, body.encoding)
+            .await
+            .map_err(AppError::from)?,
+    ))
+}
+
+#[derive(Deserialize, Default)]
+pub struct SqlFilePreviewOptions {
+    #[serde(default)]
+    pub encoding: SqlFileEncoding,
+}
+
+pub async fn refresh_sql_file_preview(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<InspectSqlFileTablesRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let path = validated_uploaded_sql_path(&state.data_dir, &body.file_path)?;
+    let content = dbx_core::sql_file_import::read_sql_file_preview_with_encoding(&path, 1_000_000, body.encoding)
+        .await
+        .map_err(AppError::from)?;
+    let analysis = dbx_core::sql_file_import::mysql_like_sql_file_bootstrap_analysis(&content);
+    Ok(Json(serde_json::json!({
+        "preview": content.chars().take(20_000).collect::<String>(),
+        "canExecuteWithoutSelectedDatabase": analysis.can_execute_without_selected_database,
+        "establishesDatabaseContext": analysis.establishes_database_context,
+    })))
 }
 
 pub async fn preview_sql_file(
     State(state): State<Arc<WebState>>,
+    Query(options): Query<SqlFilePreviewOptions>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let tmp_dir = state.data_dir.join("tmp").join("sql_file");
@@ -221,7 +250,9 @@ pub async fn preview_sql_file(
         let file_path = safe_uploaded_sql_path(&tmp_dir, &file_name)?;
         std::fs::write(&file_path, &data).map_err(|e| AppError::from(e.to_string()))?;
 
-        return preview_uploaded_sql_file(&file_path, &file_name, data.len() as u64).await.map(Json);
+        return preview_uploaded_sql_file_with_encoding(&file_path, &file_name, data.len() as u64, options.encoding)
+            .await
+            .map(Json);
     }
 
     Err(AppError::from("No file uploaded".to_string()))
@@ -231,6 +262,15 @@ async fn preview_uploaded_sql_file(
     file_path: &Path,
     file_name: &str,
     size_bytes: u64,
+) -> Result<serde_json::Value, AppError> {
+    preview_uploaded_sql_file_with_encoding(file_path, file_name, size_bytes, SqlFileEncoding::Auto).await
+}
+
+async fn preview_uploaded_sql_file_with_encoding(
+    file_path: &Path,
+    file_name: &str,
+    size_bytes: u64,
+    encoding: SqlFileEncoding,
 ) -> Result<serde_json::Value, AppError> {
     let tmp_dir = file_path.parent().ok_or_else(|| AppError::from("Invalid SQL file path".to_string()))?;
 
@@ -246,8 +286,10 @@ async fn preview_uploaded_sql_file(
             .into_iter()
             .map(|path| path.to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        let content = sql::decode_sql_file_bytes(&std::fs::read(&paths[0]).map_err(|e| AppError::from(e.to_string()))?)
-            .map_err(AppError::from)?;
+        let content =
+            dbx_core::sql_file_import::read_sql_file_preview_with_encoding(Path::new(&paths[0]), 1_000_000, encoding)
+                .await
+                .map_err(AppError::from)?;
         let preview: String = content.chars().take(20_000).collect();
         let bootstrap_analysis = dbx_core::sql_file_import::mysql_like_sql_file_bootstrap_analysis(&content);
         return Ok(serde_json::json!({
@@ -262,8 +304,9 @@ async fn preview_uploaded_sql_file(
         }));
     }
 
-    let content =
-        dbx_core::sql_file_import::read_sql_file_preview(file_path, 1_000_000).await.map_err(AppError::from)?;
+    let content = dbx_core::sql_file_import::read_sql_file_preview_with_encoding(file_path, 1_000_000, encoding)
+        .await
+        .map_err(AppError::from)?;
     let preview: String = content.chars().take(20_000).collect();
     let bootstrap_analysis = dbx_core::sql_file_import::mysql_like_sql_file_bootstrap_analysis(&content);
 

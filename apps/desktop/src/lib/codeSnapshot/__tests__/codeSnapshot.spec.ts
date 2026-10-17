@@ -302,11 +302,23 @@ describe("renderCodeSnapshotHtml", () => {
     }
   });
 
-  it("rejects snapshots that exceed the safe rendering budget at 1x", async () => {
-    toPng.mockClear();
+  it("downscales snapshots whose source width exceeds the canvas edge limit", async () => {
+    toPng.mockResolvedValue("data:image/png;base64,test");
+    vi.stubGlobal("window", { devicePixelRatio: 1 });
+    try {
+      await snapshotElementToPng({ offsetWidth: 18_788, offsetHeight: 152, scrollWidth: 18_788, scrollHeight: 152 } as HTMLElement);
 
-    await expect(snapshotElementToPng({ offsetWidth: 20_000, offsetHeight: 100, scrollWidth: 20_000, scrollHeight: 100 } as HTMLElement)).rejects.toThrow("Snapshot is too large to export safely (20000 × 100px)");
-    expect(toPng).not.toHaveBeenCalled();
+      expect(toPng).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          width: 18_788,
+          height: 152,
+          scale: 16_384 / 18_788,
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("propagates a failed native save instead of reporting a browser download", async () => {

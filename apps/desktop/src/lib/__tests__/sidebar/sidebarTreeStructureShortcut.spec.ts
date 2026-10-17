@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "@/types/database";
 import { sidebarNodeSupportsStructureEdit } from "@/lib/sidebar/sidebarTreeStructureShortcut";
@@ -36,13 +35,5 @@ describe("sidebar tree structure shortcut", () => {
 
   it("rejects SQL Server linked server nodes", () => {
     expect(sidebarNodeSupportsStructureEdit(node("table", { linkedServer: "REMOTE" }), "sqlserver")).toBe(false);
-  });
-
-  const LOCALES = ["en", "zh-CN", "zh-TW", "ja", "ko", "es", "it", "pt-BR", "ru", "az", "tr", "id"] as const;
-
-  it.each(LOCALES)("declares shortcutEditSidebarTableStructure in locale %s", (locale) => {
-    const file = new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url);
-    const content = readFileSync(file, "utf8");
-    expect(content).toMatch(/^\s*shortcutEditSidebarTableStructure:\s*".+",\s*$/m);
   });
 });

@@ -25,6 +25,8 @@ const props = defineProps<{
   dragClass?: HTMLAttributes["class"];
   columnStyle?: CSSProperties;
   copyColumnNameLabel: string;
+  /** 与 nullableLabel 等同属「按条件渲染」的文案，未传时按钮 title 为空。 */
+  copyColumnCommentLabel?: string;
   columnNameLabel: string;
   columnTypeLabel: string;
   columnCommentLabel: string;
@@ -60,6 +62,7 @@ const emit = defineEmits<{
   resizeStart: [event: MouseEvent];
   autoFit: [];
   copyName: [];
+  copyComment: [];
 }>();
 </script>
 
@@ -104,7 +107,12 @@ const emit = defineEmits<{
             </template>
             <template v-if="tooltipColumnComment ?? columnComment">
               <span class="text-background-solid/70">{{ columnCommentLabel }}</span>
-              <span>{{ tooltipColumnComment ?? columnComment }}</span>
+              <span class="flex min-w-0 items-start gap-2">
+                <span class="min-w-0 flex-1 break-words">{{ tooltipColumnComment ?? columnComment }}</span>
+                <button data-column-header-copy-comment type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/10" :title="copyColumnCommentLabel" @click.stop="emit('copyComment')">
+                  <Copy class="h-3 w-3" />
+                </button>
+              </span>
             </template>
             <template v-if="columnNullability">
               <span class="text-background-solid/70">{{ nullableLabel }}</span>

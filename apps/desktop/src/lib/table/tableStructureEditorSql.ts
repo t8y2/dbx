@@ -58,6 +58,8 @@ export interface EditableStructureIndex {
   /** Parallel to `columns`: operator class for each key column (PostgreSQL). `null` means default. */
   columnOpclasses?: (string | null)[];
   original?: IndexInfo;
+  /** Oracle-family recovery only: the original definition remains the metadata source, but its DROP already committed. */
+  oracleOriginalMissing?: boolean;
   markedForDrop: boolean;
 }
 
@@ -68,10 +70,80 @@ export interface EditableStructureForeignKey {
   refSchema: string;
   refTable: string;
   refColumn: string;
+  /** Oracle-family pairs are never reconstructed from the display strings. */
+  columns?: string[];
+  refColumns?: string[];
+  oracleState?: OracleForeignKeyState;
+  oracleOriginal?: OracleForeignKeyDefinition;
   onUpdate: string;
   onDelete: string;
   original?: ForeignKeyInfo;
   markedForDrop: boolean;
+}
+
+export interface OracleForeignKeyState {
+  enabled: boolean;
+  validated: boolean;
+  deferrable: boolean;
+  initiallyDeferred: boolean;
+  rely: boolean;
+}
+
+export interface OracleForeignKeyDefinition {
+  name: string;
+  columns: string[];
+  refSchema: string;
+  refTable: string;
+  refColumns: string[];
+  onDelete: "NO ACTION" | "CASCADE" | "SET NULL";
+  state: OracleForeignKeyState;
+}
+
+export interface OracleForeignKeyChange {
+  original: OracleForeignKeyDefinition | null;
+  target: OracleForeignKeyDefinition | null;
+}
+
+export type OracleConstraintChange = {
+  original: OracleConstraintDefinition | null;
+  target: OracleConstraintDefinition | null;
+  indexPolicy?: "keep" | "drop" | "none";
+};
+
+export type OracleConstraintDefinition = { kind: "check"; definition: OracleCheckConstraint } | { kind: "unique"; definition: OracleUniqueConstraint };
+
+export interface OracleCheckConstraint {
+  name: string;
+  expression: string;
+  state: OracleForeignKeyState;
+}
+
+export interface OracleUniqueConstraint {
+  name: string;
+  columns: string[];
+  state: OracleForeignKeyState;
+  /** Exact source dictionary value: NULL, RELY, or NORELY. */
+  relyRaw: string;
+  index: {
+    owner: string;
+    name: string;
+    tableOwner: string;
+    tableName: string;
+    sharing: string;
+    metadataComplete: boolean;
+    indexType: string;
+    uniqueness: string;
+    status: string;
+    partitioned: boolean;
+    visibility: string;
+    secondary: string | null;
+    columns: string[];
+    directions: string[];
+    keyIsExpression: boolean[];
+    includedColumns: string[];
+    newNameAvailable: boolean;
+    newName?: string;
+  };
 }
 
 export interface EditableStructureTrigger {
@@ -122,6 +194,16 @@ export interface BuildTableStructureChangeSqlOptions {
    * auto-name the constraint. Ignored when the draft only replaces an
    * existing primary key (renaming is out of scope). */
   primaryKeyName?: string;
+  oracleForeignKeyChanges?: OracleForeignKeyChange[];
+  oracleConstraintChanges?: OracleConstraintChange[];
+  /** Ordered change to an existing Oracle-family primary key; an empty target removes it. */
+  primaryKeyChange?: {
+    name: string;
+    originalColumns: string[];
+    columns: string[];
+    oracleIndex?: { policy: "keep" | "drop" | "none"; owner: string; name: string; newName?: string };
+    oracleState?: { enabled: boolean; validated: boolean; deferrable: boolean; initiallyDeferred: boolean; rely: boolean };
+  };
 }
 
 export interface TranswarpCreateTableOptions {

@@ -210,7 +210,9 @@ describe("useDataGridConditionEditor", () => {
     selectionEnd.value = 2;
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(2));
-    editor.navigate(1);
+    // The first ORDER BY suggestion is already selected; moving up keeps the
+    // first item selected while still exercising keyboard navigation.
+    editor.navigate(-1);
     expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("accept");
     expect(value.value).toBe("name");
     expect(editor.suggestions.value).toEqual([]);
@@ -569,31 +571,32 @@ describe("useDataGridConditionEditor", () => {
     expect(aborted).toHaveBeenCalledOnce();
   });
 
-  it("maps Enter, Tab, arrows, and Escape without applying stale selections", async () => {
+  it("preselects the first ORDER BY column while preserving keyboard navigation", async () => {
     const value = ref("");
     const editor = useDataGridConditionEditor({ kind: "orderBy", value, columns: ["name", "namespace"], historyScope: {} });
     value.value = "na";
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(2));
-    expect(editor.highlightedIndex.value).toBe(-1);
+    expect(editor.highlightedIndex.value).toBe(0);
 
     const initialEnter = keyboardEvent("Enter");
-    expect(editor.handleKeydown(initialEnter)).toBe("apply");
+    expect(editor.handleKeydown(initialEnter)).toBe("accept");
     expect(initialEnter.preventDefault).toHaveBeenCalledOnce();
-    expect(value.value).toBe("na");
+    expect(value.value).toBe("name");
     expect(editor.suggestions.value).toEqual([]);
 
     value.value = "nam";
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(2));
+    expect(editor.highlightedIndex.value).toBe(0);
 
     const down = keyboardEvent("ArrowDown");
     expect(editor.handleKeydown(down)).toBe("navigate");
     expect(down.preventDefault).toHaveBeenCalledOnce();
-    expect(editor.highlightedIndex.value).toBe(0);
+    expect(editor.highlightedIndex.value).toBe(1);
     const navigatedEnter = keyboardEvent("Enter");
     expect(editor.handleKeydown(navigatedEnter)).toBe("accept");
-    expect(value.value).toBe("name");
+    expect(value.value).toBe("namespace");
 
     const tabValue = ref("");
     const tabEditor = useDataGridConditionEditor({ kind: "orderBy", value: tabValue, columns: ["name"], historyScope: {} });

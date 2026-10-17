@@ -98,6 +98,21 @@ if (!connectionOptionsMatch) {
 } else {
   const connectionModeIds = new Set(["custom_mysql", "custom_postgres"]);
   const connectionIds = [...connectionOptionsMatch[1].matchAll(/value: "([^"]+)"/g)].map((match) => match[1]).filter((id) => !connectionModeIds.has(id));
+  // Grouped profiles (e.g. GBase 8s/8c under the GBase picker entry) are valid connection
+  // targets without their own top-level picker value; accept CONNECTION_PROFILES keys that
+  // the picker does not already list.
+  const profilesMapMatch = connectionProfilesSource.match(/export const CONNECTION_PROFILES = \{([\s\S]*?)\n\} as const/);
+  if (!profilesMapMatch) {
+    errors.push("Unable to read CONNECTION_PROFILES from connectionProfiles.ts");
+  } else {
+    // gbase8a is an alias of the grouped gbase entry; jdbc is the generic external-driver
+    // profile surfaced through the driver store rather than the database support matrix.
+    const profileAliases = new Set(["gbase8a", "jdbc"]);
+    const pickerIds = new Set(connectionIds);
+    for (const key of [...profilesMapMatch[1].matchAll(/^\s{2}([a-z0-9_]+): \{/gm)].map((match) => match[1])) {
+      if (!connectionModeIds.has(key) && !profileAliases.has(key) && !pickerIds.has(key)) connectionIds.push(key);
+    }
+  }
 
   if (!jdbcProductProfilesMatch) {
     errors.push("Unable to read registered JDBC product profiles");

@@ -64,6 +64,7 @@ fn is_spreadsheet_extractor(extractor: DataGridExtractorId) -> bool {
         | DataGridExtractorId::JsonLines
         | DataGridExtractorId::SqlInList
         | DataGridExtractorId::SqlInserts
+        | DataGridExtractorId::SqlDeletesInserts
         | DataGridExtractorId::SqlUpdates
         | DataGridExtractorId::SqlSelect
         | DataGridExtractorId::WhereClause

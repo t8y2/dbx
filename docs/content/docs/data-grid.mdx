@@ -65,6 +65,12 @@ Read-only cells can still open details, copy, and export. Check the data header 
 
 DBX uses specialized controls for recognizable date/time, enum, JSON, and related types. Before bulk editing, verify that the selected region matches the target column types.
 
+## Keyboard
+
+- **Add a row with the down arrow**: with the cursor on the last displayed row, pressing `↓` again adds a row and opens it for editing in its first column. The new row is always appended to the end of the result - unlike the Add Row button, which follows the toolbar insert position.
+- **Cancel a new row with `Esc`**: pressing `Esc` on a new row that has never been filled in removes that row (`Ctrl+Z` restores it). A row that was filled in and then cleared is kept.
+- **Revert a cell with `Esc`**: while a cell editor is open, `Esc` only cancels the current input; with the grid focused, `Esc` reverts the selected cell's pending change to its original value, matching DBeaver's *Reset cell changes*. Multi-cell selections are left alone.
+
 ## SQL Preview and Save
 
 Row-level relational mutations remain local until saved. DBX then shows the generated `INSERT`, `UPDATE`, and `DELETE` statements.

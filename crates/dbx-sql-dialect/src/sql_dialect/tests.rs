@@ -16,6 +16,23 @@ fn transfer_identifier_policy_preserves_legacy_output() {
 }
 
 #[test]
+fn backtick_family_predicate_matches_quoting() {
+    // `uses_backtick_identifier_quoting` is the single source of truth the "Standard
+    // SQL" export dialect consults to decide when to deviate from ANSI double
+    // quotes. It must agree with what `quote_table_identifier` actually emits, so a
+    // new backtick-family engine cannot silently drift between the two.
+    for &database_type in DatabaseType::ALL {
+        let quoted = quote_table_identifier(Some(database_type), "tbl");
+        let emits_backtick = quoted.starts_with('`');
+        assert_eq!(
+            uses_backtick_identifier_quoting(Some(database_type)),
+            emits_backtick,
+            "{database_type:?} quoting/backtick-family mismatch: {quoted}"
+        );
+    }
+}
+
+#[test]
 fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Nebula), "tag`name"), "`tag\\`name`");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Mysql), "user`name"), "`user``name`");
@@ -1274,6 +1291,47 @@ fn explicit_table_data_order_is_preserved() {
         }),
         "SELECT * FROM \"public\".\"country_gdp\" ORDER BY \"iso3\" ASC LIMIT 100;"
     );
+}
+
+#[test]
+fn selects_hidden_postgres_tuple_identity_only_for_known_unkeyed_base_tables() {
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "duplicate_rows".to_string(),
+        table_type: Some("TABLE".to_string()),
+        columns: vec!["id".to_string(), "value".to_string()],
+        limit: Some(20),
+        include_row_id: true,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        build_table_data_select_sql(base.clone()),
+        "SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS \"__DBX_ROWID\", * FROM \"public\".\"duplicate_rows\" LIMIT 20;"
+    );
+
+    // The sidebar's `listTables` path spells relkind 'r' as `BASE TABLE`; the
+    // locator must be injected for that spelling too.
+    let base_table_spelling = build_table_data_select_sql(TableDataSelectSqlOptions {
+        table_type: Some("BASE TABLE".to_string()),
+        ..base.clone()
+    });
+    assert!(base_table_spelling.contains("ctid"), "BASE TABLE must receive the locator: {base_table_spelling}");
+
+    for table_type in ["PARTITIONED TABLE", "FOREIGN TABLE", "VIEW"] {
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            table_type: Some(table_type.to_string()),
+            ..base.clone()
+        });
+        assert!(!sql.contains("ctid"), "{table_type} must not receive a synthetic tuple key: {sql}");
+    }
+
+    let unknown_type = build_table_data_select_sql(TableDataSelectSqlOptions { table_type: None, ..base.clone() });
+    assert!(!unknown_type.contains("ctid"));
+
+    let keyed = build_table_data_select_sql(TableDataSelectSqlOptions { primary_keys: vec!["id".to_string()], ..base });
+    assert!(!keyed.contains("ctid"));
 }
 
 #[test]

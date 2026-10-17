@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Offset, Utc};
 use chrono_tz::Tz;
-use duckdb::core::LogicalTypeId;
+use duckdb::core::{LogicalTypeHandle, LogicalTypeId};
 use duckdb::types::{TimeUnit, Value, ValueRef};
 use duckdb::OptionalExt;
 
@@ -232,6 +232,49 @@ mod tests {
         assert_eq!(format_utc_offset(0), "+00");
         assert_eq!(format_utc_offset(8 * 3600), "+08");
         assert_eq!(format_utc_offset(-(5 * 3600 + 30 * 60)), "-05:30");
+    }
+
+    #[test]
+    fn duckdb_execute_populates_column_types_for_computed_columns() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        con.execute_batch("CREATE TABLE tab (val INTEGER); INSERT INTO tab VALUES (100);")
+            .expect("create and insert table");
+
+        // Reproduces issue #12364: select (数值列+1.10) as 金额 from tab;
+        let result = duckdb_execute(
+            &con,
+            "SELECT (val + 1.10) AS \"金额\", (val * 2)::BIGINT AS doubled, 'item_' || val::VARCHAR AS label, val > 50 AS is_high FROM tab",
+        )
+        .expect("execute computed columns query");
+
+        assert_eq!(result.columns, vec!["金额", "doubled", "label", "is_high"]);
+        assert_eq!(result.column_types.len(), 4);
+        assert!(
+            result.column_types[0].starts_with("DECIMAL"),
+            "expected DECIMAL type for computed decimal column, got {}",
+            result.column_types[0]
+        );
+        assert_eq!(result.column_types[1], "BIGINT");
+        assert_eq!(result.column_types[2], "VARCHAR");
+        assert_eq!(result.column_types[3], "BOOLEAN");
+    }
+
+    #[test]
+    fn duckdb_execute_populates_column_types_for_various_data_types() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+        let result = duckdb_execute(
+            &con,
+            "SELECT 42 AS int_val, 3.14::FLOAT AS float_val, 12.34::DOUBLE AS double_val, 123.45::DECIMAL(10,2) AS dec_val, 'abc' AS text_val, DATE '2026-01-01' AS d_val, [1, 2, 3] AS list_val",
+        )
+        .expect("execute mixed literals");
+
+        assert_eq!(result.column_types[0], "INTEGER");
+        assert_eq!(result.column_types[1], "FLOAT");
+        assert_eq!(result.column_types[2], "DOUBLE");
+        assert_eq!(result.column_types[3], "DECIMAL(10, 2)");
+        assert_eq!(result.column_types[4], "VARCHAR");
+        assert_eq!(result.column_types[5], "DATE");
+        assert_eq!(result.column_types[6], "INTEGER[]");
     }
 }
 
@@ -534,6 +577,112 @@ fn format_temporal_without_empty_fraction(value: String) -> String {
     trimmed.to_string()
 }
 
+pub(crate) fn duckdb_logical_type_to_string(handle: &LogicalTypeHandle) -> String {
+    match handle.id() {
+        LogicalTypeId::Boolean => "BOOLEAN".to_string(),
+        LogicalTypeId::Tinyint => "TINYINT".to_string(),
+        LogicalTypeId::Smallint => "SMALLINT".to_string(),
+        LogicalTypeId::Integer | LogicalTypeId::IntegerLiteral => "INTEGER".to_string(),
+        LogicalTypeId::Bigint => "BIGINT".to_string(),
+        LogicalTypeId::Hugeint => "HUGEINT".to_string(),
+        LogicalTypeId::UTinyint => "UTINYINT".to_string(),
+        LogicalTypeId::USmallint => "USMALLINT".to_string(),
+        LogicalTypeId::UInteger => "UINTEGER".to_string(),
+        LogicalTypeId::UBigint => "UBIGINT".to_string(),
+        LogicalTypeId::UHugeint => "UHUGEINT".to_string(),
+        LogicalTypeId::Float => "FLOAT".to_string(),
+        LogicalTypeId::Double => "DOUBLE".to_string(),
+        LogicalTypeId::Decimal => {
+            let width = handle.decimal_width();
+            let scale = handle.decimal_scale();
+            if width > 0 {
+                format!("DECIMAL({}, {})", width, scale)
+            } else {
+                "DECIMAL".to_string()
+            }
+        }
+        LogicalTypeId::Varchar | LogicalTypeId::StringLiteral => "VARCHAR".to_string(),
+        LogicalTypeId::Blob => "BLOB".to_string(),
+        LogicalTypeId::Timestamp => "TIMESTAMP".to_string(),
+        LogicalTypeId::TimestampTZ => "TIMESTAMPTZ".to_string(),
+        LogicalTypeId::TimestampS => "TIMESTAMP_S".to_string(),
+        LogicalTypeId::TimestampMs => "TIMESTAMP_MS".to_string(),
+        LogicalTypeId::TimestampNs => "TIMESTAMP_NS".to_string(),
+        LogicalTypeId::Date => "DATE".to_string(),
+        LogicalTypeId::Time => "TIME".to_string(),
+        LogicalTypeId::TimeTZ => "TIMETZ".to_string(),
+        LogicalTypeId::TimeNs => "TIME_NS".to_string(),
+        LogicalTypeId::Interval => "INTERVAL".to_string(),
+        LogicalTypeId::Uuid => "UUID".to_string(),
+        LogicalTypeId::Bit => "BIT".to_string(),
+        LogicalTypeId::Enum => {
+            if let Some(alias) = handle.get_alias() {
+                let trimmed = alias.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+            "ENUM".to_string()
+        }
+        LogicalTypeId::List => {
+            if handle.num_children() > 0 {
+                let child = handle.child(0);
+                format!("{}[]", duckdb_logical_type_to_string(&child))
+            } else {
+                "LIST".to_string()
+            }
+        }
+        LogicalTypeId::Array => {
+            if handle.num_children() > 0 {
+                let child = handle.child(0);
+                format!("{}[array]", duckdb_logical_type_to_string(&child))
+            } else {
+                "ARRAY".to_string()
+            }
+        }
+        LogicalTypeId::Map => {
+            if handle.num_children() >= 2 {
+                let key = handle.child(0);
+                let val = handle.child(1);
+                format!("MAP({}, {})", duckdb_logical_type_to_string(&key), duckdb_logical_type_to_string(&val))
+            } else {
+                "MAP".to_string()
+            }
+        }
+        LogicalTypeId::Struct => {
+            let count = handle.num_children();
+            if count > 0 {
+                let mut fields = Vec::with_capacity(count);
+                for idx in 0..count {
+                    fields.push(format!(
+                        "{}: {}",
+                        handle.child_name(idx),
+                        duckdb_logical_type_to_string(&handle.child(idx))
+                    ));
+                }
+                format!("STRUCT({})", fields.join(", "))
+            } else {
+                "STRUCT".to_string()
+            }
+        }
+        LogicalTypeId::Union => "UNION".to_string(),
+        LogicalTypeId::Geometry => "GEOMETRY".to_string(),
+        LogicalTypeId::Variant => "VARIANT".to_string(),
+        LogicalTypeId::Bignum => "BIGNUM".to_string(),
+        LogicalTypeId::Any => "ANY".to_string(),
+        LogicalTypeId::SqlNull => "NULL".to_string(),
+        _ => {
+            if let Some(alias) = handle.get_alias() {
+                let trimmed = alias.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+            String::new()
+        }
+    }
+}
+
 pub fn duckdb_execute_with_max_rows(
     con: &duckdb::Connection,
     sql: &str,
@@ -554,8 +703,13 @@ pub fn duckdb_execute_with_max_rows(
         let columns: Vec<String> = (0..col_count)
             .map(|i| stmt_ref.column_name(i).map(|s| s.to_string()).unwrap_or_else(|_| "?".to_string()))
             .collect();
-        let timestamptz_columns: Vec<bool> =
-            (0..col_count).map(|i| stmt_ref.column_logical_type(i).id() == LogicalTypeId::TimestampTZ).collect();
+        let mut column_types = Vec::with_capacity(col_count);
+        let mut timestamptz_columns = Vec::with_capacity(col_count);
+        for i in 0..col_count {
+            let logical_type = stmt_ref.column_logical_type(i);
+            timestamptz_columns.push(logical_type.id() == LogicalTypeId::TimestampTZ);
+            column_types.push(duckdb_logical_type_to_string(&logical_type));
+        }
 
         let mut result_rows = Vec::new();
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
@@ -574,7 +728,7 @@ pub fn duckdb_execute_with_max_rows(
         }
         Ok(db::QueryResult {
             columns,
-            column_types: Vec::new(),
+            column_types,
             column_sortables: vec![],
             rows: result_rows,
             affected_rows: 0,

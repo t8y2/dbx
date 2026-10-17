@@ -48,6 +48,7 @@ import {
   ShieldAlert,
   AlignLeft,
   AlignRight,
+  Binary,
   PanelsTopLeft,
   Palette,
   CircleAlert,
@@ -78,6 +79,7 @@ import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
 import DataGridFreezeFirstColumnControl from "@/components/grid/DataGridFreezeFirstColumnControl.vue";
+import DataGridStatusSqlControl from "@/components/grid/DataGridStatusSqlControl.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
 import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
@@ -310,6 +312,8 @@ function groupedQueryReadonlyColumnIndexes(tab: QueryTab): number[] | undefined 
 const settingsStore = useSettingsStore();
 const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
 const setBooleanDisplayMode = (mode: "checkbox" | "dropdown") => settingsStore.updateEditorSettings({ dataGridBooleanDisplayMode: mode });
+const booleanValueStyle = computed(() => settingsStore.editorSettings.dataGridBooleanValueStyle);
+const setBooleanValueStyle = (style: "true-false" | "zero-one") => settingsStore.updateEditorSettings({ dataGridBooleanValueStyle: style });
 const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.colorizeDataGridCellTypes);
 const setColorizeDataGridCellTypes = (value: boolean) => settingsStore.updateEditorSettings({ colorizeDataGridCellTypes: value });
 const { toast } = useToast();
@@ -2463,6 +2467,32 @@ defineExpose({
                     </div>
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                       <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <Binary class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.booleanValueStyle") }}</span>
+                      </div>
+                      <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                          :disabled="booleanDisplayMode === 'checkbox'"
+                          :class="booleanValueStyle === 'true-false' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanValueStyle('true-false')"
+                        >
+                          {{ t("grid.booleanValueTrueFalse") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                          :disabled="booleanDisplayMode === 'checkbox'"
+                          :class="booleanValueStyle === 'zero-one' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanValueStyle('zero-one')"
+                        >
+                          {{ t("grid.booleanValueZeroOne") }}
+                        </button>
+                      </div>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
                         <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                         <span>{{ t("grid.colorizeDataTypes") }}</span>
                       </div>
@@ -2478,6 +2508,7 @@ defineExpose({
                     </div>
                     <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
                     <DataGridFreezeFirstColumnControl />
+                    <DataGridStatusSqlControl />
                     <DataGridCopyFormatControl
                       :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                       :current-value="dataGridRef?.defaultCopyPreference ?? ''"
@@ -2706,6 +2737,7 @@ defineExpose({
                 :has-unique-query-insert-target="!!activeTab.tableMeta && activeTab.queryAnalysis?.multiSource !== true && (activeTab.queryAnalysis?.sources?.length ?? 1) === 1 && (activeTab.queryWriteTargets?.length ?? 1) <= 1"
                 :readonly-column-indexes="hasNeo4jNodes ? undefined : groupedQueryReadonlyColumnIndexes(activeTab)"
                 :result-column-comments="hasNeo4jNodes ? undefined : activeTab.resultColumnComments"
+                :result-column-type-labels="hasNeo4jNodes ? undefined : activeTab.resultColumnTypeLabels"
                 :query-display-source-columns="hasNeo4jNodes ? undefined : activeTab.queryDisplaySourceColumns"
                 :custom-save-handler="mongoQueryResultSaveHandler"
                 :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
@@ -3166,6 +3198,32 @@ defineExpose({
               </div>
               <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                 <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <Binary class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.booleanValueStyle") }}</span>
+                </div>
+                <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                    :disabled="booleanDisplayMode === 'checkbox'"
+                    :class="booleanValueStyle === 'true-false' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanValueStyle('true-false')"
+                  >
+                    {{ t("grid.booleanValueTrueFalse") }}
+                  </button>
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                    :disabled="booleanDisplayMode === 'checkbox'"
+                    :class="booleanValueStyle === 'zero-one' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanValueStyle('zero-one')"
+                  >
+                    {{ t("grid.booleanValueZeroOne") }}
+                  </button>
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
                   <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span>{{ t("grid.colorizeDataTypes") }}</span>
                 </div>
@@ -3181,6 +3239,7 @@ defineExpose({
               </div>
               <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
               <DataGridFreezeFirstColumnControl />
+              <DataGridStatusSqlControl />
               <DataGridCopyFormatControl
                 :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                 :current-value="dataGridRef?.defaultCopyPreference ?? ''"

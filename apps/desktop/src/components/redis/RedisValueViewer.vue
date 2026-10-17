@@ -5,7 +5,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, Pause, X, FileArchive, Download } from "@lucide/vue";
+import { ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, Pause, X, FileArchive, Download } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +14,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import DateTimePicker from "@/components/ui/date-time-picker/DateTimePicker.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import AutoRefreshControl from "@/components/common/AutoRefreshControl.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { jsonTreeSearchParts, type JsonTreeSearchMatch } from "@/lib/common/jsonTreeSearch";
 import { createTextContentSearchPattern, type TextContentMatch } from "@/lib/common/textContentSearch";
@@ -72,6 +73,7 @@ import RedisHorizontalScrollbar from "@/components/redis/RedisHorizontalScrollba
 import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/lib/common/safeJsonFormat";
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
+import { redisValuePreviewLimitBytes } from "@/lib/redis/redisValuePreviewLimit";
 import { redisKeyRawToText, redisKeyTextToDisplay, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -88,6 +90,7 @@ const props = defineProps<{
   keyDisplay: string;
   keyRaw: string;
   metadata?: RedisKeyInfo | null;
+  previewLimitKiB?: number;
 }>();
 
 const redisExpiryTransport = {
@@ -119,6 +122,7 @@ const renameKeyError = ref("");
 const renameKeyInitialName = ref("");
 const renameKeyInitialRaw = ref("");
 let loadRequestId = 0;
+let loadedPreviewLimitBytes: number | undefined;
 const streamTab = ref<"entries" | "groups">("entries");
 const streamEntries = ref<RedisStreamEntry[]>([]);
 const streamEntriesCursor = ref<string | undefined>();
@@ -1770,10 +1774,10 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
   const shouldSelectDefaultMember = options.selectDefaultMember ?? true;
   const requestId = ++loadRequestId;
   if (!background) stopCollectionSearch();
-  const loadScope = { connectionId: props.connectionId, db: props.db, keyRaw: props.keyRaw };
+  const loadScope = { connectionId: props.connectionId, db: props.db, keyRaw: props.keyRaw, previewLimitBytes: redisValuePreviewLimitBytes(props.previewLimitKiB) };
   if (!background) loading.value = true;
   try {
-    let loadedValue = await api.redisGetValue(loadScope.connectionId, loadScope.db, loadScope.keyRaw);
+    let loadedValue = await api.redisGetValue(loadScope.connectionId, loadScope.db, loadScope.keyRaw, loadScope.previewLimitBytes);
     if (requestId !== loadRequestId || !redisValueViewerIsActive || (options.shouldApply && !options.shouldApply())) return false;
     if (loadedValue.data.kind === "zset" && zsetSortDir.value === "desc") {
       const sortedPage = await collectionSearchController.readPage({ ...loadScope, kind: "zset", sortDirection: "desc" }, 0, "", () => requestId === loadRequestId && (!options.shouldApply || options.shouldApply()));
@@ -1827,6 +1831,7 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
     searchLoading.value = false;
     resetValueSearch();
     data.value = loadedValue;
+    loadedPreviewLimitBytes = loadScope.previewLimitBytes;
     syncCountdownTtl(loadedValue.ttl);
     if (notifyParent) emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
@@ -2919,6 +2924,14 @@ watch(
   },
 );
 
+watch(
+  () => props.previewLimitKiB,
+  () => {
+    // Apply the new limit immediately, but never replace an edited value.
+    if (redisValueViewerIsActive && !hasUnsavedRedisDraft.value) void load();
+  },
+);
+
 watch(streamTab, (tab) => {
   if (tab === "groups" && redisKind.value === "stream") void loadStreamGroups();
 });
@@ -2961,7 +2974,7 @@ onMounted(() => {
 onActivated(() => {
   redisValueViewerIsActive = true;
   collectionSearchController.setActive(true);
-  if (!data.value && !loading.value) void load();
+  if (!loading.value && (!data.value || (loadedPreviewLimitBytes !== redisValuePreviewLimitBytes(props.previewLimitKiB) && !hasUnsavedRedisDraft.value))) void load();
   startRefreshTimers();
 });
 onDeactivated(() => {
@@ -3019,40 +3032,21 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
           <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
-          <div class="flex h-7 shrink-0 overflow-hidden rounded-md border">
-            <Button data-redis-value-refresh variant="ghost" size="icon" class="h-7 w-7 rounded-none animate-none" :disabled="loading || refreshingValue || hasUnsavedRedisDraft" :title="t('grid.refresh')" :aria-label="t('grid.refresh')" @click="refreshValueAndStreamGroups">
-              <RefreshCw class="h-3.5 w-3.5 animate-none" />
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger as-child>
-                <Button
-                  data-redis-auto-refresh-menu
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-5 rounded-none border-l px-0"
-                  :class="autoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : ''"
-                  :title="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('redis.autoRefresh')"
-                  :aria-label="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('redis.autoRefresh')"
-                >
-                  <ChevronDown class="h-3 w-3" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" class="w-40">
-                <DropdownMenuLabel>{{ t("redis.autoRefresh") }}</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem class="gap-2" @select="disableAutoRefresh">
-                  <Check v-if="!autoRefreshEnabled" class="h-3.5 w-3.5" />
-                  <span v-else class="h-3.5 w-3.5" />
-                  {{ t("serverDashboard.off") }}
-                </DropdownMenuItem>
-                <DropdownMenuItem v-for="interval in REDIS_AUTO_REFRESH_INTERVAL_OPTIONS" :key="interval" class="gap-2" @select="selectAutoRefreshInterval(interval)">
-                  <Check v-if="autoRefreshEnabled && autoRefreshIntervalSeconds === interval" class="h-3.5 w-3.5" />
-                  <span v-else class="h-3.5 w-3.5" />
-                  {{ interval }}s
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
+          <AutoRefreshControl
+            :enabled="autoRefreshEnabled"
+            :interval-seconds="autoRefreshIntervalSeconds"
+            :intervals="REDIS_AUTO_REFRESH_INTERVAL_OPTIONS"
+            :loading="refreshingValue"
+            :manual-disabled="loading || hasUnsavedRedisDraft"
+            :label="t('redis.autoRefresh')"
+            :off-label="t('serverDashboard.off')"
+            :refresh-label="t('grid.refresh')"
+            :refresh-button-attrs="{ 'data-redis-value-refresh': '' }"
+            :menu-trigger-attrs="{ 'data-redis-auto-refresh-menu': '' }"
+            @refresh="refreshValueAndStreamGroups"
+            @disable="disableAutoRefresh"
+            @select="selectAutoRefreshInterval"
+          />
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"
             ><ClipboardCopy class="h-3.5 w-3.5"

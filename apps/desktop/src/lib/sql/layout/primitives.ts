@@ -48,6 +48,8 @@ export interface SqlLayoutOptions {
    * "FROM clause" setting.
    */
   fromClauseSourceOnSameLine: boolean;
+  /** Whether the terminating semicolon is placed on its own line. */
+  newlineBeforeSemicolon: boolean;
 }
 
 export interface SqlLayoutContext {

@@ -1151,4 +1151,63 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     await flush();
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
   });
+
+  it("supports setting permanent retention for scheduled backup", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+
+    const checkbox = currentDialog().querySelector<HTMLInputElement>("[data-backup-retention-forever]");
+    if (!checkbox) throw new Error("Permanent retention checkbox not found");
+
+    expect(checkbox.checked).toBe(false);
+
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change"));
+    await flush();
+
+    expect(currentDialog().textContent).toContain(String(i18n.global.t("databaseBackup.keepForever")));
+
+    saveScheduleButton().click();
+    await flush();
+
+    expect(mocks.saveSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        retentionCount: 0,
+      }),
+    );
+  });
+
+  it("displays keep forever in schedule list for schedules with retentionCount 0 and preserves or updates it on edit", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.schedules.push(schedule({ id: "schedule-perm", retentionCount: 0 }));
+    await mountSettings();
+
+    expect(document.body.textContent).toContain(String(i18n.global.t("databaseBackup.keepForever")));
+
+    buttonWithTitle(String(i18n.global.t("databaseBackup.edit"))).click();
+    await flush();
+
+    const checkbox = currentDialog().querySelector<HTMLInputElement>("[data-backup-retention-forever]");
+    if (!checkbox) throw new Error("Permanent retention checkbox not found");
+
+    expect(checkbox.checked).toBe(true);
+
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event("change"));
+    await flush();
+
+    saveScheduleButton().click();
+    await flush();
+
+    expect(mocks.saveSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        retentionCount: 10,
+      }),
+    );
+  });
 });

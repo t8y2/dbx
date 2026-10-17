@@ -202,7 +202,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             options.getFetchSize(),
             options.getTimeoutSecs(),
             resultValueReader(),
-            JdbcExecutor.StatementMessageReader.NONE,
+            statementMessageReader(),
             advancePastUpdateCounts()
         );
     }
@@ -221,6 +221,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             this::resetSchemaSQL,
             options,
             resultValueReader(),
+            statementMessageReader(),
             advancePastUpdateCounts()
         );
     }
@@ -600,6 +601,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     }
 
     protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
+    }
+
+    protected JdbcExecutor.StatementMessageReader statementMessageReader() {
+        return JdbcExecutor.StatementMessageReader.NONE;
     }
 
     /** Called for each session RPC before its SQL can replace the connection's last trace ID. */

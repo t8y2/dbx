@@ -695,6 +695,7 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         pagination: QueryPagination { limit: page_size, offset: 0, session_id: None },
         use_agent_cursor: false,
         first_page_uses_actual_sql: true,
+        execution_hint: None,
     });
     let second_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
         sql: request.sql.clone(),
@@ -703,6 +704,7 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         pagination: QueryPagination { limit: page_size, offset: page_size, session_id: None },
         use_agent_cursor: false,
         first_page_uses_actual_sql: true,
+        execution_hint: None,
     });
 
     let (Some(first_sql), Some(second_sql)) = (first_page.page_sql.as_deref(), second_page.page_sql.as_deref()) else {
@@ -1064,6 +1066,7 @@ async fn export_query_result_core_inner(
                     pagination: QueryPagination { limit: this_page, offset, session_id: session_id.clone() },
                     use_agent_cursor,
                     first_page_uses_actual_sql: true,
+                    execution_hint: None,
                 });
                 if let Some(error) = plan.pagination_error {
                     return Err(error);
@@ -3431,5 +3434,34 @@ mod tests {
             "did not expect cell A2 to be inlineStr, got: {sheet_xml}"
         );
         assert!(!sheet_xml.contains("<t>123.45</t>"), "did not expect 123.45 to be exported as text, got: {sheet_xml}");
+    }
+
+    #[test]
+    fn start_query_result_xlsx_workbook_exports_duckdb_computed_column_as_numeric() {
+        use std::io::Read;
+
+        let req = request("xlsx", None, None);
+        // Column types populated directly from DuckDB query execution
+        let column_types = vec!["DECIMAL(18, 2)".to_string()];
+
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = start_query_result_xlsx_workbook(&mut cursor, &req, &["金额".to_string()], &column_types)
+            .expect("start workbook");
+        writer.write_row(&[serde_json::Value::String("101.10".to_string())]).expect("write row");
+        finish_streaming_xlsx_workbook(writer).expect("finish workbook");
+        let bytes = cursor.into_inner();
+
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("open zip");
+        let mut sheet_file = zip.by_name("xl/worksheets/sheet1.xml").expect("sheet1.xml");
+        let mut sheet_xml = String::new();
+        sheet_file.read_to_string(&mut sheet_xml).expect("read sheet1");
+
+        // The decimal value must be exported as a numeric cell (<v>101.10</v>) rather than text
+        assert!(sheet_xml.contains("<v>101.10</v>"), "expected numeric cell in sheet XML, got: {sheet_xml}");
+        assert!(
+            !sheet_xml.contains(r#"<c r="A2" t="inlineStr""#),
+            "did not expect cell A2 to be inlineStr, got: {sheet_xml}"
+        );
+        assert!(!sheet_xml.contains("<t>101.10</t>"), "did not expect 101.10 to be exported as text, got: {sheet_xml}");
     }
 }

@@ -2515,24 +2515,98 @@ public final class DamengAgent extends AbstractJdbcAgent {
             return StandardJdbcMetadata.INSTANCE.listTriggers(schema, table);
         }
         return unchecked(() -> {
-            List<TriggerInfo> result = new ArrayList<>();
-            String sql = """
-                SELECT TRIGGER_NAME, TRIGGERING_EVENT, '' AS TRIGGER_TYPE
-                FROM ALL_TRIGGERS
-                WHERE OWNER = ? AND TABLE_NAME = ?
-                ORDER BY TRIGGER_NAME
-                """.stripIndent().trim();
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-                stmt.setString(1, schema);
-                stmt.setString(2, table);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        result.add(new TriggerInfo(rs.getString(1), rs.getString(2), rs.getString(3)));
+            try {
+                return readTriggerDetails(schema, table);
+            } catch (Exception error) {
+                // 字典视图不可读（权限/旧版本视图缺失）时退回只取名字与事件的实现，
+                // 保证表结构编辑器的触发器列表不会因为新增列整体失败。
+                if (isDamengConnectionError(error)) {
+                    throw error;
+                }
+                return readTriggerNames(schema, table);
+            }
+        });
+    }
+
+    /**
+     * 读取表上触发器的完整字典信息，供表结构编辑器的触发器页签展示与编辑。
+     *
+     * <p>达梦不同版本的 ALL_TRIGGERS 列并不完全一致（部分版本没有 Oracle 的 TRIGGER_TYPE、
+     * WHEN_CLAUSE、TRIGGER_BODY 等列），所以这里用 SELECT * 后再按列名容错读取：
+     * 有列就带回正文/类型/状态，缺列只影响对应字段，不会让整个触发器列表失败。</p>
+     */
+    private List<TriggerInfo> readTriggerDetails(String schema, String table) throws Exception {
+        List<TriggerInfo> result = new ArrayList<>();
+        String sql = """
+            SELECT * FROM ALL_TRIGGERS
+            WHERE OWNER = ? AND TABLE_NAME = ?
+            ORDER BY TRIGGER_NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String name = triggerColumnText(rs, "TRIGGER_NAME").trim();
+                    if (name.isEmpty()) {
+                        continue;
                     }
+                    TriggerInfo trigger = new TriggerInfo(name, triggerColumnText(rs, "TRIGGERING_EVENT"), "");
+                    trigger.setTiming(normalizeTriggerTiming(triggerColumnText(rs, "TRIGGER_TYPE")));
+                    trigger.setStatement(triggerColumnText(rs, "TRIGGER_BODY"));
+                    trigger.setCondition(triggerColumnText(rs, "WHEN_CLAUSE"));
+                    trigger.setEnabled(triggerEnabledState(triggerColumnText(rs, "STATUS")));
+                    result.add(trigger);
                 }
             }
-            return result;
-        });
+        }
+        return result;
+    }
+
+    /** 修复前的降级实现：字典视图缺列时只返回触发器名字与事件。 */
+    private List<TriggerInfo> readTriggerNames(String schema, String table) throws Exception {
+        List<TriggerInfo> result = new ArrayList<>();
+        String sql = """
+            SELECT TRIGGER_NAME, TRIGGERING_EVENT, '' AS TRIGGER_TYPE
+            FROM ALL_TRIGGERS
+            WHERE OWNER = ? AND TABLE_NAME = ?
+            ORDER BY TRIGGER_NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new TriggerInfo(rs.getString(1), rs.getString(2), rs.getString(3)));
+                }
+            }
+        }
+        return result;
+    }
+
+    /** 按列名读取字典文本；当前达梦版本的视图没有该列时返回空串而不是抛错。 */
+    private static String triggerColumnText(ResultSet rs, String column) {
+        try {
+            return coalesce(readTextColumn(rs, rs.findColumn(column)));
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    /** TRIGGER_TYPE 与 Oracle 一致（BEFORE/AFTER + STATEMENT/EACH ROW），只做空白与大小写归一化。 */
+    private static String normalizeTriggerTiming(String value) {
+        return coalesce(value).trim().replaceAll("\\s+", " ").toUpperCase(Locale.ROOT);
+    }
+
+    private static Boolean triggerEnabledState(String status) {
+        String normalized = coalesce(status).trim().toUpperCase(Locale.ROOT);
+        if ("ENABLED".equals(normalized) || "ENABLE".equals(normalized) || "Y".equals(normalized)) {
+            return Boolean.TRUE;
+        }
+        if ("DISABLED".equals(normalized) || "DISABLE".equals(normalized) || "N".equals(normalized)) {
+            return Boolean.FALSE;
+        }
+        return null;
     }
 
     @Override

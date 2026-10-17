@@ -72,6 +72,7 @@ pub use dbx_sql::dml_preview_sql;
 pub(crate) use dbx_sql::mysql_ddl_normalize;
 pub use dbx_sql::mysql_event_sql;
 pub use dbx_sql::object_source_sql;
+pub use dbx_sql::oracle_view_rename;
 pub use dbx_types::models;
 pub use host::external;
 pub use persistence::history;

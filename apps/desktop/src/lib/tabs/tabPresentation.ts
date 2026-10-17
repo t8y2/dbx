@@ -188,7 +188,8 @@ export function findTabWithSameTitleSuffix(tabs: QueryTab[], target: QueryTab, s
   const wanted = suffix.trim();
   if (!wanted) return undefined;
   const base = tabDisplayTitle(target, t);
-  return tabs.find((tab) => tab.id !== target.id && tabDisplayTitle(tab, t) === base && tabTitleSuffix(tab, base) === wanted);
+  const targetMode = target.mode || "query";
+  return tabs.find((tab) => tab.id !== target.id && (tab.mode || "query") === targetMode && tabDisplayTitle(tab, t) === base && tabTitleSuffix(tab, base) === wanted);
 }
 
 function tabTitleNumber(tab: QueryTab, title: string): number | undefined {
@@ -222,6 +223,7 @@ export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
   for (const tab of tabs) {
     if (isPreviewTab(tab)) continue;
     const title = tabDisplayTitle(tab, t);
+    const groupKey = `${tab.mode || "query"}\u0000${title}`;
     const custom = customTitleSuffix(tab);
     if (custom) {
       // A custom suffix replaces the number, so the tab leaves the numbering
@@ -229,17 +231,18 @@ export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
       // fresh one instead of resurrecting a stale value.
       tab.titleNumber = undefined;
       tab.titleNumberKey = undefined;
-      const used = customSuffixes.get(title);
+      const used = customSuffixes.get(groupKey);
       if (used) used.add(custom);
-      else customSuffixes.set(title, new Set([custom]));
+      else customSuffixes.set(groupKey, new Set([custom]));
       continue;
     }
-    const group = groups.get(title);
+    const group = groups.get(groupKey);
     if (group) group.push(tab);
-    else groups.set(title, [tab]);
+    else groups.set(groupKey, [tab]);
   }
 
-  for (const [title, group] of groups) {
+  for (const [groupKey, group] of groups) {
+    const title = groupKey.slice(groupKey.indexOf("\u0000") + 1);
     const numbered = group.filter((tab) => tabTitleNumber(tab, title) !== undefined);
     if (group.length < 2 && numbered.length === 0) {
       // A lone, never-numbered tab shows its plain title; drop a number that a
@@ -255,7 +258,7 @@ export function syncTabTitleNumbers(tabs: QueryTab[], t: Translate): void {
     let next = numbered.reduce((highest, tab) => Math.max(highest, tab.titleNumber ?? 0), 0) + 1;
     for (const tab of group) {
       if (tabTitleNumber(tab, title) !== undefined) continue;
-      while (customSuffixes.get(title)?.has(String(next))) next += 1;
+      while (customSuffixes.get(groupKey)?.has(String(next))) next += 1;
       tab.titleNumber = next;
       tab.titleNumberKey = title;
       next += 1;

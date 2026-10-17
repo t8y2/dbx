@@ -72,6 +72,7 @@ pub async fn run_transfer<F>(
     source_pool_key: String,
     target_pool_key: String,
     history: Option<TransferTaskJournal>,
+    operation_timeout_secs: Option<u64>,
     progress_callback: F,
 ) -> TransferProgress
 where
@@ -81,7 +82,7 @@ where
     let total_tables = request.tables.len();
     let app = ProgressEmitter::new(progress_callback);
 
-    async {
+    super::transfer::with_transfer_operation_timeout(operation_timeout_secs, async {
         // Sort tables by FK dependency so referenced tables are transferred first,
         // and keep the foreign key metadata fetched along the way — MySQL-family
         // targets reuse it per table below instead of re-querying it.
@@ -601,7 +602,7 @@ where
         )
         .await;
         super::transfer::clear_cancelled(&transfer_id).await;
-    }
+    })
     .await;
 
     super::transfer::clear_cancelled(&transfer_id).await;
@@ -671,6 +672,7 @@ mod tests {
             DatabaseType::Sqlite,
             source_pool,
             target_pool,
+            None,
             None,
             move |progress| {
                 observed_for_callback.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(progress);

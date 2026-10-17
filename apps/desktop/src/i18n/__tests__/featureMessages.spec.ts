@@ -49,6 +49,11 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "AI conversation export (#6467)", keys: under("ai", ["exportConversation", "conversationExportMarkdown", "conversationExportHtml", "conversationRoleUser", "conversationRoleAssistant", "conversationFailedMarker", "conversationExportEmpty"]) },
   { feature: "AI conversation management", keys: under("ai", ["renameConversation", "conversationRenameFailed", "clearDatabaseSelection", "searchDatabases", "noDatabasesFound"]) },
   { feature: "AI auto routing (#9118)", keys: ["ai.actions.auto", "ai.routing.recognizing", "ai.routing.chip", "ai.routing.switchTo", "ai.defaultAutoRouting", "ai.defaultAutoRoutingDescription"] },
+  {
+    feature: "AI SQL action feedback (#11962)",
+    keys: under("ai", ["sqlActionRunning", "sqlActionSucceeded", "sqlActionSucceededIn", "sqlActionSucceededRows", "sqlActionSucceededAffected", "sqlActionFailed", "sqlActionApplied", "sqlActionAppliedIn", "sqlActionEmptySql", "sqlActionBusy", "sqlActionNoConnection", "sqlActionViewTab"]),
+    translated: true,
+  },
   { feature: "plugin AI conversation", keys: ["ai.pluginHttpModelOnly", "ai.pluginWelcome", "ai.pluginFollowUp"] },
   { feature: "quick open", keys: ["quickOpen.*", "settings.shortcutGlobalSearch"] },
   {
@@ -68,6 +73,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
       "pinTab",
       "reopenClosedTab",
       "resetTabGroup",
+      "saveAllTabs",
       "splitDown",
       "splitRight",
       "unpinTab",
@@ -142,6 +148,13 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     translated: true,
   },
   { feature: "schema diff deploy ignores foreign key checks", keys: under("diff", ["ignoreForeignKeyChecks", "ignoreForeignKeyChecksHint"]), translated: true },
+  { feature: "shortcut recorder", keys: under("settings", ["shortcutRecordKeys", "shortcutRecordKeysRecordingHint", "shortcutRecordKeysWindowInactive"]), locales: ALL_LOCALES.filter((locale) => locale !== "th") },
+  { feature: "select current statement", keys: ["settings.shortcutSelectCurrentStatement", "editor.contextMenu.selectCurrentStatement"] },
+  { feature: "MCP history kind", keys: ["history.kinds.mcp"] },
+  { feature: "editor selection to AI (#10058)", keys: under("ai", ["selectionChipLabel", "selectionChipDetail", "externalTargetUnavailable"]) },
+  { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },
+  { feature: "sidebar table structure shortcut", keys: ["settings.shortcutEditSidebarTableStructure"], locales: ALL_LOCALES.filter((locale) => locale !== "th") },
+  { feature: "MySQL AUTO_INCREMENT warnings", keys: under("structureEditor", ["mysqlAutoIncrementSingleColumn", "mysqlAutoIncrementRequiresIndex", "mysqlAutoIncrementRequiresNativeColumn"]) },
 ];
 
 function lookup(messages: unknown, path: string): unknown {

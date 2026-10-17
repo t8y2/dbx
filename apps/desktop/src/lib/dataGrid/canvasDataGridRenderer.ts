@@ -170,14 +170,18 @@ export function resolveCanvasDataGridRowBase(
   const stripedRows = options.stripedRows ?? options.zebraStriping ?? true;
   const stripedRowBg = options.zebraRowBg?.trim() || theme.rowMuted;
   if (item.isDeleted) return theme.rowDeleted;
-  if (item.isNew && !isActive) return theme.rowNew;
+  // 待插入行的整行底色优先于活动行底色（#11634）：光标总在新行上（新增后立即进入编辑），
+  // 若让活动行底色盖掉它，「这行还没保存」就恰好在这时看不见了。
+  if (item.isNew) return theme.rowNew;
   if (item.isDraft && !isActive) return theme.rowMuted;
   if (stripedRows && item.displayIndex % 2 === 1 && !isActive) return stripedRowBg;
   return theme.background;
 }
 
-export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "cellSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean }): string {
+export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "cellSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean; isNew?: boolean }): string {
   if (options.isSelected) return theme.cellSelected;
+  // 同上：待插入行保留自己的底色，活动行高亮不再覆盖它
+  if (options.isNew) return rowBase;
   if (options.isActive && !options.isDeleted) return theme.cellActive;
   return rowBase;
 }
@@ -479,6 +483,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
       isActive: rowIsActive,
       isDeleted: item.isDeleted,
       isSelected: rowSelectionVisual,
+      isNew: item.isNew,
     });
     const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, scaleY);
     ctx.globalAlpha = item.isDeleted ? 0.7 : 1;
@@ -509,7 +514,9 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
                 ? theme.rowNumberActive
                 : rowInSelection
                   ? theme.cellSelected
-                  : theme.rowNumberDefault;
+                  : item.isNew && item.status === "clean"
+                    ? rowBase
+                    : theme.rowNumberDefault;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     // 与 DOM 的 .data-grid-row-number--selected 对齐：选中行号左侧 3px 蓝色条
@@ -534,13 +541,15 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     ctx.rect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.clip();
     ctx.fillText(
-      resolveDataGridRowNumberLabel({
-        displayIndex: item.displayIndex,
-        sourceIndex: item.sourceIndex,
-        isDraft: item.isDraft,
-        sourceRowNumbers: rowNumberMode === "source",
-        pageOffset: infiniteScrollEnabled ? 0 : pageOffset,
-      }),
+      item.isNew && item.status === "clean"
+        ? "*"
+        : resolveDataGridRowNumberLabel({
+            displayIndex: item.displayIndex,
+            sourceIndex: item.sourceIndex,
+            isDraft: item.isDraft,
+            sourceRowNumbers: rowNumberMode === "source",
+            pageOffset: infiniteScrollEnabled ? 0 : pageOffset,
+          }),
       rowNumberTextX,
       textY,
     );

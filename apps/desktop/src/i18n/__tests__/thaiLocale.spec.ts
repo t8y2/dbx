@@ -66,6 +66,12 @@ describe("Thai locale", () => {
     expect(`${placeholder}\n${hint}\n${tableFilterExample}`).not.toContain("{'|'}");
   });
 
+  it("localizes the combined sidebar comment and object-size mode", () => {
+    expect(th.settings.sidebarObjectInfoModeCommentAndSize).toBe("คอมเมนต์ + ขนาดออบเจ็กต์");
+    expect(th.settings.sidebarObjectInfoModeDescription).toContain("ทั้งสองอย่าง");
+    expect(th.settings.sidebarObjectInfoModeDescription).not.toContain("ใช้พร้อมกันไม่ได้");
+  });
+
   it("loads Thai lazily and persists an explicit selection", async () => {
     globalThis.localStorage.clear();
     await setLocale("th");

@@ -80,6 +80,21 @@ function interpolationPlaceholders(message: string): Set<string> {
 const englishMessages = flattenMessages(en as Record<string, unknown>);
 
 describe("locale interpolation placeholder parity", () => {
+  it.each(locales)("%s localizes the routine rename preview", (_name, messages) => {
+    const key = "objects.routineRenamePreview";
+    const localized = flattenMessages(messages).get(key);
+    expect(localized).toBeDefined();
+    expect(localized).not.toBe(englishMessages.get(key));
+  });
+
+  it.each(locales)("%s localizes the table rename repair flow", (_name, messages) => {
+    const localizedMessages = flattenMessages(messages);
+    for (const key of ["objects.tableRenameCoverage", "objects.tableRenameObjects", "objects.tableRenameDraft", "objects.tableRenameSuccess"]) {
+      expect(localizedMessages.get(key), key).toBeDefined();
+      expect(localizedMessages.get(key), key).not.toBe(englishMessages.get(key));
+    }
+  });
+
   it.each(locales)("%s declares no placeholder English does not", (_name, messages) => {
     const offenders: string[] = [];
     for (const [key, value] of flattenMessages(messages)) {

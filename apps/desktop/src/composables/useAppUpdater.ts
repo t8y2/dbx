@@ -131,6 +131,7 @@ export async function resolveUpdaterProxy(): Promise<string | undefined> {
 export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const { t } = useI18n();
   const settingsStore = useSettingsStore();
+  const updaterDisabled = import.meta.env.VITE_DBX_DISABLE_UPDATER === "1";
   type Phase = "idle" | "checking" | "downloading" | "ready" | "preparing" | "installing" | "restart";
   const phase = ref<Phase>("idle");
   const downloaded = ref<api.DownloadedUpdate | null>(null);
@@ -223,7 +224,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     return t("updates.installFailed", { error: message });
   }
   async function checkUpdates(checkOptions: { silent?: boolean } = {}) {
-    if (disposed || isIgnoringUpdate.value) return;
+    if (updaterDisabled || disposed || isIgnoringUpdate.value) return;
     if (!checkOptions.silent) showUpdateDialog.value = true;
     // A downloaded-but-uninstalled update keeps the app in the ready phase; checks
     // continue so a newer release can replace the cached package.
@@ -281,7 +282,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     }
   }
   async function downloadUpdateInBackground(automatic = false) {
-    if (disposed || isIgnoringUpdate.value || phase.value !== "idle" || downloaded.value || !canDownloadAndInstallUpdate(updateInfo.value, isTauriRuntime())) return;
+    if (updaterDisabled || disposed || isIgnoringUpdate.value || phase.value !== "idle" || downloaded.value || !canDownloadAndInstallUpdate(updateInfo.value, isTauriRuntime())) return;
     if (automatic && !autoUpdateEnabled.value) return;
     automaticDownload = automatic;
     const version = updateInfo.value!.latest_version;
@@ -434,14 +435,17 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     }
   }
   async function installDownloadedUpdate() {
+    if (updaterDisabled) return;
     await performInstall(false);
   }
   async function restartApp() {
+    if (updaterDisabled) return;
     if (updateReady.value) await performInstall(true);
   }
   async function initialize() {
     if (initialized || disposed) return;
     initialized = true;
+    if (updaterDisabled) return;
     if (isTauriRuntime()) {
       phase.value = "checking";
       try {

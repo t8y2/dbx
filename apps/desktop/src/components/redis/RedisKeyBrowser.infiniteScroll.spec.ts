@@ -485,9 +485,7 @@ describe("RedisKeyBrowser infinite scroll auto-continue (issue #6022)", () => {
     mocks.redisScanKeysBatch.mockResolvedValueOnce({ cursor: 0, keys, total_keys: keys.length });
     const host = mountBrowser();
     await settleThoroughly();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    await settleThoroughly();
-    expect(host.querySelector('[role="button"]')).not.toBeNull();
+    await vi.waitFor(() => expect(host.querySelector('[role="button"]')).not.toBeNull());
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       frames.push(callback);

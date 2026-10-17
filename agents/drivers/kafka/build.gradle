@@ -1,5 +1,5 @@
 dependencies {
-    implementation 'com.google.code.gson:gson:2.12.1'
+    implementation 'com.google.code.gson:gson:2.14.0'
     implementation 'org.apache.kafka:kafka-clients:3.9.2'
     implementation('org.apache.zookeeper:zookeeper:3.8.4') {
         exclude group: 'log4j', module: 'log4j'

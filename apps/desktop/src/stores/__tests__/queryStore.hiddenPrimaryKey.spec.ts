@@ -2063,6 +2063,7 @@ describe("queryStore hidden primary key editing", () => {
       columnIndex: 0,
       column: "name",
       direction: "asc",
+      tieBreakerColumnIndexes: [1],
     });
     expect(executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
     const tab = store.tabs.find((item) => item.id === tabId)!;
@@ -2674,6 +2675,35 @@ describe("queryStore hidden primary key editing", () => {
         tableName: "users",
         whereInput: undefined,
         countHint: expectedCountHint,
+      }),
+    );
+  });
+
+  it.each([
+    ["disabled by default", undefined, undefined],
+    ["explicitly enabled", { gaussdbCountQueryDop: 8 }, "/*+ set(query_dop 8) */"],
+  ])("passes the GaussDB query_dop hint to query-result count and page planning %s", async (_label, externalConfig, expectedHint) => {
+    getConnectionConfig.mockReturnValue({
+      id: "gaussdb-1",
+      name: "GaussDB",
+      db_type: "gaussdb",
+      database: "app",
+      query_timeout_secs: 30,
+      external_config: externalConfig,
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("gaussdb-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT id, name FROM users", {
+      pagination: { limit: 100, offset: 0 },
+    });
+
+    expect(prepareQueryPaginationExecutionPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        databaseType: "gaussdb",
+        queryBaseSql: "SELECT id, name FROM users",
+        executionHint: expectedHint,
       }),
     );
   });

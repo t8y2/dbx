@@ -35,15 +35,15 @@ description: DBX 常见问题：连接数据保存在哪里、如何备份、如
 
 ## Linux 窗口闪烁或内容消失
 
-Linux 主窗口默认使用不透明背景，避免部分 KDE、显卡驱动与 WebKitGTK 的透明窗口合成兼容问题。不会因此关闭 GPU 加速或改变 Wayland/X11 后端。
+在 GNOME 且系统已开启窗口合成时，Linux 主窗口会绘制带圆角、阴影的浮动边框；在其他桌面（KDE、XFCE、Cinnamon 等）默认使用不透明背景，避免部分显卡驱动与 WebKitGTK 的透明窗口合成兼容问题。两种模式都不会关闭 GPU 加速或改变 Wayland/X11 后端。
 
-如果确认当前环境支持透明窗口，可以显式启用带圆角、阴影的浮动边框：
+可以通过环境变量覆盖默认行为。在其他桌面强制启用浮动边框：
 
 ```bash
 DBX_LINUX_FLOATING_FRAME=1 dbx
 ```
 
-只有环境变量值为 `1` 且系统已开启窗口合成时才启用。若启用后出现闪烁、内容消失或必须缩放窗口才能重绘，请完全退出 DBX（包括托盘），移除该环境变量或使用 `DBX_LINUX_FLOATING_FRAME=0 dbx` 重新启动。AppImage 用户请将 `dbx` 替换为实际的 AppImage 文件路径。
+若在 GNOME 上出现闪烁、内容消失或必须缩放窗口才能重绘，请完全退出 DBX（包括托盘），并使用 `DBX_LINUX_FLOATING_FRAME=0 dbx` 重新启动以强制使用不透明窗口。没有窗口合成时始终不启用浮动边框。AppImage 用户请将 `dbx` 替换为实际的 AppImage 文件路径。
 
 如果默认的不透明窗口仍有问题，请在反馈中提供 DBX 版本、安装方式、KDE/Plasma 版本、Wayland/X11 会话类型、显卡及驱动信息，以及系统 WebKitGTK 版本。
 

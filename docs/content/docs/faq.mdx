@@ -35,15 +35,15 @@ description: Frequently asked questions about DBX, including where connection da
 
 ## Linux Window Flickering or Missing Content
 
-The Linux main window uses an opaque background by default to avoid transparent-window compositing compatibility problems with some KDE, graphics driver and WebKitGTK combinations. This does not disable GPU acceleration or change the Wayland/X11 backend.
+The Linux main window draws a rounded, shadowed floating frame on GNOME when a compositing manager is running. On other desktops (KDE, XFCE, Cinnamon, ...) it uses an opaque background by default to avoid transparent-window compositing problems with some graphics driver and WebKitGTK combinations. Neither mode disables GPU acceleration or changes the Wayland/X11 backend.
 
-If your environment supports transparent windows, you can explicitly enable the floating frame with rounded corners and a shadow:
+The default can be overridden with an environment variable. To force the floating frame on another desktop:
 
 ```bash
 DBX_LINUX_FLOATING_FRAME=1 dbx
 ```
 
-The frame is enabled only when the variable is exactly `1` and a compositing manager is available. If enabling it causes flickering, missing content or redraws only after resizing, quit DBX completely, including its tray process, and remove the variable or restart with `DBX_LINUX_FLOATING_FRAME=0 dbx`. For AppImage installations, replace `dbx` with the actual AppImage path.
+To force the opaque window on GNOME, for example if you see flickering, missing content or redraws only after resizing, quit DBX completely, including its tray process, and restart with `DBX_LINUX_FLOATING_FRAME=0 dbx`. The frame is never used without a compositing manager. For AppImage installations, replace `dbx` with the actual AppImage path.
 
 If the default opaque window still has problems, include the DBX version, installation format, KDE/Plasma version, Wayland/X11 session type, graphics hardware and driver details, and system WebKitGTK version in your report.
 

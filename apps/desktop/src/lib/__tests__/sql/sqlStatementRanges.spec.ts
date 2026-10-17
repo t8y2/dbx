@@ -723,6 +723,29 @@ SELECT f1 + f2 FROM dual;`;
     expect(hasMultipleExecutionTargets(argoProcedureFixture, "argo")).toBe(false);
     expect(rangeSqlTexts(executableStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
     expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "transwarp"))).toEqual([argoProcedureFixture]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "jdbc"))).toEqual([argoProcedureFixture]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "hive"))).toEqual([argoProcedureFixture]);
+  });
+
+  it("keeps procedure bodies together on JDBC and Hive connections (#12321)", () => {
+    const procedure = `CREATE OR REPLACE PROCEDURE pro_cbs_check_his(is_date IN VARCHAR(8))
+IS
+BEGIN
+    DELETE FROM transwarp.tmp_cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    INSERT INTO transwarp.tmp_cbs_t00_corp_cust_his
+    SELECT * FROM transwarp.cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    COMMIT;
+END;`;
+
+    for (const dbType of ["jdbc", "hive", "argo", "transwarp"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(procedure, dbType))).toEqual([procedure]);
+      expect(hasMultipleExecutionTargets(procedure, dbType)).toBe(false);
+      expect(rangeSqlTexts(executableStatementRanges(procedure, dbType))).toEqual([procedure]);
+    }
   });
 
   it("statement at cursor inside an ArgoDB procedure body returns the whole definition", () => {

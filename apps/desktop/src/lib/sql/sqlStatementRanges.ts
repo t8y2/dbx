@@ -295,8 +295,9 @@ const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 // Mirrors the backend list in dbx-core/src/sql.rs is_oracle_like_database — keep both
 // in sync. ArgoDB (Transwarp Hive/Inceptor fork) ships a PL/SQL-compatible procedure
 // language (`CREATE [OR REPLACE] PROCEDURE ... IS BEGIN ... END;`), so its statement
-// ranges must stay whole instead of splitting at every body semicolon.
-const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo", "transwarp"]);
+// ranges must stay whole instead of splitting at every body semicolon. Users also connect
+// to ArgoDB/Inceptor/Oracle/etc. via generic "jdbc" or "hive" drivers (#12321).
+const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo", "transwarp", "jdbc", "hive"]);
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
 // PostgreSQL/openGauss are also the connection types users pick for GaussDB/openGauss instances
 // running in Oracle (A) compatibility mode, where a routine body is written in Oracle style

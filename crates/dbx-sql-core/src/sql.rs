@@ -316,6 +316,14 @@ impl SqlDialectProfile {
             };
         }
 
+        if matches!(db_type, DatabaseType::Jdbc | DatabaseType::Hive) {
+            return Self {
+                supports_oracle_plsql_blocks: true,
+                supports_slash_line_block_delimiter: true,
+                ..Self::default()
+            };
+        }
+
         Self::default()
     }
 
@@ -5238,6 +5246,14 @@ SELECT 2;";
         assert_eq!(firebird, SqlDialectProfile::firebird());
         assert!(firebird.supports_firebird_routine_blocks);
         assert!(!firebird.supports_backslash_escaped_quotes);
+
+        for db_type in [DatabaseType::Jdbc, DatabaseType::Hive] {
+            let profile = SqlDialectProfile::for_database_type(db_type);
+            assert!(profile.supports_oracle_plsql_blocks);
+            assert!(!profile.supports_mysql_routine_blocks);
+            assert!(profile.supports_slash_line_block_delimiter);
+            assert!(profile.supports_backslash_escaped_quotes);
+        }
     }
 
     #[test]
@@ -5690,6 +5706,30 @@ END;";
 
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Argo), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Transwarp), vec![sql.to_string()]);
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Jdbc), vec![sql.to_string()]);
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Hive), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn jdbc_and_hive_keep_procedure_statement_ranges_intact() {
+        let sql = "\
+CREATE OR REPLACE PROCEDURE pro_cbs_check_his(is_date IN VARCHAR(8))
+IS
+BEGIN
+    DELETE FROM transwarp.tmp_cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    INSERT INTO transwarp.tmp_cbs_t00_corp_cust_his
+    SELECT * FROM transwarp.cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    COMMIT;
+END;";
+
+        for db_type in [DatabaseType::Jdbc, DatabaseType::Hive, DatabaseType::Argo, DatabaseType::Transwarp] {
+            let statements = split_sql_statements_for_database(sql, db_type);
+            assert_eq!(statements, vec![sql.to_string()], "failed for {db_type:?}");
+        }
     }
 
     #[test]

@@ -197,7 +197,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(deleteRow)">
       <TooltipTrigger as-child>
-        <Button data-toolbar-action="deleteRow" variant="ghost" size="sm" :class="actionButtonClass('deleteRow')" :disabled="isDataGridToolbarCapabilityDisabled(deleteRow)" @click="void triggerDataGridToolbarAction(deleteRow)">
+        <Button data-toolbar-action="deleteRow" variant="ghost" size="sm" :class="[...actionButtonClass('deleteRow'), 'text-destructive hover:bg-destructive/10 hover:text-destructive']" :disabled="isDataGridToolbarCapabilityDisabled(deleteRow)" @click="void triggerDataGridToolbarAction(deleteRow)">
           <Trash2 class="data-grid-topbar-action-icon h-3 w-3" />
           <span class="data-grid-topbar-action-label" :class="actionLabelClass('deleteRow')">{{ deleteRow?.label }}</span>
         </Button>

@@ -1,10 +1,12 @@
 export function buildSelectedTablesPayload(allTables: string[], selectedTables: string[]): string[] | undefined {
-  if (allTables.length > 0 && selectedTables.length === allTables.length) {
+  if (allTables.length > 0 && selectedTables.length === allTables.length && allTables.every((t, i) => selectedTables[i] === t)) {
     return undefined;
   }
 
   const selected = new Set(selectedTables);
-  return allTables.filter((table) => selected.has(table));
+  const filtered = allTables.filter((table) => selected.has(table));
+  const nonTables = selectedTables.filter((name) => !allTables.includes(name));
+  return [...filtered, ...nonTables];
 }
 
 export function isDatabaseExportTableSelectionValid(options: { allTableCount: number; selectedTableCount: number; includeStructure: boolean; includeData: boolean }): boolean {

@@ -265,10 +265,18 @@ fn exports_mysql_trigger_objects(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql)
 }
 
-/// Oracle writes each table's triggers into its table DDL (see `loadTableTriggerDDLs` in
-/// `agents/drivers/oracle-go`), so a trigger that reads `seq.NEXTVAL` reaches the script
-/// whenever structure is exported. The standalone sequences it depends on are written
-/// before the tables of a whole-schema structure export so the script replays (#11673).
+/// Standalone sequences (Oracle, Kingbase, Vastbase) are exported before tables so the DDL
+/// and default expressions replay properly.
+fn exports_standalone_sequence_objects(request: &DatabaseExportRequest, db_type: DatabaseType) -> bool {
+    if !matches!(db_type, DatabaseType::Oracle | DatabaseType::Kingbase | DatabaseType::Vastbase) {
+        return false;
+    }
+    if request.include_objects {
+        return true;
+    }
+    exports_oracle_sequence_objects(request, db_type)
+}
+
 fn exports_oracle_sequence_objects(request: &DatabaseExportRequest, db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Oracle) && request.include_structure && request.selected_tables.is_empty()
 }
@@ -4131,12 +4139,25 @@ async fn export_database_sql_core_inner(
     } else {
         Vec::new()
     };
-    let all_tables = filter_export_table_infos(all_tables, &request.selected_tables, &request.excluded_tables)
+    let all_tables = filter_export_table_infos(all_tables, &[], &request.excluded_tables)
         .into_iter()
         .filter(|table| !postgres_extension_members.relation_names.contains(&table.name))
         .collect::<Vec<_>>();
-    let mut tables: Vec<_> = all_tables.iter().filter(|t| !t.table_type.contains("VIEW")).collect();
-    let mut views: Vec<_> = all_tables.iter().filter(|t| t.table_type.contains("VIEW")).collect();
+    let mut tables: Vec<_> = all_tables
+        .iter()
+        .filter(|t| !t.table_type.contains("VIEW"))
+        .filter(|t| request.selected_tables.is_empty() || request.selected_tables.contains(&t.name))
+        .collect();
+    let mut views: Vec<_> = all_tables
+        .iter()
+        .filter(|t| t.table_type.contains("VIEW"))
+        .filter(|t| {
+            if !request.include_objects {
+                return false;
+            }
+            request.selected_tables.is_empty() || request.selected_tables.contains(&t.name)
+        })
+        .collect();
     if request.include_objects && db_type == DatabaseType::Mysql && views.len() > 1 {
         match list_mysql_export_view_dependencies(state, &request.connection_id, &request.database, &client_session_id)
             .await
@@ -4214,11 +4235,11 @@ async fn export_database_sql_core_inner(
     let mut functions: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut triggers: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut events: Vec<crate::types::ObjectInfo> = Vec::new();
-    let mut oracle_sequences: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut standalone_sequences: Vec<crate::types::ObjectInfo> = Vec::new();
     let collects_schema_wide_objects = exports_schema_wide_objects(request);
-    let collects_oracle_sequences = exports_oracle_sequence_objects(request, db_type);
+    let collects_standalone_sequences = exports_standalone_sequence_objects(request, db_type);
 
-    if collects_schema_wide_objects || collects_oracle_sequences {
+    if collects_schema_wide_objects || collects_standalone_sequences {
         match crate::schema::list_objects_core(
             state,
             &request.connection_id,
@@ -4239,8 +4260,8 @@ async fn export_database_sql_core_inner(
                         continue;
                     }
                     if ot == "SEQUENCE" {
-                        if collects_oracle_sequences && !is_oracle_identity_sequence(&obj.name) {
-                            oracle_sequences.push(obj.clone());
+                        if collects_standalone_sequences && !is_oracle_identity_sequence(&obj.name) {
+                            standalone_sequences.push(obj.clone());
                         }
                         continue;
                     }
@@ -4263,6 +4284,12 @@ async fn export_database_sql_core_inner(
         }
     }
 
+    if !request.selected_tables.is_empty() {
+        standalone_sequences.retain(|s| request.selected_tables.contains(&s.name));
+        procedures.retain(|p| request.selected_tables.contains(&p.name));
+        functions.retain(|f| request.selected_tables.contains(&f.name));
+    }
+
     // A determinate total must describe the same object categories guarded by
     // the execution branches below, not every object discovered in the schema.
     let total_objects = database_export_total_objects(
@@ -4271,7 +4298,7 @@ async fn export_database_sql_core_inner(
             tables: tables.len(),
             views: views.len(),
             sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count()
-                + oracle_sequences.len(),
+                + standalone_sequences.len(),
             extensions: postgres_extensions.len(),
             enums: postgres_enums.len(),
             procedures: procedures.len(),
@@ -4477,7 +4504,7 @@ async fn export_database_sql_core_inner(
         object_index += 1;
     }
 
-    for sequence in &oracle_sequences {
+    for sequence in &standalone_sequences {
         if is_export_cancelled(&request.export_id).await {
             return Err("Export cancelled".to_string());
         }
@@ -5233,6 +5260,21 @@ fn build_database_export_object_source_sql(
     source: &str,
     drop_if_exists: bool,
 ) -> String {
+    let wrapped_source;
+    let source = if matches!(object_type, ObjectSourceKind::View | ObjectSourceKind::MaterializedView)
+        && !source.trim().to_ascii_uppercase().starts_with("CREATE")
+    {
+        wrapped_source = crate::object_source_sql::build_view_ddl_sql(crate::object_source_sql::BuildViewDdlInput {
+            database_type: Some(database_type),
+            schema: None,
+            name: object_name.to_string(),
+            source: source.to_string(),
+            identifier_quote: None,
+        });
+        &wrapped_source
+    } else {
+        source
+    };
     let source = build_export_object_source_sql(database_type, object_type.clone(), source);
     // 非 MySQL 系没有这种 definer 语法；且 strip_mysql_definer 对不含该片段的 DDL 是空操作，
     // 所以放宽到整个 MySQL 系是安全的，能顺带覆盖 Doris/StarRocks 等同族方言。
@@ -5670,6 +5712,52 @@ mod tests {
         assert!(is_oracle_identity_sequence("ISEQ$$_115126"));
         assert!(!is_oracle_identity_sequence("ORDER_SEQ"));
         assert!(!is_oracle_identity_sequence("iseq$$_custom"));
+    }
+
+    #[test]
+    fn standalone_sequences_are_exported_for_oracle_kingbase_vastbase() {
+        use super::exports_standalone_sequence_objects;
+
+        let cases = [
+            ("kingbase include objects", DatabaseType::Kingbase, export_request(false, false, true, Vec::new()), true),
+            ("kingbase structure only", DatabaseType::Kingbase, export_request(true, false, false, Vec::new()), false),
+            ("vastbase include objects", DatabaseType::Vastbase, export_request(false, false, true, Vec::new()), true),
+            ("oracle include objects", DatabaseType::Oracle, export_request(false, false, true, Vec::new()), true),
+            ("oracle structure only", DatabaseType::Oracle, export_request(true, false, false, Vec::new()), true),
+            ("postgres include objects", DatabaseType::Postgres, export_request(false, false, true, Vec::new()), false),
+            ("mysql include objects", DatabaseType::Mysql, export_request(false, false, true, Vec::new()), false),
+        ];
+        for (name, db_type, request, expected) in cases {
+            assert_eq!(exports_standalone_sequence_objects(&request, db_type), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn kingbase_view_definition_without_create_is_wrapped() {
+        let view_def = "SELECT id, name FROM public.users WHERE active = true";
+        let ddl = build_database_export_object_source_sql(
+            DatabaseType::Kingbase,
+            &ObjectSourceKind::View,
+            "v_active_users",
+            view_def,
+            false,
+        );
+        assert!(ddl.starts_with(
+            "CREATE OR REPLACE VIEW \"v_active_users\" AS\nSELECT id, name FROM public.users WHERE active = true;"
+        ));
+    }
+
+    #[test]
+    fn kingbase_view_definition_with_create_is_not_double_wrapped() {
+        let view_def = "CREATE VIEW \"v_users\" AS SELECT id FROM public.users;";
+        let ddl = build_database_export_object_source_sql(
+            DatabaseType::Kingbase,
+            &ObjectSourceKind::View,
+            "v_users",
+            view_def,
+            false,
+        );
+        assert_eq!(ddl, "CREATE VIEW \"v_users\" AS SELECT id FROM public.users;");
     }
 
     #[test]

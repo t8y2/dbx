@@ -327,7 +327,12 @@ async function loadTables(preferredTable = "", preferredTables: string[] = []) {
     const names = sortDatabaseTableNames(tableInfos.map((table) => table.name));
     tables.value = names;
     const preferredSet = new Set(preferredTables.filter((name) => names.includes(name)));
-    selectedTables.value = preferredSet.size > 0 ? names.filter((name) => preferredSet.has(name)) : preferredTable && names.includes(preferredTable) ? [preferredTable] : [...names];
+    const nonTablePrefills = preferredTables.filter((name) => !names.includes(name));
+    if (nonTablePrefills.length > 0) {
+      includeObjects.value = true;
+    }
+    const matchedTableNames = names.filter((name) => preferredSet.has(name));
+    selectedTables.value = preferredSet.size > 0 || nonTablePrefills.length > 0 ? [...matchedTableNames, ...nonTablePrefills] : preferredTable && names.includes(preferredTable) ? [preferredTable] : [...names];
   } catch (e: any) {
     tableError.value = e?.message || String(e);
   } finally {

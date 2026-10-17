@@ -1,0 +1,187 @@
+name: Win7 dbx library profile
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/win7-dbx-lib-profile.yml
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
+      SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
+      SCCACHE_IDLE_TIMEOUT: "0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.34.7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust for Windows 7
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare Win7-compatible WebView2 loader
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
+
+      - name: Prepare WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Warm Rust dependencies
+        shell: pwsh
+        run: |
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+          cargo -Z host-config -Z target-applies-to-host -Z build-std=std,panic_abort `
+            --config .github/fixtures/win7-host-repro-config.toml `
+            build --locked --package dbx --lib --release --features custom-protocol `
+            --target x86_64-win7-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Measure dbx library without profiling
+        shell: pwsh
+        run: |
+          $env:RUSTC_WRAPPER = ""
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+          cargo clean --package dbx --release --target x86_64-win7-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          cargo -Z host-config -Z target-applies-to-host -Z build-std=std,panic_abort `
+            --config .github/fixtures/win7-host-repro-config.toml `
+            rustc --locked --package dbx --lib --release --features custom-protocol `
+            --target x86_64-win7-windows-msvc --timings
+          $exitCode = $LASTEXITCODE
+          $timer.Stop()
+          if ($exitCode -ne 0) { exit $exitCode }
+          $seconds = [math]::Round($timer.Elapsed.TotalSeconds, 2)
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "dbx-lib-baseline-seconds.txt") -Value $seconds
+          "dbx_lib baseline: $seconds seconds" | Write-Host
+
+      - name: Measure dbx library with Self Profile
+        shell: pwsh
+        run: |
+          $env:RUSTC_WRAPPER = ""
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+          $profileDir = Join-Path $env:RUNNER_TEMP "dbx-lib-self-profile"
+          New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+          cargo clean --package dbx --release --target x86_64-win7-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          cargo -Z host-config -Z target-applies-to-host -Z build-std=std,panic_abort `
+            --config .github/fixtures/win7-host-repro-config.toml `
+            rustc --locked --package dbx --lib --release --features custom-protocol `
+            --target x86_64-win7-windows-msvc --timings `
+            -- "-Zself-profile=$profileDir"
+          $exitCode = $LASTEXITCODE
+          $timer.Stop()
+          if ($exitCode -ne 0) { exit $exitCode }
+          $profileFiles = @(Get-ChildItem -LiteralPath $profileDir -File)
+          if ($profileFiles.Count -eq 0) { throw "rustc did not write Self Profile data." }
+          $seconds = [math]::Round($timer.Elapsed.TotalSeconds, 2)
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "dbx-lib-profile-seconds.txt") -Value $seconds
+          "dbx_lib Self Profile: $seconds seconds" | Write-Host
+
+      - name: Summarize Self Profile
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $profileDir = Join-Path $env:RUNNER_TEMP "dbx-lib-self-profile"
+          $installRoot = Join-Path $env:RUNNER_TEMP "measureme"
+          cargo install --git https://github.com/rust-lang/measureme --branch stable `
+            --locked --root $installRoot summarize
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $profile = Get-ChildItem -LiteralPath $profileDir -File -Filter "dbx_lib-*.mm_profdata" |
+            Select-Object -First 1
+          if (!$profile) { throw "dbx_lib Self Profile data is missing." }
+          $summaryPath = Join-Path $profileDir "summary.txt"
+          & (Join-Path $installRoot "bin/summarize.exe") summarize $profile.FullName |
+            Tee-Object -FilePath $summaryPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Report measurements
+        if: always()
+        shell: pwsh
+        run: |
+          $baselinePath = Join-Path $env:RUNNER_TEMP "dbx-lib-baseline-seconds.txt"
+          $profilePath = Join-Path $env:RUNNER_TEMP "dbx-lib-profile-seconds.txt"
+          $baseline = if (Test-Path $baselinePath) { Get-Content $baselinePath -Raw } else { "failed" }
+          $profile = if (Test-Path $profilePath) { Get-Content $profilePath -Raw } else { "failed" }
+          @(
+            "### Win7 dbx_lib compile"
+            ""
+            "| Run | Elapsed seconds |"
+            "| --- | ---: |"
+            "| Baseline | $($baseline.Trim()) |"
+            "| Self Profile | $($profile.Trim()) |"
+            ""
+            "Both runs use the Win7 CI release profile. Both runs disable sccache and clean dbx before compilation."
+            "Cargo timings and raw Self Profile data are in the workflow artifacts."
+            "The summarize tool reports CPU time. Parallel events can overlap in wall time."
+          ) | Add-Content $env:GITHUB_STEP_SUMMARY
+          rustc -vV | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "dbx-lib-rustc-version.txt")
+
+      - name: Upload Self Profile data
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: DBX-win7-dbx-lib-self-profile
+          path: |
+            ${{ runner.temp }}/dbx-lib-self-profile/
+            ${{ runner.temp }}/dbx-lib-*-seconds.txt
+            ${{ runner.temp }}/dbx-lib-rustc-version.txt
+            target/cargo-timings/
+          if-no-files-found: warn
+          retention-days: 3

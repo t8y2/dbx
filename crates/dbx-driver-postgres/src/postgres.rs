@@ -10279,12 +10279,7 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
         .iter()
         .map(|row| {
             let def: String = pg_row_try_string(row, 3);
-            // Remove schema qualification from CREATE FUNCTION statement
-            // to avoid false differences when comparing across schemas.
-            // Handle both "schema.name" and schema.name formats.
-            let normalized_def = def
-                .replace(&format!("CREATE OR REPLACE FUNCTION \"{}\".", schema), "CREATE OR REPLACE FUNCTION ")
-                .replace(&format!("CREATE OR REPLACE FUNCTION {}.", schema), "CREATE OR REPLACE FUNCTION ");
+            let normalized_def = strip_routine_schema_qualifier(&def, schema);
             FunctionInfo {
                 name: pg_row_try_string(row, 0),
                 function_type: pg_row_try_string(row, 1),
@@ -10294,6 +10289,20 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
             }
         })
         .collect())
+}
+
+/// Remove the schema qualification that `pg_get_functiondef` puts on the routine
+/// name, so routines in differently named schemas compare equal.
+fn strip_routine_schema_qualifier(definition: &str, schema: &str) -> String {
+    let quoted_schema = pg_quote_ident(schema);
+    for kind in ["FUNCTION", "PROCEDURE"] {
+        for qualifier in [quoted_schema.as_str(), schema] {
+            if let Some(rest) = definition.strip_prefix(&format!("CREATE OR REPLACE {kind} {qualifier}.")) {
+                return format!("CREATE OR REPLACE {kind} {rest}");
+            }
+        }
+    }
+    definition.to_string()
 }
 
 fn postgres_sequences_sql() -> &'static str {
@@ -17022,6 +17031,25 @@ mod tests {
         config.hostaddr("127.0.0.1".parse().unwrap());
         let pinned = pin_postgres_hostaddr(&config).await;
         assert_eq!(pinned.get_hostaddrs().first(), Some(&"127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn routine_definitions_drop_their_schema_qualifier() {
+        let body = "(IN a integer)\n LANGUAGE plpgsql\nAS $procedure$ BEGIN NULL; END $procedure$\n";
+        assert_eq!(
+            strip_routine_schema_qualifier(&format!("CREATE OR REPLACE PROCEDURE cux_test.p1{body}"), "cux_test"),
+            format!("CREATE OR REPLACE PROCEDURE p1{body}")
+        );
+        assert_eq!(
+            strip_routine_schema_qualifier(&format!("CREATE OR REPLACE PROCEDURE \"AB_TEST\".p1{body}"), "AB_TEST"),
+            format!("CREATE OR REPLACE PROCEDURE p1{body}")
+        );
+        assert_eq!(
+            strip_routine_schema_qualifier("CREATE OR REPLACE FUNCTION \"a\"\"b\".f1() RETURNS integer", "a\"b"),
+            "CREATE OR REPLACE FUNCTION f1() RETURNS integer"
+        );
+        let other_schema = format!("CREATE OR REPLACE PROCEDURE other.p1{body}");
+        assert_eq!(strip_routine_schema_qualifier(&other_schema, "cux"), other_schema);
     }
 }
 

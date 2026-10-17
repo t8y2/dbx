@@ -5,6 +5,12 @@ description: Write, understand, parameterize, execute, analyze, and reuse SQL in
 
 The query editor is the SQL workspace in DBX. It combines dialect-aware highlighting and completion, semantic diagnostics, parameter input, execution progress, multiple results, execution plans, query history, the SQL library, and AI assistance in one tab.
 
+## Global file search preview
+
+In the desktop app, global file content search previews the selected file below the results. Use the up and down arrow keys or hover to select a result. The preview shows its path and line numbers and scrolls to the highlighted match. Use the toolbar copy button to copy selected text, or the whole file when nothing is selected. Click a result or press Enter to open the file. While focused in the read-only preview, the arrow keys still navigate results, Enter opens the selected result, and Escape closes the search dialog. Filename-only matches preview the beginning of the file. Empty files and read failures show an appropriate message.
+
+Use the preview toolbar edit button to change the file in place, including empty files. While editing, Enter and arrow keys edit text, and undo and redo are available. Click Save or press `Mod+S` to write the file; Cancel discards the current edits. The preview stays on the same file until you save or cancel, with searching, opening other results, and closing the dialog temporarily unavailable. Saving preserves the detected encoding and line endings. If another program has modified or deleted the file, or saving fails, DBX keeps your draft and shows an error without automatically overwriting external changes.
+
 ## Vim configuration
 
 In the desktop app, enable Vim mode in **Editor Settings** to load commands from `~/.dbx/vimrc`. Create the file if needed, then restart DBX after editing it. Blank lines and lines beginning with `"` are ignored. Commands supported by CodeMirror Vim, such as these mappings, apply to every SQL editor tab:
@@ -197,6 +203,8 @@ Query history stores executed SQL per connection with time and context. You can:
 | Query tabs | Temporary analysis and unfinished drafts | Settings can restore all tabs, pinned tabs only, or none |
 
 The save dialog can search or create folders. Quick Open indexes both SQL Library entries and SQL Files.
+
+On Desktop, the **Locate current file** button in the SQL Files panel expands parent directories, selects the current file, and scrolls it into view. If its directory is not open yet, it is added to the file tree first. Unsaved queries cannot be located. File filters remain in effect; hidden or missing files show a notification.
 
 ## Safety and Boundaries
 

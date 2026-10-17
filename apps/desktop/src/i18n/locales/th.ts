@@ -3570,6 +3570,10 @@ export default withEnglishFallback({
     inputPlaceholder: "YYYY-MM-DD HH:mm:ss",
   },
   quickOpen: {
+    finishEditing: "บันทึกหรือยกเลิกการแก้ไขตัวอย่างก่อนค้นหาต่อหรือปิด",
+    filePreview: "ตัวอย่างไฟล์",
+    previewFailed: "ไม่สามารถแสดงตัวอย่างไฟล์นี้ได้ เปิดไฟล์เพื่อดูเนื้อหา",
+    previewEmpty: "ไฟล์นี้ว่างเปล่า",
     placeholder: "ค้นหาการเชื่อมต่อ ฐานข้อมูล ตาราง ไฟล์ SQL และออบเจ็กต์อื่น...",
     emptyPlaceholder: "เริ่มพิมพ์เพื่อค้นหา",
     noResults: "ไม่พบผลลัพธ์",
@@ -8839,6 +8843,8 @@ export default withEnglishFallback({
     totalFiles: "ไฟล์ {count} ไฟล์",
   },
   sqlFileTree: {
+    locateActiveFile: "ค้นหาตำแหน่งไฟล์ปัจจุบัน",
+    activeFileNotFound: "ไม่พบไฟล์ปัจจุบัน ตรวจสอบว่าไฟล์มีอยู่หรือถูกซ่อนโดยตัวกรองไฟล์หรือไม่",
     title: "ไฟล์ SQL",
     folderNameInvalid: "ป้อนชื่อโฟลเดอร์เดียว ไม่ใช่เส้นทาง",
     folderNameExcluded: "ชื่อโฟลเดอร์นี้ถูกยกเว้นจากตัวเรียกดูไฟล์ SQL",

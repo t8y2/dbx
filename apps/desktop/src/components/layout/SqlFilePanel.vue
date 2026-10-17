@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, FolderClosed, FileCode, FolderPlus, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil, LocateFixed } from "@lucide/vue";
+import { FolderOpen, FolderClosed, FileCode, FolderPlus, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";
+import SidebarLocateButton from "@/components/sidebar/SidebarLocateButton.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -42,6 +43,12 @@ interface FolderState {
 }
 
 const folders = ref<FolderState[]>([]);
+const fileTree = ref<HTMLElement | null>(null);
+const locatingFile = ref(false);
+const currentFilePath = computed(() => {
+  const tab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+  return tab?.mode === "query" ? tab.externalSqlPath : undefined;
+});
 const filterSettingsOpen = ref(false);
 const fileFilterDraft = ref(getSqlFileFilter());
 const fileFilterRegexExample = "(?i)[.](sql|ddl|sh|py)$";
@@ -69,7 +76,6 @@ const showDeleteFolderDialog = ref(false);
 const selectedPaths = ref<Set<string>>(new Set());
 const activePath = ref<string | null>(null);
 const selectionAnchorIndex = ref<number | null>(null);
-const fileTree = ref<HTMLElement | null>(null);
 
 function findFileAncestors(entries: SqlFileEntry[], path: string): string[] | null {
   for (const entry of entries) {
@@ -159,7 +165,40 @@ async function addFolder(folderPath: string) {
   };
   folders.value.push(folder);
   saveFolders();
-  await loadFolderEntries(folderPath);
+  return loadFolderEntries(folderPath);
+}
+
+async function locateCurrentFile() {
+  const path = currentFilePath.value;
+  if (!path || locatingFile.value) return;
+  if (activeFileTarget.value) {
+    await locateActiveFile();
+    return;
+  }
+  if (!isTauriRuntime()) {
+    toast(t("sqlFileTree.desktopOnly"), 3000);
+    return;
+  }
+  locatingFile.value = true;
+  try {
+    const normalizedPath = normalizeExternalSqlPath(path);
+    const folder = folders.value.find((folder) => normalizedPath.startsWith(`${normalizeExternalSqlPath(folder.path).replace(/\/$/, "")}/`));
+    if (folder) {
+      if (await loadFolderEntries(folder.path)) return;
+    } else {
+      const slashedPath = path.replace(/\\/g, "/");
+      const parentPath = slashedPath.slice(0, slashedPath.lastIndexOf("/") + 1);
+      if (!parentPath) return;
+      if (await addFolder(parentPath)) return;
+    }
+    if (!activeFileTarget.value) {
+      toast(t("sqlFileTree.activeFileNotFound"), 5000);
+      return;
+    }
+    await locateActiveFile();
+  } finally {
+    locatingFile.value = false;
+  }
 }
 
 // Re-scan a single top-level folder and replace its entries. Mutated via the
@@ -742,10 +781,8 @@ function clearContextTarget() {
         {{ t("sqlFileTree.storageHelp") }}
       </HelpTooltip>
       <span class="flex-1" />
-      <LightTooltip :text="t('sidebar.locateActiveTab')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <Button variant="ghost" size="icon" class="h-5 w-5" :aria-label="t('sidebar.locateActiveTab')" :disabled="!activeFileTarget" @click="locateActiveFile">
-          <LocateFixed class="h-3 w-3" />
-        </Button>
+      <LightTooltip :text="t('sqlFileTree.locateActiveFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentFilePath || locatingFile || folders.some((folder) => folder.loading)" @locate="locateCurrentFile" />
       </LightTooltip>
       <LightTooltip :text="t('sqlFileTree.filterSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button
@@ -856,6 +893,7 @@ function clearContextTarget() {
                     v-for="{ entry, depth } in flatTree(folder.entries, folder.expanded)"
                     :key="entry.path"
                     :data-sql-file-path="entry.path"
+                    :aria-current="activePath === entry.path ? 'true' : undefined"
                     class="flex cursor-default select-none items-center gap-1 px-2 py-1 text-sm"
                     :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', isPathHighlighted(entry.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40']"
                     :style="{ paddingLeft: depth * 16 + 8 + 'px' }"

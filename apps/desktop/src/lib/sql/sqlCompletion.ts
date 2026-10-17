@@ -1903,7 +1903,7 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions && context.suggestJoinConditions) {
-      this.items.push(...buildJoinConditionItems(context, this.columnsByTable, this.input.foreignKeysByTable, this.dialect, this.input.keywordCase));
+      this.items.push(...buildJoinConditionItems(context, this.columnsByTable, this.input.foreignKeysByTable, this.dialect, this.input.keywordCase, this.input.currentSchema));
     }
 
     if (context.suggestKeywords && !context.exclusiveRoutineSuggestions && !pendingJoinKeyword) {
@@ -5820,7 +5820,7 @@ function buildColumnInfo(column: SqlCompletionColumn): string | undefined {
   return [title, ...details].join("\n");
 }
 
-function buildJoinConditionItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>, dialect?: SqlCompletionApplyDialect, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
+function buildJoinConditionItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>, dialect?: SqlCompletionApplyDialect, keywordCase?: SqlKeywordCase, currentSchema?: string): SqlCompletionItem[] {
   const refs = context.referencedTables;
   if (refs.length < 2) return [];
 
@@ -5829,9 +5829,9 @@ function buildJoinConditionItems(context: SqlCompletionContext, columnsByTable: 
   const items: SqlCompletionItem[] = [];
 
   for (const previous of previousRefs) {
-    const previousColumns = columnsForReferencedTable(previous, columnsByTable);
-    const latestColumns = columnsForReferencedTable(latest, columnsByTable);
-    items.push(...buildForeignKeyJoinConditionItemsForPair(previous, latest, foreignKeysByTable, context.prefix, dialect, keywordCase), ...buildJoinConditionItemsForPair(previous, previousColumns, latest, latestColumns, context.prefix, dialect, keywordCase));
+    const previousColumns = columnsForReferencedTable(previous, columnsByTable, currentSchema);
+    const latestColumns = columnsForReferencedTable(latest, columnsByTable, currentSchema);
+    items.push(...buildForeignKeyJoinConditionItemsForPair(previous, latest, foreignKeysByTable, context.prefix, dialect, keywordCase, currentSchema), ...buildJoinConditionItemsForPair(previous, previousColumns, latest, latestColumns, context.prefix, dialect, keywordCase));
   }
 
   return items;
@@ -5854,34 +5854,73 @@ export function matchesOceanBaseCompletionCacheKey(key: string, table: Completio
   return currentSchema === undefined ? key.startsWith(oceanBaseCompletionReferenceKey(table)) : key === oceanBaseCompletionCacheKey(table, currentSchema);
 }
 
-function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsByTable: Map<string, SqlCompletionColumn[]>): SqlCompletionColumn[] {
+function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsByTable: Map<string, SqlCompletionColumn[]>, currentSchema?: string): SqlCompletionColumn[] {
   const scopedColumns = [...columnsByTable].filter(([key]) => matchesOceanBaseCompletionCacheKey(key, table));
   if (scopedColumns.length > 0) return scopedColumns.length === 1 ? applyReferencedColumnAliases(table, scopedColumns[0]![1]) : [];
-  const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name];
-  for (const key of keys) {
+  for (const key of referencedTableMetadataKeys(table, currentSchema)) {
     const columns = columnsByTable.get(key);
     if (columns) return applyReferencedColumnAliases(table, columns);
   }
-  return [];
+  const columns = lookupUnambiguousTableMetadata(table, columnsByTable);
+  return columns ? applyReferencedColumnAliases(table, columns) : [];
 }
 
-function foreignKeysForReferencedTable(table: SqlCompletionReferencedTable, foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>): SqlCompletionForeignKey[] {
+function foreignKeysForReferencedTable(table: SqlCompletionReferencedTable, foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>, currentSchema?: string): SqlCompletionForeignKey[] {
   if (!foreignKeysByTable) return [];
   const scopedKeys = [...foreignKeysByTable].filter(([key]) => matchesOceanBaseCompletionCacheKey(key, table));
   if (scopedKeys.length > 0) return scopedKeys.length === 1 ? scopedKeys[0]![1] : [];
-  const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name];
-  for (const key of keys) {
+  for (const key of referencedTableMetadataKeys(table, currentSchema)) {
     const foreignKeys = foreignKeysByTable.get(key);
     if (foreignKeys) return foreignKeys;
   }
-  return [];
+  return lookupUnambiguousTableMetadata(table, foreignKeysByTable) ?? [];
 }
 
-function buildForeignKeyJoinConditionItemsForPair(left: SqlCompletionReferencedTable, right: SqlCompletionReferencedTable, foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>, prefix = "", dialect?: SqlCompletionApplyDialect, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
+// The editor keys metadata as `[database.]schema.table` and fills a schema the query left out from
+// the editor scope, so an unqualified `users` is cached as `public.users`. Resolve it the way the
+// database would: the current schema first, before falling back to the bare name.
+function referencedTableMetadataKeys(table: SqlCompletionReferencedTable, currentSchema?: string): string[] {
+  const schema = table.schema ?? currentSchema;
+  if (!schema) return [table.name];
+  const keys = [table.database ? `${table.database}.${schema}.${table.name}` : undefined, `${schema}.${table.name}`, table.name];
+  return keys.filter((key): key is string => !!key);
+}
+
+// Last resort when the cache scope schema is not the current schema: match by table name only while
+// it is unambiguous, so same-named tables in two schemas never lend each other columns or foreign keys.
+function lookupUnambiguousTableMetadata<T>(table: SqlCompletionReferencedTable, metadataByTable: Map<string, T>): T | undefined {
+  const targetName = normalizeTableName(table.name);
+  const tableSchema = table.schema ? normalizeIdentifierPart(table.schema) : undefined;
+  let match: T | undefined;
+  let matchSchema: string | undefined;
+  for (const [key, value] of metadataByTable.entries()) {
+    const owner = foreignKeyOwnerFromKey(key);
+    if (normalizeIdentifierPart(owner.name) !== targetName) continue;
+    const ownerSchema = owner.schema ? normalizeIdentifierPart(owner.schema) : undefined;
+    if (tableSchema && ownerSchema && ownerSchema !== tableSchema) continue;
+    if (match === undefined) {
+      match = value;
+      matchSchema = ownerSchema;
+    } else if (ownerSchema !== matchSchema) {
+      return undefined;
+    }
+  }
+  return match;
+}
+
+function buildForeignKeyJoinConditionItemsForPair(
+  left: SqlCompletionReferencedTable,
+  right: SqlCompletionReferencedTable,
+  foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>,
+  prefix = "",
+  dialect?: SqlCompletionApplyDialect,
+  keywordCase?: SqlKeywordCase,
+  currentSchema?: string,
+): SqlCompletionItem[] {
   if (!foreignKeysByTable) return [];
   return [
-    ...buildDirectionalForeignKeyJoinConditionItems(left, right, foreignKeysForReferencedTable(left, foreignKeysByTable), prefix, dialect, keywordCase),
-    ...buildDirectionalForeignKeyJoinConditionItems(right, left, foreignKeysForReferencedTable(right, foreignKeysByTable), prefix, dialect, keywordCase),
+    ...buildDirectionalForeignKeyJoinConditionItems(left, right, foreignKeysForReferencedTable(left, foreignKeysByTable, currentSchema), prefix, dialect, keywordCase),
+    ...buildDirectionalForeignKeyJoinConditionItems(right, left, foreignKeysForReferencedTable(right, foreignKeysByTable, currentSchema), prefix, dialect, keywordCase),
   ];
 }
 

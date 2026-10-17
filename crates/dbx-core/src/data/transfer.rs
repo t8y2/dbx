@@ -5373,6 +5373,229 @@ fn strip_dameng_storage_clauses(sql: &str) -> String {
     })
 }
 
+/// Table storage options openGauss's `pg_get_tabledef()` appends but PostgreSQL and the
+/// other PG-compatible targets do not accept (#9037). The values are openGauss-specific
+/// as well — `compression` takes `no|low|middle|high` where PostgreSQL takes
+/// `pglz|lz4|none` — so the whole option goes, not just an unrecognized value. Kept as a
+/// deny-list: every other option in the clause (`fillfactor`, `parallel_workers`,
+/// `autovacuum_*`, `toast.*`, ...) is a PostgreSQL table reloption and must survive
+/// verbatim.
+///
+/// PostgreSQL 16.15 rejects every one of these names as a table storage parameter
+/// (`unrecognized parameter`, or `syntax error at or near "row"` for `orientation`), so
+/// dropping them cannot remove a working option from a PG target. The column-store tail
+/// (`segment` onwards) is listed from openGauss's reloption set even where this fix could
+/// not observe openGauss emit it — PostgreSQL has no reloption by any of these names, so
+/// stripping them is safe either way.
+const OPENGAUSS_ONLY_TABLE_STORAGE_OPTIONS: &[&str] = &[
+    "orientation",
+    "compression",
+    "storage_type",
+    "segment",
+    "version",
+    "max_batchrow",
+    "partial_cluster_rows",
+    "enable_delta_store",
+    "compress_level",
+    "compress_chunk_size",
+    "compress_prealloc_chunks",
+    "compress_chunk_threshold",
+];
+
+/// Whether a reused source DDL came from openGauss's `pg_get_tabledef()`. A plain
+/// PostgreSQL connection profiled as openGauss/GaussDB reads its table DDL through that
+/// same function (`schema::opengauss_table_ddl`), so the profile counts exactly like the
+/// database type — the same grouping `is_opengauss_family_config` uses.
+fn source_ddl_carries_opengauss_table_options(
+    source_db_type: &DatabaseType,
+    source_driver_profile: Option<&str>,
+) -> bool {
+    matches!(source_db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
+        || matches!(source_driver_profile, Some("opengauss" | "gaussdb"))
+}
+
+/// Targets that speak the openGauss dialect and therefore accept its table storage
+/// options. Vastbase is openGauss-derived like GaussDB (`table_structure_sql::partitions`
+/// groups the three for `pg_partition`), so the clause is kept for it too. Every other
+/// target rejects the options, and stripping is the safer default for one we have not
+/// verified: an unlisted openGauss-derived engine loses at most the storage kind, whereas
+/// leaving the clause in place fails the whole `CREATE TABLE`.
+///
+/// Not covered here: a PG-compatible target that takes no PostgreSQL-style `WITH (...)`
+/// table clause at all (Redshift), where even the surviving options are invalid. That gap
+/// is pre-existing for every reused DDL aimed at such a target, not something this strip
+/// introduces, so it is left to a separate fix.
+fn target_accepts_opengauss_table_options(target_db_type: &DatabaseType, target_driver_profile: Option<&str>) -> bool {
+    matches!(target_db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb | DatabaseType::Vastbase)
+        || matches!(target_driver_profile, Some("opengauss" | "gaussdb"))
+}
+
+fn strips_opengauss_table_storage_options(
+    source_db_type: &DatabaseType,
+    source_driver_profile: Option<&str>,
+    target_db_type: &DatabaseType,
+    target_driver_profile: Option<&str>,
+) -> bool {
+    // Only a PostgreSQL-family target can reach the reuse path that carries this DDL
+    // (`rewrite_transfer_source_table_ddl`'s first branch), so the gate is scoped to the
+    // family instead of claiming to rewrite MySQL- or Oracle-target DDL it never sees.
+    is_postgres_family_target(target_db_type)
+        && source_ddl_carries_opengauss_table_options(source_db_type, source_driver_profile)
+        && !target_accepts_opengauss_table_options(target_db_type, target_driver_profile)
+}
+
+/// Splits a `WITH (...)` clause body at top-level commas, so a nested call or a quoted value
+/// that itself contains a comma cannot be cut in half. Each slice keeps the surrounding
+/// whitespace it had in `body`.
+fn split_table_storage_options(body: &str) -> Vec<&str> {
+    let mut options = Vec::new();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut start = 0usize;
+    for (index, byte) in body.bytes().enumerate() {
+        match byte {
+            // Doubling (`"a""b"`) toggles twice, so the state still ends where it started.
+            b'"' => quoted = !quoted,
+            b'(' if !quoted => depth += 1,
+            b')' if !quoted => depth = depth.saturating_sub(1),
+            b',' if !quoted && depth == 0 => {
+                options.push(&body[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    options.push(&body[start..]);
+    options
+}
+
+/// Whether one `WITH (...)` entry names an openGauss-only table storage option. The
+/// comparison covers the whole name up to `=`, so PostgreSQL's `toast.compression` is not
+/// mistaken for openGauss's `compression`, and a quoted name matches as well.
+fn is_opengauss_only_table_storage_option(option: &str) -> bool {
+    let name = option.split_once('=').map_or(option, |(name, _)| name).trim().trim_matches('"');
+    OPENGAUSS_ONLY_TABLE_STORAGE_OPTIONS.iter().any(|open| name.eq_ignore_ascii_case(open))
+}
+
+/// Drops the openGauss-only options from a reused table DDL's `WITH (...)` storage clause
+/// so a PostgreSQL-family target can parse it (#9037: PostgreSQL rejected
+/// `WITH (orientation=row, compression=no)` with `syntax error at or near "row"`). Options
+/// the target does accept are kept as written; a clause left with no options disappears
+/// entirely, because `WITH ()` is not valid SQL either. Only code spans are touched, so a
+/// `WITH` inside a string literal or comment is never rewritten. Double quotes are left as
+/// code (like [`strip_dameng_storage_clauses`]) because this runs on openGauss DDL, where
+/// they quote identifiers: keeping the whole clause in one span is what lets its
+/// parentheses be matched.
+fn strip_opengauss_only_table_storage_options(sql: &str) -> String {
+    // `sql_non_code_spans` assumes MySQL backslash escapes, while openGauss (like PostgreSQL
+    // with `standard_conforming_strings=on`) treats a backslash literally. A `\'` in a reused
+    // DDL — a table comment ending in a Windows path, for instance — would shift every later
+    // span boundary and let this rewrite delete text *inside* a `COMMENT ON` literal. Rather
+    // than risk silently corrupting the DDL, such a DDL is left untouched: the transfer then
+    // fails on the storage clause exactly as it did before the fix.
+    if sql.contains("\\'") {
+        return sql.to_string();
+    }
+    map_sql_code_spans(sql, false, |code| {
+        let mut output = String::with_capacity(code.len());
+        let bytes = code.as_bytes();
+        let mut position = 0;
+
+        while position < bytes.len() {
+            let Some(relative_start) = code[position..].to_ascii_uppercase().find("WITH") else {
+                output.push_str(&code[position..]);
+                break;
+            };
+            let start = position + relative_start;
+            let before_is_identifier = start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric() || matches!(bytes[start - 1], b'_' | b'$' | b'#'));
+            let keyword_end = start + "WITH".len();
+            let after_is_identifier = keyword_end < bytes.len()
+                && (bytes[keyword_end].is_ascii_alphanumeric() || matches!(bytes[keyword_end], b'_' | b'$' | b'#'));
+            if before_is_identifier || after_is_identifier {
+                output.push_str(&code[position..keyword_end]);
+                position = keyword_end;
+                continue;
+            }
+
+            let mut open = keyword_end;
+            while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+                open += 1;
+            }
+            if open >= bytes.len() || bytes[open] != b'(' {
+                output.push_str(&code[position..keyword_end]);
+                position = keyword_end;
+                continue;
+            }
+
+            let mut depth = 1usize;
+            let mut close = open + 1;
+            while close < bytes.len() && depth > 0 {
+                match bytes[close] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                close += 1;
+            }
+            if depth != 0 {
+                output.push_str(&code[position..keyword_end]);
+                position = keyword_end;
+                continue;
+            }
+
+            let options = split_table_storage_options(&code[open + 1..close - 1]);
+            let kept: Vec<&str> =
+                options.iter().copied().filter(|option| !is_opengauss_only_table_storage_option(option)).collect();
+            if kept.len() == options.len() {
+                // Nothing openGauss-only here (an index's `fillfactor`, `WITH (oids=false)`,
+                // ...): keep the clause exactly as written.
+                output.push_str(&code[position..close]);
+                position = close;
+                continue;
+            }
+            let kept: Vec<&str> = kept.into_iter().filter(|option| !option.trim().is_empty()).collect();
+            if kept.is_empty() {
+                // `WITH ()` is not valid SQL either, so the keyword and the whitespace that
+                // separated it from the column list go too.
+                let clause_start = position + code[position..start].trim_end().len();
+                output.push_str(&code[position..clause_start]);
+            } else {
+                output.push_str(&code[position..open + 1]);
+                output.push_str(kept.join(",").trim());
+                output.push(')');
+            }
+            position = close;
+        }
+
+        output
+    })
+}
+
+/// Normalizes a reused source table DDL for the target: openGauss's `pg_get_tabledef()`
+/// output is stripped of the storage options the target cannot parse, every other
+/// source/target pair gets the DDL unchanged. The gate lives here rather than inside
+/// [`rewrite_transfer_source_table_ddl`] because a plain PostgreSQL connection profiled as
+/// openGauss reads that same DDL, and only the transfer planner sees the driver profiles.
+fn normalize_reused_opengauss_table_ddl(
+    ddl: &str,
+    source_db_type: &DatabaseType,
+    source_driver_profile: Option<&str>,
+    target_db_type: &DatabaseType,
+    target_driver_profile: Option<&str>,
+) -> String {
+    if strips_opengauss_table_storage_options(
+        source_db_type,
+        source_driver_profile,
+        target_db_type,
+        target_driver_profile,
+    ) {
+        strip_opengauss_only_table_storage_options(ddl)
+    } else {
+        ddl.to_string()
+    }
+}
+
 fn rewrite_transfer_source_table_ddl(
     sql: &str,
     source_schema: &str,
@@ -17409,6 +17632,251 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             None,
             false,
         ));
+    }
+
+    #[test]
+    fn opengauss_reused_ddl_drops_only_the_open_gauss_storage_options() {
+        // #9037: openGauss's pg_get_tabledef() appends storage options PostgreSQL cannot
+        // parse, so the reused CREATE TABLE died with `syntax error at or near "row"`.
+        // PostgreSQL-valid options sitting in the same clause must survive untouched, and the
+        // rest of the script has to stay byte-identical — the result must be valid PostgreSQL.
+        let ddl = "SET search_path = public;\n\
+                   CREATE TABLE \"public\".\"items\" (\n\
+                     \"id\" integer,\n\
+                     \"name\" character varying(20)\n\
+                   )\n\
+                   WITH (orientation=row, compression=no, storage_type=astore, fillfactor=70)\n\
+                   TABLESPACE pg_default;";
+
+        let rewritten =
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None);
+
+        assert!(rewritten.contains("WITH (fillfactor=70)"), "storage clause: {rewritten}");
+        for dropped in ["orientation", "compression", "storage_type"] {
+            assert!(!rewritten.contains(dropped), "{dropped} must be dropped: {rewritten}");
+        }
+        // Only the WITH clause changes; the rest of the reused script is byte-identical.
+        assert!(rewritten.starts_with("SET search_path = public;\nCREATE TABLE \"public\".\"items\" ("), "{rewritten}");
+        assert!(rewritten.ends_with("TABLESPACE pg_default;"), "{rewritten}");
+        // The issue's exact pair has to reach the reuse path, otherwise the normalization
+        // above would never run for it.
+        assert!(can_reuse_source_table_ddl(&DatabaseType::OpenGauss, &DatabaseType::Postgres, None, None, true));
+    }
+
+    #[test]
+    fn opengauss_reused_ddl_removes_a_storage_clause_with_no_portable_option_left() {
+        // `WITH ()` is not valid SQL either, so an all-openGauss clause has to disappear
+        // whole — together with the newline that separated it from the column list.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\n  \"id\" integer\n)\nWITH (orientation=row, compression=no)\n;";
+
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
+            "CREATE TABLE \"public\".\"items\" (\n  \"id\" integer\n)\n;"
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_ignores_literals_comments_and_longer_identifiers() {
+        // Only a real `WITH (...)` clause may change: a literal or comment that spells one
+        // out has to survive, and `WITH` must match on a word boundary rather than inside a
+        // longer identifier.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\n\
+                     \"id\" integer,\n\
+                     \"note\" text DEFAULT 'WITH (orientation=row)',\n\
+                     withdrawal integer\n\
+                   )\n\
+                   -- WITH (orientation=row)\n\
+                   WITH (orientation=row)\n\
+                   ;";
+
+        let rewritten =
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None);
+
+        assert!(rewritten.contains("DEFAULT 'WITH (orientation=row)'"), "literal: {rewritten}");
+        assert!(rewritten.contains("-- WITH (orientation=row)"), "comment: {rewritten}");
+        assert!(rewritten.contains("withdrawal integer"), "identifier: {rewritten}");
+        // The real clause is the only thing that goes: the literal, the comment and the
+        // column list are byte-identical, and the newline that separated the clause from the
+        // column list goes with it.
+        assert_eq!(
+            rewritten,
+            "CREATE TABLE \"public\".\"items\" (\n\
+             \"id\" integer,\n\
+             \"note\" text DEFAULT 'WITH (orientation=row)',\n\
+             withdrawal integer\n\
+             )\n\
+             -- WITH (orientation=row)\n\
+             ;"
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_matches_whole_option_names_only() {
+        // The comparison covers the whole option name up to `=`, so PostgreSQL's
+        // `toast.compression` is not mistaken for openGauss's table-level `compression`,
+        // a longer name is not cut short, and a quoted name still matches.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) \
+                   WITH (toast.compression=pglz, orientation_hint=keep, \"compression\"=no)";
+
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
+            "CREATE TABLE \"public\".\"items\" (\"id\" integer) WITH (toast.compression=pglz, orientation_hint=keep)"
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_keeps_a_clause_it_has_nothing_to_drop_from() {
+        // Nothing openGauss-only in the clause: the DDL is returned exactly as it came in,
+        // including the formatting, so unrelated PostgreSQL options are never reformatted.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) \
+                   WITH ( fillfactor = 70 , parallel_workers=2 )";
+
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
+            ddl
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_covers_the_column_store_options() {
+        // openGauss column-store tables carry a longer reloption tail. PostgreSQL has no table
+        // reloption by any of these names, so every one of them goes and the clause disappears.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) \
+                   WITH (orientation=column, compression=high, segment=32, max_batchrow=10000, \
+                   compress_level=1, compress_chunk_size=1024, compress_prealloc_chunks=1, \
+                   compress_chunk_threshold=1024)";
+
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
+            "CREATE TABLE \"public\".\"items\" (\"id\" integer)"
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_leaves_a_ddl_with_a_backslash_escape_alone() {
+        // The shared literal tokenizer assumes MySQL backslash escapes, while openGauss (like
+        // PostgreSQL with `standard_conforming_strings=on`) reads `\'` as a literal backslash
+        // followed by the end of the string. Rewriting such a DDL would shift every later span
+        // and could delete text inside a COMMENT literal, so the whole DDL is left untouched:
+        // the transfer keeps failing on the storage clause instead of running corrupted DDL.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) WITH (orientation=row);\n\
+                   COMMENT ON TABLE \"public\".\"items\" IS 'path C:\\';";
+
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
+            ddl
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_keeps_the_surviving_options_well_formed() {
+        // Whatever the original spacing and separator placement, the surviving clause has to
+        // stay a valid comma-separated PostgreSQL option list — the real PostgreSQL 16 check
+        // for `WITH (fillfactor=70)` is in the PR notes.
+        let cases = [
+            ("WITH (orientation=row, fillfactor=70)", "WITH (fillfactor=70)"),
+            ("WITH (fillfactor=70, orientation=row)", "WITH (fillfactor=70)"),
+            ("WITH ( orientation=row , fillfactor = 70 )", "WITH (fillfactor = 70)"),
+            ("WITH (orientation=row, fillfactor=70, compression=no)", "WITH (fillfactor=70)"),
+            ("WITH (fillfactor=70, orientation=row,)", "WITH (fillfactor=70)"),
+            // A quoted value may contain a comma; it must not be cut in half and left behind.
+            ("WITH (\"orientation\"=\"row,column\", fillfactor=70)", "WITH (fillfactor=70)"),
+        ];
+        for (clause, expected) in cases {
+            let ddl = format!("CREATE TABLE \"public\".\"items\" (\"id\" integer) {clause}");
+            assert_eq!(
+                normalize_reused_opengauss_table_ddl(
+                    &ddl,
+                    &DatabaseType::OpenGauss,
+                    None,
+                    &DatabaseType::Postgres,
+                    None
+                ),
+                format!("CREATE TABLE \"public\".\"items\" (\"id\" integer) {expected}"),
+                "input clause: {clause}"
+            );
+        }
+        // A clause left with nothing but a dangling separator goes away entirely rather than
+        // becoming the invalid `WITH ()`.
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(
+                "CREATE TABLE \"public\".\"items\" (\"id\" integer) WITH (orientation=row,)",
+                &DatabaseType::OpenGauss,
+                None,
+                &DatabaseType::Postgres,
+                None
+            ),
+            "CREATE TABLE \"public\".\"items\" (\"id\" integer)"
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_options_are_stripped_for_every_target_that_cannot_parse_them() {
+        // #9037 polarity is locked against the whole closed enum rather than a hand-picked
+        // list, and the expected set is spelled out instead of derived from the predicate
+        // under test: a new PG-compatible target has to be classified here on purpose.
+        // Non-PostgreSQL targets never reach the reuse path, so they keep the DDL untouched.
+        let pg_family_that_rejects_the_clause = [
+            DatabaseType::Postgres,
+            DatabaseType::Redshift,
+            DatabaseType::Kingbase,
+            DatabaseType::Highgo,
+            DatabaseType::Uxdb,
+            DatabaseType::Kwdb,
+        ];
+        // The three openGauss-dialect targets understand the clause and must keep it, so a
+        // column-store source is not silently downgraded to a row-store table.
+        let open_gauss_dialect_targets = [DatabaseType::OpenGauss, DatabaseType::Gaussdb, DatabaseType::Vastbase];
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) WITH (orientation=column, compression=low)";
+
+        for target in DatabaseType::ALL {
+            let rewritten = normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, target, None);
+            let expected_to_drop = pg_family_that_rejects_the_clause.contains(target);
+            assert_eq!(
+                !rewritten.contains("WITH ("),
+                expected_to_drop,
+                "openGauss -> {} must {} the storage clause: {rewritten}",
+                target.as_str(),
+                if expected_to_drop { "drop" } else { "keep" }
+            );
+            if open_gauss_dialect_targets.contains(target) {
+                assert_eq!(rewritten, ddl, "{} speaks openGauss and keeps the DDL", target.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn opengauss_storage_option_sources_are_the_open_gauss_dialect_and_its_profile() {
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) WITH (orientation=column, compression=low)";
+
+        for source in DatabaseType::ALL {
+            let rewritten = normalize_reused_opengauss_table_ddl(ddl, source, None, &DatabaseType::Postgres, None);
+            // Only openGauss and GaussDB read table DDL through pg_get_tabledef() (see
+            // `is_opengauss_family_config`); every other source keeps its DDL as-is.
+            let expected_to_drop = matches!(source, DatabaseType::OpenGauss | DatabaseType::Gaussdb);
+            assert_eq!(
+                !rewritten.contains("WITH ("),
+                expected_to_drop,
+                "{} -> Postgres must {} the storage clause: {rewritten}",
+                source.as_str(),
+                if expected_to_drop { "drop" } else { "keep" }
+            );
+        }
+
+        // A plain PostgreSQL connection profiled as openGauss reads that same DDL, so the
+        // profile counts exactly like the database type — and only those two names, matching
+        // the case-sensitive comparison `is_opengauss_family_config` already uses.
+        let strip = |source: &DatabaseType, source_profile: Option<&str>, target_profile: Option<&str>| {
+            normalize_reused_opengauss_table_ddl(ddl, source, source_profile, &DatabaseType::Postgres, target_profile)
+                .contains("WITH (")
+        };
+        assert!(!strip(&DatabaseType::Postgres, Some("opengauss"), None), "openGauss-profiled source");
+        assert!(!strip(&DatabaseType::Postgres, Some("gaussdb"), None), "GaussDB-profiled source");
+        assert!(strip(&DatabaseType::Postgres, Some("postgres"), None), "unrelated profile");
+        assert!(strip(&DatabaseType::Postgres, None, None), "plain PostgreSQL source");
+        // A target profiled as openGauss understands the clause too.
+        assert!(strip(&DatabaseType::OpenGauss, None, Some("gaussdb")), "GaussDB-profiled target");
+        assert!(!strip(&DatabaseType::OpenGauss, None, Some("postgres")), "unrelated target profile");
     }
 
     #[test]

@@ -50,7 +50,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.22.x"
+          go-version: "1.27.x"
           cache: false
 
       - name: Validate release branch and versions
@@ -419,7 +419,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.22.x"
+          go-version: "1.27.x"
           cache: false
 
       - name: Install from npm and package every template

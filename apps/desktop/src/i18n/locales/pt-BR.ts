@@ -587,6 +587,7 @@ export default withEnglishFallback({
     logout: "Sair",
     logoutDescription: "Encerrar a sessão atual e retornar à página de login",
     logoutConfirm: "Tem certeza de que deseja sair?",
+    or: "ou",
   },
   toolbar: {
     fileEncoding: "Codificação do arquivo",

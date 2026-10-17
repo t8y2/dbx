@@ -1,16 +1,17 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::state::WebState;
+use crate::state::{AuthMethod, SessionInfo, WebState};
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -28,6 +29,33 @@ pub struct AuthCheckResponse {
     pub authenticated: bool,
     pub required: bool,
     pub setup_required: bool,
+    /// Present only when OIDC is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcInfo>,
+    /// Identity of the currently authenticated user (only when `authenticated: true`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<UserIdentity>,
+}
+
+/// OIDC provider information returned to the frontend.
+#[derive(Serialize)]
+pub struct OidcInfo {
+    pub enabled: bool,
+    /// Label shown on the SSO button (from `DBX_OIDC_BUTTON_LABEL`).
+    pub button_label: String,
+    /// If true, the password login form should be hidden.
+    pub password_disabled: bool,
+}
+
+/// Identity of the authenticated user (from session).
+#[derive(Serialize)]
+pub struct UserIdentity {
+    pub sub: String,
+    pub email: String,
+    pub name: String,
+    pub role: String,
+    /// How the session was established ("password" or "oidc").
+    pub method: String,
 }
 
 const MAX_ATTEMPTS: u32 = 5;
@@ -39,14 +67,31 @@ fn session_cookie_path(state: &WebState) -> &str {
 
 /// `Secure` is opt-in: LAN/HTTP deployments would otherwise never receive the
 /// session cookie back. Reverse-proxy TLS deployments set DBX_WEB_COOKIE_SECURE=1.
-fn cookie_secure_enabled() -> bool {
-    static SECURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SECURE.get_or_init(|| matches!(std::env::var("DBX_WEB_COOKIE_SECURE").ok().as_deref(), Some("1") | Some("true")))
+fn cookie_secure_enabled(state: &WebState) -> bool {
+    state.oidc.as_ref().map(|o| o.config.cookie_secure).unwrap_or_else(|| {
+        static SECURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SECURE
+            .get_or_init(|| matches!(std::env::var("DBX_WEB_COOKIE_SECURE").ok().as_deref(), Some("1") | Some("true")))
+    })
 }
 
 fn session_cookie(state: &WebState, token: &str) -> String {
-    let secure = if cookie_secure_enabled() { "; Secure" } else { "" };
+    let secure = if cookie_secure_enabled(state) { "; Secure" } else { "" };
     format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax{secure}", session_cookie_path(state))
+}
+
+fn create_session_info(token: String, method: AuthMethod) -> SessionInfo {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    SessionInfo {
+        token,
+        method,
+        sub: String::new(),
+        email: String::new(),
+        name: String::new(),
+        role: "Admin".to_string(),
+        claims: serde_json::Value::Null,
+        created_at: now,
+    }
 }
 
 fn api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
@@ -73,7 +118,37 @@ pub(crate) fn middleware_api_path_suffix<'a>(path: &'a str, public_base_path: &s
     path.strip_prefix('/').filter(|suffix| !suffix.is_empty())
 }
 
+pub fn session_token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    let cookie_header = headers.get("cookie")?.to_str().ok()?;
+    for pair in cookie_header.split(';') {
+        let pair = pair.trim();
+        if let Some(value) = pair.strip_prefix("dbx_session=") {
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
+    session_token_from_headers(req.headers())
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+// ---------------------------------------------------------------------------
+// Password auth handlers
+// ---------------------------------------------------------------------------
+
 pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginRequest>) -> Result<Response, StatusCode> {
+    // If OIDC is enabled and password login is disabled, reject plaintext login
+    if state.oidc.as_ref().map(|o| o.config.disable_password).unwrap_or(false) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let hash_guard = state.password_hash.read().await;
     let hash_str = match hash_guard.as_deref() {
         // No password configured: nothing to authenticate against. Answer
@@ -121,7 +196,8 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
     }
 
     let token = uuid::Uuid::new_v4().to_string();
-    state.sessions.write().await.insert(token.clone());
+    let info = create_session_info(token.clone(), AuthMethod::Password);
+    state.sessions.write().await.insert(token.clone(), info);
 
     let cookie = session_cookie(&state, &token);
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
@@ -160,25 +236,80 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 
     // Auto-login: create session
     let token = uuid::Uuid::new_v4().to_string();
-    state.sessions.write().await.insert(token.clone());
+    let info = create_session_info(token.clone(), AuthMethod::Password);
+    state.sessions.write().await.insert(token.clone(), info);
 
     let cookie = session_cookie(&state, &token);
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
 }
 
 pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Json<AuthCheckResponse> {
-    if state.password_disabled {
-        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false });
+    let oidc_info = state.oidc.as_ref().map(|oidc_svc| OidcInfo {
+        enabled: true,
+        button_label: oidc_svc.config.button_label.clone(),
+        password_disabled: oidc_svc.config.disable_password,
+    });
+
+    // If password auth is fully disabled (no OIDC configured either), allow everything
+    if state.password_disabled && state.oidc.is_none() {
+        return Json(AuthCheckResponse {
+            authenticated: true,
+            required: false,
+            setup_required: false,
+            oidc: None,
+            user: None,
+        });
     }
+
+    // If OIDC is configured and password is disabled, auth IS required (via OIDC)
     let has_password = state.password_hash.read().await.is_some();
-    if !has_password {
-        return Json(AuthCheckResponse { authenticated: false, required: false, setup_required: true });
+    let oidc_enabled = state.oidc.is_some();
+
+    // Auth is required when: password hash exists OR OIDC is configured
+    let required = has_password || oidc_enabled;
+
+    if !required {
+        // No password configured, no OIDC — setup required
+        if !state.password_disabled {
+            return Json(AuthCheckResponse {
+                authenticated: false,
+                required: false,
+                setup_required: true,
+                oidc: oidc_info,
+                user: None,
+            });
+        }
+        return Json(AuthCheckResponse {
+            authenticated: true,
+            required: false,
+            setup_required: false,
+            oidc: oidc_info,
+            user: None,
+        });
     }
-    let authenticated = match extract_session_token(&req) {
-        Some(token) => state.sessions.read().await.contains(&token),
-        None => false,
+
+    let session_guard = state.sessions.read().await;
+    let session_info = extract_session_token(&req).and_then(|token| session_guard.get(&token).cloned());
+    drop(session_guard);
+
+    let (authenticated, user) = match session_info {
+        Some(info) => {
+            let user = UserIdentity {
+                sub: info.sub.clone(),
+                email: info.email.clone(),
+                name: info.name.clone(),
+                role: info.role.clone(),
+                method: match info.method {
+                    AuthMethod::Password => "password".to_string(),
+                    AuthMethod::Oidc => "oidc".to_string(),
+                },
+            };
+            (true, Some(user))
+        }
+        None => (false, None),
     };
-    Json(AuthCheckResponse { authenticated, required: true, setup_required: false })
+
+    Json(AuthCheckResponse { authenticated, required, setup_required: false, oidc: oidc_info, user })
 }
 
 pub async fn change_password(
@@ -193,7 +324,7 @@ pub async fn change_password(
     // change, revokes every OTHER session so a stolen old cookie cannot survive
     // a credential rotation.
     let current_token = session_token_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    if !state.sessions.read().await.contains(&current_token) {
+    if !state.sessions.read().await.contains_key(&current_token) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -223,7 +354,7 @@ pub async fn change_password(
     *state.password_hash.write().await = Some(new_hash);
 
     // Rotation revokes sibling sessions; only the caller stays logged in.
-    state.sessions.write().await.retain(|token| *token == current_token);
+    state.sessions.write().await.retain(|token, _| token == &current_token);
 
     Ok((StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response())
 }
@@ -238,21 +369,112 @@ pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body:
     (StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response()
 }
 
-pub fn session_token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
-    let cookie_header = headers.get("cookie")?.to_str().ok()?;
-    for pair in cookie_header.split(';') {
-        let pair = pair.trim();
-        if let Some(value) = pair.strip_prefix("dbx_session=") {
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
+// ---------------------------------------------------------------------------
+// OIDC handlers
+// ---------------------------------------------------------------------------
+
+/// GET /api/auth/oidc/start — begin PKCE auth flow; redirects to IdP.
+pub async fn oidc_start(State(state): State<Arc<WebState>>) -> Response {
+    let Some(oidc) = &state.oidc else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "OIDC is not configured"}))).into_response();
+    };
+
+    match oidc.begin_auth().await {
+        Ok((_state_param, auth_url)) => Redirect::temporary(&auth_url).into_response(),
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response()
         }
     }
-    None
 }
 
-fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
-    session_token_from_headers(req.headers())
+#[derive(Deserialize)]
+pub struct OidcCallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+/// GET /api/auth/oidc/callback — IdP redirects here with auth code.
+pub async fn oidc_callback(State(state): State<Arc<WebState>>, Query(params): Query<OidcCallbackQuery>) -> Response {
+    let Some(oidc) = &state.oidc else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "OIDC is not configured"}))).into_response();
+    };
+
+    // IdP returned an error
+    if let Some(err) = &params.error {
+        let desc = params.error_description.as_deref().unwrap_or("");
+        tracing::warn!("OIDC callback error from IdP: {err}: {desc}");
+        return redirect_to_login_with_error(&state, "oidc_error").into_response();
+    }
+
+    let (code, state_param) = match (&params.code, &params.state) {
+        (Some(c), Some(s)) => (c.as_str(), s.as_str()),
+        _ => {
+            return redirect_to_login_with_error(&state, "missing_params").into_response();
+        }
+    };
+
+    // Retrieve and consume the pending PKCE state
+    let pending = match oidc.take_pending_state(state_param).await {
+        Some(p) => p,
+        None => {
+            tracing::warn!("OIDC callback: state parameter not found or expired");
+            return redirect_to_login_with_error(&state, "invalid_state").into_response();
+        }
+    };
+
+    // Exchange code and verify the id_token
+    match oidc.exchange_and_verify(code, &pending).await {
+        Ok((role, claims)) => {
+            let token = uuid::Uuid::new_v4().to_string();
+            let sub = claims.get("sub").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let email = claims.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = claims
+                .get("name")
+                .and_then(|v| v.as_str())
+                .or_else(|| claims.get("preferred_username").and_then(|v| v.as_str()))
+                .unwrap_or(&email)
+                .to_string();
+
+            let info = SessionInfo {
+                token: token.clone(),
+                method: AuthMethod::Oidc,
+                sub,
+                email,
+                name,
+                role,
+                claims,
+                created_at: now_unix(),
+            };
+            state.sessions.write().await.insert(token.clone(), info);
+
+            tracing::info!("OIDC login successful for sub '{}' email '{}'", &info_debug_sub(&state, &token).await, "?");
+
+            let cookie = session_cookie(&state, &token);
+            let base = state.public_base_path.trim_end_matches('/');
+            let redirect_path = format!("{base}/");
+            (StatusCode::FOUND, [("set-cookie", cookie), ("location", redirect_path)]).into_response()
+        }
+        Err(e) => {
+            tracing::warn!("OIDC verification failed: {e}");
+            let error_code = match &e {
+                crate::oidc::OidcError::AccessDenied(_) => "access_denied",
+                crate::oidc::OidcError::Internal(_) => "oidc_error",
+                crate::oidc::OidcError::EvaluationFailed(_) => "oidc_error",
+            };
+            redirect_to_login_with_error(&state, error_code).into_response()
+        }
+    }
+}
+
+async fn info_debug_sub(state: &WebState, token: &str) -> String {
+    state.sessions.read().await.get(token).map(|i| i.sub.clone()).unwrap_or_default()
+}
+
+fn redirect_to_login_with_error(state: &WebState, code: &str) -> Redirect {
+    let base = state.public_base_path.trim_end_matches('/');
+    Redirect::temporary(&format!("{base}/?oidc_error={code}"))
 }
 
 pub async fn auth_middleware(
@@ -260,11 +482,12 @@ pub async fn auth_middleware(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // Only the bootstrap auth endpoints are reachable without a session —
-    // login/setup/check. change-password and logout require one: change-password
-    // must not be an unauthenticated password oracle.
+    // Only the bootstrap auth and OIDC endpoints are reachable without a session —
+    // login/setup/check and oidc start/callback. change-password and logout require a session.
     let api_suffix = middleware_api_path_suffix(req.uri().path(), &state.public_base_path);
-    if api_suffix.is_some_and(|suffix| matches!(suffix, "auth/login" | "auth/setup" | "auth/check")) {
+    if api_suffix.is_some_and(|suffix| {
+        matches!(suffix, "auth/login" | "auth/setup" | "auth/check" | "auth/oidc/start" | "auth/oidc/callback")
+    }) {
         return next.run(req).await;
     }
 
@@ -273,20 +496,24 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    if state.password_disabled {
+    // If both password and OIDC are disabled, allow all requests
+    if state.password_disabled && state.oidc.is_none() {
         return next.run(req).await;
     }
 
-    if state.password_hash.read().await.is_none() {
+    // If there's no password hash AND no OIDC configured (setup required), block everything except auth
+    let has_password = state.password_hash.read().await.is_some();
+    let has_oidc = state.oidc.is_some();
+
+    if !has_password && !has_oidc && !state.password_disabled {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
     // Check session token
     let token = extract_session_token(&req);
     if let Some(ref token) = token {
-        if state.sessions.read().await.contains(token) {
-            // 在下游处理器及其 await 到的池创建路径上注入当前登录会话的 owner 作用域，
-            // 使 save_password=false 连接的临时密码按会话隔离（见 SessionCredentialStore）。
+        if state.sessions.read().await.contains_key(token) {
+            // Inject session owner for credential isolation (see SessionCredentialStore).
             let owner = token.clone();
             return dbx_core::session_credentials::with_credential_owner(
                 Some(owner),

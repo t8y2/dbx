@@ -1678,6 +1678,12 @@ export interface TransactionLog {
   error?: string;
 }
 
+/**
+ * 1-based line and column range in SQL text.
+ * Both `start_column` and `end_column` are 1-based and inclusive.
+ * For example, a 1-character token at line 1, column 5 has:
+ * `{ start_line: 1, start_column: 5, end_line: 1, end_column: 5 }`.
+ */
 export interface SqlTextSpan {
   start_line: number;
   start_column: number;

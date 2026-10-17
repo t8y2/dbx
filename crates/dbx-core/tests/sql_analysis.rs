@@ -114,7 +114,7 @@ fn extracts_mysql_quoted_table_references() {
     assert_eq!(analysis.tables[0].span.start_line, 1);
     assert_eq!(analysis.tables[0].span.start_column, 15);
     assert_eq!(analysis.tables[0].span.end_line, 1);
-    assert_eq!(analysis.tables[0].span.end_column, 24);
+    assert_eq!(analysis.tables[0].span.end_column, 23);
 }
 
 #[test]

@@ -119,9 +119,11 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       line: span.start_line - 1,
       column: span.start_column - 1,
     });
+    const endLine = Math.max(span.end_line - 1, span.start_line - 1);
+    const endColumn = endLine === span.start_line - 1 ? Math.max(span.end_column, span.start_column) : span.end_column;
     const to = lineColumnToOffset(sql, {
-      line: Math.max(span.end_line - 1, span.start_line - 1),
-      column: Math.max(span.end_column, span.start_column),
+      line: endLine,
+      column: endColumn,
     });
     if (from == null || to == null || to <= from) return null;
     return { from, to };

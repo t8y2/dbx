@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createApp, nextTick, ref } from "vue";
+import { createApp, defineComponent, h, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -804,5 +804,60 @@ describe("EditorGroupTabBar behavior", () => {
 
     app.unmount();
     host.remove();
+  });
+});
+
+describe("active tab reveal scrolling (issue #12010)", () => {
+  // The Settings / Driver Manager / Plugin Center tabs live in the same
+  // scrollable row as regular query tabs. Centering every newly activated tab
+  // re-centered tabs that were already fully visible, which shoved those
+  // trailing special tabs out of the viewport as soon as the user switched back
+  // to the tab before Settings.
+  it("reveals an activated tab without recentering it", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "none";
+    const tabIds = Array.from({ length: 8 }, (_, index) => store.createTab("pg-1", "app", `Query ${index}`, "query"));
+    const mainGroup = store.groups[0]!;
+    const activeTabId = ref(tabIds[0]!);
+    const host = createHost();
+
+    const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    try {
+      const Root = defineComponent({
+        setup() {
+          return () =>
+            h(EditorGroupTabBar, {
+              groupId: mainGroup.id,
+              tabs: store.tabs.slice(),
+              activeTabId: activeTabId.value,
+            });
+        },
+      });
+      const app = createApp(Root);
+      app.use(pinia);
+      app.use(
+        createI18n({
+          legacy: false,
+          locale: "en",
+          messages: { en: { common: { close: "Close" }, contextMenu: { closeTab: "Close" }, sidebar: { locateActiveTab: "Locate" } } },
+        }),
+      );
+      app.mount(host);
+      await settle();
+
+      scrollIntoView.mockClear();
+      activeTabId.value = tabIds[tabIds.length - 2]!;
+      await settle();
+
+      expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: "nearest" }));
+
+      app.unmount();
+    } finally {
+      scrollIntoView.mockRestore();
+      host.remove();
+    }
   });
 });

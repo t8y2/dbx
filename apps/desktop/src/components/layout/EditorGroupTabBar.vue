@@ -1726,7 +1726,14 @@ watch(
         if (container) {
           const activeEl = container.querySelector('[data-active-tab="true"]');
           if (activeEl) {
-            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: isVerticalLayout.value ? "nearest" : "center" });
+            // `inline: "nearest"` only scrolls when the tab is actually clipped.
+            // Centering every newly activated tab re-centered ones that were
+            // already fully visible, and because the built-in Settings / Driver
+            // Manager / Plugin Center tabs share this scrollable row, activating
+            // the last regular tab pushed those trailing tabs off the right edge
+            // (#12010). This also matches revealActiveTabAfterLayout and the
+            // special-page watcher below.
+            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: "nearest" });
           }
         }
       }

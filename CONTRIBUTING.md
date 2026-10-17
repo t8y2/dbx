@@ -18,7 +18,7 @@ If you are not sure what to pick, choose an issue with clear reproduction steps,
 ### Prerequisites
 
 - Node.js >= 22.13.0
-- pnpm 10.27.0
+- pnpm 10.34.7
 - Rust >= 1.88
 - Make
 

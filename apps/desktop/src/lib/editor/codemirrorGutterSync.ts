@@ -86,9 +86,18 @@ export function keepGuttersAttachedDuringSync(ViewPlugin: typeof import("@codemi
   return ViewPlugin.fromClass(
     class {
       private guard: GutterSyncGuard | null = null;
+      private scrollDOM?: HTMLElement;
+      private onScroll?: () => void;
 
       constructor(view: EditorView) {
         this.guard = attachGutterSyncGuard(view);
+        const scrollDOM = (view as unknown as { scrollDOM?: HTMLElement }).scrollDOM;
+        if (scrollDOM && typeof scrollDOM.addEventListener === "function") {
+          this.scrollDOM = scrollDOM;
+          this.onScroll = () => this.syncScroll();
+          this.scrollDOM.addEventListener("scroll", this.onScroll, { passive: true });
+          this.syncScroll();
+        }
       }
 
       update(update: import("@codemirror/view").ViewUpdate) {
@@ -96,14 +105,34 @@ export function keepGuttersAttachedDuringSync(ViewPlugin: typeof import("@codemi
         // that swaps the gutter extensions replaces the plugin value, so the
         // guard is re-attached until it is holding the live host.
         const held = this.guard;
-        if (held && held.host === gutterSyncHost(update.view) && held.host[SYNC_GUTTERS] === held.guarded) return;
-        if (held) releaseGutterSyncGuard(held);
-        this.guard = attachGutterSyncGuard(update.view);
+        if (!held || held.host !== gutterSyncHost(update.view) || held.host[SYNC_GUTTERS] !== held.guarded) {
+          if (held) releaseGutterSyncGuard(held);
+          this.guard = attachGutterSyncGuard(update.view);
+        }
+        this.syncScroll();
       }
 
       destroy() {
         if (this.guard) releaseGutterSyncGuard(this.guard);
         this.guard = null;
+        if (this.scrollDOM && this.onScroll) {
+          this.scrollDOM.removeEventListener("scroll", this.onScroll);
+          this.scrollDOM.removeAttribute("data-scrolled-x");
+          const gutters = this.scrollDOM.querySelector<HTMLElement>(".cm-gutters");
+          gutters?.removeAttribute("data-scrolled-x");
+          gutters?.classList.remove("cm-gutters-scrolled-x");
+        }
+      }
+
+      private syncScroll() {
+        if (!this.scrollDOM) return;
+        const isScrolledX = (this.scrollDOM.scrollLeft ?? 0) > 0;
+        this.scrollDOM.toggleAttribute("data-scrolled-x", isScrolledX);
+        const gutters = this.scrollDOM.querySelector<HTMLElement>(".cm-gutters");
+        if (gutters) {
+          gutters.toggleAttribute("data-scrolled-x", isScrolledX);
+          gutters.classList.toggle("cm-gutters-scrolled-x", isScrolledX);
+        }
       }
     },
   );

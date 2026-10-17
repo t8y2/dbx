@@ -101,15 +101,24 @@ export function useDataGridDistinctValueLoader(options: UseDataGridDistinctValue
   }
 
   function optionsFromResult(result: QueryResult, columnIndex: number, columnInfo: ColumnInfo | undefined, displayLimit: number): DataGridLocalFilterOption[] {
+    const rows = influxdbTagValueResultRows(result);
     const byKey = new Map<string, DataGridLocalFilterOption>();
-    for (const row of result.rows) {
+    for (const row of rows) {
       const option = optionFromRow(row, columnIndex, columnInfo);
       const current = byKey.get(option.key);
-      if (current) current.count = (current.count ?? 0) + (option.count ?? 0);
+      if (current) current.count = current.count === null || option.count === null ? null : current.count + option.count;
       else byKey.set(option.key, option);
       if (byKey.size > displayLimit) break;
     }
     return [...byKey.values()].slice(0, displayLimit);
+  }
+
+  function influxdbTagValueResultRows(result: QueryResult): QueryResult["rows"] {
+    if (options.getDatabaseType() !== "influxdb") return result.rows;
+    if (result.columns.length === 2 && result.columns[0] === "key" && result.columns[1] === "value") {
+      return result.rows.map((row) => [row[1] ?? null]);
+    }
+    return result.rows;
   }
 
   function applyValues(nextOptions: DataGridLocalFilterOption[], nextLimited: boolean) {

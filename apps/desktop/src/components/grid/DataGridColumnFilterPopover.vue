@@ -108,7 +108,7 @@ const { t } = useI18n();
       </div>
       <div v-if="props.draftMode === 'server' && (props.serverLoading || props.serverError || props.serverLimited)" class="flex items-center gap-1.5 border-b px-2 py-1 text-[11px] text-muted-foreground">
         <Loader2 v-if="props.serverLoading" class="h-3 w-3 animate-spin" />
-        <span class="min-w-0 truncate">
+        <span class="min-w-0 truncate" :title="props.serverError || undefined">
           <template v-if="props.serverLoading">{{ t("grid.loadingValues") }}</template>
           <template v-else-if="props.serverError">{{ props.serverError }}</template>
           <template v-else>{{ t("grid.serverValuesLimited", { count: props.serverValueLimit }) }}</template>

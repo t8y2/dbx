@@ -5,14 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/lib/backend/api";
 import { buildDataGridColumnDistinctValuesSql } from "@/lib/dataGrid/dataGridSql";
 import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
-import type { QueryResult } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 
 vi.mock("@/lib/backend/api", () => ({ executeQuery: vi.fn() }));
 vi.mock("@/lib/dataGrid/dataGridSql", () => ({ buildDataGridColumnDistinctValuesSql: vi.fn(async () => "SELECT DISTINCT VALUES") }));
 
 const disposers: Array<() => void> = [];
 
-function mountLoader() {
+function mountLoader(databaseType: DatabaseType = "postgres") {
   const identity = ref("table-1");
   const connectionId = ref<string | undefined>("connection-1");
   let loader: ReturnType<typeof useDataGridDistinctValueLoader> | undefined;
@@ -24,7 +24,7 @@ function mountLoader() {
           getConnectionId: () => connectionId.value,
           getExecutionDatabase: () => "app",
           getSchema: () => "public",
-          getDatabaseType: () => "postgres",
+          getDatabaseType: () => databaseType,
           getConnectionConfig: () => ({
             driver_profile: "native",
             query_timeout_secs: 12,
@@ -67,6 +67,41 @@ afterEach(() => {
 describe("useDataGridDistinctValueLoader", () => {
   it("keeps the default candidate limit at 1000", () => {
     expect(DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT).toBe(1000);
+  });
+
+  it("maps SHOW TAG VALUES rows to their value column for influxdb", async () => {
+    // InfluxQL tag filters run as SHOW TAG VALUES, whose rows come back as
+    // [tagKey, value] pairs and carry no per-value count.
+    vi.mocked(api.executeQuery).mockResolvedValue({
+      columns: ["key", "value"],
+      rows: [
+        ["host", "web-01"],
+        ["host", "web-02"],
+        ["host", "web-01"],
+      ],
+    } as QueryResult);
+    const { loader } = mountLoader("influxdb");
+
+    await loader.load({ columnIndex: 0, columnName: "host" });
+
+    expect(loader.options.value.map((option) => option.value)).toEqual(["web-01", "web-02"]);
+    expect(loader.options.value.every((option) => option.count === null)).toBe(true);
+    expect(loader.error.value).toBe("");
+  });
+
+  it("reads the first column for non-influxdb results", async () => {
+    vi.mocked(api.executeQuery).mockResolvedValue(
+      result([
+        ["web-01", 3],
+        ["web-02", 1],
+      ]),
+    );
+    const { loader } = mountLoader("postgres");
+
+    await loader.load({ columnIndex: 0, columnName: "status" });
+
+    expect(loader.options.value.map((option) => option.value)).toEqual(["web-01", "web-02"]);
+    expect(loader.options.value.map((option) => option.count)).toEqual([3, 1]);
   });
 
   it("marks results that reach the default 1000-candidate limit", async () => {

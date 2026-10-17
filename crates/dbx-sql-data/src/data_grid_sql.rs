@@ -823,6 +823,11 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
     }
 
     let column = column_filter_ref(options.database_type, &options.column_name, options.identifier_quote.as_deref());
+    if options.database_type == Some(DatabaseType::InfluxDb) {
+        if let Some(condition) = build_influxdb_context_filter_condition(&options, &column) {
+            return Some(condition);
+        }
+    }
     let like_column = column_like_filter_ref(
         options.database_type,
         &options.column_name,
@@ -1059,6 +1064,15 @@ fn build_membership_predicate(
         let predicate = format!("{column} IN [{}]", literals.join(", "));
         return Some(if negated { format!("NOT ({predicate})") } else { predicate });
     }
+    // InfluxQL has no IN/NOT IN; expand to OR-joined equalities
+    // (AND-joined inequalities when negated).
+    if database_type == Some(DatabaseType::InfluxDb) {
+        let operator = if negated { "<>" } else { "=" };
+        let joiner = if negated { " AND " } else { " OR " };
+        let predicate =
+            literals.iter().map(|literal| format!("{column} {operator} {literal}")).collect::<Vec<_>>().join(joiner);
+        return Some(if literals.len() > 1 { format!("({predicate})") } else { predicate });
+    }
 
     let operator = if negated { "NOT IN" } else { "IN" };
     if database_type != Some(DatabaseType::Oracle) || literals.len() <= 1000 {
@@ -1111,6 +1125,10 @@ pub fn build_data_grid_column_value_filter_condition(
     }
     let column = column_filter_ref(options.database_type, &options.column_name, options.identifier_quote.as_deref());
     if text.eq_ignore_ascii_case("null") {
+        // InfluxQL has no NULL predicate.
+        if options.database_type == Some(DatabaseType::InfluxDb) {
+            return Some(format!("{column} = ''"));
+        }
         return Some(format!("{column} IS NULL"));
     }
     let value = parse_typed_filter_value(text, options.database_type, options.column_info.as_ref());
@@ -1141,7 +1159,12 @@ pub fn build_data_grid_column_values_filter_condition(
 
     let mut predicates = Vec::new();
     if has_null {
-        predicates.push(format!("{column} IS NULL"));
+        // InfluxQL has no NULL predicate.
+        if options.database_type == Some(DatabaseType::InfluxDb) {
+            predicates.push(format!("{column} = ''"));
+        } else {
+            predicates.push(format!("{column} IS NULL"));
+        }
     }
     if literals.len() == 1 {
         predicates.push(format!("{column} = {}", literals[0]));
@@ -1159,6 +1182,9 @@ pub fn build_data_grid_column_values_filter_condition(
 pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinctValuesSqlOptions) -> String {
     if options.database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_data_grid_column_distinct_values_sql(&options);
+    }
+    if options.database_type == Some(DatabaseType::InfluxDb) {
+        return build_influxdb_data_grid_column_distinct_values_sql(&options);
     }
 
     let limit = data_grid_column_distinct_values_limit(options.limit);
@@ -1374,6 +1400,111 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
             "MATCH (n:{label}){where_clause} RETURN DISTINCT {column} AS dbx_value ORDER BY dbx_value LIMIT {limit}"
         )
     }
+}
+
+fn build_influxdb_data_grid_column_distinct_values_sql(options: &DataGridColumnDistinctValuesSqlOptions) -> String {
+    let limit = data_grid_column_distinct_values_limit(options.limit);
+    let measurement = quote_ident(Some(DatabaseType::InfluxDb), &options.table_name);
+    let column =
+        column_filter_ref(Some(DatabaseType::InfluxDb), &options.column_name, options.identifier_quote.as_deref());
+    let is_time_column = options.column_name.eq_ignore_ascii_case("time");
+    // Without column metadata a field column is indistinguishable from a tag;
+    // SHOW TAG VALUES is the safe default because it merely returns no values
+    // for a field key, while DISTINCT() on a tag is invalid InfluxQL.
+    let is_tag = !is_time_column && options.column_info.as_ref().map(|column| column.is_primary_key).unwrap_or(true);
+    if is_tag {
+        let mut sql = format!("SHOW TAG VALUES FROM {measurement} WITH KEY = {column}");
+        if let Some(search_predicate) = influxdb_distinct_values_search_predicate(options, &column) {
+            sql.push_str(" WHERE ");
+            sql.push_str(&search_predicate);
+        }
+        format!("{sql} LIMIT {limit}")
+    } else if is_time_column {
+        // InfluxQL requires a field in the SELECT list, so a time-only select
+        // parses but returns no rows.
+        format!("SELECT {column} FROM {measurement} LIMIT {limit}")
+    } else {
+        let mut sql = format!("SELECT DISTINCT({column}) FROM {measurement}");
+        if let Some(search_predicate) = influxdb_distinct_values_search_predicate(options, &column) {
+            sql.push_str(" WHERE ");
+            sql.push_str(&search_predicate);
+        }
+        format!("{sql} LIMIT {limit}")
+    }
+}
+
+fn influxdb_distinct_values_search_predicate(
+    options: &DataGridColumnDistinctValuesSqlOptions,
+    column: &str,
+) -> Option<String> {
+    let search = options.search_value.as_deref()?.trim();
+    if search.is_empty() {
+        return None;
+    }
+    let textual = options.column_info.as_ref().map(|column| is_textual_column_type(&column.data_type)).unwrap_or(true);
+    if textual {
+        // InfluxQL has no LIKE; RE2 regex matching is the text filter.
+        Some(format!("{column} =~ /{}/", escape_influxdb_regex(search)))
+    } else {
+        let value = parse_typed_filter_value(search, options.database_type, options.column_info.as_ref());
+        Some(format!(
+            "{column} = {}",
+            format_grid_sql_literal(&value, options.database_type, options.column_info.as_ref())
+        ))
+    }
+}
+
+// Translate the filter modes InfluxQL cannot express (LIKE, IS NULL) into
+// equivalents it can (RE2 =~ / !~ matching, empty-string comparison).
+// Returns None for modes whose generic SQL is already valid InfluxQL.
+fn build_influxdb_context_filter_condition(
+    options: &DataGridContextFilterConditionOptions,
+    column: &str,
+) -> Option<String> {
+    let textual = options.column_info.as_ref().map(|column| is_textual_column_type(&column.data_type)).unwrap_or(true);
+    match options.mode {
+        // InfluxQL has no NULL predicate; the empty value is the closest match.
+        DataGridContextFilterMode::IsNull | DataGridContextFilterMode::IsBlank => Some(format!("{column} = ''")),
+        DataGridContextFilterMode::IsNotNull | DataGridContextFilterMode::IsNotBlank => Some(format!("{column} <> ''")),
+        DataGridContextFilterMode::Equals if options.value.is_null() => Some(format!("{column} = ''")),
+        DataGridContextFilterMode::NotEquals if options.value.is_null() => Some(format!("{column} <> ''")),
+        DataGridContextFilterMode::Like
+        | DataGridContextFilterMode::NotLike
+        | DataGridContextFilterMode::BeginsWith
+        | DataGridContextFilterMode::EndsWith => {
+            let text = value_to_filter_text(&options.value);
+            if textual {
+                let (anchor_start, anchor_end, negate) = match options.mode {
+                    DataGridContextFilterMode::NotLike => ("", "", true),
+                    DataGridContextFilterMode::BeginsWith => ("^", "", false),
+                    DataGridContextFilterMode::EndsWith => ("", "$", false),
+                    _ => ("", "", false),
+                };
+                let operator = if negate { "!~" } else { "=~" };
+                Some(format!("{column} {operator} /{anchor_start}{}{anchor_end}/", escape_influxdb_regex(&text)))
+            } else {
+                // InfluxQL regex only matches tags and string fields; fall back
+                // to an exact comparison.
+                let value = parse_typed_filter_value(&text, options.database_type, options.column_info.as_ref());
+                let literal = format_grid_sql_literal(&value, options.database_type, options.column_info.as_ref());
+                let operator = if matches!(options.mode, DataGridContextFilterMode::NotLike) { "<>" } else { "=" };
+                Some(format!("{column} {operator} {literal}"))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn escape_influxdb_regex(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        // '/' terminates an unescaped regex literal in the InfluxQL lexer.
+        if matches!(ch, '\\' | '/' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
@@ -7540,6 +7671,30 @@ mod tests {
             .as_deref(),
             Some("`id` = 42")
         );
+        // InfluxQL has no IN; membership expands to OR-joined equalities and
+        // NULL becomes an empty-string comparison.
+        assert_eq!(
+            build_data_grid_column_values_filter_condition(DataGridColumnValuesFilterConditionOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                identifier_quote: None,
+                column_name: "host".to_string(),
+                column_info: Some(column("host", "string", true, None)),
+                values: vec![json!("web-01"), json!("web-02")],
+            })
+            .as_deref(),
+            Some("(\"host\" = 'web-01' OR \"host\" = 'web-02')")
+        );
+        assert_eq!(
+            build_data_grid_column_values_filter_condition(DataGridColumnValuesFilterConditionOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                identifier_quote: None,
+                column_name: "host".to_string(),
+                column_info: Some(column("host", "string", true, None)),
+                values: vec![Value::Null],
+            })
+            .as_deref(),
+            Some("\"host\" = ''")
+        );
     }
 
     #[test]
@@ -7795,6 +7950,186 @@ mod tests {
                 exclude_nulls: true,
             }),
             "MATCH (n:`User`) WHERE n.active = true AND n.`status` IS NOT NULL RETURN n.`status` AS dbx_value, count(*) AS dbx_count ORDER BY dbx_count DESC, dbx_value LIMIT 10"
+        );
+    }
+
+    #[test]
+    fn builds_influxdb_column_distinct_values_sql() {
+        // InfluxQL only allows ORDER BY time, GROUP BY tags, and no LIKE, so
+        // tags/fields/time each need their own query shape.
+        let tag_column = DataGridColumnInfo {
+            name: "host".to_string(),
+            data_type: "string".to_string(),
+            is_nullable: true,
+            is_primary_key: true,
+            column_default: None,
+            extra: None,
+        };
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: Some("monitor".to_string()),
+                schema: None,
+                table_name: "cpu".to_string(),
+                column_name: "host".to_string(),
+                column_info: Some(tag_column.clone()),
+                where_input: None,
+                search_value: None,
+                limit: None,
+                include_counts: true,
+                exclude_nulls: false,
+            }),
+            "SHOW TAG VALUES FROM \"cpu\" WITH KEY = \"host\" LIMIT 1000"
+        );
+        // '/' terminates an unescaped InfluxQL regex literal, so user input
+        // containing it must be escaped.
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: Some("monitor".to_string()),
+                schema: None,
+                table_name: "cpu".to_string(),
+                column_name: "host".to_string(),
+                column_info: Some(tag_column),
+                where_input: None,
+                search_value: Some("web/01(2)".to_string()),
+                limit: Some(25),
+                include_counts: true,
+                exclude_nulls: false,
+            }),
+            "SHOW TAG VALUES FROM \"cpu\" WITH KEY = \"host\" WHERE \"host\" =~ /web\\/01\\(2\\)/ LIMIT 25"
+        );
+        // Without column metadata the tag shape is the safe default: a field
+        // key merely yields no values, while DISTINCT() on a tag is invalid.
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: Some("monitor".to_string()),
+                schema: None,
+                table_name: "cpu".to_string(),
+                column_name: "host".to_string(),
+                column_info: None,
+                where_input: None,
+                search_value: None,
+                limit: None,
+                include_counts: true,
+                exclude_nulls: false,
+            }),
+            "SHOW TAG VALUES FROM \"cpu\" WITH KEY = \"host\" LIMIT 1000"
+        );
+        // Fields use DISTINCT(); numeric search stays an equality predicate.
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: Some("monitor".to_string()),
+                schema: None,
+                table_name: "cpu".to_string(),
+                column_name: "load".to_string(),
+                column_info: Some(column("load", "float", true, None)),
+                where_input: None,
+                search_value: Some("0.5".to_string()),
+                limit: None,
+                include_counts: true,
+                exclude_nulls: false,
+            }),
+            "SELECT DISTINCT(\"load\") FROM \"cpu\" WHERE \"load\" = 0.5 LIMIT 1000"
+        );
+        // The time column cannot be enumerated; emit a valid empty-result query.
+        let time_column = DataGridColumnInfo {
+            name: "time".to_string(),
+            data_type: "timestamp".to_string(),
+            is_nullable: false,
+            is_primary_key: true,
+            column_default: None,
+            extra: None,
+        };
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: Some("monitor".to_string()),
+                schema: None,
+                table_name: "cpu".to_string(),
+                column_name: "time".to_string(),
+                column_info: Some(time_column),
+                where_input: None,
+                search_value: Some("now".to_string()),
+                limit: Some(10),
+                include_counts: true,
+                exclude_nulls: false,
+            }),
+            "SELECT \"time\" FROM \"cpu\" LIMIT 10"
+        );
+    }
+
+    #[test]
+    fn builds_influxdb_context_filter_conditions() {
+        // InfluxQL has no LIKE and no NULL predicates; the visual filter
+        // builder must translate every offered mode into valid InfluxQL.
+        let build = |mode: DataGridContextFilterMode, value: Value, data_type: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                identifier_quote: None,
+                column_name: "host".to_string(),
+                mode,
+                value,
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("host", data_type, true, None)),
+            })
+        };
+
+        assert_eq!(
+            build(DataGridContextFilterMode::Like, json!("web-01(2)"), "string"),
+            Some("\"host\" =~ /web-01\\(2\\)/".to_string())
+        );
+        assert_eq!(
+            build(DataGridContextFilterMode::Like, json!("a/b"), "string"),
+            Some("\"host\" =~ /a\\/b/".to_string())
+        );
+        assert_eq!(
+            build(DataGridContextFilterMode::NotLike, json!("prod"), "string"),
+            Some("\"host\" !~ /prod/".to_string())
+        );
+        assert_eq!(
+            build(DataGridContextFilterMode::BeginsWith, json!("web"), "string"),
+            Some("\"host\" =~ /^web/".to_string())
+        );
+        assert_eq!(
+            build(DataGridContextFilterMode::EndsWith, json!("01"), "string"),
+            Some("\"host\" =~ /01$/".to_string())
+        );
+        // Regex only matches tags and string fields; numeric columns fall
+        // back to an exact comparison.
+        assert_eq!(build(DataGridContextFilterMode::Like, json!("0.5"), "float"), Some("\"host\" = 0.5".to_string()));
+        assert_eq!(build(DataGridContextFilterMode::IsNull, Value::Null, "string"), Some("\"host\" = ''".to_string()));
+        assert_eq!(
+            build(DataGridContextFilterMode::IsNotBlank, Value::Null, "string"),
+            Some("\"host\" <> ''".to_string())
+        );
+        assert_eq!(build(DataGridContextFilterMode::Equals, Value::Null, "string"), Some("\"host\" = ''".to_string()));
+        // Modes whose generic SQL is already valid InfluxQL stay untouched.
+        assert_eq!(
+            build(DataGridContextFilterMode::GreaterThan, json!(0.5), "float"),
+            Some("\"host\" > 0.5".to_string())
+        );
+        assert_eq!(
+            build(DataGridContextFilterMode::Equals, json!("web-01"), "string"),
+            Some("\"host\" = 'web-01'".to_string())
         );
     }
 

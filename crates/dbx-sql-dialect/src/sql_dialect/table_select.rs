@@ -339,6 +339,8 @@ pub fn build_table_data_select_sql_with_database(
                 quoted_table_columns_or_star(database_type, &options.columns)
             )
         }
+    } else if options.project_columns && !options.columns.is_empty() && database_type != Some(DatabaseType::Tdengine) {
+        quoted_table_columns_or_star(database_type, &options.columns)
     } else {
         build_select_columns(
             database_type,
@@ -1129,7 +1131,25 @@ mod tests {
             where_input: None,
             inject_default_time_series_where: false,
             include_row_id: false,
+            project_columns: false,
         }
+    }
+
+    #[test]
+    fn project_columns_selects_only_requested_columns() {
+        let mut options = opts(DatabaseType::Sqlite, None, None, "users");
+        options.columns = vec!["name".to_string(), "avatar".to_string()];
+        options.where_input = Some("\"id\" = 1".to_string());
+        options.limit = Some(1);
+        assert_eq!(
+            build_table_data_select_sql_with_database(options.clone(), false),
+            "SELECT * FROM \"users\" WHERE (\"id\" = 1) LIMIT 1;"
+        );
+        options.project_columns = true;
+        assert_eq!(
+            build_table_data_select_sql_with_database(options, false),
+            "SELECT \"name\", \"avatar\" FROM \"users\" WHERE (\"id\" = 1) LIMIT 1;"
+        );
     }
 
     #[test]

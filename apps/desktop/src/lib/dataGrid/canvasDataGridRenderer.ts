@@ -236,9 +236,9 @@ export function canvasDataGridActionReservedWidth(canQuickDownload: boolean, can
   return overlayWidth > 0 ? overlayWidth + 6 : 0;
 }
 
-/** 悬浮按钮组宽度：每个已启用按钮 20px + 2px 间距。 */
+/** 悬浮按钮组宽度：每个已启用按钮 20px + 2px 间距；外键单元格有「跳转」和「资讯卡」两个按钮。 */
 export function canvasDataGridActionOverlayWidth(canQuickDownload: boolean, canNavigateForeignKey = false, showCellDetail = true, canOpenExternalUrl = false): number {
-  return (showCellDetail ? 22 : 0) + (canQuickDownload ? 22 : 0) + (canNavigateForeignKey ? 22 : 0) + (canOpenExternalUrl ? 22 : 0);
+  return (showCellDetail ? 22 : 0) + (canQuickDownload ? 22 : 0) + (canNavigateForeignKey ? 44 : 0) + (canOpenExternalUrl ? 22 : 0);
 }
 
 export function resolveCanvasCellTextLayout(options: { drawX: number; colWidth: number; dpr: number; isRightAlign: boolean; reservedWidth?: number }): { textAnchorX: number; maxWidth: number } {

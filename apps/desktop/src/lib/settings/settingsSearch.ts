@@ -252,6 +252,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-grid-auto-total", category: "data", titleKey: "settings.autoCalculateTotalRows", descriptionKey: "settings.autoCalculateTotalRowsDescription", targetId: "data" },
   { id: "data-grid-infinite-scroll", category: "data", titleKey: "settings.infiniteScroll", descriptionKey: "settings.infiniteScrollDescription", targetId: "data" },
   { id: "redis-key-templates", category: "data", titleKey: "settings.redisKeyTemplates", descriptionKey: "settings.redisKeyTemplatesDescription", targetId: "redis-key-templates" },
+  { id: "data-grid-foreign-key-card", category: "data", titleKey: "settings.foreignKeyCardTrigger", descriptionKey: "settings.foreignKeyCardTriggerDescription", targetId: "data" },
   { id: "data-grid-auto-transpose", category: "data", titleKey: "settings.dataGridAutoTransposeSingleRow", descriptionKey: "settings.dataGridAutoTransposeSingleRowDescription", targetId: "data" },
   { id: "data-grid-quick-entry", category: "data", titleKey: "settings.dataGridQuickEntry", descriptionKey: "settings.dataGridQuickEntryDescription", targetId: "data" },
   { id: "data-grid-toolbar-layout", category: "data", titleKey: "settings.dataGridToolbarLayout", descriptionKey: "settings.dataGridToolbarLayoutDescription", targetId: "data-grid-toolbar-layout" },

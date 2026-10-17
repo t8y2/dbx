@@ -12,6 +12,7 @@ import * as api from "@/lib/backend/api";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { type ColumnFormatterConfig, type CustomColumnFormatterConfig, normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern } from "@/lib/dataGrid/columnFormatter";
+import { DEFAULT_FOREIGN_KEY_CARD_TRIGGER, normalizeForeignKeyCardTemplates, normalizeForeignKeyCardTrigger, type ForeignKeyCardTemplate, type ForeignKeyCardTrigger } from "@/lib/dataGrid/foreignKeyCard";
 import { type BooleanCellValueStyle, normalizeBooleanCellValueStyle } from "@/lib/dataGrid/dataGridBooleanColumn";
 import { type DataGridCopyPreference, type DataGridExtractorOptions, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT, normalizeDataGridTextFilterPanelHeight } from "@/lib/dataGrid/dataGridTextFilterPanel";
@@ -1080,6 +1081,8 @@ export interface EditorSettings {
   dataGridToolbarLayout: DataGridToolbarLayout;
   /** Opens Conditions/Text filter editors initially; users can still collapse them. */
   dataGridKeepFilterEditorExpanded: boolean;
+  /** Foreign-key info card: open by clicking the card button, or on hovering the cell. */
+  foreignKeyCardTrigger: ForeignKeyCardTrigger;
   dataGridTextFilterPanelHeight: number;
   localFilterPopoverWidth: number;
   dataGridRenderMode: DataGridRenderMode;
@@ -1172,6 +1175,8 @@ export interface EditorSettings {
   sidebarDensity: SidebarDensity;
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
+  /** Foreign-key info card HTML templates, keyed by referenced table (see foreignKeyCardTemplateKey). */
+  foreignKeyCardTemplates: Record<string, ForeignKeyCardTemplate>;
   globalDateTimeDisplayFormat: string;
   globalDateTimeExportFormat: string;
   globalDateTimeImportFormat: string;
@@ -1422,6 +1427,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridFilterEditorView: "quick",
   dataGridToolbarLayout: "single",
   dataGridKeepFilterEditorExpanded: false,
+  foreignKeyCardTrigger: DEFAULT_FOREIGN_KEY_CARD_TRIGGER,
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
   localFilterPopoverWidth: 360,
   dataGridRenderMode: "canvas",
@@ -1509,6 +1515,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarFontSize: SIDEBAR_FONT_SIZE_DEFAULT,
   sidebarDensity: "default",
   columnFormatters: {},
+  foreignKeyCardTemplates: {},
   customColumnFormatters: {},
   globalDateTimeDisplayFormat: "",
   globalDateTimeExportFormat: "",
@@ -2081,6 +2088,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
     dataGridToolbarLayout: normalizeDataGridToolbarLayout(settings.dataGridToolbarLayout),
     dataGridKeepFilterEditorExpanded: typeof settings.dataGridKeepFilterEditorExpanded === "boolean" ? settings.dataGridKeepFilterEditorExpanded : hasDataGridKeepFilterEditorExpanded ? false : legacyDataGridAutoHideFilterBuilder === false,
+    foreignKeyCardTrigger: normalizeForeignKeyCardTrigger(settings.foreignKeyCardTrigger),
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
     localFilterPopoverWidth: normalizeDrawerWidth(settings.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth),
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
@@ -2216,6 +2224,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarDensity: normalizeSidebarDensity(settings.sidebarDensity),
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
+    foreignKeyCardTemplates: normalizeForeignKeyCardTemplates(settings.foreignKeyCardTemplates),
     globalDateTimeDisplayFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeDisplayFormat),
     globalDateTimeExportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeExportFormat),
     globalDateTimeImportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeImportFormat),
@@ -2980,6 +2989,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridFilterEditorView !== undefined) editorSettings.value.dataGridFilterEditorView = normalizeDataGridFilterEditorView(partial.dataGridFilterEditorView);
     if (partial.dataGridToolbarLayout !== undefined) editorSettings.value.dataGridToolbarLayout = normalizeDataGridToolbarLayout(partial.dataGridToolbarLayout);
     if (partial.dataGridKeepFilterEditorExpanded !== undefined) editorSettings.value.dataGridKeepFilterEditorExpanded = partial.dataGridKeepFilterEditorExpanded === true;
+    if (partial.foreignKeyCardTrigger !== undefined) editorSettings.value.foreignKeyCardTrigger = normalizeForeignKeyCardTrigger(partial.foreignKeyCardTrigger);
     if (partial.dataGridTextFilterPanelHeight !== undefined) editorSettings.value.dataGridTextFilterPanelHeight = normalizeDataGridTextFilterPanelHeight(partial.dataGridTextFilterPanelHeight);
     if (partial.localFilterPopoverWidth !== undefined) editorSettings.value.localFilterPopoverWidth = normalizeDrawerWidth(partial.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth);
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
@@ -3079,6 +3089,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarDensity !== undefined) editorSettings.value.sidebarDensity = normalizeSidebarDensity(partial.sidebarDensity);
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
+    if (partial.foreignKeyCardTemplates !== undefined) editorSettings.value.foreignKeyCardTemplates = normalizeForeignKeyCardTemplates(partial.foreignKeyCardTemplates);
     if (partial.globalDateTimeDisplayFormat !== undefined) editorSettings.value.globalDateTimeDisplayFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeDisplayFormat);
     if (partial.globalDateTimeExportFormat !== undefined) editorSettings.value.globalDateTimeExportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeExportFormat);
     if (partial.globalDateTimeImportFormat !== undefined) editorSettings.value.globalDateTimeImportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeImportFormat);
@@ -3214,6 +3225,16 @@ export const useSettingsStore = defineStore("settings", () => {
       delete columnFormatters[key];
     }
     updateEditorSettings({ columnFormatters });
+  }
+
+  function updateForeignKeyCardTemplate(key: string, template: ForeignKeyCardTemplate | undefined) {
+    const foreignKeyCardTemplates = { ...editorSettings.value.foreignKeyCardTemplates };
+    if (template?.html.trim()) {
+      foreignKeyCardTemplates[key] = { html: template.html, updatedAt: Date.now() };
+    } else {
+      delete foreignKeyCardTemplates[key];
+    }
+    updateEditorSettings({ foreignKeyCardTemplates });
   }
 
   function customColumnFormatterDeleteVersion(id: string): number {
@@ -3358,6 +3379,7 @@ export const useSettingsStore = defineStore("settings", () => {
     initMcpGlobalPolicy,
     updateMcpGlobalPolicy,
     updateColumnFormatter,
+    updateForeignKeyCardTemplate,
     rememberConnectionDatabases,
     rememberedDatabaseForConnection,
     clearRememberedConnectionDatabases,

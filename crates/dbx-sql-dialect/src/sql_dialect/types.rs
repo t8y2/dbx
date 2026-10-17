@@ -81,4 +81,9 @@ pub struct TableDataSelectSqlOptions {
     pub inject_default_time_series_where: bool,
     #[serde(default)]
     pub include_row_id: bool,
+    /// Select only `columns` instead of the engine's default `*` projection.
+    /// Off for table data, which keeps `SELECT *`; previews that need a few
+    /// columns of one row (foreign key info cards) opt in.
+    #[serde(default)]
+    pub project_columns: bool,
 }

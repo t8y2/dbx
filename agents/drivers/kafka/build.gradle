@@ -9,7 +9,7 @@ dependencies {
         exclude group: 'ch.qos.logback', module: 'logback-classic'
         exclude group: 'ch.qos.logback', module: 'logback-core'
     }
-    implementation 'io.dropwizard.metrics:metrics-core:4.1.12.1'
+    implementation 'io.dropwizard.metrics:metrics-core:4.2.40'
     runtimeOnly 'org.slf4j:slf4j-simple:1.7.36'
 }
 

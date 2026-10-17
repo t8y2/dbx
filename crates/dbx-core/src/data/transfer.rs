@@ -5377,16 +5377,17 @@ fn strip_dameng_storage_clauses(sql: &str) -> String {
 /// other PG-compatible targets do not accept (#9037). The values are openGauss-specific
 /// as well — `compression` takes `no|low|middle|high` where PostgreSQL takes
 /// `pglz|lz4|none` — so the whole option goes, not just an unrecognized value. Kept as a
-/// deny-list: every other option in the clause (`fillfactor`, `parallel_workers`,
-/// `autovacuum_*`, `toast.*`, ...) is a PostgreSQL table reloption and must survive
-/// verbatim.
+/// deny-list: every option not listed here (`fillfactor`, `parallel_workers`,
+/// `autovacuum_*`, `toast.autovacuum_*`, ...) is a PostgreSQL table reloption and must
+/// survive verbatim.
 ///
-/// PostgreSQL 16.15 rejects every one of these names as a table storage parameter
-/// (`unrecognized parameter`, or `syntax error at or near "row"` for `orientation`), so
-/// dropping them cannot remove a working option from a PG target. The column-store tail
-/// (`segment` onwards) is listed from openGauss's reloption set even where this fix could
-/// not observe openGauss emit it — PostgreSQL has no reloption by any of these names, so
-/// stripping them is safe either way.
+/// The list follows openGauss 5.0's documented table storage parameters. It covers the
+/// row-store page-compression family (`compresstype`, `compress_level`,
+/// `compress_byte_convert`, `compress_diff_convert`), the UStore options (`init_td`,
+/// `hasuids`), and the column-store family (`compresslevel` is the column-store
+/// sub-level; `compress_level` is the row-store algorithm level). PostgreSQL 16 rejects
+/// every one of these names as a table storage parameter, so dropping them cannot remove
+/// a working option from a PG target.
 const OPENGAUSS_ONLY_TABLE_STORAGE_OPTIONS: &[&str] = &[
     "orientation",
     "compression",
@@ -5397,9 +5398,16 @@ const OPENGAUSS_ONLY_TABLE_STORAGE_OPTIONS: &[&str] = &[
     "partial_cluster_rows",
     "enable_delta_store",
     "compress_level",
+    "compresslevel",
     "compress_chunk_size",
     "compress_prealloc_chunks",
     "compress_chunk_threshold",
+    "compresstype",
+    "compress_byte_convert",
+    "compress_diff_convert",
+    "deltarow_threshold",
+    "init_td",
+    "hasuids",
 ];
 
 /// Whether a reused source DDL came from openGauss's `pg_get_tabledef()`. A plain
@@ -5444,26 +5452,189 @@ fn strips_opengauss_table_storage_options(
         && !target_accepts_opengauss_table_options(target_db_type, target_driver_profile)
 }
 
-/// Splits a `WITH (...)` clause body at top-level commas, so a nested call or a quoted value
-/// that itself contains a comma cannot be cut in half. Each slice keeps the surrounding
-/// whitespace it had in `body`.
+fn is_sql_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#')
+}
+
+fn prefix_is_standalone(bytes: &[u8], start: usize) -> bool {
+    start == 0 || !is_sql_identifier_byte(bytes[start - 1])
+}
+
+fn scan_single_quoted(bytes: &[u8], quote: usize, backslash_escapes: bool) -> usize {
+    let mut index = quote + 1;
+    while index < bytes.len() {
+        if backslash_escapes && bytes[index] == b'\\' && index + 1 < bytes.len() {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == b'\'' {
+            if bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn scan_double_quoted(bytes: &[u8], quote: usize) -> usize {
+    let mut index = quote + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            if bytes.get(index + 1) == Some(&b'"') {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn scan_dollar_quoted(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    if bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+        return None; // `$1` is a positional parameter, not a dollar quote
+    }
+    while bytes.get(index).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'$') {
+        return None;
+    }
+    let tag = &bytes[start..=index];
+    let mut search = index + 1;
+    while search + tag.len() <= bytes.len() {
+        if &bytes[search..search + tag.len()] == tag {
+            return Some(search + tag.len());
+        }
+        search += 1;
+    }
+    Some(bytes.len()) // unterminated: keep the rest opaque rather than rewriting it
+}
+
+fn scan_line_comment(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index < bytes.len() && bytes[index] != b'\n' {
+        index += 1;
+    }
+    index
+}
+
+fn scan_block_comment(bytes: &[u8], start: usize) -> usize {
+    let mut depth = 1usize;
+    let mut index = start + 2;
+    while index < bytes.len() {
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            depth += 1;
+            index += 2;
+        } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+            depth -= 1;
+            index += 2;
+            if depth == 0 {
+                return index;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
+}
+
+/// Returns the end (exclusive) of a PostgreSQL string literal, quoted identifier, dollar
+/// quote, or comment starting at `start`, or `None` when `start` is ordinary code.
+///
+/// openGauss reads its DDL with PostgreSQL's lexer rules, where `"tenant's"` is one quoted
+/// identifier and `'C:\'` is a complete string. The shared
+/// [`sql_non_code_spans_with_mysql_identifiers`] scanner assumes MySQL escapes and would
+/// treat the apostrophe inside the identifier as the start of a string, shifting every
+/// later span.
+fn pg_non_code_span_end(sql: &str, start: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let byte = *bytes.get(start)?;
+    match byte {
+        b'E' | b'e' if bytes.get(start + 1) == Some(&b'\'') && prefix_is_standalone(bytes, start) => {
+            Some(scan_single_quoted(bytes, start + 1, true))
+        }
+        b'U' | b'u'
+            if bytes.get(start + 1) == Some(&b'&')
+                && bytes.get(start + 2) == Some(&b'\'')
+                && prefix_is_standalone(bytes, start) =>
+        {
+            Some(scan_single_quoted(bytes, start + 2, true))
+        }
+        b'B' | b'b' | b'X' | b'x' if bytes.get(start + 1) == Some(&b'\'') && prefix_is_standalone(bytes, start) => {
+            Some(scan_single_quoted(bytes, start + 1, false))
+        }
+        b'\'' => Some(scan_single_quoted(bytes, start, false)),
+        b'"' => Some(scan_double_quoted(bytes, start)),
+        b'$' => scan_dollar_quoted(bytes, start),
+        b'-' if bytes.get(start + 1) == Some(&b'-') => Some(scan_line_comment(bytes, start)),
+        b'/' if bytes.get(start + 1) == Some(&b'*') => Some(scan_block_comment(bytes, start)),
+        _ => None,
+    }
+}
+
+fn is_with_keyword_at(bytes: &[u8], start: usize) -> bool {
+    if start + 4 > bytes.len() || !bytes[start..start + 4].eq_ignore_ascii_case(b"WITH") {
+        return false;
+    }
+    let before_is_identifier = start > 0 && is_sql_identifier_byte(bytes[start - 1]);
+    let after_is_identifier = bytes.get(start + 4).is_some_and(|byte| is_sql_identifier_byte(*byte));
+    !before_is_identifier && !after_is_identifier
+}
+
+fn find_storage_clause_end(sql: &str, open: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    while index < bytes.len() {
+        if let Some(end) = pg_non_code_span_end(sql, index) {
+            index = end;
+            continue;
+        }
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Splits a `WITH (...)` clause body at top-level commas. Nested calls, quoted identifiers
+/// and string/dollar-quoted literals cannot be cut in half: their parentheses and commas
+/// are not structural. Each slice keeps the surrounding whitespace it had in `body`.
 fn split_table_storage_options(body: &str) -> Vec<&str> {
+    let bytes = body.as_bytes();
     let mut options = Vec::new();
     let mut depth = 0usize;
-    let mut quoted = false;
     let mut start = 0usize;
-    for (index, byte) in body.bytes().enumerate() {
-        match byte {
-            // Doubling (`"a""b"`) toggles twice, so the state still ends where it started.
-            b'"' => quoted = !quoted,
-            b'(' if !quoted => depth += 1,
-            b')' if !quoted => depth = depth.saturating_sub(1),
-            b',' if !quoted && depth == 0 => {
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if let Some(end) = pg_non_code_span_end(body, index) {
+            index = end;
+            continue;
+        }
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
                 options.push(&body[start..index]);
                 start = index + 1;
             }
             _ => {}
         }
+        index += 1;
     }
     options.push(&body[start..]);
     options
@@ -5481,95 +5652,64 @@ fn is_opengauss_only_table_storage_option(option: &str) -> bool {
 /// so a PostgreSQL-family target can parse it (#9037: PostgreSQL rejected
 /// `WITH (orientation=row, compression=no)` with `syntax error at or near "row"`). Options
 /// the target does accept are kept as written; a clause left with no options disappears
-/// entirely, because `WITH ()` is not valid SQL either. Only code spans are touched, so a
-/// `WITH` inside a string literal or comment is never rewritten. Double quotes are left as
-/// code (like [`strip_dameng_storage_clauses`]) because this runs on openGauss DDL, where
-/// they quote identifiers: keeping the whole clause in one span is what lets its
-/// parentheses be matched.
+/// entirely, because `WITH ()` is not valid SQL either.
+///
+/// The scan follows PostgreSQL's lexer rules: string literals (including `E'...'`),
+/// double-quoted identifiers, dollar-quoted strings, and `--`/`/* */` comments are copied
+/// verbatim and their parentheses/commas are not structural. This is what keeps a `WITH`
+/// inside a `COMMENT` literal or a quoted identifier such as `"tenant's"` from being
+/// rewritten; a MySQL-style scanner would shift every span after the apostrophe.
 fn strip_opengauss_only_table_storage_options(sql: &str) -> String {
-    // `sql_non_code_spans` assumes MySQL backslash escapes, while openGauss (like PostgreSQL
-    // with `standard_conforming_strings=on`) treats a backslash literally. A `\'` in a reused
-    // DDL — a table comment ending in a Windows path, for instance — would shift every later
-    // span boundary and let this rewrite delete text *inside* a `COMMENT ON` literal. Rather
-    // than risk silently corrupting the DDL, such a DDL is left untouched: the transfer then
-    // fails on the storage clause exactly as it did before the fix.
-    if sql.contains("\\'") {
-        return sql.to_string();
-    }
-    map_sql_code_spans(sql, false, |code| {
-        let mut output = String::with_capacity(code.len());
-        let bytes = code.as_bytes();
-        let mut position = 0;
+    let bytes = sql.as_bytes();
+    let mut output = String::with_capacity(sql.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if let Some(end) = pg_non_code_span_end(sql, index) {
+            output.push_str(&sql[index..end]);
+            index = end;
+            continue;
+        }
+        if !is_with_keyword_at(bytes, index) {
+            let char_len = sql[index..].chars().next().map_or(1, |ch| ch.len_utf8());
+            output.push_str(&sql[index..index + char_len]);
+            index += char_len;
+            continue;
+        }
 
-        while position < bytes.len() {
-            let Some(relative_start) = code[position..].to_ascii_uppercase().find("WITH") else {
-                output.push_str(&code[position..]);
-                break;
-            };
-            let start = position + relative_start;
-            let before_is_identifier = start > 0
-                && (bytes[start - 1].is_ascii_alphanumeric() || matches!(bytes[start - 1], b'_' | b'$' | b'#'));
-            let keyword_end = start + "WITH".len();
-            let after_is_identifier = keyword_end < bytes.len()
-                && (bytes[keyword_end].is_ascii_alphanumeric() || matches!(bytes[keyword_end], b'_' | b'$' | b'#'));
-            if before_is_identifier || after_is_identifier {
-                output.push_str(&code[position..keyword_end]);
-                position = keyword_end;
-                continue;
-            }
+        let mut open = index + "WITH".len();
+        while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+            open += 1;
+        }
+        let close = if open < bytes.len() && bytes[open] == b'(' { find_storage_clause_end(sql, open) } else { None };
+        let Some(close) = close else {
+            output.push_str(&sql[index..index + "WITH".len()]);
+            index += "WITH".len();
+            continue;
+        };
 
-            let mut open = keyword_end;
-            while open < bytes.len() && bytes[open].is_ascii_whitespace() {
-                open += 1;
-            }
-            if open >= bytes.len() || bytes[open] != b'(' {
-                output.push_str(&code[position..keyword_end]);
-                position = keyword_end;
-                continue;
-            }
-
-            let mut depth = 1usize;
-            let mut close = open + 1;
-            while close < bytes.len() && depth > 0 {
-                match bytes[close] {
-                    b'(' => depth += 1,
-                    b')' => depth -= 1,
-                    _ => {}
-                }
-                close += 1;
-            }
-            if depth != 0 {
-                output.push_str(&code[position..keyword_end]);
-                position = keyword_end;
-                continue;
-            }
-
-            let options = split_table_storage_options(&code[open + 1..close - 1]);
-            let kept: Vec<&str> =
-                options.iter().copied().filter(|option| !is_opengauss_only_table_storage_option(option)).collect();
-            if kept.len() == options.len() {
-                // Nothing openGauss-only here (an index's `fillfactor`, `WITH (oids=false)`,
-                // ...): keep the clause exactly as written.
-                output.push_str(&code[position..close]);
-                position = close;
-                continue;
-            }
+        let options = split_table_storage_options(&sql[open + 1..close - 1]);
+        let kept: Vec<&str> =
+            options.iter().copied().filter(|option| !is_opengauss_only_table_storage_option(option)).collect();
+        if kept.len() == options.len() {
+            // Nothing openGauss-only here (an index's `fillfactor`, `WITH (oids=false)`,
+            // ...): keep the clause exactly as written.
+            output.push_str(&sql[index..close]);
+        } else {
             let kept: Vec<&str> = kept.into_iter().filter(|option| !option.trim().is_empty()).collect();
             if kept.is_empty() {
                 // `WITH ()` is not valid SQL either, so the keyword and the whitespace that
                 // separated it from the column list go too.
-                let clause_start = position + code[position..start].trim_end().len();
-                output.push_str(&code[position..clause_start]);
+                let trimmed_len = output.trim_end().len();
+                output.truncate(trimmed_len);
             } else {
-                output.push_str(&code[position..open + 1]);
+                output.push_str(&sql[index..open + 1]);
                 output.push_str(kept.join(",").trim());
                 output.push(')');
             }
-            position = close;
         }
-
-        output
-    })
+        index = close;
+    }
+    output
 }
 
 /// Normalizes a reused source table DDL for the target: openGauss's `pg_get_tabledef()`
@@ -17683,6 +17823,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         let ddl = "CREATE TABLE \"public\".\"items\" (\n\
                      \"id\" integer,\n\
                      \"note\" text DEFAULT 'WITH (orientation=row)',\n\
+                     \"note2\" text DEFAULT $$WITH (orientation=row)$$,\n\
                      withdrawal integer\n\
                    )\n\
                    -- WITH (orientation=row)\n\
@@ -17693,6 +17834,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None);
 
         assert!(rewritten.contains("DEFAULT 'WITH (orientation=row)'"), "literal: {rewritten}");
+        assert!(rewritten.contains("DEFAULT $$WITH (orientation=row)$$"), "dollar quote: {rewritten}");
         assert!(rewritten.contains("-- WITH (orientation=row)"), "comment: {rewritten}");
         assert!(rewritten.contains("withdrawal integer"), "identifier: {rewritten}");
         // The real clause is the only thing that goes: the literal, the comment and the
@@ -17703,6 +17845,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             "CREATE TABLE \"public\".\"items\" (\n\
              \"id\" integer,\n\
              \"note\" text DEFAULT 'WITH (orientation=row)',\n\
+             \"note2\" text DEFAULT $$WITH (orientation=row)$$,\n\
              withdrawal integer\n\
              )\n\
              -- WITH (orientation=row)\n\
@@ -17712,9 +17855,10 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
 
     #[test]
     fn opengauss_storage_strip_matches_whole_option_names_only() {
-        // The comparison covers the whole option name up to `=`, so PostgreSQL's
-        // `toast.compression` is not mistaken for openGauss's table-level `compression`,
-        // a longer name is not cut short, and a quoted name still matches.
+        // The comparison covers the whole option name up to `=`, so a dotted name such as
+        // `toast.compression` is not mistaken for openGauss's table-level `compression`, a
+        // longer name is not cut short, and a quoted name still matches. (`toast.compression`
+        // is not a PostgreSQL 16 table reloption, but it is a legal name to keep untouched.)
         let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) \
                    WITH (toast.compression=pglz, orientation_hint=keep, \"compression\"=no)";
 
@@ -17739,12 +17883,15 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
 
     #[test]
     fn opengauss_storage_strip_covers_the_column_store_options() {
-        // openGauss column-store tables carry a longer reloption tail. PostgreSQL has no table
-        // reloption by any of these names, so every one of them goes and the clause disappears.
+        // openGauss column-store tables carry a longer reloption tail. `compresslevel` is
+        // the column-store sub-level (the row-store algorithm level is `compress_level`);
+        // PostgreSQL has no table reloption by any of these names, so every one goes and the
+        // clause disappears.
         let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) \
                    WITH (orientation=column, compression=high, segment=32, max_batchrow=10000, \
-                   compress_level=1, compress_chunk_size=1024, compress_prealloc_chunks=1, \
-                   compress_chunk_threshold=1024)";
+                   partial_cluster_rows=10000, enable_delta_store=on, deltarow_threshold=100, \
+                   compresslevel=2, compress_chunk_size=1024, compress_prealloc_chunks=1, \
+                   compress_chunk_threshold=1024, version=0.12)";
 
         assert_eq!(
             normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
@@ -17753,19 +17900,100 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     }
 
     #[test]
-    fn opengauss_storage_strip_leaves_a_ddl_with_a_backslash_escape_alone() {
-        // The shared literal tokenizer assumes MySQL backslash escapes, while openGauss (like
-        // PostgreSQL with `standard_conforming_strings=on`) reads `\'` as a literal backslash
-        // followed by the end of the string. Rewriting such a DDL would shift every later span
-        // and could delete text inside a COMMENT literal, so the whole DDL is left untouched:
-        // the transfer keeps failing on the storage clause instead of running corrupted DDL.
+    fn opengauss_storage_strip_covers_the_row_store_compression_options() {
+        // Row-store page compression is a separate openGauss family from the column-store
+        // options; PostgreSQL rejects all four names.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) \
+                   WITH (compresstype=2, compress_level=1, compress_byte_convert=on, \
+                   compress_diff_convert=off, fillfactor=70)";
+
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
+            "CREATE TABLE \"public\".\"items\" (\"id\" integer) WITH (fillfactor=70)"
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_covers_the_ustore_options() {
+        // UStore tables add their own reloptions; PostgreSQL does not know them.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) \
+                   WITH (storage_type=ustore, init_td=8, hasuids=on)";
+
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
+            "CREATE TABLE \"public\".\"items\" (\"id\" integer)"
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_keeps_a_trailing_backslash_literal() {
+        // PostgreSQL reads a backslash in a regular string literally, so `'path C:\'` ends
+        // at the quote. The storage clause still has to be stripped, and the literal has to
+        // survive byte-for-byte.
         let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) WITH (orientation=row);\n\
                    COMMENT ON TABLE \"public\".\"items\" IS 'path C:\\';";
 
         assert_eq!(
             normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
-            ddl
+            "CREATE TABLE \"public\".\"items\" (\"id\" integer);\n\
+             COMMENT ON TABLE \"public\".\"items\" IS 'path C:\\';"
         );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_keeps_quoted_identifiers_and_comment_literals() {
+        // A quoted identifier may contain an apostrophe (`tenant's schema` is a real
+        // openGauss input; see schema::tests). A MySQL-style tokenizer would read the
+        // apostrophe as a string start, shift every later span, and delete the text inside
+        // the COMMENT literal. The storage clause must still be stripped.
+        let ddl = "SET search_path = \"tenant's\";\n\
+                   CREATE TABLE \"tenant's\".\"items\" (\"id\" integer) WITH (orientation=row);\n\
+                   COMMENT ON TABLE \"tenant's\".\"items\" IS 'keep WITH (orientation=row) text';";
+
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
+            "SET search_path = \"tenant's\";\n\
+             CREATE TABLE \"tenant's\".\"items\" (\"id\" integer);\n\
+             COMMENT ON TABLE \"tenant's\".\"items\" IS 'keep WITH (orientation=row) text';"
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_keeps_e_string_literals() {
+        // In an `E'...'` literal a backslash escapes the next byte, so the `\'` inside the
+        // text does not end the literal; the `WITH` inside it must not be rewritten.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer) WITH (orientation=row);\n\
+                   COMMENT ON TABLE \"public\".\"items\" IS E'it\\'s WITH (orientation=row)';";
+
+        assert_eq!(
+            normalize_reused_opengauss_table_ddl(ddl, &DatabaseType::OpenGauss, None, &DatabaseType::Postgres, None),
+            "CREATE TABLE \"public\".\"items\" (\"id\" integer);\n\
+             COMMENT ON TABLE \"public\".\"items\" IS E'it\\'s WITH (orientation=row)';"
+        );
+    }
+
+    #[test]
+    fn opengauss_storage_strip_handles_quoted_parentheses() {
+        // Parentheses inside a quoted identifier or value are not structural; a scanner
+        // that counts them would cut the clause at the wrong `)` and emit invalid SQL.
+        let cases = [
+            ("WITH (\"orientation\"=\"row)\", fillfactor=70)", "WITH (fillfactor=70)"),
+            ("WITH (orientation=row, \"note\"=\"(\")", "WITH (\"note\"=\"(\")"),
+        ];
+        for (clause, expected) in cases {
+            let ddl = format!("CREATE TABLE \"public\".\"items\" (\"id\" integer) {clause}");
+            assert_eq!(
+                normalize_reused_opengauss_table_ddl(
+                    &ddl,
+                    &DatabaseType::OpenGauss,
+                    None,
+                    &DatabaseType::Postgres,
+                    None
+                ),
+                format!("CREATE TABLE \"public\".\"items\" (\"id\" integer) {expected}"),
+                "input clause: {clause}"
+            );
+        }
     }
 
     #[test]

@@ -5082,7 +5082,9 @@ function scrollToIndexSearchMatch(direction: 1 | -1 = 1) {
     return;
   }
   const rows = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-index-row-index]") ?? []);
-  const matches = indexes.value.map((index, rowIndex) => ({ index, rowIndex })).filter(({ index }) => indexMatchesSearch(index));
+  // DOM rows render in displayedIndexes order, which differs from indexes.value
+  // once the column-list sort is active.
+  const matches = displayedIndexes.value.map((index, rowIndex) => ({ index, rowIndex })).filter(({ index }) => indexMatchesSearch(index));
   if (!matches.length) return;
   const currentIndex = highlightedIndexId.value ? matches.findIndex(({ index }) => index.id === highlightedIndexId.value) : -1;
   const nextMatch = matches[(currentIndex + direction + matches.length) % matches.length] ?? matches[0];
@@ -5421,10 +5423,12 @@ function newIndexDraft(): EditableStructureIndex {
 function addIndex() {
   if (!structureCapabilities.value.createIndex || indexesLoading.value) return;
   activeTab.value = "indexes";
-  indexes.value.push(newIndexDraft());
+  const draft = newIndexDraft();
+  indexes.value.push(draft);
   void nextTick(() => {
-    const indexRows = rootRef.value?.querySelectorAll<HTMLElement>('[data-new-index-row="true"]');
-    const row = indexRows?.[indexRows.length - 1];
+    // The sorted DOM order is not the insertion order; focus the row belonging
+    // to this draft instead of the last rendered new-index row.
+    const row = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-index-row-id]") ?? []).find((candidate) => candidate.dataset.indexRowId === draft.id);
     const input = row?.querySelector<HTMLInputElement>("[data-index-name-input]");
     row?.scrollIntoView({ block: "nearest" });
     input?.focus();
@@ -8183,7 +8187,7 @@ watch(
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(index, rowIndex) in displayedIndexes" :key="index.id" :class="indexRowClass(index)" :data-new-index-row="!index.original ? 'true' : undefined" :data-index-row-index="rowIndex">
+                <tr v-for="(index, rowIndex) in displayedIndexes" :key="index.id" :class="indexRowClass(index)" :data-index-row-id="index.id" :data-new-index-row="!index.original ? 'true' : undefined" :data-index-row-index="rowIndex">
                   <td :class="[structureCellClass, 'structure-index-name']">
                     <div class="flex min-w-0 items-center gap-1">
                       <KeyRound :class="[structureIconClass, 'structure-column-key-icon shrink-0']" :title="index.isPrimary ? 'PRIMARY' : index.isUnique ? 'UNIQUE' : index.indexType || 'INDEX'" />

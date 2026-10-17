@@ -426,6 +426,70 @@ describe("TableStructureEditor column index actions", () => {
     expect(mocks.executeBatch).not.toHaveBeenCalled();
   });
 
+  it("navigates index search matches in sorted row order", async () => {
+    const indexDrafts = createIndexDrafts([
+      { name: "idx_z", columns: ["z"], is_unique: false, is_primary: false },
+      { name: "idx_a", columns: ["a"], is_unique: false, is_primary: false },
+    ]);
+    const draft = savedIndexDraft(indexDrafts[0]!);
+    draft.indexes = indexDrafts;
+
+    const root = await mountStructureEditor(draft);
+    const rows = [...root.querySelectorAll<HTMLElement>("[data-index-row-id]")];
+    expect(rows.map((row) => row.dataset.indexRowId)).toEqual(["existing:idx_z", "existing:idx_a"]);
+    const scrollSpies = new Map(rows.map((row) => [row.dataset.indexRowId!, vi.fn()]));
+    for (const row of rows) row.scrollIntoView = scrollSpies.get(row.dataset.indexRowId!)!;
+
+    root.querySelector<HTMLElement>("th[aria-sort]")!.click();
+    await settle();
+    expect([...root.querySelectorAll<HTMLElement>("[data-index-row-id]")].map((row) => row.dataset.indexRowId)).toEqual(["existing:idx_a", "existing:idx_z"]);
+
+    const search = root.querySelector<HTMLInputElement>('input[placeholder="structureEditor.searchIndexes"]')!;
+    search.value = "idx";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await settle();
+
+    expect(root.querySelector<HTMLElement>("[data-index-row-id].structure-column-search-current")?.dataset.indexRowId).toBe("existing:idx_a");
+    expect(scrollSpies.get("existing:idx_a")).toHaveBeenCalledOnce();
+    expect(scrollSpies.get("existing:idx_z")).not.toHaveBeenCalled();
+  });
+
+  it("focuses the newly added index when sorted before an older draft", async () => {
+    const seedDraft: EditableStructureIndex = {
+      id: "new:seed",
+      name: "idx_seed",
+      columns: ["z"],
+      nameEdited: true,
+      isUnique: false,
+      isPrimary: false,
+      filter: "",
+      indexType: "BTREE",
+      includedColumns: [],
+      comment: "",
+      concurrently: false,
+      columnOpclasses: [],
+      markedForDrop: false,
+    };
+    const draft = savedIndexDraft(seedDraft);
+    draft.indexes = [...createIndexDrafts([{ name: "idx_a", columns: ["a"], is_unique: false, is_primary: false }]), seedDraft];
+
+    const root = await mountStructureEditor(draft);
+    root.querySelector<HTMLElement>("th[aria-sort]")!.click();
+    await settle();
+
+    const addButton = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("structureEditor.addIndex"));
+    expect(addButton).toBeDefined();
+    addButton!.click();
+    await settle();
+
+    const activeInput = document.activeElement as HTMLInputElement | null;
+    expect(activeInput?.matches("[data-index-name-input]")).toBe(true);
+    expect(activeInput?.closest<HTMLElement>("[data-index-row-id]")?.dataset.indexRowIndex).toBe("0");
+    expect(activeInput?.value).toBe("");
+  });
+
   it("builds a composite index in selection order and appends fields without duplicates", async () => {
     loadMetadata();
     const root = await mountStructureEditor();

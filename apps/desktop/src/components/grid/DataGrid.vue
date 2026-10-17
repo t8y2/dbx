@@ -274,7 +274,7 @@ import { resolveCrosshairTarget, type CrosshairTarget } from "@/lib/dataGrid/cro
 import { DATA_GRID_DARK_NEW_ROW_BG, DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_NEW_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
-import { buildDataGridSavedRowRefreshPlan, dataGridSavedRowRefreshPatches } from "@/lib/dataGrid/dataGridSavedRowRefresh";
+import { buildDataGridSavedRowRefreshPlan, dataGridSavedRowRefreshPatches, executeDataGridSavedRowRefreshQuery } from "@/lib/dataGrid/dataGridSavedRowRefresh";
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { sqlWithoutCommentsForCopy } from "@/lib/sql/sqlWithoutCommentsForCopy";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -4450,6 +4450,7 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
     identityConditions.push(`(${conditions.join(" AND ")})`);
   }
 
+  const largeValuePreviewOptions = tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value);
   const sql = await buildTableSelectSql({
     databaseType: resolvedDatabaseType.value,
     driverProfile: connectionStore.getConfig(connectionId)?.driver_profile,
@@ -4463,16 +4464,21 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
     columns: tableMeta.columns.map((column) => column.name),
     includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
     primaryKeys: tableMeta.primaryKeys,
-    ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
+    ...largeValuePreviewOptions,
     whereInput: identityConditions.join(" OR "),
     limit: planResult.plan.sourceIndexes.length + 1,
     includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
   });
-  const refreshed = await api.executeQuery(connectionId, props.executionDatabase ?? props.database ?? "", sql, tableMeta.schema ?? props.schema, undefined, {
-    maxRows: planResult.plan.sourceIndexes.length + 1,
-    fetchSize: planResult.plan.sourceIndexes.length + 1,
-    pageSize: planResult.plan.sourceIndexes.length + 1,
+  const refreshed = await executeDataGridSavedRowRefreshQuery(api, {
+    connectionId,
+    database: props.executionDatabase ?? props.database ?? "",
+    schema: tableMeta.schema ?? props.schema,
+    sql,
+    rowLimit: planResult.plan.sourceIndexes.length + 1,
+    primaryKeys: tableMeta.primaryKeys,
+    largeValuePreview: "largeValuePreviewSize" in largeValuePreviewOptions,
   });
+  if (!refreshed) return false;
   const patches = dataGridSavedRowRefreshPatches(planResult.plan, request.columns, props.sourceColumns, refreshed.columns, refreshed.rows);
   if (!patches) return false;
 

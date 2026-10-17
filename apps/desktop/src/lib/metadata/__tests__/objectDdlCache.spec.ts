@@ -434,5 +434,24 @@ describe("objectDdlCache", () => {
       expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith("object-ddl:v1:a%3Ab%20c%25%E4%B8%AD:");
       expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith("object-meta:v1:a%3Ab%20c%25%E4%B8%AD:");
     });
+
+    it("strips NUL bytes from remote and cached DDL", async () => {
+      mocks.getTableDisplayDdl.mockResolvedValue("CREATE TABLE t (id int DEFAULT '2'\0\0);");
+
+      const remoteResult = await loadObjectDdl(request, { force: true });
+      expect(remoteResult.ddl).toBe("CREATE TABLE t (id int DEFAULT '2');");
+      expect(remoteResult.ddl).not.toContain("\0");
+
+      mocks.persisted.set(objectDdlCacheKey(request), {
+        version: 1,
+        cachedAt: new Date().toISOString(),
+        ddl: "CREATE TABLE t (name varchar DEFAULT ''\0\0);",
+      });
+      clearMetadataRuntimeCache();
+
+      const diskResult = await loadObjectDdl(request);
+      expect(diskResult.ddl).toBe("CREATE TABLE t (name varchar DEFAULT '');");
+      expect(diskResult.ddl).not.toContain("\0");
+    });
   });
 });

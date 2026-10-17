@@ -9770,19 +9770,21 @@ async fn get_table_ddl_core_with_options(
                 .get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id)
                 .await
                 .ok();
-            return Ok(enrich_ddl_with_oracle_style_comments(
-                state,
-                connection_id,
-                database,
-                schema,
-                table,
-                &ddl,
-                client_session_id,
-                pool_key.as_deref(),
-            )
-            .await);
+            return Ok(sanitize_ddl_string(
+                enrich_ddl_with_oracle_style_comments(
+                    state,
+                    connection_id,
+                    database,
+                    schema,
+                    table,
+                    &ddl,
+                    client_session_id,
+                    pool_key.as_deref(),
+                )
+                .await,
+            ));
         }
-        return Ok(ddl);
+        return Ok(sanitize_ddl_string(ddl));
     }
     if matches!(object_type, Some(db::ObjectSourceKind::MaterializedView)) {
         let source = get_object_source_core(
@@ -9796,7 +9798,7 @@ async fn get_table_ddl_core_with_options(
             None,
         )
         .await?;
-        return Ok(source.source);
+        return Ok(sanitize_ddl_string(source.source));
     }
     if let Some(kind) = object_type.clone().filter(ddl_kind_uses_object_source) {
         // Routines, packages, triggers, types and the other schema objects have no
@@ -9805,7 +9807,7 @@ async fn get_table_ddl_core_with_options(
         // instead, and keep the previous behaviour when the driver cannot produce
         // one (engine without a source query, empty definition, …).
         match get_object_source_core(state, connection_id, database, schema, table, kind, None, None).await {
-            Ok(source) if !source.source.trim().is_empty() => return Ok(source.source),
+            Ok(source) if !source.source.trim().is_empty() => return Ok(sanitize_ddl_string(source.source)),
             Ok(_) => {}
             Err(error) => {
                 log::debug!(
@@ -9824,20 +9826,29 @@ async fn get_table_ddl_core_with_options(
     if should_append_oracle_style_comment_ddl(db_config.as_ref()) {
         let pool_key =
             state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await.ok();
-        Ok(enrich_ddl_with_oracle_style_comments(
-            state,
-            connection_id,
-            database,
-            schema,
-            table,
-            &ddl,
-            client_session_id,
-            pool_key.as_deref(),
-        )
-        .await)
+        Ok(sanitize_ddl_string(
+            enrich_ddl_with_oracle_style_comments(
+                state,
+                connection_id,
+                database,
+                schema,
+                table,
+                &ddl,
+                client_session_id,
+                pool_key.as_deref(),
+            )
+            .await,
+        ))
     } else {
-        Ok(ddl)
+        Ok(sanitize_ddl_string(ddl))
     }
+}
+
+pub(crate) fn sanitize_ddl_string(mut ddl: String) -> String {
+    if ddl.contains('\0') {
+        ddl.retain(|c| c != '\0');
+    }
+    ddl
 }
 
 /// Whether the DDL of this object kind is its own definition, rather than the
@@ -16496,4 +16507,17 @@ fn render_sqlserver_table_ddl_details(
         ));
     }
     ddl
+}
+
+#[test]
+fn sanitize_ddl_string_removes_nul_characters() {
+    assert_eq!(
+        sanitize_ddl_string("CREATE TABLE t (id INT DEFAULT 0\0\0);".to_string()),
+        "CREATE TABLE t (id INT DEFAULT 0);"
+    );
+    assert_eq!(
+        sanitize_ddl_string("CREATE TABLE t (name VARCHAR DEFAULT ''\0\0);".to_string()),
+        "CREATE TABLE t (name VARCHAR DEFAULT '');"
+    );
+    assert_eq!(sanitize_ddl_string("no nul chars".to_string()), "no nul chars");
 }

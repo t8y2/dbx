@@ -970,6 +970,35 @@ class CommonJavaCompatibilityTest {
         assertEquals(ddl, DdlBuilder.appendTrailingSql(ddl, "   "));
     }
 
+    @Test
+    void ddlBuilderStripsNulCharactersFromDefaultsAndComments() {
+        ColumnInfo col1 = new ColumnInfo("status\0ignored", "int", false, "'2'\0\0\0", false);
+        col1.setComment("status comment\0ignored");
+        ColumnInfo col2 = new ColumnInfo("name", "varchar", true, "''\0\0\0", false);
+        ColumnInfo col3 = new ColumnInfo("blank_default", "int", true, "\0\0\0", false);
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "app\0ignored",
+            "users\0ignored",
+            Arrays.asList(col1, col2, col3),
+            Collections.emptyList(),
+            Collections.emptyList(),
+            Collections.emptyList(),
+            false,
+            true,
+            "table comment\0ignored"
+        );
+
+        assertFalse(ddl.contains("\0"), "DDL must not contain NUL bytes");
+        assertTrue(ddl.contains("CREATE TABLE \"app\".\"users\""));
+        assertTrue(ddl.contains("\"status\" int NOT NULL DEFAULT '2'"));
+        assertTrue(ddl.contains("\"name\" varchar DEFAULT ''"));
+        assertTrue(ddl.contains("\"blank_default\" int"));
+        assertFalse(ddl.contains("\"blank_default\" int DEFAULT"));
+        assertTrue(ddl.contains("COMMENT ON TABLE \"app\".\"users\" IS 'table comment';"));
+        assertTrue(ddl.contains("COMMENT ON COLUMN \"app\".\"users\".\"status\" IS 'status comment';"));
+    }
+
     private static class MinimalAgent implements DatabaseAgent {
         private ExecuteQueryOptions lastExecuteOptions;
 

@@ -613,7 +613,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             bind(stmt, args);
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
-                    String value = rs.getString("column_default");
+                    String value = sanitizeColumnDefault(rs.getString("column_default"));
                     if (value != null) {
                         defaults.put(trim(rs.getString("colname")), value);
                     }
@@ -623,6 +623,18 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             return Collections.emptyMap();
         }
         return defaults;
+    }
+
+    public static String sanitizeColumnDefault(String value) {
+        if (value == null) {
+            return null;
+        }
+        int nullIndex = value.indexOf('\0');
+        if (nullIndex >= 0) {
+            value = value.substring(0, nullIndex);
+        }
+        value = value.trim();
+        return value.isEmpty() ? null : value;
     }
 
     private static boolean isMysqlCompatMode(ConnectParams params) {
@@ -928,7 +940,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String chunk = rs.getString("viewtext");
-                        source.append(chunk == null ? "" : chunk);
+                        if (chunk != null) {
+                            int nullIndex = chunk.indexOf('\0');
+                            if (nullIndex >= 0) {
+                                source.append(chunk, 0, nullIndex);
+                            } else {
+                                source.append(chunk);
+                            }
+                        }
                     }
                 }
             }
@@ -1199,7 +1218,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     private static String trim(String value) {
-        return value == null ? "" : value.trim();
+        if (value == null) {
+            return "";
+        }
+        int nullIndex = value.indexOf('\0');
+        if (nullIndex >= 0) {
+            value = value.substring(0, nullIndex);
+        }
+        return value.trim();
     }
 
     private static String emptyToNull(String value) {
@@ -1207,7 +1233,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     private static String stripTrailing(String value) {
-        return value == null ? "" : value.stripTrailing();
+        if (value == null) {
+            return "";
+        }
+        int nullIndex = value.indexOf('\0');
+        if (nullIndex >= 0) {
+            value = value.substring(0, nullIndex);
+        }
+        return value.stripTrailing();
     }
 
     private String currentCatalog() {

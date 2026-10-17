@@ -15,6 +15,7 @@ skipTcpProbe: false
 defaultPort: 3306
 traits:
   diagramSql: true
+  showSystemDatabases: true
 supportLevel: operate
 capabilities:
   queryExecution: true

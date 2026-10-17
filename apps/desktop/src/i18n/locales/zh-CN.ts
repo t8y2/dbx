@@ -1916,6 +1916,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "在当前连接的表列表中显示 Dolt 内置的版本控制表。",
     showSystemSchemas: "显示系统 Schema",
     showSystemSchemasHint: "为当前连接在侧边栏和 Schema 选择器中显示内置/元数据 Schema。",
+    showSystemDatabases: "显示系统库",
+    showSystemDatabasesHint: "为当前连接在侧边栏和数据库选择器中显示内置系统库（information_schema、performance_schema、mysql、sys）。",
     showDatabaseLinks: "显示数据库链接",
     showDatabaseLinksHint: "在侧边栏中显示当前连接的数据库链接（DB Link）入口。",
     tableLoading: "表加载策略",

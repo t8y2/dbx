@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { connectionUsesConnectionRootSchemaMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { supportsShowSystemDatabases } from "@/lib/database/databaseFeatureSupport";
 
 type VisibleDatabaseConnection = Partial<ConnectionConfig>;
 
@@ -241,7 +242,15 @@ export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], con
   if (connection?.db_type === "gbase8s") {
     return databaseNames;
   }
-  return databaseNames.filter((name) => !isSystemDatabaseName(effectiveDatabaseTypeForConnection(connection), name));
+  const databaseType = effectiveDatabaseTypeForConnection(connection);
+  // MySQL-family engines keep their system namespaces *as databases*, so the
+  // "show system schemas" setting has to lift the database blacklist there.
+  // Schema-aware engines are untouched: their system objects live inside a
+  // database and are filtered by filterSchemaNamesForVisiblePicker instead.
+  if (connection?.show_system_schemas === true && supportsShowSystemDatabases(databaseType)) {
+    return databaseNames;
+  }
+  return databaseNames.filter((name) => !isSystemDatabaseName(databaseType, name));
 }
 
 export function filterSchemaNamesForVisiblePicker(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, options?: SchemaFilterOptions): string[] {

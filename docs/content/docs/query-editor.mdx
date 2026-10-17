@@ -53,6 +53,28 @@ With `set clipboard=unnamedplus`, Vim yanks and deletes write to the system clip
   </Step>
 </Steps>
 
+## Double-Click String or Word Selection
+
+By default, double-clicking inside a SQL string selects its whole value. For example, double-clicking the year in `'2013-12-20 09:30:26.603'` selects the entire timestamp without the surrounding quotes.
+
+To select only the word or numeric segment under the pointer:
+
+1. Open **Settings → Editor**.
+2. Set **Double-click inside a string** to **Select single word**.
+3. Click **Apply** or **Apply and Close**.
+
+This mode uses the editor's default word boundaries. For example:
+
+| String content | Double-click target | Selected text |
+| --- | --- | --- |
+| `2013-12-20 09:30:26.603` | Year | `2013` |
+| `2013-12-20 09:30:26.603` | Milliseconds | `603` |
+| `123-456` | Second numeric segment | `456` |
+| `123.456` | Second numeric segment | `456` |
+| `abc123` | Digits | `abc123` |
+
+This is word selection, so adjacent letters and digits remain one word. Switch back to **Select whole value** to restore the default behavior. This option controls double-clicking strings in the SQL editor; it does not control text selection in the result grid.
+
 ## Execute SQL
 
 | Action | macOS | Windows / Linux |

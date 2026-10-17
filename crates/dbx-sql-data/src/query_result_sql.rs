@@ -511,7 +511,7 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     }
     let normalized_base_len = base_sql.trim_end_matches(';').trim().len();
     if statement.len() != normalized_base_len {
-        if options.database_type != Some(DatabaseType::Mysql) {
+        if !matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb)) {
             return err("multi");
         }
         statement = restore_leading_execution_hint(base_sql, &statement, options.database_type);
@@ -519,11 +519,12 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
             return err("multi");
         }
     }
-    let (execution_hint, statement) = if options.database_type == Some(DatabaseType::Mysql) {
-        split_leading_execution_hint(&statement, options.database_type)
-    } else {
-        ("", statement.as_str())
-    };
+    let (execution_hint, statement) =
+        if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb)) {
+            split_leading_execution_hint(&statement, options.database_type)
+        } else {
+            ("", statement.as_str())
+        };
     if statement.trim_start().to_ascii_uppercase().starts_with("WITH") {
         return err("with");
     }
@@ -552,14 +553,14 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         .collect::<Vec<_>>();
     let derived_table_rejects_duplicate_labels = match options.database_type {
         Some(DatabaseType::Oracle) => has_duplicate_labels(|left, right| left == right),
-        Some(DatabaseType::Mysql) => has_duplicate_labels(str::eq_ignore_ascii_case),
+        Some(DatabaseType::Mysql | DatabaseType::Goldendb) => has_duplicate_labels(str::eq_ignore_ascii_case),
         _ => false,
     };
     if derived_table_rejects_duplicate_labels
         || (options.database_type == Some(DatabaseType::OceanbaseOracle)
             && !rownum_wrapper_projection_is_safe(statement))
     {
-        let parsed = if options.database_type == Some(DatabaseType::Mysql) {
+        let parsed = if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb)) {
             Parser::parse_sql(&MySqlDialect {}, statement)
         } else {
             Parser::parse_sql(&GenericDialect {}, statement)
@@ -613,7 +614,7 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     // Caché/IRIS rejects derived-table column alias lists (`t(col, col)`)
     // outright (SQLCODE -25), regardless of delimited-identifier support.
     let use_derived_column_aliases = !uses_hive_subquery_syntax
-        && options.database_type != Some(DatabaseType::Mysql)
+        && !matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb))
         && options.database_type != Some(DatabaseType::ClickHouse)
         // Doris accepts the derived-table alias but not its column-name list.
         && options.database_type != Some(DatabaseType::Doris)
@@ -7193,6 +7194,55 @@ WHERE u.id = picked.id;
 
         assert!(!result.ok);
         assert_eq!(result.reason.as_deref(), Some("unsupported"));
+    }
+
+    #[test]
+    fn goldendb_sort_with_duplicate_labels_does_not_wrap_the_query() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "/*+ MAX_EXECUTION_TIME(1000) */ SELECT t.id, t.* FROM dbx_eval_t t ORDER BY t.id;"
+                .to_string(),
+            database_type: Some(DatabaseType::Goldendb),
+            result_columns: vec!["id".to_string(), "id".to_string(), "name".to_string(), "qty".to_string()],
+            column_index: 2,
+            column: "name".to_string(),
+            direction: QuerySortDirection::Desc,
+            tie_breaker_column_indexes: Vec::new(),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "/*+ MAX_EXECUTION_TIME(1000) */ SELECT t.id, t.* FROM dbx_eval_t t ORDER BY 3 DESC;"
+        );
+    }
+
+    #[test]
+    fn goldendb_sort_treats_labels_differing_only_in_case_as_duplicates() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT a.ID, b.id FROM a JOIN b ON b.a_id = a.id".to_string(),
+            database_type: Some(DatabaseType::Goldendb),
+            result_columns: vec!["ID".to_string(), "id".to_string()],
+            column_index: 1,
+            column: "id".to_string(),
+            direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT a.ID, b.id FROM a JOIN b ON b.a_id = a.id ORDER BY 2 ASC;");
+    }
+
+    #[test]
+    fn goldendb_sort_without_duplicate_labels_wraps_in_derived_table_without_column_aliases() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT id, name FROM users".to_string(),
+            database_type: Some(DatabaseType::Goldendb),
+            result_columns: vec!["id".to_string(), "name".to_string()],
+            column_index: 1,
+            column: "name".to_string(),
+            direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t ORDER BY `name` ASC;");
     }
 
     #[test]

@@ -143,7 +143,10 @@ export function createTableLayout(statement: StatementNode, ctx: SqlLayoutContex
       if (endsWithLineComment(rest)) writer.markLineComment();
     }
   }
-  if (statement.hasSemicolon) writer.write(";");
+  if (statement.hasSemicolon) {
+    if (ctx.options.newlineBeforeSemicolon) writer.newline(0);
+    writer.write(";");
+  }
   return writer.toString();
 }
 

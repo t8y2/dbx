@@ -48,6 +48,8 @@ export interface SqlLayoutOptions {
    * "FROM clause" setting.
    */
   fromClauseSourceOnSameLine: boolean;
+  /** Whether the terminating semicolon is placed on its own line. */
+  newlineBeforeSemicolon: boolean;
 }
 
 export interface SqlLayoutContext {
@@ -409,6 +411,28 @@ export function clauseChildContext(ctx: SqlLayoutContext, clause: ClauseNode): S
   return { ...ctx, nonCallParens: new Set([...(ctx.nonCallParens ?? []), clause.children[at]]) };
 }
 
+// The parser groups everything up to a semicolon into one StatementNode,
+// including scripts whose statements are separated only by newlines. Do not
+// collapse several statement heads onto one line. Only inspect sibling clauses:
+// SELECTs in CTEs, subqueries, strings and comments must not count here.
+function hasMultipleStatementHeads(nodes: AstNode[]): boolean {
+  let seenHead = false;
+  let updateNeedsSet = false;
+  for (const node of nodes) {
+    if (node.type !== "clause") continue;
+    const keyword = node.nameKw.text.toUpperCase();
+    if (keyword === "SET" && updateNeedsSet) {
+      updateNeedsSet = false;
+      continue;
+    }
+    if (!/^(?:SELECT|INSERT|REPLACE|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|SHOW|DESCRIBE|DESC|EXPLAIN|USE|SET|CALL|EXEC|EXECUTE|GRANT|REVOKE|COMMIT|ROLLBACK)\b/.test(keyword)) continue;
+    if (seenHead) return true;
+    seenHead = true;
+    updateNeedsSet = keyword === "UPDATE";
+  }
+  return false;
+}
+
 /**
  * Renders `nodes` on one line, or `null` when they do not fit in `width`.
  *
@@ -427,7 +451,7 @@ export function clauseChildContext(ctx: SqlLayoutContext, clause: ClauseNode): S
  * while it fits; the printer splits the operators onto their own lines otherwise.
  */
 export function renderInline(ctx: SqlLayoutContext, nodes: AstNode[], width: number): string | null {
-  if (nodes.length === 0 || width <= 0) return null;
+  if (nodes.length === 0 || width <= 0 || hasMultipleStatementHeads(nodes)) return null;
 
   const parenAt = nodes.findIndex(isParenthesis);
   if (parenAt >= 0) {

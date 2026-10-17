@@ -1818,6 +1818,8 @@ export default withEnglishFallback({
     showLabels: "Değerleri Göster",
   },
   grid: {
+    showStatusSql: "Alt Bilgide SQL Göster",
+    showStatusSqlHint: "Tüm sorgu sonuçlarının ve tablo verilerinin alt bilgi çubuğunda SQL göster.",
     rows: "{count} satır",
     totalRows: "Toplam {count} satır",
     loadedRows: "{count} satır yüklendi",

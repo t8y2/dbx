@@ -2217,6 +2217,8 @@ export default withEnglishFallback({
     showLabels: "値を表示",
   },
   grid: {
+    showStatusSql: "フッターに SQL を表示",
+    showStatusSqlHint: "すべてのクエリ結果とテーブルデータのフッターに SQL を表示します。",
     agentExecuteTime: "実行時間：{duration}",
     serverExecuteTime: "DB 実行：{duration}",
     serverExecuteTimeUnavailable: "DB 実行：取得不可",
@@ -3089,6 +3091,7 @@ export default withEnglishFallback({
     binaryImportTooLarge: "ファイルが大きすぎます（{size}、上限 {limit}）。大きなファイルの単一セルへのインポートはサポートされていません。",
     cut: "切り取りました",
     uncommittedBlankRow: "未入力の新しい行は、保存時に無視されます",
+    copyExtractorSqlDeletesInserts: "SQL DELETEs/INSERTs ステートメント",
   },
   exportProgress: {
     streamingUnsupported: "このクエリはストリーミングエクスポートに対応していません。クエリを簡略化するか、対応しているドライバーを使用してください。",
@@ -4496,6 +4499,10 @@ export default withEnglishFallback({
     copyPasswordConfirmTitle: "パスワードを含めてコピー",
     copyPasswordConfirmMessage: "コピーされるテキストには保存済みのパスワードが平文で含まれます。続行しますか？",
     copyPasswordConfirmAction: "コピー",
+    enableTrigger: "トリガーを有効化",
+    disableTrigger: "トリガーを無効化",
+    enableTriggerSuccess: "トリガー「{name}」を有効化しました",
+    disableTriggerSuccess: "トリガー「{name}」を無効化しました",
   },
   visibleDatabases: {
     title: "表示するデータベース",

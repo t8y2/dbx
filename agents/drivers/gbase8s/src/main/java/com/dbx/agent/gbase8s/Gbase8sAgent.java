@@ -509,49 +509,83 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             Set<Integer> primaryKeyColumns = getPrimaryKeyColumnNumbers(conn, owner, table);
             boolean mysqlCompatMode = isMysqlCompatMode(databaseListParams);
             Map<String, String> columnDefaults = loadColumnDefaults(conn, owner, table, mysqlCompatMode);
-            List<Object> args = new ArrayList<>();
-            args.add(table);
-            StringBuilder sql = new StringBuilder("""
+            try {
+                return loadColumns(conn, owner, table, true, primaryKeyColumns, columnDefaults);
+            } catch (Exception ignored) {
+                return loadColumns(conn, owner, table, false, primaryKeyColumns, columnDefaults);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private List<ColumnInfo> loadColumns(
+        Connection conn,
+        String owner,
+        String table,
+        boolean includeExtendedTypes,
+        Set<Integer> primaryKeyColumns,
+        Map<String, String> columnDefaults
+    ) throws Exception {
+        List<Object> args = new ArrayList<>();
+        args.add(table);
+        StringBuilder sql = new StringBuilder();
+        if (includeExtendedTypes) {
+            sql.append("""
+                SELECT c.colname, c.coltype, c.colno, c.collength, cc.comments, x.name AS extended_name
+                FROM syscolumns c
+                JOIN systables t ON t.tabid = c.tabid
+                LEFT JOIN sysxtdtypes x ON x.extended_id = c.extended_id
+                LEFT JOIN syscolcomms cc ON cc.tabid = c.tabid AND cc.colno = c.colno
+                WHERE t.tabid >= 100 AND t.tabname = ?
+                """.stripIndent().trim());
+        } else {
+            sql.append("""
                 SELECT c.colname, c.coltype, c.colno, c.collength, cc.comments
                 FROM syscolumns c
                 JOIN systables t ON t.tabid = c.tabid
                 LEFT JOIN syscolcomms cc ON cc.tabid = c.tabid AND cc.colno = c.colno
                 WHERE t.tabid >= 100 AND t.tabname = ?
                 """.stripIndent().trim());
-            if (!owner.isEmpty()) {
-                sql.append(" AND t.owner = ?");
-                args.add(owner);
-            }
-            sql.append(" ORDER BY c.colno");
+        }
+        if (!owner.isEmpty()) {
+            sql.append(" AND t.owner = ?");
+            args.add(owner);
+        }
+        sql.append(" ORDER BY c.colno");
 
-            List<ColumnInfo> result = new ArrayList<>();
-            try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
-                bind(stmt, args);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        String name = trim(rs.getString("colname"));
-                        int coltype = rs.getInt("coltype");
-                        int baseType = baseColType(coltype);
-                        int length = rs.getInt("collength");
-                        result.add(new ColumnInfo(
-                            name,
-                            mapColType(baseType),
-                            (coltype & 256) == 0,
-                            columnDefaults.get(name),
-                            primaryKeyColumns.contains(rs.getInt("colno")),
-                            null,
-                            emptyToNull(trim(rs.getString("comments"))),
-                            numericPrecision(baseType, length),
-                            numericScale(baseType, length),
-                            characterMaximumLength(baseType, length)
-                        ));
+        List<ColumnInfo> result = new ArrayList<>();
+        try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
+            bind(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String name = trim(rs.getString("colname"));
+                    int coltype = rs.getInt("coltype");
+                    int baseType = baseColType(coltype);
+                    int length = rs.getInt("collength");
+                    String extendedName = "";
+                    if (includeExtendedTypes) {
+                        try {
+                            extendedName = trim(rs.getString("extended_name"));
+                        } catch (Exception ignored) {
+                        }
                     }
+                    result.add(new ColumnInfo(
+                        name,
+                        mapColType(baseType, length, extendedName),
+                        (coltype & 256) == 0,
+                        columnDefaults.get(name),
+                        primaryKeyColumns.contains(rs.getInt("colno")),
+                        null,
+                        emptyToNull(trim(rs.getString("comments"))),
+                        numericPrecision(baseType, length),
+                        numericScale(baseType, length),
+                        characterMaximumLength(baseType, length)
+                    ));
                 }
             }
-            return result;
-        } catch (Exception e) {
-            throw new RuntimeException(e);
         }
+        return result;
     }
 
     private static Map<String, String> loadColumnDefaults(
@@ -952,7 +986,25 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     public static String mapColType(int coltype) {
-        return switch (baseColType(coltype)) {
+        return mapColType(coltype, 0, null);
+    }
+
+    public static String mapColType(int coltype, String extendedName) {
+        return mapColType(coltype, 0, extendedName);
+    }
+
+    public static String mapColType(int coltype, int length, String extendedName) {
+        if (extendedName != null && !extendedName.trim().isEmpty()) {
+            return extendedName.trim().toUpperCase(Locale.ROOT);
+        }
+        int baseType = baseColType(coltype);
+        if (baseType == 41) {
+            if (length == 72) {
+                return "BLOB";
+            }
+            return "BOOLEAN";
+        }
+        return switch (baseType) {
             case 0 -> "CHAR";
             case 1 -> "SMALLINT";
             case 2 -> "INTEGER";
@@ -989,7 +1041,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             case 67 -> "TINYINT";
             case 68 -> "MEDIUMINT";
             case 69 -> "BIT";
-            default -> "UNKNOWN(" + baseColType(coltype) + ")";
+            default -> "UNKNOWN(" + baseType + ")";
         };
     }
 

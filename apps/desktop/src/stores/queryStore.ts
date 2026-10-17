@@ -100,7 +100,8 @@ import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connect
 import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel, queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
 import { sqlServerCountUsesLocalTempTable } from "@/lib/query/queryResultCountSession";
-import { stripPaginationRowNumber } from "@/lib/query/queryPaginationResult";
+import { stripPaginationRowNumber, trimQueryPageProbe } from "@/lib/query/queryPaginationResult";
+import { mysqlTablePageBaseSql } from "@/lib/table/tableDataPageProbe";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 import { appendLargeValueCells, canUseTableDataLargeValuePreview, remapLargeValueCells, supportsTableDataLargeValuePreview, tableDataLargeValuePreviewOptions, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
@@ -384,7 +385,8 @@ function markQueryResultsRowsRaw(results: QueryResult[]): QueryResult[] {
 }
 
 function exactTotalFromIncompletePage(result: QueryResult, pageLimit: number | undefined, pageOffset: number | undefined, useAgentResultSession: boolean | undefined): number | undefined {
-  if (typeof pageLimit !== "number" || result.rows.length >= pageLimit || result.truncated === true) return undefined;
+  if (typeof pageLimit !== "number" || result.truncated === true || result.page_has_more === true) return undefined;
+  if (result.rows.length >= pageLimit && result.page_has_more !== false) return undefined;
   // Cursor-backed drivers must explicitly confirm exhaustion; an omitted
   // has_more value may come from an older driver or an exhausted row cap.
   if (useAgentResultSession && result.has_more !== false) return undefined;
@@ -447,6 +449,7 @@ export function appendQueryResultSegment(previous: QueryResult, segment: QueryRe
     client_result_ms: previous.client_result_ms !== undefined && segment.client_result_ms !== undefined ? previous.client_result_ms + segment.client_result_ms : undefined,
     timing_page_count: (previous.timing_page_count ?? 1) + (segment.timing_page_count ?? 1),
     has_more: previous.rows.length + appendedRowCount >= maxRows ? false : segment.has_more,
+    page_has_more: appendedRowCount < segment.rows.length ? true : segment.page_has_more,
   });
 }
 
@@ -1170,7 +1173,7 @@ export const useQueryStore = defineStore("query", () => {
   // 里而不是渲染函数里，是为了避免在 computed 求值过程中写标签状态；getter 只读
   // 参与标题计算的字段（id + 显示标题），分配编号本身不会再次触发它。
   watch(
-    () => tabs.value.map((tab) => `${tab.id}\u0000${tabDisplayTitle(tab, t)}\u0000${tab.titleSuffix ?? ""}`),
+    () => tabs.value.map((tab) => `${tab.id}\u0000${tab.mode || "query"}\u0000${tabDisplayTitle(tab, t)}\u0000${tab.titleSuffix ?? ""}`),
     () => syncTabTitleNumbers(tabs.value, t),
     { immediate: true, flush: "sync" },
   );
@@ -7706,6 +7709,7 @@ export const useQueryStore = defineStore("query", () => {
     let pageSql: string | undefined;
     let requestedPageLimit: number | undefined;
     let pageLimit: number | undefined;
+    let pageProbeLimit: number | undefined;
     let pageOffset: number | undefined;
     let countSql: string | undefined;
     let exactQueryRowBound: number | undefined;
@@ -8514,8 +8518,12 @@ export const useQueryStore = defineStore("query", () => {
         if (sqlServerUseScript && !canPaginateSqlServerUseScript) {
           sqlToExecute = sqlBeforePagination;
         } else {
-          sqlToExecute = sqlServerUseScript ? replaceSqlServerLeadingUseQuery(sqlBeforePagination, sqlServerUseScript, plan.sqlToExecute) : plan.sqlToExecute;
-          pageSql = sqlServerUseScript && plan.pageSql ? replaceSqlServerLeadingUseQuery(sqlBeforePagination, sqlServerUseScript, plan.pageSql) : plan.pageSql;
+          // Only the backend's strict read-only proof may enable an extra row.
+          // Older backends omit pageProbeSql and retain their original behavior.
+          const probeSql = effectiveDbType === "mysql" && !plan.useAgentResultSession && plan.pageSql && typeof plan.pageLimit === "number" ? plan.pageProbeSql : undefined;
+          sqlToExecute = sqlServerUseScript ? replaceSqlServerLeadingUseQuery(sqlBeforePagination, sqlServerUseScript, plan.sqlToExecute) : (probeSql ?? plan.sqlToExecute);
+          pageSql = sqlServerUseScript && plan.pageSql ? replaceSqlServerLeadingUseQuery(sqlBeforePagination, sqlServerUseScript, plan.pageSql) : (probeSql ?? plan.pageSql);
+          pageProbeLimit = probeSql && typeof plan.pageLimit === "number" ? plan.pageLimit + 1 : undefined;
           pageLimit = plan.pageLimit;
           pageOffset = plan.pageOffset;
           countSql = sqlServerUseScript && plan.countSql ? replaceSqlServerLeadingUseQuery(queryBaseSql, sqlServerUseScript, plan.countSql) : plan.countSql;
@@ -8548,6 +8556,25 @@ export const useQueryStore = defineStore("query", () => {
         pageLimit = pagination.limit;
         pageOffset = pagination.offset;
         useAgentResultSession = usesAgentCursorForTableData(conn?.db_type, conn?.driver_profile);
+        if (effectiveDbType === "mysql" && !useAgentCursor && !useAgentResultSession) {
+          // Data tabs already contain the generated LIMIT/OFFSET. Remove that
+          // page bound before planning, otherwise it hides the extra probe row
+          // (or applies the offset twice). The backend still proves read safety.
+          const baseSql = mysqlTablePageBaseSql(sqlToExecute, pageLimit, pageOffset);
+          if (baseSql) {
+            const plan = await api.prepareQueryPaginationExecutionPlan({
+              sql: baseSql,
+              queryBaseSql: sqlToExecute,
+              databaseType: effectiveDbType,
+              pagination,
+              useAgentCursor: false,
+            });
+            if (plan.pageProbeSql) {
+              sqlToExecute = plan.pageProbeSql;
+              pageProbeLimit = pageLimit + 1;
+            }
+          }
+        }
       }
 
       errorLocateContext = {
@@ -8592,7 +8619,7 @@ export const useQueryStore = defineStore("query", () => {
                   pageSize: pageLimit,
                   resultSessionId: options?.pagination?.sessionId,
                 }
-              : { maxRows: pageLimit, fetchSize: pageLimit }
+              : { maxRows: pageProbeLimit ?? pageLimit, fetchSize: pageProbeLimit ?? pageLimit }
             : { maxRows: agentProtocolQueryResultMaxRows(queryResultMaxRows) }),
           ...(useJdbcDriverRowOffset && typeof pageOffset === "number" && pageOffset > 0 ? { rowOffset: pageOffset } : {}),
           ...(executionClientSessionId ? { clientSessionId: executionClientSessionId } : {}),
@@ -8738,7 +8765,7 @@ export const useQueryStore = defineStore("query", () => {
                 sqlToExecute,
                 executionDatabase,
                 executionSchema,
-                cursor ? agentProtocolQueryResultMaxRows(queryResultMaxRows) : (pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows)),
+                cursor ? agentProtocolQueryResultMaxRows(queryResultMaxRows) : (pageProbeLimit ?? pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows)),
                 useLargeValuePreview,
                 cursor ? pageLimit : undefined,
                 cursor ? options?.pagination?.sessionId : undefined,
@@ -8820,6 +8847,9 @@ export const useQueryStore = defineStore("query", () => {
       const resultProcessingStartedAt = performance.now();
       const annotatedResults = annotateQueryResultSources(markQueryResultsRowsRaw(responseResults), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset, sqlStatementParameterOptions, sqlToExecute, options?.sourceOffset === undefined ? undefined : tab.sql);
       const results = offsetBatchQueryResultIndexes(annotatedResults.results, batchResume?.startStatementIndex ?? 0);
+      if (pageProbeLimit !== undefined && pageLimit !== undefined && results.length === 1) {
+        results[0] = markQueryResultRowsRaw(trimQueryPageProbe(results[0]!, pageLimit));
+      }
       if (paginationRowNumberColumn && results.length === 1) {
         results[0] = markQueryResultsRowsRaw([stripPaginationRowNumber(results[0]!, paginationRowNumberColumn)])[0]!;
       }
@@ -8982,13 +9012,21 @@ export const useQueryStore = defineStore("query", () => {
         const resultLimitReached = !!current.result && queryResultLimitReached(resultStartOffset, resultRowCount, queryResultMaxRows);
         if (resultLimitReached && current.result) {
           current.result.has_more = false;
-          current.result.truncated = true;
+          current.result.truncated = current.result.page_has_more !== false;
           current.resultTotalRowCount = queryResultMaxRows;
         }
         const paginationPageResult = shouldAppendResult ? results[0] : current.result;
         const exactIncompletePageTotal = paginationPageResult ? exactTotalFromIncompletePage(paginationPageResult, pageLimit, pageOffset, useAgentResultSession) : undefined;
         const totalKnownFromIncompletePage = typeof exactIncompletePageTotal === "number";
         let totalRowCountResolved = false;
+        if (paginationPageResult?.page_has_more === false && typeof exactIncompletePageTotal === "number") {
+          current.resultTotalRowCount = exactIncompletePageTotal;
+          current.resultTotalRowCountLoading = false;
+          totalRowCountResolved = true;
+        } else if (paginationPageResult?.page_has_more === true && typeof current.resultTotalRowCount === "number" && current.resultTotalRowCount <= (pageOffset ?? 0) + paginationPageResult.rows.length && !resultLimitReached) {
+          // A previous count belongs to an older snapshot; the probe proves it stale.
+          current.resultTotalRowCount = undefined;
+        }
         if (current.mode === "query" && current.result && !isQueryExecutionErrorResult(current.result) && typeof exactQueryRowBound === "number") {
           const boundedTotal = capQueryResultTotal(exactQueryRowBound, queryResultMaxRows);
           current.resultTotalRowCount = Math.min(boundedTotal, exactIncompletePageTotal ?? boundedTotal);
@@ -10176,12 +10214,13 @@ export const useQueryStore = defineStore("query", () => {
     // Appended segments retain resultPageOffset=0, so inspect their last page.
     const sourceSnapshotComplete =
       sourceResult.has_more === false &&
+      sourceResult.page_has_more !== true &&
       !sourceResult.truncated &&
       !sourceResult.large_value_cells?.length &&
       !sourceResult.execution_error &&
       sourcePageOffset === 0 &&
       (typeof sourceTotalRows !== "number" || sourceTotalRows <= sourceResult.rows.length) &&
-      (!tab.resultPageSql || hasShortDataGridSqlPage({ rowCount: sourceResult.rows.length, pageOffset: sourcePageOffset, executedPageOffset: sourceLastPageOffset, executedPageLimit: sourcePageLimit }));
+      (!tab.resultPageSql || sourceResult.page_has_more === false || hasShortDataGridSqlPage({ rowCount: sourceResult.rows.length, pageOffset: sourcePageOffset, executedPageOffset: sourceLastPageOffset, executedPageLimit: sourcePageLimit }));
     const sourceHiddenNames = new Set((sourceResult.hidden_column_indexes ?? []).map((index) => sourceResult.columns[index]).filter((name): name is string => name !== undefined && sourceResult.columns.filter((column) => column === name).length === 1));
     const resultForTransfer = (result: QueryResult): QueryResult => {
       if (!probeRowLimit) return result;

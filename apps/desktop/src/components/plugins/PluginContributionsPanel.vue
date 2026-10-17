@@ -63,6 +63,7 @@ import {
   formatMarketplaceReleasedDate,
   marketplaceHomepageUrl,
   pluginSourceChange,
+  resolveMarketplaceReleaseUrl,
   sortMarketplacePluginListings,
   type InstalledPluginUpdateEntry,
   type MarketplacePluginListing,
@@ -333,10 +334,7 @@ function marketplaceVersionPublishedLabel(version: PluginMarketplaceVersion): st
 // The expanded entry links to the release page for that exact version in the
 // plugin's source repository, mirroring the 更新管理 panel's GitHub Release button.
 function marketplaceVersionReleaseUrl(version: PluginMarketplaceVersion): string {
-  const source = selectedMarketplaceListing.value?.plugin.source?.trim();
-  if (!source) return "";
-  const tag = version.version.startsWith("v") ? version.version : `v${version.version}`;
-  return `${source.replace(/\/+$/, "")}/releases/tag/${encodeURIComponent(tag)}`;
+  return resolveMarketplaceReleaseUrl(selectedMarketplaceListing.value?.plugin.source, version);
 }
 const batchUpdatableListings = computed(() => filteredMarketplaceListings.value.filter((listing) => listing.status === "update"));
 const batchSelectedListings = computed(() => filteredMarketplaceListings.value.filter((listing) => isBatchSelectableListing(listing.status) && selectedListingKeys.value.has(listing.key)));

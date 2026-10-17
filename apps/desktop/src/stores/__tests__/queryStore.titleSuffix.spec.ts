@@ -96,4 +96,21 @@ describe("queryStore tab title suffix", () => {
     store.setTabTitleSuffix(second, "");
     expect(numberOf(second)).toBe(2);
   });
+
+  it("does not number or alter a data tab when a query tab is renamed to match its name", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const dataTab = store.createTab("pg-1", "app", "users", "data", "public", undefined, undefined, { forceNew: true });
+    const queryTab = store.createTab("pg-1", "app", "scratch", "query", undefined, undefined, undefined, { forceNew: true });
+
+    const dataTabInstance = store.tabs.find((t) => t.id === dataTab)!;
+    expect(dataTabInstance.titleNumber).toBeUndefined();
+
+    store.renameTab(queryTab, dataTabInstance.title);
+    await nextTick();
+
+    const queryTabInstance = store.tabs.find((t) => t.id === queryTab)!;
+    expect(dataTabInstance.titleNumber).toBeUndefined();
+    expect(queryTabInstance.titleNumber).toBeUndefined();
+  });
 });

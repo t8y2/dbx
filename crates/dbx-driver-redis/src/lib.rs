@@ -940,6 +940,7 @@ pub async fn discover_sentinel_master(
 
 pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPool, String> {
     let seed_nodes = redis_cluster_seed_nodes(config)?;
+    let timeout = Duration::from_secs(config.effective_connect_timeout_secs());
     let mut last_error = None;
     for auth in redis_auth_candidates(&config.username, &config.password) {
         let cluster_nodes: Vec<ConnectionInfo> = seed_nodes
@@ -956,10 +957,13 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
                 )
             })
             .collect::<Result<_, _>>()?;
-        let client = ClusterClient::new(cluster_nodes).map_err(|e| format!("Redis cluster connection failed: {e}"))?;
-        let mut con = match tokio::time::timeout(connection_timeout(), client.get_async_connection())
+        let client = ClusterClient::builder(cluster_nodes)
+            .connection_timeout(timeout)
+            .build()
+            .map_err(|e| format!("Redis cluster connection failed: {e}"))?;
+        let mut con = match tokio::time::timeout(timeout, client.get_async_connection())
             .await
-            .map_err(|_| format!("Redis cluster connection timed out ({}s)", CONNECTION_TIMEOUT_SECS))?
+            .map_err(|_| format!("Redis cluster connection timed out ({}s)", timeout.as_secs()))?
             .map_err(|e| format!("Redis cluster connection failed: {e}"))
         {
             Ok(con) => con,
@@ -974,17 +978,13 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
             Err(err) => return Err(err),
         };
 
-        let cluster_ping = match tokio::time::timeout(
-            connection_timeout(),
-            redis::cmd("PING").query_async::<String>(&mut con),
-        )
-        .await
+        let cluster_ping = match tokio::time::timeout(timeout, redis::cmd("PING").query_async::<String>(&mut con)).await
         {
             Ok(Ok(_)) => Ok(()),
             // Reachable and authenticated, only the PING privilege is missing (issue #9394).
             Ok(Err(error)) if is_redis_command_denied_error(&error.to_string()) => Ok(()),
             Ok(Err(error)) => Err(format!("Redis cluster ping failed: {error}")),
-            Err(_) => Err(format!("Redis cluster ping timed out ({}s)", CONNECTION_TIMEOUT_SECS)),
+            Err(_) => Err(format!("Redis cluster ping timed out ({}s)", timeout.as_secs())),
         };
         match cluster_ping {
             Ok(_) => {
@@ -6502,6 +6502,149 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("connection timed out"));
+    }
+
+    #[derive(Clone, Copy)]
+    enum ClusterDelayStage {
+        Setup,
+        Slots,
+        Ping,
+    }
+
+    // Unlike the sequential Sentinel/standalone mocks, cluster discovery opens
+    // multiple sockets. Keep their tasks owned so aborting the server closes all
+    // sockets, including a deliberately delayed response after client timeout.
+    async fn cluster_timeout_mock(
+        stage: ClusterDelayStage,
+        delay: Duration,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let slots_seen = Arc::new(AtomicUsize::new(0));
+        let pings_after_slots = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let slots_seen = slots_seen.clone();
+                        let pings_after_slots = pings_after_slots.clone();
+                        connections.spawn(async move {
+                            let (reader, mut writer) = stream.into_split();
+                            let mut reader = BufReader::new(reader);
+                            let mut first = true;
+                            let mut ping_count = 0;
+                            loop {
+                                let mut line = String::new();
+                                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                    break;
+                                }
+                                let count: usize = line.trim().strip_prefix('*').unwrap().parse().unwrap();
+                                let mut args = Vec::new();
+                                for _ in 0..count {
+                                    line.clear();
+                                    reader.read_line(&mut line).await.unwrap();
+                                    let len: usize = line.trim().strip_prefix('$').unwrap().parse().unwrap();
+                                    let mut arg = vec![0; len + 2];
+                                    reader.read_exact(&mut arg).await.unwrap();
+                                    arg.truncate(len);
+                                    args.push(arg);
+                                }
+                                let is_slots = args[0] == b"CLUSTER" && args[1] == b"SLOTS";
+                                if args[0] == b"PING" {
+                                    ping_count += 1;
+                                }
+                                let should_delay = match stage {
+                                    ClusterDelayStage::Setup => first,
+                                    ClusterDelayStage::Slots => is_slots && slots_seen.load(Ordering::SeqCst) == 0,
+                                    // With this one-node topology redis-rs sends PING
+                                    // on connect, then checks the reused socket after
+                                    // CLUSTER SLOTS. The third PING is the DBX probe.
+                                    ClusterDelayStage::Ping => args[0] == b"PING"
+                                        && ping_count > 2
+                                        && slots_seen.load(Ordering::SeqCst) > 0
+                                        && pings_after_slots.fetch_add(1, Ordering::SeqCst) == 0,
+                                };
+                                first = false;
+                                if should_delay {
+                                    tokio::time::sleep(delay).await;
+                                }
+                                let response = if is_slots {
+                                    slots_seen.fetch_add(1, Ordering::SeqCst);
+                                    format!("*1\r\n*3\r\n:0\r\n:16383\r\n*2\r\n$9\r\n127.0.0.1\r\n:{}\r\n", address.port())
+                                } else if args[0] == b"PING" {
+                                    "+PONG\r\n".to_string()
+                                } else {
+                                    "+OK\r\n".to_string()
+                                };
+                                if writer.write_all(response.as_bytes()).await.is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    finished = connections.join_next(), if !connections.is_empty() => {
+                        finished.unwrap().unwrap();
+                    }
+                }
+            }
+        });
+        (address, server)
+    }
+
+    async fn cluster_connect_with_delay(
+        stage: ClusterDelayStage,
+        delay: Duration,
+        timeout_secs: u64,
+    ) -> Result<(), String> {
+        let (address, server) = cluster_timeout_mock(stage, delay).await;
+        let mut config = redis_test_connection_config();
+        config.host = address.ip().to_string();
+        config.port = address.port();
+        config.password = "test-only".to_string();
+        config.connect_timeout_secs = timeout_secs;
+        let result = tokio::time::timeout(Duration::from_secs(20), super::connect_cluster(&config)).await;
+        server.abort();
+        let _ = server.await;
+        result.expect("cluster regression exceeded its test deadline").map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn cluster_connect_honors_configured_handshake_timeout() {
+        cluster_connect_with_delay(ClusterDelayStage::Setup, Duration::from_millis(1500), 30).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cluster_connect_honors_configured_initialization_timeout() {
+        cluster_connect_with_delay(ClusterDelayStage::Slots, Duration::from_millis(5500), 30).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cluster_connect_honors_configured_ping_timeout() {
+        cluster_connect_with_delay(ClusterDelayStage::Ping, Duration::from_millis(5500), 30).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cluster_connect_rejects_initialization_over_configured_timeout() {
+        let error =
+            cluster_connect_with_delay(ClusterDelayStage::Slots, Duration::from_millis(1500), 1).await.unwrap_err();
+        assert_eq!(error, "Redis cluster connection timed out (1s)");
+    }
+
+    #[tokio::test]
+    async fn cluster_connect_uses_effective_timeout_for_unset_and_oversized_values() {
+        for timeout in [0, u64::MAX] {
+            cluster_connect_with_delay(ClusterDelayStage::Setup, Duration::from_millis(1500), timeout).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cluster_connect_rejects_ping_over_configured_timeout() {
+        let error =
+            cluster_connect_with_delay(ClusterDelayStage::Ping, Duration::from_millis(1500), 1).await.unwrap_err();
+        assert_eq!(error, "Redis cluster ping timed out (1s)");
     }
 
     #[derive(Clone, Copy)]

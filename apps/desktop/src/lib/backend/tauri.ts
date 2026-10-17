@@ -550,6 +550,8 @@ export interface QueryPaginationExecutionPlanOptions {
 
 export interface QueryPaginationExecutionPlan {
   sqlToExecute: string;
+  /** Optional N+1 SQL page approved by the backend's strict read-only proof. */
+  pageProbeSql?: string;
   pageSql?: string;
   pageLimit?: number;
   pageOffset?: number;

@@ -2085,6 +2085,8 @@ export default withEnglishFallback({
     showLabels: "Tampilkan Nilai",
   },
   grid: {
+    showStatusSql: "Tampilkan SQL di Bagian Bawah",
+    showStatusSqlHint: "Tampilkan SQL di bagian bawah semua hasil kueri dan data tabel.",
     rows: "{count} baris",
     totalRows: "Total {count} baris",
     loadedRows: "{count} baris dimuat",

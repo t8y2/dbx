@@ -433,6 +433,104 @@ class Gbase8sAgentTest {
     }
 
     @Test
+    void mapsExtendedDataTypesFromCatalogAndFallbacks() {
+        // Extended types resolved from sysxtdtypes.name
+        Assertions.assertEquals("BLOB", Gbase8sAgent.mapColType(41, 72, "blob"));
+        Assertions.assertEquals("CLOB", Gbase8sAgent.mapColType(41, 72, "clob"));
+        Assertions.assertEquals("BOOLEAN", Gbase8sAgent.mapColType(41, 1, "boolean"));
+        Assertions.assertEquals("LVARCHAR", Gbase8sAgent.mapColType(40, 255, "lvarchar"));
+        Assertions.assertEquals("JSON", Gbase8sAgent.mapColType(41, 0, "json"));
+        Assertions.assertEquals("BSON", Gbase8sAgent.mapColType(41, 0, "bson"));
+        Assertions.assertEquals("USER_DEFINED", Gbase8sAgent.mapColType(41, 16, "user_defined"));
+
+        // Fallback when extended_name is empty or null: length 72 is smart LOB (BLOB), length 1 is BOOLEAN
+        Assertions.assertEquals("BLOB", Gbase8sAgent.mapColType(41, 72, null));
+        Assertions.assertEquals("BOOLEAN", Gbase8sAgent.mapColType(41, 1, null));
+        Assertions.assertEquals("BOOLEAN", Gbase8sAgent.mapColType(41, 0, ""));
+        Assertions.assertEquals("BOOLEAN", Gbase8sAgent.mapColType(41));
+    }
+
+    @Test
+    void getColumnsResolvesExtendedTypesSuchAsBlobClobAndBoolean() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            sql,
+            resultSet(new String[]{"part1"}, new Object[][]{}),
+            resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
+            resultSet(
+                new String[]{"colname", "coltype", "colno", "collength", "comments", "extended_name"},
+                new Object[][]{
+                    {"photo", 41, 1, 72, "Profile image", "blob"},
+                    {"document", 41, 2, 72, null, "clob"},
+                    {"is_active", 41 + 256, 3, 1, null, "boolean"},
+                    {"notes", 40, 4, 2000, null, "lvarchar"},
+                    {"meta", 41, 5, 0, null, "json"}
+                }
+            )
+        ));
+
+        List<ColumnInfo> columns = agent.getColumns("root", "media");
+
+        Assertions.assertTrue(sql.get(2).contains("LEFT JOIN sysxtdtypes x ON x.extended_id = c.extended_id"), sql.get(2));
+        Assertions.assertEquals(5, columns.size());
+
+        // BLOB and CLOB must NOT be misidentified as BOOLEAN
+        Assertions.assertEquals("BLOB", columns.get(0).getData_type());
+        Assertions.assertNull(columns.get(0).getCharacter_maximum_length());
+        Assertions.assertTrue(columns.get(0).getIs_nullable());
+        Assertions.assertEquals("Profile image", columns.get(0).getComment());
+
+        Assertions.assertEquals("CLOB", columns.get(1).getData_type());
+        Assertions.assertNull(columns.get(1).getCharacter_maximum_length());
+        Assertions.assertTrue(columns.get(1).getIs_nullable());
+
+        Assertions.assertEquals("BOOLEAN", columns.get(2).getData_type());
+        Assertions.assertFalse(columns.get(2).getIs_nullable());
+
+        Assertions.assertEquals("LVARCHAR", columns.get(3).getData_type());
+        Assertions.assertEquals(2000, columns.get(3).getCharacter_maximum_length());
+
+        Assertions.assertEquals("JSON", columns.get(4).getData_type());
+
+        String ddl = DdlBuilder.buildTableDdl("root", "media", columns, List.of(), List.of());
+        Assertions.assertEquals("""
+            CREATE TABLE "root"."media" (
+              "photo" BLOB,
+              "document" CLOB,
+              "is_active" BOOLEAN NOT NULL,
+              "notes" LVARCHAR,
+              "meta" JSON
+            );
+            """, ddl);
+    }
+
+    @Test
+    void getColumnsFallsBackWhenSysxtdtypesQueryFailsAndInfersBlobByLength() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, fallbackOnSysxtdtypesFailureConnection(
+            sql,
+            resultSet(new String[]{"part1"}, new Object[][]{}),
+            resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
+            // When query with sysxtdtypes fails, fallback query without sysxtdtypes succeeds
+            resultSet(
+                new String[]{"colname", "coltype", "colno", "collength", "comments"},
+                new Object[][]{
+                    {"blob_col", 41, 1, 72, null},
+                    {"bool_col", 41, 2, 1, null}
+                }
+            )
+        ));
+
+        List<ColumnInfo> columns = agent.getColumns("root", "mixed");
+
+        Assertions.assertEquals(2, columns.size());
+        Assertions.assertEquals("BLOB", columns.get(0).getData_type());
+        Assertions.assertEquals("BOOLEAN", columns.get(1).getData_type());
+    }
+
+    @Test
     void getColumnsLoadsDefaultsFromDefaultExpressionCatalogInMysqlCompatMode() throws Exception {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();
@@ -729,6 +827,32 @@ class Gbase8sAgentTest {
                     if ("executeQuery".equals(statementMethod.getName())) {
                         if (query.contains("sysdefaultsexpr")) {
                             throw new SQLException("Backtick identifiers are not supported");
+                        }
+                        return resultSets[resultIndex[0]++];
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection fallbackOnSysxtdtypesFailureConnection(List<String> sql, ResultSet... resultSets) {
+        int[] resultIndex = {0};
+        return proxy(Connection.class, (method, args) -> {
+            if ("getCatalog".equals(method.getName())) {
+                return "appdb";
+            }
+            if ("prepareStatement".equals(method.getName())) {
+                String query = String.valueOf(args[0]);
+                sql.add(query);
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        if (query.contains("sysxtdtypes")) {
+                            throw new SQLException("sysxtdtypes table query failed");
                         }
                         return resultSets[resultIndex[0]++];
                     }

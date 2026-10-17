@@ -22,6 +22,72 @@ const ASCII_SYMBOLS = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 // stored credential for clients that never percent-decode.
 const ENCODED_ASCII_SYMBOLS = "%21%22%23%24%25%26%27%28%29%2A%2B%2C-.%2F%3A%3B%3C=%3E%3F%40%5B%5C%5D%5E_%60%7B%7C%7D~";
 
+describe("OceanBase copy readability and compatibility", () => {
+  const oceanbase = (overrides: Partial<ConnectionUrlCopyConfig> = {}) => config({ db_type: "mysql", driver_profile: "oceanbase", port: 2881, username: "admin@tenant@cluster", ...overrides });
+
+  it("keeps tenant names readable across the four copy formats", () => {
+    const connection = oceanbase();
+    expect(buildConnectionUrlCopy(connection, "url")).toBe("oceanbase://admin@tenant@cluster@db.example.com:2881/appdb");
+    expect(buildConnectionUrlCopy(connection, "urlWithPassword")).toBe("oceanbase://admin@tenant@cluster:secret@db.example.com:2881/appdb");
+    expect(buildConnectionUrlCopy(connection, "jdbcUrl")).toBe("jdbc:oceanbase://db.example.com:2881/appdb");
+    expect(buildConnectionUrlCopy(connection, "jdbcUrlWithCredentials")).toBe("jdbc:oceanbase://db.example.com:2881/appdb?user=admin@tenant@cluster&password=secret");
+    expect(connectionUrlCopyFormats(connection)).toEqual(["url", "urlWithPassword", "jdbcUrl", "jdbcUrlWithCredentials", "hostPort"]);
+    for (const format of ["url", "urlWithPassword", "jdbcUrlWithCredentials"] as const) {
+      const parsed = parseConnectionUrl(buildConnectionUrlCopy(connection, format)!);
+      expect(parsed.username).toBe(connection.username);
+      expect(parsed.host).toBe(connection.host);
+      expect(parsed.port).toBe(2881);
+      expect(parsed.password).toBe(format === "url" ? "" : connection.password);
+    }
+  });
+
+  it("keeps safe punctuation readable without changing ordinary MySQL encoding", () => {
+    const username = "u!$()*,=@tenant";
+    expect(buildConnectionUrlCopy(oceanbase({ username }), "url")).toContain(username + "@");
+    expect(buildConnectionUrlCopy(oceanbase({ password: "p!$()*,=" }), "urlWithPassword")).toContain(":p!$()*,=@");
+    expect(buildConnectionUrlCopy(config({ db_type: "mysql", username }), "url")).toContain("u%21%24%28%29%2A%2C=%40tenant@");
+  });
+
+  it("round-trips all standard URL credential symbols and IPv6 without losing escaping boundaries", () => {
+    const connection = oceanbase({ username: "u" + ASCII_SYMBOLS + "@tenant", password: "p" + ASCII_SYMBOLS, host: "2001:db8::1" });
+    const text = buildConnectionUrlCopy(connection, "urlWithPassword")!;
+    expect(text).toContain("%27");
+    expect(text).toContain("%40");
+    const parsed = parseConnectionUrl(text);
+    expect(parsed.username).toBe(connection.username);
+    expect(parsed.password).toBe(connection.password);
+    expect(parsed.port).toBe(connection.port);
+    expect(parsed.database).toBe(connection.database);
+    expect(new URL(text).hostname).toBe("[2001:db8::1]");
+  });
+
+  it("uses literal JDBC property values instead of percent-encoded credentials", () => {
+    const value = "a!$()*+,=:@/?[]<>`|^{}\\中文b";
+    const text = buildConnectionUrlCopy(oceanbase({ username: value, password: value }), "jdbcUrlWithCredentials")!;
+    expect(text).toContain("user=" + value + "&password=" + value);
+    expect(parseConnectionUrl(text).username).toBe(value);
+    expect(parseConnectionUrl(text).password).toBe(value);
+  });
+
+  it.each(["&", ";", "'", '"', "#", "%40", " ", "\n", "\t"])("does not offer a JDBC credential URL that cannot preserve %j", (symbol) => {
+    for (const field of ["username", "password"] as const) {
+      const connection = oceanbase({ [field]: "a" + symbol + "b" });
+      expect(buildConnectionUrlCopy(connection, "jdbcUrlWithCredentials")).toBeNull();
+      expect(connectionUrlCopyFormats(connection)).not.toContain("jdbcUrlWithCredentials");
+      expect(connectionUrlCopyFormats(connection)).toContain("urlWithPassword");
+      expect(parseConnectionUrl(buildConnectionUrlCopy(connection, "urlWithPassword")!)[field]).toBe(connection[field]);
+    }
+  });
+
+  it("preserves explicit strings while redacting passwords behind raw tenant names", () => {
+    const explicit = "oceanbase://admin@tenant:synthetic%40secret@db.example.com:2881/appdb";
+    expect(buildConnectionUrlCopy(oceanbase({ connection_string: explicit }), "url")).toBe("oceanbase://admin@tenant:***@db.example.com:2881/appdb");
+    expect(buildConnectionUrlCopy(oceanbase({ connection_string: explicit }), "urlWithPassword")).toBe(explicit);
+    const jdbc = "jdbc:oceanbase://db.example.com:2881/appdb?user=literal%40tenant&password=secret";
+    expect(buildConnectionUrlCopy(oceanbase({ connection_string: jdbc }), "jdbcUrlWithCredentials")).toBe(jdbc);
+  });
+});
+
 describe("connectionUrlCopyFormats", () => {
   it("lists all formats for a PostgreSQL connection with a stored password", () => {
     expect(connectionUrlCopyFormats(config({}))).toEqual(["url", "urlWithPassword", "jdbcUrl", "jdbcUrlWithCredentials", "hostPort", "dsn", "dsnWithPassword", "psqlCommand"]);

@@ -3,10 +3,12 @@ import {
   buildInstalledUpdateIndex,
   buildMarketplacePluginListings,
   compareVersions,
+  extractRepositoryBaseUrl,
   filterMarketplacePluginListings,
   formatMarketplaceReleasedDate,
   marketplaceHomepageUrl,
   pluginSourceChange,
+  resolveMarketplaceReleaseUrl,
   selectMarketplaceArtifact,
   sortMarketplacePluginListings,
   type MarketplacePluginListing,
@@ -135,6 +137,72 @@ describe("plugin marketplace listings", () => {
   it("treats a repository URL and its homepage URL as one link", () => {
     expect(marketplaceHomepageUrl("https://github.com/dbxio/example/", "https://github.com/dbxio/example#readme")).toBeUndefined();
     expect(marketplaceHomepageUrl("https://github.com/dbxio/example", "https://dbxio.com/plugins/example")).toBe("https://dbxio.com/plugins/example");
+  });
+
+  describe("resolveMarketplaceReleaseUrl", () => {
+    it("resolves GitHub branch and tag tree URLs to root repository release tag", () => {
+      // Regression for #12516: source with /tree/<ref> should not result in /tree/<ref>/releases/tag/...
+      expect(resolveMarketplaceReleaseUrl("https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/tree/v0.3.3", "0.3.3")).toBe("https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/releases/tag/v0.3.3");
+
+      expect(resolveMarketplaceReleaseUrl("https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/tree/v0.3.3/", "0.3.3")).toBe("https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/releases/tag/v0.3.3");
+
+      expect(resolveMarketplaceReleaseUrl("https://github.com/t8y2/dbx/tree/main/plugins/examples/hello-workbench", "0.1.0")).toBe("https://github.com/t8y2/dbx/releases/tag/v0.1.0");
+    });
+
+    it("resolves standard repository URLs with and without trailing slash or .git", () => {
+      expect(resolveMarketplaceReleaseUrl("https://github.com/jinpy/dbx-ssh-plugin", "3.0.0")).toBe("https://github.com/jinpy/dbx-ssh-plugin/releases/tag/v3.0.0");
+      expect(resolveMarketplaceReleaseUrl("https://github.com/jinpy/dbx-ssh-plugin/", "3.0.0")).toBe("https://github.com/jinpy/dbx-ssh-plugin/releases/tag/v3.0.0");
+      expect(resolveMarketplaceReleaseUrl("https://github.com/jinpy/dbx-ssh-plugin.git", "3.0.0")).toBe("https://github.com/jinpy/dbx-ssh-plugin/releases/tag/v3.0.0");
+      expect(resolveMarketplaceReleaseUrl("https://github.com/jinpy/dbx-ssh-plugin", "v3.0.0")).toBe("https://github.com/jinpy/dbx-ssh-plugin/releases/tag/v3.0.0");
+    });
+
+    it("resolves blob, releases, and ssh URLs", () => {
+      expect(resolveMarketplaceReleaseUrl("https://github.com/owner/repo/blob/main/README.md", "1.0.0")).toBe("https://github.com/owner/repo/releases/tag/v1.0.0");
+      expect(resolveMarketplaceReleaseUrl("https://github.com/owner/repo/releases", "1.0.0")).toBe("https://github.com/owner/repo/releases/tag/v1.0.0");
+      expect(resolveMarketplaceReleaseUrl("https://github.com/owner/repo/releases/tag/v0.1.0", "1.0.0")).toBe("https://github.com/owner/repo/releases/tag/v1.0.0");
+      expect(resolveMarketplaceReleaseUrl("git@github.com:Ezreal-byte/dbx-plugin-xxl-job-console.git", "0.3.3")).toBe("https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/releases/tag/v0.3.3");
+    });
+
+    it("supports Gitee, GitLab, and CNB repository formats", () => {
+      expect(resolveMarketplaceReleaseUrl("https://gitee.com/someone/my-plugin/tree/master", "1.0.0")).toBe("https://gitee.com/someone/my-plugin/releases/tag/v1.0.0");
+      expect(resolveMarketplaceReleaseUrl("https://gitlab.com/group/subgroup/my-plugin/-/tree/main", "1.0.0")).toBe("https://gitlab.com/group/subgroup/my-plugin/-/releases/v1.0.0");
+      expect(resolveMarketplaceReleaseUrl("https://cnb.cool/dbxio.com/my-plugin/-/tree/main", "1.0.0")).toBe("https://cnb.cool/dbxio.com/my-plugin/-/releases/tag/v1.0.0");
+    });
+
+    it("accepts PluginMarketplaceVersion objects and handles empty inputs gracefully", () => {
+      expect(
+        resolveMarketplaceReleaseUrl("https://github.com/owner/repo", {
+          version: "2.1.0",
+          artifacts: [],
+        }),
+      ).toBe("https://github.com/owner/repo/releases/tag/v2.1.0");
+
+      expect(resolveMarketplaceReleaseUrl("", "1.0.0")).toBe("");
+      expect(resolveMarketplaceReleaseUrl("   ", "1.0.0")).toBe("");
+      expect(resolveMarketplaceReleaseUrl(undefined, "1.0.0")).toBe("");
+      expect(resolveMarketplaceReleaseUrl(null, "1.0.0")).toBe("");
+      expect(resolveMarketplaceReleaseUrl("https://github.com/owner/repo", "")).toBe("");
+      expect(resolveMarketplaceReleaseUrl("https://github.com/owner/repo", "   ")).toBe("");
+      expect(resolveMarketplaceReleaseUrl("https://github.com/owner/repo", undefined)).toBe("");
+      expect(resolveMarketplaceReleaseUrl("https://github.com/owner/repo", { version: "", artifacts: [] })).toBe("");
+    });
+
+    it("extracts base repository URL from various git URL formats", () => {
+      expect(extractRepositoryBaseUrl("https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/tree/v0.3.3")).toEqual({
+        baseUrl: "https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console",
+        host: "github.com",
+      });
+      expect(extractRepositoryBaseUrl("https://github.com/owner/repo.git")).toEqual({
+        baseUrl: "https://github.com/owner/repo",
+        host: "github.com",
+      });
+      expect(extractRepositoryBaseUrl("git@github.com:owner/repo.git")).toEqual({
+        baseUrl: "https://github.com/owner/repo",
+        host: "github.com",
+      });
+      expect(extractRepositoryBaseUrl("")).toBeNull();
+      expect(extractRepositoryBaseUrl("   ")).toBeNull();
+    });
   });
 });
 

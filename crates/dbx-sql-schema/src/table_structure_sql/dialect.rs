@@ -149,19 +149,17 @@ pub(super) fn capabilities_for(
         },
         // GBase 8s is Informix-compatible, unlike GBase 8a (`Gbase`), which speaks
         // the MySQL wire protocol and SQL dialect.
-        Some(DatabaseType::Gbase8s) => {
-            TableStructureCapabilities {
-                dialect: StructureDialect::Informix,
-                add_column: true,
-                drop_column: true,
-                rename_column: true,
-                alter_existing_column: true,
-                create_index: true,
-                drop_index: true,
-                rebuild_index: true,
-                ..base
-            }
-        }
+        Some(DatabaseType::Gbase8s) => TableStructureCapabilities {
+            dialect: StructureDialect::Informix,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            create_index: true,
+            drop_index: true,
+            rebuild_index: true,
+            ..base
+        },
         Some(DatabaseType::Gbase) => TableStructureCapabilities {
             dialect: StructureDialect::Mysql,
             add_column: true,

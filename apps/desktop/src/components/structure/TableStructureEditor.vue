@@ -5668,6 +5668,7 @@ const canEditForeignKeys = computed(() => (isOracleForeignKeyEditor.value ? true
 const canEditTriggers = computed(() => structureDialect.value === "mysql" || structureDialect.value === "oracle" || structureDialect.value === "sqlserver");
 const isOracleTriggerEditor = computed(() => structureDialect.value === "oracle");
 const isSqlServerTriggerEditor = computed(() => structureDialect.value === "sqlserver");
+const supportsTriggerEnableToggle = computed(() => isOracleTriggerEditor.value || isSqlServerTriggerEditor.value);
 
 function generatedForeignKeyName(column = ""): string {
   const table = structureIndexTableName() || "table";
@@ -8656,7 +8657,7 @@ watch(
                     </SelectContent>
                   </Select>
                   <Button
-                    v-if="isOracleTriggerEditor && trigger.enabled !== undefined"
+                    v-if="supportsTriggerEnableToggle && trigger.enabled !== undefined"
                     variant="outline"
                     size="sm"
                     :class="['h-[var(--structure-control-height)] shrink-0 px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]', !trigger.enabled ? 'text-muted-foreground' : '']"

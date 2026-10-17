@@ -2153,6 +2153,81 @@ fn format_export_table_ddl(ddl: &str, database_type: Option<DatabaseType>, opts:
     format!("{ddl};")
 }
 
+pub(crate) fn is_dameng_auto_increment_ddl(ddl: &str) -> bool {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut chars = ddl.chars().peekable();
+    let mut current_word = String::new();
+
+    while let Some(ch) = chars.next() {
+        if in_single_quote {
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                } else {
+                    in_single_quote = false;
+                }
+            }
+            continue;
+        }
+        if in_double_quote {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                } else {
+                    in_double_quote = false;
+                }
+            }
+            continue;
+        }
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+
+        if ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            in_line_comment = true;
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block_comment = true;
+            continue;
+        }
+        if ch == '\'' {
+            in_single_quote = true;
+            continue;
+        }
+        if ch == '"' {
+            in_double_quote = true;
+            continue;
+        }
+
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current_word.push(ch);
+        } else {
+            if current_word.eq_ignore_ascii_case("auto_increment") || current_word.eq_ignore_ascii_case("autoincrement")
+            {
+                return true;
+            }
+            current_word.clear();
+        }
+    }
+    current_word.eq_ignore_ascii_case("auto_increment") || current_word.eq_ignore_ascii_case("autoincrement")
+}
+
 /// PostgreSQL database export: split the statements that may depend on
 /// schema-wide routines out of a relation's DDL, returning
 /// `(table, indexes, triggers)`.
@@ -3034,6 +3109,7 @@ fn write_database_export_rows<W: Write>(
         insert_dialect,
         SqlInsertMode::default(),
         false,
+        None,
     )
 }
 
@@ -3050,7 +3126,24 @@ fn write_database_export_rows_with_mode<W: Write>(
     insert_dialect: SqlInsertDialect,
     insert_mode: SqlInsertMode,
     preserve_original_language: bool,
+    table_ddl: Option<&str>,
 ) -> Result<(), String> {
+    let normalized_column_extras;
+    let column_extras = if *db_type == DatabaseType::Dameng && table_ddl.is_some_and(is_dameng_auto_increment_ddl) {
+        normalized_column_extras = column_extras
+            .iter()
+            .map(|extra| {
+                if extra.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("identity")) {
+                    Some("auto_increment".to_string())
+                } else {
+                    extra.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        normalized_column_extras.as_slice()
+    } else {
+        column_extras
+    };
     let insert_indices = columns
         .iter()
         .enumerate()
@@ -4466,6 +4559,8 @@ async fn export_database_sql_core_inner(
             error_summary: None,
         });
 
+        let mut table_ddl_text: Option<String> = None;
+
         // Export structure
         if request.include_structure {
             if request.drop_table_if_exists {
@@ -4519,6 +4614,7 @@ async fn export_database_sql_core_inner(
             }
             match ddl_result {
                 Ok(ddl) => {
+                    table_ddl_text = Some(ddl.clone());
                     let (ddl, indexes, triggers) = split_postgres_export_table_ddl(&ddl, db_type);
                     deferred_postgres_indexes.extend(indexes);
                     deferred_postgres_triggers.extend(triggers);
@@ -4594,6 +4690,29 @@ async fn export_database_sql_core_inner(
             let col_types = columns.iter().map(|c| Some(c.data_type.clone())).collect::<Vec<_>>();
             let col_extras = columns.iter().map(|c| c.extra.clone()).collect::<Vec<_>>();
 
+            if table_ddl_text.is_none()
+                && db_type == DatabaseType::Dameng
+                && col_extras
+                    .iter()
+                    .any(|extra| extra.as_deref().is_some_and(|e| e.to_ascii_lowercase().contains("identity")))
+            {
+                if let Ok(ddl) = await_export_operation(
+                    &request.export_id,
+                    Box::pin(get_export_table_ddl_isolated(
+                        state.clone(),
+                        request.connection_id.clone(),
+                        request.database.clone(),
+                        request.schema.clone(),
+                        table_name.clone(),
+                        client_session_id.clone(),
+                    )),
+                )
+                .await
+                {
+                    table_ddl_text = Some(ddl);
+                }
+            }
+
             if !col_names.is_empty() {
                 if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
                     let sql = database_export_select_sql(&col_names, &col_types, table_name, &request.schema, &db_type);
@@ -4625,6 +4744,7 @@ async fn export_database_sql_core_inner(
                                     request.insert_dialect,
                                     request.insert_mode,
                                     request.preserve_original_language,
+                                    table_ddl_text.as_deref(),
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -4744,6 +4864,7 @@ async fn export_database_sql_core_inner(
                             request.insert_dialect,
                             request.insert_mode,
                             request.preserve_original_language,
+                            table_ddl_text.as_deref(),
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
@@ -5155,15 +5276,16 @@ mod tests {
         format_mysql_spatial_export_literal, format_postgres_spatial_export_literal_with_srid,
         format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
         generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
-        generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
-        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
-        record_export_destination_identity, record_export_error, replace_database_export_select_list,
-        sort_export_views_by_dependencies, split_postgres_export_table_ddl, write_database_export_rows,
-        write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
-        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
-        DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum, PostgresExportExtension, PostgresExportSequence,
-        PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE,
-        DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
+        generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl, is_postgres_extension_member_routine,
+        mysql_database_export_preamble, mysql_view_dependencies_from_rows, mysql_view_dependencies_sql,
+        normalize_export_table_ddl, record_export_destination_identity, record_export_error,
+        replace_database_export_select_list, sort_export_views_by_dependencies, split_postgres_export_table_ddl,
+        write_database_export_rows, write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions,
+        BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions, DatabaseExportObjectCounts,
+        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum,
+        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
+        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
+        POSTGRES_EXPORT_SEQUENCES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -8148,6 +8270,7 @@ mod tests {
             SqlInsertDialect::Source,
             SqlInsertMode::Single,
             false,
+            None,
         )
         .unwrap();
         drop(file);
@@ -8459,6 +8582,70 @@ mod tests {
                 "SET IDENTITY_INSERT \"SYSDBA\".\"USERS\" ON;\nINSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\nSET IDENTITY_INSERT \"SYSDBA\".\"USERS\" OFF;"
             ]
         );
+    }
+
+    #[test]
+    fn dameng_auto_increment_export_inserts_omit_identity_insert() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Dameng),
+            identifier_quote: None,
+            schema: Some("SYSDBA".to_string()),
+            table_name: Some("USERS".to_string()),
+            qualified_table_name: None,
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            column_types: vec![Some("INT".to_string()), Some("VARCHAR(20)".to_string())],
+            column_extras: vec![Some("auto_increment".to_string()), None],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(1), json!("Ada")]],
+            batch_size: Some(10),
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');"]);
+    }
+
+    #[test]
+    fn dameng_database_row_writer_omits_identity_insert_when_table_ddl_has_auto_increment() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        let ddl = "CREATE TABLE \"SYSDBA\".\"USERS\" (\"ID\" INT AUTO_INCREMENT PRIMARY KEY, \"NAME\" VARCHAR(20));";
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1), json!("Ada")]],
+            &["ID".to_string(), "NAME".to_string()],
+            &[Some("INT".to_string()), Some("VARCHAR(20)".to_string())],
+            // Catalog reports "identity" because DM c.INFO2 & 0x01 = 1 for auto_increment
+            &[Some("identity".to_string()), None],
+            "USERS",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            SqlInsertDialect::Source,
+            SqlInsertMode::Single,
+            false,
+            Some(ddl),
+        )
+        .unwrap();
+        drop(file);
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(!content.contains("IDENTITY_INSERT"));
+        assert_eq!(content, "INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\n\n");
+    }
+
+    #[test]
+    fn dameng_is_auto_increment_ddl_detection() {
+        assert!(is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT AUTO_INCREMENT, \"NAME\" VARCHAR(20))"));
+        assert!(is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT autoincrement PRIMARY KEY)"));
+        assert!(is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT AUTO_INCREMENT=100)"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT IDENTITY(1, 1), \"NAME\" VARCHAR(20))"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"AUTO_INCREMENT\" INT)"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"VAL\" VARCHAR(50) DEFAULT 'AUTO_INCREMENT')"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT /* AUTO_INCREMENT */)"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\n-- AUTO_INCREMENT\n\"ID\" INT)"));
     }
 
     #[test]

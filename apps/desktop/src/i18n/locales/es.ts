@@ -2296,6 +2296,8 @@ export default withEnglishFallback({
     showLabels: "Mostrar valores",
   },
   grid: {
+    showStatusSql: "Mostrar SQL al pie",
+    showStatusSqlHint: "Mostrar SQL al pie de todos los resultados de consultas y datos de tablas.",
     agentExecuteTime: "Ejecución: {duration}",
     serverExecuteTime: "Ejecución en BD: {duration}",
     serverExecuteTimeUnavailable: "Ejecución en BD: no disponible",
@@ -3192,6 +3194,7 @@ export default withEnglishFallback({
     binaryImportTooLarge: "El archivo es demasiado grande ({size}, límite {limit}). No se admite importar archivos grandes en una sola celda.",
     cut: "Cortado",
     uncommittedBlankRow: "Fila nueva sin completar, se ignorará al guardar.",
+    copyExtractorSqlDeletesInserts: "Sentencias SQL DELETEs/INSERTs",
   },
   exportProgress: {
     streamingUnsupported: "La exportación en streaming no es compatible con esta consulta. Simplifíquela o use un controlador compatible.",
@@ -4392,6 +4395,10 @@ export default withEnglishFallback({
     dropAllIndexes: "Eliminar todos los índices",
     dropForeignKey: "Eliminar clave foránea",
     dropTrigger: "Eliminar disparador",
+    enableTrigger: "Habilitar disparador",
+    disableTrigger: "Deshabilitar disparador",
+    enableTriggerSuccess: 'Disparador "{name}" habilitado.',
+    disableTriggerSuccess: 'Disparador "{name}" deshabilitado.',
     batchDrop: "Eliminar seleccionados ({count})",
     batchEmpty: "Vaciar seleccionadas ({count})",
     batchTruncate: "Truncar seleccionadas ({count})",

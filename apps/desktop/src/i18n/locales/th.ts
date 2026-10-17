@@ -2481,6 +2481,8 @@ export default withEnglishFallback({
     showLabels: "แสดงค่า",
   },
   grid: {
+    showStatusSql: "แสดง SQL ที่ด้านล่าง",
+    showStatusSqlHint: "แสดง SQL ในแถบสถานะด้านล่างของผลลัพธ์คิวรีและข้อมูลตารางทั้งหมด",
     rows: "{count} แถว",
     totalRows: "รวม {count} แถว",
     loadedRows: "โหลดแล้ว {count} แถว",
@@ -3373,6 +3375,7 @@ export default withEnglishFallback({
     filterModeOrderMoveDown: "เลื่อนตัวดำเนินการลง",
     filterModeOrderReset: "คืนค่าลำดับเริ่มต้น",
     uncommittedBlankRow: "แถวใหม่ที่ยังไม่ได้กรอกจะถูกละเว้นเมื่อบันทึก",
+    copyExtractorSqlDeletesInserts: "คำสั่ง SQL DELETEs/INSERTs",
   },
   exportProgress: {
     streamingUnsupported: "ไม่รองรับการส่งออกแบบ Streaming สำหรับ Query นี้ ทำให้เรียบง่ายขึ้นหรือใช้ Driver ที่รองรับ",
@@ -4816,6 +4819,10 @@ export default withEnglishFallback({
     schemaCommentPlaceholder: "ป้อน Comment ของ Schema...",
     schemaCommentSaving: "กำลังบันทึก...",
     editSchemaCommentSuccess: "อัปเดต Comment ของ Schema “{name}” แล้ว",
+    enableTrigger: "เปิดใช้งานทริกเกอร์",
+    disableTrigger: "ปิดใช้งานทริกเกอร์",
+    enableTriggerSuccess: 'เปิดใช้งานทริกเกอร์ "{name}" แล้ว',
+    disableTriggerSuccess: 'ปิดใช้งานทริกเกอร์ "{name}" แล้ว',
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",

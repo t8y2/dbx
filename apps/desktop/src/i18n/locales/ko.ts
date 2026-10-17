@@ -2191,6 +2191,8 @@ export default withEnglishFallback({
     showLabels: "값 표시",
   },
   grid: {
+    showStatusSql: "하단에 SQL 표시",
+    showStatusSqlHint: "모든 쿼리 결과와 테이블 데이터의 하단 상태 표시줄에 SQL을 표시합니다.",
     agentExecuteTime: "실행 시간: {duration}",
     serverExecuteTime: "DB 실행: {duration}",
     serverExecuteTimeUnavailable: "DB 실행: 사용 불가",
@@ -3015,6 +3017,7 @@ export default withEnglishFallback({
     xlsxHeaderNameAndCommentRowsHint: "1행은 필드 이름, 2행은 주석이며 데이터는 3행부터 시작합니다. 다시 가져오기 전에 주석 행을 삭제하면 필드 이름과 일치합니다.",
     batchAppendPasteNoMatchingColumns: "INSERT 문의 열 이름이 현재 결과 집합의 어떤 열과도 일치하지 않습니다.",
     uncommittedBlankRow: "입력되지 않은 새 행은 저장 시 무시됩니다.",
+    copyExtractorSqlDeletesInserts: "SQL DELETEs/INSERTs 문",
   },
   exportProgress: {
     streamingUnsupported: "이 쿼리는 스트리밍 내보내기를 지원하지 않습니다. 쿼리를 단순화하거나 지원되는 드라이버를 사용하세요.",
@@ -4404,6 +4407,10 @@ export default withEnglishFallback({
     copyPasswordConfirmTitle: "비밀번호 포함 복사",
     copyPasswordConfirmMessage: "복사되는 텍스트에 저장된 비밀번호가 평문으로 포함됩니다. 계속할까요?",
     copyPasswordConfirmAction: "복사",
+    enableTrigger: "트리거 활성화",
+    disableTrigger: "트리거 비활성화",
+    enableTriggerSuccess: "트리거 '{name}'을(를) 활성화했습니다",
+    disableTriggerSuccess: "트리거 '{name}'을(를) 비활성화했습니다",
   },
   visibleDatabases: {
     title: "표시할 데이터베이스",

@@ -1203,6 +1203,7 @@ export type {
   GlobalSearchRequest,
   GlobalSearchMatch,
   GlobalSearchSettings,
+  McpKeychainAccess,
 } from "@/lib/backend/tauri";
 
 // MQTT

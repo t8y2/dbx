@@ -779,6 +779,141 @@ fn builds_mysql_column_and_index_changes() {
 }
 
 #[test]
+fn mysql_rebuild_index_uses_one_alter_table() {
+    let mut changed = existing_index("userId", &["userId", "cylId", "isClose"], false);
+    changed.columns.push("isEmpty".to_string());
+    changed.index_type = "BTREE".to_string();
+    changed.original.as_mut().unwrap().index_type = Some("BTREE".to_string());
+    let mut options = index_change_options(DatabaseType::Mysql, Some("dbx12441_native"), changed);
+    options.table_name = "ls_station_delivery_staff_stock_log".to_string();
+
+    let result = build_table_structure_change_sql(options);
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec![
+        "ALTER TABLE `ls_station_delivery_staff_stock_log` DROP INDEX `userId`, ADD INDEX `userId` USING BTREE (`userId`, `cylId`, `isClose`, `isEmpty`);"
+    ]);
+}
+
+#[test]
+fn mysql_rebuild_index_preserves_definition_types() {
+    for (index_type, unique, definition) in [
+        ("", false, "INDEX `idx`"),
+        ("btree", false, "INDEX `idx` USING BTREE"),
+        ("HASH", false, "INDEX `idx` USING HASH"),
+        ("BTREE", true, "UNIQUE INDEX `idx` USING BTREE"),
+        ("", true, "UNIQUE INDEX `idx`"),
+        ("FULLTEXT", false, "FULLTEXT INDEX `idx`"),
+        ("SPATIAL", false, "SPATIAL INDEX `idx`"),
+        ("RTREE", false, "SPATIAL INDEX `idx`"),
+    ] {
+        let mut changed = existing_index("idx", &["old_key"], false);
+        changed.columns = vec!["second".to_string(), "first".to_string()];
+        changed.index_type = index_type.to_string();
+        changed.is_unique = unique;
+        changed.comment = "owner's index".to_string();
+        let result = build_table_structure_change_sql(index_change_options(DatabaseType::Mysql, None, changed));
+
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert_eq!(
+            result.statements,
+            vec![format!(
+                "ALTER TABLE `USERS` DROP INDEX `idx`, ADD {definition} (`second`, `first`) COMMENT 'owner''s index';"
+            )]
+        );
+    }
+}
+
+#[test]
+fn mysql_rebuild_index_preserves_quoted_names_and_functional_keys() {
+    let expression = "((lower(`email`)))";
+    let mut changed = existing_index("old`idx", &["email"], false);
+    changed.name = "new`idx".to_string();
+    // Parenthesized plain identifiers keep their existing quoting behavior;
+    // only wrapped functional key parts are treated as SQL expressions.
+    changed.columns = vec!["a`b".to_string(), "name(10)".to_string(), expression.to_string()];
+    let mut options = index_change_options(DatabaseType::Mysql, Some("db`name"), changed);
+    options.table_name = "table`name".to_string();
+    let result = build_table_structure_change_sql(options);
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(
+        result.statements,
+        vec![format!(
+            "ALTER TABLE `table``name` DROP INDEX `old``idx`, ADD INDEX `new``idx` (`a``b`, `name(10)`, {expression});"
+        )]
+    );
+}
+
+#[test]
+fn mysql_rebuild_index_rejects_empty_replacement_without_drop() {
+    for (name, columns) in [(" ", vec!["email"]), ("idx", vec![]), ("idx", vec![" ", ""])] {
+        let mut changed = existing_index("idx", &["email"], false);
+        changed.name = name.to_string();
+        changed.columns = columns.into_iter().map(str::to_string).collect();
+        let result = build_table_structure_change_sql(index_change_options(DatabaseType::Mysql, None, changed));
+
+        assert!(result.statements.is_empty(), "{:?}", result.statements);
+        assert!(!result.warnings.is_empty());
+    }
+}
+
+#[test]
+fn mysql_rebuild_index_keeps_noop_primary_and_capability_guards() {
+    let unchanged = existing_index("idx", &["email"], false);
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Mysql, None, unchanged));
+    assert!(result.statements.is_empty());
+    assert!(result.warnings.is_empty());
+
+    let mut primary = existing_primary_index("PRIMARY", &["id"]);
+    primary.columns.push("email".to_string());
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Mysql, None, primary));
+    assert!(result.statements.is_empty());
+    assert!(result.warnings.iter().any(|warning| warning.contains("cannot be edited")));
+
+    let mut changed = existing_index("idx", &["email"], false);
+    changed.columns.push("id".to_string());
+    let mut options = index_change_options(DatabaseType::Mysql, None, changed);
+    options.driver_profile = Some("starrocks".to_string());
+    let mut warnings = Vec::new();
+    assert!(super::indexes::build_index_sql(&options, &mut warnings).is_empty());
+    assert!(warnings.iter().any(|warning| warning.contains("Editing existing indexes is not supported")));
+    let result = build_table_structure_change_sql(options);
+    assert!(result.statements.is_empty());
+    assert!(!result.warnings.is_empty());
+}
+
+#[test]
+fn mysql_rebuild_index_ignores_stale_concurrently_flag_with_real_change() {
+    let mut changed = existing_index("idx", &["email"], false);
+    changed.concurrently = true;
+    changed.comment = "new comment".to_string();
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Mysql, None, changed));
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `USERS` DROP INDEX `idx`, ADD INDEX `idx` (`email`) COMMENT 'new comment';"]
+    );
+}
+
+#[test]
+fn mysql_dialect_other_engines_keep_standalone_rebuilds() {
+    for database_type in [DatabaseType::Goldendb, DatabaseType::Sundb, DatabaseType::Databend] {
+        let mut changed = existing_index("idx", &["email"], false);
+        changed.is_unique = true;
+        let result = build_table_structure_change_sql(index_change_options(database_type, None, changed));
+
+        assert!(result.warnings.is_empty(), "{database_type:?}: {:?}", result.warnings);
+        assert_eq!(
+            result.statements,
+            vec!["DROP INDEX `idx` ON `USERS`;", "CREATE UNIQUE INDEX `idx` ON `USERS` (`email`);",],
+            "{database_type:?}"
+        );
+    }
+}
+
+#[test]
 fn dameng_replaces_same_name_index_before_validating_uniqueness() {
     let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], false);
     changed.name = "  IDX_USERS_EMAIL  ".to_string();
@@ -1048,7 +1183,6 @@ fn dameng_new_and_dropped_indexes_do_not_use_or_replace() {
 #[test]
 fn non_dameng_index_rebuilds_do_not_use_or_replace() {
     for database_type in [
-        DatabaseType::Mysql,
         DatabaseType::Postgres,
         DatabaseType::Sqlite,
         DatabaseType::SqlServer,
@@ -6262,8 +6396,7 @@ fn mysql_clears_auto_increment_when_the_only_covering_index_is_rebuilt_by_the_sa
         result.statements,
         vec![
             "ALTER TABLE `users` DROP PRIMARY KEY, MODIFY COLUMN `id` bigint NOT NULL, ADD PRIMARY KEY (`external_id`);",
-            "DROP INDEX `idx_users_id` ON `users`;",
-            "CREATE UNIQUE INDEX `idx_users_id` ON `users` (`id`);",
+            "ALTER TABLE `users` DROP INDEX `idx_users_id`, ADD UNIQUE INDEX `idx_users_id` (`id`);",
         ]
     );
 }

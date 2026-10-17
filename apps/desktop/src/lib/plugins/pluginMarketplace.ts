@@ -1,4 +1,4 @@
-import type { InstalledPlugin, PluginMarketplaceArtifact, PluginMarketplacePlugin, PluginRepository, PluginRepositoryCatalogResult } from "@/types/database";
+import type { InstalledPlugin, PluginMarketplaceArtifact, PluginMarketplacePlugin, PluginMarketplaceVersion, PluginRepository, PluginRepositoryCatalogResult } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 
 export type MarketplacePluginStatus = "install" | "installed" | "update" | "unsupported";
@@ -34,6 +34,99 @@ export function marketplaceHomepageUrl(source?: string, homepage?: string): stri
   const normalizedHomepage = normalizeExternalUrl(homepage);
   if (!normalizedHomepage || normalizedHomepage === normalizedSource) return undefined;
   return homepage?.trim() || undefined;
+}
+
+/**
+ * Resolves the external release URL for a specific plugin version.
+ *
+ * Plugin catalogs often provide repository URLs pointing to a specific branch,
+ * tag, or subfolder (e.g. `https://github.com/owner/repo/tree/v0.3.3` or
+ * `https://github.com/owner/repo/tree/main/packages/plugin`), or git clone URLs
+ * (`.git`). This extracts the base repository root and appends the appropriate
+ * release path for the given version tag.
+ */
+export function resolveMarketplaceReleaseUrl(source?: string | null, version?: string | PluginMarketplaceVersion | null): string {
+  const trimmedSource = source?.trim();
+  const rawVersion = typeof version === "string" ? version.trim() : (version?.version?.trim() ?? "");
+  if (!trimmedSource || !rawVersion) return "";
+
+  const tag = rawVersion.startsWith("v") || rawVersion.startsWith("V") ? rawVersion : `v${rawVersion}`;
+  const repo = extractRepositoryBaseUrl(trimmedSource);
+  if (!repo) return "";
+
+  if (repo.host === "cnb.cool" || repo.host.endsWith(".cnb.cool")) {
+    return `${repo.baseUrl}/-/releases/tag/${encodeURIComponent(tag)}`;
+  }
+  if (repo.host === "gitlab.com" || repo.host.endsWith(".gitlab.com")) {
+    return `${repo.baseUrl}/-/releases/${encodeURIComponent(tag)}`;
+  }
+  return `${repo.baseUrl}/releases/tag/${encodeURIComponent(tag)}`;
+}
+
+export function extractRepositoryBaseUrl(source: string): { baseUrl: string; host: string } | null {
+  const trimmed = source.trim();
+  if (!trimmed) return null;
+
+  // Handle SSH URLs: git@github.com:owner/repo.git or ssh://git@github.com/owner/repo.git
+  const sshMatch = /^(?:ssh:\/\/)?git@([^/:]+)[:/](.+)$/i.exec(trimmed);
+  let normalized = trimmed;
+  if (sshMatch) {
+    const host = sshMatch[1];
+    const path = sshMatch[2].replace(/\.git$/i, "").replace(/^\/+/, "");
+    normalized = `https://${host}/${path}`;
+  } else if (!/^https?:\/\//i.test(normalized)) {
+    normalized = `https://${normalized}`;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    const cleaned = trimmed
+      .replace(/\/(?:-?\/)?(?:tree|blob|releases|src)(?:\/.*)?$/i, "")
+      .replace(/\.git$/i, "")
+      .replace(/\/+$/, "");
+    return cleaned ? { baseUrl: cleaned, host: "" } : null;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const origin = parsed.origin;
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length === 0) return null;
+
+  // On GitHub and Gitee, repositories are strictly <owner>/<repo>.
+  // Any trailing segment (e.g. /tree/<ref>, /blob/<ref>, /releases) is not part of the repository.
+  if (host === "github.com" || host.endsWith(".github.com") || host === "gitee.com" || host.endsWith(".gitee.com")) {
+    if (segments.length >= 2) {
+      const owner = segments[0];
+      const repoName = segments[1].replace(/\.git$/i, "");
+      return { baseUrl: `${origin}/${owner}/${repoName}`, host };
+    }
+    return { baseUrl: `${origin}/${segments[0].replace(/\.git$/i, "")}`, host };
+  }
+
+  // On GitLab, CNB, etc., UI routes (tree, blob, releases, etc.) follow a "/-/" segment:
+  // e.g. https://gitlab.com/group/subgroup/project/-/tree/main
+  // e.g. https://cnb.cool/org/project/-/releases/tag/v1.0.0
+  const dashIndex = segments.indexOf("-");
+  if (dashIndex > 0) {
+    const repoSegments = segments.slice(0, dashIndex);
+    repoSegments[repoSegments.length - 1] = repoSegments[repoSegments.length - 1].replace(/\.git$/i, "");
+    return { baseUrl: `${origin}/${repoSegments.join("/")}`, host };
+  }
+
+  // Generic git hosts (Gitea, Bitbucket, self-hosted, etc.):
+  // Strip trailing branches/trees/blobs/releases/src if present
+  const cutIndex = segments.findIndex((seg) => ["tree", "blob", "releases", "src"].includes(seg.toLowerCase()));
+  if (cutIndex > 0) {
+    const repoSegments = segments.slice(0, cutIndex);
+    repoSegments[repoSegments.length - 1] = repoSegments[repoSegments.length - 1].replace(/\.git$/i, "");
+    return { baseUrl: `${origin}/${repoSegments.join("/")}`, host };
+  }
+
+  // Default: strip .git from the last segment
+  segments[segments.length - 1] = segments[segments.length - 1].replace(/\.git$/i, "");
+  return { baseUrl: `${origin}/${segments.join("/")}`, host };
 }
 
 export function buildMarketplacePluginListings(results: readonly PluginRepositoryCatalogResult[], installedPlugins: readonly InstalledPlugin[], locale: string): MarketplacePluginListing[] {

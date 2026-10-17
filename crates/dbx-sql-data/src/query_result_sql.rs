@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
+use dbx_sql_core::sql_risk::{prove_read_only_for_database, ReadProof};
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
@@ -59,6 +60,10 @@ pub struct QueryPaginationExecutionPlanOptions {
 #[serde(rename_all = "camelCase")]
 pub struct QueryPaginationExecutionPlan {
     pub sql_to_execute: String,
+    /// Optional native MySQL page with one extra row. Only offered for queries
+    /// accepted by the strict read-only proof; callers must trim the probe row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_probe_sql: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_sql: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,6 +166,7 @@ pub fn build_query_pagination_execution_plan(
     };
     let mut plan = QueryPaginationExecutionPlan {
         sql_to_execute: options.sql.clone(),
+        page_probe_sql: None,
         page_sql: None,
         page_limit: None,
         page_offset: None,
@@ -252,6 +258,34 @@ pub fn build_query_pagination_execution_plan(
         plan.page_sql = page_sql;
         plan.page_limit = Some(options.pagination.limit);
         plan.page_offset = Some(options.pagination.offset);
+        // A SELECT can mutate session state or invoke a user function. Do not
+        // evaluate an extra row unless both the original and rewritten query
+        // satisfy the same strict proof used for manual-transaction reads.
+        if options.database_type == Some(DatabaseType::Mysql)
+            && !options.use_agent_cursor
+            && options.pagination.limit > 0
+            && prove_read_only_for_database(&options.sql, DatabaseType::Mysql) == ReadProof::ProvenReadOnly
+            && (options.sql == options.query_base_sql
+                || prove_read_only_for_database(&options.query_base_sql, DatabaseType::Mysql)
+                    == ReadProof::ProvenReadOnly)
+        {
+            if let Some(probe_limit) =
+                options.pagination.limit.checked_add(1).filter(|limit| *limit <= i32::MAX as usize)
+            {
+                let probe = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                    original_sql: options.sql.clone(),
+                    database_type: options.database_type,
+                    limit: probe_limit,
+                    offset: options.pagination.offset,
+                });
+                if probe.ok {
+                    plan.page_probe_sql = probe.sql.map(|sql| match execution_hint {
+                        Some(hint) => inject_execution_hint(&sql, hint),
+                        None => sql,
+                    });
+                }
+            }
+        }
         if options.pagination.offset > 0
             && pagination_strategy(options.database_type, PaginationContext::UserQuery)
                 == TablePaginationStrategy::Rownum

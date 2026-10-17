@@ -155,6 +155,7 @@ pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:"
 pub const SQLSERVER_LEGACY_DRIVER_PROFILE: &str = "sqlserver-legacy";
 pub const SQLSERVER_LEGACY_DRIVER_LABEL: &str = "SQL Server legacy compatibility component";
 const SQLSERVER_DEFAULT_PORT: u16 = 1433;
+pub const SQLSERVER_MAX_ROUTING_REDIRECTS: usize = 2;
 const SQLSERVER_UNSAFE_PROBE_BLOCK_ERROR_PREFIX: &str = "SQL Server unsafe result type:";
 const SQLSERVER_RESULT_TYPE_PROBE_SQL: &str = "\
     DECLARE @dbx_use_describe_dmv bit = CASE \
@@ -437,6 +438,14 @@ fn sqlserver_connect_failure_message(encrypted_error: &str, fallback_errors: &[(
             "{encrypted_error}\n\n{SQLSERVER_LEGACY_TLS_HINT}\n\nAutomatic native legacy fallback also failed: {legacy_summary}"
         );
     }
+    if !encrypted_error.is_empty() && !encrypted_error.starts_with("encryption was disabled") {
+        if legacy_summary.is_empty() {
+            return encrypted_error.to_string();
+        }
+        return format!(
+            "{encrypted_error}\n\nThe SQL Server legacy compatibility fallbacks also failed:\n{legacy_summary}"
+        );
+    }
     legacy_summary
 }
 
@@ -488,38 +497,95 @@ async fn try_connect(
     encryption: tiberius::EncryptionLevel,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
-    let mut config = Config::new();
-    let endpoint = sqlserver_endpoint(host);
-    let uses_named_instance_resolution = sqlserver_uses_named_instance_resolution(&endpoint, port, port_explicit);
-    config.host(endpoint.host);
-    if let Some(instance_name) = endpoint.instance_name.filter(|_| uses_named_instance_resolution) {
-        config.instance_name(instance_name);
-    } else {
-        config.port(port);
-    }
-    config.authentication(AuthMethod::sql_server(user, pass));
-    if let Some(db) = database {
-        config.database(db);
-    }
-    config.trust_cert();
-    config.encryption(encryption);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut current_host = host.to_string();
+    let mut current_port = port;
+    let mut current_port_explicit = port_explicit;
+    let mut redirects = 0;
 
-    let tcp = if uses_named_instance_resolution {
-        tokio::time::timeout(timeout, TcpStream::connect_named(&config))
-            .await
-            .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
-            .map_err(|e| format!("SQL Server connection failed: {e}"))?
-    } else {
-        tokio::time::timeout(timeout, TcpStream::connect(config.get_addr()))
-            .await
-            .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
-            .map_err(|e| format!("SQL Server connection failed: {e}"))?
-    };
-    let client = tokio::time::timeout(timeout, Client::connect(config, tcp.compat_write()))
-        .await
-        .map_err(|_| format!("SQL Server handshake timed out ({}s)", timeout.as_secs()))?
-        .map_err(|e| format!("SQL Server connection failed: {e}"))?;
-    Ok(SqlServerClient::new(client))
+    loop {
+        let mut config = Config::new();
+        let endpoint = sqlserver_endpoint(&current_host);
+        let uses_named_instance_resolution =
+            sqlserver_uses_named_instance_resolution(&endpoint, current_port, current_port_explicit);
+        config.host(endpoint.host);
+        if let Some(instance_name) = endpoint.instance_name.filter(|_| uses_named_instance_resolution) {
+            config.instance_name(instance_name);
+        } else {
+            config.port(current_port);
+        }
+        config.authentication(AuthMethod::sql_server(user, pass));
+        if let Some(db) = database {
+            config.database(db);
+        }
+        config.trust_cert();
+        config.encryption(encryption);
+
+        let remaining_connect = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining_connect.is_zero() {
+            return Err(format!("SQL Server connection timed out ({}s)", timeout.as_secs()));
+        }
+
+        let tcp = if uses_named_instance_resolution {
+            tokio::time::timeout(remaining_connect, TcpStream::connect_named(&config))
+                .await
+                .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
+                .map_err(|e| {
+                    if redirects > 0 {
+                        format!("SQL Server connection on routed address `{current_host}:{current_port}` failed: {e}")
+                    } else {
+                        format!("SQL Server connection failed: {e}")
+                    }
+                })?
+        } else {
+            tokio::time::timeout(remaining_connect, TcpStream::connect(config.get_addr()))
+                .await
+                .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
+                .map_err(|e| {
+                    if redirects > 0 {
+                        format!("SQL Server connection on routed address `{current_host}:{current_port}` failed: {e}")
+                    } else {
+                        format!("SQL Server connection failed: {e}")
+                    }
+                })?
+        };
+        let _ = tcp.set_nodelay(true);
+
+        let remaining_handshake = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining_handshake.is_zero() {
+            return Err(format!("SQL Server handshake timed out ({}s)", timeout.as_secs()));
+        }
+
+        let client = match tokio::time::timeout(remaining_handshake, Client::connect(config, tcp.compat_write())).await
+        {
+            Ok(Ok(client)) => client,
+            Ok(Err(tiberius::error::Error::Routing { host: routed_host, port: routed_port })) => {
+                redirects += 1;
+                if redirects > SQLSERVER_MAX_ROUTING_REDIRECTS {
+                    return Err(format!(
+                        "SQL Server routing failed: exceeded maximum routing redirects ({SQLSERVER_MAX_ROUTING_REDIRECTS})"
+                    ));
+                }
+                log::info!(
+                    "SQL Server redirected connection to routed address `{routed_host}:{routed_port}` (redirect {redirects}/{SQLSERVER_MAX_ROUTING_REDIRECTS})"
+                );
+                current_host = routed_host;
+                current_port = routed_port;
+                current_port_explicit = true;
+                continue;
+            }
+            Ok(Err(e)) => {
+                return Err(if redirects > 0 {
+                    format!("SQL Server connection on routed address `{current_host}:{current_port}` failed: {e}")
+                } else {
+                    format!("SQL Server connection failed: {e}")
+                });
+            }
+            Err(_) => return Err(format!("SQL Server handshake timed out ({}s)", timeout.as_secs())),
+        };
+
+        return Ok(SqlServerClient::new(client));
+    }
 }
 
 fn row_to_json(row: &tiberius::Row) -> Vec<serde_json::Value> {
@@ -4323,6 +4389,7 @@ mod tests {
         SpatialColumn,
     };
     use chrono::NaiveDate;
+    use std::time::Duration;
     use std::{borrow::Cow, time::Instant};
     use tiberius::{Column, ColumnData, ColumnType, IntoSql};
 
@@ -4872,6 +4939,300 @@ mod tests {
         assert!(message.starts_with(encrypted_error));
         assert!(message.contains("This may be caused by an old SQL Server TLS/encryption configuration"));
         assert!(message.contains("Automatic native legacy fallback also failed:"));
+    }
+
+    #[test]
+    fn sqlserver_connect_failure_message_preserves_initial_routing_or_transport_error() {
+        let routed_error =
+            "SQL Server connection on routed address `worker.database.windows.net:1433` failed: connection refused";
+        let fallback_errors = vec![
+            (
+                "login-only encryption",
+                "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+                    .to_string(),
+            ),
+            (
+                "no-encryption compatibility fallback",
+                "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+                    .to_string(),
+            ),
+        ];
+
+        let message = super::sqlserver_connect_failure_message(routed_error, &fallback_errors);
+        assert!(message.starts_with(routed_error), "{message}");
+        assert!(message.contains("The SQL Server legacy compatibility fallbacks also failed:"), "{message}");
+        assert!(message.contains("login-only encryption failed:"), "{message}");
+        assert!(message.contains("no-encryption compatibility fallback failed:"), "{message}");
+
+        let redirect_limit_error = "SQL Server routing failed: exceeded maximum routing redirects (2)";
+        let message = super::sqlserver_connect_failure_message(redirect_limit_error, &fallback_errors);
+        assert!(message.starts_with(redirect_limit_error), "{message}");
+        assert!(message.contains("The SQL Server legacy compatibility fallbacks also failed:"), "{message}");
+
+        let skipped_msg = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled";
+        let message = super::sqlserver_connect_failure_message(skipped_msg, &fallback_errors);
+        assert!(!message.contains(skipped_msg), "{message}");
+        assert!(message.starts_with("login-only encryption failed:"), "{message}");
+    }
+
+    fn mock_tds_prelogin_response() -> Vec<u8> {
+        let mut packet = vec![
+            0x12, // PacketType::PreLogin
+            0x01, // PacketStatus::EndOfMessage
+            0x00, 0x20, // Length: 32 bytes (BE)
+            0x00, 0x00, // SPID
+            0x01, // Packet ID
+            0x00, // Window
+        ];
+        packet.extend_from_slice(&[0x00, 0x00, 0x10, 0x00, 0x06]); // token 0 (version), offset 16, len 6
+        packet.extend_from_slice(&[0x01, 0x00, 0x16, 0x00, 0x01]); // token 1 (encryption), offset 22, len 1
+        packet.extend_from_slice(&[0x04, 0x00, 0x17, 0x00, 0x01]); // token 4 (mars), offset 23, len 1
+        packet.push(0xFF); // terminator
+        packet.extend_from_slice(&[0x0F, 0x00, 0x00, 0x00, 0x00, 0x00]); // version 15.0.0
+        packet.push(0x02); // EncryptionLevel::NotSupported
+        packet.push(0x00); // mars: 0
+        packet
+    }
+
+    fn mock_tds_routing_response(host: &str, port: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(0xE3); // TokenType::EnvChange
+        let host_utf16: Vec<u16> = host.encode_utf16().collect();
+        let routing_data_len = 1 + 2 + 2 + (host_utf16.len() * 2) as u16;
+        let env_change_payload_len = 1 + 2 + routing_data_len;
+        payload.extend_from_slice(&env_change_payload_len.to_le_bytes());
+        payload.push(20); // EnvChangeTy::Routing
+        payload.extend_from_slice(&routing_data_len.to_le_bytes());
+        payload.push(0); // routing protocol: TCP
+        payload.extend_from_slice(&port.to_le_bytes());
+        payload.extend_from_slice(&(host_utf16.len() as u16).to_le_bytes());
+        for code_unit in host_utf16 {
+            payload.extend_from_slice(&code_unit.to_le_bytes());
+        }
+
+        // TokenDone: 0xFD
+        payload.push(0xFD);
+        payload.extend_from_slice(&0u16.to_le_bytes()); // status: 0
+        payload.extend_from_slice(&0u16.to_le_bytes()); // cur_cmd: 0
+        payload.extend_from_slice(&0u64.to_le_bytes()); // done_rows: 0 (8 bytes)
+
+        let total_len = (8 + payload.len()) as u16;
+        let mut packet = vec![
+            0x04, // PacketType::TabularResult
+            0x01, // PacketStatus::EndOfMessage
+            (total_len >> 8) as u8,
+            (total_len & 0xFF) as u8,
+            0x00,
+            0x00, // SPID
+            0x01, // Packet ID
+            0x00, // Window
+        ];
+        packet.extend(payload);
+        packet
+    }
+
+    fn mock_tds_loginack_response() -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(0xAD); // TokenType::LoginAck
+        let prog_name = "Microsoft SQL Server";
+        let prog_name_utf16: Vec<u16> = prog_name.encode_utf16().collect();
+        let loginack_len = (1 + 4 + 1 + prog_name_utf16.len() * 2 + 4) as u16;
+        payload.extend_from_slice(&loginack_len.to_le_bytes());
+        payload.push(1); // interface: SQL_TSQL
+        payload.extend_from_slice(&0x74000004u32.to_be_bytes()); // SqlServerN (TDS 7.4) in BigEndian
+        payload.push(prog_name_utf16.len() as u8);
+        for code_unit in prog_name_utf16 {
+            payload.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        payload.extend_from_slice(&0x0F000000u32.to_le_bytes()); // version: 15.0.0.0
+
+        // TokenDone: 0xFD
+        payload.push(0xFD);
+        payload.extend_from_slice(&0u16.to_le_bytes()); // status: 0
+        payload.extend_from_slice(&0u16.to_le_bytes()); // cur_cmd: 0
+        payload.extend_from_slice(&0u64.to_le_bytes()); // done_rows: 0 (8 bytes)
+
+        let total_len = (8 + payload.len()) as u16;
+        let mut packet = vec![
+            0x04, // PacketType::TabularResult
+            0x01, // PacketStatus::EndOfMessage
+            (total_len >> 8) as u8,
+            (total_len & 0xFF) as u8,
+            0x00,
+            0x00, // SPID
+            0x01, // Packet ID
+            0x00, // Window
+        ];
+        packet.extend(payload);
+        packet
+    }
+
+    async fn read_mock_tds_packet(stream: &mut tokio::net::TcpStream) -> std::io::Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let mut header = [0u8; 8];
+        stream.read_exact(&mut header).await?;
+        let len = u16::from_be_bytes([header[2], header[3]]) as usize;
+        if len < 8 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid TDS packet length"));
+        }
+        let mut payload = vec![0u8; len - 8];
+        stream.read_exact(&mut payload).await?;
+        let mut packet = header.to_vec();
+        packet.extend(payload);
+        Ok(packet)
+    }
+
+    #[tokio::test]
+    async fn sqlserver_try_connect_follows_tds_routing_redirect() {
+        use tokio::io::AsyncWriteExt;
+        let hop1_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hop1_port = hop1_listener.local_addr().unwrap().port();
+
+        let hop2_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hop2_port = hop2_listener.local_addr().unwrap().port();
+
+        let hop1_task = tokio::spawn(async move {
+            let (mut socket, _) = hop1_listener.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap(); // PreLogin
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap(); // Login7
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", hop2_port)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let hop2_task = tokio::spawn(async move {
+            let (mut socket, _) = hop2_listener.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap(); // PreLogin
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap(); // Login7
+            socket.write_all(&mock_tds_loginack_response()).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
+
+        let client = super::try_connect(
+            "127.0.0.1",
+            hop1_port,
+            true,
+            "sa",
+            "password",
+            None,
+            tiberius::EncryptionLevel::NotSupported,
+            Duration::from_secs(3),
+        )
+        .await;
+
+        hop1_task.await.unwrap();
+        hop2_task.await.unwrap();
+
+        assert!(client.is_ok(), "client connection failed: {:?}", client.err());
+    }
+
+    #[tokio::test]
+    async fn sqlserver_try_connect_enforces_max_routing_redirects() {
+        use tokio::io::AsyncWriteExt;
+        let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port1 = listener1.local_addr().unwrap().port();
+
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port2 = listener2.local_addr().unwrap().port();
+
+        let listener3 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port3 = listener3.local_addr().unwrap().port();
+
+        let t1 = tokio::spawn(async move {
+            let (mut socket, _) = listener1.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", port2)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let t2 = tokio::spawn(async move {
+            let (mut socket, _) = listener2.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", port3)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let t3 = tokio::spawn(async move {
+            let (mut socket, _) = listener3.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            // 3rd redirect exceeds limit of 2 redirects
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", 9999)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let result = super::try_connect(
+            "127.0.0.1",
+            port1,
+            true,
+            "sa",
+            "password",
+            None,
+            tiberius::EncryptionLevel::NotSupported,
+            Duration::from_secs(3),
+        )
+        .await;
+
+        t1.await.unwrap();
+        t2.await.unwrap();
+        t3.await.unwrap();
+
+        let err = result.err().expect("should fail after exceeding max routing redirects");
+        assert!(err.contains("exceeded maximum routing redirects (2)"), "unexpected error message: {err}");
+    }
+
+    #[tokio::test]
+    async fn sqlserver_try_connect_routed_address_failure_reports_routed_endpoint() {
+        use tokio::io::AsyncWriteExt;
+        let hop1_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hop1_port = hop1_listener.local_addr().unwrap().port();
+
+        // Pick a port that is guaranteed not to have a server listening
+        let dead_port = {
+            let temp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            temp.local_addr().unwrap().port()
+        };
+
+        let hop1_task = tokio::spawn(async move {
+            let (mut socket, _) = hop1_listener.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", dead_port)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let result = super::try_connect(
+            "127.0.0.1",
+            hop1_port,
+            true,
+            "sa",
+            "password",
+            None,
+            tiberius::EncryptionLevel::NotSupported,
+            Duration::from_secs(3),
+        )
+        .await;
+
+        hop1_task.await.unwrap();
+
+        let err = result.err().expect("connection to closed port should fail");
+        assert!(
+            err.contains(&format!("SQL Server connection on routed address `127.0.0.1:{dead_port}` failed:")),
+            "error should mention routed address and port: {err}"
+        );
     }
 
     #[test]

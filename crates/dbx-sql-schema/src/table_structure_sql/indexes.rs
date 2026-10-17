@@ -63,6 +63,18 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 warnings.push(format!("Primary index \"{}\" cannot be edited from this editor.", original.name));
                 continue;
             }
+            if options.database_type == Some(DatabaseType::Mysql) && dialect == StructureDialect::Mysql {
+                // ALTER TABLE and standalone DROP/CREATE INDEX have different privilege
+                // requirements. Validate the replacement before building a single ALTER
+                // so an incomplete draft can never expose a DROP-only plan.
+                if let Some(definition) = mysql_inline_index_definition(index) {
+                    statements.push(format!(
+                        "ALTER TABLE {table} DROP INDEX {}, ADD {definition};",
+                        quote_ident(dialect, &original.name)
+                    ));
+                }
+                continue;
+            }
             if is_dameng_constraint_backed(options.database_type, original) {
                 statements.extend(build_dameng_constraint_index_edit(
                     options,
@@ -313,7 +325,7 @@ pub(super) fn mysql_index_parts(index_type: &str) -> (String, String) {
     }
 }
 
-/// Inline MySQL index definition for indexes required at CREATE TABLE time.
+/// MySQL index definition shared by CREATE TABLE and ALTER TABLE ADD INDEX.
 pub(super) fn mysql_inline_index_definition(index: &EditableStructureIndex) -> Option<String> {
     let name = clean(&index.name);
     let columns: Vec<_> =

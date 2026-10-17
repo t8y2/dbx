@@ -2284,6 +2284,8 @@ export default withEnglishFallback({
     showLabels: "Показывать значения",
   },
   grid: {
+    showStatusSql: "Показывать SQL внизу",
+    showStatusSqlHint: "Показывать SQL в нижней строке всех результатов запросов и данных таблиц.",
     rows: "Строк: {count}",
     totalRows: "Всего строк: {count}",
     loadedRows: "Загружено строк: {count}",
@@ -3149,6 +3151,7 @@ export default withEnglishFallback({
     victoriaMetricsTruncatedHint: "Результаты превысили лимит загрузки, поэтому загружены только первые {count} строк. «Строк на страницу» пагинирует только загруженные данные; сократите диапазон времени или добавьте фильтры, чтобы получить полный результат.",
     cut: "Вырезать",
     uncommittedBlankRow: "Незаполненная новая строка будет проигнорирована при сохранении",
+    copyExtractorSqlDeletesInserts: "SQL-операторы DELETEs/INSERTs",
   },
   exportProgress: {
     streamingUnsupported: "Потоковый экспорт не поддерживается для этого запроса. Упростите его или используйте поддерживаемый драйвер.",
@@ -4593,6 +4596,10 @@ export default withEnglishFallback({
     schemaCommentPlaceholder: "Введите комментарий к схеме...",
     schemaCommentSaving: "Сохранение...",
     editSchemaCommentSuccess: "Комментарий к схеме «{name}» обновлён",
+    enableTrigger: "Включить триггер",
+    disableTrigger: "Отключить триггер",
+    enableTriggerSuccess: "Триггер «{name}» включён",
+    disableTriggerSuccess: "Триггер «{name}» отключён",
   },
   visibleDatabases: {
     title: "Видимые базы данных",

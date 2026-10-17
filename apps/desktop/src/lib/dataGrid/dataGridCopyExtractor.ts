@@ -1,7 +1,28 @@
 import type { DatabaseType } from "@/types/database";
 import type { DataGridCopyInsertMode, DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 
-export const DATA_GRID_COPY_EXTRACTOR_IDS = ["raw", "tsv", "tsv-with-headers", "csv", "csv-with-headers", "pipe-separated", "dsv", "json", "json-lines", "one-row", "sql-in-list", "sql-inserts", "sql-updates", "sql-select", "where-clause", "markdown", "html", "xml", "pretty"] as const;
+export const DATA_GRID_COPY_EXTRACTOR_IDS = [
+  "raw",
+  "tsv",
+  "tsv-with-headers",
+  "csv",
+  "csv-with-headers",
+  "pipe-separated",
+  "dsv",
+  "json",
+  "json-lines",
+  "one-row",
+  "sql-in-list",
+  "sql-inserts",
+  "sql-deletes-inserts",
+  "sql-updates",
+  "sql-select",
+  "where-clause",
+  "markdown",
+  "html",
+  "xml",
+  "pretty",
+] as const;
 
 export type DataGridCopyExtractorId = (typeof DATA_GRID_COPY_EXTRACTOR_IDS)[number];
 export type DataGridCopyPreference = "smart" | DataGridCopyExtractorId;
@@ -21,6 +42,7 @@ export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference
   "one-row",
   "sql-in-list",
   "sql-inserts",
+  "sql-deletes-inserts",
   "sql-updates",
   "where-clause",
   "markdown",
@@ -47,6 +69,7 @@ export const DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS: Record<DataGridCopyExtractorI
   "json-lines": { category: "json" },
   "sql-in-list": { category: "sql", separatorBefore: true },
   "sql-inserts": { category: "sql" },
+  "sql-deletes-inserts": { category: "sql" },
   "sql-updates": { category: "sql" },
   "sql-select": { category: "sql" },
   "where-clause": { category: "sql" },
@@ -64,12 +87,14 @@ export type DataGridExtractorOptionsError = "column-separator-empty" | "row-sepa
  * sql-updates has a Mongo-specific updateOne path, so Mongo is NOT disabled;
  * where-clause has no Mongo equivalent, so Mongo IS disabled. */
 const NO_SQL_UPDATE_DATABASE_TYPES: ReadonlyArray<string> = ["neo4j", "tdengine"];
+const NO_SQL_DELETES_INSERTS_DATABASE_TYPES: ReadonlyArray<string> = ["neo4j", "tdengine", "mongodb"];
 const NO_WHERE_CLAUSE_DATABASE_TYPES: ReadonlyArray<string> = ["neo4j", "tdengine", "mongodb"];
 
 /** True when the extractor emits relational SQL the database type cannot run. */
 export function extractorUnavailableForDatabase(extractor: DataGridCopyExtractorId, databaseType: string | undefined | null): boolean {
   const db = databaseType ?? "";
   if (extractor === "sql-updates") return NO_SQL_UPDATE_DATABASE_TYPES.includes(db);
+  if (extractor === "sql-deletes-inserts") return NO_SQL_DELETES_INSERTS_DATABASE_TYPES.includes(db);
   if (extractor === "where-clause" || extractor === "sql-select") return NO_WHERE_CLAUSE_DATABASE_TYPES.includes(db);
   return false;
 }

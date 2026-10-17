@@ -2197,6 +2197,8 @@ export default withEnglishFallback({
     showLabels: "Mostrar valores",
   },
   grid: {
+    showStatusSql: "Mostrar SQL no rodapé",
+    showStatusSqlHint: "Mostrar SQL no rodapé de todos os resultados de consultas e dados de tabelas.",
     agentExecuteTime: "Execução: {duration}",
     serverExecuteTime: "Execução no BD: {duration}",
     serverExecuteTimeUnavailable: "Execução no BD: indisponível",
@@ -3065,6 +3067,7 @@ export default withEnglishFallback({
     binaryImportTooLarge: "O arquivo é muito grande ({size}, limite {limit}). Não há suporte para importar arquivos grandes em uma única célula.",
     cut: "Recortado",
     uncommittedBlankRow: "Nova linha não preenchida, será ignorada ao salvar",
+    copyExtractorSqlDeletesInserts: "Instruções SQL DELETEs/INSERTs",
   },
   exportProgress: {
     streamingUnsupported: "A exportação em streaming não é compatível com esta consulta. Simplifique-a ou use um driver compatível.",
@@ -4473,6 +4476,10 @@ export default withEnglishFallback({
     copyPasswordConfirmTitle: "Copiar com senha",
     copyPasswordConfirmMessage: "O texto copiado conterá a senha armazenada em texto simples. Continuar?",
     copyPasswordConfirmAction: "Copiar",
+    enableTrigger: "Ativar trigger",
+    disableTrigger: "Desativar trigger",
+    enableTriggerSuccess: 'Trigger "{name}" ativado',
+    disableTriggerSuccess: 'Trigger "{name}" desativado',
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

@@ -213,7 +213,17 @@ pub(super) async fn prepare_table_ddl(
             target_table,
         ) {
             reused_source_ddl = source_ddl_was_read;
-            rewritten
+            // openGauss's `pg_get_tabledef()` DDL carries storage options the PG-compatible
+            // targets reject (`WITH (orientation=row, compression=no)` → #9037). The profiles
+            // are passed in because a plain PostgreSQL connection profiled as openGauss reads
+            // that same DDL.
+            normalize_reused_opengauss_table_ddl(
+                &rewritten,
+                source_db_type,
+                source_driver_profile.as_deref(),
+                target_db_type,
+                target_driver_profile.as_deref(),
+            )
         } else {
             // The reused DDL's CREATE TABLE head could not be renamed safely; fall back
             // to the generated DDL rather than creating the table under the wrong name.

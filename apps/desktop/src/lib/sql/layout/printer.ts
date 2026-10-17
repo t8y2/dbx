@@ -354,7 +354,10 @@ function writeBodyNode(writer: Writer, node: AstNode, baseColumn: number, ctx: S
 function printStatement(statement: StatementNode, ctx: SqlLayoutContext): string | null {
   const hasMultiItemProjection = statement.children.some((node) => node.type === "clause" && isProjectionClauseName(node.nameKw.text) && splitByComma(node.children).length > 1);
   const collapsed = hasMultiItemProjection ? null : renderInline(collapsedContext(ctx), statement.children, ctx.options.lineWidth);
-  if (collapsed) return statement.hasSemicolon ? `${collapsed};` : collapsed;
+  if (collapsed) {
+    if (!statement.hasSemicolon) return collapsed;
+    return ctx.options.newlineBeforeSemicolon ? `${collapsed}\n;` : `${collapsed};`;
+  }
 
   if (isCreateTable(statement)) return createTableLayout(statement, ctx);
 
@@ -371,7 +374,10 @@ function printStatement(statement: StatementNode, ctx: SqlLayoutContext): string
     writeBodyNode(writer, node, 0, ctx);
     first = false;
   }
-  if (statement.hasSemicolon) writer.write(";");
+  if (statement.hasSemicolon) {
+    if (ctx.options.newlineBeforeSemicolon) writer.newline(0);
+    writer.write(";");
+  }
   return writer.toString();
 }
 

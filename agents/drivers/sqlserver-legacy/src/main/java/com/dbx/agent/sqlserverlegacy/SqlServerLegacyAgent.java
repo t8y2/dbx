@@ -446,22 +446,40 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     @Override
     public String getTableComment(String schema, String table) {
-        if (sqlServer2000Mode) {
-            return null;
-        }
         return unchecked(() -> {
-            try (PreparedStatement statement = requireConnection().prepareStatement(tableCommentSql())) {
-                statement.setString(1, schema);
-                statement.setString(2, table);
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    if (resultSet.next()) {
-                        String comment = resultSet.getString("table_comment");
-                        return comment != null && !comment.trim().isEmpty() ? comment : null;
-                    }
+            try {
+                return readTableComment(tableCommentSql(), schema, table);
+            } catch (SQLException | RuntimeException error) {
+                // sys.extended_properties is absent on SQL Server 2000, where the property
+                // lives in sysproperties; the compatibility function answers on every version.
+                // Bailing out on the driver mode instead used to hide a table comment that had
+                // just been written whenever the connection ran on the jTDS fallback. (#11606)
+                System.err.println(
+                    "[sqlserver-legacy] sys.extended_properties table comment unavailable; trying compatibility function: "
+                        + error.getMessage()
+                );
+            }
+            try {
+                return readTableComment(sqlServer2000TableCommentSql(), schema, table);
+            } catch (SQLException | RuntimeException error) {
+                System.err.println("[sqlserver-legacy] table comment unavailable: " + error.getMessage());
+                return null;
+            }
+        });
+    }
+
+    private String readTableComment(String sql, String schema, String table) throws SQLException {
+        try (PreparedStatement statement = requireConnection().prepareStatement(sql)) {
+            statement.setString(1, schema);
+            statement.setString(2, table);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    String comment = resultSet.getString("table_comment");
+                    return comment != null && !comment.trim().isEmpty() ? comment : null;
                 }
             }
-            return null;
-        });
+        }
+        return null;
     }
 
     @Override
@@ -751,6 +769,16 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             + "JOIN sys.schemas s ON s.schema_id = t.schema_id "
             + "WHERE ep.class = 1 AND ep.minor_id = 0 AND ep.name = N'MS_Description' "
             + "AND s.name = ? AND t.name = ?";
+    }
+
+    /**
+     * SQL Server 2000 stores extended properties in sysproperties and has no
+     * sys.extended_properties view; the compatibility function answers on every version,
+     * so a jTDS connection can still read back a comment written as MS_Description. (#11606)
+     */
+    static String sqlServer2000TableCommentSql() {
+        return "SELECT CONVERT(nvarchar(4000), value) AS table_comment "
+            + "FROM ::fn_listextendedproperty(N'MS_Description', N'USER', ?, N'TABLE', ?, NULL, NULL)";
     }
 
     static String appendTableCommentDdl(String ddl, String schema, String table, String comment) {

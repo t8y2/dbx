@@ -44,7 +44,7 @@ let previewTimer: ReturnType<typeof setTimeout> | undefined;
 const draftExtractor = computed<DataGridCopyExtractorId | null>(() => (draftPreference.value === "smart" ? null : draftPreference.value));
 const extractorCategory = computed(() => (draftExtractor.value ? DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[draftExtractor.value].category : null));
 const isDsv = computed(() => extractorCategory.value === "delimited");
-const isSql = computed(() => draftExtractor.value === "sql-inserts" || draftExtractor.value === "sql-updates");
+const isSql = computed(() => draftExtractor.value === "sql-inserts" || draftExtractor.value === "sql-deletes-inserts" || draftExtractor.value === "sql-updates");
 const isJson = computed(() => extractorCategory.value === "json");
 const optionsError = computed(() => {
   if (!draftExtractor.value) return "";
@@ -210,7 +210,7 @@ function save() {
           <template v-if="isSql">
             <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.skipComputedColumns" @change="updateSql('skipComputedColumns', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorSkipComputed") }}</label>
             <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.skipGeneratedColumns" @change="updateSql('skipGeneratedColumns', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorSkipGenerated") }}</label>
-            <div v-if="draftExtractor === 'sql-inserts'" class="space-y-1.5">
+            <div v-if="draftExtractor === 'sql-inserts' || draftExtractor === 'sql-deletes-inserts'" class="space-y-1.5">
               <Label>{{ t("grid.copyExtractorExcludePrimaryKeys") }}</Label>
               <Select :model-value="draftOptions.sql.primaryKeyMode" @update:model-value="updateSql('primaryKeyMode', $event as DataGridExtractorOptions['sql']['primaryKeyMode'])">
                 <SelectTrigger><SelectValue /></SelectTrigger>
@@ -222,7 +222,7 @@ function save() {
               </Select>
             </div>
             <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.includeDatabaseName" @change="updateSql('includeDatabaseName', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorIncludeDatabaseName") }}</label>
-            <div v-if="draftExtractor === 'sql-inserts'" class="space-y-1.5">
+            <div v-if="draftExtractor === 'sql-inserts' || draftExtractor === 'sql-deletes-inserts'" class="space-y-1.5">
               <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.quoteIdentifiers" @change="updateSql('quoteIdentifiers', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorQuoteIdentifiers") }}</label>
               <Label>{{ t("grid.copyExtractorTemporalFormat") }}</Label>
               <Select :model-value="draftOptions.sql.temporalFormat" @update:model-value="updateSql('temporalFormat', $event as DataGridExtractorOptions['sql']['temporalFormat'])">
@@ -234,7 +234,7 @@ function save() {
               </Select>
               <p v-if="draftOptions.sql.temporalFormat === 'string'" class="text-xs text-muted-foreground">{{ t("grid.copyExtractorTemporalStringHint") }}</p>
             </div>
-            <div v-if="draftExtractor === 'sql-inserts'" class="space-y-1.5">
+            <div v-if="draftExtractor === 'sql-inserts' || draftExtractor === 'sql-deletes-inserts'" class="space-y-1.5">
               <Label>{{ t("grid.copyExtractorInsertMode") }}</Label>
               <Select :model-value="draftOptions.sql.insertMode" @update:model-value="updateSql('insertMode', $event as DataGridExtractorOptions['sql']['insertMode'])">
                 <SelectTrigger><SelectValue /></SelectTrigger>

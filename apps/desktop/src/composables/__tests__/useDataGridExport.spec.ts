@@ -617,6 +617,73 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).toHaveBeenCalledWith("UPDATE users SET `name` = 'Ada', `active` = TRUE WHERE `id` = 7;");
   });
 
+  it("builds a SQL DELETEs/INSERTs request when primary keys and rows are present", async () => {
+    const item = { ...row([7, "Ada", true]), sourceIndex: 0 };
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0, 1],
+      columns: ["display_name", "active"],
+      rows: [["Ada", true]],
+    };
+    const options: UseDataGridExportOptions = {
+      columns: computed(() => ["display_name", "active"]),
+      displayItems: computed(() => [{ ...item, data: ["Ada", true], isDirtyCol: [false, false] }]),
+      allColumns: computed(() => ["id", "display_name", "active"]),
+      allDisplayItems: computed(() => [item]),
+      allSourceColumns: computed(() => ["id", "name", "active"]),
+      visibleColumnIndexes: computed(() => [1, 2]),
+      sql: computed(() => undefined),
+      tableMeta: computed(() => ({
+        tableName: "users",
+        primaryKeys: ["id"],
+        columns: [
+          { name: "id", data_type: "int", is_nullable: false, is_primary_key: true },
+          { name: "name", data_type: "varchar", is_nullable: false },
+          { name: "active", data_type: "boolean", is_nullable: false },
+        ],
+      })),
+      databaseType: computed(() => "mysql"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "dbx"),
+      context: computed(() => "table-data"),
+      sourceColumns: computed(() => ["name", "active"]),
+      columnTypes: computed(() => ["varchar", "boolean"]),
+      whereInput: computed(() => undefined),
+      orderBy: computed(() => undefined),
+      exportBatchSize: computed(() => 1000),
+      hasCellSelection: computed(() => true),
+      selectedCells: computed(() => matrix),
+      selectedCellMatrix: computed(() => matrix),
+      selectedRange: computed(() => ({ startRow: 0, endRow: 0, startCol: 1, endCol: 1 })),
+      contextCell: ref({ rowId: item.id, rowIndex: 0, col: 1 }),
+      contextSelectionIsSynthetic: ref(false),
+      getRowItem: (rowId) => (rowId === item.id ? item : undefined),
+      selectedRowIds: ref(new Set<number>()),
+      hasRowSelection: computed(() => false),
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
+      text: "DELETE FROM users WHERE `id` = 7;\nINSERT INTO users (`name`, `active`) VALUES ('Ada', TRUE);",
+      mimeType: "application/sql",
+      fileExtension: "sql",
+      rowCount: 1,
+      columnCount: 2,
+    });
+    const state = useDataGridExport(options);
+
+    expect(state.canCopyWithExtractor("sql-deletes-inserts")).toBe(true);
+    await state.copyWithExtractor("sql-deletes-inserts");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-deletes-inserts",
+        selectedColumnIndexes: [0, 1],
+        rows: [["Ada", true, 7]],
+        selectionKind: "cells",
+      }),
+    );
+    expect(copyToClipboard).toHaveBeenCalledWith("DELETE FROM users WHERE `id` = 7;\nINSERT INTO users (`name`, `active`) VALUES ('Ada', TRUE);");
+  });
+
   it("builds a SELECT request for exactly one explicitly selected cell", async () => {
     const matrix: CellSelectionMatrix = {
       rowIndexes: [0],
@@ -948,6 +1015,7 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     expect(state.canCopyWithExtractor("sql-updates")).toBe(true);
+    expect(state.canCopyWithExtractor("sql-deletes-inserts")).toBe(true);
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(true);
   });
 

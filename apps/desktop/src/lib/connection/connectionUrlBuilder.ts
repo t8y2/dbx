@@ -203,6 +203,15 @@ function encodeCredential(value: string): string {
     .replace(/%3D/g, "=");
 }
 
+function encodeOceanBaseUrlCredential(value: string): string {
+  return encodeCredential(value).replace(/%(21|24|28|29|2A|2C)/g, decodeURIComponent);
+}
+
+/** Tenant separators stay readable in OceanBase URL previews and copies. */
+export function encodeOceanBaseUrlUsername(value: string): string {
+  return encodeOceanBaseUrlCredential(value).replace(/%40/g, "@");
+}
+
 /**
  * Characters an Oracle `oracle://` credential keeps verbatim: the RFC 3986
  * unreserved and sub-delim sets, plus `^`.
@@ -220,16 +229,16 @@ function encodeOracleUrlCredential(value: string): string {
   return Array.from(value, (character) => (ORACLE_URL_CREDENTIAL_LITERAL_CHARACTERS.has(character) ? character : encodeURIComponent(character))).join("");
 }
 
-function buildUserInfo(config: ConnectionUrlCopyConfig, includePassword: boolean, encode: (value: string) => string = encodeCredential): string {
+function buildUserInfo(config: ConnectionUrlCopyConfig, includePassword: boolean, encode: (value: string) => string = encodeCredential, encodeUser: (value: string) => string = encode): string {
   const user = effectiveUsername(config);
   const password = config.password ?? "";
   if (includePassword) {
-    if (user && password) return `${encode(user)}:${encode(password)}@`;
-    if (user) return `${encode(user)}@`;
+    if (user && password) return `${encodeUser(user)}:${encode(password)}@`;
+    if (user) return `${encodeUser(user)}@`;
     if (password) return `:${encode(password)}@`;
     return "";
   }
-  return user ? `${encode(user)}@` : "";
+  return user ? `${encodeUser(user)}@` : "";
 }
 
 function standardUrlScheme(config: ConnectionUrlCopyConfig): string | null {
@@ -282,7 +291,8 @@ function buildStandardUrl(config: ConnectionUrlCopyConfig, options: ConnectionUr
   if (!host) return null;
 
   const database = effectiveDatabase(config, options);
-  const userInfo = buildUserInfo(config, options.includePassword, config.db_type === "oracle" ? encodeOracleUrlCredential : encodeCredential);
+  const encode = scheme === "oceanbase" ? encodeOceanBaseUrlCredential : config.db_type === "oracle" ? encodeOracleUrlCredential : encodeCredential;
+  const userInfo = buildUserInfo(config, options.includePassword, encode, scheme === "oceanbase" ? encodeOceanBaseUrlUsername : encode);
   const hostPart = formatHostForUrl(host);
   const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
   const path = database ? `/${encodeURIComponent(database)}` : "";
@@ -444,8 +454,8 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
 
 function jdbcQuery(config: ConnectionUrlCopyConfig, prefix: string, withCredentials: boolean): string {
   const raw = (config.url_params ?? "").trim().replace(/^[?&]+/, "");
-  // Strict encoding is enabled only for verified query-style drivers.
-  const encode = MYSQL_QUERY_JDBC_PREFIXES.has(prefix) || prefix === "jdbc:postgresql" ? encodeCredential : encodeURIComponent;
+  // OceanBase uses literal property values; other verified query-style drivers use percent encoding.
+  const encode = prefix === "jdbc:oceanbase" ? (value: string) => value : MYSQL_QUERY_JDBC_PREFIXES.has(prefix) || prefix === "jdbc:postgresql" ? encodeCredential : encodeURIComponent;
   const parts = [...jdbcCredentialParams(config, withCredentials, encode)];
   if (raw) parts.push(raw);
   if (config.ssl) {
@@ -472,6 +482,8 @@ function buildJdbcUrl(config: ConnectionUrlCopyConfig, options: ConnectionUrlCop
 
   const prefix = jdbcPrefixFor(config);
   if (!prefix) return null;
+  // The driver uses literal properties; these characters cannot also round-trip through the URL importer.
+  if (prefix === "jdbc:oceanbase" && options.withCredentials && [effectiveUsername(config), config.password ?? ""].some((value) => /[&;'"#%\s]/.test(value))) return null;
   const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
   const path = database ? `/${encodeURIComponent(database)}` : "";
   const query = jdbcQuery(config, prefix, options.withCredentials);

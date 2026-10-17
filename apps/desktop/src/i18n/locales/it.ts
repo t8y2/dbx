@@ -2195,6 +2195,8 @@ export default withEnglishFallback({
     showLabels: "Mostra valori",
   },
   grid: {
+    showStatusSql: "Mostra SQL nel piè di pagina",
+    showStatusSqlHint: "Mostra SQL nel piè di pagina di tutti i risultati delle query e dei dati delle tabelle.",
     agentExecuteTime: "Esecuzione: {duration}",
     serverExecuteTime: "Esecuzione DB: {duration}",
     serverExecuteTimeUnavailable: "Esecuzione DB: non disponibile",
@@ -3065,6 +3067,7 @@ export default withEnglishFallback({
     binaryImportTooLarge: "Il file è troppo grande ({size}, limite {limit}). L'importazione di file di grandi dimensioni in una singola cella non è supportata.",
     cut: "Tagliato",
     uncommittedBlankRow: "Nuova riga non compilata, verrà ignorata al salvataggio",
+    copyExtractorSqlDeletesInserts: "Istruzioni SQL DELETEs/INSERTs",
   },
   exportProgress: {
     streamingUnsupported: "L'esportazione in streaming non è supportata per questa query. Semplificala o usa un driver supportato.",
@@ -4473,6 +4476,10 @@ export default withEnglishFallback({
     copyPasswordConfirmTitle: "Copia con password",
     copyPasswordConfirmMessage: "Il testo copiato conterrà la password salvata in chiaro. Continuare?",
     copyPasswordConfirmAction: "Copia",
+    enableTrigger: "Abilita trigger",
+    disableTrigger: "Disabilita trigger",
+    enableTriggerSuccess: "Trigger «{name}» abilitato",
+    disableTriggerSuccess: "Trigger «{name}» disabilitato",
   },
   visibleDatabases: {
     title: "Database Visibili",

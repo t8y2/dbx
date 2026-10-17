@@ -1700,6 +1700,23 @@ describe("marketplace detail update history", () => {
     expect(openSpy).toHaveBeenCalledWith("https://github.com/jinpy/dbx-ssh-plugin/releases/tag/v3.0.0", "_blank", "noopener,noreferrer");
     openSpy.mockRestore();
   });
+
+  it("links expanded version to GitHub release page when source has a branch tree URL", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const cat = multiVersionCatalog();
+    cat.catalog!.plugins[0].source = "https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/tree/v0.3.3";
+    state.catalogResults = [cat];
+    await flushUi();
+    state.openMarketplaceDetails(state.marketplaceListings[0]);
+    await flushUi();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const releaseButton = [...dialog.querySelectorAll("button")].find((element) => element.textContent?.includes("pluginPlatform.pluginDetailsOpenRelease"))!;
+    expect(releaseButton).toBeDefined();
+    releaseButton.click();
+    await flushUi();
+    expect(openSpy).toHaveBeenCalledWith("https://github.com/Ezreal-byte/dbx-plugin-xxl-job-console/releases/tag/v3.0.0", "_blank", "noopener,noreferrer");
+    openSpy.mockRestore();
+  });
 });
 
 describe("marketplace author filtering", () => {

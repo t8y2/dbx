@@ -769,6 +769,17 @@ class SqlServerLegacyAgentTest {
     }
 
     @Test
+    void legacyTableCommentFallbackUsesTheCompatibilityFunction() {
+        // #11606: sys.extended_properties is absent on SQL Server 2000, so the table comment
+        // reader falls back to ::fn_listextendedproperty, which answers on every version.
+        String sql = SqlServerLegacyAgent.sqlServer2000TableCommentSql();
+
+        Assertions.assertTrue(sql.contains("fn_listextendedproperty"));
+        Assertions.assertTrue(sql.contains("N'MS_Description'"));
+        Assertions.assertTrue(sql.contains("N'TABLE'"));
+    }
+
+    @Test
     void columnCommentQueryReadsColumnExtendedPropertiesOnly() {
         String sql = SqlServerLegacyAgent.columnCommentsSql();
 

@@ -16,6 +16,7 @@ import { canDropDatabaseTables, canEmptyDatabaseTables, useDatabaseTableEmpty } 
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import {
+  Ban,
   BarChart3,
   BookOpen,
   Braces,
@@ -87,7 +88,7 @@ import { parseDynamicMenuResponse, renderDynamicMenuEntries, type DynamicMenuAct
 import type { PluginContextMenuInvocation } from "@/lib/plugins/pluginContext";
 import type { InstalledPlugin, PluginContextMenuContribution, PluginWorkbenchContribution } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -257,6 +258,7 @@ import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
+import { buildTriggerToggleSql, supportsTriggerToggle } from "@/lib/database/triggerToggleSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
@@ -3066,6 +3068,78 @@ async function executeXuguSchedulerJobAction(action: XuguSchedulerJobAction) {
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+async function toggleTriggerState(node: TreeNode, enabled: boolean) {
+  if (!node.connectionId || !node.database) return;
+  const databaseType = databaseTypeForNode(node);
+  const triggerName = node.meta && "name" in node.meta ? (node.meta as TriggerInfo).name : node.objectName || node.label.replace(/\s+\(.+\)$/, "");
+  if (!triggerName) return;
+
+  const sql = buildTriggerToggleSql({
+    databaseType,
+    schema: node.schema,
+    tableName: node.tableName,
+    triggerName,
+    enabled,
+  });
+  if (!sql) return;
+
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
+    if (node.meta && typeof node.meta === "object") {
+      (node.meta as TriggerInfo).enabled = enabled;
+    }
+    toast(t(enabled ? "contextMenu.enableTriggerSuccess" : "contextMenu.disableTriggerSuccess", { name: triggerName }), 3000);
+    await connectionStore.refreshTreeNode(node);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+function triggerToggleMenuItems(node: TreeNode): ContextMenuItem[] {
+  const dbType = databaseTypeForNode(node);
+  if (!supportsTriggerToggle(dbType)) return [];
+  const triggerName = node.meta && "name" in node.meta ? (node.meta as TriggerInfo).name : node.objectName || node.label.replace(/\s+\(.+\)$/, "");
+  if (!triggerName) return [];
+  if (["postgres", "kingbase", "opengauss", "vastbase", "highgo", "uxdb", "gaussdb", "kwdb"].includes(dbType || "") && !node.tableName) {
+    return [];
+  }
+
+  const trigger = node.meta as TriggerInfo | undefined;
+  const currentEnabled = trigger?.enabled;
+  const items: ContextMenuItem[] = [];
+
+  if (currentEnabled === false) {
+    items.push({
+      label: t("contextMenu.enableTrigger"),
+      action: () => toggleTriggerState(node, true),
+      icon: Play,
+    });
+  } else if (currentEnabled === true) {
+    items.push({
+      label: t("contextMenu.disableTrigger"),
+      action: () => toggleTriggerState(node, false),
+      icon: Ban,
+    });
+  } else {
+    items.push(
+      {
+        label: t("contextMenu.enableTrigger"),
+        action: () => toggleTriggerState(node, true),
+        icon: Play,
+      },
+      {
+        label: t("contextMenu.disableTrigger"),
+        action: () => toggleTriggerState(node, false),
+        icon: Ban,
+      },
+    );
+  }
+
+  return items;
 }
 
 function requestDropObject() {
@@ -7484,6 +7558,11 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (node.type === "trigger") {
       items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
       items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+      const toggleItems = triggerToggleMenuItems(node);
+      if (toggleItems.length > 0) {
+        items.push({ label: "", separator: true });
+        items.push(...toggleItems);
+      }
     }
     if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
@@ -7610,6 +7689,13 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
       items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
+    }
+    if (node.type === "trigger") {
+      const toggleItems = triggerToggleMenuItems(node);
+      if (toggleItems.length > 0) {
+        items.push({ label: "", separator: true });
+        items.push(...toggleItems);
+      }
     }
     if (node.type === "package" && currentDatabaseType() === "xugu" && node.xuguPackageBodyAvailable === true) {
       items.push({

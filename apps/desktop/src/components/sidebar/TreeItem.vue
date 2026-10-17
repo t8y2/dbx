@@ -55,6 +55,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import { encodeOceanBaseUrlUsername } from "@/lib/connection/connectionUrlBuilder";
 import type { ColumnInfo, ConnectionConfig, CustomTypeTreeMemberMeta, DatabaseType, TreeNode, TriggerInfo } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, isSidebarCommentSupportedType, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import {
@@ -555,7 +556,8 @@ function connectionTooltipUrl(config: ConnectionConfig): string {
   const scheme = connectionDisplayUrlScheme(config);
   const port = Number(config.port) > 0 ? `:${config.port}` : "";
   const user = cleanTooltipValue(config.username);
-  const userInfo = user ? `${encodeURIComponent(user)}@` : "";
+  const encodedUser = config.db_type === "mysql" && config.driver_profile?.trim().toLowerCase() === "oceanbase" ? encodeOceanBaseUrlUsername(user) : encodeURIComponent(user).replace(/%40/g, "@");
+  const userInfo = user ? `${encodedUser}@` : "";
   const database = tooltipDatabaseValue(config);
   const encodedDatabase = config.db_type === "spanner" ? encodeSpannerResourcePath(database) : encodeURIComponent(database);
   const path = database ? `/${encodedDatabase}` : "";

@@ -1671,6 +1671,37 @@ async fn export_table_data_core_inner(
         let primary_keys: Vec<String> = columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
         (col_names, column_types, column_extras, primary_keys)
     };
+    let mut column_extras = column_extras;
+    if request.format.eq_ignore_ascii_case("sql")
+        && db_type == DatabaseType::Dameng
+        && column_extras
+            .iter()
+            .any(|extra| extra.as_deref().is_some_and(|e| e.to_ascii_lowercase().contains("identity")))
+    {
+        if let Ok(ddl) = crate::schema::get_table_ddl_core(
+            state,
+            &request.connection_id,
+            &request.database,
+            request.schema.as_deref().unwrap_or(""),
+            &request.table_name,
+            None,
+        )
+        .await
+        {
+            if crate::data::database_export::is_dameng_auto_increment_ddl(&ddl) {
+                column_extras = column_extras
+                    .into_iter()
+                    .map(|extra| {
+                        if extra.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("identity")) {
+                            Some("auto_increment".to_string())
+                        } else {
+                            extra
+                        }
+                    })
+                    .collect();
+            }
+        }
+    }
 
     let sql_projection = if request.format.eq_ignore_ascii_case("sql") {
         Some(SqlExportProjection::resolve(&col_names, request.selected_columns.as_deref())?)

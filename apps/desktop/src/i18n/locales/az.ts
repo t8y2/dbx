@@ -1819,6 +1819,8 @@ export default withEnglishFallback({
     showLabels: "Dəyərləri göstər",
   },
   grid: {
+    showStatusSql: "Alt paneldə SQL göstər",
+    showStatusSqlHint: "Bütün sorğu nəticələrinin və cədvəl məlumatlarının alt panelində SQL göstər.",
     rows: "{count} sətir",
     totalRows: "Cəmi {count} sətir",
     loadedRows: "{count} sətir yükləndi",

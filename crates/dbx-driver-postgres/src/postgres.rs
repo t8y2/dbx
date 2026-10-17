@@ -2997,7 +2997,9 @@ where
                         // LISTEN/NOTIFY messages are not surfaced anywhere.
                         Some(Ok(_)) => {}
                         Some(Err(err)) => {
-                            log::warn!("[postgres] connection driver error: {err}");
+                            // `tokio_postgres::Error`'s `Display` omits the underlying
+                            // I/O error, which is the only clue to why the socket died.
+                            log::warn!("[postgres] connection driver error: {}", error_with_sources_to_string(&err));
                             break;
                         }
                         None => break,
@@ -5113,15 +5115,14 @@ fn postgres_columns_for_relations_query_tiers() -> [&'static str; 3] {
 // 4880): same column list and detection logic (identity/serial inference,
 // numeric precision/scale, enum values), batched by oid instead of a single
 // (schema, table) pair. Kept as a separate literal rather than sharing a
-// fragment — `pg_class` needs the `c` alias here for the oid filter, which
-// pushes `information_schema.columns` to `ic` instead of the single-relation
-// version's `c`, and every column's position in the SELECT list is relied on
+// fragment — `pg_class` needs the `c` alias here for the oid filter,
+// and every column's position in the SELECT list is relied on
 // positionally by `column_info_from_row_offset`. A change to one almost
 // certainly needs the same change in the other.
 fn postgres_columns_for_relations_sql() -> &'static str {
     "SELECT c.oid::bigint AS relid, a.attname AS column_name, \
              format_type(a.atttypid, a.atttypmod) AS full_type, \
-             COALESCE(ic.is_nullable = 'YES', NOT a.attnotnull) AS is_nullable, \
+             NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable, \
              CASE WHEN a.attgenerated <> '' THEN NULL ELSE pg_get_expr(ad.adbin, ad.adrelid) END AS column_default, \
              EXISTS ( \
                SELECT 1 FROM pg_constraint co \
@@ -5157,7 +5158,6 @@ fn postgres_columns_for_relations_sql() -> &'static str {
                               FROM pg_enum e WHERE e.enumtypid = enum_t.oid), '[]') END AS enum_values \
              FROM pg_attribute a \
              JOIN pg_class c ON c.oid = a.attrelid \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
              JOIN pg_type t ON t.oid = a.atttypid \
              LEFT JOIN pg_type enum_t ON enum_t.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typtype = 'e' THEN t.oid ELSE NULL END AND enum_t.typtype = 'e' \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
@@ -5183,8 +5183,6 @@ fn postgres_columns_for_relations_sql() -> &'static str {
                LIMIT 1 \
              ) dep ON TRUE \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
-             LEFT JOIN information_schema.columns ic \
-               ON ic.table_schema = n.nspname AND ic.table_name = c.relname AND ic.column_name = a.attname \
              WHERE c.oid = ANY($1::bigint[]) \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY c.oid, a.attnum"
@@ -5195,7 +5193,7 @@ fn postgres_columns_for_relations_sql() -> &'static str {
 fn postgres_columns_for_relations_compat_sql() -> &'static str {
     "SELECT c.oid::bigint AS relid, a.attname AS column_name, \
              format_type(a.atttypid, a.atttypmod) AS full_type, \
-             COALESCE(ic.is_nullable = 'YES', NOT a.attnotnull) AS is_nullable, \
+             NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable, \
              pg_get_expr(ad.adbin, ad.adrelid) AS column_default, \
              EXISTS ( \
                SELECT 1 FROM pg_constraint co \
@@ -5220,7 +5218,6 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
              NULL::text AS enum_values \
              FROM pg_attribute a \
              JOIN pg_class c ON c.oid = a.attrelid \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
              JOIN pg_type t ON t.oid = a.atttypid \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN pg_catalog.pg_class serial_seq ON serial_seq.oid = ( \
@@ -5243,8 +5240,6 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
                ORDER BY sequence_dep.objid \
                LIMIT 1 \
              ) AND serial_seq.relkind = 'S' \
-             LEFT JOIN information_schema.columns ic \
-               ON ic.table_schema = n.nspname AND ic.table_name = c.relname AND ic.column_name = a.attname \
              WHERE c.oid = ANY($1::bigint[]) \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY c.oid, a.attnum"
@@ -8049,7 +8044,7 @@ pub async fn list_schema_infos_with_system(pool: &Pool, show_system_schemas: boo
 // note there about why these aren't merged into a shared fragment.
 const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
              format_type(a.atttypid, a.atttypmod) AS full_type, \
-             COALESCE(c.is_nullable = 'YES', NOT a.attnotnull) AS is_nullable, \
+             NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable, \
              CASE WHEN a.attgenerated <> '' THEN NULL ELSE pg_get_expr(ad.adbin, ad.adrelid) END AS column_default, \
              EXISTS ( \
                SELECT 1 FROM pg_constraint co \
@@ -8085,8 +8080,6 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
                               FROM pg_enum e WHERE e.enumtypid = enum_t.oid), '[]') END AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
-             JOIN pg_class relation_class ON relation_class.oid = a.attrelid \
-             JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace \
              LEFT JOIN pg_type enum_t ON enum_t.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typtype = 'e' THEN t.oid ELSE NULL END AND enum_t.typtype = 'e' \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN LATERAL ( \
@@ -8111,8 +8104,6 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
                LIMIT 1 \
              ) dep ON TRUE \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
-             LEFT JOIN information_schema.columns c \
-               ON c.table_schema = relation_namespace.nspname AND c.table_name = relation_class.relname AND c.column_name = a.attname \
              WHERE a.attrelid = (CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
@@ -8121,7 +8112,7 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
 // 3148) — see the note on `POSTGRES_COLUMNS_SQL` above.
 const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              format_type(a.atttypid, a.atttypmod) AS full_type, \
-             COALESCE(c.is_nullable = 'YES', NOT a.attnotnull) AS is_nullable, \
+             NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable, \
              pg_get_expr(ad.adbin, ad.adrelid) AS column_default, \
              EXISTS ( \
                SELECT 1 FROM pg_constraint co \
@@ -8146,8 +8137,6 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              NULL::text AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
-             JOIN pg_class relation_class ON relation_class.oid = a.attrelid \
-             JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN pg_catalog.pg_class serial_seq ON serial_seq.oid = ( \
                SELECT sequence_dep.objid \
@@ -8169,8 +8158,6 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
                ORDER BY sequence_dep.objid \
                LIMIT 1 \
              ) AND serial_seq.relkind = 'S' \
-             LEFT JOIN information_schema.columns c \
-               ON c.table_schema = relation_namespace.nspname AND c.table_name = relation_class.relname AND c.column_name = a.attname \
              WHERE a.attrelid = (CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
@@ -14397,8 +14384,10 @@ mod tests {
         assert!(POSTGRES_COLUMNS_SQL.contains("pg_sequence"));
         assert!(POSTGRES_COLUMNS_SQL.contains("generated by default as identity"));
         assert!(POSTGRES_COLUMNS_SQL.contains("generated always as identity"));
-        assert!(POSTGRES_COLUMNS_SQL.contains("COALESCE(c.is_nullable = 'YES', NOT a.attnotnull)"));
-        assert!(POSTGRES_COLUMNS_SQL.contains("LEFT JOIN information_schema.columns"));
+        assert!(
+            POSTGRES_COLUMNS_SQL.contains("NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable")
+        );
+        assert!(!POSTGRES_COLUMNS_SQL.contains("information_schema.columns"));
         assert!(POSTGRES_COLUMNS_SQL.contains("pg_enum"));
         assert!(POSTGRES_COLUMNS_SQL.contains("AS enum_values"));
     }
@@ -14410,7 +14399,7 @@ mod tests {
         // matches both NULL and the empty string on every PostgreSQL-compatible kernel.
         for sql in [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL] {
             assert!(sql.contains("CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2)"), "{sql}");
-            assert!(sql.contains("c.table_schema = relation_namespace.nspname"));
+            assert!(!sql.contains("information_schema.columns"));
         }
         for sql in [POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL] {
             assert!(sql.contains("t.oid = (CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2)"), "{sql}");
@@ -14501,10 +14490,12 @@ mod tests {
         assert_eq!(column_tiers.len(), 3);
         assert!(column_tiers.iter().all(|sql| sql.contains("c.oid = ANY($1::bigint[])")));
         assert!(column_tiers[0].contains("a.attgenerated"));
+        assert!(!column_tiers[0].contains("information_schema.columns"));
         assert!(!column_tiers[1].contains("a.attgenerated"));
         assert!(!column_tiers[1].contains("pg_sequence"));
         assert!(column_tiers[1].contains("sequence_dep.deptype = 'a'"));
         assert!(!column_tiers[1].contains("LEFT JOIN LATERAL"));
+        assert!(!column_tiers[1].contains("information_schema.columns"));
         assert!(column_tiers[2].contains("information_schema.columns"));
         assert!(!column_tiers[2].contains("pg_attribute"));
 
@@ -14558,10 +14549,27 @@ mod tests {
         assert!(!POSTGRES_COLUMNS_COMPAT_SQL.contains("pg_sequence"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("AS column_extra"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("col_description"));
-        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("COALESCE(c.is_nullable = 'YES', NOT a.attnotnull)"));
-        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("LEFT JOIN information_schema.columns"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL
+            .contains("NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable"));
+        assert!(!POSTGRES_COLUMNS_COMPAT_SQL.contains("information_schema.columns"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("NULL::text AS enum_values"));
         assert!(!POSTGRES_COLUMNS_COMPAT_SQL.contains("pg_enum"));
+    }
+
+    #[test]
+    fn postgres_columns_queries_avoid_information_schema_columns_join() {
+        // Issue #12393: information_schema.columns join took 34-42s in GaussDB/openGauss/PG.
+        // Direct catalog query using pg_type domain nullability drops it to <1s.
+        for sql in [
+            POSTGRES_COLUMNS_SQL,
+            POSTGRES_COLUMNS_COMPAT_SQL,
+            postgres_columns_for_relations_sql(),
+            postgres_columns_for_relations_compat_sql(),
+        ] {
+            assert!(sql.contains("NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable"), "{sql}");
+            assert!(!sql.contains("information_schema.columns"), "{sql}");
+            assert!(!sql.contains("relation_namespace"), "{sql}");
+        }
     }
 
     #[test]

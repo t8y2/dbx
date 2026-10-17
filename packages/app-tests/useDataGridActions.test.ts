@@ -78,6 +78,16 @@ test("data reload executes before slow metadata refresh completes", async () => 
     if (url.pathname === "/api/query/build-table-select-sql") {
       return Response.json("SELECT * FROM `users` LIMIT 50 OFFSET 0");
     }
+    if (url.pathname === "/api/query/prepare-pagination-plan") {
+      const { options } = JSON.parse(String(init?.body ?? "{}"));
+      assert.equal(options.sql, "SELECT * FROM `users`");
+      assert.deepEqual(options.pagination, { limit: 50, offset: 0 });
+      return Response.json({
+        sqlToExecute: "SELECT * FROM `users` LIMIT 50;",
+        pageProbeSql: "SELECT * FROM `users` LIMIT 51;",
+        useAgentResultSession: false,
+      });
+    }
     if (url.pathname === "/api/query/execute-multi") {
       executeBody = JSON.parse(String(init?.body ?? "{}"));
       return Response.json([{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
@@ -100,6 +110,8 @@ test("data reload executes before slow metadata refresh completes", async () => 
 
     await waitFor(() => !!executeBody, 5_000);
     assert.equal(executeBody.clientSessionId, tabId);
+    assert.equal(executeBody.sql, "SELECT * FROM `users` LIMIT 51;");
+    assert.equal(executeBody.maxRows, 51);
     assert.deepEqual(tab.result?.rows, [[1]]);
 
     await waitFor(() => typeof resolveColumns === "function");

@@ -333,7 +333,7 @@ fn is_informix_family(database_type: Option<DatabaseType>) -> bool {
     matches!(database_type, Some(DatabaseType::Informix | DatabaseType::Gbase8s))
 }
 
-pub fn supports_create_database_target(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
+pub fn supports_create_database_target(database_type: Option<DatabaseType>, _driver_profile: Option<&str>) -> bool {
     // Informix / GBase 8s create namespaces with `CREATE DATABASE`, so they are valid targets
     // even though they are absent from the explicit list below.
     if is_informix_family(database_type) {
@@ -848,7 +848,9 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
             ));
         }
     }
-    if let Some(database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase)) = options.database_type {
+    if let Some(database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase | DatabaseType::Oscar)) =
+        options.database_type
+    {
         comment_sql.extend(options.column_comments.iter().filter_map(|column| {
             if column.comment.trim().is_empty() {
                 return None;
@@ -1212,6 +1214,7 @@ fn supports_duplicate_table_comment(database_type: DatabaseType) -> bool {
             | DatabaseType::OpenGauss
             | DatabaseType::Dameng
             | DatabaseType::Vastbase
+            | DatabaseType::Oscar
     )
 }
 
@@ -1325,9 +1328,9 @@ fn quote_sql_string(value: &str) -> String {
 }
 
 fn quote_duplicate_table_comment(database_type: DatabaseType, value: &str) -> String {
-    // Dameng rejects Postgres E'...' escape strings; keep standard '' escaping
-    // (same as DamengAgent COMMENT ON / COMMENT ON COLUMN generation).
-    if database_type == DatabaseType::Dameng {
+    // Dameng and Oscar reject Postgres E'...' escape strings; keep standard '' escaping
+    // (same as DamengAgent/Oscar COMMENT ON / COMMENT ON COLUMN generation).
+    if matches!(database_type, DatabaseType::Dameng | DatabaseType::Oscar) {
         return quote_sql_string(value);
     }
     if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
@@ -2584,6 +2587,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn duplicate_table_structure_oscar_includes_table_and_column_comments() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Oscar),
+            schema: Some("SYSDBA".to_string()),
+            source_name: "USERS".to_string(),
+            target_name: "USERS_COPY".to_string(),
+            table_comment: Some("用户表'测试".to_string()),
+            column_comments: vec![
+                DuplicateTableColumnComment { name: "NAME".to_string(), comment: "姓名'测试".to_string() },
+                DuplicateTableColumnComment { name: "AGE".to_string(), comment: "年龄".to_string() },
+                DuplicateTableColumnComment { name: "EMPTY".to_string(), comment: " \t\n".to_string() },
+            ],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: Some("\"".to_string()),
+        });
+        let expected_statements = vec![
+            "CREATE TABLE \"SYSDBA\".\"USERS_COPY\" AS SELECT * FROM \"SYSDBA\".\"USERS\" WHERE 1=0",
+            "COMMENT ON TABLE \"SYSDBA\".\"USERS_COPY\" IS '用户表''测试'",
+            "COMMENT ON COLUMN \"SYSDBA\".\"USERS_COPY\".\"NAME\" IS '姓名''测试'",
+            "COMMENT ON COLUMN \"SYSDBA\".\"USERS_COPY\".\"AGE\" IS '年龄'",
+        ];
+        assert_eq!(sql, format!("{};", expected_statements.join(";\n")));
+        assert_eq!(crate::sql::split_sql_statements_for_database(&sql, DatabaseType::Oscar), expected_statements);
+
+        // Control chars / backslashes must keep standard '' escaping for Oscar (no Postgres E'...' literals).
+        let oscar_escape_sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Oscar),
+            schema: Some("SYSDBA".to_string()),
+            source_name: "ORDERS".to_string(),
+            target_name: "ORDERS_COPY".to_string(),
+            table_comment: Some("line1\\path\nline2".to_string()),
+            column_comments: vec![DuplicateTableColumnComment {
+                name: "PATH".to_string(),
+                comment: "C:\\data\t'file'".to_string(),
+            }],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: None,
+        });
+        assert_eq!(
+            oscar_escape_sql,
+            "CREATE TABLE \"SYSDBA\".\"ORDERS_COPY\" AS SELECT * FROM \"SYSDBA\".\"ORDERS\" WHERE 1=0;\nCOMMENT ON TABLE \"SYSDBA\".\"ORDERS_COPY\" IS 'line1\\path\nline2';\nCOMMENT ON COLUMN \"SYSDBA\".\"ORDERS_COPY\".\"PATH\" IS 'C:\\data\t''file''';"
+        );
     }
 
     #[test]

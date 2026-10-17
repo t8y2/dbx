@@ -32,6 +32,8 @@ import type { MultiDbExecutionTarget } from "@/types/sqlExecution";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitionRightSidebarPanels, useSettingsStore, type RightSidebarPanelId, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { ensureConnectionGroupAccessible, filterConnectionsOutsideLockedGroups } from "@/lib/sidebar/connectionGroupPassword";
+import { ensureSavedSqlFileAccessible, excludeLockedSavedSqlFiles } from "@/lib/sidebar/savedSqlFolderAccess";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
@@ -1638,7 +1640,7 @@ const connectionStats = computed(() => ({
   connected: welcomePageMode.value === "workspace" ? connectionStore.connectedIds.size : 0,
   types: welcomePageMode.value === "workspace" ? new Set(connectionStore.connections.map((c) => c.driver_profile || c.db_type)).size : 0,
 }));
-const recentConnections = computed(() => (welcomePageMode.value === "workspace" ? rankRecentConnections(connectionStore.connections, recentConnectionIds.value) : []));
+const recentConnections = computed(() => (welcomePageMode.value === "workspace" ? rankRecentConnections(filterConnectionsOutsideLockedGroups(connectionStore.connections), recentConnectionIds.value) : []));
 
 function rememberRecentConnection(connectionId: string | null) {
   if (!connectionId) return;
@@ -1665,7 +1667,7 @@ const savedSqlHistoryItems = computed(() => {
     }
     return parts.join("/");
   };
-  return rankSavedSqlHistory(savedSqlStore.allFiles, { limit: 6 }).map((file) => {
+  return rankSavedSqlHistory(excludeLockedSavedSqlFiles(savedSqlStore.allFiles), { limit: 6 }).map((file) => {
     const connection = connectionStore.getConfig(file.connectionId);
     return {
       id: file.id,
@@ -3330,6 +3332,9 @@ async function newQuery(options: NewQueryOptions = {}) {
 async function openConnectionQuery(connectionId: string) {
   const connection = connectionStore.getConfig(connectionId);
   if (!connection) return;
+  // The quick-start list never surfaces connections inside locked groups, so
+  // gate the open action too in case the list is stale.
+  if (!(await ensureConnectionGroupAccessible(connectionId))) return;
   rememberRecentConnection(connectionId);
   connectionStore.activeConnectionId = connectionId;
   const initialTarget = quickConnectionOpenTarget(connection);
@@ -3399,6 +3404,9 @@ async function openConnectionQuery(connectionId: string) {
 async function openSavedSqlFromWelcome(fileId: string) {
   const file = await savedSqlStore.ensureFileContent(fileId);
   if (!file) return;
+  // The welcome history never lists locked contents, so gate the open action
+  // too in case the file is opened from a stale list.
+  if (!(await ensureSavedSqlFileAccessible(file))) return;
   const tabId = queryStore.openSavedSql(file);
   const openedConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
   if (openedConnectionId) connectionStore.activeConnectionId = openedConnectionId;

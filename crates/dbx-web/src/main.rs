@@ -1349,6 +1349,9 @@ async fn serve() -> Result<(), String> {
         .route("/saved-sql/{id}/default-content", post(routes::saved_sql::save_default_query_content))
         .route("/saved-sql/folders", post(routes::saved_sql::save_saved_sql_folder))
         .route("/saved-sql/folders/{id}", delete(routes::saved_sql::delete_saved_sql_folder))
+        .route("/saved-sql/folders/{id}/set-password", post(routes::saved_sql::set_saved_sql_folder_password))
+        .route("/saved-sql/folders/{id}/verify-password", post(routes::saved_sql::verify_saved_sql_folder_password))
+        .route("/saved-sql/folders/{id}/clear-password", post(routes::saved_sql::clear_saved_sql_folder_password))
         // AI
         .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
         .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))
@@ -1449,6 +1452,15 @@ async fn serve() -> Result<(), String> {
         .route("/changelog", get(routes::update::fetch_changelog))
         // Layout
         .route("/layout/sidebar", post(routes::layout::save_sidebar_layout).get(routes::layout::load_sidebar_layout))
+        .route("/layout/sidebar/groups/{group_id}/set-password", post(routes::layout::set_connection_group_password))
+        .route(
+            "/layout/sidebar/groups/{group_id}/verify-password",
+            post(routes::layout::verify_connection_group_password),
+        )
+        .route(
+            "/layout/sidebar/groups/{group_id}/clear-password",
+            post(routes::layout::clear_connection_group_password),
+        )
         .route(
             "/layout/table-vgroups",
             post(routes::layout::save_table_vgroups).get(routes::layout::load_table_vgroups),

@@ -15,6 +15,18 @@ pub struct SavedSqlFolder {
     pub order_index: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Protection-password verifier (Argon2 or a legacy format). Persisted only
+    /// inside the local database and never serialized to clients; callers gate
+    /// on `has_password` and verify through the storage layer.
+    #[serde(skip_serializing, skip_deserializing, default)]
+    pub password_hash: Option<String>,
+    /// Setter attribution for the protection password. No multi-user system: left unset,
+    /// kept only to stay compatible with data persisted by builds that fill it.
+    #[serde(default)]
+    pub password_set_by: Option<String>,
+    /// Whether a protection-password verifier is stored for this folder.
+    #[serde(default)]
+    pub has_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

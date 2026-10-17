@@ -53,6 +53,25 @@ tiberius = { path = "vendor/tiberius" }
 # backtraces resolvable while shrinking dev/test build time and artifacts.
 debug = "line-tables-only"
 
+# Protection-password verification (argon2id m=19456/t=2) is on the user-
+# perceptible unlock path; unoptimized blamka/sha2 in dev costs ~0.5-1s per
+# verify, which reads as "stuck" in the password prompt. Optimize just these
+# small crypto crates so dev unlocks stay fast without slowing the main build.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.password-hash]
+opt-level = 3
+
 [profile.release]
 panic = "abort"
 strip = true

@@ -1825,6 +1825,10 @@ export interface ConnectionGroup {
   id: string;
   name: string;
   collapsed: boolean;
+  /** Whether a protection password is set for this group. The verifier itself stays server-side; unlock goes through a backend command. */
+  hasPassword?: boolean;
+  /** Kept for compatibility with data persisted by builds that fill it; unused (single-user app). */
+  passwordSetBy?: string;
 }
 
 export type SidebarOrderEntry = { type: "group"; id: string; children?: SidebarOrderEntry[]; connectionIds?: string[] } | { type: "connection"; id: string };
@@ -2557,6 +2561,10 @@ export interface SavedSqlFolder {
   orderIndex?: number;
   createdAt: string;
   updatedAt: string;
+  /** Whether a protection password is set for this folder. The verifier itself stays server-side; unlock goes through a backend command. */
+  hasPassword?: boolean;
+  /** Kept for compatibility with data persisted by builds that fill it; unused (single-user app). */
+  passwordSetBy?: string;
 }
 
 export interface SavedSqlFile {

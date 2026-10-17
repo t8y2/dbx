@@ -687,6 +687,7 @@ export const useConnectionStore = defineStore("connection", () => {
     allDatabases?: boolean;
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
+  const unlockedConnectionGroupIds = ref<ReadonlySet<string>>(new Set());
   const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
   const lastDataGripFallbackUsernamesCount = ref(0);
   const dirtyTableVGroupScopeKeys = new Set<string>();
@@ -10819,6 +10820,59 @@ export const useConnectionStore = defineStore("connection", () => {
       const result = createGroupOp(sidebarLayout.value, name, parentGroupId);
       updateLayoutAndRebuild(result.layout);
       return result.groupId;
+    },
+    isConnectionGroupUnlocked(groupId: string) {
+      return unlockedConnectionGroupIds.value.has(groupId);
+    },
+    unlockConnectionGroup(groupId: string) {
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.add(groupId);
+      unlockedConnectionGroupIds.value = next;
+      rebuildTreeNodes();
+    },
+    lockConnectionGroup(groupId: string) {
+      if (!unlockedConnectionGroupIds.value.has(groupId)) return;
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.delete(groupId);
+      unlockedConnectionGroupIds.value = next;
+      // Hide contents immediately after locking so the lock state is visible.
+      const group = sidebarLayout.value.groups.find((g) => g.id === groupId);
+      if (group && !group.collapsed) {
+        updateLayoutAndRebuild({
+          ...sidebarLayout.value,
+          groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? { ...g, collapsed: true } : g)),
+        });
+      } else {
+        rebuildTreeNodes();
+      }
+    },
+    /** Set (or replace) a group's protection password through the backend command; the verifier is minted in Rust and never travels through the frontend. */
+    async setConnectionGroupPassword(groupId: string, password: string) {
+      const group = sidebarLayout.value.groups.find((g) => g.id === groupId);
+      if (!group) return;
+      await api.setConnectionGroupPassword(groupId, password);
+      // Changing the password invalidates this session's unlock, and locking
+      // the group right away keeps the new lock state visible.
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.delete(groupId);
+      unlockedConnectionGroupIds.value = next;
+      updateLayoutAndRebuild({
+        ...sidebarLayout.value,
+        groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? { ...g, hasPassword: true, collapsed: true } : g)),
+      });
+    },
+    /** Recovery path: clear a group's protection password after the caller verified the app's login password (web only). */
+    async clearConnectionGroupPassword(groupId: string, loginPassword?: string) {
+      const group = sidebarLayout.value.groups.find((g) => g.id === groupId);
+      if (!group) return;
+      await api.clearConnectionGroupPassword(groupId, loginPassword);
+      const next = new Set(unlockedConnectionGroupIds.value);
+      next.delete(groupId);
+      unlockedConnectionGroupIds.value = next;
+      updateLayoutAndRebuild({
+        ...sidebarLayout.value,
+        groups: sidebarLayout.value.groups.map((g) => (g.id === groupId ? { ...g, hasPassword: false } : g)),
+      });
     },
     renameConnectionGroup(groupId: string, name: string) {
       updateLayoutAndRebuild(renameGroupOp(sidebarLayout.value, groupId, name));

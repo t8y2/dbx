@@ -212,6 +212,8 @@ export const schemaCommentPreviewSql = ref("");
 export const showDeleteGroupConfirm = ref(false);
 export const showMoveToNewGroupDialog = ref(false);
 export const moveToNewGroupName = ref("");
+export const showSetGroupPasswordDialog = ref(false);
+export const setGroupPasswordValue = ref("");
 
 const openFlags = [
   showDeleteConfirm,
@@ -256,6 +258,7 @@ const openFlags = [
   showMoveToNewGroupDialog,
   showTableVGroupDialog,
   showTableVGroupDeleteConfirm,
+  showSetGroupPasswordDialog,
 ];
 
 export function resetSidebarTreeDialogState() {
@@ -294,4 +297,5 @@ export function resetSidebarTreeDialogState() {
   tableVGroupDialogScope.value = null;
   tableVGroupDialogParentGroupId.value = null;
   tableVGroupDialogTableNames.value = [];
+  setGroupPasswordValue.value = "";
 }

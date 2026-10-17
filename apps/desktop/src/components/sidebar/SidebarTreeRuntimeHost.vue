@@ -73,8 +73,16 @@ import {
   GitBranch,
   Sparkles,
   Link2,
+  KeyRound,
+  LockOpen,
+  Lock,
+  ShieldAlert,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import { promptConnectionGroupUnlock } from "@/lib/sidebar/connectionGroupPassword";
+import { useResetProtectionPasswordPromptStore } from "@/stores/resetProtectionPasswordPromptStore";
+import { isProtectionPasswordFeatureActive } from "@/lib/sidebar/protectionPassword";
+import { ensureSavedSqlFileAccessible, excludeLockedSavedSqlFiles } from "@/lib/sidebar/savedSqlFolderAccess";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { getTableMutationHistoryStoreOrNull, recordTableMutationHistory } from "@/lib/history/tableMutationHistory";
 import { useQueryStore } from "@/stores/queryStore";
@@ -413,6 +421,7 @@ import {
   deleteConnectionsWithGroup,
   showMoveToNewGroupDialog,
   moveToNewGroupName,
+  showSetGroupPasswordDialog,
   type DuplicateStructureSource,
 } from "./sidebarTreeDialogState";
 
@@ -421,6 +430,7 @@ const cloneDialog = useOceanbaseCloneDialog(t);
 const { state: cloneDialogState, open: cloneDialogOpen } = cloneDialog;
 
 const connectionStore = useConnectionStore();
+const resetProtectionPasswordPromptStore = useResetProtectionPasswordPromptStore();
 
 const queryStore = useQueryStore();
 
@@ -917,6 +927,11 @@ async function toggle(requestId = beginNavigationRequest()) {
   const wasExpanded = !!node.isExpanded;
 
   if (node.type === "connection-group") {
+    // Locked groups require password verification before expanding.
+    if (!node.isExpanded) {
+      const group = connectionStore.sidebarLayout.groups.find((item) => item.id === node.id);
+      if (group?.hasPassword && !(await promptConnectionGroupUnlock(group))) return;
+    }
     node.isExpanded = !node.isExpanded;
     if (!node.isExpanded) collapseSubtreeDescendants(node);
     connectionStore.toggleConnectionGroupCollapsed(node.id);
@@ -1576,6 +1591,8 @@ function requestRenameSelectedNode(): boolean {
     return true;
   }
   if (activeNode.value.type === "connection-group") {
+    // Locked groups cannot be renamed — unlock first.
+    if (connectionGroupPasswordLockable()) return true;
     startRenameGroup();
     return true;
   }
@@ -1659,6 +1676,8 @@ function requestDeleteSelectedNode(): boolean {
     return true;
   }
   if (activeNode.value.type === "connection-group") {
+    // Locked groups cannot be deleted — unlock first.
+    if (connectionGroupPasswordLockable()) return true;
     deleteConnectionGroup();
     return true;
   }
@@ -6591,6 +6610,9 @@ function savedSqlHistoryScopeForNode(node: TreeNode): SavedSqlHistoryScope | nul
 async function openSavedSqlHistoryFile(fileId: string) {
   const file = await savedSqlStore.ensureFileContent(fileId);
   if (!file) return;
+  // The history list never surfaces locked contents, so gate the open action
+  // too in case the file was locked after the menu was built.
+  if (!(await ensureSavedSqlFileAccessible(file))) return;
   const tabId = queryStore.openSavedSql(file);
   connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
   void savedSqlStore.recordFileUsage(file.id);
@@ -6599,7 +6621,7 @@ async function openSavedSqlHistoryFile(fileId: string) {
 function savedSqlHistorySubmenu(): ContextMenuItem | null {
   const scope = savedSqlHistoryScopeForNode(activeNode.value);
   if (!scope) return null;
-  const files = rankSavedSqlHistory(savedSqlStore.allFiles, { ...scope, limit: 10 });
+  const files = rankSavedSqlHistory(excludeLockedSavedSqlFiles(savedSqlStore.allFiles), { ...scope, limit: 10 });
   return {
     sidebarActionId: "contextMenu.sqlHistory",
     label: t("contextMenu.sqlHistory"),
@@ -6841,13 +6863,13 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
   if (node.type === "connection-group") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
-    items.push({ label: t("toolbar.newConnection"), action: newConnectionInGroup, icon: Plus });
-    items.push({ label: t("connectionGroup.newGroup"), action: newSubgroup, icon: FolderPlus });
+    items.push({ label: t("toolbar.newConnection"), action: newConnectionInGroup, icon: Plus, disabled: connectionGroupPasswordLockable() });
+    items.push({ label: t("connectionGroup.newGroup"), action: newSubgroup, icon: FolderPlus, disabled: connectionGroupPasswordLockable() });
     items.push({
       label: connectionGroupDisconnectMenuLabel(),
       action: disconnectConnectionGroup,
       icon: Unplug,
-      disabled: !canDisconnectConnectionGroup(),
+      disabled: !canDisconnectConnectionGroup() || connectionGroupPasswordLockable(),
       shortcut: shortcutDisconnectConnection.value,
     });
     items.push({ label: "", separator: true });
@@ -6856,18 +6878,106 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       action: startRenameGroup,
       icon: Pencil,
       shortcut: shortcutRename,
+      disabled: connectionGroupPasswordLockable(),
     });
-    items.push({ label: "", separator: true });
-    items.push({
-      label: connectionGroupDeleteMenuLabel(),
-      action: deleteConnectionGroup,
-      icon: Trash2,
-      shortcut: shortcutDelete,
-      variant: "destructive" as const,
-    });
+    // Locked groups cannot have password changed or removed — unlock first.
+    // Desktop has no protection-password feature, so the entry is hidden.
+    if (isProtectionPasswordFeatureActive() && !connectionGroupPasswordLockable()) {
+      items.push({
+        label: connectionGroupPasswordMenuLabel(),
+        action: openSetGroupPasswordDialog,
+        icon: KeyRound,
+      });
+    }
+    if (connectionGroupPasswordLockable()) {
+      items.push({
+        label: t("connectionGroup.unlockGroup"),
+        action: unlockConnectionGroupFromMenu,
+        icon: LockOpen,
+      });
+      // Forgotten-password recovery path (#11907): opens a confirm dialog
+      // that re-verifies the app's login password before clearing.
+      items.push({
+        label: t("auth.resetProtectionPasswordMenu"),
+        action: requestResetGroupProtection,
+        icon: ShieldAlert,
+      });
+    } else if (connectionGroupPasswordUnlocked()) {
+      items.push({
+        label: t("connectionGroup.lockGroup"),
+        action: lockConnectionGroupFromMenu,
+        icon: Lock,
+      });
+    }
+    // Locked groups cannot be deleted — unlock first.
+    if (!connectionGroupPasswordLockable()) {
+      items.push({ label: "", separator: true });
+      items.push({
+        label: connectionGroupDeleteMenuLabel(),
+        action: deleteConnectionGroup,
+        icon: Trash2,
+        shortcut: shortcutDelete,
+        variant: "destructive" as const,
+      });
+    }
     return true;
   }
   return false;
+}
+
+function connectionGroupPasswordMenuLabel(): string {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return "";
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  return group?.hasPassword ? t("connectionGroup.changePassword") : t("connectionGroup.setPassword");
+}
+
+function openSetGroupPasswordDialog() {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return;
+  sidebarFormTarget.value = node;
+  showSetGroupPasswordDialog.value = true;
+}
+
+function connectionGroupPasswordLockable(): boolean {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return false;
+  // Protection passwords are web-only; desktop groups are never locked.
+  if (!isProtectionPasswordFeatureActive()) return false;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  return !!group?.hasPassword && !connectionStore.isConnectionGroupUnlocked(node.id);
+}
+
+function connectionGroupPasswordUnlocked(): boolean {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return false;
+  if (!isProtectionPasswordFeatureActive()) return false;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  return !!group?.hasPassword && connectionStore.isConnectionGroupUnlocked(node.id);
+}
+
+function requestResetGroupProtection() {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  if (!group) return;
+  resetProtectionPasswordPromptStore.requestReset({ targetType: "group", id: group.id, name: group.name });
+}
+
+async function unlockConnectionGroupFromMenu() {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  if (!group?.hasPassword) return;
+  await promptConnectionGroupUnlock(group);
+}
+
+function lockConnectionGroupFromMenu() {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  if (!group?.hasPassword) return;
+  connectionStore.lockConnectionGroup(node.id);
 }
 
 function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {

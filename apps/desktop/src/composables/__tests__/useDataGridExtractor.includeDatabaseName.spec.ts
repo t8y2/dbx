@@ -77,17 +77,51 @@ describe("useDataGridExtractor includeDatabaseName payload", () => {
     expect(request.options.sql.includeDatabaseName).toBe(true);
   });
 
-  it("strips optional qualifiers and keeps the flag off for non schema-qualified dialects", async () => {
+  it("keeps optional qualifiers and sets the flag on by default for MySQL", async () => {
     const request = await capturedRequest("mysql", qualifiedMeta(undefined, "mydb"));
+    expect(request.tableMeta.database).toBe("mydb");
+    expect(request.options.sql.includeDatabaseName).toBe(true);
+  });
+
+  it("strips optional qualifiers when explicitly opted out", async () => {
+    const request = await capturedRequest("mysql", qualifiedMeta(undefined, "mydb"), { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, includeDatabaseName: false } });
     expect(request.tableMeta.database).toBeUndefined();
     expect(request.tableMeta.schema).toBeUndefined();
     expect(request.options.sql.includeDatabaseName).toBe(false);
   });
 
-  it("preserves an explicit opt-in for non schema-qualified dialects", async () => {
-    const request = await capturedRequest("mysql", qualifiedMeta(undefined, "mydb"), { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, includeDatabaseName: true } });
-    expect(request.tableMeta.database).toBe("mydb");
-    expect(request.options.sql.includeDatabaseName).toBe(true);
+  it("falls back to option database when tableMeta database is missing", async () => {
+    const allColumns = ["id", "name"];
+    const items = [{ id: 1, data: [1, "Ada"], isDraft: false }];
+    const state = useDataGridExtractor({
+      columns: computed(() => allColumns),
+      allColumns: computed(() => allColumns),
+      displayItems: computed(() => items),
+      allDisplayItems: computed(() => items),
+      allSourceColumns: computed(() => undefined),
+      visibleColumnIndexes: computed(() => [0, 1]),
+      columnTypes: computed(() => ["int", "varchar"]),
+      extractorOptions: computed(() => DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
+      databaseType: computed(() => "mysql"),
+      identifierQuote: computed(() => undefined),
+      tableMeta: computed(() => ({ tableName: "users", primaryKeys: ["id"], columns: [{ name: "id" }, { name: "name" }] })),
+      database: computed(() => "appdb"),
+      hasCellSelection: computed(() => false),
+      selectedCells: computed(() => ({ columns: [], rows: [] })),
+      selectedCellMatrix: computed(() => null),
+      hasRowSelection: computed(() => true),
+      hasColumnSelection: computed(() => false),
+      selectedRowIds: ref(new Set<number>([1])),
+      contextCell: ref(null),
+      contextSelectionIsSynthetic: ref(false),
+      copyText: vi.fn(async () => true),
+      canCopySqlInsert: () => true,
+      buildMongoInsert: vi.fn(async () => undefined),
+    });
+    const extraction = await state.extractWithExtractor("sql-inserts");
+    expect(extraction).not.toBeNull();
+    const req = mocks.extract.mock.calls.at(-1)![0];
+    expect(req.tableMeta.database).toBe("appdb");
   });
 
   it("passes real query types for reordered and hidden row columns without table metadata", async () => {

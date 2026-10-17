@@ -9003,7 +9003,16 @@ const {
   sql: computed(() => props.sql),
   exportSql: computed(() => props.exportSql),
   pageSql: computed(() => props.pageSql),
-  tableMeta: computed(() => (props.tableMeta ? { ...props.tableMeta } : undefined)),
+  tableMeta: computed(() => {
+    if (!props.tableMeta) return undefined;
+    const database = props.tableMeta.database ?? props.executionDatabase ?? props.database;
+    const schema = props.tableMeta.schema ?? props.schema;
+    return {
+      ...props.tableMeta,
+      ...(database && !props.tableMeta.database ? { database } : {}),
+      ...(schema && !props.tableMeta.schema ? { schema } : {}),
+    };
+  }),
   includeDatabaseName: computed(() => settingsStore.editorSettings.generateSqlIncludeDatabaseName),
   hasUniqueQueryInsertTarget: computed(() => props.hasUniqueQueryInsertTarget === true),
   copyInsertTargetLabel: computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel),

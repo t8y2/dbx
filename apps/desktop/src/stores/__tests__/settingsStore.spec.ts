@@ -692,21 +692,27 @@ describe("normalizeEditorSettings", () => {
     expect(configured.dataGridExtractorOptions.dsv.nullText).toBe("NULL");
   });
 
-  it("resets the copy extractor database-name opt-in once when migrating to v2", () => {
+  it("restores the copy extractor database-name opt-in default when migrating to v3 (#12146)", () => {
     const legacy = normalizeEditorSettings({
-      dataGridExtractorOptionsMigrationVersion: 1,
-      dataGridExtractorOptions: { sql: { includeDatabaseName: true } },
+      dataGridExtractorOptionsMigrationVersion: 2,
+      dataGridExtractorOptions: { sql: { includeDatabaseName: false } },
     });
-    // 历史持久化的「包含数据库名称」归位到新默认：复制/导出 SQL 默认不带库名/模式名
-    expect(legacy.dataGridExtractorOptions.sql.includeDatabaseName).toBe(false);
+    // v2 中被重置为 false 的历史配置重新恢复为新默认：复制/导出 SQL 默认带库名/模式名
+    expect(legacy.dataGridExtractorOptions.sql.includeDatabaseName).toBe(true);
     expect(legacy.dataGridExtractorOptionsMigrationVersion).toBe(DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION);
 
-    const current = normalizeEditorSettings({
+    const currentExplicitFalse = normalizeEditorSettings({
+      dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
+      dataGridExtractorOptions: { sql: { includeDatabaseName: false } },
+    });
+    // v3 迁移之后用户的显式取消勾选必须被保留
+    expect(currentExplicitFalse.dataGridExtractorOptions.sql.includeDatabaseName).toBe(false);
+
+    const currentExplicitTrue = normalizeEditorSettings({
       dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
       dataGridExtractorOptions: { sql: { includeDatabaseName: true } },
     });
-    // 迁移之后用户的显式勾选必须被保留
-    expect(current.dataGridExtractorOptions.sql.includeDatabaseName).toBe(true);
+    expect(currentExplicitTrue.dataGridExtractorOptions.sql.includeDatabaseName).toBe(true);
   });
 
   it("defaults retained result runs to tiled tabs and preserves list mode", () => {

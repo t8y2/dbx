@@ -1916,18 +1916,19 @@ describe("useDataGridExport prepared row statements", () => {
     expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].options.sql).toEqual(saved.sql);
   });
 
-  it("follows the extractor option for the copied SQL table qualifier (#11195)", async () => {
+  it("follows the extractor option for the copied SQL table qualifier (#11195, #12146)", async () => {
     const tableMeta: DataGridTableMeta = { ...editableTable, schema: "SYSDBA" };
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0, 1], columns: ["id", "name"], rows: [[1, "Ada"]] };
     vi.mocked(extractDataGridSelection).mockResolvedValue({ text: "copied", mimeType: "text/plain", fileExtension: "sql", rowCount: 1, columnCount: 2 });
-    const withDatabaseName = { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, includeDatabaseName: true } };
 
-    const enabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], withDatabaseName, false, undefined, false, undefined, undefined, "dameng");
-    await enabled.copyWithExtractor("sql-inserts");
+    // 默认开启 includeDatabaseName：保留模式名
+    const defaultEnabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "dameng");
+    await defaultEnabled.copyWithExtractor("sql-inserts");
     expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].tableMeta).toMatchObject({ schema: "SYSDBA", tableName: "users" });
 
-    // 未勾选（默认）时保持既有行为：把可选的库名/模式名前缀交给后端省略
-    const disabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "dameng");
+    // 显式未勾选时把可选的库名/模式名前缀交给后端省略
+    const withoutDatabaseName = { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, includeDatabaseName: false } };
+    const disabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], withoutDatabaseName, false, undefined, false, undefined, undefined, "dameng");
     await disabled.copyWithExtractor("sql-inserts");
     expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].tableMeta?.schema).toBeUndefined();
   });

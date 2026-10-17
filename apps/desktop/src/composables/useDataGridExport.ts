@@ -968,6 +968,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     databaseType,
     identifierQuote,
     tableMeta,
+    database: options.database,
     includeDatabaseName: options.includeDatabaseName,
     hasCellSelection,
     selectedCells,

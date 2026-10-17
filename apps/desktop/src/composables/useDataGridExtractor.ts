@@ -66,6 +66,7 @@ interface UseDataGridExtractorOptions {
   databaseType: ComputedRef<DatabaseType | undefined>;
   identifierQuote?: ComputedRef<string | undefined>;
   tableMeta: ComputedRef<DataGridTableMeta | undefined>;
+  database?: ComputedRef<string | undefined>;
   /** Editor setting "Include database name in generated SQL". When false, SQL extractors omit optional schema/database qualifiers. */
   includeDatabaseName?: ComputedRef<boolean>;
   hasCellSelection: ComputedRef<boolean>;
@@ -267,11 +268,17 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // （`generateSqlIncludeDatabaseName`）任一开启都保留库名/模式名；后者还会影响
     // 保存 SQL、侧栏导出等其它路径，因此这里取“或”，不覆盖全局偏好。
     const extractorOptionValues = normalizeDataGridExtractorOptions(extractorOptions);
+    const effectiveTableMeta = options.tableMeta.value
+      ? {
+          ...options.tableMeta.value,
+          database: options.tableMeta.value.database ?? options.database?.value,
+        }
+      : undefined;
     const tableMeta =
       descriptor.category === "sql"
         ? tableMetaWithoutOptionalDatabaseQualifier(
             compactTableMeta(
-              options.tableMeta.value,
+              effectiveTableMeta,
               columns.map((column) => column.sourceName ?? column.displayName),
             ),
             options.databaseType.value,

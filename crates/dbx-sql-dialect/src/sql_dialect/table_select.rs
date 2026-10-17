@@ -508,15 +508,19 @@ pub fn database_qualified_table_name(
     database: Option<&str>,
     table_name: &str,
 ) -> Option<String> {
-    let database = database.map(str::trim).filter(|database| !database.is_empty())?;
+    let database = database.map(str::trim).filter(|database| !database.is_empty());
+    let schema = schema.map(str::trim).filter(|schema| !schema.is_empty());
     match database_type {
-        Some(DatabaseType::ClickHouse) => Some(format!(
-            "{}.{}",
-            quote_table_identifier(database_type, database),
-            quote_table_identifier(database_type, table_name)
-        )),
+        Some(DatabaseType::ClickHouse) => {
+            let namespace = database.or(schema)?;
+            Some(format!(
+                "{}.{}",
+                quote_table_identifier(database_type, namespace),
+                quote_table_identifier(database_type, table_name)
+            ))
+        }
         Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks) => {
-            let namespace = schema.map(str::trim).filter(|schema| !schema.is_empty()).unwrap_or(database);
+            let namespace = schema.or(database)?;
             Some(qualified_table_name_with_catalog(
                 database_type,
                 catalog,
@@ -526,9 +530,10 @@ pub fn database_qualified_table_name(
             ))
         }
         Some(DatabaseType::SqlServer) => {
+            let database = database?;
             // A linked-server schema already carries `server|catalog|schema`, so
             // prefixing it with the local database would produce a bogus name.
-            let schema = schema.map(str::trim).filter(|schema| !schema.is_empty())?;
+            let schema = schema?;
             if parse_sqlserver_linked_schema_ref(schema).is_some() {
                 return None;
             }
@@ -1339,9 +1344,17 @@ mod tests {
             Some("`db_9`.`t`")
         );
         assert_eq!(
+            database_qualified_table_name(Some(DatabaseType::Mysql), None, Some("db_9"), None, "t").as_deref(),
+            Some("`db_9`.`t`")
+        );
+        assert_eq!(
             database_qualified_table_name(Some(DatabaseType::ClickHouse), None, Some("default"), Some("dbx"), "t")
                 .as_deref(),
             Some("`dbx`.`t`")
+        );
+        assert_eq!(
+            database_qualified_table_name(Some(DatabaseType::ClickHouse), None, Some("default"), None, "t").as_deref(),
+            Some("`default`.`t`")
         );
         assert_eq!(
             database_qualified_table_name(Some(DatabaseType::SqlServer), None, Some("dbo"), Some("dbx"), "t")

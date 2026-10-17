@@ -1943,9 +1943,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     if (!isLegacyExtractorOptions) return normalizedExtractorOptions;
     // v1：旧的 "NULL" 文本迁移为空串
     const nullTextMigrated = normalizedExtractorOptions.dsv.nullText === "NULL" ? { ...normalizedExtractorOptions, dsv: { ...normalizedExtractorOptions.dsv, nullText: "" } } : normalizedExtractorOptions;
-    // v2：复制/导出 SQL 的「包含数据库名称」改为由提取器勾选框决定且默认关闭，
-    // 历史持久化的 true 一并归位到新默认（想带库名/模式名的用户重新勾选即可）
-    return nullTextMigrated.sql.includeDatabaseName ? { ...nullTextMigrated, sql: { ...nullTextMigrated.sql, includeDatabaseName: false } } : nullTextMigrated;
+    // v3：复制/导出 SQL 的「包含数据库名称」默认恢复开启（带库名/模式名，#12146），
+    // 历史在 v2 中被强制归位为 false 的持久化配置重新提升到新默认 true。
+    return !nullTextMigrated.sql.includeDatabaseName ? { ...nullTextMigrated, sql: { ...nullTextMigrated.sql, includeDatabaseName: true } } : nullTextMigrated;
   })();
   // Preserve the explicit intent behind the legacy update controls. Disabling
   // update reminders was a full opt-out; disabling automatic downloads only
@@ -2487,12 +2487,12 @@ export const useSettingsStore = defineStore("settings", () => {
           const needsCompactTabTitleDefaultMigration = typeof savedSettings.compactTabTitleDefaultVersion !== "number" || savedSettings.compactTabTitleDefaultVersion < COMPACT_TAB_TITLE_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
-          // v2 also resets a historically persisted includeDatabaseName=true, so
+          // v3 also resets a historically persisted includeDatabaseName=false (from v2), so
           // trigger the eager persist for that stale disk value even when the
           // v1 "NULL" marker is already migrated away.
           const savedSqlIncludeDatabaseName = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.sql?.includeDatabaseName;
           const needsDataGridExtractorOptionsMigration =
-            (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === true);
+            (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === false);
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
           if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsCompactTabTitleDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.

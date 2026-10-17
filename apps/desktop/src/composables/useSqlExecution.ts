@@ -14,7 +14,7 @@ import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connection
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
-import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
+import { defaultViewForResult, statementRunsWithoutResultGrid } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
 import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
@@ -475,10 +475,14 @@ export function useSqlExecution(deps: {
     }
     const statementCount = splitSqlStatementRanges(sql, executionDatabaseType, sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : undefined)).length;
     const redisConsoleSelected = executionDatabaseType === "redis" && tab.uiState?.redisResultViewMode === "console";
+    // A single write/DDL statement has no result grid to show while it runs, so
+    // it starts on the summary tab where the in-flight status is rendered
+    // instead of leaving an empty data grid up (issue #12283).
+    const autoSummaryWhileRunning = statementCount === 1 && !redisConsoleSelected && executionDatabaseType !== "redis" && statementRunsWithoutResultGrid(sql);
     // Output-view switching belongs to the tab the user is looking at — both
     // when the query starts and when it finishes.
     if (deps.activeTab.value?.id === executionTabId) {
-      deps.activeOutputView.value = redisConsoleSelected ? "result" : statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : "result";
+      deps.activeOutputView.value = redisConsoleSelected ? "result" : statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : autoSummaryWhileRunning ? "summary" : "result";
     }
     const connName = executionConnection?.name || "";
     const start = Date.now();
@@ -512,6 +516,10 @@ export function useSqlExecution(deps: {
       if (executionTabStillActive && deps.activeOutputView.value !== "messages") {
         deps.activeOutputView.value = statementCount === 1 ? defaultViewForResult(tab.result) : "summary";
       }
+    } else if (executionTabStillActive && autoSummaryWhileRunning && deps.activeOutputView.value === "summary" && ((tab.result?.columns.length ?? 0) > 0 || tab.results?.some((result) => result.columns.length > 0))) {
+      // `INSERT ... RETURNING` and siblings do return a grid even though their
+      // leading keyword normally means "no result set"; show it once it lands.
+      deps.activeOutputView.value = "result";
     } else if (executionTabStillActive && deps.activeOutputView.value === "messages" && ((tab.result?.columns.length ?? 0) > 0 || tab.results?.some((result) => result.columns.length > 0))) {
       // A notice can arrive before the statement produces its rows, so the live-output watcher
       // in ContentArea advances to Messages while it cannot yet know that data will follow.

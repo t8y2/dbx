@@ -1058,6 +1058,20 @@ describe("normalizeEditorSettings - continueOnErrorOnBatch", () => {
   });
 });
 
+describe("normalizeEditorSettings - pinResultTabOnClick", () => {
+  it("defaults pinResultTabOnClick to true", () => {
+    expect(normalizeEditorSettings({}).pinResultTabOnClick).toBe(true);
+  });
+
+  it("preserves an explicitly disabled value", () => {
+    expect(normalizeEditorSettings({ pinResultTabOnClick: false }).pinResultTabOnClick).toBe(false);
+  });
+
+  it("treats non-boolean values as enabled", () => {
+    expect(normalizeEditorSettings({ pinResultTabOnClick: "no" } as any).pinResultTabOnClick).toBe(true);
+  });
+});
+
 describe("normalizeEditorSettings - clickTableNavigationTarget", () => {
   it("defaults clickTableNavigationTarget to 'data'", () => {
     expect(normalizeEditorSettings({}).clickTableNavigationTarget).toBe("data");

@@ -8163,6 +8163,8 @@ export default withEnglishFallback({
     queryPageSizeDescription: "Filas cargadas por página de resultados. Se admiten hasta {max} filas.",
     defaultAutoKeepResults: "Conservar resultados automáticamente por defecto",
     defaultAutoKeepResultsDescription: "Al aplicar este ajuste se actualizan las pestañas de consulta abiertas y se establece el valor predeterminado para las nuevas. Puedes cambiarlo en cada pestaña.",
+    pinResultTabOnClick: "Fijar la pestaña de resultado al hacer clic",
+    pinResultTabOnClickDescription: "Al hacer clic en una pestaña de resultado, ese resultado se conserva cuando se ejecuta la siguiente consulta. Desactívalo si cada ejecución debe reemplazar el resultado actual; aún puedes fijar resultados manualmente desde el menú de la pestaña.",
     multiStatementDefaultView: "Vista predeterminada para varias sentencias",
     multiStatementDefaultViewDescription: "Elige si los lotes con varias sentencias SQL se abren en la tabla de resultados o en el resumen de ejecución.",
     defaultExplainView: "Vista predeterminada para el plan de ejecución",

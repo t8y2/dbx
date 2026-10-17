@@ -7941,6 +7941,8 @@ export default withEnglishFallback({
     queryPageSizeDescription: "Linhas carregadas por página de resultados. São suportadas até {max} linhas.",
     defaultAutoKeepResults: "Manter resultados automaticamente por padrão",
     defaultAutoKeepResultsDescription: "Ao aplicar esta configuração, as abas de consulta abertas são atualizadas e o padrão para novas abas é definido. Você pode alternar em cada aba.",
+    pinResultTabOnClick: "Fixar a aba de resultado ao clicar",
+    pinResultTabOnClickDescription: "Ao clicar em uma aba de resultado, esse resultado é mantido na próxima execução. Desative se cada execução deve substituir o resultado atual; ainda é possível fixar resultados manualmente pelo menu da aba.",
     multiStatementDefaultView: "Visualização padrão para várias instruções",
     multiStatementDefaultViewDescription: "Escolha se lotes com várias instruções SQL abrem na tabela de resultados ou no resumo da execução.",
     defaultExplainView: "Visualização padrão para plano de execução",

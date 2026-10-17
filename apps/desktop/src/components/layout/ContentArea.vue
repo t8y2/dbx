@@ -16,6 +16,7 @@ import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import { provideTabUiState } from "@/lib/tabs/tabUiState";
+import { shouldPinResultRunOnClick } from "@/lib/tabs/resultRunPin";
 import {
   Check,
   CheckSquare2,
@@ -1674,7 +1675,7 @@ function dispatchBeforeResultTabSwitch() {
 async function selectResultRunFromTab(runId: string) {
   if (!(await selectResultRun(runId))) return;
   const run = resultRuns.value.find((item) => item.id === runId);
-  if (run && !run.pinned) toggleResultRunPinned(runId);
+  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick)) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {

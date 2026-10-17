@@ -7809,6 +7809,8 @@ export default withEnglishFallback({
     queryPageSizeDescription: "쿼리 결과 페이지당 로드할 행 수입니다. 최대 {max}행을 지원합니다.",
     defaultAutoKeepResults: "기본적으로 쿼리 결과 자동 보관",
     defaultAutoKeepResultsDescription: "적용하면 열린 쿼리 탭을 업데이트하고 새 탭의 기본값으로 설정합니다. 탭별로 전환할 수 있습니다.",
+    pinResultTabOnClick: "결과 탭 클릭 시 고정",
+    pinResultTabOnClickDescription: "결과 탭을 클릭하면 다음 쿼리 실행 후에도 해당 결과를 유지합니다. 매번 실행 시 현재 결과를 교체하려면 끄세요. 결과 탭 메뉴에서 수동으로 고정할 수도 있습니다.",
     multiStatementDefaultView: "여러 구문 기본 보기",
     multiStatementDefaultViewDescription: "여러 SQL 구문이 있는 배치를 결과 테이블 또는 실행 요약 중 어디에서 열지 선택합니다.",
     defaultExplainView: "실행 계획 기본 보기",

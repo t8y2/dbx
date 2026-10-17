@@ -9714,6 +9714,8 @@ export default withEnglishFallback({
     queryPageSizeDescription: "จำนวนแถวที่โหลดต่อหน้าผลลัพธ์ Query ขนาดหน้าสูงสุดที่รองรับคือ {max}",
     defaultAutoKeepResults: "เก็บผลลัพธ์ Query อัตโนมัติโดยค่าเริ่มต้น",
     defaultAutoKeepResultsDescription: "การใช้การตั้งค่านี้จะอัปเดตแท็บ Query ที่เปิดอยู่และกำหนดค่าเริ่มต้นสำหรับแท็บใหม่ คุณยังสลับเป็นรายแท็บได้",
+    pinResultTabOnClick: "ปักหมุดแท็บผลลัพธ์เมื่อคลิก",
+    pinResultTabOnClickDescription: "เมื่อคลิกแท็บผลลัพธ์ ผลลัพธ์นั้นจะถูกเก็บไว้เมื่อรันคิวรีครั้งถัดไป ปิดตัวเลือกนี้หากต้องการให้ทุกครั้งแทนที่ผลลัพธ์ปัจจุบัน ยังปักหมุดเองได้จากเมนูแท็บผลลัพธ์",
     multiStatementDefaultView: "มุมมองเริ่มต้นสำหรับหลาย Statement",
     multiStatementDefaultViewDescription: "เลือกว่าจะเปิด Batch ที่มีหลาย SQL Statement ในตารางผลลัพธ์หรือสรุปการเรียกใช้",
     defaultExplainView: "มุมมองเริ่มต้นของ Execution Plan",

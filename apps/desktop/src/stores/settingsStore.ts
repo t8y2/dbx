@@ -1092,6 +1092,7 @@ export interface EditorSettings {
   dataGridExtractorOptionsMigrationVersion: number;
   resultRunDisplayMode: ResultRunDisplayMode;
   defaultAutoKeepResults: boolean;
+  pinResultTabOnClick: boolean;
   multiStatementDefaultView: MultiStatementDefaultView;
   defaultExplainView: DefaultExplainView;
   dataGridAutoTransposeSingleRow: boolean;
@@ -1435,6 +1436,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
   resultRunDisplayMode: "tabs",
   defaultAutoKeepResults: false,
+  pinResultTabOnClick: true,
   multiStatementDefaultView: "result",
   defaultExplainView: "canvas",
   dataGridAutoTransposeSingleRow: false,
@@ -2095,6 +2097,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
     resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
     defaultAutoKeepResults: settings.defaultAutoKeepResults === true,
+    pinResultTabOnClick: settings.pinResultTabOnClick !== false,
     multiStatementDefaultView: normalizeMultiStatementDefaultView(settings.multiStatementDefaultView),
     defaultExplainView: normalizeDefaultExplainView(settings.defaultExplainView),
     dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
@@ -2995,6 +2998,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridExtractorOptionsMigrationVersion !== undefined) editorSettings.value.dataGridExtractorOptionsMigrationVersion = DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
     if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
     if (partial.defaultAutoKeepResults !== undefined) editorSettings.value.defaultAutoKeepResults = partial.defaultAutoKeepResults === true;
+    if (partial.pinResultTabOnClick !== undefined) editorSettings.value.pinResultTabOnClick = partial.pinResultTabOnClick !== false;
     if (partial.multiStatementDefaultView !== undefined) editorSettings.value.multiStatementDefaultView = normalizeMultiStatementDefaultView(partial.multiStatementDefaultView);
     if (partial.defaultExplainView !== undefined) editorSettings.value.defaultExplainView = normalizeDefaultExplainView(partial.defaultExplainView);
     if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;

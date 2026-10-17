@@ -7285,6 +7285,8 @@ export default withEnglishFallback({
     queryPageSizeDescription: "每個查詢結果分頁載入的列數，最多支援 {max} 列。",
     defaultAutoKeepResults: "預設自動保留查詢結果",
     defaultAutoKeepResultsDescription: "套用後同步更新已開啟的查詢分頁，新建查詢分頁也使用此設定。仍可在分頁內個別切換。",
+    pinResultTabOnClick: "點擊結果分頁時固定結果",
+    pinResultTabOnClickDescription: "開啟後，點擊結果分頁會同時固定該結果，下一次查詢不會覆蓋它；關閉後每次執行都直接取代目前結果，需要保留時可在結果分頁選單裡手動固定。",
     multiStatementDefaultView: "多語句執行預設檢視",
     multiStatementDefaultViewDescription: "選擇多條 SQL 語句批次執行後預設開啟資料表或執行摘要。",
     defaultExplainView: "執行計畫預設檢視",

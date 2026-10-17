@@ -7,6 +7,7 @@ import {
   getPostgresSequenceLiteralCompletionContext,
   getSqlCompletionContext,
   prepareSqlCompletionReplacement,
+  quotedCompletionFilterPrefix,
   selectStarResultColumnsMatch,
   shouldAutoOpenSqlCompletion,
 } from "@/lib/sql/sqlCompletion";
@@ -2730,5 +2731,32 @@ describe("smart unpaired SQL keyword completion before existing keywords (#11527
     const keyLabels = keyItems.filter((item) => item.type === "keyword").map((item) => item.label);
     expect(keyLabels[0]).toBe("UNIQUE");
     expect(keyLabels).not.toContain("UNIQUE KEY");
+  });
+});
+
+describe("quoted identifier completion filtering (issue #12008)", () => {
+  // CodeMirror filters candidate labels against the raw document span from the
+  // completion result's `from` to the cursor. A quoted-identifier completion
+  // replaces the opening quote too, so that span starts with `` ` ``/`"`/`[`
+  // and no identifier label can ever match it, leaving the menu empty.
+  it.each([
+    ["`test_", "test_", "test_"],
+    ['"test_', "test_", "test_"],
+    ["[test_", "test_", "test_"],
+    ["`test_`", "test_", "test_"],
+    ['"test_"', "test_", "test_"],
+    ["[test_]", "test_", "test_"],
+  ])("maps the quoted span %s with prefix %s back to %s", (query, prefix, expected) => {
+    expect(quotedCompletionFilterPrefix(query, prefix)).toBe(expected);
+  });
+
+  it.each([
+    ["test_", "test_"],
+    ["`other_", "test_"],
+    ["`test", "test_"],
+    ["tes", "test_"],
+    ["", "test_"],
+  ])("leaves %s (prefix %s) to CodeMirror's own matcher", (query, prefix) => {
+    expect(quotedCompletionFilterPrefix(query, prefix)).toBeUndefined();
   });
 });

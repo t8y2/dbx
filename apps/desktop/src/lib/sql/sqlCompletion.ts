@@ -1677,6 +1677,30 @@ const SQL_COMPLETION_CLOSING_QUOTES: Readonly<Record<string, SqlCompletionClosin
   "[": "]",
 };
 
+/**
+ * CodeMirror runs its own matcher over each candidate label against the
+ * document text between the completion result's `from` and the cursor. For a
+ * bare identifier that text is exactly the typed prefix, but a
+ * quoted-identifier completion has to replace the span *including* its opening
+ * quote, so `from` sits on the quote and the text reads `` `test_ `` /`"test_"`/
+ * `[test_`. No identifier label starts with a quote character, so CodeMirror
+ * drops every option and the menu stays empty even though the provider found
+ * matches (#12008).
+ *
+ * The provider already filtered and ranked candidates by the unquoted prefix,
+ * so return that prefix when the only difference is the surrounding quote, and
+ * let the caller bypass CodeMirror's matcher with its own match ranges.
+ * Returns `undefined` when the text is a plain prefix CodeMirror can match.
+ */
+export function quotedCompletionFilterPrefix(query: string, prefix: string): string | undefined {
+  if (!query || !prefix || query === prefix) return undefined;
+  const closing = SQL_COMPLETION_CLOSING_QUOTES[query[0] ?? ""];
+  if (!closing) return undefined;
+  const quotedByClosingQuote = query.length > 1 && query.endsWith(closing);
+  const inner = quotedByClosingQuote ? query.slice(1, -1) : query.slice(1);
+  return inner === prefix ? prefix : undefined;
+}
+
 const SELECT_WILDCARD_FOLLOWING_CLAUSES = new Set(["except", "fetch", "for", "from", "group", "having", "intersect", "into", "limit", "offset", "order", "qualify", "union", "where", "window"]);
 const SELECT_PROJECTION_MODIFIERS = new Set(["all", "distinct", "distinctrow"]);
 

@@ -13,6 +13,7 @@ import {
   isSqlLikeCompletionStatement,
   normalizeIdentifierPart,
   prepareSqlCompletionReplacement,
+  quotedCompletionFilterPrefix,
   recordCompletionSelection,
   shouldAutoOpenSqlCompletion,
   shouldChainSqlCompletionAfterAccept,
@@ -278,11 +279,18 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return true;
   }
 
-  function buildCompletionResult(sourceItems: Array<QueryCompletionItem | BatchColumnSelectionActionItem>, from: number, validFor?: RegExp, prefix?: string) {
+  function buildCompletionResult(sourceItems: Array<QueryCompletionItem | BatchColumnSelectionActionItem>, from: number, validFor?: RegExp, prefix?: string, queryText?: string) {
     const items = filterExcludedCompletions(sourceItems, excludedCompletionLabelSet(settingsStore.editorSettings.excludedCompletionItems));
     if (items.length === 0) return null;
-    const bypassFilter = !!prefix && shouldBypassCompletionFilter(prefix, items);
-    const resultItems = bypassFilter && prefix ? completionItemsForBypassedFilter(prefix, items) : items;
+    const matcherBypass = !!prefix && shouldBypassCompletionFilter(prefix, items);
+    // CodeMirror matches each label against `queryText` (the document span from
+    // `from` to the cursor). Inside a quoted identifier that span keeps the
+    // opening quote, so no label ever matches and the menu comes up empty
+    // (#12008). The provider already filtered by the unquoted prefix, so take
+    // over matching for exactly that case, like the Han/pinyin bypass does.
+    const quotedBypassPrefix = prefix && queryText ? quotedCompletionFilterPrefix(queryText, prefix) : undefined;
+    const bypassFilter = matcherBypass || !!quotedBypassPrefix;
+    const resultItems = matcherBypass && prefix ? completionItemsForBypassedFilter(prefix, items) : items;
     return {
       from,
       // Keep CodeMirror's live filtering enabled so an already-open menu follows the typed prefix.
@@ -323,7 +331,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           },
         ]
       : [];
-    return buildCompletionResult(actions.length > 0 ? [...replacement.items, ...actions] : replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+    return buildCompletionResult(actions.length > 0 ? [...replacement.items, ...actions] : replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix, fullDoc.slice(replacement.from, position));
   }
 
   // CodeMirror's built-in matcher only matches single-character queries against

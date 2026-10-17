@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { Upload, Download, ArrowDownUp, FolderPlus, FolderOpen, RefreshCw, ChevronsLeft, ChevronsDownUp, Trash2, FolderInput, Check, Minus, Square, X } from "@lucide/vue";
+import { Upload, Download, ArrowDownUp, FolderPlus, FolderOpen, RefreshCw, ChevronsLeft, ChevronsDownUp, Trash2, FolderInput, Check, Minus, Square, X, Server } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,7 @@ import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
 import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import type { QueryTab, TreeNode } from "@/types/database";
 
@@ -35,6 +36,7 @@ type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const connectionTreeRef = ref<InstanceType<typeof ConnectionTree>>();
@@ -62,6 +64,17 @@ const connectionTransferItems = computed(() => [
   },
 ]);
 const connectionTransferLabel = computed(() => t("sidebar.importExport"));
+const activeWindowConnection = computed(() => {
+  const tab = queryStore.tabs.find((item) => item.id === queryStore.activeTabId);
+  const connectionId = tab?.connectionId || connectionStore.activeConnectionId;
+  return connectionId ? connectionStore.getConfig(connectionId) : undefined;
+});
+const activeConnectionEndpoint = computed(() => {
+  const connection = activeWindowConnection.value;
+  if (!connection) return "";
+  const host = connection.host?.trim();
+  return host ? `${host}:${connection.port}` : "";
+});
 const connectionIdSet = computed(() => new Set(connectionStore.connections.map((connection) => connection.id)));
 const allConnectionIds = computed(() => connectionStore.connections.map((connection) => connection.id));
 const selectedConnectionIds = computed(() => (connectionStore.connectionMultiSelectActive ? connectionStore.selectedTreeNodeIds.filter((id) => connectionIdSet.value.has(id)) : []));
@@ -308,6 +321,10 @@ defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, 
       </div>
       <div class="flex-1 min-h-0">
         <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(nodes) => emit('add-to-ai', nodes)" />
+      </div>
+      <div v-if="activeConnectionEndpoint" data-sidebar-connection-endpoint class="flex shrink-0 items-center gap-1.5 border-t border-border/60 px-2.5 py-1.5 text-[11px] leading-none text-muted-foreground" :title="activeWindowConnection?.name">
+        <Server class="h-3 w-3 shrink-0" />
+        <span class="min-w-0 truncate font-mono">{{ activeConnectionEndpoint }}</span>
       </div>
       <PluginShortcutBar v-if="settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === 'sidebar-bottom'" position="sidebar-bottom" />
     </div>

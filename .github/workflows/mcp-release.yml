@@ -159,7 +159,7 @@ jobs:
         run: cargo check -p dbx-mcp -p dbx-cli --no-default-features
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b # v2.68.13
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.137
 
@@ -328,9 +328,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.18.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -581,9 +581,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.18.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'

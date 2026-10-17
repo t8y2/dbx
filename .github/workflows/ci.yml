@@ -233,14 +233,14 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b # v2.68.13
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.137
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.18.0"
 
       - name: Configure sccache
         shell: bash
@@ -322,7 +322,7 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.18.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -400,7 +400,7 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.18.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -832,7 +832,7 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-17
           components: rust-src
 
       - name: Setup MSVC
@@ -842,11 +842,11 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.15"
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.18.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -917,7 +917,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.18.0"
 
       - name: Configure sccache
         shell: bash
@@ -1035,7 +1035,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.18.0"
 
       - name: Configure sccache
         shell: bash
@@ -1518,7 +1518,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.18.0"
       - name: Configure sccache
         shell: bash
         env:
@@ -1604,7 +1604,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.25.x
+          go-version: 1.27.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
       - name: Native Go tests and target builds
         env:
@@ -1644,7 +1644,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.25.x
+          go-version: 1.27.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
         if: matrix.driver != 'tdengine'
       - name: Setup Rust

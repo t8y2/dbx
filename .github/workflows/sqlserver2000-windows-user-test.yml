@@ -48,7 +48,7 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-17
           components: rust-src
 
       - name: Rust cache

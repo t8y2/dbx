@@ -2751,7 +2751,8 @@ describe("queryStore hidden primary key editing", () => {
       [7, 7],
       [8, 8],
     ]);
-    expect(tab.result?.columns).toEqual(["NAME", "NAME"]);
+    // Duplicate result labels are disambiguated at the result boundary (#12452).
+    expect(tab.result?.columns).toEqual(["NAME", "NAME_1"]);
   });
 
   it.each(["SELECT * FROM events", "SELECT t.* FROM events t"])("preserves a real __dbx_row_num column across OceanBase wildcard pages: %s", async (sql) => {

@@ -52,12 +52,15 @@ const props = defineProps<{
   ignoreForeignKeyChecks?: boolean;
   /** Whether the target database is MySQL, the only engine that gets the option. */
   showIgnoreForeignKeyChecks?: boolean;
+  /** Skip failed statements and keep running the rest of the deploy script. */
+  continueOnError?: boolean;
 }>();
 
 const emit = defineEmits<{
   "update:deploySql": [sql: string];
   "update:deploySqlMode": [mode: "forward" | "rollback"];
   "update:ignoreForeignKeyChecks": [enabled: boolean];
+  "update:continueOnError": [enabled: boolean];
   back: [];
   deploy: [];
 }>();
@@ -394,6 +397,10 @@ function getObjectIconColor(kind: DiffObjectKind): string {
         <label v-if="showIgnoreForeignKeyChecks" class="flex items-center gap-1.5 text-xs" :class="executing ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'" :title="t('diff.ignoreForeignKeyChecksHint')">
           <input type="checkbox" class="accent-primary" :checked="ignoreForeignKeyChecks === true" :disabled="executing" @change="emit('update:ignoreForeignKeyChecks', ($event.target as HTMLInputElement).checked)" />
           {{ t("diff.ignoreForeignKeyChecks") }}
+        </label>
+        <label class="flex items-center gap-1.5 text-xs" :class="executing ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'" :title="t('diff.continueOnErrorHint')">
+          <input type="checkbox" class="accent-primary" :checked="continueOnError === true" :disabled="executing" @change="emit('update:continueOnError', ($event.target as HTMLInputElement).checked)" />
+          {{ t("diff.continueOnError") }}
         </label>
       </div>
       <div class="flex items-center gap-2">

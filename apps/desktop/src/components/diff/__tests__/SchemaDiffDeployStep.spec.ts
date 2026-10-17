@@ -54,8 +54,8 @@ vi.mock("codemirror", () => ({ basicSetup: [] }));
 
 const mountedApps: App[] = [];
 
-async function mountDeployStep(extraProps: Record<string, unknown> = {}, onIgnoreForeignKeyChecks?: (value: boolean) => void) {
-  const state = reactive({ ignoreForeignKeyChecks: false });
+async function mountDeployStep(extraProps: Record<string, unknown> = {}, onIgnoreForeignKeyChecks?: (value: boolean) => void, onContinueOnError?: (value: boolean) => void) {
+  const state = reactive({ ignoreForeignKeyChecks: false, continueOnError: false });
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(
@@ -70,9 +70,14 @@ async function mountDeployStep(extraProps: Record<string, unknown> = {}, onIgnor
           executing: false,
           ...extraProps,
           ignoreForeignKeyChecks: state.ignoreForeignKeyChecks,
+          continueOnError: state.continueOnError,
           "onUpdate:ignoreForeignKeyChecks": (value: boolean) => {
             state.ignoreForeignKeyChecks = value;
             onIgnoreForeignKeyChecks?.(value);
+          },
+          "onUpdate:continueOnError": (value: boolean) => {
+            state.continueOnError = value;
+            onContinueOnError?.(value);
           },
         }),
     }),
@@ -88,6 +93,39 @@ function foreignKeyCheckbox(container: HTMLElement): HTMLInputElement | null {
   const label = [...container.querySelectorAll<HTMLLabelElement>("label")].find((candidate) => candidate.textContent?.includes("diff.ignoreForeignKeyChecks"));
   return label?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? null;
 }
+
+function continueOnErrorCheckbox(container: HTMLElement): HTMLInputElement | null {
+  const label = [...container.querySelectorAll<HTMLLabelElement>("label")].find((candidate) => candidate.textContent?.includes("diff.continueOnError"));
+  return label?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? null;
+}
+
+describe("SchemaDiffDeployStep continue-on-error option", () => {
+  it("is offered unchecked by default and reports both states to the dialog", async () => {
+    const updates: boolean[] = [];
+    const { container, state } = await mountDeployStep({}, undefined, (value) => updates.push(value));
+
+    const checkbox = continueOnErrorCheckbox(container);
+    expect(checkbox).not.toBeNull();
+    expect(checkbox?.checked).toBe(false);
+    expect(checkbox?.closest("label")?.getAttribute("title")).toBe("diff.continueOnErrorHint");
+
+    checkbox!.checked = true;
+    checkbox!.dispatchEvent(new Event("change"));
+    await nextTick();
+    checkbox!.checked = false;
+    checkbox!.dispatchEvent(new Event("change"));
+    await nextTick();
+
+    expect(updates).toEqual([true, false]);
+    expect(state.continueOnError).toBe(false);
+  });
+
+  it("is disabled while the deploy is running", async () => {
+    const { container } = await mountDeployStep({ executing: true });
+
+    expect(continueOnErrorCheckbox(container)?.disabled).toBe(true);
+  });
+});
 
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();

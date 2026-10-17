@@ -1871,6 +1871,16 @@ fn mark_postgres_client_unnamed_statements(client: &deadpool_postgres::Client) {
     clients.insert(key, Arc::downgrade(statement_cache));
 }
 
+/// TBase (observed on v3.16.4.7) answers a request for binary result columns
+/// with text-format bytes for values read from tables, while values computed
+/// on the coordinator (a bare `SELECT 123::numeric`) are binary. Decoding that text as binary turns
+/// `numeric` into NULL and can misread other fixed-width types, so such
+/// servers are read through the text protocol only (issue #11601).
+/// OpenTenBase v2.6.0, the open-source branch, returns real binary values.
+fn postgres_server_ignores_binary_result_format(server_version: &str) -> bool {
+    server_version.contains("TBase")
+}
+
 fn postgres_typed_params<'a>(
     params: &[&'a (dyn tokio_postgres::types::ToSql + Sync)],
     param_types: &[Type],
@@ -2048,6 +2058,13 @@ async fn start_postgres_select_stream(
     force_unnamed: bool,
 ) -> Result<PostgresSelectStreamOutcome, PgError> {
     let client = &EncodingClient::new(client);
+    if postgres_client_requires_text_results(client).await {
+        let metadata = prepare_unnamed_select_metadata(client, sql).await?;
+        return Ok(PostgresSelectStreamOutcome::TextFallback {
+            column_types: metadata.column_types,
+            unsupported_type: "binary result format".to_string(),
+        });
+    }
     if force_unnamed || postgres_client_uses_unnamed_statements(client) {
         let metadata = prepare_unnamed_select_metadata(client, sql).await?;
         if let Some(unsupported_type) = metadata.unsupported_type {
@@ -2797,6 +2814,39 @@ fn postgres_notice_buffers() -> &'static Mutex<PostgresNoticeBuffers> {
     BUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Connections whose server ignores the binary result format. Each entry holds
+/// the connection's notice buffer weakly, only as a liveness token, so it
+/// expires with the connection like the notice buffer itself.
+fn postgres_text_result_connections() -> &'static Mutex<PostgresNoticeBuffers> {
+    static CONNECTIONS: OnceLock<Mutex<PostgresNoticeBuffers>> = OnceLock::new();
+    CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn mark_postgres_connection_text_results(key: &PostgresConnectionKey) {
+    let Some(buffer) = postgres_notice_buffers().lock().unwrap_or_else(|error| error.into_inner()).get(key).cloned()
+    else {
+        return;
+    };
+    let mut connections = postgres_text_result_connections().lock().unwrap_or_else(|error| error.into_inner());
+    connections.retain(|_, weak| weak.strong_count() > 0);
+    connections.insert(key.clone(), buffer);
+}
+
+async fn postgres_client_requires_text_results(client: &deadpool_postgres::Client) -> bool {
+    // Avoid resolving the connection identity for the common case of no such server.
+    if postgres_text_result_connections().lock().unwrap_or_else(|error| error.into_inner()).is_empty() {
+        return false;
+    }
+    let Some(key) = postgres_client_key(&EncodingClient::new(client)).await else {
+        return false;
+    };
+    postgres_text_result_connections()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&key)
+        .is_some_and(|weak| weak.strong_count() > 0)
+}
+
 /// Connection identity cache, keyed by the per-physical-connection statement
 /// cache pointer (same identity pattern as `postgres_single_schema_clients`).
 /// The `Weak` guards against pointer reuse: a new connection whose
@@ -2968,6 +3018,8 @@ where
             // is tried (issue #10955).
             let pg_config = pin_postgres_hostaddr(&pg_config).await;
             let (client, mut connection) = pg_config.connect(tls).await?;
+            let ignores_binary_results =
+                connection.parameter("server_version").is_some_and(postgres_server_ignores_binary_result_format);
             // No query can complete before the connection is being driven, so
             // the notice buffer is handed to the driver task through a slot
             // that is filled once the backend PID is known.
@@ -3015,9 +3067,13 @@ where
                     let buffer = Arc::new(Mutex::new(PostgresNoticeBuffer::default()));
                     let mut buffers = postgres_notice_buffers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     buffers.retain(|_, weak| weak.strong_count() > 0);
-                    buffers.insert(key, Arc::downgrade(&buffer));
+                    buffers.insert(key.clone(), Arc::downgrade(&buffer));
                     drop(buffers);
                     *notice_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(buffer);
+                    if ignores_binary_results {
+                        log::info!("[postgres][server_version] binary result format unsupported, using text protocol");
+                        mark_postgres_connection_text_results(&key);
+                    }
                 }
             }
 
@@ -11926,6 +11982,15 @@ mod tests {
     }
 
     #[test]
+    fn tbase_server_version_requires_text_results() {
+        assert!(postgres_server_ignores_binary_result_format(
+            "10.0 @ TBase_v3.16.4.7 (commit: afc4893aa) 2024-08-06 14:20:47"
+        ));
+        assert!(!postgres_server_ignores_binary_result_format("10.0 OpenTenBase V2"));
+        assert!(!postgres_server_ignores_binary_result_format("17.10 (Debian 17.10-1.pgdg12+1)"));
+    }
+
+    #[test]
     fn postgres_custom_other_type_requires_text_protocol() {
         assert!(pg_scalar_type_requires_text_protocol(8_880, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::Other));
@@ -16386,6 +16451,32 @@ mod tests {
         let client = pool.get().await.expect("checkout postgres");
         let timezone: String = client.query_one("SHOW timezone", &[]).await.unwrap().get(0);
         assert_ne!(timezone, "Invalid/DBX_Timezone");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn text_result_connection_reads_selects_through_text_protocol() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(5), "UTC")
+            .await
+            .expect("connect PostgreSQL database");
+        let client = pool.get().await.expect("checkout postgres");
+        assert!(!postgres_client_requires_text_results(&client).await);
+
+        let key = postgres_client_key(&client).await.expect("resolve connection identity");
+        mark_postgres_connection_text_results(&key);
+        assert!(postgres_client_requires_text_results(&client).await);
+        let result = execute_select_query(
+            &client,
+            "SELECT 532::numeric(18,0) AS a, '\\x0102'::bytea AS bin",
+            Instant::now(),
+            10,
+        )
+        .await
+        .expect("select through text protocol");
+        // The binary path renders bytea as `0x0102`; the PostgreSQL text form
+        // proves the statement was read through the simple query protocol.
+        assert_eq!(result.rows, vec![vec![serde_json::json!("532"), serde_json::json!("\\x0102")]]);
     }
 
     #[tokio::test]

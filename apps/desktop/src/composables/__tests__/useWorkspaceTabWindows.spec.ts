@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   context: { kind: "main", windowLabel: "main" },
+  isWindows: true,
   settings: { editorSettings: { crossWindowTabDragPreviewEnabled: true, tabPlacement: "top" } },
   tabs: [] as Array<{ id: string; title: string }>,
   listeners: new Map<string, (message: { payload: any }) => void>(),
@@ -28,6 +29,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/lib/app/windowContext", () => ({ resolveWindowContext: () => ({ ...mocks.context }) }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+vi.mock("@/lib/backend/platform", () => ({ isWindows: () => mocks.isWindows }));
 vi.mock("@/lib/common/utils", () => ({ uuid: () => "transfer-1" }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => mocks.settings }));
@@ -113,6 +115,7 @@ describe("useWorkspaceTabWindows", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.context = { kind: "main", windowLabel: "main" };
+    mocks.isWindows = true;
     mocks.settings.editorSettings.crossWindowTabDragPreviewEnabled = true;
     mocks.tabs.length = 0;
     mocks.calls.length = 0;
@@ -188,6 +191,14 @@ describe("useWorkspaceTabWindows", () => {
     expect(service.enabled.value).toBe(false);
     expect(service.startNativeDrag(tab as any, { clientX: 0, clientY: 0 } as PointerEvent, {} as any)).toBe(false);
     expect(mocks.invoke).not.toHaveBeenCalledWith("start_tab_drag_preview", expect.anything());
+  });
+
+  it("does not enable the Windows-only drag feature on other platforms", async () => {
+    mocks.isWindows = false;
+    const service = await mount();
+
+    expect(service.enabled.value).toBe(false);
+    expect(service.startNativeDrag({ id: "source", title: "SQL" } as any, { clientX: 0, clientY: 0 } as PointerEvent, {} as any)).toBe(false);
   });
 
   it("removes the source only after the target committed", async () => {

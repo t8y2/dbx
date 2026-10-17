@@ -5,6 +5,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { isWindows } from "@/lib/backend/platform";
 import { resolveWindowContext } from "@/lib/app/windowContext";
 import { acquireUpdateBarrier, assertUpdateSafe, beginUpdateSensitiveOperation } from "@/lib/app/updatePreparation";
 import { uuid } from "@/lib/common/utils";
@@ -47,7 +48,7 @@ export function useWorkspaceTabWindows(options: { requestClose(): void; assertCl
   const { toast } = useToast();
   const context = resolveWindowContext();
   const label = context.windowLabel;
-  const enabled = computed(() => isTauriRuntime() && (context.kind === "main" || context.kind === "workspace") && settingsStore.editorSettings.crossWindowTabDragPreviewEnabled);
+  const enabled = computed(() => isTauriRuntime() && isWindows() && (context.kind === "main" || context.kind === "workspace") && settingsStore.editorSettings.crossWindowTabDragPreviewEnabled);
   const targets = ref<Array<{ label: string; title: string }>>([]);
   const remoteDrop = ref<DropTarget | null>(null);
   const busyTabs = new Set<string>();

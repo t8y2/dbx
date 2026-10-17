@@ -8534,7 +8534,7 @@ onUnmounted(() => {
                 </div>
                 <Switch id="colorize-connection-tabs" v-model="editColorizeConnectionTabs" />
               </div>
-              <div v-if="!isWeb" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div v-if="!isWeb && isWindows()" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="cross-window-tab-drag-preview">{{ t("settings.crossWindowTabDragPreview") }}</Label>
                   <p class="text-xs text-muted-foreground">{{ t("settings.crossWindowTabDragPreviewDescription") }}</p>

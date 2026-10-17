@@ -38,6 +38,15 @@ impl HttpTunnelManager {
             return Ok(local_port);
         }
         let local_port = portpicker::pick_unused_port().ok_or("No available port")?;
+        log::info!(
+            "[http-tunnel] starting dbx_tcp connection_id={} local_port={} url={} target={}:{} timeout_secs={}",
+            connection_id,
+            local_port,
+            redacted_tunnel_url(tunnel_url),
+            remote_host,
+            remote_port,
+            connect_timeout_secs
+        );
         let listener = TcpListener::bind(("127.0.0.1", local_port))
             .await
             .map_err(|e| format!("Failed to bind HTTP tunnel local port: {e}"))?;
@@ -52,6 +61,52 @@ impl HttpTunnelManager {
             return Ok(*existing_port);
         }
 
+        tunnels.insert(connection_id.to_string(), (handle, local_port));
+        Ok(local_port)
+    }
+
+    pub async fn start_navicat_mysql_tunnel(
+        &self,
+        connection_id: &str,
+        tunnel_url: &str,
+        connect_timeout_secs: u64,
+        remote_host: &str,
+        remote_port: u16,
+        username: &str,
+        password: &str,
+        database: Option<&str>,
+    ) -> Result<u16, String> {
+        if let Some(local_port) = self.local_port(connection_id).await {
+            return Ok(local_port);
+        }
+        let local_port = portpicker::pick_unused_port().ok_or("No available port")?;
+        log::info!(
+            "[http-tunnel] starting navicat_mysql connection_id={} local_port={} url={} target={}:{} timeout_secs={}",
+            connection_id,
+            local_port,
+            redacted_tunnel_url(tunnel_url),
+            remote_host,
+            remote_port,
+            connect_timeout_secs
+        );
+        let listener = TcpListener::bind(("127.0.0.1", local_port))
+            .await
+            .map_err(|error| format!("Failed to bind Navicat MySQL tunnel local port: {error}"))?;
+        let endpoint = crate::navicat_mysql_tunnel::NavicatMysqlEndpoint::new(
+            tunnel_url,
+            remote_host,
+            remote_port,
+            username,
+            password,
+            database,
+            connect_timeout_secs,
+        )?;
+        let handle = tokio::spawn(crate::navicat_mysql_tunnel::serve(listener, endpoint));
+        let mut tunnels = self.tunnels.lock().await;
+        if let Some((_, existing_port)) = tunnels.get(connection_id) {
+            handle.abort();
+            return Ok(*existing_port);
+        }
         tunnels.insert(connection_id.to_string(), (handle, local_port));
         Ok(local_port)
     }
@@ -82,6 +137,16 @@ impl HttpTunnelManager {
             handle.abort();
         }
     }
+}
+
+fn redacted_tunnel_url(raw: &str) -> String {
+    reqwest::Url::parse(raw)
+        .map(|mut url| {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        })
+        .unwrap_or_else(|_| raw.trim().to_string())
 }
 
 struct HttpTunnelEndpoint {

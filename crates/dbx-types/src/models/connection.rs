@@ -570,11 +570,21 @@ pub struct HttpTunnelConfig {
     pub url: String,
     #[serde(default)]
     pub token: String,
+    #[serde(default)]
+    pub protocol: HttpTunnelProtocol,
     #[serde(default = "default_http_tunnel_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
     /// See [`SshTunnelConfig::profile_id`].
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpTunnelProtocol {
+    #[default]
+    DbxTcp,
+    NavicatMysql,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

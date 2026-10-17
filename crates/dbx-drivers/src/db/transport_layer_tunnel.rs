@@ -440,6 +440,7 @@ mod tests {
             enabled: true,
             url: url.to_string(),
             token: String::new(),
+            protocol: dbx_types::models::connection::HttpTunnelProtocol::DbxTcp,
             connect_timeout_secs: 10,
         })
     }

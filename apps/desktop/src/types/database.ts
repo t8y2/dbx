@@ -379,6 +379,7 @@ export interface HttpTunnelConfig {
   enabled?: boolean;
   url: string;
   token?: string;
+  protocol?: "dbx_tcp" | "navicat_mysql";
   connect_timeout_secs?: number;
   /** See {@link SshTunnelConfig.profile_id}. */
   profile_id?: string;

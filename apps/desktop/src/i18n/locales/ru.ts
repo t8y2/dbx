@@ -1820,6 +1820,11 @@ export default withEnglishFallback({
     cancelConnecting: "Отменить подключение",
     connectCancelled: "Подключение отменено",
     sshTotpCancelled: "Ввод одноразового кода отменён",
+    httpTunnelProtocol: "Протокол туннеля",
+    httpTunnelProtocolDbx: "Скрипт DBX TCP",
+    httpTunnelProtocolNavicat: "Navicat MySQL HTTP",
+    httpTunnelNavicatHint: "Поддерживается только MySQL; поддерживаются адреса HTTP/HTTPS, рекомендуется использовать HTTPS. Нельзя одновременно включать MySQL SSL или другой туннель.",
+    httpTunnelNavicatNoToken: "Протокол Navicat не использует токен",
   },
   editor: {
     duckdbDraining: "Предыдущий запрос DuckDB ещё завершается. Повторите попытку чуть позже.",

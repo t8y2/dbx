@@ -1821,6 +1821,11 @@ export default withEnglishFallback({
     mqttClientKeyPath: "用戶端私鑰路徑",
     mqttNoLocal: "禁止本機轉送",
     readOnlyExplanation: "唯讀模式：直接阻止目前連線的寫入操作，需要暫時解鎖後才能寫入。",
+    httpTunnelProtocol: "隧道協定",
+    httpTunnelProtocolDbx: "DBX TCP 指令碼",
+    httpTunnelProtocolNavicat: "Navicat MySQL HTTP",
+    httpTunnelNavicatHint: "僅支援 MySQL；支援 HTTP/HTTPS 位址，建議使用 HTTPS。不能同時啟用 MySQL SSL 或其他隧道。",
+    httpTunnelNavicatNoToken: "Navicat 通訊協定不使用 Token",
   },
   editor: {
     duckdbDraining: "上一筆 DuckDB 查詢仍在停止，請稍後重試。",

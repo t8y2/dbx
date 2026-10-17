@@ -1743,6 +1743,11 @@ export default withEnglishFallback({
     mqttDirectionFilterAll: "전체",
     mqttDirectionFilterReceived: "수신됨",
     mqttDirectionFilterSent: "발신됨",
+    httpTunnelProtocol: "터널 프로토콜",
+    httpTunnelProtocolDbx: "DBX TCP 스크립트",
+    httpTunnelProtocolNavicat: "Navicat MySQL HTTP",
+    httpTunnelNavicatHint: "MySQL만 지원합니다. HTTP/HTTPS 주소를 지원하며 HTTPS 사용을 권장합니다. MySQL SSL 또는 다른 터널을 동시에 활성화할 수 없습니다.",
+    httpTunnelNavicatNoToken: "Navicat 프로토콜은 Token을 사용하지 않습니다",
   },
   editor: {
     duckdbDraining: "이전 DuckDB 쿼리가 아직 중지 중입니다. 잠시 후 다시 시도해 주세요.",

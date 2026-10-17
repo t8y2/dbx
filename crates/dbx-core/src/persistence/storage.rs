@@ -11761,6 +11761,7 @@ mod tests {
             enabled: true,
             url: "https://bastion.example.com".to_string(),
             token: "tunnel-token".to_string(),
+            protocol: crate::models::connection::HttpTunnelProtocol::DbxTcp,
             connect_timeout_secs: 5,
             profile_id: String::new(),
         });

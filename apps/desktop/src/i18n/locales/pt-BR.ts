@@ -1820,6 +1820,11 @@ export default withEnglishFallback({
     pluginSshKeyPickerEmpty: "Nenhuma chave encontrada",
     pluginSshKeyEncrypted: "Criptografada",
     objectCacheRefreshFailed: "Falha ao atualizar o cache de objetos: {message}",
+    httpTunnelProtocol: "Protocolo de túnel",
+    httpTunnelProtocolDbx: "Script TCP DBX",
+    httpTunnelProtocolNavicat: "Navicat MySQL HTTP",
+    httpTunnelNavicatHint: "Somente MySQL é suportado; endereços HTTP/HTTPS são suportados, recomenda-se usar HTTPS. Não é possível habilitar MySQL SSL ou outro túnel ao mesmo tempo.",
+    httpTunnelNavicatNoToken: "O protocolo Navicat não usa Token",
   },
   editor: {
     duckdbDraining: "A consulta anterior do DuckDB ainda está sendo interrompida. Tente novamente em breve.",

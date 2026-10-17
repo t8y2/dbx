@@ -41,11 +41,13 @@ const advancedExpanded = ref(false);
 const messageSearchQuery = ref("");
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
 const kafkaStartPosition = ref<KafkaPeekStartPosition>("latest");
+const kafkaStartTimestamp = ref("");
 const kafkaMessageDisplayOrder = ref<KafkaMessageDisplayOrder>("newest");
 let messageRequestVersion = 0;
 
 const isKafka = computed(() => props.mqSystemKind === "kafka");
 const isKafkaOffsetMode = computed(() => kafkaStartPosition.value === "offset");
+const isKafkaTimestampMode = computed(() => kafkaStartPosition.value === "timestamp");
 const isMonitoring = computed(() => props.appearance === "monitoring");
 const normalizedMessageSearchQuery = computed(() => normalizeKafkaMessageSearchQuery(messageSearchQuery.value));
 const searchableMessages = computed(() =>
@@ -94,6 +96,11 @@ async function loadMessages() {
         if (parsedOffset == null) throw new Error(t("mqMessages.offsetMustBeNonNegativeIntRequired"));
         options.offset = parsedOffset;
         offset.value = String(parsedOffset);
+      }
+      if (isKafkaTimestampMode.value) {
+        const parsedTime = Date.parse(String(kafkaStartTimestamp.value));
+        if (!Number.isFinite(parsedTime)) throw new Error(t("mqMessages.timestampRequired"));
+        options.timestamp = parsedTime;
       }
     } else {
       if (partitionText !== "") {
@@ -223,8 +230,13 @@ watch(kafkaStartPosition, () => {
             <SelectItem value="latest">{{ t("mqMessages.kafkaLatest") }}</SelectItem>
             <SelectItem value="earliest">{{ t("mqMessages.kafkaEarliest") }}</SelectItem>
             <SelectItem value="offset">{{ t("mqMessages.kafkaOffset") }}</SelectItem>
+            <SelectItem value="timestamp">{{ t("mqMessages.kafkaTimestamp") }}</SelectItem>
           </SelectContent>
         </Select>
+      </label>
+      <label v-if="isKafka && isKafkaTimestampMode && !isMonitoring">
+        <span>{{ t("mqMessages.startTimestamp") }}</span>
+        <input v-model="kafkaStartTimestamp" data-testid="kafka-peek-start-timestamp" type="datetime-local" step="1" :disabled="loading" />
       </label>
       <label v-if="isKafka">
         <span>{{ t("mqMessages.timeOrder") }}</span>

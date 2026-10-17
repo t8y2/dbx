@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+/// Agent drivers can serialize an empty native slice as JSON `null` instead of
+/// `[]` (for example a Vastbase `UPDATE ... FROM` that returns no result
+/// columns). A present `null` must deserialize as an empty vector: one driver's
+/// serialization detail must not fail the whole agent call with
+/// "invalid type: null, expected a sequence".
+fn deserialize_vec_or_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// A data-grid statement whose BLOB values travel outside the executable SQL.
 /// The preview must match the caller's reviewed SQL before any statement runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,26 +596,28 @@ pub struct LargeValueCell {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryResult {
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub columns: Vec<String>,
     /// Database type name for each column, parallel to `columns`. May be empty
     /// when a driver cannot supply types (e.g. schemaless stores or fallback
     /// query paths); consumers must tolerate a shorter/empty vector.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub column_types: Vec<String>,
     /// Sortable for each column. Parallel to `columns`. Optional and may
     /// be shorter/empty when a driver cannot supply sortable information.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub column_sortables: Vec<bool>,
     /// Spatial reference metadata for geometry/geography cells. Kept outside
     /// `rows` so displayed, copied, exported, and edited values remain WKT.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default", skip_serializing_if = "Vec::is_empty")]
     pub spatial_columns: Vec<SpatialColumn>,
     /// Per-cell SRID metadata, parallel to `rows`: `spatial_values[row][column]`
     /// is the SRID of that cell's geometry value (`None` for non-spatial cells
     /// or unknown SRID). Unlike `spatial_columns` (a column-level hint), every
     /// geometry value keeps its own SRID so mixed-SRID results stay correct.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default", skip_serializing_if = "Vec::is_empty")]
     pub spatial_values: Vec<Vec<Option<u32>>>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub rows: Vec<Vec<serde_json::Value>>,
     pub affected_rows: u64,
     pub execution_time_ms: u128,
@@ -627,7 +642,7 @@ pub struct QueryResult {
     /// Messages emitted by the database server while executing the statement
     /// (notices, warnings, info messages). Empty for drivers that do not
     /// capture server messages.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default", skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<QueryMessage>,
 }
 
@@ -1671,5 +1686,51 @@ mod tests {
         let deserialized: super::QueryResult =
             serde_json::from_value(serde_json::to_value(bigint_result_sample()).unwrap()).unwrap();
         assert_eq!(deserialized.rows[0][0], serde_json::json!("1391198305898897409"));
+    }
+
+    /// Agent drivers may serialize empty native slices as JSON `null` (seen on
+    /// Vastbase `UPDATE ... FROM`, #11668). A present null must mean "empty",
+    /// not a contract violation.
+    #[test]
+    fn query_result_treats_null_vectors_from_agents_as_empty() {
+        let deserialized: super::QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": null,
+            "column_types": null,
+            "column_sortables": null,
+            "spatial_columns": null,
+            "spatial_values": null,
+            "rows": null,
+            "affected_rows": 3,
+            "execution_time_ms": 7,
+            "messages": null
+        }))
+        .expect("null vectors should deserialize as empty");
+
+        assert!(deserialized.columns.is_empty());
+        assert!(deserialized.column_types.is_empty());
+        assert!(deserialized.column_sortables.is_empty());
+        assert!(deserialized.spatial_columns.is_empty());
+        assert!(deserialized.spatial_values.is_empty());
+        assert!(deserialized.rows.is_empty());
+        assert!(deserialized.messages.is_empty());
+        assert_eq!(deserialized.affected_rows, 3);
+        assert_eq!(deserialized.execution_time_ms, 7);
+    }
+
+    #[test]
+    fn query_result_still_deserializes_real_columns_and_rows() {
+        let deserialized: super::QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": ["id", "name"],
+            "column_types": ["int4", "text"],
+            "column_sortables": [true, true],
+            "rows": [[1, "a"]],
+            "affected_rows": 1,
+            "execution_time_ms": 2
+        }))
+        .unwrap();
+
+        assert_eq!(deserialized.columns, ["id", "name"]);
+        assert_eq!(deserialized.rows.len(), 1);
+        assert_eq!(deserialized.rows[0][1], serde_json::json!("a"));
     }
 }

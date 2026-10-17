@@ -3307,26 +3307,45 @@ where
 
     let data = match redis_type.as_str() {
         "string" => {
-            // Ask for one extra byte so large values are detected without ever
-            // materializing the complete payload in the backend or IPC layer.
-            let v: RedisRawValue = redis::cmd("GETRANGE")
-                .arg(key)
-                .arg(0)
-                .arg(preview_limit_bytes as i64)
-                .query_async(con)
-                .await
-                .map_err(|e| e.to_string())?;
-            let mut bytes =
-                redis_value_to_bytes(v).ok_or_else(|| "Redis string payload is not byte-addressable".to_string())?;
-            let truncated = bytes.len() > preview_limit_bytes;
-            if truncated {
-                bytes.truncate(preview_limit_bytes);
+            // GETRANGE in spans no larger than `STRING_PREVIEW_MAX_BYTES`: some
+            // Redis-compatible servers (e.g. TongRDS) reject a larger span, so a
+            // configured preview above the default budget is fetched in chunks
+            // (issue #11792). Filling the budget exactly means the value may
+            // continue — STRLEN settles that without materializing the rest in
+            // the backend or IPC layer.
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut at_budget = false;
+            while bytes.len() < preview_limit_bytes {
+                let span = (preview_limit_bytes - bytes.len()).min(STRING_PREVIEW_MAX_BYTES);
+                let start = bytes.len() as i64;
+                let chunk: RedisRawValue = redis::cmd("GETRANGE")
+                    .arg(key)
+                    .arg(start)
+                    .arg(start + span as i64 - 1)
+                    .query_async(con)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let chunk = redis_value_to_bytes(chunk)
+                    .ok_or_else(|| "Redis string payload is not byte-addressable".to_string())?;
+                let chunk_len = chunk.len();
+                bytes.extend_from_slice(&chunk);
+                if chunk_len < span {
+                    break;
+                }
+                if bytes.len() >= preview_limit_bytes {
+                    at_budget = true;
+                    break;
+                }
             }
-            let total_bytes = if truncated {
+            let total_bytes = if at_budget {
                 redis::cmd("STRLEN").arg(key).query_async(con).await.ok()
             } else {
                 Some(bytes.len() as u64)
             };
+            let truncated = total_bytes.map_or(at_budget, |total| total > preview_limit_bytes as u64);
+            if truncated {
+                bytes.truncate(preview_limit_bytes);
+            }
             RedisValueData::String { content: redis_blob_from_bytes(&bytes), total_bytes, truncated }
         }
         "list" => {
@@ -7351,6 +7370,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn string_value_range_stays_within_the_64kib_server_limit() {
+        // Some Redis-compatible servers reject a GETRANGE span above 64 KiB;
+        // the old budget + 1 request asked for 65537 bytes (TongRDS answered
+        // "0-65537 is out of bounds").
+        let mut con = FakeRedisConnection::new(vec![bulk("string"), RedisRawValue::Int(-1), bulk("hello")]);
+
+        super::get_value(&mut con, b"message").await.unwrap();
+
+        let getrange =
+            con.commands.iter().find(|packed| packed.contains("\r\nGETRANGE\r\n")).expect("GETRANGE is issued");
+        assert!(getrange.contains(&format!("\r\n$5\r\n{}\r\n", super::STRING_PREVIEW_MAX_BYTES - 1)), "{getrange:?}");
+        assert!(!getrange.contains(&format!("\r\n$5\r\n{}\r\n", super::STRING_PREVIEW_MAX_BYTES)), "{getrange:?}");
+    }
+
+    #[tokio::test]
+    async fn string_value_at_the_preview_budget_is_not_flagged_truncated() {
+        let payload = vec![b'a'; super::STRING_PREVIEW_MAX_BYTES];
+        let mut con = FakeRedisConnection::new(vec![
+            bulk("string"),
+            RedisRawValue::Int(-1),
+            RedisRawValue::BulkString(payload.clone()),
+            RedisRawValue::Int(super::STRING_PREVIEW_MAX_BYTES as i64),
+        ]);
+
+        let value = super::get_value(&mut con, b"exact").await.unwrap();
+
+        let RedisValueData::String { content, total_bytes, truncated } = &value.data else {
+            panic!("expected a String value");
+        };
+        assert_eq!(*total_bytes, Some(super::STRING_PREVIEW_MAX_BYTES as u64));
+        assert!(!truncated);
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&content.raw_base64).unwrap();
+        assert_eq!(decoded.len(), super::STRING_PREVIEW_MAX_BYTES);
+        assert_eq!(con.command_count("GETRANGE"), 1);
+        assert_eq!(con.command_count("STRLEN"), 1);
+    }
+
+    #[tokio::test]
     async fn string_value_truncates_large_payloads_before_ipc_serialization() {
         let preview_with_sentinel = vec![0xFF; super::STRING_PREVIEW_MAX_BYTES + 1];
         let total_bytes = 45 * 1024 * 1024;
@@ -7379,8 +7436,10 @@ mod tests {
     #[tokio::test]
     async fn value_preview_limit_controls_the_range_and_exact_boundary() {
         for limit in [1024, 256 * 1024, super::VALUE_PREVIEW_MAX_BYTES] {
-            // Large limit uses a small payload to avoid allocating 64 MiB in a unit test.
-            let size = limit.min(256 * 1024);
+            // A short read ends the value: the request spans min(limit, 64 KiB) and the
+            // fake answers one byte less, so the total needs no STRLEN round trip.
+            let span = limit.min(super::STRING_PREVIEW_MAX_BYTES);
+            let size = span - 1;
             let mut con = FakeRedisConnection::new(vec![
                 bulk("string"),
                 RedisRawValue::Int(-1),
@@ -7400,14 +7459,22 @@ mod tests {
             assert!(!truncated);
             assert_eq!(total_bytes, Some(size as u64));
             assert_eq!(content.raw_base64, base64::engine::general_purpose::STANDARD.encode(vec![b'x'; size]));
-            assert!(con.commands.iter().any(|command| command.contains(&format!("\r\n{limit}\r\n"))));
+            let getrange =
+                con.commands.iter().find(|packed| packed.contains("\r\nGETRANGE\r\n")).expect("GETRANGE is issued");
+            assert!(getrange.contains(&format!("\r\n{}\r\n", span - 1)), "{getrange:?}");
+            assert!(!getrange.contains(&format!("\r\n{}\r\n", span)), "{getrange:?}");
+            assert_eq!(con.command_count("GETRANGE"), 1);
             assert_eq!(con.command_count("GET"), 0);
+            assert_eq!(con.command_count("STRLEN"), 0);
         }
+        // A configured limit above the 64 KiB span cap is fetched in 64 KiB chunks,
+        // and filling the budget exactly asks STRLEN for the real size.
         let limit = 128 * 1024;
         let mut con = FakeRedisConnection::new(vec![
             bulk("string"),
             RedisRawValue::Int(-1),
-            RedisRawValue::BulkString(vec![0xff; limit + 1]),
+            RedisRawValue::BulkString(vec![0xff; super::STRING_PREVIEW_MAX_BYTES]),
+            RedisRawValue::BulkString(vec![0xff; super::STRING_PREVIEW_MAX_BYTES]),
             RedisRawValue::Int(200_000),
         ]);
         let value = super::get_value_scoped_with_preview_limit(
@@ -7422,6 +7489,8 @@ mod tests {
         assert!(truncated);
         assert_eq!(total_bytes, Some(200_000));
         assert_eq!(base64::engine::general_purpose::STANDARD.decode(content.raw_base64).unwrap().len(), limit);
+        assert_eq!(con.command_count("GETRANGE"), 2);
+        assert_eq!(con.command_count("STRLEN"), 1);
     }
 
     #[tokio::test]

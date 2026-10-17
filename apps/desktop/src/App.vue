@@ -3996,6 +3996,15 @@ async function handleQuickOpenSelect(item: any) {
     return;
   }
 
+  // Plugin connections have their own destination (a contributed workbench or
+  // filesystem provider). Route them through the same lifecycle used by the
+  // sidebar instead of treating them like database connections and attempting
+  // to load a database tree.
+  if (item.type === "connection" && connectionStore.getConfig(item.connectionId)?.db_type === "plugin") {
+    await openConnectionQuery(item.connectionId);
+    return;
+  }
+
   // For all other types, set the active connection
   connectionStore.activeConnectionId = item.connectionId;
 

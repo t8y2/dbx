@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::{
     file_identity, guess_content_type, DroppedFile, DroppedFilesResult, PluginFileHandle, PluginFileState,
-    MAX_DROPPED_FILES, MAX_DROP_FOLDER_DEPTH, MAX_DROP_FOLDER_FILES,
+    MAX_DROPPED_FILES, MAX_DROP_FOLDER_DEPTH, MAX_DROP_FOLDER_FILES, MAX_DROP_PATHS,
 };
 
 /// One regular file collected from a drop: absolute path, '/'-separated path
@@ -39,9 +39,23 @@ pub(super) fn open_dropped_plugin_files(
         log::warn!("plugin_file_open_dropped requires a plugin id");
         return DroppedFilesResult { drop_id, files: Vec::new(), truncated: false };
     }
-    let mut handles = Vec::new();
+    // The claim list length is renderer input even though each claim must
+    // still match a native-drop grant: cap it so one open call cannot make
+    // the host scan grants and emit warn lines without bound. Excess claims
+    // surface as partial delivery, like every other cap.
     let mut truncated = false;
-    for path in paths {
+    let claimed: &[String] = if paths.len() > MAX_DROP_PATHS {
+        log::warn!(
+            "plugin_file_open_dropped got {} claimed paths for plugin \"{plugin_id}\"; only the first {MAX_DROP_PATHS} were processed",
+            paths.len()
+        );
+        truncated = true;
+        &paths[..MAX_DROP_PATHS]
+    } else {
+        paths
+    };
+    let mut handles = Vec::new();
+    for path in claimed {
         if !state.consume_dropped_path(webview_label, path) {
             // Indistinguishable from a vanished path to the caller; the host log is
             // where a probe attempt can be told apart from a stale drop grant.

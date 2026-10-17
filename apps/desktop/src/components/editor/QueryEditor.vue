@@ -88,7 +88,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
-import { buildSelectStarExpansion, selectStarResultColumnsMatch } from "@/lib/sql/sqlCompletion";
+import { buildSelectStarExpansion, selectStarResultColumnsMatch, type SqlCompletionColumn, type SqlCompletionContext, type SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
 
 import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
@@ -145,7 +145,7 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isMacOS } from "@/lib/backend/platform";
 import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
-import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
+import { queryEditorStatementDatabaseType } from "@/lib/mongo/mongoSql";
 
 const props = defineProps<QueryEditorProps>();
 
@@ -157,7 +157,12 @@ function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
 
 function queryEditorSelectionLanguage(): "sql" | "text" {
   const databaseType = props.databaseType;
+  if (databaseType === "mongodb" && props.mongoQueryLanguage === "sql") return "sql";
   return databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "solr" || databaseType === "victoriametrics" ? "text" : "sql";
+}
+
+function statementDatabaseType() {
+  return queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage);
 }
 
 const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
@@ -1156,12 +1161,12 @@ function emitContextObjectAction(action: QueryContextObjectAction) {
 }
 
 function executableStatementRangeStartingAt(currentView: EditorViewType, lineFrom: number) {
-  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
+  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, statementDatabaseType(), sqlStatementParameterOptions());
   return executableStatementRangeStartingAtLine(executableStatementRangeCache, lineFrom);
 }
 
 function executableStatementRangeAtPosition(currentView: EditorViewType, position: number): SqlTextRange | null {
-  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
+  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, statementDatabaseType(), sqlStatementParameterOptions());
   return executableStatementRangeAtCursor(executableStatementRangeCache, position);
 }
 
@@ -1717,7 +1722,7 @@ async function formatCurrentSql() {
   try {
     let formatted: string;
     let formattedAsSql = false;
-    if (props.databaseType === "mongodb") {
+    if (props.databaseType === "mongodb" && props.mongoQueryLanguage !== "sql") {
       formatted = formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter);
     } else {
       const esRequest = detectAndFormatElasticsearchRequests(source, props.databaseType, settingsStore.editorSettings.sqlFormatter.tabWidth);
@@ -2547,7 +2552,7 @@ watch([() => props.clientSessionId, () => props.completionContextVersion], () =>
 });
 
 watch(
-  [() => props.tabId, () => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlDriverProfile],
+  [() => props.tabId, () => props.databaseType, () => props.dialect, () => props.syntaxDialect, () => props.mongoQueryLanguage, sqlDriverProfile],
   () => {
     executableStatementRangeCache = null;
     statementBoundaries.invalidate();

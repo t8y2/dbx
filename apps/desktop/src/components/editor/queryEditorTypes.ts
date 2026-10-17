@@ -3,6 +3,7 @@ import type { DatabaseType, QueryResult } from "@/types/database";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
+import type { MongoQueryLanguage } from "@/lib/mongo/mongoSql";
 
 export interface QueryEditorProps {
   modelValue: string;
@@ -40,6 +41,8 @@ export interface QueryEditorProps {
   initialSelection?: { anchor: number; head: number };
   revealRequest?: { id: number; line: number; column?: number };
   statementExecutionMarkers?: StatementExecutionMarker[];
+  /** MongoDB query tabs: SQL mode uses the SQL statement splitter and formatter. */
+  mongoQueryLanguage?: MongoQueryLanguage;
 }
 
 export type CompletionMetadataScope = Pick<SqlCompletionScope, "database" | "schema">;

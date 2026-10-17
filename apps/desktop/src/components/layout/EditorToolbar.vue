@@ -31,6 +31,7 @@ import {
   WrapText,
   RefreshCw,
   UserRound,
+  Copy,
 } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { Button } from "@/components/ui/button";
@@ -58,7 +59,10 @@ import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { useToast } from "@/composables/useToast";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
+import type { MongoQueryLanguage } from "@/lib/mongo/mongoSql";
 
 const props = defineProps<{
   activeTab: QueryTab;
@@ -126,9 +130,23 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const showMongoSqlToggle = computed(() => props.activeConnection?.db_type === "mongodb" && props.activeTab.mode === "query");
+const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? "shell");
+
+function setMongoQueryLanguage(language: MongoQueryLanguage) {
+  queryStore.setMongoQueryLanguage(props.activeTab.id, language);
+}
+
+async function copyGeneratedMongoShell() {
+  const shell = props.activeTab.mongoGeneratedShell;
+  if (!shell) return;
+  await copyToClipboard(shell);
+  toast(t("toolbar.mongoShellCopied"));
+}
 const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas, isSchemaAware } = useSchemaOptions();
 
@@ -586,6 +604,22 @@ defineExpose({
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : executeShortcutTooltip }}</TooltipContent>
+      </Tooltip>
+      <div v-if="showMongoSqlToggle" class="ml-1 flex h-6 shrink-0 items-center rounded-md border bg-muted/40 p-0.5" role="group" :aria-label="t('toolbar.mongoQueryLanguage')">
+        <button type="button" class="h-5 rounded px-1.5 text-[11px] font-medium" :class="mongoQueryLanguage !== 'sql' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :aria-pressed="mongoQueryLanguage !== 'sql'" @click="setMongoQueryLanguage('shell')">
+          {{ t("toolbar.mongoShellMode") }}
+        </button>
+        <button type="button" class="h-5 rounded px-1.5 text-[11px] font-medium" :class="mongoQueryLanguage === 'sql' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :aria-pressed="mongoQueryLanguage === 'sql'" @click="setMongoQueryLanguage('sql')">
+          {{ t("toolbar.mongoSqlMode") }}
+        </button>
+      </div>
+      <Tooltip v-if="showMongoSqlToggle && mongoQueryLanguage === 'sql' && activeTab.mongoGeneratedShell">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" :aria-label="t('toolbar.copyMongoShell')" @click="copyGeneratedMongoShell">
+            <Copy class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.copyMongoShell") }}</TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>

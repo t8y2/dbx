@@ -2506,6 +2506,13 @@ export interface QueryTab {
     collection: string;
     idColumn: "_id";
   };
+  /**
+   * MongoDB query tabs only. "sql" compiles the editor text to a mongo-shell
+   * command before the existing execution path runs it. Absent means shell.
+   */
+  mongoQueryLanguage?: "shell" | "sql";
+  /** Shell text produced by the latest SQL-mode execution. Not persisted. */
+  mongoGeneratedShell?: string;
   mongoBucket?: {
     bucketName: string;
   };

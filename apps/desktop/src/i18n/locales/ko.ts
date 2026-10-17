@@ -653,6 +653,11 @@ export default withEnglishFallback({
     alwaysOnTop: "항상 위에 표시",
     alwaysOnTopOff: "항상 위 표시 해제",
     blockDangerousRedisCommands: "위험한 명령 차단",
+    mongoQueryLanguage: "MongoDB 쿼리 언어",
+    mongoShellMode: "Shell",
+    mongoSqlMode: "SQL",
+    copyMongoShell: "생성된 셸 복사",
+    mongoShellCopied: "Mongo 셸 명령이 복사되었습니다",
     saveSqlFile: "원본 파일에 저장",
     pluginCenter: "플러그인 센터",
   },
@@ -2180,6 +2185,8 @@ export default withEnglishFallback({
   queryMessages: {
     empty: "메시지 없음",
     code: "코드: {code}",
+    mongoShell: "생성된 mongo shell",
+    copyMongoShell: "셸 복사",
   },
   chart: {
     title: "차트",

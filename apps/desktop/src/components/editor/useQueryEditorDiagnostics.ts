@@ -357,6 +357,10 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       return;
     }
     if (props.databaseType === "mongodb") {
+      if (props.mongoQueryLanguage === "sql") {
+        setSemanticDiagnostics([]);
+        return;
+      }
       // Shell commands have no SQL semantics; surface the parser's own diagnosis instead of waiting for Run.
       const cursor = currentView.state.selection.main.head;
       setSemanticDiagnostics(buildMongoSyntaxDiagnostics(sql, cursor));
@@ -543,6 +547,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
   async function loadSqlUnknownObjectSpans(currentView: EditorViewType): Promise<SqlUnknownObjectSpan[]> {
     if (!SQL_UNKNOWN_OBJECT_HIGHLIGHT_ENABLED || !runtime.editorIsActive) return [];
     if (options.queryEditorSelectionLanguage() !== "sql") return [];
+    if (props.databaseType === "mongodb") return [];
     if (shouldSkipSqlSemanticDiagnostics()) return [];
     if (props.databaseType && NON_SQL_UNKNOWN_OBJECT_DATABASE_TYPES.has(props.databaseType)) return [];
     if (!props.connectionId || props.database == null) return [];

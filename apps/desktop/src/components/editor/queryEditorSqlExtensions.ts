@@ -16,6 +16,7 @@ import { createSqlAliasHighlights } from "@/lib/editor/codemirrorSqlAliasHighlig
 import { createDbxCodeMirrorSqlDialect, supportsQueryEditorSqlLanguage } from "@/lib/editor/codemirrorSqlDialect";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
 import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
+import { queryEditorStatementDatabaseType } from "@/lib/mongo/mongoSql";
 import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
@@ -331,7 +332,9 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
   const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });
 
-  codeMirrorRuntime.buildSqlLanguageExtension = () => [
+  codeMirrorRuntime.buildSqlLanguageExtension = () => {
+    const commentDatabaseType = queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage);
+    return [
     supportsQueryEditorSqlLanguage(props.databaseType)
       ? langSql.sql({
           dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
@@ -339,11 +342,12 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
       : [],
     // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
     // comment marker that toggleLineComment reads from language data.
-    Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(props.databaseType) }])),
+    Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(commentDatabaseType) }])),
     Prec.highest(EditorState.languageData.of(() => queryEditorWordLanguageData(props.databaseType))),
     // The SQL grammar does not tokenize `//`, so those comments are highlighted by hand.
-    queryEditorLineCommentToken(props.databaseType) === "//" ? shellLineCommentHighlightPlugin : [],
+    queryEditorLineCommentToken(commentDatabaseType) === "//" ? shellLineCommentHighlightPlugin : [],
   ];
+  };
 
   const MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS = 32;
 
@@ -517,7 +521,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
         let range = currentExecutableStatementRange(view);
         if (!range) {
           const cursorLine = view.state.doc.lineAt(cursorPos);
-          cache.value = executableStatementRangeCacheForDoc(cache.value, view.state.doc, props.databaseType, sqlStatementParameterOptions());
+          cache.value = executableStatementRangeCacheForDoc(cache.value, view.state.doc, queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage), sqlStatementParameterOptions());
           // Find ranges that overlap the cursor line, then expand to include
           // adjacent ranges (handles parser fragments from edge cases like
           // ultra-long comments splitting a statement).

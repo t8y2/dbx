@@ -76,6 +76,7 @@ export interface SavedOpenTab {
   tableComment?: QueryTab["tableComment"];
   tableMeta?: QueryTab["tableMeta"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
+  mongoQueryLanguage?: QueryTab["mongoQueryLanguage"];
   resultEvicted?: boolean;
   resultCacheKey?: string;
   resultRuns?: SavedQueryResultRun[];
@@ -226,6 +227,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.tableComment !== undefined ? { tableComment: tab.tableComment } : {}),
     tableMeta: tab.tableMeta,
     ...(tab.mongoEditTarget !== undefined ? { mongoEditTarget: tab.mongoEditTarget } : {}),
+    ...(tab.mongoQueryLanguage === "sql" ? { mongoQueryLanguage: "sql" as const } : {}),
     ...(tab.mode !== "data" && tab.resultEvicted ? { resultEvicted: true } : {}),
     ...(tab.mode !== "data" && tab.resultEvicted && tab.resultCacheKey !== undefined ? { resultCacheKey: tab.resultCacheKey } : {}),
     ...(tab.mode === "query" && tab.resultRuns?.length
@@ -289,6 +291,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
       return {
         ...tab,
         mode,
+        mongoQueryLanguage: tab.mongoQueryLanguage === "sql" ? "sql" : undefined,
         sql: typeof tab.sql === "string" ? tab.sql : "",
         isExecuting: false,
         redisMonitorActive: false,

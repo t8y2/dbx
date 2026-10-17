@@ -628,6 +628,11 @@ export default withEnglishFallback({
     alwaysOnTop: "Поверх других окон",
     alwaysOnTopOff: "Не оставлять поверх других окон",
     blockDangerousRedisCommands: "Блокировать опасные команды",
+    mongoQueryLanguage: "Язык запросов MongoDB",
+    mongoShellMode: "Shell",
+    mongoSqlMode: "SQL",
+    copyMongoShell: "Копировать сгенерированный shell",
+    mongoShellCopied: "Команда mongo shell скопирована",
     multiDbExecute: "Выполнение на нескольких БД",
   },
   multiDbExecute: {
@@ -2273,6 +2278,8 @@ export default withEnglishFallback({
   queryMessages: {
     empty: "Нет сообщений",
     code: "Код: {code}",
+    mongoShell: "Сгенерированный mongo shell",
+    copyMongoShell: "Копировать shell",
   },
   chart: {
     title: "Диаграмма",

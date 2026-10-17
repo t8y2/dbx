@@ -700,6 +700,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (!props.connectionId) return null;
     const fullDoc = currentState.doc.toString();
     if (props.databaseType === "mongodb") {
+      if (props.mongoQueryLanguage === "sql") return null;
       return provideMongoCompletions(currentState, position, explicit);
     }
     if (props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb") return null;

@@ -33,7 +33,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3"
 serde_yaml_ng = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 log = "0.4"
 tauri = { version = "2.10.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-log = "2"
@@ -50,27 +50,27 @@ tauri-plugin-dialog = "2.7.0"
 tauri-plugin-fs = "2.5.0"
 tauri-plugin-single-instance = "2.4.2"
 tauri-plugin-shell = "2"
-tauri-plugin-updater = "=2.10.1"
+tauri-plugin-updater = "=2.14.0"
 tauri-plugin-process = "2"
 tauri-plugin-window-state = "2"
 redis = { version = "1.7.1", features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "cluster-async"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 portpicker = "0.1.1"
-tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "sql-browser-tokio"] }
+tiberius = { version = "0.13.0", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "sql-browser-tokio"] }
 tokio-util = { version = "0.7", features = ["compat"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 regex = "1"
-grep = "0.3"
+grep = "0.4"
 ignore = "0.4"
 futures = "0.3"
 mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
 percent-encoding = "2"
-minisign-verify = "0.2.5"
+minisign-verify = "0.3.0"
 semver = "1"
-sha2 = "0.10"
-russh = "0.60"
+sha2 = "0.11"
+russh = "0.64"
 csv = "1.4.0"
-calamine = "0.30.1"
+calamine = "0.36.0"
 zip = "4.6.1"
 dbx-core = { path = "../crates/dbx-core", default-features = false }
 dbx-mcp = { path = "../crates/dbx-mcp", default-features = false, features = ["duckdb-sidecar", "mq-admin"] }
@@ -81,7 +81,7 @@ axum = { version = "0.8", features = ["ws"] }
 font-kit = "0.14.3"
 tauri-plugin-clipboard-manager = "2.3.2"
 sys-locale = "0.3"
-sysinfo = { version = "0.32", features = ["system"] }
+sysinfo = { version = "0.39", features = ["system"] }
 
 [dev-dependencies]
 dbx-core = { path = "../crates/dbx-core", default-features = false, features = ["test-support"] }
@@ -93,14 +93,14 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSAp
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSBundle", "NSData", "NSString"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libloading = "0.8"
-gtk = "0.18"
+libloading = "0.9"
+gtk = "0.19"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # 与 vendored wry / tauri-runtime-wry 同版本（Cargo.lock 只有一份 0.38.x），用于在
 # 快捷键录入态运行时切换 WebView2 的浏览器加速键开关（见 commands/shortcut_recording.rs）。
-webview2-com = "0.38"
+webview2-com = "0.39"
 # `cast`（Settings → Settings3 的 QueryInterface）来自 windows-core 的 Interface trait，
 # 版本与 vendored wry / webview2-com-sys 一致。
-windows-core = "0.61"
+windows-core = "0.100"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

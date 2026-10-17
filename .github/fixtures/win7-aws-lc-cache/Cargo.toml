@@ -5,6 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
-aws-lc-sys = { version = "=0.43.0", features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "=0.46.0", features = ["prebuilt-nasm"] }
 
 [workspace]

@@ -19,6 +19,30 @@ async function format(sql: string, overrides: Partial<SqlFormatterSettings> = {}
 const lines = (...rows: string[]) => rows.join("\n");
 
 describe("sql layout", () => {
+  it.each([
+    ["SELECT 1\nSELECT 2", "SELECT 1\nSELECT 2"],
+    ["SELECT a FROM t\nSELECT b FROM u", "SELECT a\nFROM t\nSELECT b\nFROM u"],
+    ["SELECT 1\nUPDATE t SET a = 2", "SELECT 1\nUPDATE t\nSET a = 2"],
+    ["UPDATE t SET a = 1\nUPDATE t SET a = 2", "UPDATE t\nSET a = 1\nUPDATE t\nSET a = 2"],
+    ["SET @a = 1\nSELECT @a", "SET @a = 1\nSELECT @a"],
+    ["DELETE FROM t\nINSERT INTO t VALUES (1)", "DELETE FROM t\nINSERT INTO t\nVALUES (1)"],
+    ["SELECT 1\nSHOW TABLES", "SELECT 1\nSHOW TABLES"],
+  ])("keeps unseparated statements on different lines (#12523): %s", async (sql, expected) => {
+    const formatted = await format(sql);
+    expect(formatted).toBe(expected);
+    expect(await format(formatted)).toBe(formatted);
+    expect(formatted).not.toContain(";");
+  });
+
+  it.each([
+    ["SELECT (SELECT 1) AS value", "SELECT (SELECT 1) AS value"],
+    ["WITH t AS (SELECT 1 AS a) SELECT a FROM t", "WITH t AS (SELECT 1 AS a) SELECT a FROM t"],
+    ["SELECT 'SELECT UPDATE' AS value", "SELECT 'SELECT UPDATE' AS value"],
+    ["UPDATE t SET a = 1 WHERE id = 2", "UPDATE t SET a = 1 WHERE id = 2"],
+  ])("keeps a single short statement compact: %s", async (sql, expected) => {
+    expect(await format(sql)).toBe(expected);
+  });
+
   it("formats a query with a derived table (#827)", async () => {
     const sql = lines(
       "SELECT loc_id, loc_name, loc_type, delivery_emp_num, update_time",

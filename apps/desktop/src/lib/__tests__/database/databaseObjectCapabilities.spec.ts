@@ -173,4 +173,11 @@ describe("databaseObjectCapabilities", () => {
     expect(schemaDiffRoutineObjectTypesIntersection("postgres", "opengauss")).toEqual(["PROCEDURE", "FUNCTION"]);
     expect(sidebarObjectKindsForDatabase("sqlserver")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION"]);
   });
+
+  it("exposes tables and views for GBase 8s and Informix", () => {
+    for (const dbType of ["gbase", "gbase8s", "informix"] as const) {
+      expect(sidebarObjectKindsForDatabase(dbType)).toEqual(["TABLE", "VIEW"]);
+      expect(databaseObjectCapabilities(dbType).sourceReadable).toEqual(["VIEW"]);
+    }
+  });
 });

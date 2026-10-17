@@ -122,7 +122,7 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
     databaseType === "goldendb"
   )
     return `\`${name.replace(/`/g, "``")}\``;
-  if (databaseType === "informix" && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) return name;
+  if ((databaseType === "informix" || databaseType === "gbase8s") && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) return name;
   if (databaseType === "neo4j") return quoteCypherIdentifier(name);
   if (databaseType === "sqlserver") return `[${name.replace(/\]/g, "]]")}]`;
   return `"${name.replace(/"/g, '""')}"`;
@@ -134,7 +134,7 @@ export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined,
     return `${identifierQuote}${name.replaceAll(identifierQuote, identifierQuote + identifierQuote)}${identifierQuote}`;
   }
   if ((databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "postgres") && identifierQuote != null) return quoteGaussDbJdbcIdentifier(name, identifierQuote);
-  if ((databaseType === "kingbase" || databaseType === "informix" || databaseType === "spanner") && identifierQuote != null) {
+  if ((databaseType === "kingbase" || databaseType === "informix" || databaseType === "gbase8s" || databaseType === "spanner") && identifierQuote != null) {
     if (!identifierQuote) return name;
     return `${identifierQuote}${name.replaceAll(identifierQuote, identifierQuote + identifierQuote)}${identifierQuote}`;
   }
@@ -205,7 +205,7 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
   const { databaseType, driverProfile, identifierQuote, schema, tableName, catalog, database, includeDatabaseName, quoteIdentifiers } = options;
   const quoteTable = (name: string) => (quoteIdentifiers === false ? quoteTableIdentifierIfNeeded(databaseType, name, identifierQuote) : quoteTableIdentifier(databaseType, name));
   const quoteTableData = (name: string) => (quoteIdentifiers === false ? quoteTableIdentifierIfNeeded(databaseType, name, identifierQuote) : quoteTableDataIdentifier(databaseType, name, identifierQuote));
-  if (databaseType === "informix" && driverProfile?.trim().toLowerCase() === "gbase8s") {
+  if (databaseType === "gbase8s" || (databaseType === "informix" && driverProfile?.trim().toLowerCase() === "gbase8s")) {
     return quoteTableData(tableName);
   }
   // Doris / StarRocks multi-catalog: address external-catalog tables with the

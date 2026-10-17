@@ -5,6 +5,7 @@ import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.TestSupport;
@@ -335,6 +336,51 @@ class Gbase8sAgentTest {
         Assertions.assertEquals("Product catalog", tables.get(0).getComment());
         Assertions.assertTrue(sql.get(0).contains("LEFT JOIN syscomms"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("t.owner = ?"), sql.get(0));
+    }
+
+    @Test
+    void listObjectsLoadsGbase8sTablesAndViews() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"tabname", "tabtype", "comments"},
+            new Object[][]{
+                {"users", "T", "User table"},
+                {"v_active_users", "V", "Active users view"}
+            }
+        )));
+
+        List<ObjectInfo> objects = agent.listObjects("root");
+
+        Assertions.assertEquals(2, objects.size());
+        Assertions.assertEquals("users", objects.get(0).getName());
+        Assertions.assertEquals("TABLE", objects.get(0).getObject_type());
+        Assertions.assertEquals("v_active_users", objects.get(1).getName());
+        Assertions.assertEquals("VIEW", objects.get(1).getObject_type());
+        Assertions.assertTrue(sql.get(0).contains("FROM systables"));
+    }
+
+    @Test
+    void constrainedListObjectsFiltersGbase8sViews() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"tabname", "tabtype", "comments"},
+            new Object[][]{
+                {"v_orders", "V", null}
+            }
+        )));
+
+        List<ObjectInfo> objects = agent.listObjects(
+            "gbasedbt",
+            new MetadataListConstraints(null, null, null, List.of("VIEW"))
+        );
+
+        Assertions.assertEquals(1, objects.size());
+        Assertions.assertEquals("v_orders", objects.get(0).getName());
+        Assertions.assertEquals("VIEW", objects.get(0).getObject_type());
+        Assertions.assertTrue(sql.get(0).contains("FROM systables"));
+        Assertions.assertTrue(sql.get(0).contains("tabtype IN ('V')"));
     }
 
     @Test

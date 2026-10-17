@@ -5,7 +5,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import type { TreeNode } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
-import { effectiveDatabaseTypeForConnection, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema } from "@/lib/database/jdbcDialect";
+import { effectiveDatabaseTypeForConnection, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionTableSqlSchema } from "@/lib/database/jdbcDialect";
 import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS, tableMetadataToDataTabMeta } from "@/lib/metadata/tableMetadataCache";
 import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, isDataTabMetadataLifecycleStale, type DataTabOpenMode, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
@@ -392,10 +392,10 @@ export function useSidebarDataOpenRuntime() {
       const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
-        driverProfile: config?.driver_profile,
+        driverProfile: config?.driver_profile || (config?.db_type === "gbase8s" ? "gbase8s" : undefined),
         serverVersion: connectionStore.getConfig(node.connectionId)?.database_info?.productVersion,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
-        schema: tableSchema,
+        schema: connectionTableSqlSchema(config, tableSchema),
         database: node.database,
         tableName: node.label,
         tableType,

@@ -2468,7 +2468,7 @@ async function openSidebarMultiTableDdlTab(targets: Array<TreeNode & { connectio
       return buildViewDdl({
         databaseType: databaseTypeForNode(target),
         identifierQuote: connectionStore.connectionIdentifierQuote?.(target.connectionId),
-        schema,
+        schema: connectionTableSqlSchema(connectionStore.getConfig(target.connectionId), schema),
         name: target.label,
         source: result.source,
       });
@@ -2830,10 +2830,11 @@ function dropObjectSqlOptions(): DropObjectSqlOptions | null {
 
 function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | null {
   if (node.type !== "view" && node.type !== "materialized_view" && node.type !== "procedure" && node.type !== "function" && node.type !== "event") return null;
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
   return {
     databaseType: tableStructureDatabaseTypeForNode(node),
     objectType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : node.type === "function" ? "FUNCTION" : "EVENT",
-    schema: node.schema,
+    schema: connectionTableSqlSchema(config, node.schema),
     name: node.objectName || node.label,
     signature: node.signature,
     // Cloud Spanner's dialect decides the quote; the static per-type mapping cannot.

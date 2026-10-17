@@ -181,6 +181,8 @@ describe("jdbc dialect inference", () => {
 
   it("omits the metadata owner from GBase 8s table SQL", () => {
     expect(connectionTableSqlSchema({ db_type: "gbase8s", driver_profile: "gbase8s" }, "gbasedbt")).toBeUndefined();
+    expect(connectionTableSqlSchema({ db_type: "gbase8s" }, "gbasedbt")).toBeUndefined();
+    expect(connectionTableSqlSchema({ db_type: "informix", driver_profile: "gbase8s" }, "gbasedbt")).toBeUndefined();
     expect(connectionTableSqlSchema({ db_type: "gbase", driver_profile: "gbase8a" }, "analytics")).toBe("analytics");
     expect(connectionTableSqlSchema({ db_type: "informix", driver_profile: "informix" }, "informix")).toBe("informix");
   });

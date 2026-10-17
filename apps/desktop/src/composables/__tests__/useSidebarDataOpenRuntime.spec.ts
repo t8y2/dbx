@@ -113,6 +113,7 @@ vi.mock("@/lib/database/jdbcDialect", () => ({
   effectiveDatabaseTypeForConnection: () => mocks.databaseType,
   connectionObjectTreeNodeSchema: (_config: unknown, _database: string, schema?: string) => schema,
   connectionObjectTreeQuerySchema: (_config: unknown, database: string, schema?: string) => schema ?? database,
+  connectionTableSqlSchema: (_config: unknown, schema?: string) => schema,
 }));
 
 vi.mock("@/lib/metadata/tableMetadataCache", async (importOriginal) => {

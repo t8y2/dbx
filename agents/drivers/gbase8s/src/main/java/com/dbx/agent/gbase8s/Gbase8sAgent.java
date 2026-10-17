@@ -9,8 +9,10 @@ import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
+import com.dbx.agent.StandardJdbcMetadata;
 import com.dbx.agent.TableInfo;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -499,6 +501,19 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             return listTables(schema);
         }
         return queryConstrainedTables(schema, normalized);
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema) {
+        return listObjects(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        String resolved = schema == null ? "" : schema.trim();
+        List<TableInfo> tables = listTables(resolved, normalized);
+        return normalized.filterObjects(StandardJdbcMetadata.INSTANCE.listObjects(tables, resolved));
     }
 
     @Override

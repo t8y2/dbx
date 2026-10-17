@@ -348,7 +348,7 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
 
 /** GBase 8s reports the table owner as a schema, but does not accept it in table DML/DDL names. */
 export function connectionTableSqlSchema(connection: JdbcDialectConnection | undefined, schema?: string): string | undefined {
-  if (connection?.db_type === "gbase8s") return undefined;
+  if (connection?.db_type === "gbase8s" || isGbase8sProfile(connection?.driver_profile)) return undefined;
   return schema;
 }
 

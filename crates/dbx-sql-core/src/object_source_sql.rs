@@ -537,7 +537,9 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         return Ok(vec![executable_oracle_routine_ddl(source)]);
     }
 
-    if input.database_type == DatabaseType::Informix && input.object_type == ObjectSourceKind::View {
+    if matches!(input.database_type, DatabaseType::Informix | DatabaseType::Gbase8s)
+        && input.object_type == ObjectSourceKind::View
+    {
         return Ok(executable_informix_view_statements(input.schema.as_deref(), &input.name, source));
     }
 
@@ -743,7 +745,9 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
         // Some providers return full view DDL instead of a bare SELECT body.
         return ensure_semicolon(source.trim());
     }
-    if input.database_type == DatabaseType::Informix && input.object_type == ObjectSourceKind::View {
+    if matches!(input.database_type, DatabaseType::Informix | DatabaseType::Gbase8s)
+        && input.object_type == ObjectSourceKind::View
+    {
         return editable_informix_view_ddl(input.schema.as_deref(), &input.name, &source);
     }
     if is_mysql_like(input.database_type)
@@ -2681,6 +2685,19 @@ mod tests {
         });
 
         assert_eq!(sql, "CREATE VIEW demo_view as select id from users;");
+    }
+
+    #[test]
+    fn gbase8s_view_source_opened_for_editing_shows_unqualified_create_view() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Gbase8s,
+            object_type: ObjectSourceKind::View,
+            schema: Some("gbasedbt".to_string()),
+            name: "v_orders".to_string(),
+            source: "create view \"gbasedbt\".v_orders as select id from orders".to_string(),
+        });
+
+        assert_eq!(sql, "CREATE VIEW v_orders as select id from orders;");
     }
 
     #[test]

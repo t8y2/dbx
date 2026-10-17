@@ -557,6 +557,9 @@ pub fn table_data_qualified_table_name(
             .map(|schema| format!("{}.{table}", quote_iris_identifier(schema, identifier_quote)))
             .unwrap_or(table);
     }
+    if database_type == Some(DatabaseType::Gbase8s) {
+        return quote_table_data_identifier(database_type, table_name, identifier_quote);
+    }
     if !uses_connection_identifier_quote(database_type, identifier_quote) {
         return qualified_table_name(database_type, schema, table_name);
     }

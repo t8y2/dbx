@@ -119,6 +119,7 @@ import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind, type CellValueGenerationOptions } from "@/lib/dataGrid/cellValueGeneration";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridClipboardText, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridExternalValue, mongoDocumentGridInputValue, mongoDocumentGridNumericValue, mongoDocumentRelaxedExtendedJson } from "@/lib/mongo/mongoDocumentValues";
 import { compactHeaderColumnType, formatMetadataColumnTypeLabel, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType, shortHeaderTypeName } from "@/lib/dataGrid/dataGridColumnType";
+import { dedupeResultColumnNames } from "@/lib/sql/resultColumnNames";
 import { dataGridCellTextClass, dataGridTypeVisualClass } from "@/lib/dataGrid/dataGridCellTextVisual";
 import { DATA_GRID_TYPE_COLOR_KEYS, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import {
@@ -2419,6 +2420,10 @@ const filteredGoToColumns = computed(() => {
   return filterDataGridColumnLookupItems(goToColumnItems.value, goToColumnSearch.value, goToColumnMatchMode.value);
 });
 const visibleColumns = computed(() => visibleColumnIndexes.value.map((index) => props.result.columns[index]));
+// Header labels only: SQL generation, sorting, transfer and export keep the raw
+// result columns so duplicate-label handling (#12214) and INSERT targets stay
+// correct. Duplicate labels are disambiguated for display only (#12452).
+const displayColumnNames = computed(() => dedupeResultColumnNames(props.result.columns));
 const visibleColumnIndexIndicators = computed(() =>
   visibleColumns.value.map((column) => {
     if (!showIndexIndicatorsInHeader.value) return false;
@@ -14823,7 +14828,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   <DataGridColumnHeader
                     v-for="col in renderedGridColumns"
                     :key="`${col.name}-${col.actualColIdx}`"
-                    :name="col.name"
+                    :name="displayColumnNames[col.actualColIdx] ?? col.name"
                     :actual-column-index="col.actualColIdx"
                     :visible-column-index="col.visibleColIdx"
                     :class="{ 'crosshair-column': !!crosshairTarget?.columnCrosshair && crosshairTarget.visibleColIdx === col.visibleColIdx }"

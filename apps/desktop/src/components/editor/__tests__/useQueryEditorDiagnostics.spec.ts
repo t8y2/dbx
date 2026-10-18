@@ -8,6 +8,7 @@ import { useQueryEditorDiagnostics } from "../useQueryEditorDiagnostics";
 import type { SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
 import type { QueryEditorProps } from "../queryEditorTypes";
 import type { QueryResult, SqlReferenceAnalysis } from "@/types/database";
+import { graphQueryDatabases } from "@/lib/graph/graphQueryProfiles";
 
 const { analyze, buildDiagnostics } = vi.hoisted(() => ({ analyze: vi.fn(), buildDiagnostics: vi.fn() }));
 vi.mock("@/lib/backend/api", () => ({ analyzeSqlReferences: analyze }));
@@ -88,6 +89,14 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
 }
 
 describe("QueryEditor diagnostic scheduling ownership", () => {
+  it.each(graphQueryDatabases)("does not send %s editor text to SQL semantic diagnostics", async (databaseType) => {
+    const { diagnostics, metadata } = createHarness({ databaseType });
+    diagnostics.scheduleSemanticDiagnostics(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(analyze).not.toHaveBeenCalled();
+    expect(buildDiagnostics).not.toHaveBeenCalled();
+    expect(metadata.ensureColumnsForTable).not.toHaveBeenCalled();
+  });
   it("preserves the unqualified quoted OceanBase reference and selected schema through metadata loading", async () => {
     const sql = 'SELECT MISSING FROM "Alias"';
     const { diagnostics, metadata } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP", modelValue: sql });

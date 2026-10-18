@@ -425,7 +425,7 @@ pub struct RedisClusterPool {
     pub node_routes: Vec<RedisNodeRoute>,
     pub tls: bool,
     pub tls_insecure: bool,
-    pub tls_certificates: Option<redis::TlsCertificates>,
+    pub tls_certificates: Option<Box<redis::TlsCertificates>>,
     pub username: String,
     pub password: String,
     scan_sessions: Box<Mutex<RedisClusterScanSessions>>,
@@ -1030,7 +1030,7 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
                     node_routes,
                     tls: config.ssl,
                     tls_insecure: config.redis_tls_insecure(),
-                    tls_certificates: certificates.clone(),
+                    tls_certificates: certificates.clone().map(Box::new),
                     username: auth.username,
                     password: auth.password,
                     scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
@@ -1103,7 +1103,7 @@ pub async fn connect_routed_cluster(
         node_routes,
         tls: config.ssl,
         tls_insecure: config.redis_tls_insecure(),
-        tls_certificates: load_redis_tls_certificates(config)?,
+        tls_certificates: load_redis_tls_certificates(config)?.map(Box::new),
         username: auth.username,
         password: auth.password,
         scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
@@ -2244,7 +2244,7 @@ pub async fn cluster_master_nodes(pool: &RedisClusterPool) -> Result<Vec<RedisNo
             &pool.seed_routes,
             pool.tls,
             pool.tls_insecure,
-            pool.tls_certificates.as_ref(),
+            pool.tls_certificates.as_deref(),
             &pool.username,
             &pool.password,
         )
@@ -2255,7 +2255,7 @@ pub async fn cluster_master_nodes(pool: &RedisClusterPool) -> Result<Vec<RedisNo
         &pool.seed_nodes,
         pool.tls,
         pool.tls_insecure,
-        pool.tls_certificates.as_ref(),
+        pool.tls_certificates.as_deref(),
         &pool.username,
         &pool.password,
     )
@@ -2426,7 +2426,7 @@ async fn native_cluster_database_connection(pool: &RedisClusterPool, db: u32) ->
         .collect::<Result<Vec<_>, _>>()?;
     let mut builder = ClusterClient::builder(nodes).database_id(i64::from(db));
     if let Some(certificates) = &pool.tls_certificates {
-        builder = builder.certs(certificates.clone());
+        builder = builder.certs((**certificates).clone());
     }
     let client = builder.build().map_err(|error| error.to_string())?;
     let initialized = tokio::time::timeout(connection_timeout(), client.get_async_connection())
@@ -2494,7 +2494,7 @@ pub async fn connect_cluster_node_in_db(
 ) -> Result<redis::aio::MultiplexedConnection, String> {
     let client = build_redis_client(
         cluster_node_connection_info(pool, advertised_endpoint, db)?,
-        pool.tls_certificates.as_ref(),
+        pool.tls_certificates.as_deref(),
     )?;
     connect_client(client).await
 }

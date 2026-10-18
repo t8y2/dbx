@@ -1,17 +1,22 @@
 import { commonGraphFunctions, functionDefinitions, graphListPredicates, graphReduce, temporalFunctions, type GraphQueryProfile } from "../graphQueryProfile";
 
 // Neo4j 5 built-ins: https://neo4j.com/docs/cypher-manual/5/functions/
-const keywords =
+const reservedWords =
   "ALL ALTER AND AS ASC ASCENDING ASSERT BY CALL CASE COMMIT COMPOSITE CONSTRAINT CONSTRAINTS CONTAINS CREATE CSV CURRENT DATABASE DATABASES DELETE DESC DESCENDING DETACH DISTINCT DROP ELSE END ENDS EXCEPT EXECUTABLE EXISTS EXPLAIN FALSE FIELDTERMINATOR FOR FOREACH FROM FUNCTIONS HEADERS IF IN INDEX INDEXES IS JOIN LIMIT LOAD MATCH MERGE NODE NODETACH NOT NULL OF ON OPTIONAL OR ORDER PERIODIC PRIVILEGES PROCEDURE PROCEDURES PROFILE REMOVE RENAME REQUIRE RETURN ROLE ROLES SCAN SERVER SERVERS SET SETTINGS SHOW SKIP START STARTS THEN TO TRANSACTION TRANSACTIONS TRUE UNION UNIQUE UNWIND USE USER USERS USING WHEN WHERE WITH XOR YIELD".split(
     " ",
   );
+// Cypher 5.19+ path selectors/restrictors (SHORTEST/WALK/TRAIL/ACYCLIC/SIMPLE) and index
+// DDL words (LOOKUP/FULLTEXT) complete and highlight as keywords but stay out of
+// reservedWords; POINT/RANGE/TEXT/GROUP are intentionally omitted because they are common
+// variable/property names and keyword-ness breaks bound-variable resolution.
+const keywords = [...new Set([...reservedWords, ..."ACYCLIC FULLTEXT LOOKUP SHORTEST SIMPLE TRAIL WALK".split(" ")])];
 
 const profile: GraphQueryProfile = {
   databaseType: "neo4j",
   language: "Cypher",
   lineComment: "//",
   keywords,
-  reservedWords: keywords,
+  reservedWords,
   functions: [
     ...commonGraphFunctions,
     ...functionDefinitions({

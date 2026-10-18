@@ -2832,10 +2832,7 @@ pub async fn unlock_connection_writes(
     connection_id: String,
     duration_secs: u64,
 ) -> Result<WriteUnlockState, String> {
-    if !state.configs.read().await.contains_key(&connection_id) {
-        return Err("Connection not found".to_string());
-    }
-    let remaining_ms = state.write_unlock_windows.unlock(&connection_id, duration_secs).await?;
+    let remaining_ms = dbx_core::query::unlock_connection_writes_core(&state, &connection_id, duration_secs).await?;
     Ok(WriteUnlockState { remaining_ms })
 }
 

@@ -85,6 +85,7 @@ pub async fn start_transfer(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let operation_timeout_secs = body.operation_timeout_secs;
     let req = body.request;
+    transfer::check_data_charset_transfer(&state.app, &req).await.map_err(AppError::from)?;
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
     transfer::validate_transfer_operation_timeout(operation_timeout_secs).map_err(AppError::from)?;
 

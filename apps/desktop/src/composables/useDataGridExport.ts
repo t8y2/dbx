@@ -2,6 +2,7 @@ import { computed, type ComputedRef, type Ref, createApp, watch, getCurrentScope
 import { getActivePinia } from "pinia";
 import { useI18n } from "vue-i18n";
 import { useDataGridExtractor } from "@/composables/useDataGridExtractor";
+import { mysqlDataCharsetAllowsExport } from "@/lib/connection/mysqlDataCharset";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/lib/export/saveTextFile";
@@ -97,6 +98,7 @@ export interface MongoCopyUpdateTarget {
 }
 
 export interface UseDataGridExportOptions {
+  mysqlDataCharsetReadOnly?: ComputedRef<boolean>;
   columns: ComputedRef<string[]>;
   displayItems: ComputedRef<RowItem[]>;
   allColumns?: ComputedRef<string[]>;
@@ -217,6 +219,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   const { toast } = useToast();
   const tracker = useExportTracker();
   const exportGuard: ActionActivationGuard = {};
+  function allowExport(format: string): boolean {
+    if (mysqlDataCharsetAllowsExport(options.mysqlDataCharsetReadOnly?.value === true, format)) return true;
+    toast(t("connection.mysqlDataCharsetExportHint"), 5000);
+    return false;
+  }
 
   const {
     columns,
@@ -322,6 +329,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function materializeExportSnapshot(result: QueryResult, isResultCurrent: () => boolean): Promise<QueryResult["rows"]> {
+    if (result.large_value_cells?.some((cell) => cell.pending_decode)) throw new Error(t("grid.largeValuePendingDecodeExport"));
     if (!result.large_value_cells?.some((cell) => cell.value_ref)) return result.rows;
     const originalConnectionId = connectionId.value;
     const originalDatabase = database.value;
@@ -561,6 +569,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
       if (result) {
+        if (result.large_value_cells?.some((cell) => cell.pending_decode)) throw new Error(t("grid.largeValuePendingDecodeExport"));
         const projected = databaseType.value === "mongodb" || hasColumnSubset ? projectResultColumns(result, targetColumns, projectionSourceIndexes) : undefined;
         const exportedColumns = projected?.columns ?? result.columns;
         const exportedColumnTypes = projected?.columnTypes ?? result.column_types ?? [];
@@ -956,6 +965,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   const { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
+    allowExtractor: (extractor) => !options.mysqlDataCharsetReadOnly?.value || (!extractor.startsWith("sql-") && extractor !== "where-clause"),
     columns,
     displayItems,
     allColumns,
@@ -1028,6 +1038,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
+    if (!allowExport(extractor === "csv-with-headers" ? "csv" : extractor)) return false;
     let exported = false;
     await runExclusiveExport(async () => {
       if (!canCopyWithExtractor(extractor, extractorOptions)) return;
@@ -1314,6 +1325,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportMarkdown(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+    if (!allowExport("markdown")) return;
     const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
@@ -1339,6 +1351,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportCurrentPageMarkdown(columnIndexes?: number[]) {
+    if (!allowExport("markdown")) return;
     await runExclusiveExport(async () => {
       try {
         let outputPath = exportFileName("export-page", "md", { page: true });
@@ -1361,6 +1374,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportTxt(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+    if (!allowExport("txt")) return;
     const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
@@ -1378,6 +1392,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportHtml(target?: ExportTargetParam, openAfterExport = false, columnIndexesParam?: number[]) {
+    if (!allowExport("html")) return;
     const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
@@ -1405,6 +1420,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportCurrentPageHtml(columnIndexes?: number[]) {
+    if (!allowExport("html")) return;
     await runExclusiveExport(async () => {
       try {
         let outputPath = exportFileName("export-page", "html", { page: true });
@@ -1427,6 +1443,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportCurrentPageTxt(columnIndexes?: number[]) {
+    if (!allowExport("txt")) return;
     await runExclusiveExport(async () => {
       try {
         const result = await resultToExport({ columnIndexes }, undefined, false);
@@ -1980,6 +1997,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportSql(target?: ExportTargetParam, columnIndexesParam?: number[]) {
+    if (!allowExport("sql")) return;
     const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       const exportId = uuid();
@@ -2096,6 +2114,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportCurrentPageSql(columnIndexes?: number[]) {
+    if (!allowExport("sql")) return;
     await runExclusiveExport(async () => {
       const chosenColumns = columnIndexes !== undefined ? columnIndexes.map((i) => columns.value[i]).filter((c): c is string => !!c) : undefined;
       const selectedSqlExportOptions = (await showSqlInsertModeDialog({ columns: sqlExportChoices(false, chosenColumns) })) as SqlExportOptions | SqlInsertMode | null;

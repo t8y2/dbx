@@ -2518,6 +2518,7 @@ for line in sys.stdin:
             column_types: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows,
             affected_rows,

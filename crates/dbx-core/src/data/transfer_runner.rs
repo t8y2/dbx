@@ -83,6 +83,25 @@ where
     let app = ProgressEmitter::new(progress_callback);
 
     super::transfer::with_transfer_operation_timeout(operation_timeout_secs, async {
+        if let Err(error) = super::transfer::check_data_charset_transfer(&state, &request).await {
+            emit_terminal_progress(
+                &app,
+                history.as_ref(),
+                TransferProgress {
+                    transfer_id: transfer_id.clone(),
+                    table: String::new(),
+                    table_index: 0,
+                    total_tables,
+                    rows_transferred: 0,
+                    total_rows: None,
+                    status: TransferStatus::Error,
+                    error: Some(error),
+                    terminal: true,
+                },
+            )
+            .await;
+            return;
+        }
         // Sort tables by FK dependency so referenced tables are transferred first,
         // and keep the foreign key metadata fetched along the way — MySQL-family
         // targets reuse it per table below instead of re-querying it.

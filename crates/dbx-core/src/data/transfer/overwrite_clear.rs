@@ -28,6 +28,7 @@ pub async fn clear_foreign_key_linked_overwrite_targets(
     target_db_type: DatabaseType,
     target_pool_key: &str,
 ) -> Result<HashSet<String>, String> {
+    super::check_data_charset_transfer(state, request).await?;
     if request.mode != TransferMode::Overwrite
         || request.drop_target_before_create
         || tables.len() < 2

@@ -924,6 +924,16 @@ pub async fn export_query_result_core(
     on_progress: impl Fn(TableExportProgress),
 ) -> Result<(), String> {
     let mut session_id: Option<String> = None;
+    crate::query::mysql_data_charset_policy::check_export(state, &request.connection_id, &request.format).await?;
+    if crate::query::mysql_data_charset_policy::enabled_for_connection(state, &request.connection_id).await? {
+        crate::query::check_read_only_for_connection_multi(
+            state,
+            &request.connection_id,
+            &[request.sql.as_str(), request.query_base_sql.as_str()],
+        )
+        .await?;
+        crate::query::check_read_only_for_connection_multi(state, &request.connection_id, &request.setup_sql).await?;
+    }
     let result = export_query_result_core_inner(state, request, cancel_token, &on_progress, &mut session_id).await;
 
     if let Some(session_id) = session_id {
@@ -1660,7 +1670,7 @@ async fn try_export_mysql_query_result_stream(
 
     let progress_clock = Arc::new(StreamProgressClock::new());
     let progress_clock_for_stream = progress_clock.clone();
-    let stream_future = crate::db::mysql::stream_query_result_on_conn(
+    let stream_future = crate::db::mysql::stream_query_result_on_conn_with_data_charset(
         &mut conn,
         &request.sql,
         bare,
@@ -1668,6 +1678,7 @@ async fn try_export_mysql_query_result_stream(
         mysql_dialect,
         &export_cancelled,
         format.eq_ignore_ascii_case("sql"),
+        pool.data_charset(),
         |item| {
             if export_cancelled.load(Ordering::SeqCst)
                 || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())

@@ -1012,6 +1012,16 @@ export default withEnglishFallback({
   },
 
   connection: {
+    mysqlDataCharsetWriteBlocked: "El modo de compatibilidad del juego de caracteres impone acceso de solo lectura. No permite escrituras ni desbloqueo temporal.",
+    mysqlDataCharsetUnsupported: "dataCharset solo es compatible con el perfil MySQL nativo, no con MariaDB, TiDB ni otros perfiles de base de datos.",
+    mysqlDataCharsetCloseTabs: "Antes de cambiar el juego de caracteres, cierre las pestañas de datos/estructura y borre los resultados de esta conexión. Finalice consultas y transacciones activas. Se conservan los borradores SQL; la conexión anterior se desconecta antes de guardar.",
+    mysqlDataCharset: "Juego de caracteres de datos (solo lectura)",
+    mysqlDataCharsetHint: "Para bytes heredados GBK/GB18030/BIG5 en columnas de texto latin1. Requiere la sesión predeterminada o charset=utf8mb4 explícito. No es detección automática: puede reinterpretar texto occidental normal; si falla la decodificación, conserva el texto original.",
+    mysqlDataCharsetReadOnly: "Este modo es de solo lectura y no se puede desbloquear. Desactiva edición, importaciones y comandos SET de sesión. No convierte condiciones WHERE/LIKE en chino. Use una cuenta con solo permiso SELECT para protección del servidor.",
+    mysqlDataCharsetExportHint: "Solo admite exportaciones de presentación CSV, JSON y XLSX decodificadas, no copias reversibles de bytes. Las exportaciones/copias SQL y transferencias de datos están desactivadas.",
+    mysqlDataCharsetInvalid: "Use una sola opción dataCharset: GBK, GB18030 o BIG5; elimínela para restaurar el comportamiento predeterminado.",
+    mysqlDataCharsetConflict:
+      "dataCharset requiere la sesión predeterminada o una única opción charset=utf8mb4 explícita. Elimine ajustes charset incompatibles; los comandos SET de sesión no están disponibles en este modo. Requiere inicialización de sesión estándar, sin sessionVariables ni modo proxySql.",
     title: "Nueva conexión",
     name: "Nombre",
     namePlaceholder: "Nombre de conexión, se genera automáticamente si está vacío",
@@ -2909,6 +2919,9 @@ export default withEnglishFallback({
     largeValueRowUnavailable: "No se pudo localizar la fila en la base de datos. La operación se canceló sin usar el valor de vista previa.",
     largeValueColumnUnavailable: "No se pudo localizar la columna de origen de este valor grande.",
     largeValueLoadFailed: "No se pudo cargar el valor completo del campo grande.",
+    largeValuePendingDecode: "Leer el valor completo para decodificar",
+    largeValueOriginalKeyUnavailable: "Faltan claves originales de fila o son ambiguas. Recargue el resultado antes de leer el valor completo.",
+    largeValuePendingDecodeExport: "Algunos textos requieren decodificación completa. Cargue esos valores primero o exporte directamente desde la base de datos.",
     largeValueNeedsStableKey: "Esta tabla no tiene una clave primaria utilizable, por lo que el valor completo del campo grande no se puede cargar de forma segura. La operación se canceló.",
     largeValueLoadFailedWithMessage: "No se pudo cargar el valor completo del campo grande: {message}",
     largeValueLocalSortUnavailable: "Esta columna contiene vistas previas de valores grandes y no se puede ordenar localmente por su contenido. Use la ordenación de la base de datos.",

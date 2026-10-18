@@ -680,6 +680,7 @@ fn execute_change_transaction(
             column_types: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: Vec::new(),
             affected_rows: 0,

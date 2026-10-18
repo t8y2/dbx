@@ -25,6 +25,7 @@ pub async fn start_table_export(
     state: State<'_, Arc<AppState>>,
     request: TableExportRequest,
 ) -> Result<(), String> {
+    dbx_core::query::mysql_data_charset_policy::check_export(&state, &request.connection_id, &request.format).await?;
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
     let file_path = request.file_path.clone();

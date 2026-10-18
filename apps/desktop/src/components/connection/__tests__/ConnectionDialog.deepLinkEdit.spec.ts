@@ -209,6 +209,34 @@ afterEach(() => {
 });
 
 describe("ConnectionDialog deep-link edit confirmation", () => {
+  it("preserves the MySQL data charset through save and reopen without changing stored readonly", async () => {
+    const saved = savedConnection({ url_params: "charset=utf8mb4&dataCharset=GBK", read_only: false });
+    await mountDialog(saved, "");
+    expect(document.querySelector("#mysql-data-charset")?.textContent).toContain("GBK");
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    save!.click();
+    await settle();
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ url_params: "charset=utf8mb4&dataCharset=GBK", read_only: undefined }));
+    const persisted = store.updateConnection.mock.calls[0]![0] as ConnectionConfig;
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog(persisted, "");
+    expect(document.querySelector("#mysql-data-charset")?.textContent).toContain("GBK");
+  });
+
+  it("rejects conflicting session charset on save instead of silently changing it", async () => {
+    await mountDialog(savedConnection({ url_params: "charset=latin1&dataCharset=GBK" }), "");
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    save!.click();
+    await settle();
+    expect(store.updateConnection).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("dataCharset requires the default");
+  });
+
+  it("does not expose the MySQL data charset selector for MariaDB", async () => {
+    await mountDialog(savedConnection({ driver_profile: "mariadb", driver_label: "MariaDB" }), "");
+    expect(document.querySelector("#mysql-data-charset")).toBeNull();
+  });
   it("shows the global Redis preview limit in advanced settings and persists it", async () => {
     visibleTab.value = "advanced";
     settings.editorSettings.redisValuePreviewLimitKiB = 64;

@@ -244,12 +244,20 @@ export function createResultScopedPendingRequests<T>() {
 }
 
 export function appendLargeValueCells(previous: QueryResult["large_value_cells"], segment: QueryResult["large_value_cells"], rowOffset: number, appendedRowCount: number): QueryResult["large_value_cells"] {
+  return appendIndexedResultCells(previous, segment, rowOffset, appendedRowCount);
+}
+
+export function appendIndexedResultCells<T extends { row_index: number }>(previous: T[] | undefined, segment: T[] | undefined, rowOffset: number, appendedRowCount: number): T[] | undefined {
   const appended = (segment ?? []).filter((cell) => cell.row_index < appendedRowCount).map((cell) => ({ ...cell, row_index: cell.row_index + rowOffset }));
   const combined = [...(previous ?? []), ...appended];
   return combined.length > 0 ? combined : undefined;
 }
 
 export function remapLargeValueCells(cells: QueryResult["large_value_cells"], rowIndexes: number[]): QueryResult["large_value_cells"] {
+  return remapIndexedResultCells(cells, rowIndexes);
+}
+
+export function remapIndexedResultCells<T extends { row_index: number }>(cells: T[] | undefined, rowIndexes: number[]): T[] | undefined {
   if (!cells?.length) return undefined;
   const targetBySource = new Map(rowIndexes.map((sourceIndex, targetIndex) => [sourceIndex, targetIndex]));
   const remapped = cells

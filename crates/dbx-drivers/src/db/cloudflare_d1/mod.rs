@@ -480,6 +480,7 @@ fn query_result(
         column_types: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows: result.rows,
         affected_rows,

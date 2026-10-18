@@ -1,4 +1,5 @@
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { hexToRgba } from "@/lib/common/color";
 import { isLegacyWebView } from "@/lib/ui/legacyWebView";
@@ -75,7 +76,8 @@ export function tabConnectionColor(connectionId: string): string {
 
 export function isConnectionReadonly(connectionId: string): boolean {
   const connectionStore = useConnectionStore();
-  return connectionStore.getConfig(connectionId)?.read_only ?? false;
+  const connection = connectionStore.getConfig(connectionId);
+  return mysqlDataCharsetEnabled(connection) || connection?.read_only === true;
 }
 
 function jdbcTargetLabel(connection: ConnectionConfig): string {

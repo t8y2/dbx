@@ -97,6 +97,7 @@ import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracl
 import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
 import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseConnectionDeepLinkUpdate, parseServiceConnectionUrl, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
+import { MYSQL_DATA_CHARSETS, mysqlDataCharset, setMysqlDataCharset, mysqlDataCharsetValidation, supportsMysqlDataCharset } from "@/lib/connection/mysqlDataCharset";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeper/zookeeperConnection";
@@ -4006,6 +4007,16 @@ const firebirdCharset = computed({
   },
 });
 const FIREBIRD_DATA_CHARSET_OPTIONS = ["GBK", "GB18030", "BIG5"];
+const mysqlDataCharsetValue = computed({
+  get: () => mysqlDataCharset(form.value.url_params),
+  set: (value: string) => {
+    form.value.url_params = setMysqlDataCharset(form.value.url_params, value);
+  },
+});
+const mysqlDataCharsetItems = computed(() => {
+  const current = mysqlDataCharsetValue.value;
+  return current !== "default" && !MYSQL_DATA_CHARSETS.some((value) => value === current) ? [current, ...MYSQL_DATA_CHARSETS] : MYSQL_DATA_CHARSETS;
+});
 const firebirdDataCharsetItems = computed(() => {
   const current = getUrlParam(form.value.url_params, "dataCharset");
   return current && !FIREBIRD_DATA_CHARSET_OPTIONS.includes(current) ? [current, ...FIREBIRD_DATA_CHARSET_OPTIONS] : FIREBIRD_DATA_CHARSET_OPTIONS;
@@ -5467,6 +5478,8 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
   // Pasted credentials may carry invisible characters that trim() keeps (#9043).
   sanitizeConnectionCredentials(config);
+  const mysqlCharsetError = mysqlDataCharsetValidation(config);
+  if (mysqlCharsetError) throw new Error(t(mysqlCharsetError));
   return config as ConnectionConfig;
 }
 
@@ -9547,6 +9560,21 @@ function openExternalUrl(url: string) {
                           </SelectContent>
                         </Select>
                         <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.firebirdDataCharsetHint") }}</p>
+                      </div>
+                    </div>
+
+                    <div v-if="supportsMysqlDataCharset(form)" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelTopClass">{{ t("connection.mysqlDataCharset") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <Select v-model="mysqlDataCharsetValue">
+                          <SelectTrigger id="mysql-data-charset" class="h-9"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="default">{{ t("common.default") }}</SelectItem>
+                            <SelectItem v-for="charset in mysqlDataCharsetItems" :key="charset" :value="charset">{{ charset }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.mysqlDataCharsetHint") }}</p>
+                        <p v-if="mysqlDataCharsetValue !== 'default'" class="text-xs leading-5 text-muted-foreground">{{ t("connection.mysqlDataCharsetReadOnly") }} {{ t("connection.mysqlDataCharsetExportHint") }}</p>
                       </div>
                     </div>
 

@@ -635,6 +635,22 @@ describe("useSidebarTreeExportRuntime", () => {
     expect(apiMock.startTableExport).toHaveBeenLastCalledWith(expect.objectContaining({ format: "sql", omitDatabaseQualifier: false }), expect.any(Function));
   });
 
+  it("rejects compatibility SQL export before creating output or connecting", async () => {
+    const activeNode = shallowRef({ id: "table-1", type: "table", label: "events", connectionId: "conn-1", database: "warehouse", schema: "warehouse", children: [] } as TreeNode);
+    const connectionStore = {
+      ensureConnected: vi.fn(),
+      getConfig: () => ({ db_type: "mysql", url_params: "dataCharset=GBK" }),
+      connectionIdentifierQuote: () => "`",
+      treeNodes: [],
+      selectedTreeNodeIds: [],
+    };
+    const runtime = useSidebarTreeExportRuntime({ activeNode, connectionStore: connectionStore as never, settingsStore: exportSettings() as never, acceptedSelectionIds: () => null });
+    await runtime.exportData("sql");
+    expect(connectionStore.ensureConnected).not.toHaveBeenCalled();
+    expect(apiMock.startTableExport).not.toHaveBeenCalled();
+    expect(toastMock).toHaveBeenCalledWith("connection.mysqlDataCharsetExportHint", 5000);
+  });
+
   it.each([
     ["source", undefined],
     ["standard", "standard"],

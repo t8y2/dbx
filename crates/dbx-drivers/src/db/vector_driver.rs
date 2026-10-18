@@ -980,6 +980,7 @@ fn json_to_query_result(
         column_types: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows: vec![vec![
             Value::Number(status.into()),
@@ -1019,6 +1020,7 @@ fn values_to_query_result(items: Vec<Value>, start: Instant) -> QueryResult {
         column_types: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         affected_rows: rows.len() as u64,
         rows,

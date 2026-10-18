@@ -1318,6 +1318,7 @@ impl DbxBackend for LocalBackend {
                 connection.id.clone(),
                 database.to_string(),
                 client_session_id.to_string(),
+                pool.data_charset(),
             ),
             owner_config,
             resource_permit,
@@ -2753,6 +2754,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         column_types: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows,
         affected_rows,
@@ -4406,19 +4408,12 @@ mod tests {
         let server_csr = dir.path().join("server.csr");
         let server_pem = dir.path().join("server.pem");
         let run = |args: &[&str]| {
-            let status = std::process::Command::new("openssl")
-                .args(args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap();
             let output = std::process::Command::new("openssl").args(args).output().unwrap();
             assert!(
                 output.status.success(),
                 "openssl failed: {args:?} stderr={}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let _ = status;
         };
         // Self-signed CA.
         run(&[
@@ -4454,7 +4449,12 @@ mod tests {
         // Server cert signed by the CA, with SAN for 127.0.0.1. The x509 -req
         // subcommand takes extensions via -extfile, not -addext.
         let ext_path = dir.path().join("server.ext");
-        std::fs::write(&ext_path, "subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n").unwrap();
+        // Native TLS on macOS requires an explicit TLS server purpose.
+        std::fs::write(
+            &ext_path,
+            "subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n",
+        )
+        .unwrap();
         run(&[
             "x509",
             "-req",

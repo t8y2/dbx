@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -88,7 +89,7 @@ const transferDialogStyle = {
 const store = useConnectionStore();
 const DEFAULT_TRANSFER_OPERATION_TIMEOUT_SECS = 600;
 
-const sqlConnections = computed(() => store.connections.filter((c) => supportsTransfer(transferDatabaseTypeForConnection(c))));
+const sqlConnections = computed(() => store.connections.filter((c) => !mysqlDataCharsetEnabled(c) && supportsTransfer(transferDatabaseTypeForConnection(c))));
 const sourceConnections = computed(() => {
   const targetType = transferDatabaseTypeForConnection(store.getConfig(targetConnectionId.value));
   return sqlConnections.value.filter((connection) => isTransferPairSupported(transferDatabaseTypeForConnection(connection), targetType));
@@ -358,6 +359,7 @@ const operationTimeoutHint = computed(() => {
 });
 
 const canStart = computed(() => {
+  if (mysqlDataCharsetEnabled(store.getConfig(sourceConnectionId.value)) || mysqlDataCharsetEnabled(store.getConfig(targetConnectionId.value))) return false;
   const effectiveSourceSchema = sourceSchema.value || sourceDatabaseName.value;
   const effectiveTargetSchema = targetSchema.value || targetDatabaseName.value;
   const sameCatalogAndDatabase = isSameTransferDatabase(
@@ -1057,7 +1059,7 @@ watch(
 watch(
   () => {
     const connection = store.getConfig(targetConnectionId.value);
-    return JSON.stringify([connection?.read_only, connection?.is_production, connection?.production_databases]);
+    return JSON.stringify([connection?.read_only, connection?.is_production, connection?.production_databases, mysqlDataCharsetEnabled(connection), mysqlDataCharsetEnabled(store.getConfig(sourceConnectionId.value))]);
   },
   cancelPendingTransfer,
   { flush: "sync" },
@@ -1650,6 +1652,7 @@ async function saveConfigTask() {
       </div>
 
       <DialogFooter class="shrink-0">
+        <p v-if="mysqlDataCharsetEnabled(store.getConfig(sourceConnectionId)) || mysqlDataCharsetEnabled(store.getConfig(targetConnectionId))" class="text-xs text-muted-foreground">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
         <Button variant="outline" size="sm" @click="open = false">
           {{ t("transfer.cancel") }}
         </Button>

@@ -669,6 +669,12 @@ pub async fn execute_sql_file_content(
     started_at: Instant,
     emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
     with_sql_file_transaction(
         state,
         request,
@@ -804,6 +810,12 @@ async fn execute_sql_file_paths_with_options(
     zip_package: bool,
     emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
     with_sql_file_transaction(
         state,
         request,

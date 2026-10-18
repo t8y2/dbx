@@ -101,6 +101,7 @@ async fn public_lob_request_cancels_while_waiting_for_transaction_connection() {
         fixture.state.transaction_sessions.write().await.insert(
             "txn".into(),
             TransactionSession {
+                mysql_data_charset: None,
                 sqlserver: None,
                 connection: connection.clone(),
                 pool_key: "lob".into(),

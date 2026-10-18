@@ -1001,6 +1001,17 @@ export default withEnglishFallback({
   },
 
   connection: {
+    mysqlDataCharsetWriteBlocked: "La modalità di compatibilità del set di caratteri impone l'accesso in sola lettura. Scrittura e sblocco temporaneo non sono disponibili.",
+    mysqlDataCharsetUnsupported: "dataCharset è supportato solo dal profilo MySQL nativo, non da MariaDB, TiDB o altri profili di database.",
+    mysqlDataCharsetCloseTabs: "Prima di cambiare il set di caratteri, chiudere le schede dati/struttura e cancellare i risultati di questa connessione. Terminare query e transazioni attive. Le bozze SQL vengono conservate; la vecchia connessione viene disconnessa prima del salvataggio.",
+    mysqlDataCharset: "Set di caratteri dati (sola lettura)",
+    mysqlDataCharsetHint:
+      "Per byte legacy GBK/GB18030/BIG5 in colonne di testo latin1. Richiede la sessione predefinita o charset=utf8mb4 esplicito. Non è rilevamento automatico: il testo occidentale normale può essere reinterpretato; se la decodifica fallisce, il testo originale viene conservato.",
+    mysqlDataCharsetReadOnly: "Questa modalità è di sola lettura e non può essere sbloccata. Modifica, importazione e comandi SET di sessione sono disabilitati. Le condizioni WHERE/LIKE in cinese non vengono convertite. Usare un account con solo permesso SELECT per la protezione lato server.",
+    mysqlDataCharsetExportHint: "Sono supportate solo esportazioni di presentazione CSV, JSON e XLSX decodificate, non backup reversibili dei byte. Esportazioni/backup SQL e trasferimenti dati sono disabilitati.",
+    mysqlDataCharsetInvalid: "Usare una sola opzione dataCharset: GBK, GB18030 o BIG5; rimuoverla per ripristinare il comportamento predefinito.",
+    mysqlDataCharsetConflict:
+      "dataCharset richiede la sessione predefinita o una sola opzione charset=utf8mb4 esplicita. Rimuovere impostazioni charset incompatibili; i comandi SET di sessione non sono disponibili in questa modalità. Richiede inizializzazione di sessione standard, senza sessionVariables o modalità proxySql.",
     title: "Nuova Connessione",
     name: "Nome",
     namePlaceholder: "Nome connessione, generato automaticamente se vuoto",
@@ -2803,6 +2814,9 @@ export default withEnglishFallback({
     largeValueRowUnavailable: "Impossibile individuare la riga nel database. L'operazione è stata annullata senza usare il valore di anteprima.",
     largeValueColumnUnavailable: "Impossibile individuare la colonna di origine per questo valore di grandi dimensioni.",
     largeValueLoadFailed: "Impossibile caricare il valore completo del campo di grandi dimensioni.",
+    largeValuePendingDecode: "Leggere il valore completo per decodificare",
+    largeValueOriginalKeyUnavailable: "Le chiavi originali della riga sono mancanti o ambigue. Ricaricare il risultato prima di leggere il valore completo.",
+    largeValuePendingDecodeExport: "Alcuni testi richiedono la decodifica completa. Caricare prima questi valori o esportare direttamente dal database.",
     largeValueNeedsStableKey: "Questa tabella non dispone di una chiave primaria utilizzabile, quindi il valore completo del campo non può essere caricato in modo sicuro. L'operazione è stata annullata.",
     largeValueLoadFailedWithMessage: "Impossibile caricare il valore completo del campo di grandi dimensioni: {message}",
     largeValueLocalSortUnavailable: "Questa colonna contiene anteprime di valori di grandi dimensioni e non può essere ordinata localmente in base all'anteprima. Usa l'ordinamento del database.",

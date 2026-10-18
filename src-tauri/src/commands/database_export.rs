@@ -31,6 +31,12 @@ pub async fn export_database_sql(
     state: State<'_, Arc<AppState>>,
     request: DatabaseExportRequest,
 ) -> Result<(), String> {
+    dbx_core::query::mysql_data_charset_policy::reject_operation(
+        &state,
+        &request.connection_id,
+        dbx_core::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await?;
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
 

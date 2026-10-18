@@ -293,6 +293,8 @@ pub enum TxnConnection {
 }
 
 pub struct TransactionSession {
+    /// Immutable interpretation from the pool that owns the pinned connection.
+    pub mysql_data_charset: Option<db::mysql::MySqlDataCharset>,
     pub sqlserver: Option<crate::query::sqlserver_manual_transaction::SessionMetadata>,
     pub connection: Arc<Mutex<TxnConnection>>,
     pub pool_key: String,
@@ -6897,7 +6899,7 @@ fn is_manual_transaction_pool_key(pool_key: &str) -> bool {
 /// `conn` from matching a `conn-2` pool. Used by
 /// [`AppState::is_connection_open`] and [`config_for_pool_key`];
 /// `drain_connection_pools` filters on the same convention.
-fn pool_key_belongs_to_connection(pool_key: &str, connection_id: &str) -> bool {
+pub(crate) fn pool_key_belongs_to_connection(pool_key: &str, connection_id: &str) -> bool {
     pool_key.strip_prefix(connection_id).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
 }
 
@@ -7415,6 +7417,12 @@ fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionCon
 }
 
 fn validate_connection_url_params(config: &ConnectionConfig) -> Result<(), String> {
+    db::mysql::data_charset_for_config(config)?;
+    if matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
+        && db::mysql::data_charset_from_params(config.url_params.as_deref().unwrap_or(""))?.is_some()
+    {
+        return Err("dataCharset interpretation is supported only by the native MySQL connection type".into());
+    }
     let normalized = native_postgres_url_config(config);
     normalized.as_ref().unwrap_or(config).validate_native_url_params()
 }
@@ -8113,6 +8121,7 @@ mod tests {
             column_types: vec!["text".to_string()],
             column_sortables: vec![true],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![serde_json::json!("M")]],
             affected_rows: 0,
@@ -9487,6 +9496,38 @@ sleep 30
             connection_url_for_endpoint(&config, &config.host, config.port),
             "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=prefer&application_name=dbx"
         );
+    }
+
+    #[test]
+    fn mysql_data_charset_rejects_compatible_native_products_before_connect() {
+        for db_type in [DatabaseType::Doris, DatabaseType::StarRocks, DatabaseType::ManticoreSearch] {
+            let mut config = mysql_config(None);
+            config.db_type = db_type;
+            for params in [
+                "dataCharset=GBK",
+                "charset=utf8mb4& dataCharset=GBK",
+                "  dataCharset=GBK  ",
+                "%64ataCharset=GBK",
+                "dataCharset+=GBK",
+                "dataCharset%20=GBK",
+                "%64ataCharset=%47BK",
+                "%64ataCharset=",
+                "%64ataCharset=invalid",
+                "%64ataCharset",
+            ] {
+                config.url_params = Some(params.into());
+                assert!(validate_connection_url_params(&config).is_err(), "{db_type:?}: {params}");
+            }
+            config.url_params = None;
+            validate_connection_url_params(&config).unwrap();
+        }
+        let mut config = mysql_config(None);
+        config.url_params = Some("%64ataCharset=%47BK".into());
+        validate_connection_url_params(&config).unwrap();
+        // Firebird owns its own unrelated option; this gate must not parse it.
+        config.db_type = DatabaseType::Firebird;
+        config.url_params = Some("dataCharset=WIN1252".into());
+        validate_connection_url_params(&config).unwrap();
     }
 
     #[test]

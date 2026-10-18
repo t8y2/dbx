@@ -2,6 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useReadOnlyUnlockStore } from "@/stores/readOnlyUnlockStore";
 import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess, formatWriteUnlockRemaining, sqlLooksLikeMutation } from "../readOnlyWriteAccess";
+import zhCN from "@/i18n/locales/zh-CN";
+
+const { toast } = vi.hoisted(() => ({ toast: vi.fn() }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast }) }));
+vi.mock("@/i18n", () => ({ default: { global: { t: (key: string) => (key === "connection.mysqlDataCharsetWriteBlocked" ? zhCN.connection.mysqlDataCharsetWriteBlocked : key) } } }));
 
 const unlockConnectionWrites = vi.fn();
 const lockConnectionWrites = vi.fn();
@@ -28,12 +33,47 @@ describe("read-only write unlock", () => {
     lockConnectionWrites.mockReset().mockResolvedValue(undefined);
     connectionWriteUnlockState.mockReset().mockResolvedValue(0);
     vi.useRealTimers();
+    toast.mockClear();
   });
 
   it("formats remaining time as m:ss", () => {
     expect(formatWriteUnlockRemaining(60_000)).toBe("1:00");
     expect(formatWriteUnlockRemaining(5_000)).toBe("0:05");
     expect(formatWriteUnlockRemaining(0)).toBe("0:00");
+  });
+
+  it("never unlocks compatibility mode, even with a stale active window", async () => {
+    const store = useReadOnlyUnlockStore();
+    const connection = { id: "legacy", db_type: "mysql" as const, read_only: false, url_params: "dataCharset=GBK" };
+    store.rememberWindow("legacy", 60_000);
+    expect(connectionIsEffectivelyReadOnly(connection)).toBe(true);
+    await expect(ensureReadOnlyWriteAccess({ connection, sql: "UPDATE t SET a=1" })).resolves.toBe(false);
+    await expect(ensureReadOnlyWriteAccess({ connection, treatAsMutation: true })).resolves.toBe(false);
+    await expect(ensureReadOnlyWriteAccess({ connection, sql: "SELECT 1" })).resolves.toBe(true);
+    expect(toast).toHaveBeenCalledTimes(2);
+    expect(toast).toHaveBeenCalledWith("数据字符集兼容模式强制只读，无法执行写入，也不能临时解锁。", 5000);
+    expect(store.pending).toBeUndefined();
+    expect(unlockConnectionWrites).not.toHaveBeenCalled();
+    expect(connection.read_only).toBe(false);
+    expect(connection.url_params).toBe("dataCharset=GBK");
+    expect(connectionIsEffectivelyReadOnly({ ...connection, url_params: "" })).toBe(false);
+    expect(connectionIsEffectivelyReadOnly({ ...connection, db_type: "firebird" })).toBe(false);
+  });
+
+  it("allows compatibility reads silently and notifies once per explicit mutation denial", async () => {
+    const connection = { id: "legacy", db_type: "mysql" as const, url_params: "dataCharset=GBK" };
+    await expect(ensureReadOnlyWriteAccess({ connection, sql: "SELECT 1" })).resolves.toBe(true);
+    expect(toast).not.toHaveBeenCalled();
+    await expect(ensureReadOnlyWriteAccess({ connection, sql: "SELECT 1", treatAsMutation: true })).resolves.toBe(false);
+    expect(toast).toHaveBeenCalledOnce();
+    expect(useReadOnlyUnlockStore().pending).toBeUndefined();
+    expect(unlockConnectionWrites).not.toHaveBeenCalled();
+    expect(connectionWriteUnlockState).not.toHaveBeenCalled();
+  });
+
+  it.each(["az", "en", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "th", "tr", "zh-CN", "zh-TW"])("provides the blocked-write notification in %s", async (locale) => {
+    const messages = await import(`../../../i18n/locales/${locale}.ts`);
+    expect(messages.default.connection.mysqlDataCharsetWriteBlocked).toBeTruthy();
   });
 
   it("classifies SQL and Redis writes without treating reads as mutations", () => {
@@ -72,6 +112,7 @@ describe("read-only write unlock", () => {
     const store = await waitForPending("prod");
     store.cancel();
     await expect(cancelled).resolves.toBe(false);
+    expect(toast).not.toHaveBeenCalled();
     expect(unlockConnectionWrites).not.toHaveBeenCalled();
     expect(connectionIsEffectivelyReadOnly(connection)).toBe(true);
 
@@ -94,6 +135,7 @@ describe("read-only write unlock", () => {
     await expect(ensureReadOnlyWriteAccess({ connection: { id: "r", read_only: true, db_type: "mysql" }, sql: "SELECT 1" })).resolves.toBe(true);
     expect(store.pending).toBeUndefined();
     expect(connectionWriteUnlockState).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
   });
 
   it("does not prompt for Elasticsearch searches on a read-only connection", async () => {

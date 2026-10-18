@@ -585,11 +585,10 @@ pub async fn unlock_connection_writes(
     State(state): State<Arc<WebState>>,
     Json(body): Json<UnlockConnectionWritesRequest>,
 ) -> Result<Json<WriteUnlockStateResponse>, AppError> {
-    if !state.app.configs.read().await.contains_key(&body.connection_id) {
-        return Err(AppError::from("Connection not found".to_string()));
-    }
     let remaining_ms =
-        state.app.write_unlock_windows.unlock(&body.connection_id, body.duration_secs).await.map_err(AppError::from)?;
+        dbx_core::query::unlock_connection_writes_core(&state.app, &body.connection_id, body.duration_secs)
+            .await
+            .map_err(AppError::from)?;
     Ok(Json(WriteUnlockStateResponse { remaining_ms }))
 }
 
@@ -2012,10 +2011,10 @@ mod tests {
         headers
     }
 
-    /// 回归：Web connect_db 不得把明文 no-save 密码写入全局 AppState.configs，
-    /// 且凭据严格按登录会话隔离——会话 B 无法复用/重建出会话 A 的密码。
+    /// Encrypted SQLite must scope no-save credentials when supported; the fast
+    /// bundled lane must reject encryption without retaining the attempted secret.
     #[tokio::test]
-    async fn connect_db_sanitizes_global_config_and_scopes_password_by_session() {
+    async fn connect_db_scopes_password_by_session_or_rejects_unavailable_sqlite_encryption() {
         let (state, dir) = test_web_state().await;
         let db_path = dir.join("a.db").to_string_lossy().to_string();
         std::fs::File::create(&db_path).unwrap();
@@ -2041,8 +2040,59 @@ mod tests {
             .await
         })
         .await;
+        // Another workspace member may enable encryption on dbx-core even when
+        // this crate's feature is off. In that case retain the positive checks.
+        // Explicit SQLCipher builds always require success; never swallow their errors.
+        #[cfg(not(feature = "sqlite-sqlcipher"))]
+        if let Err(error) = &result {
+            assert_eq!(
+                error.message,
+                "Encrypted SQLite support is not compiled in this build. Rebuild with the sqlite-sqlcipher or sqlite-multiple-ciphers feature."
+            );
+            assert!(state.app.pool_handle("conn-a").await.is_none());
+            assert!(!state.app.session_credentials.has("token-a", "conn-a"));
+            assert!(!state.app.session_credentials.has("token-b", "conn-a"));
+            if let Some(stored) = state.app.configs.read().await.get("conn-a") {
+                assert!(stored.password.is_empty());
+            }
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
         assert!(result.is_ok(), "{result:?}");
 
+        assert_session_password_is_scoped(&state).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Saving no-save credentials requires no encrypted driver. Keep the positive
+    /// owner-isolation contract covered even in the bundled SQLite fast lane.
+    #[tokio::test]
+    async fn save_connections_sanitizes_global_config_and_scopes_password_by_session() {
+        let (state, dir) = test_web_state().await;
+        let mut config = sqlite_config("conn-a", &dir.join("a.db").to_string_lossy());
+        config.db_type = DatabaseType::Postgres;
+        config.host = "127.0.0.1".to_string();
+        config.port = 5432;
+        config.save_password = false;
+        config.password = "hunter2".to_string();
+
+        let _ = save_connections(
+            State(state.clone()),
+            cookie_headers("token-a"),
+            Json(SaveConnectionsRequest { configs: vec![config], removed_ids: Vec::new() }),
+        )
+        .await
+        .unwrap();
+
+        assert_session_password_is_scoped(&state).await;
+        let persisted = state.app.storage.load_connections().await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].id, "conn-a");
+        assert!(persisted[0].password.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn assert_session_password_is_scoped(state: &Arc<WebState>) {
         // 全局运行态配置不含明文密码（泄露面消除）。
         let stored = state.app.configs.read().await.get("conn-a").cloned().unwrap();
         assert_eq!(stored.password, "");
@@ -2064,8 +2114,6 @@ mod tests {
             assert_eq!(db_config.password, "");
         })
         .await;
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

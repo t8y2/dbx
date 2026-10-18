@@ -244,6 +244,7 @@ mod tests {
                     column_types: Vec::new(),
                     column_sortables: Vec::new(),
                     spatial_columns: Vec::new(),
+                    raw_key_cells: Vec::new(),
                     spatial_values: Vec::new(),
                     rows: Vec::new(),
                     affected_rows: 0,

@@ -7144,6 +7144,12 @@ pub async fn import_table_file_core<F>(
 where
     F: FnMut(TableImportProgress),
 {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
     let started_at = Instant::now();
     let mut db_write_ms = 0u128;
     let mut statement_count = 0usize;

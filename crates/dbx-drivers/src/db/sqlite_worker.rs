@@ -125,6 +125,7 @@ impl SqliteWorkerSession<'_> {
                 column_types: column_types.unwrap_or_default(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: rows.unwrap_or_default(),
                 affected_rows: affected_rows.unwrap_or(0),

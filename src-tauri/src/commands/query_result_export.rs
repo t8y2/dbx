@@ -290,6 +290,7 @@ pub async fn start_query_result_export(
     state: State<'_, Arc<AppState>>,
     mut request: QueryResultExportRequest,
 ) -> Result<(), String> {
+    dbx_core::query::mysql_data_charset_policy::check_export(&state, &request.connection_id, &request.format).await?;
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
     let target = StagedExportTarget::new(&request.file_path)?;

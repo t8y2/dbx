@@ -37,6 +37,7 @@ import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
 import { uuid } from "@/lib/common/utils";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 
 type StructureCopyFormat = "tsv" | "markdown";
 
@@ -635,6 +636,10 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
   async function exportData(format: "csv" | "json" | "sql", insertDialect: SqlInsertDialect = "source") {
     const targets = currentTableExportTargets();
     if (!targets.length) return;
+    if (format === "sql" && targets.some((target) => mysqlDataCharsetEnabled(connectionStore.getConfig(target.connectionId)))) {
+      toast(t("connection.mysqlDataCharsetExportHint"), 5000);
+      return;
+    }
 
     const outputDirectory = await resolveMultiTableExportDirectory(targets.length);
     if (outputDirectory === null) return;

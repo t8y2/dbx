@@ -592,6 +592,33 @@ pub struct LargeValueCell {
     /// Opaque original-result locator. Absent for legacy preview/re-query drivers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_ref: Option<String>,
+    /// A server-truncated carrier cannot be strictly decoded until explicitly
+    /// fetching the complete value. The preview is not presentation data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_decode: Option<bool>,
+}
+
+/// Original, complete key cells retained before presentation-only decoding.
+/// These are internal read locators, never inverse-encoded displayed values.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct OriginalKeyCell {
+    pub row_index: usize,
+    pub column_index: usize,
+    pub value: serde_json::Value,
+}
+
+impl Serialize for OriginalKeyCell {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("OriginalKeyCell", 3)?;
+        state.serialize_field("row_index", &self.row_index)?;
+        state.serialize_field("column_index", &self.column_index)?;
+        state.serialize_field("value", &JsSafeCell(&self.value))?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -619,6 +646,10 @@ pub struct QueryResult {
     pub spatial_values: Vec<Vec<Option<u32>>>,
     #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub rows: Vec<Vec<serde_json::Value>>,
+    /// Sparse original key values for internal full-value reads. Empty means
+    /// no authoritative locator metadata, not permission to guess decoded keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_key_cells: Vec<OriginalKeyCell>,
     pub affected_rows: u64,
     pub execution_time_ms: u128,
     /// OceanBase SQL Audit EXECUTE_TIME in microseconds. Absent when the
@@ -667,6 +698,7 @@ impl Serialize for QueryResult {
         let field_count = 9
             + usize::from(!self.spatial_columns.is_empty())
             + usize::from(!self.spatial_values.is_empty())
+            + usize::from(!self.raw_key_cells.is_empty())
             + usize::from(self.elasticsearch_raw_body.is_some())
             + usize::from(self.server_execute_time_us.is_some())
             + usize::from(self.query_timings_ms.is_some())
@@ -682,6 +714,9 @@ impl Serialize for QueryResult {
             state.serialize_field("spatial_values", &self.spatial_values)?;
         }
         state.serialize_field("rows", &JsSafeRows(&self.rows))?;
+        if !self.raw_key_cells.is_empty() {
+            state.serialize_field("raw_key_cells", &self.raw_key_cells)?;
+        }
         state.serialize_field("affected_rows", &self.affected_rows)?;
         state.serialize_field("execution_time_ms", &self.execution_time_ms)?;
         if let Some(server_execute_time_us) = &self.server_execute_time_us {
@@ -1508,6 +1543,7 @@ mod tests {
             column_types: vec!["bigint".to_string()],
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows: vec![vec![
                 serde_json::json!(1391198305898897409i64),
@@ -1528,6 +1564,24 @@ mod tests {
             elasticsearch_raw_body: None,
             messages: Vec::new(),
         }
+    }
+
+    #[test]
+    fn raw_key_cells_are_optional_and_preserve_javascript_integer_fidelity() {
+        let mut result = bigint_result_sample();
+        assert!(serde_json::to_value(&result).unwrap().get("raw_key_cells").is_none());
+        result.raw_key_cells = vec![super::OriginalKeyCell {
+            row_index: 0,
+            column_index: 0,
+            value: serde_json::json!(1391198305898897409i64),
+        }];
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["raw_key_cells"][0]["value"], "1391198305898897409");
+        let restored: super::QueryResult = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.raw_key_cells[0].value, "1391198305898897409");
+        let mut old_wire = serde_json::to_value(bigint_result_sample()).unwrap();
+        old_wire.as_object_mut().unwrap().remove("raw_key_cells");
+        assert!(serde_json::from_value::<super::QueryResult>(old_wire).unwrap().raw_key_cells.is_empty());
     }
 
     /// #7832: integers beyond JavaScript's ±(2^53 - 1) safe range must cross

@@ -216,6 +216,7 @@ import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlF
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { isAiRedisConsoleTarget, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
@@ -2992,7 +2993,7 @@ defineExpose({
                     <DropdownMenuSubContent>
                       <DropdownMenuItem @click="dataGridRef?.exportCsv()"> CSV </DropdownMenuItem>
                       <DropdownMenuItem @click="dataGridRef?.exportJson()"> JSON </DropdownMenuItem>
-                      <DropdownMenuItem @click="dataGridRef?.exportSql()"> SQL INSERT </DropdownMenuItem>
+                      <DropdownMenuItem v-if="!mysqlDataCharsetEnabled(activeConnection)" @click="dataGridRef?.exportSql()"> SQL INSERT </DropdownMenuItem>
                       <DropdownMenuItem @click="dataGridRef?.exportXlsx()"> XLSX </DropdownMenuItem>
                     </DropdownMenuSubContent>
                   </DropdownMenuPortal>

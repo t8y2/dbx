@@ -729,6 +729,7 @@ async fn fetch_table_export_batch(
 ) -> Result<QueryResult, String> {
     if *table_read_completed {
         return Ok(QueryResult {
+            raw_key_cells: Vec::new(),
             columns: col_names.to_vec(),
             column_types: Vec::new(),
             column_sortables: Vec::new(),
@@ -1569,6 +1570,7 @@ pub async fn export_table_data_core(
     request: &TableExportRequest,
     on_progress: impl Fn(TableExportProgress),
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::check_export(state, &request.connection_id, &request.format).await?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_token = CancellationToken::new();
     let cancel_watcher =

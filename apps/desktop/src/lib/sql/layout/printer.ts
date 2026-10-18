@@ -91,7 +91,7 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
       // copied verbatim, and only when it fits the remaining line width.
       const commentText = item
         .slice(0, leadingComments)
-        .map((node) => node.text)
+        .map((node) => ("text" in node ? node.text : ""))
         .join(" ");
       if (commentText && writer.column + 1 + commentText.length <= ctx.options.lineWidth) {
         leadingText = commentText;

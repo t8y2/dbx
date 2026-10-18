@@ -5316,6 +5316,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
       throw new Error(t("connection.etcdClientCertPairRequired"));
     }
+  } else if (config.db_type === "redis") {
+    config.etcd_endpoints = undefined;
+    config.client_cert_path = config.client_cert_path?.trim() || "";
+    config.client_key_path = config.client_key_path?.trim() || "";
+    if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
+      throw new Error(t("connection.redisClientCertPairRequired"));
+    }
   } else if (form.value.db_type !== "consul" && config.db_type !== "elasticsearch" && config.db_type !== "easysearch" && config.db_type !== "solr") {
     config.etcd_endpoints = undefined;
     config.client_cert_path = undefined;
@@ -5337,6 +5344,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.db_type !== "doris" &&
     config.db_type !== "mongodb" &&
     config.db_type !== "victoriametrics" &&
+    config.db_type !== "redis" &&
     config.db_type !== "zookeeper" &&
     config.db_type !== "elasticsearch" &&
     config.db_type !== "easysearch" &&
@@ -6911,6 +6919,29 @@ async function browseEtcdTlsFile(target: "ca" | "cert" | "key") {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       title: target === "ca" ? t("connection.etcdCaCertBrowse") : target === "cert" ? t("connection.etcdClientCertBrowse") : t("connection.etcdClientKeyBrowse"),
+      multiple: false,
+      filters: [
+        { name: "PEM", extensions: ["pem", "crt", "cer", "key"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+    if (selected && typeof selected === "string") {
+      if (target === "ca") {
+        form.value.ca_cert_path = selected;
+      } else if (target === "cert") {
+        form.value.client_cert_path = selected;
+      } else {
+        form.value.client_key_path = selected;
+      }
+    }
+  }
+}
+
+async function browseRedisTlsFile(target: "ca" | "cert" | "key") {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: target === "ca" ? t("connection.redisCaCertBrowse") : target === "cert" ? t("connection.redisClientCertBrowse") : t("connection.redisClientKeyBrowse"),
       multiple: false,
       filters: [
         { name: "PEM", extensions: ["pem", "crt", "cer", "key"] },
@@ -9844,6 +9875,55 @@ function openExternalUrl(url: string) {
                     </span>
                   </label>
                 </div>
+
+                <template v-if="form.db_type === 'redis'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.redisCaCert") }}</Label>
+                    <div class="col-span-3 flex items-center gap-1">
+                      <Input v-model="form.ca_cert_path" class="flex-1" :placeholder="t('connection.redisCaCertPlaceholder')" :disabled="!form.ssl" />
+                      <Tooltip v-if="isDesktop">
+                        <TooltipTrigger as-child>
+                          <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!form.ssl" @click="browseRedisTlsFile('ca')">
+                            <FolderOpen class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t("connection.redisCaCertBrowse") }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.redisClientCert") }}</Label>
+                    <div class="col-span-3 flex items-center gap-1">
+                      <Input v-model="form.client_cert_path" class="flex-1" :placeholder="t('connection.redisClientCertPlaceholder')" :disabled="!form.ssl" />
+                      <Tooltip v-if="isDesktop">
+                        <TooltipTrigger as-child>
+                          <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!form.ssl" @click="browseRedisTlsFile('cert')">
+                            <FolderOpen class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t("connection.redisClientCertBrowse") }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.redisClientKey") }}</Label>
+                    <div class="col-span-3 flex items-center gap-1">
+                      <Input v-model="form.client_key_path" class="flex-1" :placeholder="t('connection.redisClientKeyPlaceholder')" :disabled="!form.ssl" />
+                      <Tooltip v-if="isDesktop">
+                        <TooltipTrigger as-child>
+                          <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!form.ssl" @click="browseRedisTlsFile('key')">
+                            <FolderOpen class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t("connection.redisClientKeyBrowse") }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.redisTlsCertificateHint") }}</p>
+                  </div>
+                </template>
 
                 <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch' || form.db_type === 'nebula'">
                   <div class="grid grid-cols-4 items-start gap-4">

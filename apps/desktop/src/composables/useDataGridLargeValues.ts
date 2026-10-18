@@ -623,13 +623,25 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   async function hydrateLargeValueCells(rowIds: number[], columnIndexes: number[]): Promise<number> {
     const sourceResult = options.result.value;
     const resolved = await resolveLargeValueCells(rowIds, columnIndexes);
+    // Same staleness guard as the single-cell path: paginating or refreshing
+    // mid-load replaces tab.result, and the row metadata below belongs to the
+    // result the batch was resolved for.
+    if (options.result.value !== sourceResult) return 0;
     let changed = 0;
     for (const [rowId, values] of resolved) {
       const item = options.getRowItem(rowId);
       if (item?.sourceIndex === undefined) continue;
       for (const [columnIndex, value] of values) {
         sourceResult.rows[item.sourceIndex]![columnIndex] = value;
-        const metadata = largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex));
+        const hydrationKey = largeValueCellKey(item.sourceIndex, columnIndex);
+        const metadata = largeValueCellsByKey.value.get(hydrationKey);
+        if (metadata?.value_ref && typeof value === "string") {
+          // Keep the shared 64 MiB view/edit budget aware of batch-hydrated
+          // cells so later single-cell loads and save baselines stay bounded.
+          const sizes = materializedSnapshotBytes.get(sourceResult) ?? new Map<string, number>();
+          sizes.set(hydrationKey, new TextEncoder().encode(value).length);
+          materializedSnapshotBytes.set(sourceResult, sizes);
+        }
         if (metadata?.value_ref) sourceResult.large_value_refs = [...new Set([...(sourceResult.large_value_refs ?? []), metadata.value_ref])];
         sourceResult.large_value_cells = sourceResult.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
         visibleLargeValuePreviewCaches.get(sourceResult)?.forget(item.sourceIndex, columnIndex);

@@ -5890,13 +5890,26 @@ const largeValueRuntimeInstance = useDataGridLargeValues({
 largeValueRuntime = largeValueRuntimeInstance;
 const { isLargeValuePreview, largeValueOriginalBytes, formatGridItemCell, formatGridItemCellForConfirmation, visibleLargeValuePreviewValue, resolveLargeValueCells, hydrateLargeValueCells, reportLargeValueLoadError, cloneRow, cloneRows } = largeValueRuntimeInstance;
 
+// Pagination/refresh replaces tab.result without remounting the grid, so the
+// page-scoped full-text state must follow the result it was loaded for; the
+// next page starts from the byte-budgeted preview again (#12289).
+watch(
+  () => props.result,
+  () => {
+    tableDataFullTextMode.value = false;
+    tableDataPreviewNoticeDismissed.value = false;
+  },
+);
+
 async function loadCurrentPageFullText() {
   if (tableDataFullTextLoading.value || !props.tableMeta) return;
+  const sourceResult = props.result;
   tableDataFullTextLoading.value = true;
   try {
     const rowIds = displayItems.value.filter((item) => !item.isDraft).map((item) => item.id);
-    const columnIndexes = props.result.columns.map((_, index) => index);
+    const columnIndexes = sourceResult.columns.map((_, index) => index);
     const count = await hydrateLargeValueCells(rowIds, columnIndexes);
+    if (props.result !== sourceResult) return;
     tableDataFullTextMode.value = true;
     tableDataPreviewNoticeDismissed.value = true;
     clearCellFormatCache();

@@ -445,6 +445,18 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(host.querySelector("[data-grid-preview-notice]")).toBeNull();
   });
 
+  it("re-shows the large table preview notice after pagination replaces the result (#12289)", async () => {
+    const { host, replaceResult } = mountGrid(largeValueResult(1, "preview"));
+    await settle();
+    expect(host.querySelector("[data-grid-preview-notice]")).toBeTruthy();
+    host.querySelector<HTMLElement>("[data-grid-preview-notice] button[title]")!.click();
+    await settle();
+    expect(host.querySelector("[data-grid-preview-notice]")).toBeNull();
+    replaceResult(largeValueResult(1, "next-page"));
+    await settle();
+    expect(host.querySelector("[data-grid-preview-notice]")).toBeTruthy();
+  });
+
   it("offers toolbar-equivalent refresh in the cell context menu (issue #7273)", async () => {
     const onReload = vi.fn();
     const { host } = mountGrid(hydratedResult(1, "value"), onReload);

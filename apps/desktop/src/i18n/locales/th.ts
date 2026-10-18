@@ -3377,6 +3377,12 @@ export default withEnglishFallback({
     uncommittedBlankRow: "แถวใหม่ที่ยังไม่ได้กรอกจะถูกละเว้นเมื่อบันทึก",
     copyExtractorSqlDeletesInserts: "คำสั่ง SQL DELETEs/INSERTs",
     columnInfo: "ข้อมูลคอลัมน์",
+    tableDataPreviewNotice: "ข้อมูลในตารางปัจจุบันมีขนาดใหญ่ เพื่อให้เปิดได้เร็ว จึงโหลดข้อความแบบยาวเพียงบางส่วนเท่านั้น",
+    tableDataPreviewLoadPage: "โหลดข้อความฉบับเต็มของหน้าปัจจุบัน",
+    tableDataPreviewLoading: "กำลังโหลดข้อความฉบับเต็มของหน้าปัจจุบัน…",
+    tableDataPreviewDismiss: "ไม่แสดงอีก",
+    tableDataPreviewLoaded: "โหลดเซลล์ข้อความฉบับเต็มในหน้าปัจจุบันแล้ว {count} เซลล์",
+    tableDataPreviewLoadFailed: "โหลดข้อความฉบับเต็มไม่สำเร็จ: {message}",
   },
   exportProgress: {
     streamingUnsupported: "ไม่รองรับการส่งออกแบบ Streaming สำหรับ Query นี้ ทำให้เรียบง่ายขึ้นหรือใช้ Driver ที่รองรับ",

@@ -3153,6 +3153,12 @@ export default withEnglishFallback({
     uncommittedBlankRow: "Незаполненная новая строка будет проигнорирована при сохранении",
     copyExtractorSqlDeletesInserts: "SQL-операторы DELETEs/INSERTs",
     columnInfo: "Информация о столбце",
+    tableDataPreviewNotice: "Текущая таблица содержит большой объём данных, поэтому для скорости открытия загружены только некоторые длинные тексты.",
+    tableDataPreviewLoadPage: "Загрузить полный текст текущей страницы",
+    tableDataPreviewLoading: "Загрузка полного текста текущей страницы…",
+    tableDataPreviewDismiss: "Больше не показывать",
+    tableDataPreviewLoaded: "Загружено {count} ячеек с полным текстом на текущей странице",
+    tableDataPreviewLoadFailed: "Не удалось загрузить полный текст: {message}",
   },
   exportProgress: {
     streamingUnsupported: "Потоковый экспорт не поддерживается для этого запроса. Упростите его или используйте поддерживаемый драйвер.",

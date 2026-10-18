@@ -3069,6 +3069,12 @@ export default withEnglishFallback({
     cut: "Recortado",
     uncommittedBlankRow: "Nova linha não preenchida, será ignorada ao salvar",
     copyExtractorSqlDeletesInserts: "Instruções SQL DELETEs/INSERTs",
+    tableDataPreviewNotice: "Os dados da tabela atual são grandes; para garantir a velocidade de abertura, apenas parte dos textos longos foi carregada.",
+    tableDataPreviewLoadPage: "Carregar o texto completo da página atual",
+    tableDataPreviewLoading: "Carregando o texto completo da página atual…",
+    tableDataPreviewDismiss: "Não mostrar novamente",
+    tableDataPreviewLoaded: "Carregadas {count} células de texto completo na página atual",
+    tableDataPreviewLoadFailed: "Falha ao carregar o texto completo: {message}",
   },
   exportProgress: {
     streamingUnsupported: "A exportação em streaming não é compatível com esta consulta. Simplifique-a ou use um driver compatível.",

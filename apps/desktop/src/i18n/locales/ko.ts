@@ -3019,6 +3019,12 @@ export default withEnglishFallback({
     batchAppendPasteNoMatchingColumns: "INSERT 문의 열 이름이 현재 결과 집합의 어떤 열과도 일치하지 않습니다.",
     uncommittedBlankRow: "입력되지 않은 새 행은 저장 시 무시됩니다.",
     copyExtractorSqlDeletesInserts: "SQL DELETEs/INSERTs 문",
+    tableDataPreviewNotice: "현재 테이블 데이터가 많아 열기 속도를 보장하기 위해 일부 긴 텍스트만 불러왔습니다.",
+    tableDataPreviewLoadPage: "현재 페이지의 전체 텍스트 불러오기",
+    tableDataPreviewLoading: "현재 페이지의 전체 텍스트를 불러오는 중…",
+    tableDataPreviewDismiss: "다시 표시하지 않음",
+    tableDataPreviewLoaded: "현재 페이지의 전체 텍스트 셀 {count}개를 불러왔습니다",
+    tableDataPreviewLoadFailed: "전체 텍스트를 불러오지 못했습니다: {message}",
   },
   exportProgress: {
     streamingUnsupported: "이 쿼리는 스트리밍 내보내기를 지원하지 않습니다. 쿼리를 단순화하거나 지원되는 드라이버를 사용하세요.",

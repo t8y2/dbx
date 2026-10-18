@@ -3072,6 +3072,12 @@ export default withEnglishFallback({
     filterModeOrderMoveDown: "下移運算子",
     filterModeOrderReset: "恢復預設順序",
     uncommittedBlankRow: "未填寫的新行，儲存時會被忽略",
+    tableDataPreviewNotice: "目前資料表資料量較大，為確保開啟速度，僅載入部分長文字。",
+    tableDataPreviewLoadPage: "載入目前頁面的完整文字",
+    tableDataPreviewLoading: "正在載入目前頁面的完整文字…",
+    tableDataPreviewDismiss: "不再提示",
+    tableDataPreviewLoaded: "已載入目前頁面 {count} 個完整文字儲存格",
+    tableDataPreviewLoadFailed: "載入完整文字失敗：{message}",
   },
   exportProgress: {
     streamingUnsupported: "目前查詢暫不支援串流匯出，請簡化查詢或使用支援的驅動程式。",

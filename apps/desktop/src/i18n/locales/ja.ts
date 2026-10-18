@@ -3093,6 +3093,12 @@ export default withEnglishFallback({
     cut: "切り取りました",
     uncommittedBlankRow: "未入力の新しい行は、保存時に無視されます",
     copyExtractorSqlDeletesInserts: "SQL DELETEs/INSERTs ステートメント",
+    tableDataPreviewNotice: "現在のテーブルデータが大きいため、開く速度を確保するために長いテキストの一部のみを読み込みました。",
+    tableDataPreviewLoadPage: "現在のページの完全なテキストを読み込む",
+    tableDataPreviewLoading: "現在のページの完全なテキストを読み込み中…",
+    tableDataPreviewDismiss: "今後表示しない",
+    tableDataPreviewLoaded: "現在のページの完全なテキストセルを {count} 個読み込みました",
+    tableDataPreviewLoadFailed: "完全なテキストの読み込みに失敗しました：{message}",
   },
   exportProgress: {
     streamingUnsupported: "このクエリはストリーミングエクスポートに対応していません。クエリを簡略化するか、対応しているドライバーを使用してください。",

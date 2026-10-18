@@ -1249,6 +1249,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function onEditKeydown(e: KeyboardEvent) {
+    // Enter/Escape can also be the key that commits an IME candidate. Never
+    // treat that key as the grid shortcut; otherwise a Chinese/Japanese input
+    // commits the cell before the composition is inserted (#12470).
+    if (e.isComposing || e.keyCode === 229) return;
     const isExpandedTextarea = typeof HTMLTextAreaElement !== "undefined" && e.target instanceof HTMLTextAreaElement && e.target.dataset.expandedCellEditor === "true";
     if (e.key === "Enter" && (!isExpandedTextarea || e.metaKey || e.ctrlKey)) {
       e.preventDefault();

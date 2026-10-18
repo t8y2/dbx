@@ -2339,6 +2339,24 @@ describe("useDataGridEditor saveChanges reload", () => {
   });
 });
 
+describe("useDataGridEditor IME composition", () => {
+  it("does not commit or cancel the cell while Enter/Escape belongs to an IME composition", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "hidden", "Lovelace"]]);
+    editor.startEdit(0, 0);
+    editor.editValue.value = "中";
+
+    const composing = { key: "Enter", isComposing: true, keyCode: 229, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyboardEvent;
+    editor.onEditKeydown(composing);
+    expect(composing.preventDefault).not.toHaveBeenCalled();
+    expect(editor.editingCell.value).not.toBeNull();
+
+    const escape = { key: "Escape", isComposing: true, keyCode: 229, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyboardEvent;
+    editor.onEditKeydown(escape);
+    expect(escape.preventDefault).not.toHaveBeenCalled();
+    expect(editor.editingCell.value).not.toBeNull();
+  });
+});
+
 describe("useDataGridEditor cell edit focus", () => {
   it("selects the editor value only on the first frame so fast typing is not clobbered (#7336)", async () => {
     const editor = createEditor(undefined, true, undefined, undefined, [["long json value", "hidden", "last"]]);

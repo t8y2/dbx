@@ -32,7 +32,9 @@ pub(crate) fn take_approved_detached_window_close(label: &str) -> bool {
     approved_detached_closes().lock().map(|mut labels| labels.remove(label)).unwrap_or(false)
 }
 
-pub(crate) async fn load_detached_tabs_map(state: &AppState) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+pub(crate) async fn load_detached_tabs_map(
+    state: &AppState,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     Ok(state
         .storage
         .load_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY)
@@ -283,8 +285,14 @@ pub async fn save_open_tabs_state(
     state: State<'_, Arc<AppState>>,
     payload: serde_json::Value,
 ) -> Result<(), String> {
-    super::workspace_tabs::save_window_tabs(&app, &window, &state, open_tabs_state_key(cfg!(debug_assertions)), &payload)
-        .await
+    super::workspace_tabs::save_window_tabs(
+        &app,
+        &window,
+        &state,
+        open_tabs_state_key(cfg!(debug_assertions)),
+        &payload,
+    )
+    .await
 }
 
 #[tauri::command]

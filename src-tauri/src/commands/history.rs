@@ -44,7 +44,11 @@ pub async fn clear_history(app: AppHandle, state: State<'_, Arc<AppState>>) -> R
 }
 
 #[tauri::command]
-pub async fn clear_history_by_source(app: AppHandle, state: State<'_, Arc<AppState>>, source: String) -> Result<(), String> {
+pub async fn clear_history_by_source(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    source: String,
+) -> Result<(), String> {
     state.storage.clear_history_by_source(&source).await?;
     let _ = app.emit("dbx:history-changed", ());
     Ok(())

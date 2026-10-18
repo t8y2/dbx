@@ -22,7 +22,10 @@ export function usePluginShortcutHeight(options: { section: Ref<HTMLElement | nu
     const section = options.section.value;
     const scroll = options.scroll.value;
     if (!section || !scroll || !options.sidebarList.value) return;
-    const tree = section.previousElementSibling as HTMLElement | null;
+    // Fixed rows (like the connection endpoint bar) may sit between the
+    // flexible tree region and this section, so the tree cannot be found
+    // via previousElementSibling.
+    const tree = (section.parentElement?.querySelector<HTMLElement>(":scope > [data-sidebar-tree]") ?? section.previousElementSibling) as HTMLElement | null;
     const divider = section.querySelector<HTMLElement>("[data-shortcut-resize]");
     const header = section.querySelector<HTMLElement>("[data-shortcut-header]");
     available.value = (tree?.offsetHeight ?? 0) + section.offsetHeight - (divider?.offsetHeight ?? 0) - (header?.offsetHeight ?? 0);

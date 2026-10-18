@@ -7252,6 +7252,53 @@ fn dameng_alter_column_preserves_character_length_unit() {
 }
 
 #[test]
+fn dameng_rename_column_uses_alter_column_rename_to() {
+    let mut renamed = column("NAME");
+    renamed.name = "NEW_NAME".to_string();
+    renamed.data_type = "VARCHAR2(64)".to_string();
+    renamed.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR2(64)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        driver_profile: None,
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        columns: vec![renamed],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        mysql_auto_increment_value: None,
+        transwarp_create: None,
+        partitioned: false,
+        foreign_table: false,
+        is_gaussdb_m_mode: false,
+        table_collation: None,
+        primary_key_name: None,
+        primary_key_change: None,
+        oracle_constraint_changes: None,
+        oracle_foreign_key_changes: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"SYSDBA\".\"USERS\" ALTER COLUMN \"NAME\" RENAME TO \"NEW_NAME\";"]
+    );
+}
+
+#[test]
 fn dameng_rejects_multiple_identity_columns() {
     let mut first = column("ID");
     first.data_type = "INT".to_string();

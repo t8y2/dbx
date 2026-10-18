@@ -81,6 +81,34 @@ function resolveOracleExtendedDialect(sqlFormatter: SqlFormatterModule): SqlForm
   return oracleExtendedDialect;
 }
 
+// sql-formatter 15's PostgreSQL grammar predates PostgreSQL 15's MERGE
+// statement: MERGE / MATCHED are plain identifiers to it, so the DBX layout
+// printer — which splits a statement at its clauses — receives a flat child
+// list it cannot recognise and puts every token on its own line. Register
+// PostgreSQL's MERGE clauses (and the bare `INSERT` action, which has no
+// `INTO`) so MERGE keeps the same one-clause-per-line shape as INSERT/UPDATE.
+// The statement itself is untouched: the words are only recognized as clause
+// boundaries. `WHEN MATCHED` / `WHEN NOT MATCHED` are registered without the
+// trailing `THEN` so the optional `AND <condition>` form still splits here.
+const POSTGRES_MERGE_CLAUSES = ["MERGE INTO", "WHEN MATCHED", "WHEN NOT MATCHED", "UPDATE SET", "INSERT"];
+let postgresMergeDialect: SqlFormatterModule["postgresql"] | null = null;
+
+function resolvePostgresMergeDialect(sqlFormatter: SqlFormatterModule): SqlFormatterModule["postgresql"] {
+  if (postgresMergeDialect) return postgresMergeDialect;
+
+  const clauses = sqlFormatter.postgresql.tokenizerOptions.reservedClauses;
+  const extraClauses = POSTGRES_MERGE_CLAUSES.filter((clause) => !clauses.includes(clause));
+
+  postgresMergeDialect = {
+    ...sqlFormatter.postgresql,
+    tokenizerOptions: {
+      ...sqlFormatter.postgresql.tokenizerOptions,
+      reservedClauses: [...clauses, ...extraClauses],
+    },
+  };
+  return postgresMergeDialect;
+}
+
 export function canFormatSqlForDatabaseType(dbType: string | null | undefined): boolean {
   return dbType !== "redis" && dbType !== "victoriametrics";
 }
@@ -432,7 +460,16 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
           },
         }
       : options;
-  const resolvedDialect = dialect === "mysql" ? resolveMysqlFunctionSafeDialect(sqlFormatter) : dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : dialect === "oracle" ? resolveOracleExtendedDialect(sqlFormatter) : undefined;
+  const resolvedDialect =
+    dialect === "mysql"
+      ? resolveMysqlFunctionSafeDialect(sqlFormatter)
+      : dialect === "clickhouse"
+        ? resolveClickHouseIdentifierSafeDialect(sqlFormatter)
+        : dialect === "oracle"
+          ? resolveOracleExtendedDialect(sqlFormatter)
+          : dialect === "postgres"
+            ? resolvePostgresMergeDialect(sqlFormatter)
+            : undefined;
   const formatWithFallback = (input: string): string => {
     try {
       if (resolvedDialect) {

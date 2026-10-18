@@ -410,9 +410,11 @@ mod tests {
         }
 
         assert!(can_offer_transfer(&transfers, "next"));
-        transfers.insert("pending".into(), pending());
+        for index in 0..MAX_PENDING_TRANSFERS {
+            transfers.insert(format!("pending-{index}"), pending());
+        }
         assert!(!can_offer_transfer(&transfers, "next"));
-        assert!(!can_offer_transfer(&transfers, "pending"));
+        assert!(!can_offer_transfer(&transfers, "pending-0"));
     }
 
     #[test]

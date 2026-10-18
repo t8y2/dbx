@@ -1,3 +1,5 @@
+#![cfg(any(target_os = "windows", test))]
+
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]

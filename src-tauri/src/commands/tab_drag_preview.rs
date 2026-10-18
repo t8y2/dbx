@@ -1,8 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
+#[cfg(target_os = "windows")]
 pub const TAB_DRAG_PREVIEW_RELEASE_EVENT: &str = "dbx:tab-drag-preview-release";
 
 #[derive(Default)]
@@ -15,21 +16,21 @@ struct ActivePreview {
     cancelled: Arc<AtomicBool>,
 }
 
+// 非 Windows 平台仅反序列化请求后返回不支持，跟踪参数只由 Windows 后端读取。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartTabDragPreviewRequest {
     pub transfer_id: String,
     pub source_window_label: String,
-    pub title: String,
     pub left: i32,
     pub top: i32,
-    pub width: i32,
-    pub height: i32,
     pub grab_x: i32,
     pub grab_y: i32,
 }
 
-#[derive(Clone, Serialize)]
+#[cfg(target_os = "windows")]
+#[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TabDragPreviewRelease {
     transfer_id: String,
@@ -77,6 +78,7 @@ mod windows {
     use super::*;
     use std::thread;
     use std::time::Duration;
+    use tauri::Emitter;
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON};
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;

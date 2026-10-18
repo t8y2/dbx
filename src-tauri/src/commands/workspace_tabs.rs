@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 use super::connection::AppState;
 use super::workspace_tab_recovery::merge_recovered_tabs;
+#[cfg(target_os = "windows")]
 use super::workspace_window_hit_test::{topmost_workspace_window_at, WindowHitBox};
 
 const TRANSFER_LIFETIME: Duration = Duration::from_secs(30);
@@ -79,7 +80,7 @@ pub fn workspace_window_at(app: AppHandle, point: WorkspaceWindowPoint) -> Resul
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (app, point);
+        let _ = (app, point.x, point.y);
         Ok(None)
     }
 }

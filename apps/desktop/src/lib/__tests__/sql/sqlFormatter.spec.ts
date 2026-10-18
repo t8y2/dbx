@@ -159,13 +159,13 @@ describe("sqlFormatter", () => {
   });
 
   it("keeps a view's trailing line comment from swallowing the next column (issue #10278)", async () => {
-    // A `--` comment consumes the rest of its line, so the column that follows
-    // it in the view text has to start a new line; appending it to the comment
-    // would silently drop it from the DDL shown to the user.
+    // A `--` comment consumes the rest of its line. Keeping it on the previous
+    // field's line is safe only when the following column starts a new line,
+    // otherwise the column would silently disappear from the DDL shown to the user.
     const viewDdl = `CREATE VIEW "TEMP_TEST_VIEW" AS SELECT trunc(sysdate) AS dates, -- 测试\n(SELECT sysdate FROM dual t) AS nows\nFROM dual;`;
     const formatted = await formatSqlForDisplay(viewDdl, sqlFormatDialectForDbType("oracle"));
 
-    expect(formatted).toBe('CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates,\n       -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;');
+    expect(formatted).toBe('CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates, -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;');
   });
 
   it("keeps a short OceanBase Oracle view projection readable (issue #7540)", async () => {
@@ -503,6 +503,22 @@ LIMIT 100;`);
 
   it("preserves whitespace after a recovered trailing dot", async () => {
     await expect(formatSqlForEditing("SELECT 1 .\n", "dameng")).resolves.toBe("SELECT 1 .\n");
+  });
+
+  it("keeps trailing SELECT comments on the field line (#12615)", async () => {
+    const source = `select a, -- first field\n b, -- second field\n c -- third field\nfrom t;`;
+    const formatted = await formatSqlForEditing(source, "postgres");
+
+    expect(formatted).toContain("SELECT a, -- first field\n");
+    expect(formatted).toContain("       b, -- second field\n");
+    expect(formatted).toContain("       c -- third field\nFROM t;");
+  });
+
+  it("keeps source-standalone SELECT comments on their own line", async () => {
+    const source = `select a,\n-- heading for b\n b\nfrom t;`;
+    const formatted = await formatSqlForEditing(source, "postgres");
+
+    expect(formatted).toContain("SELECT a,\n       -- heading for b\n       b\nFROM t;");
   });
 
   it("preserves the newline before a trailing dot after a line comment", async () => {

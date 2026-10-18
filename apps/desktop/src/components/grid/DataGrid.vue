@@ -458,6 +458,15 @@ const dataGridCrosshairHighlight = computed(() => settingsStore.editorSettings.d
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 const rowNumberWidth = ref(DATA_GRID_ROW_NUM_WIDTH);
 const largeValueResolutionVersion = ref(0);
+// Direct table browsing uses a byte-budgeted preview. Keep that fast path, but
+// let the user explicitly expand the current page (and then bypass the display
+// cache for this table) instead of guessing from a column width (#12289).
+const tableDataFullTextMode = ref(false);
+const tableDataFullTextLoading = ref(false);
+const tableDataPreviewNoticeDismissed = ref(false);
+const tableDataPreviewTruncated = computed(() => !!props.tableMeta && (props.result.large_value_cells?.length ?? 0) > 0);
+const showTableDataPreviewNotice = computed(() => tableDataPreviewTruncated.value && !tableDataFullTextMode.value && !tableDataPreviewNoticeDismissed.value);
+const tableDataFullTextEnabled = computed(() => !!props.tableMeta && tableDataFullTextMode.value);
 const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
 const hideEmptyColumns = computed(() => settingsStore.editorSettings.dataGridHideEmptyColumns);
@@ -5879,7 +5888,29 @@ const largeValueRuntimeInstance = useDataGridLargeValues({
   cloneRows: cloneEditorRows,
 });
 largeValueRuntime = largeValueRuntimeInstance;
-const { isLargeValuePreview, largeValueOriginalBytes, formatGridItemCell, formatGridItemCellForConfirmation, visibleLargeValuePreviewValue, resolveLargeValueCells, reportLargeValueLoadError, cloneRow, cloneRows } = largeValueRuntimeInstance;
+const { isLargeValuePreview, largeValueOriginalBytes, formatGridItemCell, formatGridItemCellForConfirmation, visibleLargeValuePreviewValue, resolveLargeValueCells, hydrateLargeValueCells, reportLargeValueLoadError, cloneRow, cloneRows } = largeValueRuntimeInstance;
+
+async function loadCurrentPageFullText() {
+  if (tableDataFullTextLoading.value || !props.tableMeta) return;
+  tableDataFullTextLoading.value = true;
+  try {
+    const rowIds = displayItems.value.filter((item) => !item.isDraft).map((item) => item.id);
+    const columnIndexes = props.result.columns.map((_, index) => index);
+    const count = await hydrateLargeValueCells(rowIds, columnIndexes);
+    tableDataFullTextMode.value = true;
+    tableDataPreviewNoticeDismissed.value = true;
+    clearCellFormatCache();
+    toast(t("grid.tableDataPreviewLoaded", { count }), 3000);
+  } catch (error: any) {
+    toast(t("grid.tableDataPreviewLoadFailed", { message: translateBackendError(t, error) }), 5000);
+  } finally {
+    tableDataFullTextLoading.value = false;
+  }
+}
+
+function dismissTableDataPreviewNotice() {
+  tableDataPreviewNoticeDismissed.value = true;
+}
 
 const exportContextCell = computed(() => {
   if (!contextCell.value) return null;
@@ -7709,7 +7740,7 @@ function formatCell(value: CellValue, columnIndex?: number, originalBytes?: numb
   }
   if (formatter?.kind === "foreign-key-display" && columnIndex !== undefined) {
     const display = formatForeignKeyCellDisplay(value, columnIndex);
-    return limitDisplay ? limitDataGridCellDisplay(display, resolvedDatabaseType.value === "sqlserver" ? SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH : undefined) : display;
+    return limitDisplay && !tableDataFullTextEnabled.value ? limitDataGridCellDisplay(display, resolvedDatabaseType.value === "sqlserver" ? SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH : undefined) : display;
   }
   const columnInfo = columnIndex === undefined ? undefined : tableColumnForGridColumn(columnIndex);
   const displayColumnInfo = columnInfo ?? (columnIndex === undefined ? undefined : resultColumnInfoForGridColumn(columnIndex));
@@ -7726,7 +7757,7 @@ function formatCell(value: CellValue, columnIndex?: number, originalBytes?: numb
   const booleanDisplay = formatter ? undefined : booleanCellDisplayText(value, booleanCellValueStyle.value);
   if (booleanDisplay !== undefined) return booleanDisplay;
   const s = applyColumnFormatter(value, formatter);
-  return limitDisplay ? limitDataGridCellDisplay(s, resolvedDatabaseType.value === "sqlserver" ? SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH : undefined) : s;
+  return limitDisplay && !tableDataFullTextEnabled.value ? limitDataGridCellDisplay(s, resolvedDatabaseType.value === "sqlserver" ? SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH : undefined) : s;
 }
 
 function formatCellCached(value: CellValue, columnIndex?: number, originalBytes?: number): string {
@@ -14521,6 +14552,24 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @copy-sql="copySortSqlPreview"
           @apply="applyStructuredSortRules"
         />
+        <!-- Large table preview notice: explicit opt-in instead of guessing from column width (#12289). -->
+        <div v-if="showTableDataPreviewNotice" data-grid-preview-notice class="shrink-0 px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-700 dark:text-amber-300 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Info class="h-3.5 w-3.5 shrink-0" />
+          <span>{{ t("grid.tableDataPreviewNotice") }}</span>
+          <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 disabled:opacity-50 dark:hover:text-amber-100" :disabled="tableDataFullTextLoading" @click="loadCurrentPageFullText">
+            {{ tableDataFullTextLoading ? t("grid.tableDataPreviewLoading") : t("grid.tableDataPreviewLoadPage") }}
+          </button>
+          <button
+            type="button"
+            class="ml-auto shrink-0 rounded p-0.5 text-amber-600/70 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400/70 dark:hover:text-amber-200"
+            :title="t('grid.tableDataPreviewDismiss')"
+            :aria-label="t('grid.tableDataPreviewDismiss')"
+            @click="dismissTableDataPreviewNotice"
+          >
+            <X class="h-3.5 w-3.5" />
+          </button>
+        </div>
+
         <!-- Truncation warning banner -->
         <div v-if="showTruncationWarning" class="shrink-0 px-3 py-1 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
           <span>{{ t(truncationHintKey, { count: result.rows.length }) }}</span>
@@ -14548,7 +14597,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               :match-count="searchMatchCount"
               :current-match-index="currentMatchIndex"
               :has-deferred-search-text="!!deferredClientSearchText"
-              :values-truncated="(props.result.large_value_cells?.length ?? 0) > 0"
               @keydown="onSearchKeydown"
               @navigate="navigateMatch"
               @replace-current="replaceGridMatches(true)"

@@ -614,6 +614,36 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     return resolved;
   }
 
+  /**
+   * Resolve every truncated cell the caller can currently see in one batch and
+   * write the full values back into the result. Used by the table-preview
+   * "load current page" action; the result-level display cache still applies to
+   * cells the user has not chosen to expand.
+   */
+  async function hydrateLargeValueCells(rowIds: number[], columnIndexes: number[]): Promise<number> {
+    const sourceResult = options.result.value;
+    const resolved = await resolveLargeValueCells(rowIds, columnIndexes);
+    let changed = 0;
+    for (const [rowId, values] of resolved) {
+      const item = options.getRowItem(rowId);
+      if (item?.sourceIndex === undefined) continue;
+      for (const [columnIndex, value] of values) {
+        sourceResult.rows[item.sourceIndex]![columnIndex] = value;
+        const metadata = largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex));
+        if (metadata?.value_ref) sourceResult.large_value_refs = [...new Set([...(sourceResult.large_value_refs ?? []), metadata.value_ref])];
+        sourceResult.large_value_cells = sourceResult.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
+        visibleLargeValuePreviewCaches.get(sourceResult)?.forget(item.sourceIndex, columnIndex);
+        changed += 1;
+      }
+    }
+    if (changed > 0) {
+      options.largeValueResolutionVersion.value += 1;
+      options.clearCellFormatCache();
+      options.invalidateResultEstimate(sourceResult);
+    }
+    return changed;
+  }
+
   function reportLargeValueLoadError(error: unknown) {
     options.toast(options.translate("grid.largeValueLoadFailedWithMessage", { message: options.translateBackendError(error) }), 5000);
   }
@@ -740,6 +770,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     formatGridItemCellForConfirmation,
     visibleLargeValuePreviewValue,
     resolveLargeValueCells,
+    hydrateLargeValueCells,
     hydrateLargeValueCell,
     prepareSaveBaseline,
     invalidateVisibleLargeValuePreviewCell,

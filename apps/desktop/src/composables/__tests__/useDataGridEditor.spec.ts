@@ -2355,6 +2355,28 @@ describe("useDataGridEditor IME composition", () => {
     expect(escape.preventDefault).not.toHaveBeenCalled();
     expect(editor.editingCell.value).not.toBeNull();
   });
+
+  it("keeps the guard for the Process key without keyCode 229", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "hidden", "Lovelace"]]);
+    editor.startEdit(0, 0);
+    const process = { key: "Process", isComposing: false, keyCode: 13, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyboardEvent;
+    editor.onEditKeydown(process);
+    expect(process.preventDefault).not.toHaveBeenCalled();
+    expect(editor.editingCell.value).not.toBeNull();
+  });
+
+  it("defers to the composition tracking flag when the keydown itself carries no composition signal", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "hidden", "Lovelace"]]);
+    editor.startEdit(0, 0);
+    // WebKit fires compositionend before the committing keydown, so the input's
+    // composition tracking ref is the only reliable signal in that window.
+    const enter = { key: "Enter", isComposing: false, keyCode: 13, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyboardEvent;
+    editor.onEditKeydown(enter, true);
+    expect(enter.preventDefault).not.toHaveBeenCalled();
+    expect(editor.editingCell.value).not.toBeNull();
+    editor.onEditKeydown(enter, false);
+    expect(enter.preventDefault).toHaveBeenCalled();
+  });
 });
 
 describe("useDataGridEditor cell edit focus", () => {

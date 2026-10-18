@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 dbx-core = { path = "../../../crates/dbx-core", default-features = false, features = ["duckdb-sidecar"] }
-sysinfo = "0.32"
+sysinfo = "0.39"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 

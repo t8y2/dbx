@@ -52,42 +52,42 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 webpki-roots = "0.26"
-rusqlite = { version = "0.32", default-features = false, features = ["load_extension", "backup", "functions", "column_decltype"] }
+rusqlite = { version = "0.40", default-features = false, features = ["load_extension", "backup", "functions", "column_decltype"] }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
-sqlparser = { version = "0.62.0", features = ["visitor"] }
+sqlparser = { version = "0.63.0", features = ["visitor"] }
 redis = { version = "1.7.1", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2"
-reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }
 prometheus-parse = "=0.2.5"
 futures = "0.3"
 mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
-rumqttc = { version = "0.24", features = ["websocket"], optional = true }
+rumqttc = { version = "0.25", features = ["websocket"], optional = true }
 portpicker = "0.1.1"
 csv = "1"
-calamine = { version = "0.30.1", features = ["dates"] }
+calamine = { version = "0.36.0", features = ["dates"] }
 ssfmt = { version = "0.1.2", default-features = false }
-quick-xml = "0.37"
-base64 = "0.22"
+quick-xml = "0.42"
+base64 = "0.23"
 jsonwebtoken = "9"
-aes-gcm = "0.10"
-aes = "0.8"
-cbc = "0.1"
-argon2 = "0.5"
+aes-gcm = "0.11"
+aes = "0.9"
+cbc = "0.2"
+argon2 = "0.6"
 # macOS/Windows keychain backend. The crate's own Linux backend requires
 # C libdbus (cannot cross-compile); Linux uses the secret-service crate below
 # with the same on-disk attribute layout instead.
 keyring = { version = "3.6.3", default-features = false, optional = true, features = ["apple-native", "windows-native", "crypto-rust"] }
-sha2 = "0.10"
+sha2 = "0.11"
 async-trait = "0.1"
 bytes = "1"
 font-kit = { version = "0.14.3", optional = true }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 flate2 = "1"
 crc = "3"
-sha1 = "0.10"
+sha1 = "0.11"
 tar = "0.4"
-sysinfo = { version = "0.32", features = ["system"] }
+sysinfo = { version = "0.39", features = ["system"] }
 minijinja = "2"
 notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
 arc-swap = "1"
@@ -98,7 +98,7 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 
 [dev-dependencies]
 dbx-core = { path = ".", default-features = false, features = ["test-support"] }
-zstd = "0.13"
+zstd = "0.14"
 dbx-drivers = { path = "../dbx-drivers", default-features = false, features = ["test-support"] }
 dbx-plugin-runtime = { path = "../dbx-plugin-runtime", features = ["test-support"] }
 dbx-platform = { path = "../dbx-platform", features = ["test-support"] }

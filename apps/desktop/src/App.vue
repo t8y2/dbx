@@ -3379,13 +3379,18 @@ async function openConnectionQuery(connectionId: string) {
     }
     return;
   }
-  const tabId = queryStore.createTab(connectionId, initialTarget.database);
+  // The quick-start page opens a query directly, bypassing newQuery() and its
+  // default-schema fallback. Pass the configured schema here too, otherwise an
+  // Oracle connection with a default schema opens the editor without a session
+  // schema and unqualified tables resolve against the session default (#11844).
+  const tabId = queryStore.createTab(connectionId, initialTarget.database, undefined, "query", initialTarget.schema);
   try {
     await connectionStore.ensureConnected(connectionId);
     const options = await getDatabaseOptions(connectionId);
     const target = quickConnectionOpenTarget(connection, options);
     if (target.kind === "query") {
       queryStore.updateDatabase(tabId, target.database);
+      if (target.schema) queryStore.updateSchema(tabId, target.schema);
     }
   } catch (e: any) {
     toast(

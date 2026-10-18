@@ -2405,6 +2405,7 @@ export const useSettingsStore = defineStore("settings", () => {
   function syncAlwaysOnTopToolbarVisibility(visible: boolean) {
     editorSettings.value.toolbarItems.alwaysOnTop = visible;
     persistedAlwaysOnTopToolbarVisibility = visible;
+    persistedEditorSettingsSnapshot.toolbarItems.alwaysOnTop = visible;
   }
 
   // Whether the editor-settings blob loaded from disk actually carried a global

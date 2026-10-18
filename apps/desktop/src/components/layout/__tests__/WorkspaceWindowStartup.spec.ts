@@ -87,9 +87,12 @@ describe("workspace startup preview", () => {
 
   it("shows the committed workspace if the source acknowledges before inspection returns", async () => {
     let rejectInspection!: (error: Error) => void;
-    mocks.invoke.mockImplementationOnce(() => new Promise((_resolve, reject) => {
-      rejectInspection = reject;
-    }));
+    mocks.invoke.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectInspection = reject;
+        }),
+    );
     mount();
     await flushPromises();
 

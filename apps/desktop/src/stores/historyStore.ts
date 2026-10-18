@@ -41,19 +41,30 @@ export const useHistoryStore = defineStore("history", () => {
   let disposed = false;
   let refreshQueued = false;
   if (isTauriRuntime()) {
-    void import("@tauri-apps/api/event").then(({ listen }) => listen("dbx:history-changed", () => {
-      invalidateConnectionOptionRequests();
-      if (!historyPanelActive || refreshQueued || disposed) return;
-      refreshQueued = true;
-      queueMicrotask(() => {
-        refreshQueued = false;
-        if (!historyPanelActive || disposed) return;
-        void search(latestRequestedSearch).catch(() => {});
-        void loadConnectionOptions().catch(() => {});
-      });
-    })).then((stop) => { if (disposed) stop(); else stopHistorySync = stop; }).catch((error) => console.warn("[DBX][history:sync-listen:error]", error));
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen("dbx:history-changed", () => {
+          invalidateConnectionOptionRequests();
+          if (!historyPanelActive || refreshQueued || disposed) return;
+          refreshQueued = true;
+          queueMicrotask(() => {
+            refreshQueued = false;
+            if (!historyPanelActive || disposed) return;
+            void search(latestRequestedSearch).catch(() => {});
+            void loadConnectionOptions().catch(() => {});
+          });
+        }),
+      )
+      .then((stop) => {
+        if (disposed) stop();
+        else stopHistorySync = stop;
+      })
+      .catch((error) => console.warn("[DBX][history:sync-listen:error]", error));
   }
-  onScopeDispose(() => { disposed = true; stopHistorySync?.(); });
+  onScopeDispose(() => {
+    disposed = true;
+    stopHistorySync?.();
+  });
 
   function invalidateConnectionOptionRequests() {
     optionsRequestSerial += 1;

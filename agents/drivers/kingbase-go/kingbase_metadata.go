@@ -281,13 +281,14 @@ func (s *server) connectionInfo() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var database, username, version, schema string
+	var database, username, version string
+	var schema sql.NullString
 	err = db.QueryRow("SELECT current_database(), current_user, version(), current_schema()").Scan(&database, &username, &version, &schema)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"database": database, "username": username, "version": version, "schema": schema,
+		"database": database, "username": username, "version": version, "schema": schema.String,
 		"compatibilityMode": s.mode.compatibilityMode, "mysql_compat_mode": s.mode.mysqlCompat,
 		"identifierQuote": s.identifierQuote(),
 	}, nil

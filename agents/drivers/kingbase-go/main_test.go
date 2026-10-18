@@ -68,6 +68,7 @@ type modeDetectionDriverState struct {
 	queries             []string
 	databaseMode        *string
 	backtickIdentifiers bool
+	nullCurrentSchema   bool
 	databaseErr         error
 }
 
@@ -253,9 +254,13 @@ func (connection *modeDetectionConn) QueryContext(_ context.Context, query strin
 
 	switch {
 	case strings.Contains(query, "SELECT current_database()"):
+		var schema driver.Value = "public"
+		if connection.state.nullCurrentSchema {
+			schema = nil
+		}
 		return &valueRows{
 			columns: []string{"current_database", "current_user", "version", "current_schema"},
-			rows:    [][]driver.Value{{"test", "system", "KingbaseES", "public"}},
+			rows:    [][]driver.Value{{"test", "system", "KingbaseES", schema}},
 		}, nil
 	case strings.Contains(query, "LOWER(name) = 'database_mode'"):
 		if connection.state.databaseErr != nil {
@@ -4497,6 +4502,25 @@ func TestConnectionInfoReportsCompatibilityIdentifierQuote(t *testing.T) {
 				t.Fatalf("unexpected identifier quote: %#v", info["identifierQuote"])
 			}
 		})
+	}
+}
+
+func TestConnectionInfoAllowsNullCurrentSchema(t *testing.T) {
+	db := openModeDetectionDB(t, &modeDetectionDriverState{nullCurrentSchema: true})
+	server := newServer()
+	server.db = db
+	server.mode.compatibilityMode = "mysql"
+	server.mode.mysqlCompat = true
+
+	info, err := server.connectionInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["schema"] != "" {
+		t.Fatalf("unexpected schema: %#v", info["schema"])
+	}
+	if info["identifierQuote"] != "`" {
+		t.Fatalf("unexpected identifier quote: %#v", info["identifierQuote"])
 	}
 }
 

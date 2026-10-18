@@ -3604,8 +3604,11 @@ export const useConnectionStore = defineStore("connection", () => {
     if (connectionUsesVisibleSchemaFilter(config)) {
       return schemaCacheKey(connectionId, config.database || "", config.db_type === "oracle" ? "schemas-v2" : "schemas", config.show_system_schemas === true ? "show-system" : "hide-system");
     }
-    // v3 includes per-database compatibilityMode used by openGauss A-mode capabilities.
-    return schemaCacheKey(connectionId, "databases-v3");
+    // v4 includes per-database compatibilityMode used by openGauss A-mode
+    // capabilities, and keys the "show system databases" flag: MySQL-family
+    // connections lift the frontend database blacklist with it, so a cached
+    // (filtered) child list must not be served after the setting changes.
+    return schemaCacheKey(connectionId, "databases-v4", config.show_system_schemas === true ? "show-system" : "hide-system");
   }
 
   async function hydrateTreeNodeFromCache(node: TreeNode | null, cacheKey: string | null): Promise<boolean> {
@@ -5642,8 +5645,10 @@ export const useConnectionStore = defineStore("connection", () => {
               setChildren(targetNode, children);
               await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || children);
             } else {
-              // v3 persists per-database compatibilityMode for openGauss A-mode features.
-              const cacheKey = schemaCacheKey(connectionId, "databases-v3");
+              // v4 persists per-database compatibilityMode for openGauss A-mode
+              // features and keys the "show system databases" flag so toggling it
+              // re-fetches instead of replaying the filtered cache.
+              const cacheKey = schemaCacheKey(connectionId, "databases-v4", config?.show_system_schemas === true ? "show-system" : "hide-system");
               if (!options?.force) {
                 const cached = await loadPersistedTreeChildren(node, cacheKey, load);
                 if (cached.hit) {

@@ -1671,6 +1671,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "在目前連線的資料表清單中顯示 Dolt 內建的版本控制資料表。",
     showSystemSchemas: "顯示系統 Schema",
     showSystemSchemasHint: "為目前連線在側邊欄和 Schema 選擇器中顯示內建/中繼資料 Schema。",
+    showSystemDatabases: "顯示系統庫",
+    showSystemDatabasesHint: "為目前連線在側邊欄和資料庫選擇器中顯示內建系統庫（information_schema、performance_schema、mysql、sys）。",
     showDatabaseLinks: "顯示資料庫連結",
     showDatabaseLinksHint: "在側邊欄中顯示目前連線的資料庫連結（DB Link）入口。",
     docsNotesPath: "筆記檔案",

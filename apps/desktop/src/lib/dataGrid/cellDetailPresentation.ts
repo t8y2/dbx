@@ -1,4 +1,6 @@
 import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
+import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
+import type { DatabaseType } from "@/types/database";
 
 export type CellDetailTab = "details" | "hexViewer" | "valueEditor";
 export type ValueEditorAction = "formatJson" | "compactJson" | "setNull" | "restoreOriginal";
@@ -35,6 +37,11 @@ export function visibleCellDetailTabs(options: CellDetailPresentationOptions): C
     tabs.push("valueEditor");
   }
   return tabs;
+}
+
+/** Preview text for the detail surfaces. Boolean columns use the same label as the grid (TRUE/FALSE or 1/0), while rawValue stays untouched for length/copy/edit semantics. */
+export function cellDetailPreviewText(detail: Pick<{ type: string; rawValuePreview: string; displayValuePreview: string }, "type" | "rawValuePreview" | "displayValuePreview">, databaseType?: DatabaseType): string {
+  return isBooleanColumnType(detail.type, databaseType) ? detail.displayValuePreview : detail.rawValuePreview;
 }
 
 export function cellDetailEditorText(value: unknown, _columnType?: string): string {

@@ -11,7 +11,7 @@ import { TabsContent } from "@/components/ui/tabs";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import { useDataGridCellDetail } from "@/composables/useDataGridCellDetail";
 import { BINARY_CELL_DOWNLOAD_MODES, isBinaryCellColumnType, binaryCellUtf8Text, isBlobCellColumnType, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
-import { isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
+import { cellDetailPreviewText, isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { isHexGeometry } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
@@ -78,7 +78,7 @@ void detailsEditorContainer;
 void sideJsonPreviewContainer;
 
 const binaryTextPreview = computed(() => (isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
-const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? props.detail.rawValuePreview : props.detail.displayValuePreview));
+const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? cellDetailPreviewText(props.detail, props.databaseType) : props.detail.displayValuePreview));
 const transformOpen = ref(false);
 // 底部面板横向空间充足：有图片预览时与值文本左右并排，侧栏窄面板保持上下堆叠。
 const valueBesideImage = computed(() => props.panelIsBottom && !props.editing && !!props.detail.imagePreviewUrl);

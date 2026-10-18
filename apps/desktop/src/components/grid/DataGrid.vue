@@ -6977,7 +6977,7 @@ function cellDetailFor(rowIndex: number, columnIndex: number): DataGridCellDetai
     typeByColumn: columnTypeMap.value,
     resultColumnTypes: props.result.column_types,
     commentByColumn: columnCommentMap.value,
-    displayValue: (value, index) => booleanCellDisplayText(value, booleanCellValueStyle.value) ?? formatCellCached(value, index),
+    displayValue: (value, index) => formatCellCached(value, index),
     rawValue: gridDetailRawValue,
     isNullValue: gridDetailIsNullValue,
     isEditable: canEditGridCellDetail({
@@ -16332,6 +16332,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       v-model:column-open="columnDetailDialogOpen"
       :row-detail="rowDetail"
       :column-detail="columnDetail"
+      :database-type="resolvedDatabaseType"
       :type-color-class="typeColorClass"
       @navigate-row="navigateRowDetail"
       @navigate-column="navigateColumnDetail"

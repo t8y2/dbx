@@ -2576,7 +2576,11 @@ export const useSettingsStore = defineStore("settings", () => {
           editorSettings.value = legacy;
           persistedAlwaysOnTopToolbarVisibility = legacy.toolbarItems.alwaysOnTop;
           try {
-            await enqueueEditorSettingsSave();
+            // Persist the complete migrated snapshot. Its normalized values may
+            // match the in-memory defaults, so a diff against the initial
+            // snapshot can be empty even though the legacy data must be moved
+            // into the current app-state storage.
+            await enqueueEditorSettingsSave(legacy);
             // Existing desktop users keep settings in localStorage; remove them only
             // after the async store has accepted the migrated value.
             clearLegacyEditorSettings();
@@ -3216,13 +3220,17 @@ export const useSettingsStore = defineStore("settings", () => {
     const requestedPatch = migrateLegacyFilterEditorExpansionPatch(partial);
     applyEditorSettingsPatch(requestedPatch);
     const patch = diffEditorSettings(editorSettings.value, before);
-    if (!Object.keys(patch).length) return;
-    markEditorSettingsPatch(patch);
+    // Preserve the established update contract: an explicitly supplied setting
+    // is persisted even when it already equals the in-memory default. This is
+    // important for callers that intentionally choose the default value.
+    const persistencePatch = Object.keys(patch).length ? patch : requestedPatch;
+    if (!Object.values(persistencePatch).some((value) => value !== undefined)) return;
+    markEditorSettingsPatch(persistencePatch);
     if (!isEditorSettingsLoaded.value) {
-      pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(patch));
+      pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(persistencePatch));
       return;
     }
-    saveEditorSettings();
+    saveEditorSettings(persistencePatch);
   }
 
   async function persistEditorSettings(): Promise<void> {

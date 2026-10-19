@@ -2,6 +2,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 export type WindowContext =
   | { kind: "main"; windowLabel: "main" }
+  | { kind: "workspace"; windowLabel: string }
   | { kind: "detached-tab"; windowLabel: string; tabId: string }
   /** A floating plugin window: one plugin workbench rendered outside the shell (§8.3 surface "window"). */
   | { kind: "plugin-window"; windowLabel: string; pluginId: string; contributionId: string; creatorLabel: string; pluginContext?: Record<string, unknown> };
@@ -88,6 +89,11 @@ export function resolveWindowContext(): WindowContext {
   }
 
   const search = new URLSearchParams(window.location.search);
+  const workspaceId = search.get("dbxWorkspace");
+  if (workspaceId && /^[a-zA-Z0-9-]+$/.test(workspaceId)) {
+    cachedContext = { kind: "workspace", windowLabel: `dbx-tab-${workspaceId}` };
+    return cachedContext;
+  }
   const tabId = search.get(DETACHED_WINDOW_PARAM)?.trim();
   if (tabId) {
     // The window label is not available synchronously from the Tauri API. The
@@ -118,6 +124,10 @@ export function resolveWindowContext(): WindowContext {
 
 export function isDetachedWindow(): boolean {
   return resolveWindowContext().kind === "detached-tab";
+}
+
+export function isWorkspaceWindow(): boolean {
+  return resolveWindowContext().kind === "workspace";
 }
 
 export function isFloatingPluginWindow(): boolean {

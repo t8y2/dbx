@@ -1027,7 +1027,8 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return invoke("load_editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
+export async function saveEditorSettings(settings: unknown, patch?: unknown): Promise<unknown> {
+  if (patch !== undefined) return invoke("patch_editor_settings", { patch });
   return invoke("save_editor_settings", { settings });
 }
 

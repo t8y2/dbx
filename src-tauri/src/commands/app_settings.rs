@@ -7,7 +7,7 @@ use std::{
 use dbx_core::storage::{
     AppAppearanceSettings, AppAppearanceSettingsPatch, DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState,
 };
-use tauri::{AppHandle, Manager, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 use super::connection::AppState;
 use crate::{
@@ -32,7 +32,9 @@ pub(crate) fn take_approved_detached_window_close(label: &str) -> bool {
     approved_detached_closes().lock().map(|mut labels| labels.remove(label)).unwrap_or(false)
 }
 
-async fn load_detached_tabs_map(state: &AppState) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+pub(crate) async fn load_detached_tabs_map(
+    state: &AppState,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     Ok(state
         .storage
         .load_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY)
@@ -41,7 +43,7 @@ async fn load_detached_tabs_map(state: &AppState) -> Result<serde_json::Map<Stri
         .unwrap_or_default())
 }
 
-fn open_tabs_state_key(debug_build: bool) -> &'static str {
+pub(crate) fn open_tabs_state_key(debug_build: bool) -> &'static str {
     if debug_build {
         DEVELOPMENT_OPEN_TABS_STATE_KEY
     } else {
@@ -190,7 +192,11 @@ pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn request_app_close_from_window_controls(app: AppHandle) -> Result<(), String> {
+pub async fn request_app_close_from_window_controls(app: AppHandle, window: Window) -> Result<(), String> {
+    if super::workspace_tabs::is_workspace_window(window.label()) {
+        super::workspace_tabs::request_workspace_close(&window);
+        return Ok(());
+    }
     request_app_close(&app, "settings");
     Ok(())
 }
@@ -227,6 +233,18 @@ pub async fn save_editor_settings(state: State<'_, Arc<AppState>>, settings: ser
     state.storage.save_editor_settings(&settings).await
 }
 
+#[tauri::command]
+pub async fn patch_editor_settings(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, Arc<AppState>>,
+    patch: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let merged = state.storage.merge_editor_settings_patch(&patch).await?;
+    let _ = app.emit("dbx:editor-settings-patch", serde_json::json!({ "source": window.label(), "patch": patch }));
+    Ok(merged)
+}
+
 const GLOBAL_SEARCH_SETTINGS_FILE: &str = "global-search-settings.json";
 
 #[tauri::command]
@@ -252,13 +270,29 @@ pub async fn save_global_search_settings(app: AppHandle, settings: serde_json::V
 }
 
 #[tauri::command]
-pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
-    state.storage.load_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions))).await
+pub async fn load_open_tabs_state(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<serde_json::Value>, String> {
+    super::workspace_tabs::load_window_tabs(&app, &window, &state, open_tabs_state_key(cfg!(debug_assertions))).await
 }
 
 #[tauri::command]
-pub async fn save_open_tabs_state(state: State<'_, Arc<AppState>>, payload: serde_json::Value) -> Result<(), String> {
-    state.storage.save_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions)), &payload).await
+pub async fn save_open_tabs_state(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, Arc<AppState>>,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    super::workspace_tabs::save_window_tabs(
+        &app,
+        &window,
+        &state,
+        open_tabs_state_key(cfg!(debug_assertions)),
+        &payload,
+    )
+    .await
 }
 
 #[tauri::command]

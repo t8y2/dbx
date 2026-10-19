@@ -2514,8 +2514,23 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return loadBrowserAppState("editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
+export async function saveEditorSettings(settings: unknown, patch?: unknown): Promise<unknown> {
+  if (patch !== undefined) return patchEditorSettings(patch);
   await saveBrowserAppState("editor_settings", settings);
+  return undefined;
+}
+
+async function patchEditorSettings(patch: unknown): Promise<unknown> {
+  const current = await loadEditorSettings();
+  const merge = (base: unknown, update: unknown): unknown => {
+    if (!base || typeof base !== "object" || Array.isArray(base) || !update || typeof update !== "object" || Array.isArray(update)) return update;
+    const result = { ...(base as Record<string, unknown>) };
+    for (const [key, value] of Object.entries(update as Record<string, unknown>)) result[key] = key in result ? merge(result[key], value) : value;
+    return result;
+  };
+  const merged = merge(current ?? {}, patch);
+  await saveEditorSettings(merged);
+  return merged;
 }
 
 // Background images are desktop-only: the web backend has no local data dir.

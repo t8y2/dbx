@@ -25,6 +25,7 @@ export interface SavedQueryResultRun {
 export interface SavedOpenTab {
   id: string;
   createdAt?: number;
+  sqlUpdatedAt?: number;
   title: string;
   customTitle?: boolean;
   /** 用户自定义的标签后缀，取代自动编号 */
@@ -175,6 +176,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
   return tabs.filter(shouldPersistOpenTab).map((tab) => ({
     id: tab.id,
     ...(typeof tab.createdAt === "number" ? { createdAt: tab.createdAt } : {}),
+    ...(typeof tab.sqlUpdatedAt === "number" && Number.isFinite(tab.sqlUpdatedAt) ? { sqlUpdatedAt: tab.sqlUpdatedAt } : {}),
     title: tab.title,
     ...(tab.customTitle ? { customTitle: true } : {}),
     ...(tab.titleSuffix?.trim() ? { titleSuffix: tab.titleSuffix.trim() } : {}),
@@ -290,6 +292,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         ...tab,
         mode,
         sql: typeof tab.sql === "string" ? tab.sql : "",
+        sqlUpdatedAt: typeof tab.sqlUpdatedAt === "number" && Number.isFinite(tab.sqlUpdatedAt) ? tab.sqlUpdatedAt : undefined,
         isExecuting: false,
         redisMonitorActive: false,
         isCancelling: false,

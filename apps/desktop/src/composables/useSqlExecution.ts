@@ -295,6 +295,11 @@ export function useSqlExecution(deps: {
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted("no-tab", options.tabId);
     }
+    // A CodeMirror execution snapshot can arrive before the editor's model
+    // update has reached the store (for example, while composition is ending).
+    // Persist the whole document, not just the selected statement, so the tab's
+    // unsaved marker and later draft persistence reflect what the user sees.
+    if (isSqlExecutionSnapshot(sqlOverride)) queryStore.updateSql(context.tabId, sqlOverride.fullSql);
     const { sql, sourceOffset, editorViewportRequestId } = await resolvedExecutableSql(sqlOverride, context);
     const executionOptions = { ...options, editorViewportRequestId, tabId: context.tabId };
     if (!sql.trim()) {

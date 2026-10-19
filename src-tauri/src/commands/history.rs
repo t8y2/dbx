@@ -1,12 +1,14 @@
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use super::connection::AppState;
 pub use dbx_core::history::{HistoryConnectionOption, HistoryEntry, HistorySearchRequest, HistorySearchResult};
 
 #[tauri::command]
-pub async fn save_history(state: State<'_, Arc<AppState>>, entry: HistoryEntry) -> Result<(), String> {
-    state.storage.save_history_entry(&entry).await
+pub async fn save_history(app: AppHandle, state: State<'_, Arc<AppState>>, entry: HistoryEntry) -> Result<(), String> {
+    state.storage.save_history_entry(&entry).await?;
+    let _ = app.emit("dbx:history-changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -35,21 +37,35 @@ pub async fn load_history_connection_options(
 }
 
 #[tauri::command]
-pub async fn clear_history(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    state.storage.clear_history().await
+pub async fn clear_history(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.storage.clear_history().await?;
+    let _ = app.emit("dbx:history-changed", ());
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn clear_history_by_source(state: State<'_, Arc<AppState>>, source: String) -> Result<(), String> {
-    state.storage.clear_history_by_source(&source).await
+pub async fn clear_history_by_source(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    source: String,
+) -> Result<(), String> {
+    state.storage.clear_history_by_source(&source).await?;
+    let _ = app.emit("dbx:history-changed", ());
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn cleanup_mcp_history_retention(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
-    state.storage.cleanup_mcp_history_retention().await
+pub async fn cleanup_mcp_history_retention(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<u64, String> {
+    let removed = state.storage.cleanup_mcp_history_retention().await?;
+    if removed > 0 {
+        let _ = app.emit("dbx:history-changed", ());
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
-pub async fn delete_history_entry(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
-    state.storage.delete_history_entry(&id).await
+pub async fn delete_history_entry(app: AppHandle, state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    state.storage.delete_history_entry(&id).await?;
+    let _ = app.emit("dbx:history-changed", ());
+    Ok(())
 }

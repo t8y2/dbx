@@ -55,6 +55,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "appLayout",
   "webLogoPosition",
   "tabLayout",
+  "crossWindowTabDragPreviewEnabled",
   "tabPlacement",
   "colorizeConnectionTabs",
   "tabGroupMode",

@@ -137,7 +137,7 @@ import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { BackendErrorException, formatError, isManualTransactionSessionExpired, isUnsupportedManualTransactionMethod, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
-import { isDetachedWindow, resolveWindowContext } from "@/lib/app/windowContext";
+import { isDetachedWindow, isWorkspaceWindow, resolveWindowContext } from "@/lib/app/windowContext";
 import { normalizeDetachedTabRuntime, type DetachedTabHandoff, type DetachedTabRuntimeState } from "@/lib/app/detachedTabHandoff";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromFile, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
@@ -1449,6 +1449,7 @@ export const useQueryStore = defineStore("query", () => {
    */
   function registerOpenTab(tab: QueryTab, options: { activate?: boolean; insertAfterTabId?: string } = {}): string {
     assertUpdateAllowsInteraction();
+    if (typeof tab.sqlUpdatedAt !== "number" || !Number.isFinite(tab.sqlUpdatedAt)) tab.sqlUpdatedAt = Date.now();
     initializeResultAutoSave(tab);
     const anchorIndex = options.insertAfterTabId ? tabs.value.findIndex((item) => item.id === options.insertAfterTabId) : -1;
     if (anchorIndex >= 0) {
@@ -2689,6 +2690,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   async function recoverDetachedTabsToMain(options: { validConnectionIds?: Iterable<string> } = {}) {
+    if (isWorkspaceWindow()) return;
     if (!isTauriRuntime() || useSettingsStore().editorSettings.openTabsRestoreMode === "none") return;
     const validConnectionIds = options.validConnectionIds ? new Set(options.validConnectionIds) : undefined;
     const handoffs = await api.listDetachedTabHandoffs().catch(() => []);
@@ -2705,6 +2707,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function scheduleResultCacheMaintenance() {
+    if (isWorkspaceWindow()) return;
     const maintain = () => {
       const liveKeys = tabs.value.flatMap((tab) => [tab.resultCacheKey, ...(tab.resultRuns?.map((run) => run.resultCacheKey) ?? [])]).filter((key): key is string => !!key);
       void pruneTabResultSnapshots(liveKeys).catch((error) => console.warn("[DBX][result-cache:maintenance:error]", error));
@@ -2717,7 +2720,14 @@ export const useQueryStore = defineStore("query", () => {
   async function initOpenTabs(options: { validConnectionIds?: Iterable<string> } = {}) {
     if (isDetachedWindow()) return;
     if (isOpenTabsLoaded.value) return;
-    const saved = await api.loadOpenTabsState().catch(() => null);
+    const saved = isWorkspaceWindow() ? await api.loadOpenTabsState() : await api.loadOpenTabsState().catch(() => null);
+    // 子工作窗口只恢复自身快照；刷新现存窗口不受应用重启恢复偏好影响，
+    // 也不能回退读取 main 的旧 localStorage 或清理全局恢复标记。
+    if (isWorkspaceWindow()) {
+      if (saved?.tabs) applyRestoredOpenTabs({ ...restoreOpenTabsPayload(saved, options), workspace: saved });
+      isOpenTabsLoaded.value = true;
+      return;
+    }
     if (saved?.tabs && Array.isArray(saved.tabs)) {
       const restored = restoreSavedTabsFromPayload(saved, options);
       applyRestoredOpenTabs(restored);
@@ -2772,6 +2782,7 @@ export const useQueryStore = defineStore("query", () => {
       database: t.database,
       schema: t.schema,
       sql: t.sql,
+      sqlUpdatedAt: t.sqlUpdatedAt,
       editorViewport: t.editorViewport,
       editorSelection: t.editorSelection,
       savedSqlId: t.savedSqlId,
@@ -2872,10 +2883,11 @@ export const useQueryStore = defineStore("query", () => {
     return saveTabs(tabs.value, activeTabId.value, { groups: groups.value, focusedGroupId: focusedGroupId.value, orientation: orientation.value, sizes: sizes.value });
   }
 
-  async function prepareDetachedTab(tabId: string, runtime: DetachedTabRuntimeState = {}): Promise<DetachedTabHandoff> {
+  async function prepareDetachedTab(tabId: string, runtime: DetachedTabRuntimeState = {}, options: { workspace?: boolean } = {}): Promise<DetachedTabHandoff> {
     const tab = tabs.value.find((candidate) => candidate.id === tabId);
     if (!tab) throw new Error("Tab is no longer open");
-    if (tab.mode !== "query" && tab.mode !== "data") throw new Error("Only SQL and data tabs can be detached");
+    if (!options.workspace && tab.mode !== "query" && tab.mode !== "data") throw new Error("Only SQL and data tabs can be detached");
+    if (options.workspace && ((tab.pendingDataChangeCount ?? 0) > 0 || tab.hasPendingDataEditorDraft)) throw new Error("Save or discard pending data edits before moving this tab");
     if (tab.isExecuting || tab.isCancelling || tab.isExplaining) throw new Error("Wait for the current operation to finish before detaching this tab");
 
     await flushDefaultQuery(tab);
@@ -2956,6 +2968,7 @@ export const useQueryStore = defineStore("query", () => {
         restoredTab.title = restoredTab.customTitle ? restoredTab.title : file.name;
         restoredTab.sql = file.sql;
         restoredTab.originalSql = file.sql;
+        touchTabSqlRevision(restoredTab);
       }
     }
     Object.assign(restoredTab, normalizeDetachedTabRuntime(handoff.runtime));
@@ -4457,12 +4470,20 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function markTabClean(tab: QueryTab | undefined) {
-    if (tab) tab.originalSql = tab.sql;
+    if (tab && tab.originalSql !== tab.sql) {
+      tab.originalSql = tab.sql;
+      touchTabSqlRevision(tab);
+    }
+  }
+
+  function touchTabSqlRevision(tab: QueryTab) {
+    tab.sqlUpdatedAt = Math.max(Date.now(), (tab.sqlUpdatedAt ?? 0) + 1);
   }
 
   function applyExternalSqlFileSnapshot(id: string, sql: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab?.externalSqlPath) return;
+    if (tab.sql !== sql || tab.originalSql !== sql) touchTabSqlRevision(tab);
     tab.sql = sql;
     tab.originalSql = sql;
     tab.externalSqlFileVersion = version;
@@ -4473,6 +4494,7 @@ export const useQueryStore = defineStore("query", () => {
   function markExternalSqlFileSaved(id: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab?.externalSqlPath) return;
+    if (tab.originalSql !== tab.sql) touchTabSqlRevision(tab);
     tab.originalSql = tab.sql;
     tab.externalSqlFileVersion = version;
     tab.externalSqlIgnoredFileVersion = undefined;
@@ -4593,13 +4615,16 @@ export const useQueryStore = defineStore("query", () => {
     }
     if (tab.mode !== "query") return false;
     if (tab.originalSql !== undefined) {
+      if (tab.sql !== tab.originalSql) touchTabSqlRevision(tab);
       tab.sql = tab.originalSql;
       return true;
     }
     if (tab.savedSqlId) {
+      if (tab.sql !== "") touchTabSqlRevision(tab);
       tab.sql = "";
       return true;
     }
+    if (tab.sql !== "" || tab.originalSql !== "") touchTabSqlRevision(tab);
     tab.sql = "";
     tab.originalSql = "";
     return true;
@@ -5589,6 +5614,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateSql(id: string, sql: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
+      if (tab.sql !== sql) touchTabSqlRevision(tab);
       if (tab.isDefaultQuery && tab.originalSql === undefined) tab.originalSql = "";
       tab.sql = sql;
       queueSavedSqlEditorPositionPersist(tab);
@@ -6088,6 +6114,7 @@ export const useQueryStore = defineStore("query", () => {
       if (!existing.sql && file.sql && existing.originalSql === undefined) {
         existing.sql = file.sql;
         existing.originalSql = file.sql;
+        touchTabSqlRevision(existing);
         const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
         existing.editorSelection = restored.selection;
         existing.editorViewport = restored.viewport;
@@ -6142,6 +6169,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.title = tab.customTitle ? tab.title : file.name;
       tab.sql = file.sql;
       tab.originalSql = file.sql;
+      touchTabSqlRevision(tab);
       const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
       tab.editorSelection = restored.selection;
       tab.editorViewport = restored.viewport;

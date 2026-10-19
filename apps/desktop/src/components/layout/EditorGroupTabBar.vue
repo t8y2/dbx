@@ -1,5 +1,6 @@
 <script lang="ts">
 import { reactive } from "vue";
+import type { TabDragAppearance } from "@/lib/tabs/tabDragAppearance";
 
 /**
  * Drag session state lives at module scope, shared by every group's tab bar
@@ -21,13 +22,14 @@ const groupTabDrag = reactive({
 
 let groupTabDragGhost: HTMLElement | null = null;
 let groupTabDragSourceEl: HTMLElement | null = null;
+let groupTabDragAppearance: TabDragAppearance | null = null;
 
 /** Horizontal distance (px) required before a press becomes a tab drag; absorbs click jitter. */
 const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 </script>
 
 <script setup lang="ts">
-import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { computed, h, inject, nextTick, onUnmounted, ref, render, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -109,6 +111,10 @@ import "./appTabBar.css";
 import type { QueryTab } from "@/types/database";
 import { buildConnectionDatabaseTabGroupStripEntries, type TabGroupTreeGuide } from "@/lib/tabs/tabGroupTree";
 import TabGroupTreeGuides from "./TabGroupTreeGuides.vue";
+import TabLabelContent from "./TabLabelContent.vue";
+import TabDragPreviewChip from "./TabDragPreviewChip.vue";
+import { captureTabDragAppearance } from "@/lib/tabs/tabDragAppearance";
+import { WORKSPACE_TAB_WINDOWS } from "@/composables/useWorkspaceTabWindows";
 
 const props = defineProps<{
   groupId: string;
@@ -143,6 +149,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
+const workspaceWindows = inject(WORKSPACE_TAB_WINDOWS, null);
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const toolbar = inject(EDITOR_TOOLBAR_ACTIONS, null);
@@ -1166,6 +1173,12 @@ function isConnectionlessPluginTab(tab: QueryTab): boolean {
  * whether the drop lands before or after it.
  */
 function tabDropStyle(tab: QueryTab): CSSProperties | undefined {
+  const remote = workspaceWindows?.remoteDrop.value;
+  if (remote?.groupId === props.groupId && remote.tabId === tab.id) {
+    const after = remote.index === props.tabs.findIndex((item) => item.id === tab.id) + 1;
+    if (isVerticalLayout.value) return after ? { borderBottom: "2px solid var(--ring)" } : { borderTop: "2px solid var(--ring)" };
+    return { boxShadow: `inset ${after ? -3 : 3}px 0 0 0 var(--ring)` };
+  }
   if (!groupTabDrag.active) {
     return undefined;
   }
@@ -1186,24 +1199,25 @@ function tabDropStyle(tab: QueryTab): CSSProperties | undefined {
 
 function createTabDragGhost(sourceEl: HTMLElement, x: number, y: number) {
   const ghost = document.createElement("div");
-  const textNode = sourceEl.querySelector(".truncate");
-  const suffixNode = sourceEl.querySelector("[data-tab-title-suffix]");
-  ghost.textContent = [textNode?.textContent, suffixNode?.textContent].filter(Boolean).join(" ");
-  ghost.style.cssText = `position: fixed; pointer-events: none; z-index: 9999; opacity: 0.9; box-shadow: 0 2px 8px rgba(0,0,0,0.15); border-radius: var(--dbx-radius-fixed-6); background: var(--background, #fff); border: 1px solid var(--border, #e5e7eb); max-width: 200px; height: 28px; padding: 0 12px; font-size: 12px; line-height: 28px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; left: ${x + 12}px; top: ${y - 14}px;`;
+  groupTabDragAppearance = captureTabDragAppearance(sourceEl, { x: groupTabDrag.startX, y: groupTabDrag.startY });
+  ghost.style.cssText = `position: fixed; pointer-events: none; z-index: 9999; left: ${x - groupTabDragAppearance.grabX}px; top: ${y - groupTabDragAppearance.grabY}px;`;
+  render(h(TabDragPreviewChip, { appearance: groupTabDragAppearance }), ghost);
   document.body.appendChild(ghost);
   return ghost;
 }
 
 function moveTabDragGhost(x: number, y: number) {
   if (groupTabDragGhost) {
-    groupTabDragGhost.style.left = `${x + 8}px`;
-    groupTabDragGhost.style.top = `${y - 14}px`;
+    groupTabDragGhost.style.left = `${x - (groupTabDragAppearance?.grabX ?? 0)}px`;
+    groupTabDragGhost.style.top = `${y - (groupTabDragAppearance?.grabY ?? 0)}px`;
   }
 }
 
 function removeTabDragGhost() {
+  if (groupTabDragGhost) render(null, groupTabDragGhost);
   groupTabDragGhost?.remove();
   groupTabDragGhost = null;
+  groupTabDragAppearance = null;
 }
 
 function isDirtyTab(tab: QueryTab) {
@@ -1421,6 +1435,14 @@ function hasTabsToLeft(tab: QueryTab) {
   return tabsToLeftInDisplayOrder(tab).length > 0;
 }
 
+async function openWorkspaceTabMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
+  event.preventDefault();
+  event.stopPropagation();
+  await workspaceWindows?.refreshTargets().catch(() => {});
+  await nextTick();
+  open(event);
+}
+
 function handleSaveAllTabs() {
   emit("save-all-tabs");
 }
@@ -1461,7 +1483,18 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       label: t("tabs.openInNewWindow"),
       action: () => emit("detach-tab", tab),
       icon: Maximize2,
-      visible: !!props.canDetachTabs && isDetachableTab(tab),
+      visible: !!props.canDetachTabs && (workspaceWindows?.enabled.value || isDetachableTab(tab)),
+    },
+    {
+      label: t("contextMenu.moveTabToAnotherWindow"),
+      visible: !!workspaceWindows?.enabled.value,
+      disabled: !workspaceWindows?.targets.value.length,
+      children: workspaceWindows?.targets.value.map((target, index) => ({
+        label: target.label === "main" ? t("contextMenu.mainWindow") : `${t("contextMenu.detachedWindow", { number: index + 1 })} — ${target.title}`,
+        action: () => {
+          void workspaceWindows.moveTab(tab, target.label);
+        },
+      })),
     },
     createLocateTabMenuItem({
       t,
@@ -1625,9 +1658,8 @@ function handleTabPointerMove(event: PointerEvent) {
     return;
   }
   if (!drag.active) {
-    // Use the strip's primary axis for the drag threshold: horizontal strips
-    // react to horizontal movement, while left/right strips react vertically.
-    const distance = isVerticalLayout.value ? Math.abs(event.clientY - drag.startY) : Math.abs(event.clientX - drag.startX);
+    // 跨窗口拖动允许任意方向越过阈值；关闭该功能时保留上游标签栏主轴判断。
+    const distance = workspaceWindows?.enabled.value ? Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) : isVerticalLayout.value ? Math.abs(event.clientY - drag.startY) : Math.abs(event.clientX - drag.startX);
     if (distance < TAB_DRAG_HORIZONTAL_THRESHOLD) {
       return;
     }
@@ -1641,6 +1673,11 @@ function handleTabPointerMove(event: PointerEvent) {
   }
   event.preventDefault();
   moveTabDragGhost(event.clientX, event.clientY);
+  const draggedTab = queryStore.tabs.find((tab) => tab.id === drag.tabId);
+  if (draggedTab && groupTabDragAppearance && workspaceWindows?.startNativeDrag(draggedTab, event, groupTabDragAppearance)) {
+    cleanupTabDrag();
+    return;
+  }
 
   const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
   const tabElement = element?.closest<HTMLElement>("[data-tab-id]");
@@ -1680,7 +1717,12 @@ function handleTabPointerUp(event: PointerEvent) {
     return;
   }
   const targetGroupId = drag.targetGroupId;
-  if (!targetGroupId) {
+  const dropElement = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+  const droppedOnTabBar = !!dropElement?.closest<HTMLElement>("[data-main-tab-bar][data-group-id]");
+  // 源组内容区不是有效标签落点：沿用跨窗口拖出语义创建子窗口；其他分组仍保留上游的组间移动。
+  if (!targetGroupId || (targetGroupId === payload.sourceGroupId && !droppedOnTabBar)) {
+    const tab = queryStore.tabs.find((tab) => tab.id === payload.tabId);
+    if (tab) workspaceWindows?.finishPointerDrag(tab, event);
     return;
   }
   // Validate the payload against live store state: both groups must exist and
@@ -1794,7 +1836,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
   <!-- data-main-tab-bar is the drag-back hit-test anchor: dropping a detached window over ANY pane's strip returns the tab. -->
   <div
     class="app-tab-bar group-tabbar relative flex w-full min-w-0 shrink-0 overflow-hidden"
-    :class="[tabBarClass, isWrapLayout ? 'tab-wrap-mode' : '', { 'ring-2 ring-primary ring-inset': detachedDropTarget }]"
+    :class="[tabBarClass, isWrapLayout ? 'tab-wrap-mode' : '', { 'ring-2 ring-primary ring-inset': detachedDropTarget || workspaceWindows?.remoteDrop.value?.groupId === groupId }]"
     :style="tabBarStyle"
     data-main-tab-bar
     :data-group-id="groupId"
@@ -1944,7 +1986,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                       :style="tabGroupTreeRowStyle(entry)"
                       :aria-hidden="entry.grouping && !tabSearchQuery.trim() && isEntryHidden(entry)"
                       :inert="entry.grouping && !tabSearchQuery.trim() && isEntryHidden(entry)"
-                      @contextmenu="onContextMenu"
+                      @contextmenu="openWorkspaceTabMenu($event, onContextMenu)"
                       @transitionend.self="handleTabGroupTransitionEnd"
                     >
                       <TabGroupTreeGuides v-if="showTabTreeGuides" :guides="entry.treeGuides ?? []" />
@@ -1971,45 +2013,50 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             @dblclick="handleTabDoubleClick(entry.tab, $event)"
                             @mousedown.middle.prevent="closeTab(entry.tab)"
                           >
-                            <TabExecutionStatus :tab="entry.tab">
-                              <span class="shrink-0" :class="tabIconClass(entry.tab)">
-                                <TabModeIcon :tab="entry.tab" class="h-3.5 w-3.5" />
-                              </span>
-                            </TabExecutionStatus>
-                            <span v-if="isTabBarCollapsed && isDirtyTab(entry.tab)" class="compact-dirty-tab-marker" aria-hidden="true" />
-                            <input
-                              v-if="editingTabId === entry.tab.id && !isTabBarCollapsed"
-                              v-model="editingTitle"
-                              :data-tab-title-input="entry.tab.id"
-                              :aria-label="t('contextMenu.renameTab')"
-                              class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
-                              @click.stop
-                              @mousedown.stop
-                              @keydown.enter.prevent="commitRenameTab(entry.tab)"
-                              @keydown.escape.prevent="cancelRenameTab"
-                              @blur="commitRenameTab(entry.tab)"
-                            />
-                            <span v-else-if="!isTabBarCollapsed" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
-                              <span v-if="isDirtyTab(entry.tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                              <span class="flex min-w-0 flex-1 items-center overflow-hidden">
-                                <span class="min-w-0 truncate" :style="tabTitleStyle(entry.tab)" data-tab-title-base>{{ tabTitleBase(entry.tab) }}</span>
-                                <span v-if="tabTitleSuffixText(entry.tab)" class="tab-title-suffix max-w-full shrink-0 overflow-hidden pl-1 text-ellipsis whitespace-nowrap" :style="tabTitleStyle(entry.tab)" data-tab-title-suffix>{{ tabTitleSuffixText(entry.tab) }}</span>
-                              </span>
-                            </span>
-                            <ReadOnlySessionControl v-if="!isTabBarCollapsed" :connection-id="entry.tab.connectionId" compact />
-                            <button
-                              v-if="entry.tab.pinned && !isTabBarCollapsed"
-                              class="rounded p-0.5 text-primary hover:bg-muted-foreground/20 shrink-0"
-                              :aria-label="t('contextMenu.unpinTab')"
-                              :title="t('contextMenu.unpinTab')"
-                              @pointerdown.stop
-                              @click.stop="queryStore.togglePinnedTab(entry.tab.id)"
+                            <TabLabelContent
+                              :title="tabTitleText(entry.tab)"
+                              :dirty="isDirtyTab(entry.tab)"
+                              :collapsed="isTabBarCollapsed"
+                              :pinned="entry.tab.pinned"
+                              :title-style="tabTitleStyle(entry.tab)"
+                              :close-label="t('contextMenu.closeTab')"
+                              :unpin-label="t('contextMenu.unpinTab')"
+                              @close="closeTab(entry.tab)"
+                              @unpin="queryStore.togglePinnedTab(entry.tab.id)"
                             >
-                              <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
-                            </button>
-                            <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
-                              <X class="h-3 w-3" />
-                            </button>
+                              <template #icon>
+                                <TabExecutionStatus :tab="entry.tab">
+                                  <span data-tab-label-part="icon" class="shrink-0" :class="tabIconClass(entry.tab)">
+                                    <TabModeIcon :tab="entry.tab" class="h-3.5 w-3.5" />
+                                  </span>
+                                </TabExecutionStatus>
+                              </template>
+                              <template v-if="editingTabId === entry.tab.id && !isTabBarCollapsed" #title>
+                                <input
+                                  v-model="editingTitle"
+                                  :data-tab-title-input="entry.tab.id"
+                                  :aria-label="t('contextMenu.renameTab')"
+                                  class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
+                                  @click.stop
+                                  @mousedown.stop
+                                  @keydown.enter.prevent="commitRenameTab(entry.tab)"
+                                  @keydown.escape.prevent="cancelRenameTab"
+                                  @blur="commitRenameTab(entry.tab)"
+                                />
+                              </template>
+                              <template v-else-if="!isTabBarCollapsed" #title>
+                                <span data-tab-label-part="title" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
+                                  <span v-if="isDirtyTab(entry.tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                                  <span class="flex min-w-0 flex-1 items-center overflow-hidden">
+                                    <span class="min-w-0 truncate" :style="tabTitleStyle(entry.tab)" data-tab-title-base>{{ tabTitleBase(entry.tab) }}</span>
+                                    <span v-if="tabTitleSuffixText(entry.tab)" class="tab-title-suffix max-w-full shrink-0 overflow-hidden pl-1 text-ellipsis whitespace-nowrap" :style="tabTitleStyle(entry.tab)" data-tab-title-suffix>{{ tabTitleSuffixText(entry.tab) }}</span>
+                                  </span>
+                                </span>
+                              </template>
+                              <template #readonly>
+                                <ReadOnlySessionControl :connection-id="entry.tab.connectionId" compact />
+                              </template>
+                            </TabLabelContent>
                           </div>
                         </TooltipTrigger>
                         <TooltipContent v-if="isConnectionlessPluginTab(entry.tab)" :side="tabTooltipSide" data-plugin-title-tooltip>
@@ -2154,7 +2201,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                     activateTab(tab.id);
                     tabOverflowOpen = false;
                   "
-                  @contextmenu="onContextMenu"
+                  @contextmenu="openWorkspaceTabMenu($event, onContextMenu)"
                   @keydown.enter.prevent="
                     activateTab(tab.id);
                     tabOverflowOpen = false;

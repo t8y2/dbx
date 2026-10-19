@@ -753,6 +753,19 @@ describe("EditorGroupTabBar group behavior", () => {
     app.unmount();
     host.remove();
   });
+
+  it("marks the slotted tab title so the drag preview captures its text", async () => {
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Orders query", "query");
+    const { app, host } = mountBar(store.groups[0].id, store.tabs.slice(), tabId, pinia);
+    await settle();
+
+    const title = host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"] [data-tab-label-part="title"]`);
+    expect(title?.textContent).toContain("Orders query");
+
+    app.unmount();
+    host.remove();
+  });
 });
 
 describe("EditorGroupTabBar special page navigation", () => {
@@ -878,6 +891,29 @@ describe("EditorGroupTabBar special page navigation", () => {
     await settle();
     expect(events).toEqual(["close-settings", "close-driver-store"]);
     expect(store.tabs.map((item) => item.id)).toEqual([tabId]);
+    app.unmount();
+    host.remove();
+  });
+
+  it("keeps the upstream open-in-new-window action when the multi-window preview is disabled", async () => {
+    const detach = vi.fn();
+    const { app, host, settings, store, tabId } = mountSpecialBar({
+      canDetachTabs: true,
+      "onDetach-tab": detach,
+    });
+    settings.editorSettings.crossWindowTabDragPreviewEnabled = false;
+    await settle();
+
+    const tab = host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"]`)!;
+    tab.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const menu = document.body.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+    const openInNewWindow = Array.from(menu.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Open in new window"));
+    expect(openInNewWindow).toBeDefined();
+    openInNewWindow!.click();
+    await settle();
+    expect(detach).toHaveBeenCalledWith(store.tabs.find((candidate) => candidate.id === tabId));
+
     app.unmount();
     host.remove();
   });

@@ -1115,7 +1115,13 @@ const renameInputRef = ref<HTMLInputElement>();
 const renameTargetNode = shallowRef<TreeNode | null>(null);
 
 function restoreRowFocus() {
-  void nextTick(() => rowRef.value?.focus({ preventScroll: true }));
+  void nextTick(() => {
+    // Only reclaim focus when it is genuinely lost (fell back to <body>).
+    // A blur triggered by the user focusing something else (editor, search
+    // box, Tab navigation) must keep that target focused.
+    if (document.activeElement && document.activeElement !== document.body) return;
+    rowRef.value?.focus({ preventScroll: true });
+  });
 }
 
 function startRenameGroup() {

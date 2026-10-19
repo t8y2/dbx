@@ -3185,14 +3185,17 @@ async function openPendingPluginInstallLinks() {
   }
 }
 
-function setConnectionDialogOpen(value: boolean) {
+function setConnectionDialogOpen(value: boolean, options?: { restoreFocus?: boolean }) {
   showConnectionDialog.value = value;
   if (!value) {
     connectionDialogPrefill.value = null;
     connectionDialogUpdate.value = null;
     connectionPluginProvider.value = null;
     connectionDialogInitialTab.value = undefined;
-    void appSidebarRef.value?.focusSelectedNode();
+    // Handlers that immediately open another surface (driver store page,
+    // settings, or a reopened connection dialog) opt out: the delayed tree
+    // refocus would steal focus back from the new surface's autofocus.
+    if (options?.restoreFocus !== false) void appSidebarRef.value?.focusSelectedNode();
   }
 }
 
@@ -5688,15 +5691,15 @@ onUnmounted(() => {
               )
           "
           @open-driver-store="
-            setConnectionDialogOpen(false);
+            setConnectionDialogOpen(false, { restoreFocus: false });
             openDriverStorePage($event);
           "
           @open-tunnel-profile-settings="
-            setConnectionDialogOpen(false);
+            setConnectionDialogOpen(false, { restoreFocus: false });
             openSettings('tunnels');
           "
           @open-connection-settings="
-            setConnectionDialogOpen(false);
+            setConnectionDialogOpen(false, { restoreFocus: false });
             openConnectionSettings($event, 'advanced');
           "
           @open-lineage-target="openLineageTarget"

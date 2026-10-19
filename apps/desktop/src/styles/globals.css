@@ -3106,3 +3106,14 @@ html.dbx-bg-active .cm-scroller {
   background-color: transparent !important;
 }
 
+/* When the editor scroller is scrolled horizontally, the sticky gutter sits on
+   top of scrolled code lines. Give .cm-gutters an opaque surface so the text
+   scrolling underneath does not clash or overlap with line numbers (#11806). */
+html.dbx-bg-active .cm-scroller[data-scrolled-x] > .cm-gutters,
+html.dbx-bg-active .cm-gutters[data-scrolled-x],
+html.dbx-bg-active .cm-gutters.cm-gutters-scrolled-x {
+  background-color: var(--background-solid, var(--background)) !important;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.18);
+}
+
+

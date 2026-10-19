@@ -62,6 +62,25 @@ describe("qualifiedTableName — SQL Server three-part names", () => {
   });
 });
 
+describe("qualifiedTableName — reserved words keep quotes when quoting is off", () => {
+  it("keeps MySQL 8 reserved words quoted", () => {
+    expect(qualifiedTableName({ databaseType: "mysql", tableName: "rank", quoteIdentifiers: false })).toBe("`rank`");
+    expect(qualifiedTableName({ databaseType: "mysql", tableName: "groups", quoteIdentifiers: false })).toBe("`groups`");
+    expect(qualifiedTableName({ databaseType: "mysql", tableName: "events", quoteIdentifiers: false })).toBe("events");
+  });
+
+  it("keeps T-SQL-only reserved words quoted", () => {
+    expect(qualifiedTableName({ databaseType: "sqlserver", schema: "dbo", tableName: "plan", quoteIdentifiers: false })).toBe("dbo.[plan]");
+    expect(qualifiedTableName({ databaseType: "sqlserver", schema: "dbo", tableName: "percent", quoteIdentifiers: false })).toBe("dbo.[percent]");
+    expect(qualifiedTableName({ databaseType: "sqlserver", schema: "dbo", tableName: "gen_table", quoteIdentifiers: false })).toBe("dbo.gen_table");
+  });
+
+  it("keeps PostgreSQL reserved words quoted", () => {
+    expect(qualifiedTableName({ databaseType: "postgres", schema: "public", tableName: "order", identifierQuote: '"', quoteIdentifiers: false })).toBe('public."order"');
+    expect(qualifiedTableName({ databaseType: "postgres", schema: "public", tableName: "events", identifierQuote: '"', quoteIdentifiers: false })).toBe("public.events");
+  });
+});
+
 describe("qualifyTableReferencesInSql", () => {
   it("qualifies FROM and JOIN sources while preserving aliases", () => {
     expect(

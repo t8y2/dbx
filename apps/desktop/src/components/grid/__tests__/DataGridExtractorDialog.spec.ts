@@ -135,6 +135,16 @@ describe("extractor draft preview", () => {
     expect(save).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ sql: expect.objectContaining({ quoteIdentifiers: false, temporalFormat: "string" }) }) }));
   });
 
+  it("disables the per-format quoting toggle while the editor setting keeps quoting off", async () => {
+    const { props, host } = mountDialog();
+    props.quoteIdentifiersEnabled = false;
+    props.open = true;
+    await advancePreview();
+    const label = Array.from(host.querySelectorAll("label")).find((item) => item.textContent?.includes("copyExtractorQuoteIdentifiers"))!;
+    expect(label.querySelector("input")!.disabled).toBe(true);
+    expect(host.textContent).toContain("copyExtractorQuoteIdentifiersFollowsSetting");
+  });
+
   it.each(["resolve", "reject"] as const)("ignores an old %s during the debounce window and after a newer preview", async (settle) => {
     const old = deferred();
     const newer = deferred();

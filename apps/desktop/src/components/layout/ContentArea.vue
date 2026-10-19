@@ -560,6 +560,8 @@ async function copySelectedResultSql(items: ResultSetItem[]) {
   const identifierQuote = connectionStore.connectionIdentifierQuote(activeResultConnectionId.value);
   const extractorOptions = JSON.parse(JSON.stringify(settingsStore.editorSettings.dataGridExtractorOptions));
   extractorOptions.sql.includeDatabaseName = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
+  // 与数据网格内的复制/导出一致：编辑器设置关闭引号后，批量复制也不再输出方言引号。
+  extractorOptions.sql.quoteIdentifiers = extractorOptions.sql.quoteIdentifiers !== false && settingsStore.editorSettings.generateSqlQuoteIdentifiers;
   const isCurrent = () => props.activeTab === tab && tab.activeResultRunId === runId && tab.resultViewGeneration === generation && items.every((item) => (tab.results ?? [tab.result]).includes(item.result));
   try {
     const sections: string[] = [];

@@ -23,6 +23,8 @@ const props = defineProps<{
   options: DataGridExtractorOptions;
   items: Array<{ value: DataGridCopyPreference; label: string; disabled?: boolean }>;
   preview: (preference: DataGridCopyPreference, options: DataGridExtractorOptions) => Promise<DataGridExtractPreview>;
+  /** Editor setting "Add quotes to identifiers when generating SQL"; it is the master switch, so the per-format toggle is inert when it is off. */
+  quoteIdentifiersEnabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -223,7 +225,10 @@ function save() {
             </div>
             <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.includeDatabaseName" @change="updateSql('includeDatabaseName', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorIncludeDatabaseName") }}</label>
             <div v-if="draftExtractor === 'sql-inserts' || draftExtractor === 'sql-deletes-inserts'" class="space-y-1.5">
-              <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.quoteIdentifiers" @change="updateSql('quoteIdentifiers', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorQuoteIdentifiers") }}</label>
+              <label class="flex items-center gap-2 text-sm"
+                ><input type="checkbox" :disabled="quoteIdentifiersEnabled === false" :checked="draftOptions.sql.quoteIdentifiers" @change="updateSql('quoteIdentifiers', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorQuoteIdentifiers") }}</label
+              >
+              <p v-if="quoteIdentifiersEnabled === false" class="text-xs text-muted-foreground">{{ t("grid.copyExtractorQuoteIdentifiersFollowsSetting") }}</p>
               <Label>{{ t("grid.copyExtractorTemporalFormat") }}</Label>
               <Select :model-value="draftOptions.sql.temporalFormat" @update:model-value="updateSql('temporalFormat', $event as DataGridExtractorOptions['sql']['temporalFormat'])">
                 <SelectTrigger><SelectValue /></SelectTrigger>

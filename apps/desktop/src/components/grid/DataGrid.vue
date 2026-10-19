@@ -204,6 +204,7 @@ import {
   type DataGridCellDetail,
 } from "@/lib/dataGrid/dataGridDetail";
 import { adjacentDataGridDetailIndex, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
+import { isDataGridSurfaceBusy, type DataGridSurfaceBusyFlags } from "@/lib/dataGrid/dataGridSurfaceBusy";
 import { applyColumnFormatter, DataGridDateTimePatterns, displayTimeZoneOption, formatIoTDBTimestampEditorValue, iotdbTimestampFractionDigits, iotdbTimestampPrecision, parseIoTDBTimestampEditorValue, type ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellDisplayText, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, isPointInBooleanCheckbox, nextBooleanCellValue, normalizeBooleanCellValue, parseBooleanCellEditorValue } from "@/lib/dataGrid/dataGridBooleanColumn";
@@ -3644,6 +3645,9 @@ watch(
 );
 const manualTotalRowCount = ref<number | undefined>(undefined);
 const manualTotalRowCountLoading = ref(false);
+/** Count that runs before a jump to the last page. Unlike the plain manual
+ *  count it ends in a real page switch, so it keeps the surface busy mask. */
+const lastPageCountLoading = ref(false);
 let manualTotalRowCountGeneration = 0;
 function invalidateManualTotalRowCount() {
   manualTotalRowCountGeneration++;
@@ -3766,14 +3770,22 @@ const canFetchNextInfiniteScrollSegment = computed(() =>
 // are not the table browser's whereInput. Never count that table as a fallback.
 const canCountTableRows = computed(() => props.context !== "results" && !!props.tableMeta);
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || canCalculateTotalRowCount.value));
-const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
+const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value || lastPageCountLoading.value);
 const pageJumpBusy = computed(() => !!props.pageJumpProgress && props.pageJumpProgress.totalRequests > 1);
 const rowPreparationProgress = shallowRef<DataGridRowPreparationProgress | null>(null);
 let rowPreparationController: AbortController | null = null;
 let gridClipboardLifecycle = 0;
 let gridClipboardActive = true;
 /** Automatic background counts keep rows interactive; explicit count navigation still blocks the surface. */
-const gridSurfaceBusy = computed(() => isRefreshingData.value || props.loading === true || manualTotalRowCountLoading.value || pageJumpBusy.value || rowPreparationProgress.value !== null);
+const gridSurfaceBusy = computed(() =>
+  isDataGridSurfaceBusy({
+    isRefreshingData: isRefreshingData.value,
+    loading: props.loading === true,
+    lastPageCountLoading: lastPageCountLoading.value,
+    pageJumpBusy: pageJumpBusy.value,
+    rowPreparationActive: rowPreparationProgress.value !== null,
+  } satisfies DataGridSurfaceBusyFlags),
+);
 const gridPaginationBusy = computed(() => gridSurfaceBusy.value || totalRowCountBusy.value);
 const dataGridNativeSelectionBlockOwner = {};
 watch(
@@ -4260,11 +4272,20 @@ async function beginManualTotalRowCount(): Promise<number | undefined> {
   return generation;
 }
 
+async function beginLastPageCount(): Promise<number | undefined> {
+  if (lastPageCountLoading.value) return undefined;
+  const generation = manualTotalRowCountGeneration;
+  lastPageCountLoading.value = true;
+  // Flush busy UI (overlay / spinner) before the slow COUNT starts.
+  await nextTick();
+  return generation;
+}
+
 async function lastPage() {
   if (infiniteScrollEnabled.value || allRowsLoaded.value) return;
   // Navicat-style: always re-COUNT when jumping to the last page.
   if (props.countTotalRows) {
-    const generation = await beginManualTotalRowCount();
+    const generation = await beginLastPageCount();
     if (generation === undefined) return;
     try {
       if (generation !== manualTotalRowCountGeneration) return;
@@ -4283,12 +4304,12 @@ async function lastPage() {
         5000,
       );
     } finally {
-      manualTotalRowCountLoading.value = false;
+      lastPageCountLoading.value = false;
     }
     return;
   }
   if (props.connectionId && (props.countSql || canCountTableRows.value)) {
-    const generation = await beginManualTotalRowCount();
+    const generation = await beginLastPageCount();
     if (generation === undefined) return;
     try {
       if (generation !== manualTotalRowCountGeneration) return;
@@ -4306,7 +4327,7 @@ async function lastPage() {
     } catch {
       // COUNT query failed — ignore silently
     } finally {
-      manualTotalRowCountLoading.value = false;
+      lastPageCountLoading.value = false;
     }
     return;
   }

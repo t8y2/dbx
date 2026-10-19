@@ -1219,6 +1219,26 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     ]);
   });
 
+  it("keeps a pasted empty string as an empty string instead of NULL", () => {
+    const editor = createEditor();
+    editor.newRows.value = [];
+
+    const result = editor.appendPastedRowsAsNewRows([["", null, "Lovelace"]], [0, 1, 2]);
+
+    expect(result).toEqual({ ok: true, rowCount: 1 });
+    expect(editor.newRows.value).toEqual([["", null, "Lovelace"]]);
+  });
+
+  it("keeps a pasted empty string when filling a blank target row", () => {
+    const editor = createEditor();
+    editor.newRows.value = [[null, null, null]];
+
+    const result = editor.appendPastedRowsToNewRow(-1, [["", "Lovelace"]], [0, 2]);
+
+    expect(result).toEqual({ ok: true, rowCount: 1 });
+    expect(editor.newRows.value).toEqual([["", null, "Lovelace"]]);
+  });
+
   it("rejects a non-empty terminal new-row draft", () => {
     const editor = createEditor();
     editor.newRows.value = [];

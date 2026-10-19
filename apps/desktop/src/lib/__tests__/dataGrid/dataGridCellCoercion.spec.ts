@@ -103,6 +103,36 @@ describe("coerceDataGridCellValue", () => {
     expect(coerceDataGridCellValue({ ...options, preserveEmptyString: true })).toBe("");
   });
 
+  it.each([
+    ["a numeric column", "postgres" as const, { data_type: "integer" }],
+    ["a boolean column", "postgres" as const, { data_type: "boolean" }],
+    ["a MySQL TINYINT(1) column", "mysql" as const, { data_type: "tinyint(1)" }],
+    ["a PostgreSQL array column", "postgres" as const, { data_type: "text[]" }],
+    ["a date column", "postgres" as const, { data_type: "date" }],
+    ["a timestamp column", "postgres" as const, { data_type: "timestamp without time zone" }],
+    ["a time column", "mysql" as const, { data_type: "time" }],
+    ["a uuid column", "postgres" as const, { data_type: "uuid" }],
+    ["a jsonb column", "postgres" as const, { data_type: "jsonb" }],
+    ["a bytea column", "postgres" as const, { data_type: "bytea" }],
+    ["an unclassified column", "postgres" as const, { data_type: "some_custom_type" }],
+    ["a column with no metadata", "postgres" as const, undefined],
+  ])("keeps an empty string NULL in %s instead of coercing it", (_name, databaseType, columnInfo) => {
+    const options = { value: "", oldValue: null, databaseType, columnInfo };
+
+    expect(coerceDataGridCellValue({ ...options, preserveEmptyString: true })).toBeNull();
+  });
+
+  it.each([
+    ["varchar", "mysql" as const, { data_type: "varchar(255)" }],
+    ["text", "postgres" as const, { data_type: "text" }],
+    ["char", "sqlserver" as const, { data_type: "char(4)" }],
+    ["clob", "oracle" as const, { data_type: "clob" }],
+  ])("keeps a pasted empty string in a %s column", (_name, databaseType, columnInfo) => {
+    const options = { value: "", oldValue: null, databaseType, columnInfo };
+
+    expect(coerceDataGridCellValue({ ...options, preserveEmptyString: true })).toBe("");
+  });
+
   it.each([null, false, true])("coerces MySQL TINYINT(1) from metadata when the sampled value is %p", (oldValue) => {
     expect(
       coerceDataGridCellValue({

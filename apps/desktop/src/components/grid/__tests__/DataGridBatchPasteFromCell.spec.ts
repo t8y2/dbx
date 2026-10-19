@@ -411,6 +411,36 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     expect(save.mock.calls[0]![0].dirtyRows.size).toBe(0);
   });
 
+  it("keeps a pasted empty string as an empty string instead of NULL", async () => {
+    const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
+    const { host } = mountGrid({ customSaveHandler: { canInsert: true, save } });
+    await settle();
+    await addBlankRow(host);
+    await selectCell(visibleCells(pendingRows(host)[0]!)[0]!);
+    await paste(host, "2\t\tAda\tLovelace");
+    host.querySelector<HTMLElement>("[data-toolbar-action='save']")!.click();
+    await settle();
+
+    expect(save.mock.calls[0]![0].newRows).toEqual([[2, "", "Ada", "Lovelace"]]);
+  });
+
+  it("saves the configured NULL text as NULL while keeping an empty field empty", async () => {
+    const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
+    const { host } = mountGrid({ customSaveHandler: { canInsert: true, save } });
+    await settle();
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({
+      dataGridExtractorOptions: { ...settingsStore.editorSettings.dataGridExtractorOptions, dsv: { ...settingsStore.editorSettings.dataGridExtractorOptions.dsv, nullText: "\\N" } },
+    });
+    await addBlankRow(host);
+    await selectCell(visibleCells(pendingRows(host)[0]!)[0]!);
+    await paste(host, "\\N\tkeep\tAda\tLovelace");
+    host.querySelector<HTMLElement>("[data-toolbar-action='save']")!.click();
+    await settle();
+
+    expect(save.mock.calls[0]![0].newRows).toEqual([[null, "keep", "Ada", "Lovelace"]]);
+  });
+
   it("expands beyond pre-added blank rows when pasted rows exceed them", async () => {
     const { host } = mountGrid();
     await settle();

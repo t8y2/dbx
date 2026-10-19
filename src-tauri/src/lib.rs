@@ -16,6 +16,8 @@ mod startup_recovery;
 #[path = "startup_recovery_noop.rs"]
 mod startup_recovery;
 #[cfg(any(target_os = "windows", test))]
+mod webview2_legacy_css;
+#[cfg(any(target_os = "windows", test))]
 mod webview2_recovery;
 mod window_state_guard;
 

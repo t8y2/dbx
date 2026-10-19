@@ -8,7 +8,7 @@ use mysql_async::prelude::Queryable;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-use crate::connection::{AppState, PoolKind};
+use crate::connection::{AppState, ClientSessionPoolCleanupGuard, PoolKind};
 use crate::db;
 use crate::models::connection::DatabaseType;
 
@@ -661,6 +661,45 @@ async fn with_sql_file_transaction<T>(
     result
 }
 
+/// A session pinned for one SQL file execution.
+///
+/// Non-MySQL files execute each statement through the shared pool, so a file
+/// that contains its own `BEGIN` / `COMMIT` can span physical connections and
+/// leave an unfinished transaction `idle in transaction` in the pool (#12160).
+/// MySQL already pins a connection in [`MySqlSqlFileExecutor`], and manual
+/// transactions own their session, so both keep using their existing paths.
+struct SqlFilePinnedSession {
+    client_session_id: Option<String>,
+    _cleanup: Option<ClientSessionPoolCleanupGuard>,
+}
+
+impl SqlFilePinnedSession {
+    fn id(&self) -> Option<&str> {
+        self.client_session_id.as_deref()
+    }
+}
+
+fn should_pin_sql_file_session(request: &SqlFileRequest, mysql_executor_present: bool) -> bool {
+    request.txn_session_id.is_none() && !mysql_executor_present
+}
+
+async fn pin_sql_file_session(
+    state: &AppState,
+    request: &SqlFileRequest,
+    mysql_executor_present: bool,
+) -> SqlFilePinnedSession {
+    if !should_pin_sql_file_session(request, mysql_executor_present) {
+        return SqlFilePinnedSession { client_session_id: None, _cleanup: None };
+    }
+    let client_session_id = format!("sql-file-{}", uuid::Uuid::new_v4());
+    let database = request.database.trim();
+    let database = (!database.is_empty()).then_some(database);
+    // The guard removes the session-scoped pool when the file finishes, errors
+    // or is cancelled, which also rolls back a transaction the file left open.
+    let cleanup = state.workload_session_pool_cleanup_guard(&request.connection_id, database, &client_session_id).await;
+    SqlFilePinnedSession { client_session_id: Some(client_session_id), _cleanup: cleanup }
+}
+
 pub async fn execute_sql_file_content(
     state: &AppState,
     request: &SqlFileRequest,
@@ -714,6 +753,9 @@ async fn execute_sql_file_content_inner(
     // MySQL-family imports need one pinned connection so `USE` and session
     // state survive across the whole file.
     let mut mysql_executor = MySqlSqlFileExecutor::build(state, request, import_target.as_ref()).await?;
+    // Every other family also needs one connection for the whole file: a
+    // file-level `BEGIN` / `COMMIT` must not span pooled sessions (#12160).
+    let pinned_session = pin_sql_file_session(state, request, mysql_executor.is_some()).await;
     let bypass_kind = import_target.as_ref().and_then(relational_constraint_bypass_kind);
     let non_mysql_bypass = request.skip_relational_constraints
         && mysql_executor.is_none()
@@ -733,6 +775,7 @@ async fn execute_sql_file_content_inner(
         started_at,
         &planned_statements,
         mysql_executor.as_mut(),
+        pinned_session.id(),
         &mut progress,
         &mut emit,
     )
@@ -883,6 +926,9 @@ async fn execute_sql_file_paths_inner(
             return Err(error);
         }
     };
+    // Non-MySQL families need one connection for the whole batch so a file-level
+    // `BEGIN` / `COMMIT` cannot span pooled sessions (#12160).
+    let pinned_session = pin_sql_file_session(state, request, mysql_executor.is_some()).await;
     let constraints_disabled = request.skip_relational_constraints && mysql_executor.is_some();
     if constraints_disabled {
         let executor = mysql_executor.as_mut().expect("missing MySQL executor while disabling constraints");
@@ -1037,6 +1083,7 @@ async fn execute_sql_file_paths_inner(
                     max_insert_batch_statements,
                     import_target.as_ref(),
                     mysql_executor.as_mut(),
+                    pinned_session.id(),
                     &mut progress,
                     &mut emit,
                 )
@@ -1073,6 +1120,7 @@ async fn execute_sql_file_paths_inner(
                 max_insert_batch_statements,
                 import_target.as_ref(),
                 mysql_executor.as_mut(),
+                pinned_session.id(),
                 &mut progress,
                 &mut emit,
             )
@@ -2012,6 +2060,7 @@ async fn execute_sql_file_statement_batch(
     max_insert_batch_statements: Option<usize>,
     import_target: Option<&SqlFileImportTarget>,
     mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    session_id: Option<&str>,
     progress: &mut SqlFileExecutionProgress,
     emit: &mut impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
@@ -2033,6 +2082,7 @@ async fn execute_sql_file_statement_batch(
         started_at,
         &planned_statements,
         mysql_executor,
+        session_id,
         progress,
         emit,
     )
@@ -2489,6 +2539,7 @@ async fn execute_planned_statements_with_progress(
     started_at: Instant,
     planned_statements: &[ControlledSqlFileImportStatement],
     mut mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    session_id: Option<&str>,
     progress: &mut SqlFileExecutionProgress,
     emit: &mut impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
@@ -2509,6 +2560,7 @@ async fn execute_planned_statements_with_progress(
             &mut progress.failure_count,
             &mut progress.affected_rows,
             mysql_executor.as_deref_mut(),
+            session_id,
             emit,
         )
         .await?
@@ -2532,6 +2584,7 @@ async fn execute_statement_with_progress(
     failure_count: &mut usize,
     affected_rows: &mut u64,
     mut mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    session_id: Option<&str>,
     emit: &mut impl FnMut(SqlFileProgress),
 ) -> Result<bool, String> {
     let statement = &controlled_statement.statement;
@@ -2595,8 +2648,16 @@ async fn execute_statement_with_progress(
 
     let result = {
         let mysql_executor = mysql_executor.as_deref_mut();
-        execute_sql_file_statement_with_executor(state, request, &statement.sql, token, statement_index, mysql_executor)
-            .await
+        execute_sql_file_statement_with_executor(
+            state,
+            request,
+            &statement.sql,
+            token,
+            statement_index,
+            mysql_executor,
+            session_id,
+        )
+        .await
     };
 
     match result {
@@ -2630,6 +2691,7 @@ async fn execute_statement_with_progress(
                     failure_count,
                     affected_rows,
                     mysql_executor,
+                    session_id,
                     emit,
                 )
                 .await;
@@ -2671,6 +2733,7 @@ async fn execute_merged_statement_fallback_with_progress(
     failure_count: &mut usize,
     affected_rows: &mut u64,
     mut mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    session_id: Option<&str>,
     emit: &mut impl FnMut(SqlFileProgress),
 ) -> Result<bool, String> {
     for (offset, source_sql) in statement.source_sqls.iter().enumerate() {
@@ -2710,6 +2773,7 @@ async fn execute_merged_statement_fallback_with_progress(
             token,
             statement_index,
             mysql_executor.as_deref_mut(),
+            session_id,
         )
         .await
         {
@@ -2764,11 +2828,12 @@ async fn execute_sql_file_statement_with_executor(
     token: &CancellationToken,
     statement_index: usize,
     mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    pinned_session_id: Option<&str>,
 ) -> Result<QueryResult, String> {
     if let Some(mysql_executor) = mysql_executor {
         mysql_executor.execute_statement(state, request, sql, token, statement_index).await
     } else {
-        execute_sql_file_statement(state, request, sql, token, statement_index).await
+        execute_sql_file_statement(state, request, sql, token, statement_index, pinned_session_id).await
     }
 }
 
@@ -2778,6 +2843,7 @@ async fn execute_sql_file_statement(
     sql: &str,
     token: &CancellationToken,
     statement_index: usize,
+    pinned_session_id: Option<&str>,
 ) -> Result<QueryResult, String> {
     if let Some(session_id) = request.txn_session_id.as_deref() {
         let schema = sql_file_transaction_schema(state, request).await?;
@@ -2816,7 +2882,12 @@ async fn execute_sql_file_statement(
         sql,
         request.schema.as_deref(),
         Some(child_token),
-        QueryExecutionOptions { execution_id: Some(execution_id), timeout_secs, ..Default::default() },
+        QueryExecutionOptions {
+            execution_id: Some(execution_id),
+            timeout_secs,
+            client_session_id: pinned_session_id.map(str::to_string),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -2918,6 +2989,31 @@ mod tests {
         assert!(manual.iter().all(|item| item.stop_on_error && item.statement.source_statement_count == 1));
         assert_eq!(manual[0].statement.sql, statements[0].sql);
         assert_eq!(manual[1].statement.sql, statements[1].sql);
+    }
+
+    #[test]
+    fn auto_commit_file_execution_pins_one_session_unless_mysql_or_manual() {
+        let mut request = SqlFileRequest {
+            execution_id: "pin-session".to_string(),
+            connection_id: "connection".to_string(),
+            database: String::new(),
+            schema: None,
+            file_path: String::new(),
+            continue_on_error: false,
+            txn_session_id: None,
+            selected_tables: None,
+            part_cooldown_ms: 0,
+            skip_relational_constraints: false,
+            failure_log_enabled: true,
+            encoding: Default::default(),
+        };
+        // Non-MySQL auto-commit files must keep BEGIN/COMMIT on one connection.
+        assert!(should_pin_sql_file_session(&request, false));
+        // MySQL already pins its own connection in MySqlSqlFileExecutor.
+        assert!(!should_pin_sql_file_session(&request, true));
+        // Manual transactions already own a session.
+        request.txn_session_id = Some("manual-transaction".to_string());
+        assert!(!should_pin_sql_file_session(&request, false));
     }
 
     #[tokio::test]

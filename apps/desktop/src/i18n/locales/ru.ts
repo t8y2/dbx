@@ -3154,6 +3154,7 @@ export default withEnglishFallback({
     cut: "Вырезать",
     uncommittedBlankRow: "Незаполненная новая строка будет проигнорирована при сохранении",
     copyExtractorSqlDeletesInserts: "SQL-операторы DELETEs/INSERTs",
+    copyExtractorQuoteIdentifiersFollowsSetting: "«Настройки — Редактор — Добавлять кавычки к идентификаторам при генерации SQL» отключено, здесь больше не действует; зарезервированные слова и специальные символы по-прежнему автоматически заключаются в кавычки.",
   },
   exportProgress: {
     streamingUnsupported: "Потоковый экспорт не поддерживается для этого запроса. Упростите его или используйте поддерживаемый драйвер.",

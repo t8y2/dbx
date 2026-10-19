@@ -3020,6 +3020,7 @@ export default withEnglishFallback({
     batchAppendPasteNoMatchingColumns: "INSERT 문의 열 이름이 현재 결과 집합의 어떤 열과도 일치하지 않습니다.",
     uncommittedBlankRow: "입력되지 않은 새 행은 저장 시 무시됩니다.",
     copyExtractorSqlDeletesInserts: "SQL DELETEs/INSERTs 문",
+    copyExtractorQuoteIdentifiersFollowsSetting: "「설정 - 편집기 - SQL 생성 시 식별자에 따옴표 추가」가 꺼져 있어 여기서는 더 이상 적용되지 않습니다. 예약어와 특수 문자에는 여전히 자동으로 따옴표가 유지됩니다.",
   },
   exportProgress: {
     streamingUnsupported: "이 쿼리는 스트리밍 내보내기를 지원하지 않습니다. 쿼리를 단순화하거나 지원되는 드라이버를 사용하세요.",

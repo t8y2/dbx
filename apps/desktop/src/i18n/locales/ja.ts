@@ -3094,6 +3094,7 @@ export default withEnglishFallback({
     cut: "切り取りました",
     uncommittedBlankRow: "未入力の新しい行は、保存時に無視されます",
     copyExtractorSqlDeletesInserts: "SQL DELETEs/INSERTs ステートメント",
+    copyExtractorQuoteIdentifiersFollowsSetting: "「設定 - エディター - SQL 生成時に識別子を引用符で囲む」がオフになっているため、ここでは適用されません。予約語や特殊文字は引き続き自動的に引用符で囲まれます。",
   },
   exportProgress: {
     streamingUnsupported: "このクエリはストリーミングエクスポートに対応していません。クエリを簡略化するか、対応しているドライバーを使用してください。",

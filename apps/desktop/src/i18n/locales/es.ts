@@ -3197,6 +3197,7 @@ export default withEnglishFallback({
     cut: "Cortado",
     uncommittedBlankRow: "Fila nueva sin completar, se ignorará al guardar.",
     copyExtractorSqlDeletesInserts: "Sentencias SQL DELETEs/INSERTs",
+    copyExtractorQuoteIdentifiersFollowsSetting: "«Configuración - Editor - Añadir comillas a los identificadores al generar SQL» está desactivada, por lo que ya no se aplica aquí; las palabras reservadas y los caracteres especiales se seguirán entrecomillando automáticamente.",
   },
   exportProgress: {
     streamingUnsupported: "La exportación en streaming no es compatible con esta consulta. Simplifíquela o use un controlador compatible.",

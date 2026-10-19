@@ -3070,6 +3070,7 @@ export default withEnglishFallback({
     cut: "Tagliato",
     uncommittedBlankRow: "Nuova riga non compilata, verrà ignorata al salvataggio",
     copyExtractorSqlDeletesInserts: "Istruzioni SQL DELETEs/INSERTs",
+    copyExtractorQuoteIdentifiersFollowsSetting: "「Impostazioni - Editor - Aggiungi virgolette agli identificatori durante la generazione di SQL」 è disattivato, quindi questa opzione non ha più effetto qui; le parole riservate e i caratteri speciali manterranno comunque automaticamente le virgolette.",
   },
   exportProgress: {
     streamingUnsupported: "L'esportazione in streaming non è supportata per questa query. Semplificala o usa un driver supportato.",

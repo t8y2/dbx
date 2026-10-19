@@ -3070,6 +3070,7 @@ export default withEnglishFallback({
     cut: "Recortado",
     uncommittedBlankRow: "Nova linha não preenchida, será ignorada ao salvar",
     copyExtractorSqlDeletesInserts: "Instruções SQL DELETEs/INSERTs",
+    copyExtractorQuoteIdentifiersFollowsSetting: "“Configurações - Editor - Adicionar aspas aos identificadores ao gerar SQL” está desativado, portanto isso não se aplica mais aqui; palavras reservadas e caracteres especiais ainda receberão aspas automaticamente.",
   },
   exportProgress: {
     streamingUnsupported: "A exportação em streaming não é compatível com esta consulta. Simplifique-a ou use um driver compatível.",

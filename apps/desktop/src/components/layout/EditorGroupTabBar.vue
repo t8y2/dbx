@@ -103,7 +103,20 @@ import {
   createSaveAllTabsMenuItem,
 } from "@/lib/tabs/tabMenu";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
-import { findTabWithSameTitleSuffix, joinTabTitleParts, TAB_TITLE_SUFFIX_MAX_LENGTH, tabConnectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabDisplayTitleParts, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import {
+  connectionColor,
+  findTabWithSameTitleSuffix,
+  joinTabTitleParts,
+  TAB_TITLE_SUFFIX_MAX_LENGTH,
+  tabConnectionColor,
+  dirtyTabTitleStyle,
+  tabColorStyle as sharedTabColorStyle,
+  tabDatabaseIconType,
+  tabDisplayTitle,
+  tabDisplayTitleParts,
+  tabIconClass,
+  tabTooltipLines,
+} from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
 import type { QueryTab } from "@/types/database";
@@ -1112,9 +1125,9 @@ const stripSections = computed(() => {
 });
 
 function tabColorStyle(tab: QueryTab): CSSProperties | undefined {
-  // Keep ungrouped sidebar tabs aligned with the horizontal tab strip: every
-  // tab gets a connection-colored wash, while the active tab gets the stronger
-  // border and leading accent.
+  // Grouped sidebar tabs rely on the tree rails; ungrouped ones keep a
+  // connection-colored wash (configured or generated), with a stronger border
+  // and leading accent on the active tab.
   if (isVerticalLayout.value) {
     if (settingsStore.editorSettings.tabGroupMode !== "none" || !settingsStore.editorSettings.colorizeConnectionTabs) return undefined;
     const active = isTabActive(tab);
@@ -1130,10 +1143,15 @@ function tabColorStyle(tab: QueryTab): CSSProperties | undefined {
         : { borderColor: hexToRgba(color, 0.18) }),
     } as CSSProperties;
   }
-  // Keep horizontal tabs quiet by default; group headers and rails already
-  // provide the connection identity, while the selected tab gets the wash.
   if (!isTabActive(tab)) {
-    return undefined;
+    // Grouped horizontal tabs already show the group identity on the header
+    // and rail (the connection color when grouping by connection), so keep
+    // their washes quiet to make the active tab easy to spot (issue #12485).
+    // Ungrouped tabs have no rail: a color the user configured in the
+    // connection settings still marks them, while the auto-generated hue stays
+    // quiet.
+    const grouped = settingsStore.editorSettings.tabGroupMode !== "none";
+    if (grouped || !connectionColor(tab.connectionId)) return undefined;
   }
   return sharedTabColorStyle(tab, isTabActive(tab), isClassicLayout.value);
 }

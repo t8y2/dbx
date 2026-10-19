@@ -222,6 +222,49 @@ describe("EditorGroupTabBar group behavior", () => {
     }
   });
 
+  it.each(["classic", "separated"] as const)("keeps configured connection colors on inactive horizontal tabs when grouping is off in %s layout", async (layout) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres", color: "#3b82f6" } as ConnectionConfig, { id: "pg-2", name: "Auto", db_type: "postgres", driver_profile: "postgres", color: "" } as ConnectionConfig];
+    settings.editorSettings.appLayout = layout;
+    settings.editorSettings.tabGroupMode = "none";
+    settings.editorSettings.tabPlacement = "top";
+    settings.editorSettings.colorizeConnectionTabs = true;
+    const activeTabId = store.createTab("pg-1", "app", "PG 1", "query");
+    const configuredTabId = store.createTab("pg-1", "app", "PG 2", "query");
+    const autoTabId = store.createTab("pg-2", "app", "PG 3", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), activeTabId, pinia);
+
+    try {
+      for (const placement of ["top", "bottom"] as const) {
+        settings.editorSettings.tabPlacement = placement;
+        await settle();
+        const activeTab = host.querySelector<HTMLElement>(`[data-tab-id="${activeTabId}"]`)!;
+        const configuredTab = host.querySelector<HTMLElement>(`[data-tab-id="${configuredTabId}"]`)!;
+        const autoTab = host.querySelector<HTMLElement>(`[data-tab-id="${autoTabId}"]`)!;
+        const activeBackground = activeTab.style.getPropertyValue("--app-tab-background");
+        const configuredBackground = configuredTab.style.getPropertyValue("--app-tab-background");
+        expect(configuredTab.getAttribute("data-active-tab")).toBe("false");
+        // A color the user picked in the connection settings keeps marking its
+        // tabs when no group header/rail carries it; auto-generated hues stay
+        // quiet and the active tab still reads stronger than its peers.
+        expect(configuredBackground).toBe(layout === "classic" ? "rgba(59, 130, 246, 0.07)" : "rgba(59, 130, 246, 0.09)");
+        expect(autoTab.style.getPropertyValue("--app-tab-background")).toBe("");
+        expect(activeBackground).toBe("rgba(59, 130, 246, 0.24)");
+      }
+
+      // Turning the connection-tab colors off must silence the inactive wash
+      // even for a configured connection color.
+      settings.editorSettings.colorizeConnectionTabs = false;
+      await settle();
+      expect(host.querySelector<HTMLElement>(`[data-tab-id="${configuredTabId}"]`)!.style.getPropertyValue("--app-tab-background")).toBe("");
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
   it("renders one header per connection cluster and collapses it to a count badge", async () => {
     const store = useQueryStore();
     const settings = useSettingsStore();

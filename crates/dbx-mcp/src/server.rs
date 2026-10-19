@@ -1316,7 +1316,7 @@ impl DbxMcpServer {
         match self.backend.list_tables(&resolved.connection, &database, &schema).await {
             Ok(tables) if tables.is_empty() => {
                 let mut message = "No tables found.".to_string();
-                if let Some(warning) = &notes_warning {
+                if let Some(warning) = notes_warning {
                     message.push('\n');
                     message.push_str(warning);
                 }
@@ -1385,7 +1385,7 @@ impl DbxMcpServer {
         match self.backend.get_columns(&resolved.connection, &database, &schema, &request.table).await {
             Ok(columns) if columns.is_empty() => {
                 let mut message = "No columns found.".to_string();
-                if let Some(warning) = &notes_warning {
+                if let Some(warning) = notes_warning {
                     message.push('\n');
                     message.push_str(warning);
                 }
@@ -1416,7 +1416,7 @@ impl DbxMcpServer {
                 let mut output = docs_notes::guard_untrusted_note_output(format_columns(&columns), notes_applied);
                 if let Some(warning) = notes_warning {
                     output.push_str("\n\n");
-                    output.push_str(&warning);
+                    output.push_str(warning);
                 }
                 text(output)
             }
@@ -2798,7 +2798,7 @@ impl DbxMcpServer {
         );
         if let Some(warning) = notes_warning {
             output.push_str("\n\n");
-            output.push_str(&warning);
+            output.push_str(warning);
         }
         text(output)
     }

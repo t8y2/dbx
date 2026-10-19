@@ -961,7 +961,7 @@ async fn execute_list_tables(
         let mut message = "No tables found in this database/schema.".to_string();
         if let Some(warning) = notes_warning {
             message.push('\n');
-            message.push_str(&warning);
+            message.push_str(warning);
         }
         return Ok(message);
     }
@@ -1026,7 +1026,7 @@ async fn execute_get_columns(
         } else {
             format!("No columns found for table '{table}'.")
         };
-        if let Some(warning) = &notes_warning {
+        if let Some(warning) = notes_warning {
             message.push('\n');
             message.push_str(warning);
         }

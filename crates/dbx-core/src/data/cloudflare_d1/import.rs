@@ -95,68 +95,6 @@ mod tests {
 
     #[test]
     fn streaming_import_joins_individually_size_limited_statements() {
-        #[test]
-        fn sql_import_current_timestamp_marker_becomes_the_keyword() {
-            let marker = serde_json::json!({ "$dbxSqlImportExpression": "currentTimestamp" });
-            let rows = vec![vec![serde_json::Value::from(1), marker]];
-            let columns = vec!["id".to_string(), "created_at".to_string()];
-            let mappings = vec![
-                TableImportColumnMapping {
-                    source_column: "id".to_string(),
-                    target_column: "id".to_string(),
-                    target_data_type: None,
-                },
-                TableImportColumnMapping {
-                    source_column: "created_at".to_string(),
-                    target_column: "created_at".to_string(),
-                    target_data_type: None,
-                },
-            ];
-
-            let batch = crate::table_import::build_import_insert_batch_from_rows(
-                &rows,
-                &columns,
-                &mappings,
-                &[],
-                "events",
-                "main",
-                &DatabaseType::CloudflareD1,
-            )
-            .unwrap()
-            .unwrap();
-
-            assert!(batch.sql.contains("CURRENT_TIMESTAMP"), "sql: {}", batch.sql);
-            assert!(!batch.sql.contains("$dbxSqlImportExpression"), "sql: {}", batch.sql);
-            assert!(!batch.sql.contains(D1_CURRENT_TIMESTAMP_TOKEN), "sql: {}", batch.sql);
-        }
-
-        #[test]
-        fn row_data_containing_the_sentinel_token_fails_closed() {
-            let rows = vec![vec![serde_json::Value::String(D1_CURRENT_TIMESTAMP_TOKEN.to_string())]];
-            let columns = vec!["payload".to_string()];
-            let mappings = vec![TableImportColumnMapping {
-                source_column: "payload".to_string(),
-                target_column: "payload".to_string(),
-                target_data_type: None,
-            }];
-
-            let result = crate::table_import::build_import_insert_batch_from_rows(
-                &rows,
-                &columns,
-                &mappings,
-                &[],
-                "events",
-                "main",
-                &DatabaseType::CloudflareD1,
-            );
-
-            assert!(
-                result.is_err(),
-                "expected reserved-token rejection, got: {:?}",
-                result.ok().flatten().map(|batch| batch.sql)
-            );
-        }
-
         let rows = vec![vec![serde_json::json!("a".repeat(60_000))], vec![serde_json::json!("b".repeat(60_000))]];
         let columns = vec!["value".to_string()];
         let mappings = vec![TableImportColumnMapping {
@@ -180,5 +118,67 @@ mod tests {
         assert_eq!(batch.row_count, 2);
         assert_eq!(batch.sql.split(";\n").count(), 2);
         assert!(batch.sql.split(";\n").all(|statement| statement.len() <= super::super::MAX_SQL_STATEMENT_BYTES));
+    }
+
+    #[test]
+    fn sql_import_current_timestamp_marker_becomes_the_keyword() {
+        let marker = serde_json::json!({ "$dbxSqlImportExpression": "currentTimestamp" });
+        let rows = vec![vec![serde_json::Value::from(1), marker]];
+        let columns = vec!["id".to_string(), "created_at".to_string()];
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "id".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "created_at".to_string(),
+                target_column: "created_at".to_string(),
+                target_data_type: None,
+            },
+        ];
+
+        let batch = crate::table_import::build_import_insert_batch_from_rows(
+            &rows,
+            &columns,
+            &mappings,
+            &[],
+            "events",
+            "main",
+            &DatabaseType::CloudflareD1,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(batch.sql.contains("CURRENT_TIMESTAMP"), "sql: {}", batch.sql);
+        assert!(!batch.sql.contains("$dbxSqlImportExpression"), "sql: {}", batch.sql);
+        assert!(!batch.sql.contains(D1_CURRENT_TIMESTAMP_TOKEN), "sql: {}", batch.sql);
+    }
+
+    #[test]
+    fn row_data_containing_the_sentinel_token_fails_closed() {
+        let rows = vec![vec![serde_json::Value::String(D1_CURRENT_TIMESTAMP_TOKEN.to_string())]];
+        let columns = vec!["payload".to_string()];
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "payload".to_string(),
+            target_column: "payload".to_string(),
+            target_data_type: None,
+        }];
+
+        let result = crate::table_import::build_import_insert_batch_from_rows(
+            &rows,
+            &columns,
+            &mappings,
+            &[],
+            "events",
+            "main",
+            &DatabaseType::CloudflareD1,
+        );
+
+        assert!(
+            result.is_err(),
+            "expected reserved-token rejection, got: {:?}",
+            result.ok().flatten().map(|batch| batch.sql)
+        );
     }
 }

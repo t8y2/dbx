@@ -4,7 +4,7 @@ import { DATABASE_SCHEMA_QUALIFIED_TYPES } from "@/lib/database/databaseCapabili
 import { jdbcDriverProfileUsesSchemaQualification } from "@/lib/database/jdbcDialect";
 import * as api from "@/lib/backend/api.ts";
 import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/database/sqlServerLinkedServers.ts";
-import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
+import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote, requiresSqlServerIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
 import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import { sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
@@ -176,7 +176,7 @@ function requiresIdentifierQuote(databaseType: DatabaseType | undefined, name: s
     case "kingbase":
       return identifierQuote === "`" ? requiresMysqlIdentifierQuote(name) : requiresPostgresIdentifierQuote(name);
     case "sqlserver":
-      return requiresMysqlIdentifierQuote(name);
+      return requiresSqlServerIdentifierQuote(name);
     case "jdbc":
       return identifierQuote === "`" ? requiresMysqlIdentifierQuote(name) : requiresPostgresIdentifierQuote(name);
     default:

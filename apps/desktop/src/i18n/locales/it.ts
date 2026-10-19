@@ -1662,6 +1662,8 @@ export default withEnglishFallback({
     jdbcMissingRuntimeDependencyHint: "Il driver JDBC corrente manca di dipendenze runtime. Installare utilizzando le coordinate Maven in 'Gestione driver', o importare il driver e tutti i JAR delle dipendenze in una volta.",
     showSystemSchemas: "Mostra Schema di sistema",
     showSystemSchemasHint: "Mostra lo Schema built-in/di metadati nella barra laterale e nel selettore Schema per la connessione corrente.",
+    showSystemDatabases: "Mostra database di sistema",
+    showSystemDatabasesHint: "Mostra i database di sistema integrati (information_schema, performance_schema, mysql, sys) nella barra laterale e nei selettori di database per questa connessione.",
     showDatabaseLinks: "Mostra collegamenti database",
     showDatabaseLinksHint: "Mostra la voce dei collegamenti al database (DB Link) nella barra laterale per questa connessione.",
     docsNotesPath: "File delle note",

@@ -4,7 +4,7 @@ description: 使用 WebDAV、GitHub Gist、Gitee 或 GitLab Snippets 同步 DBX 
 ---
 
 <Callout type="info">
-DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照。桌面端可通过 WebDAV 或私有代码片段同步，Web/Docker 可通过 WebDAV 同步，并在另一个 DBX 实例恢复。
+DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照。可通过 WebDAV 或私有代码片段同步，并在另一个 DBX 实例恢复。
 </Callout>
 
 <Callout type="warn">云同步备份的是 DBX 配置，不会读取或备份连接中的业务数据库。表结构和数据请使用 [数据库导出](/cn/docs/database-export)；Desktop 定时 MySQL/PostgreSQL 备份请使用 [数据库备份](/cn/docs/database-backup)。</Callout>
@@ -12,7 +12,7 @@ DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照。�
 在 **设置 → 同步** 中选择同步方式：
 
 - **WebDAV**：适合已有 NAS、Nextcloud、坚果云或其他 WebDAV 服务的用户，支持定时自动上传。
-- **GitHub / Gitee / GitLab 代码片段**：通过私有代码片段保存快照，GitLab 支持企业自托管实例。目前仅桌面端显示，且需要手动上传和下载，不自动合并。
+- **GitHub / Gitee / GitLab 代码片段**：通过私有代码片段保存快照，GitLab 支持企业自托管实例。需要手动上传和下载，不自动合并。
 
 ## 同步哪些内容
 

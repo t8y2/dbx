@@ -1941,6 +1941,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "แสดง Table ควบคุมเวอร์ชันในตัวของ Dolt ในรายการตารางสำหรับการเชื่อมต่อนี้",
     showSystemSchemas: "แสดง System Schema",
     showSystemSchemasHint: "แสดง Schema ในตัวและ Schema เมทาดาทาในแถบด้านข้างและตัวเลือก Schema สำหรับการเชื่อมต่อนี้",
+    showSystemDatabases: "แสดงฐานข้อมูล System",
+    showSystemDatabasesHint: "แสดงฐานข้อมูลระบบในตัว (information_schema, performance_schema, mysql, sys) ในแถบด้านข้างและตัวเลือกฐานข้อมูลสำหรับการเชื่อมต่อนี้",
     showDatabaseLinks: "แสดง Database Link",
     showDatabaseLinksHint: "แสดงรายการ Database Link ในแถบด้านข้างสำหรับการเชื่อมต่อนี้",
     tableLoading: "การโหลดตาราง",

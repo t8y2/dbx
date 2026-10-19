@@ -1750,6 +1750,8 @@ export default withEnglishFallback({
     jdbcMissingRuntimeDependencyHint: "El controlador JDBC actual carece de dependencias de ejecución. Utilice las coordenadas Maven en 'Administración de controladores' para instalar, o importe el controlador y todos los JAR de dependencia de una vez.",
     showSystemSchemas: "Mostrar Schema del sistema",
     showSystemSchemasHint: "Mostrar el Schema integrado/de metadatos para la conexión actual en la barra lateral y el selector de Schema.",
+    showSystemDatabases: "Mostrar bases de datos del sistema",
+    showSystemDatabasesHint: "Mostrar las bases de datos del sistema integradas (information_schema, performance_schema, mysql, sys) en la barra lateral y los selectores de base de datos de esta conexión.",
     showDatabaseLinks: "Mostrar enlaces de base de datos",
     showDatabaseLinksHint: "Mostrar la entrada de enlaces de base de datos (DB Link) en la barra lateral para esta conexión.",
     tableLoading: "Carga de tablas",

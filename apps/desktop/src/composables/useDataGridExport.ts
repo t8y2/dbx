@@ -110,6 +110,8 @@ export interface UseDataGridExportOptions {
   tableMeta: ComputedRef<DataGridTableMeta | undefined>;
   /** Editor setting "Include database name in generated SQL" — passed through to SQL extractors and INSERT exports. */
   includeDatabaseName?: ComputedRef<boolean>;
+  /** Editor setting "Add quotes to identifiers when generating SQL" — master switch for SQL extractor output. */
+  quoteIdentifiers?: ComputedRef<boolean>;
   /** True only when query metadata resolves exactly one source table as the INSERT target. */
   hasUniqueQueryInsertTarget?: ComputedRef<boolean>;
   copyInsertTargetLabel?: ComputedRef<string | undefined>;
@@ -969,6 +971,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     identifierQuote,
     tableMeta,
     includeDatabaseName: options.includeDatabaseName,
+    quoteIdentifiers: options.quoteIdentifiers,
     hasCellSelection,
     selectedCells,
     selectedCellMatrix,

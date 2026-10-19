@@ -179,10 +179,20 @@ fn sql_insert_quote_opt_out_keeps_required_delimiters_and_namespaces() {
         (DatabaseType::Mysql, None, "events", "events"),
         (DatabaseType::Mysql, None, "order", "`order`"),
         (DatabaseType::Mysql, None, "a`b", "`a``b`"),
+        // MySQL 8.0 reserved words (window functions / CTEs / roles)
+        (DatabaseType::Mysql, None, "rank", "`rank`"),
+        (DatabaseType::Mysql, None, "groups", "`groups`"),
+        (DatabaseType::Mysql, None, "system", "`system`"),
+        (DatabaseType::Mysql, None, "recursive", "`recursive`"),
         (DatabaseType::Postgres, None, "events", "events"),
         (DatabaseType::Postgres, None, "Events", "\"Events\""),
         (DatabaseType::SqlServer, None, "events", "events"),
         (DatabaseType::SqlServer, None, "a]b", "[a]]b]"),
+        // T-SQL-only reserved words
+        (DatabaseType::SqlServer, None, "percent", "[percent]"),
+        (DatabaseType::SqlServer, None, "plan", "[plan]"),
+        (DatabaseType::SqlServer, None, "user", "[user]"),
+        (DatabaseType::SqlServer, None, "top", "[top]"),
         (DatabaseType::Dameng, None, "EVENTS", "EVENTS"),
         (DatabaseType::Dameng, None, "ABSOLUTE", "\"ABSOLUTE\""),
         (DatabaseType::Kingbase, Some("`"), "events", "events"),
@@ -214,6 +224,30 @@ fn sql_insert_quote_opt_out_keeps_required_delimiters_and_namespaces() {
                 assert_eq!(text, format!("INSERT INTO {expected} ({expected}) VALUES (1);"));
             }
         }
+    }
+}
+
+#[test]
+fn sql_insert_quote_opt_out_keeps_sqlite_only_reserved_words_quoted() {
+    for (name, quoted) in [("plan", true), ("query", true), ("events", false)] {
+        let mut request = request(DataGridExtractorId::SqlInserts);
+        request.database_type = Some(DatabaseType::Sqlite);
+        request.table_meta = Some(DataGridTableMeta {
+            catalog: None,
+            database: None,
+            schema: None,
+            table_name: name.into(),
+            primary_keys: vec![],
+            columns: None,
+        });
+        request.columns = vec![column(name, 0)];
+        request.selected_column_indexes = vec![0];
+        request.rows = vec![vec![json!(1)]];
+        request.options.sql.quote_identifiers = false;
+        request.options.sql.include_database_name = false;
+        let text = extract_data_grid_selection(request).unwrap().text;
+        let expected = if quoted { format!("\"{name}\"") } else { name.to_string() };
+        assert_eq!(text, format!("INSERT INTO {expected} ({expected}) VALUES (1);"));
     }
 }
 

@@ -1333,6 +1333,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "Bu əlaqənin cədvəl siyahılarında Dolt-un daxili versiya idarəetmə cədvəllərini göstər.",
     showSystemSchemas: "Sistem sxemlərini göstər",
     showSystemSchemasHint: "Bu əlaqə üçün yan paneldə və sxem seçicilərində daxili və metaməlumat sxemlərini göstər.",
+    showSystemDatabases: "Sistem verilənlər bazalarını göstər",
+    showSystemDatabasesHint: "Bu əlaqə üçün daxili sistem verilənlər bazalarını (information_schema, performance_schema, mysql, sys) yan paneldə və verilənlər bazası seçicilərində göstər.",
     showDatabaseLinks: "Verilənlər bazası keçidlərini göstər",
     showDatabaseLinksHint: "Bu əlaqə üçün yan paneldə verilənlər bazası keçidləri (DB Link) bölməsini göstər.",
     docsNotesPath: "Qeydlər faylı",

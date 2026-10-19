@@ -172,7 +172,7 @@ import {
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
 import { resolveVisibleDatabaseSaveAction } from "@/components/sidebar/visibleDatabasesDialogState";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
-import { isSchemaAware, isSingleDatabase, supportsDataDictionary, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, isSingleDatabase, supportsDataDictionary, supportsShowSystemObjectsSetting, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
@@ -4212,6 +4212,13 @@ function setProductionProtectionEnabled(enabled: boolean) {
   }
 }
 const canChooseVisibleSchemas = computed(() => isSchemaAware(form.value.db_type));
+
+// MySQL-family engines have no schema level: their system namespaces
+// (information_schema, performance_schema, mysql, sys) are databases, so the
+// same `show_system_schemas` flag drives the database list instead.
+const showSystemObjectsSettingVisible = computed(() => supportsShowSystemObjectsSetting(form.value.db_type));
+const showSystemObjectsSettingLabelKey = computed(() => (isSchemaAware(form.value.db_type) ? "connection.showSystemSchemas" : "connection.showSystemDatabases"));
+const showSystemObjectsSettingHintKey = computed(() => (isSchemaAware(form.value.db_type) ? "connection.showSystemSchemasHint" : "connection.showSystemDatabasesHint"));
 const visibleSchemasDatabaseKey = computed(() => form.value.database || "");
 const hasVisibleSchemaFilter = computed(() => {
   const key = visibleSchemasDatabaseKey.value;
@@ -10534,11 +10541,11 @@ function openExternalUrl(url: string) {
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
                   </label>
                 </div>
-                <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.showSystemSchemas") }}</Label>
+                <div v-if="showSystemObjectsSettingVisible" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t(showSystemObjectsSettingLabelKey) }}</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
-                    <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
+                    <span class="text-xs text-muted-foreground">{{ t(showSystemObjectsSettingHintKey) }}</span>
                   </label>
                 </div>
                 <div v-if="supportsOracleDatabaseLinks(form.db_type)" class="grid grid-cols-4 items-center gap-4">

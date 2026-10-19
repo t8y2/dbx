@@ -48,6 +48,16 @@ fn can_unquote(name: &str, database_type: Option<DatabaseType>, identifier_quote
                 && chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
                 && !dameng_reserved(name)
         }
+        Some(DatabaseType::SqlServer) => {
+            (first.is_ascii_alphabetic() || first == '_')
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '#' | '@'))
+                && !sqlserver_reserved(name)
+        }
+        Some(DatabaseType::Sqlite) => {
+            let simple = |ch: char| ch.is_ascii_alphabetic() || matches!(ch, '_' | '$') || ('\u{80}'..='\u{ffff}').contains(&ch);
+            let lower = name.to_ascii_lowercase();
+            simple(first) && chars.all(|ch| simple(ch) || ch.is_ascii_digit()) && !mysql_reserved(&lower) && !sqlite_reserved(&lower)
+        }
         Some(
             DatabaseType::Postgres
             | DatabaseType::Gaussdb
@@ -134,7 +144,58 @@ fn mysql_reserved(name: &str) -> bool {
                 "partition purge range read_write regexp release rename replace require rlike schema schemas ",
                 "separator show spatial sql_big_result sql_calc_found_rows sql_small_result ssl starting ",
                 "straight_join terminated tinyint unlock unsigned use utc_date utc_time utc_timestamp values ",
-                "varbinary varchar write xor zerofill",
+                "varbinary varchar write xor zerofill ",
+                // MySQL 8.0 reserved words added after 5.7 (window functions, CTEs, JSON_TABLE, roles).
+                "admin cube cume_dist dense_rank empty first_value function generated grouping groups json_table ",
+                "lag last_value lead member nth_value ntile of over percent_rank rank recursive row row_number rows ",
+                "system",
+            )
+            .split_ascii_whitespace()
+            .collect()
+        })
+        .contains(name)
+}
+
+/// SQL Server (T-SQL) reserved keywords. `user`, `key`, `order`, `desc` and
+/// friends already sit in the shared MySQL-style set, but T-SQL reserves a
+/// number of words that list does not carry (`percent`, `plan`, `rule`,
+/// `statistics`, `top`, ...), so an unquoted INSERT would fail on them.
+fn sqlserver_reserved(name: &str) -> bool {
+    static KEYWORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    const KEYWORDS_LIST: &str = concat!(
+        "add all alter and any as asc authorization backup begin between break browse bulk by cascade case check ",
+        "checkpoint close clustered coalesce collate column commit compute constraint contains containstable ",
+        "continue convert create cross current current_date current_time current_timestamp current_user cursor ",
+        "database dbcc deallocate declare default delete deny desc disk distinct distributed double drop dump else ",
+        "end errlvl escape except exec execute exists exit external fetch file fillfactor for foreign freetext ",
+        "freetexttable from full function goto grant group having holdlock identity identity_insert identitycol if ",
+        "in index inner insert intersect into is join key kill left like lineno load merge national nocheck ",
+        "nonclustered not null nullif of off offsets on open opendatasource openquery openrowset openxml option or ",
+        "order outer over percent pivot plan precision primary print proc procedure public raiserror read ",
+        "readtext reconfigure references replication restore restrict return revert revoke right rollback rowcount ",
+        "rowguidcol rule save schema securityaudit select semantickeyphrasetable semanticsimilaritydetailstable ",
+        "semanticsimilaritytable session_user set setuser shutdown some statistics system_user table tablesample ",
+        "textsize then to top tran transaction trigger truncate try_convert tsequal union unique unpivot update ",
+        "updatetext use user values varying view waitfor when where while with writetext",
+    );
+    KEYWORDS
+        .get_or_init(|| KEYWORDS_LIST.split_ascii_whitespace().collect())
+        .contains(name.to_ascii_lowercase().as_str())
+}
+
+/// SQLite keywords that the shared MySQL-style list does not carry. SQLite
+/// keeps most MySQL keywords reserved too, so this set only adds its own
+/// (`glob`, `plan`, `query`, `raise`, `reindex`, `vacuum`, ...).
+fn sqlite_reserved(name: &str) -> bool {
+    static KEYWORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    KEYWORDS
+        .get_or_init(|| {
+            concat!(
+                "abort action after analyze attach autoincrement before cascade conflict database deferred detach ",
+                "each exclude exclusive explain fail filter first following generated glob groups if ignore indexed ",
+                "instead last match materialized nothing nulls of offset others over partition plan pragma preceding ",
+                "query raise range recursive reindex release row rows savepoint temp temporary ties unbounded vacuum ",
+                "virtual without",
             )
             .split_ascii_whitespace()
             .collect()

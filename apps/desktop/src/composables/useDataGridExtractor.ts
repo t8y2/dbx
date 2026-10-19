@@ -68,6 +68,8 @@ interface UseDataGridExtractorOptions {
   tableMeta: ComputedRef<DataGridTableMeta | undefined>;
   /** Editor setting "Include database name in generated SQL". When false, SQL extractors omit optional schema/database qualifiers. */
   includeDatabaseName?: ComputedRef<boolean>;
+  /** Editor setting "Add quotes to identifiers when generating SQL". It is the master switch: when false, SQL extractors drop dialect identifier quotes even if the copy/export dialog keeps quoting enabled. */
+  quoteIdentifiers?: ComputedRef<boolean>;
   hasCellSelection: ComputedRef<boolean>;
   selectedCells: ComputedRef<SelectionData>;
   selectedCellMatrix: ComputedRef<CellSelectionMatrix | null>;
@@ -278,6 +280,13 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
             options.includeDatabaseName?.value === true || extractorOptionValues.sql.includeDatabaseName === true,
           )
         : undefined;
+    // 「生成 SQL 时为标识符添加引号」是全局总开关：编辑器设置关闭后，复制/导出对话框里
+    // 「表名和字段名加引号」即便保持勾选也不再输出方言引号，避免同一份 INSERT 语句与
+    // 新建查询、DDL 的引号风格互相打架。
+    const sqlOptions: DataGridExtractorOptions["sql"] = {
+      ...extractorOptionValues.sql,
+      quoteIdentifiers: extractorOptionValues.sql.quoteIdentifiers && options.quoteIdentifiers?.value !== false,
+    };
     const request: DataGridExtractRequest = {
       version: DATA_GRID_EXTRACTOR_CONTRACT_VERSION,
       extractor,
@@ -293,7 +302,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       // namespace prefix when include_database_name=false, which would regress
       // the default output to a bare table name; keep the flag aligned with
       // the qualified tableMeta we intentionally preserved.
-      options: tableMeta && (tableMeta.schema !== undefined || tableMeta.database !== undefined) ? { ...extractorOptionValues, sql: { ...extractorOptionValues.sql, includeDatabaseName: true } } : extractorOptionValues,
+      options: tableMeta && (tableMeta.schema !== undefined || tableMeta.database !== undefined) ? { ...extractorOptionValues, sql: { ...sqlOptions, includeDatabaseName: true } } : { ...extractorOptionValues, sql: sqlOptions },
     };
     requestSources.set(request, {
       rowIds: sourceRowIds,

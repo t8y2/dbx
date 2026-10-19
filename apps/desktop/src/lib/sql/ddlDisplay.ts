@@ -1,4 +1,4 @@
-import { requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote, requiresSqlServerIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -8,7 +8,6 @@ import { formatStarRocksDdlForDisplay } from "@/lib/sql/starrocksDdlDisplay";
 import { dropsSchemaQualifier, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import type { DatabaseType } from "@/types/database";
 
-const SIMPLE_SQLSERVER_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const CREATE_TABLE_MODIFIERS = new Set(["external", "global", "local", "materialized", "or", "replace", "temp", "temporary", "transient", "unlogged", "volatile"]);
 const TABLE_CONSTRAINT_NAMES = new Set(["check", "constraint", "exclude", "foreign", "fulltext", "index", "key", "period", "primary", "spatial", "unique"]);
 
@@ -42,7 +41,7 @@ function canRenderUnquoted(identifier: string, dialect: SqlFormatDialect): boole
     case "oracle":
       return !requiresOracleIdentifierQuote(identifier);
     case "sqlserver":
-      return SIMPLE_SQLSERVER_IDENTIFIER.test(identifier) && !requiresMysqlIdentifierQuote(identifier.toLowerCase());
+      return !requiresSqlServerIdentifierQuote(identifier);
     default:
       return false;
   }

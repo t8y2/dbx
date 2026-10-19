@@ -64,7 +64,7 @@ GROUP BY ${1:column};
 
 ## 保存、同步与安全
 
-代码片段属于编辑器设置，会保存在当前 DBX 运行环境中。桌面版的[配置云同步](/cn/docs/cloud-sync)可以连同其他编辑器设置一起同步片段；[连接配置迁移](/cn/docs/config-export)只处理数据库连接，不包含代码片段。
+代码片段属于编辑器设置，会保存在当前 DBX 运行环境中。[配置云同步](/cn/docs/cloud-sync)可以连同其他编辑器设置一起同步片段；[连接配置迁移](/cn/docs/config-export)只处理数据库连接，不包含代码片段。
 
 片段只是生成 SQL，不会绕过数据库权限或 DBX 的生产保护。执行包含写入或 DDL 的模板前，仍应检查展开后的完整 SQL，并遵循[生产安全](/cn/docs/production-safety)建议。
 

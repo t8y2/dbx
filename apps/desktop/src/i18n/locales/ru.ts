@@ -1747,6 +1747,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "Показывать встроенные таблицы контроля версий Dolt в списках таблиц для этого подключения.",
     showSystemSchemas: "Показывать системные схемы",
     showSystemSchemasHint: "Показывать встроенные схемы и схемы метаданных на боковой панели и в выборе схем для этого подключения.",
+    showSystemDatabases: "Показывать системные базы данных",
+    showSystemDatabasesHint: "Показывать встроенные системные базы данных (information_schema, performance_schema, mysql, sys) на боковой панели и в выборе баз данных для этого подключения.",
     showDatabaseLinks: "Показывать связи баз данных",
     showDatabaseLinksHint: "Показывать раздел связей баз данных (DB Link) на боковой панели для этого подключения.",
     docsNotesPath: "Файл заметок",

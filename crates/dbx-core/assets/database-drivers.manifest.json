@@ -18,7 +18,8 @@
       "skipTcpProbe": false,
       "defaultPort": 3306,
       "traits": {
-        "diagramSql": true
+        "diagramSql": true,
+        "showSystemDatabases": true
       },
       "supportLevel": "operate",
       "capabilities": {
@@ -846,6 +847,9 @@
       "metadataConnectionScoped": true,
       "skipTcpProbe": false,
       "defaultPort": 9030,
+      "traits": {
+        "showSystemDatabases": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -880,6 +884,9 @@
       "metadataConnectionScoped": true,
       "skipTcpProbe": false,
       "defaultPort": 9030,
+      "traits": {
+        "showSystemDatabases": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1210,6 +1217,9 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 3306,
+      "traits": {
+        "showSystemDatabases": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,

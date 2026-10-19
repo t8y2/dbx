@@ -1645,6 +1645,8 @@ export default withEnglishFallback({
     readOnlyExplanation: "읽기 전용 모드는 이 연결의 쓰기 작업을 직접 차단합니다. 데이터를 변경하려면 일시적으로 쓰기 잠금을 해제해야 합니다.",
     showSystemSchemas: "시스템 스키마 표시",
     showSystemSchemasHint: "이 연결의 사이드바와 스키마 선택기에 내장 및 메타데이터 스키마를 표시합니다.",
+    showSystemDatabases: "시스템 데이터베이스 표시",
+    showSystemDatabasesHint: "이 연결의 사이드바와 데이터베이스 선택기에 내장 시스템 데이터베이스(information_schema, performance_schema, mysql, sys)를 표시합니다.",
     showDatabaseLinks: "데이터베이스 링크 표시",
     showDatabaseLinksHint: "이 연결의 사이드바에 데이터베이스 링크(DB Link) 항목을 표시합니다.",
     docsNotesPath: "노트 파일",

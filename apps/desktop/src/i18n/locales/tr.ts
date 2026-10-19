@@ -1332,6 +1332,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "Bu bağlantı için Dolt'un yerleşik sürüm denetimi tablolarını tablo listelerinde göster.",
     showSystemSchemas: "Sistem Şemalarını Göster",
     showSystemSchemasHint: "Bu bağlantı için yerleşik ve meta veri şemalarını kenar çubuğunda ve şema seçicilerinde göster.",
+    showSystemDatabases: "Sistem veritabanlarını göster",
+    showSystemDatabasesHint: "Bu bağlantı için yerleşik sistem veritabanlarını (information_schema, performance_schema, mysql, sys) kenar çubuğunda ve veritabanı seçicilerinde göster.",
     showDatabaseLinks: "Veritabanı Bağlantılarını Göster",
     showDatabaseLinksHint: "Bu bağlantı için kenar çubuğunda veritabanı bağlantıları (DB Link) girişini göster.",
     docsNotesPath: "Not dosyası",

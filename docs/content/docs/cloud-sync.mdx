@@ -4,7 +4,7 @@ description: Sync DBX connections, settings, and saved SQL with WebDAV, GitHub G
 ---
 
 <Callout type="info">
-DBX can package connections, application settings, and saved SQL into a snapshot. Desktop can sync through WebDAV or private snippets, while Web/Docker can sync through WebDAV and restore the snapshot in another DBX instance.
+DBX can package connections, application settings, and saved SQL into a snapshot. You can sync through WebDAV or private snippets and restore the snapshot in another DBX instance.
 </Callout>
 
 <Callout type="warn">Cloud Sync backs up DBX configuration. It does not read or back up the business databases behind your connections. Use [Database Export](/en/docs/database-export) for schema and data, or [Database Backup](/en/docs/database-backup) for scheduled Desktop MySQL/PostgreSQL backups.</Callout>
@@ -12,7 +12,7 @@ DBX can package connections, application settings, and saved SQL into a snapshot
 Choose a provider under **Settings → Sync**:
 
 - **WebDAV**: Best when you already use a NAS, Nextcloud, or another WebDAV service. Supports scheduled uploads.
-- **GitHub / Gitee / GitLab snippets**: Stores the snapshot in a private snippet, including on self-managed GitLab. It is currently exposed in Desktop only; uploads and downloads are manual and never merge automatically.
+- **GitHub / Gitee / GitLab snippets**: Stores the snapshot in a private snippet, including on self-managed GitLab. Uploads and downloads are manual and never merge automatically.
 
 ## What Is Synchronized
 

@@ -46,6 +46,20 @@ describe("read-only write unlock", () => {
     expect(sqlLooksLikeMutation("SET k v", "redis")).toBe(true);
     expect(sqlLooksLikeMutation("# note\nGET k", "redis")).toBe(false);
     expect(sqlLooksLikeMutation("-- note\nSET k v", "redis")).toBe(true);
+    expect(sqlLooksLikeMutation("SET @begin_id = 0", "mysql")).toBe(false);
+    expect(sqlLooksLikeMutation("SET @end_id = @begin_id + 100000;", "mysql")).toBe(false);
+    expect(sqlLooksLikeMutation("SET @begin_id = 0;\nSET @end_id = @begin_id + 100000;", "mysql")).toBe(false);
+    expect(sqlLooksLikeMutation("SET NAMES utf8mb4", "mysql")).toBe(false);
+    expect(sqlLooksLikeMutation("SET search_path TO public", "postgres")).toBe(false);
+    expect(sqlLooksLikeMutation("SET TIME ZONE 'UTC'", "postgres")).toBe(false);
+    expect(sqlLooksLikeMutation("SET @@session.sort_buffer_size = 10000", "mysql")).toBe(false);
+    expect(sqlLooksLikeMutation("SET GLOBAL max_connections = 100", "mysql")).toBe(true);
+    expect(sqlLooksLikeMutation("SET @@global.max_connections = 100", "mysql")).toBe(true);
+    expect(sqlLooksLikeMutation("SET PERSIST max_connections = 100", "mysql")).toBe(true);
+    expect(sqlLooksLikeMutation("SET PASSWORD = 'secret'", "mysql")).toBe(true);
+    expect(sqlLooksLikeMutation("SET @x = (DELETE FROM users)", "mysql")).toBe(true);
+    expect(sqlLooksLikeMutation("SET @x = (UPDATE users SET a = 1)", "mysql")).toBe(true);
+    expect(sqlLooksLikeMutation("SET @x = (DROP TABLE users)", "mysql")).toBe(true);
   });
 
   it("keeps the persistent read-only flag on while a window is active", async () => {

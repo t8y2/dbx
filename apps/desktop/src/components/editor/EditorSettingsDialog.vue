@@ -10802,10 +10802,10 @@ LIMIT 100;</pre>
 
             <section v-else-if="activeSettingsTab === 'sync'" data-settings-search-id="sync" :class="['py-2', settingsSearchTargetClass('sync')]">
               <Tabs v-model="syncMethodTab" class="w-full">
-                <TabsList v-if="!isWeb" class="grid w-full grid-cols-3">
+                <TabsList :class="isWeb ? 'grid w-full grid-cols-2' : 'grid w-full grid-cols-3'">
                   <TabsTrigger value="webdav">WebDAV</TabsTrigger>
                   <TabsTrigger value="snippet">{{ t("settings.syncSnippetTitle") }}</TabsTrigger>
-                  <TabsTrigger value="local">{{ t("settings.localBackupTitle") }}</TabsTrigger>
+                  <TabsTrigger v-if="!isWeb" value="local">{{ t("settings.localBackupTitle") }}</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="webdav" data-settings-search-id="sync-webdav" :class="['mt-5 space-y-5', settingsSearchTargetClass('sync-webdav')]">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS, elasticsearchCursorPageJumpRequestCount, hasCompleteLocalDataGridResult, reconcileDataGridExactTotalWithObservedPage } from "@/lib/dataGrid/dataGridPagination";
+import { ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS, elasticsearchCursorPageJumpRequestCount, hasCompleteLocalDataGridResult, isDataGridSurfaceBusy, reconcileDataGridExactTotalWithObservedPage } from "@/lib/dataGrid/dataGridPagination";
 
 describe("Elasticsearch cursor page jumps", () => {
   it("counts only missing forward cursors", () => {
@@ -52,6 +52,26 @@ describe("complete local DataGrid results", () => {
         hasMore: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe("DataGrid surface busy overlay", () => {
+  const idle = { isRefreshingData: false, loading: false, pageJumpBusy: false };
+
+  it("keeps the full-surface overlay off while a footer total-row count runs", () => {
+    expect(isDataGridSurfaceBusy({ ...idle, manualTotalRowCountLoading: true, manualTotalRowCountCoversSurface: false })).toBe(false);
+  });
+
+  it("covers the surface for count-then-navigate flows", () => {
+    expect(isDataGridSurfaceBusy({ ...idle, manualTotalRowCountLoading: true, manualTotalRowCountCoversSurface: true })).toBe(true);
+  });
+
+  it("covers the surface for real reloads, page jumps, and row preparation", () => {
+    expect(isDataGridSurfaceBusy({ ...idle, isRefreshingData: true })).toBe(true);
+    expect(isDataGridSurfaceBusy({ ...idle, loading: true })).toBe(true);
+    expect(isDataGridSurfaceBusy({ ...idle, pageJumpBusy: true })).toBe(true);
+    expect(isDataGridSurfaceBusy({ ...idle, rowPreparationBusy: true })).toBe(true);
+    expect(isDataGridSurfaceBusy(idle)).toBe(false);
   });
 });
 

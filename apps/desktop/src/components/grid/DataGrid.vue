@@ -241,6 +241,7 @@ import {
   elasticsearchCursorPageJumpRequestCount,
   hasCompleteLocalDataGridResult,
   hasShortDataGridSqlPage,
+  isDataGridSurfaceBusy,
   reconcileDataGridExactTotalWithObservedPage,
   resolveDataGridPaginationTotal,
   showDataGridRerunTotalCountAction,
@@ -3644,6 +3645,8 @@ watch(
 );
 const manualTotalRowCount = ref<number | undefined>(undefined);
 const manualTotalRowCountLoading = ref(false);
+/** True only for count-then-navigate flows (e.g. jump to last page), where the grid must stay covered. */
+const manualTotalRowCountCoversSurface = ref(false);
 let manualTotalRowCountGeneration = 0;
 function invalidateManualTotalRowCount() {
   manualTotalRowCountGeneration++;
@@ -3772,8 +3775,20 @@ const rowPreparationProgress = shallowRef<DataGridRowPreparationProgress | null>
 let rowPreparationController: AbortController | null = null;
 let gridClipboardLifecycle = 0;
 let gridClipboardActive = true;
-/** Automatic background counts keep rows interactive; explicit count navigation still blocks the surface. */
-const gridSurfaceBusy = computed(() => isRefreshingData.value || props.loading === true || manualTotalRowCountLoading.value || pageJumpBusy.value || rowPreparationProgress.value !== null);
+/**
+ * Automatic background counts keep rows interactive. A manual footer count only covers the grid when it is
+ * part of a navigation flow; counting total rows on demand must not look like a table refresh.
+ */
+const gridSurfaceBusy = computed(() =>
+  isDataGridSurfaceBusy({
+    isRefreshingData: isRefreshingData.value,
+    loading: props.loading === true,
+    pageJumpBusy: pageJumpBusy.value,
+    rowPreparationBusy: rowPreparationProgress.value !== null,
+    manualTotalRowCountLoading: manualTotalRowCountLoading.value,
+    manualTotalRowCountCoversSurface: manualTotalRowCountCoversSurface.value,
+  }),
+);
 const gridPaginationBusy = computed(() => gridSurfaceBusy.value || totalRowCountBusy.value);
 const dataGridNativeSelectionBlockOwner = {};
 watch(
@@ -4251,20 +4266,26 @@ function jumpToCountedLastPage(total: number) {
   requestServerPageJump(lastPageNum);
 }
 
-async function beginManualTotalRowCount(): Promise<number | undefined> {
+async function beginManualTotalRowCount(coversSurface = false): Promise<number | undefined> {
   if (manualTotalRowCountLoading.value) return undefined;
   const generation = manualTotalRowCountGeneration;
+  manualTotalRowCountCoversSurface.value = coversSurface;
   manualTotalRowCountLoading.value = true;
-  // Flush busy UI (overlay / spinner) before the slow COUNT starts.
+  // Flush the button spinner (and the overlay for count-then-navigate flows) before the slow COUNT starts.
   await nextTick();
   return generation;
+}
+
+function finishManualTotalRowCount() {
+  manualTotalRowCountLoading.value = false;
+  manualTotalRowCountCoversSurface.value = false;
 }
 
 async function lastPage() {
   if (infiniteScrollEnabled.value || allRowsLoaded.value) return;
   // Navicat-style: always re-COUNT when jumping to the last page.
   if (props.countTotalRows) {
-    const generation = await beginManualTotalRowCount();
+    const generation = await beginManualTotalRowCount(true);
     if (generation === undefined) return;
     try {
       if (generation !== manualTotalRowCountGeneration) return;
@@ -4283,12 +4304,12 @@ async function lastPage() {
         5000,
       );
     } finally {
-      manualTotalRowCountLoading.value = false;
+      finishManualTotalRowCount();
     }
     return;
   }
   if (props.connectionId && (props.countSql || canCountTableRows.value)) {
-    const generation = await beginManualTotalRowCount();
+    const generation = await beginManualTotalRowCount(true);
     if (generation === undefined) return;
     try {
       if (generation !== manualTotalRowCountGeneration) return;
@@ -4306,7 +4327,7 @@ async function lastPage() {
     } catch {
       // COUNT query failed — ignore silently
     } finally {
-      manualTotalRowCountLoading.value = false;
+      finishManualTotalRowCount();
     }
     return;
   }
@@ -4378,7 +4399,7 @@ async function calculateTotalRowCount() {
   } catch (e: any) {
     toast(t("grid.calculateTotalRowsFailed", { message: e?.message || String(e) }), 5000);
   } finally {
-    manualTotalRowCountLoading.value = false;
+    finishManualTotalRowCount();
   }
 }
 

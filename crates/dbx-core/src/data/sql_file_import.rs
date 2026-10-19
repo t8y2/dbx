@@ -691,7 +691,7 @@ async fn pin_sql_file_session(
     if !should_pin_sql_file_session(request, mysql_executor_present) {
         return SqlFilePinnedSession { client_session_id: None, _cleanup: None };
     }
-    let client_session_id = format!("sql-file-{}", uuid::Uuid::new_v4());
+    let client_session_id = format!("sql-file-{}", request.execution_id);
     let database = request.database.trim();
     let database = (!database.is_empty()).then_some(database);
     // The guard removes the session-scoped pool when the file finishes, errors
@@ -4030,9 +4030,15 @@ mod tests {
         state.configs.write().await.insert(config.id.clone(), config);
 
         let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        // SQL file execution pins a session-scoped pool, so the injected pool
+        // must exist under that key too; the base key keeps any non-pinned path
+        // (metadata probes) working.
+        let session_pool_key =
+            state.session_pool_key_for_test("gauss-stream", None, "sql-file-gauss-stop-on-error").await;
         state
             .update_connection_pools(|connections| {
                 connections.insert("gauss-stream".to_string(), crate::connection::PoolKind::Sqlite(pool.clone()));
+                connections.insert(session_pool_key, crate::connection::PoolKind::Sqlite(pool.clone()));
             })
             .await;
 

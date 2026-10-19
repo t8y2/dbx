@@ -1576,6 +1576,21 @@ impl AppState {
         update(&mut connections)
     }
 
+    /// Test-only: the pool key a workload session uses. Tests that inject a
+    /// pool instead of opening a real connection need the exact session key the
+    /// executor will look up.
+    #[cfg(test)]
+    pub(crate) async fn session_pool_key_for_test(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: &str,
+    ) -> String {
+        let config = self.configs.read().await.get(connection_id).cloned();
+        let base_pool_key = base_pool_key_for_config(config.as_ref(), connection_id, database, None, false);
+        pool_key_for_session_role(config.as_ref(), base_pool_key, Some(client_session_id), AgentSessionRole::Workload)
+    }
+
     fn pool_routing_control(&self) -> PoolRoutingControl {
         PoolRoutingControl {
             connections: self.connections.clone(),

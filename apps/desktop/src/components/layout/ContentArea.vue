@@ -2049,6 +2049,7 @@ defineExpose({
               :hide-execution-controls="!!activeTab.ddlViewer"
               enable-explain-shortcut
               :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
+              :is-executing="activeTab.isExecuting"
               @update:model-value="emit('editorUpdate', activeTab.id, $event)"
               @selection-change="emit('editorSelectionChange', activeTab.id, $event)"
               @send-selection-to-ai="emit('sendSelectionToAi', activeTab.id, $event)"

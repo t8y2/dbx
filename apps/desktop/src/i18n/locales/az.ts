@@ -1119,6 +1119,9 @@ export default withEnglishFallback({
     gaussdbConnectionModeMJdbc: "M rejimi (istehsalçının JDBC drayveri)",
     gaussdbConnectionModeNativeHint: "GaussDB A/PG/Oracle uyğunluq rejimləri üçün DBX-in daxili PostgreSQL ilə uyğun protokolundan istifadə edir.",
     gaussdbConnectionModeMJdbcHint: "GaussDB M rejimi üçün com.huawei.gaussdb.jdbc.Driver ilə jdbc:gaussdb-dən istifadə edir.",
+    gaussdbConnectionModeDws: "Huawei DWS (PostgreSQL ilə uyğun daxili drayver)",
+    gaussdbConnectionModeDwsHint:
+      "Bu bağlantını açıq şəkildə Huawei DWS kimi işarələyir. Plugin Host Estimated Plan API açıq DWS profili üçün serverin kiçik versiyasından asılı olmayaraq aktiv olur; adi GaussDB və M-JDBC bağlantıları dəstəklənmir. Daxili PostgreSQL-ə uyğun drayverdən istifadə edilir.",
     gaussdbMJdbcDriver: "GaussDB JDBC drayveri",
     gaussdbMJdbcDriverPlaceholder: "Server versiyasına uyğun gaussdbjdbc.jar seçin",
     gaussdbMJdbcDriverHint: "Drayver hər GaussDB server versiyası ilə birlikdə buraxılır. gaussdbjdbc.jar faylını uyğun GaussDB drayver paketindən əldə edin.",
@@ -6827,6 +6830,8 @@ export default withEnglishFallback({
     fileProgress: "Fayl {current} / {total}",
     fileColumn: "Fayl",
     totalFiles: "{count} fayl",
+    executeSuccess: "SQL faylı uğurla icra edildi",
+    completedWithErrors: "İcra tamamlandı: {succeeded} uğurlu, {failed} uğursuz",
   },
   sqlFileTree: {
     folderNameInvalid: "Yol deyil, tək qovluq adı daxil edin.",

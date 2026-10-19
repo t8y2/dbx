@@ -83,6 +83,8 @@ interface ColumnarQueryResult {
   truncated?: boolean;
   has_more?: boolean;
   page_has_more?: boolean;
+  sqlPage?: QueryResult["sqlPage"];
+  executedStatement?: string;
   sourceLabel?: string;
   sourceLabelKind?: QueryResult["sourceLabelKind"];
   sourceQualifier?: string;
@@ -382,6 +384,8 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     session_id: undefined,
     has_more: result.has_more,
     page_has_more: result.page_has_more,
+    sqlPage: result.sqlPage ? { ...result.sqlPage } : undefined,
+    executedStatement: result.executedStatement,
     sourceLabel: result.sourceLabel,
     sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
@@ -448,6 +452,8 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     truncated: result.truncated,
     has_more: result.has_more,
     page_has_more: result.page_has_more,
+    sqlPage: result.sqlPage ? { ...result.sqlPage } : undefined,
+    executedStatement: result.executedStatement,
     sourceLabel: result.sourceLabel,
     sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,
@@ -488,6 +494,8 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     session_id: undefined,
     has_more: result.has_more,
     page_has_more: result.page_has_more,
+    sqlPage: result.sqlPage ? { ...result.sqlPage } : undefined,
+    executedStatement: result.executedStatement,
     sourceLabel: result.sourceLabel,
     sourceLabelKind: result.sourceLabelKind,
     sourceQualifier: result.sourceQualifier,

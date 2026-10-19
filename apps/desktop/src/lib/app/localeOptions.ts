@@ -9,6 +9,7 @@ export const LOCALE_OPTIONS: { value: Locale; flag: string; label: string }[] = 
   { value: "ja", flag: "🇯🇵", label: "日本語" },
   { value: "ko", flag: "🇰🇷", label: "한국어" },
   { value: "pt-BR", flag: "🇧🇷", label: "Português" },
+  { value: "pl", flag: "🇵🇱", label: "Polski" },
   { value: "ru", flag: "🇷🇺", label: "Русский" },
   { value: "th", flag: "🇹🇭", label: "ภาษาไทย" },
   { value: "tr", flag: "🇹🇷", label: "Türkçe" },

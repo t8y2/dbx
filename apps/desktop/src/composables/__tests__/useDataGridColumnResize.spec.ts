@@ -348,6 +348,33 @@ describe("useDataGridColumnResize", () => {
     expect(remounted.columnWidths.value).toEqual(first.columnWidths.value);
   });
 
+  it("restores adjusted column widths for external SQL file executions across tab reopens", () => {
+    const firstTab = { id: "tab-instance-1", externalSqlPath: "/queries/monthly_report.sql", activeResultIndex: 0 };
+    const secondTab = { id: "tab-instance-2", externalSqlPath: "/queries/monthly_report.sql", activeResultIndex: 0 };
+    const firstKey = resultGridColumnWidthCacheKey(firstTab);
+    const secondKey = resultGridColumnWidthCacheKey(secondTab);
+
+    expect(secondKey).toBe(firstKey);
+
+    const firstGrid = createResizeState({
+      columns: ["id", "report_data"],
+      rows: [[1, "summary"]],
+      cacheKey: firstKey,
+    });
+    firstGrid.initColumnWidths();
+    firstGrid.onResizeStart(1, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 350 }));
+
+    const secondGrid = createResizeState({
+      columns: ["id", "report_data"],
+      rows: [[2, "another summary"]],
+      cacheKey: secondKey,
+    });
+    secondGrid.initColumnWidths();
+
+    expect(secondGrid.columnWidths.value[1]).toBe(firstGrid.columnWidths.value[1]);
+  });
+
   it("isolates widths by result cache key", () => {
     const first = createResizeState({ columns: ["id"], rows: [["x".repeat(120)]], cacheKey: "result-a" });
     first.initColumnWidths();

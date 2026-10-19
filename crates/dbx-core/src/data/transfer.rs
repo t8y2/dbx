@@ -34,7 +34,9 @@ use crate::db;
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
+use crate::object_source_sql::{
+    build_executable_object_source_statements, build_mysql_routine_replacement_statements, EditableObjectSourceSqlInput,
+};
 use crate::query::{
     agent_execute_query_params, is_dbx_query_timeout_error, pool_error_action, query_timeout_duration,
     should_discard_pool_after_query_timeout, wait_for_query_opt, PoolErrorAction, QueryExecutionOptions,
@@ -393,6 +395,9 @@ pub struct TransferStructurePreview {
     pub sql: String,
     pub tables: Vec<TransferStructurePreviewTable>,
     pub operations: Vec<TransferStructureOperation>,
+    /// Whether selected non-table schema objects are expanded in `sql`.
+    #[serde(rename = "schemaObjectsExpanded")]
+    pub schema_objects_expanded: bool,
 }
 
 /// One user-facing logical operation produced by the structure transfer planner.
@@ -1068,6 +1073,30 @@ pub fn validate_transfer_database_pair(
     if transfer_support_level(target_db_type).is_none() {
         return Err(format!("{} 暂未声明数据传输兼容级别", target_db_type.as_str()));
     }
+    if !matches!(source_db_type, DatabaseType::Xugu)
+        && !matches!(target_db_type, DatabaseType::Xugu)
+        && matches!(request.content, TransferContent::StructureOnly)
+        && request.mode == TransferMode::Overwrite
+        && request.objects.as_ref().map_or_else(
+            || {
+                // The legacy PostgreSQL→PostgreSQL request shape omitted
+                // `objects` but still means "all schema objects".
+                transfer_object_family(source_db_type) == Some(TransferObjectFamily::Postgres)
+                    && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Postgres)
+            },
+            |objects| {
+                objects
+                    .iter()
+                    .any(|selection| selection.object_type != TransferObjectKind::Table && !selection.names.is_empty())
+            },
+        )
+        && !matches!(
+            (transfer_object_family(source_db_type), transfer_object_family(target_db_type)),
+            (Some(TransferObjectFamily::Mysql), Some(TransferObjectFamily::Mysql))
+        )
+    {
+        return Err("结构-only 的“存在则替换”当前仅支持 MySQL 同族的非表对象".to_string());
+    }
     if !matches!(source_db_type, DatabaseType::Xugu) && !matches!(target_db_type, DatabaseType::Xugu) {
         return Ok(());
     }
@@ -1365,7 +1394,7 @@ pub fn target_object_exists_sql(
 /// Remove `DEFINER=`user`@`host`` tokens from MySQL DDL (they are not
 /// transferable and frequently reference accounts that don't exist on target).
 pub fn strip_mysql_definer(ddl: &str) -> String {
-    let re = Regex::new(r"(?i)\bDEFINER\s*=\s*`[^`]*`@`[^`]*`\s*").unwrap();
+    let re = Regex::new(r"(?i)\bDEFINER\s*=\s*`(?:``|[^`])*`@`(?:``|[^`])*`\s*").unwrap();
     re.replace_all(ddl, "").to_string()
 }
 
@@ -1375,8 +1404,10 @@ pub fn rewrite_mysql_schema_qualifier(ddl: &str, source_schema: &str, target_sch
     if source_schema == target_schema || source_schema.is_empty() {
         return ddl.to_string();
     }
-    let re = Regex::new(&format!(r"`{}`\.", regex::escape(source_schema))).unwrap();
-    re.replace_all(ddl, &format!("`{}`.", target_schema)).to_string()
+    let source = quote_identifier(source_schema, &DatabaseType::Mysql);
+    let target = quote_identifier(target_schema, &DatabaseType::Mysql);
+    let re = Regex::new(&format!(r"{}\.", regex::escape(&source))).unwrap();
+    re.replace_all(ddl, |_: &regex::Captures<'_>| format!("{target}.")).to_string()
 }
 
 pub fn mysql_trigger_ddl(
@@ -1387,8 +1418,11 @@ pub fn mysql_trigger_ddl(
     table: &str,
     statement: &str,
 ) -> String {
+    let name = quote_identifier(name, &DatabaseType::Mysql);
+    let schema = quote_identifier(schema, &DatabaseType::Mysql);
+    let table = quote_identifier(table, &DatabaseType::Mysql);
     format!(
-        "CREATE TRIGGER `{name}` {timing} {manipulation} ON `{schema}`.`{table}` FOR EACH ROW {statement}",
+        "CREATE TRIGGER {name} {timing} {manipulation} ON {schema}.{table} FOR EACH ROW {statement}",
         name = name,
         timing = timing,
         manipulation = manipulation,
@@ -1399,8 +1433,9 @@ pub fn mysql_trigger_ddl(
 }
 
 pub fn mysql_event_ddl(_schema: &str, name: &str, status: &str, schedule: &str, body: &str) -> String {
+    let name = quote_identifier(name, &DatabaseType::Mysql);
     format!(
-        "CREATE EVENT `{name}` ON SCHEDULE {schedule} {status} DO {body}",
+        "CREATE EVENT {name} ON SCHEDULE {schedule} {status} DO {body}",
         name = name,
         schedule = schedule,
         status = status,
@@ -1416,10 +1451,12 @@ pub fn mysql_event_ddl(_schema: &str, name: &str, status: &str, schedule: &str, 
 pub fn mysql_object_source_query(kind: &TransferObjectKind, database: &str, name: &str) -> Result<String, String> {
     let db = quote_string_literal(database);
     let n = quote_string_literal(name);
+    let database_identifier = quote_identifier(database, &DatabaseType::Mysql);
+    let object_identifier = quote_identifier(name, &DatabaseType::Mysql);
     let ddl = match kind {
-        TransferObjectKind::View => format!("SHOW CREATE VIEW `{database}`.`{name}`"),
-        TransferObjectKind::Procedure => format!("SHOW CREATE PROCEDURE `{database}`.`{name}`"),
-        TransferObjectKind::Function => format!("SHOW CREATE FUNCTION `{database}`.`{name}`"),
+        TransferObjectKind::View => format!("SHOW CREATE VIEW {database_identifier}.{object_identifier}"),
+        TransferObjectKind::Procedure => format!("SHOW CREATE PROCEDURE {database_identifier}.{object_identifier}"),
+        TransferObjectKind::Function => format!("SHOW CREATE FUNCTION {database_identifier}.{object_identifier}"),
         TransferObjectKind::Trigger => format!(
             "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, ACTION_STATEMENT \
              FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = {db} AND TRIGGER_NAME = {n}"
@@ -1475,6 +1512,175 @@ pub fn mysql_object_ddl_from_result(
         }
         _ => Err(format!("MySQL object DDL extraction not supported for {:?}", kind)),
     }
+}
+
+/// Build the statements needed to replace an existing MySQL schema object.
+fn mysql_object_replacement_statements(
+    kind: &TransferObjectKind,
+    target_database: &str,
+    name: &str,
+    ddl: &str,
+    validation_name: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let source_kind = match kind {
+        TransferObjectKind::Procedure => Some(db::ObjectSourceKind::Procedure),
+        TransferObjectKind::Function => Some(db::ObjectSourceKind::Function),
+        _ => None,
+    };
+
+    if let Some(source_kind) = source_kind {
+        let input = EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: source_kind,
+            schema: Some(target_database.to_string()),
+            name: name.to_string(),
+            source: ddl.to_string(),
+        };
+        let statements = match validation_name {
+            Some(validation_name) => build_mysql_routine_replacement_statements(input, validation_name)?,
+            None => build_executable_object_source_statements(input)?,
+        };
+        // SHOW CREATE should return the selected routine name.  Refuse to
+        // replace anything if a malformed/renamed source DDL would make the
+        // generated DROP target a different routine; otherwise a failed CREATE
+        // could leave the requested target missing without a safe rollback.
+        if validation_name.is_some()
+            && !statements.get(2).is_some_and(|statement| {
+                mysql_replacement_statement_drops_target(kind, target_database, name, statement)
+            })
+        {
+            return Err(format!("MySQL {kind:?} source DDL name does not match selected object {name:?}"));
+        }
+        return Ok(statements);
+    }
+
+    let keyword = match kind {
+        TransferObjectKind::View => "VIEW",
+        TransferObjectKind::Trigger => "TRIGGER",
+        TransferObjectKind::Event => "EVENT",
+        _ => return Err(format!("MySQL object replacement not supported for {kind:?}")),
+    };
+    let qualified_name = format!(
+        "{}.{}",
+        quote_identifier(target_database, &DatabaseType::Mysql),
+        quote_identifier(name, &DatabaseType::Mysql)
+    );
+    Ok(vec![format!("DROP {keyword} IF EXISTS {qualified_name}"), ddl.to_string()])
+}
+
+fn mysql_object_drop_statement(kind: &TransferObjectKind, target_database: &str, name: &str) -> Result<String, String> {
+    let keyword = match kind {
+        TransferObjectKind::View => "VIEW",
+        TransferObjectKind::Procedure => "PROCEDURE",
+        TransferObjectKind::Function => "FUNCTION",
+        TransferObjectKind::Trigger => "TRIGGER",
+        TransferObjectKind::Event => "EVENT",
+        _ => return Err(format!("MySQL object replacement not supported for {kind:?}")),
+    };
+    let qualified_name = format!(
+        "{}.{}",
+        quote_identifier(target_database, &DatabaseType::Mysql),
+        quote_identifier(name, &DatabaseType::Mysql)
+    );
+    Ok(format!("DROP {keyword} IF EXISTS {qualified_name};"))
+}
+
+fn mysql_transfer_validation_routine_name(
+    transfer_id: &str,
+    target_database: &str,
+    kind: &TransferObjectKind,
+    name: &str,
+) -> String {
+    // Scope the temporary name to one transfer run and keep it below MySQL's
+    // routine-name limit without exposing request text in executable SQL.
+    let mut hash = 0xcbf29ce484222325u64;
+    let kind_name = format!("{kind:?}");
+    for value in [transfer_id, target_database, kind_name.as_str(), name] {
+        for byte in value.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("dbx_transfer_check_{hash:016x}")
+}
+
+fn mysql_object_restore_statements(
+    kind: &TransferObjectKind,
+    target_database: &str,
+    name: &str,
+    ddl: &str,
+) -> Result<Vec<String>, String> {
+    Ok(vec![mysql_object_drop_statement(kind, target_database, name)?, ddl.to_string()])
+}
+
+fn normalize_mysql_statement_for_compare(statement: &str) -> String {
+    statement.trim().trim_end_matches(';').trim().to_ascii_lowercase()
+}
+
+fn mysql_replacement_statement_drops_target(
+    kind: &TransferObjectKind,
+    target_database: &str,
+    target_name: &str,
+    statement: &str,
+) -> bool {
+    let Ok(expected) = mysql_object_drop_statement(kind, target_database, target_name) else {
+        return false;
+    };
+    normalize_mysql_statement_for_compare(statement) == normalize_mysql_statement_for_compare(&expected)
+}
+
+fn mysql_replacement_statement_drops_validation(
+    kind: &TransferObjectKind,
+    target_database: &str,
+    statement: &str,
+    validation_name: Option<&str>,
+) -> bool {
+    let Some(validation_name) = validation_name else {
+        return false;
+    };
+    let Ok(expected) = mysql_object_drop_statement(kind, target_database, validation_name) else {
+        return false;
+    };
+    normalize_mysql_statement_for_compare(statement) == normalize_mysql_statement_for_compare(&expected)
+}
+
+fn mysql_replacement_statement_creates_validation(
+    kind: &TransferObjectKind,
+    statement: &str,
+    validation_name: Option<&str>,
+) -> bool {
+    let Some(validation_name) = validation_name else {
+        return false;
+    };
+    let keyword = match kind {
+        TransferObjectKind::Procedure => "procedure",
+        TransferObjectKind::Function => "function",
+        _ => return false,
+    };
+    let prefix =
+        Regex::new(&format!(r"(?is)^\s*CREATE\s+(?:DEFINER\s*=\s*.+?\s+)?{keyword}\s+(?:IF\s+NOT\s+EXISTS\s+)?"))
+            .expect("valid MySQL routine validation prefix");
+    let Some(captures) = prefix.find(statement) else {
+        return false;
+    };
+    statement[captures.end()..]
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with(&quote_identifier(validation_name, &DatabaseType::Mysql).to_ascii_lowercase())
+}
+
+async fn mysql_existing_object_ddl(
+    state: &AppState,
+    target_pool_key: &str,
+    target_database: &str,
+    kind: &TransferObjectKind,
+    name: &str,
+) -> Result<String, String> {
+    let query = mysql_object_source_query(kind, target_database, name)?;
+    let result = execute_on_pool(state, target_pool_key, &query).await?;
+    mysql_object_ddl_from_result(kind, target_database, &result.rows)
 }
 
 pub fn oracle_object_source_query(kind: &TransferObjectKind, schema: &str, name: &str) -> Result<String, String> {
@@ -2554,6 +2760,21 @@ fn parse_mysql_extra_clauses(extra: Option<&str>) -> MysqlExtraClauses {
     }
 
     result
+}
+
+/// Whether a mapped target type is one MySQL accepts for `AUTO_INCREMENT`.
+///
+/// MySQL allows the clause on integer columns only, so an identity source mapped to
+/// `DECIMAL`/`NUMBER` must not receive it even when its metadata is identity-style.
+/// Doris and StarRocks share the MySQL family but require the auto-increment column
+/// to be `BIGINT`; leaving `INT` there would turn a legal plain column into a
+/// rejected table (#11994 review).
+fn mysql_auto_increment_type_supported(mapped_type: &str, target_db: &DatabaseType) -> bool {
+    let base = mapped_type.split(['(', ' ']).next().unwrap_or("").trim().to_ascii_lowercase();
+    match target_db {
+        DatabaseType::Doris | DatabaseType::StarRocks => base == "bigint",
+        _ => matches!(base.as_str(), "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint"),
+    }
 }
 
 fn postgres_order_by_expression(columns: &[String], db_type: &DatabaseType) -> Option<String> {
@@ -4540,7 +4761,25 @@ fn generate_create_table_ddl_with_column_quoting(
                         }
                         _ => false,
                     };
-                    if !skip_default {
+                    // MySQL rejects `DEFAULT` on an `AUTO_INCREMENT` column. The clause
+                    // can come from MySQL-spelled metadata or from identity-style sources
+                    // whose metadata may still carry a synthetic default, so decide
+                    // before rendering the default (#11994 review).
+                    let mysql_extra_clauses =
+                        if is_mysql_family { Some(parse_mysql_extra_clauses(c.extra.as_deref())) } else { None };
+                    // `AUTO_INCREMENT` must also follow identity-style sources (SQL
+                    // Server `identity(1, 1)`, Dameng `identity`): the MySQL-spelling
+                    // parser only recognises `auto_increment`. Only a primary key on
+                    // an integer column qualifies - MySQL requires the auto-increment
+                    // column to be a key and rejects the clause on other types;
+                    // Doris/StarRocks narrow the accepted type to `BIGINT`.
+                    let mysql_identity_source = is_mysql_family
+                        && c.is_primary_key
+                        && column_is_auto_increment(c)
+                        && mysql_auto_increment_type_supported(&mapped_type, target_db);
+                    let mysql_auto_increment =
+                        mysql_identity_source || mysql_extra_clauses.as_ref().is_some_and(|extra| extra.auto_increment);
+                    if !skip_default && !mysql_auto_increment {
                         if let Some(default_clause) =
                             column_default_clause(c, source_schema, schema, source_db, target_db)
                         {
@@ -4561,8 +4800,13 @@ fn generate_create_table_ddl_with_column_quoting(
                         line.push_str(" NOT NULL");
                     }
                     if is_mysql_family {
-                        let extra_clauses = parse_mysql_extra_clauses(c.extra.as_deref());
-                        if extra_clauses.auto_increment {
+                        let extra_clauses = mysql_extra_clauses.expect("parsed for the MySQL family");
+                        // `AUTO_INCREMENT` must also follow identity-style sources (SQL
+                        // Server `identity(1, 1)`, Dameng `identity`): the MySQL-spelling
+                        // parser only recognises `auto_increment`. Only a primary key on
+                        // an integer column qualifies — MySQL requires the auto-increment
+                        // column to be a key and rejects the clause on other types.
+                        if mysql_auto_increment {
                             line.push_str(" AUTO_INCREMENT");
                         }
                         if let Some(on_update_expr) = extra_clauses.on_update {
@@ -4745,6 +4989,11 @@ pub fn generate_insert_typed(
     generate_insert_typed_from_value_rows(columns, &value_rows, table, schema, db_type, catalog)
 }
 
+/// Values are interpolated exactly as read, including identity columns: an explicit
+/// `0` keeps its literal form. MySQL then assigns a fresh id for `0` unless
+/// `NO_AUTO_VALUE_ON_ZERO` is set, while SQL Server `IDENTITY_INSERT` can produce
+/// `0`; MySQL-to-MySQL transfers already behaved this way, so this is recorded
+/// rather than rewritten (#11994 review).
 pub(crate) fn generate_insert_typed_from_value_rows(
     columns: &[String],
     value_rows: &[String],
@@ -9327,6 +9576,9 @@ where
     F: FnMut(TransferProgress),
 {
     let mut outcome = TransferObjectOutcome::default();
+    // Overwrite is the explicit opt-in for replacing selected MySQL schema
+    // objects; append keeps the historical skip-existing behavior.
+    let replace_existing = request.mode == TransferMode::Overwrite;
     let source_db = &request.source_database;
     let target_db =
         if request.target_database.trim().is_empty() { source_db.as_str() } else { request.target_database.as_str() };
@@ -9355,24 +9607,196 @@ where
             // skip if the target already has it
             let exists_sql = target_object_exists_sql(&DatabaseType::Mysql, target_db, &name, &kind)?;
             let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
-            if exists {
+            if exists && !replace_existing {
                 outcome.skipped.push(format!("{kind:?}:{name}"));
                 progress(&mut outcome, TransferStatus::Running, None);
                 continue;
             }
+            let validation_name = if exists
+                && replace_existing
+                && matches!(kind, TransferObjectKind::Procedure | TransferObjectKind::Function)
+            {
+                let validation_name =
+                    mysql_transfer_validation_routine_name(&request.transfer_id, target_db, &kind, &name);
+                let validation_exists_sql =
+                    target_object_exists_sql(&DatabaseType::Mysql, target_db, &validation_name, &kind)?;
+                let validation_exists =
+                    !execute_on_pool(state, target_pool_key, &validation_exists_sql).await?.rows.is_empty();
+                if validation_exists {
+                    let error = format!(
+                        "Temporary MySQL routine validation name already exists: {target_db}.{validation_name}; retry the transfer"
+                    );
+                    outcome.failed.push(format!("{kind:?}:{name}"));
+                    progress(&mut outcome, TransferStatus::Error, Some(error));
+                    continue;
+                }
+                Some(validation_name)
+            } else {
+                None
+            };
+            let replacement_backup = if exists && replace_existing {
+                match mysql_existing_object_ddl(state, target_pool_key, target_db, &kind, &name).await {
+                    Ok(ddl) => Some(ddl),
+                    Err(error) => {
+                        outcome.failed.push(format!("{kind:?}:{name}"));
+                        progress(&mut outcome, TransferStatus::Error, Some(error));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let query = mysql_object_source_query(&kind, source_db, &name)?;
             let result = execute_on_pool(state, source_pool_key, &query).await?;
             let raw_ddl = mysql_object_ddl_from_result(&kind, source_db, &result.rows)?;
             let ddl = strip_mysql_definer(&raw_ddl);
             let ddl = rewrite_mysql_schema_qualifier(&ddl, source_db, target_db);
-            match execute_on_pool(state, target_pool_key, &ddl).await {
-                Ok(_) => {
+            let statements = if exists && replace_existing {
+                match mysql_object_replacement_statements(&kind, target_db, &name, &ddl, validation_name.as_deref()) {
+                    Ok(statements) => statements,
+                    Err(error) => {
+                        outcome.failed.push(format!("{kind:?}:{name}"));
+                        progress(&mut outcome, TransferStatus::Error, Some(error));
+                        continue;
+                    }
+                }
+            } else {
+                vec![ddl]
+            };
+            let mut execution_error = None;
+            let mut target_drop_attempted = false;
+            let mut target_drop_completed = false;
+            let mut validation_created = false;
+            let mut validation_cleaned = false;
+            for statement in statements {
+                let creates_validation =
+                    mysql_replacement_statement_creates_validation(&kind, &statement, validation_name.as_deref());
+                let drops_validation = mysql_replacement_statement_drops_validation(
+                    &kind,
+                    target_db,
+                    &statement,
+                    validation_name.as_deref(),
+                );
+                let drops_target = mysql_replacement_statement_drops_target(&kind, target_db, &name, &statement);
+                target_drop_attempted |= drops_target;
+                if let Err(error) = execute_on_pool(state, target_pool_key, &statement).await {
+                    execution_error = Some(error);
+                    break;
+                }
+                validation_created |= creates_validation;
+                validation_cleaned |= drops_validation;
+                target_drop_completed |= drops_target;
+            }
+            match execution_error {
+                None => {
                     outcome.transferred.push(format!("{kind:?}:{name}"));
                     progress(&mut outcome, TransferStatus::Running, None);
                 }
-                Err(e) => {
+                Some(mut error) => {
+                    if target_drop_attempted && !target_drop_completed {
+                        match target_object_exists_sql(&DatabaseType::Mysql, target_db, &name, &kind) {
+                            Ok(exists_sql) => match execute_on_pool(state, target_pool_key, &exists_sql).await {
+                                Ok(result) if result.rows.is_empty() => target_drop_completed = true,
+                                Ok(_) => {}
+                                Err(verify_error) => {
+                                    error = format!(
+                                        "{error}; failed to verify whether the original object still exists: {verify_error}"
+                                    );
+                                }
+                            },
+                            Err(verify_error) => {
+                                error = format!(
+                                    "{error}; failed to build verification for the original object: {verify_error}"
+                                );
+                            }
+                        }
+                    }
+                    if validation_created && !validation_cleaned {
+                        if let Some(validation_name) = validation_name.as_deref() {
+                            match mysql_object_drop_statement(&kind, target_db, validation_name) {
+                                Ok(cleanup) => {
+                                    if let Err(cleanup_error) = execute_on_pool(state, target_pool_key, &cleanup).await
+                                    {
+                                        error = format!(
+                                            "{error}; failed to clean up temporary validation routine: {cleanup_error}"
+                                        );
+                                    }
+                                }
+                                Err(cleanup_error) => {
+                                    error = format!(
+                                        "{error}; failed to build temporary validation cleanup: {cleanup_error}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if target_drop_completed {
+                        if let Some(backup_ddl) = replacement_backup.as_deref() {
+                            match mysql_object_restore_statements(&kind, target_db, &name, backup_ddl) {
+                                Ok(restore_statements) => {
+                                    let mut restore_error = None;
+                                    for statement in restore_statements {
+                                        if let Err(restore) = execute_on_pool(state, target_pool_key, &statement).await
+                                        {
+                                            restore_error = Some(restore);
+                                            break;
+                                        }
+                                    }
+                                    if let Some(restore) = restore_error {
+                                        // A target routine may have a DEFINER account that the
+                                        // transfer user cannot recreate. Retry with the same
+                                        // definer-stripped form used for normal transfers before
+                                        // reporting that the original object is lost.
+                                        let stripped_backup = strip_mysql_definer(backup_ddl);
+                                        if stripped_backup != backup_ddl {
+                                            match mysql_object_restore_statements(
+                                                &kind,
+                                                target_db,
+                                                &name,
+                                                &stripped_backup,
+                                            ) {
+                                                Ok(fallback_statements) => {
+                                                    let mut fallback_error = None;
+                                                    for statement in fallback_statements {
+                                                        if let Err(fallback) =
+                                                            execute_on_pool(state, target_pool_key, &statement).await
+                                                        {
+                                                            fallback_error = Some(fallback);
+                                                            break;
+                                                        }
+                                                    }
+                                                    if let Some(fallback) = fallback_error {
+                                                        error = format!(
+                                                            "{error}; failed to restore the original object: {restore}; fallback restore also failed: {fallback}"
+                                                        );
+                                                    } else {
+                                                        error = format!(
+                                                            "{error}; the original object was restored without its original DEFINER"
+                                                        );
+                                                    }
+                                                }
+                                                Err(fallback) => {
+                                                    error = format!(
+                                                        "{error}; failed to restore the original object: {restore}; fallback restore could not be built: {fallback}"
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            error =
+                                                format!("{error}; failed to restore the original object: {restore}");
+                                        }
+                                    } else {
+                                        error = format!("{error}; the original object was restored");
+                                    }
+                                }
+                                Err(restore) => {
+                                    error = format!("{error}; failed to build restore statements: {restore}");
+                                }
+                            }
+                        }
+                    }
                     outcome.failed.push(format!("{kind:?}:{name}"));
-                    progress(&mut outcome, TransferStatus::Error, Some(e));
+                    progress(&mut outcome, TransferStatus::Error, Some(error));
                 }
             }
         }
@@ -14921,6 +15345,30 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         }
 
         #[test]
+        fn structure_only_object_overwrite_is_limited_to_mysql_family() {
+            let request = TransferRequest {
+                content: TransferContent::StructureOnly,
+                mode: TransferMode::Overwrite,
+                objects: Some(vec![TransferObjectSelection {
+                    object_type: TransferObjectKind::Procedure,
+                    names: vec!["refresh_cache".into()],
+                }]),
+                ..base_request()
+            };
+
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Mysql, &DatabaseType::Mysql).is_ok());
+            let error = validate_transfer_database_pair(&request, &DatabaseType::Postgres, &DatabaseType::Postgres)
+                .expect_err("non-MySQL object replacement must be rejected rather than silently skipped");
+            assert!(error.contains("MySQL"), "{error}");
+
+            let legacy_request = TransferRequest { objects: None, ..request };
+            assert!(
+                validate_transfer_database_pair(&legacy_request, &DatabaseType::Postgres, &DatabaseType::Postgres,)
+                    .is_err()
+            );
+        }
+
+        #[test]
         fn xugu_structure_transfer_rejects_renamed_tables_and_non_table_objects() {
             let request = TransferRequest { target_table_name_case: TransferTableNameCase::Upper, ..base_request() };
             assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu)
@@ -15475,6 +15923,10 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 strip_mysql_definer("CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` VIEW v AS SELECT 1"),
                 "CREATE ALGORITHM=UNDEFINED VIEW v AS SELECT 1"
             );
+            assert_eq!(
+                strip_mysql_definer("CREATE DEFINER=`u``ser`@`host``name` PROCEDURE p() BEGIN END"),
+                "CREATE PROCEDURE p() BEGIN END"
+            );
             assert_eq!(strip_mysql_definer("CREATE PROCEDURE p() BEGIN END"), "CREATE PROCEDURE p() BEGIN END");
         }
 
@@ -15483,6 +15935,14 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             assert_eq!(
                 rewrite_mysql_schema_qualifier("CREATE VIEW `src`.`v` AS SELECT 1 FROM `src`.`t`", "src", "dst"),
                 "CREATE VIEW `dst`.`v` AS SELECT 1 FROM `dst`.`t`"
+            );
+            assert_eq!(
+                rewrite_mysql_schema_qualifier(
+                    "CREATE VIEW `shop``tenant`.`v` AS SELECT 1 FROM `shop``tenant`.`t`",
+                    "shop`tenant",
+                    "dst$schema",
+                ),
+                "CREATE VIEW `dst$schema`.`v` AS SELECT 1 FROM `dst$schema`.`t`"
             );
         }
 
@@ -15495,6 +15955,10 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             );
             let event = mysql_event_ddl("shop", "ev1", "ENABLE", "EVERY 1 DAY", "DELETE FROM logs");
             assert_eq!(event, "CREATE EVENT `ev1` ON SCHEDULE EVERY 1 DAY ENABLE DO DELETE FROM logs");
+
+            let quoted = mysql_trigger_ddl("shop`tenant", "trg`1", "BEFORE", "INSERT", "user`events", "SET NEW.id = 1");
+            assert!(quoted.contains("CREATE TRIGGER `trg``1`"));
+            assert!(quoted.contains("ON `shop``tenant`.`user``events`"));
         }
 
         #[test]
@@ -15755,6 +16219,8 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         fn builds_mysql_object_source_queries() {
             let sql = mysql_object_source_query(&TransferObjectKind::View, "shop", "v1").unwrap();
             assert!(sql.contains("SHOW CREATE VIEW"));
+            let quoted = mysql_object_source_query(&TransferObjectKind::View, "tenant`schema", "active`view").unwrap();
+            assert!(quoted.contains("SHOW CREATE VIEW `tenant``schema`.`active``view`"), "{quoted}");
             let sql = mysql_object_source_query(&TransferObjectKind::Trigger, "shop", "trg1").unwrap();
             assert!(sql.contains("information_schema.TRIGGERS"));
             assert!(sql.contains("TRIGGER_NAME = 'trg1'"));
@@ -15886,6 +16352,149 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             let views = selected_object_names(&selections, &TransferObjectKind::View);
             assert_eq!(views, vec!["v1", "v2"]);
             assert!(selected_object_names(&selections, &TransferObjectKind::Event).is_empty());
+        }
+
+        #[test]
+        fn mysql_overwrite_builds_drop_and_create_for_existing_objects() {
+            let view = mysql_object_replacement_statements(
+                &TransferObjectKind::View,
+                "target_db",
+                "v1",
+                "CREATE VIEW `target_db`.`v1` AS SELECT 1",
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                view,
+                vec![
+                    "DROP VIEW IF EXISTS `target_db`.`v1`".to_string(),
+                    "CREATE VIEW `target_db`.`v1` AS SELECT 1".to_string(),
+                ]
+            );
+            let trigger = mysql_object_replacement_statements(
+                &TransferObjectKind::Trigger,
+                "target_db",
+                "trg1",
+                "CREATE TRIGGER `trg1` BEFORE INSERT ON `target_db`.`items` FOR EACH ROW SET NEW.id = 1",
+                None,
+            )
+            .unwrap();
+            assert_eq!(trigger[0], "DROP TRIGGER IF EXISTS `target_db`.`trg1`".to_string());
+            let event = mysql_object_replacement_statements(
+                &TransferObjectKind::Event,
+                "target_db",
+                "ev1",
+                "CREATE EVENT `ev1` ON SCHEDULE EVERY 1 DAY ENABLE DO SELECT 1",
+                None,
+            )
+            .unwrap();
+            assert_eq!(event[0], "DROP EVENT IF EXISTS `target_db`.`ev1`".to_string());
+
+            let validation_name =
+                mysql_transfer_validation_routine_name("transfer-1", "target_db", &TransferObjectKind::Procedure, "p1");
+            let routine = mysql_object_replacement_statements(
+                &TransferObjectKind::Procedure,
+                "target_db",
+                "p1",
+                "CREATE PROCEDURE `p1`() BEGIN SELECT 1; END",
+                Some(&validation_name),
+            )
+            .unwrap();
+            assert_eq!(routine.len(), 4);
+            assert!(routine[0].contains(&format!("CREATE PROCEDURE `{validation_name}`")));
+            assert!(routine[1].contains(&format!("DROP PROCEDURE IF EXISTS `target_db`.`{validation_name}`")));
+            assert!(routine[2].contains("DROP PROCEDURE IF EXISTS `target_db`.`p1`"));
+            assert!(!routine[0].to_ascii_uppercase().contains("DROP"));
+        }
+
+        #[test]
+        fn restore_statements_keep_original_definer_until_fallback() {
+            let backup = "CREATE DEFINER=`owner`@`localhost` PROCEDURE `p1`() BEGIN END";
+            let restore =
+                mysql_object_restore_statements(&TransferObjectKind::Procedure, "target_db", "p1", backup).unwrap();
+            assert_eq!(restore[0], "DROP PROCEDURE IF EXISTS `target_db`.`p1`;".to_string());
+            assert_eq!(restore[1], backup);
+            assert_eq!(strip_mysql_definer(backup), "CREATE PROCEDURE `p1`() BEGIN END");
+        }
+
+        #[test]
+        fn validation_drop_is_not_treated_as_target_drop() {
+            let validation_name = "dbx_transfer_check_0123456789abcdef";
+            let validation_drop = format!("DROP PROCEDURE IF EXISTS `target_db`.`{validation_name}`;");
+            let target_drop = "DROP PROCEDURE IF EXISTS `target_db`.`p1`;";
+            assert!(!mysql_replacement_statement_drops_target(
+                &TransferObjectKind::Procedure,
+                "target_db",
+                "p1",
+                &validation_drop,
+            ));
+            assert!(mysql_replacement_statement_drops_target(
+                &TransferObjectKind::Procedure,
+                "target_db",
+                "p1",
+                target_drop,
+            ));
+            let dotted_name = "routine.name";
+            let dotted_drop = "DROP PROCEDURE IF EXISTS `target_db`.`routine.name`;";
+            assert!(mysql_replacement_statement_drops_target(
+                &TransferObjectKind::Procedure,
+                "target_db",
+                dotted_name,
+                dotted_drop,
+            ));
+            let validation_create = format!("CREATE PROCEDURE `{validation_name}`() BEGIN END;");
+            assert!(mysql_replacement_statement_creates_validation(
+                &TransferObjectKind::Procedure,
+                &validation_create,
+                Some(validation_name),
+            ));
+            assert!(mysql_replacement_statement_drops_validation(
+                &TransferObjectKind::Procedure,
+                "target_db",
+                &validation_drop,
+                Some(validation_name),
+            ));
+
+            let differently_cased_target_drop = "DROP PROCEDURE IF EXISTS `target_db`.`P1`;";
+            assert!(mysql_replacement_statement_drops_target(
+                &TransferObjectKind::Procedure,
+                "target_db",
+                "p1",
+                differently_cased_target_drop,
+            ));
+
+            let current_user_validation_create =
+                format!("CREATE DEFINER=CURRENT_USER() PROCEDURE `{validation_name}`() BEGIN END;");
+            assert!(mysql_replacement_statement_creates_validation(
+                &TransferObjectKind::Procedure,
+                &current_user_validation_create,
+                Some(validation_name),
+            ));
+        }
+
+        #[test]
+        fn mysql_routine_replacement_rejects_a_source_name_mismatch() {
+            let validation_name =
+                mysql_transfer_validation_routine_name("transfer-1", "target_db", &TransferObjectKind::Procedure, "p1");
+            let error = mysql_object_replacement_statements(
+                &TransferObjectKind::Procedure,
+                "target_db",
+                "p1",
+                "CREATE PROCEDURE `p2`() BEGIN END",
+                Some(&validation_name),
+            )
+            .expect_err("a source routine with a different name must not replace the requested target");
+            assert!(error.contains("does not match"), "{error}");
+        }
+
+        #[test]
+        fn transfer_validation_scopes_routine_validation_names_to_the_run() {
+            let first =
+                mysql_transfer_validation_routine_name("transfer-1", "target_db", &TransferObjectKind::Procedure, "p1");
+            let second =
+                mysql_transfer_validation_routine_name("transfer-2", "target_db", &TransferObjectKind::Procedure, "p1");
+            assert_ne!(first, second);
+            assert!(first.len() < 64);
         }
     }
 
@@ -22769,6 +23378,154 @@ SELECT 1 FROM dual"#
             assert!(!ddl.contains("AUTOINCREMENT"), "{target:?}: {ddl}");
             assert!(!ddl.contains("IDENTITY"), "{target:?}: {ddl}");
         }
+    }
+
+    #[test]
+    fn transfer_create_table_preserves_identity_sources_for_mysql() {
+        // `AUTO_INCREMENT` must also follow identity-style sources (SQL Server
+        // `identity(1, 1)`, Dameng `identity`); the MySQL-spelling parser alone only
+        // recognises `auto_increment`.
+        for (source, extra) in [(DatabaseType::SqlServer, "identity(1,1)"), (DatabaseType::Dameng, "identity")] {
+            let cols = vec![db::ColumnInfo {
+                is_primary_key: true,
+                is_nullable: false,
+                extra: Some(extra.to_string()),
+                ..test_column("id", "int")
+            }];
+
+            let ddl =
+                generate_create_table_ddl(&cols, "users", "source", "shop", &DatabaseType::Mysql, &source, None, None);
+            assert!(ddl.contains("`id` INT NOT NULL AUTO_INCREMENT"), "{source:?}->Mysql: {ddl}");
+        }
+    }
+
+    #[test]
+    fn transfer_create_table_keeps_non_key_identity_sources_out_of_auto_increment() {
+        // MySQL requires the auto-increment column to be a key: an identity source on
+        // a non-key column stays a plain column instead of failing CREATE TABLE.
+        let cols = vec![db::ColumnInfo {
+            is_nullable: false,
+            extra: Some("identity".to_string()),
+            ..test_column("ticket", "int")
+        }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "shop",
+            &DatabaseType::Mysql,
+            &DatabaseType::Dameng,
+            None,
+            None,
+        );
+
+        assert!(!ddl.contains("AUTO_INCREMENT"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn mysql_auto_increment_type_supported_accepts_only_mysql_integers() {
+        for supported in ["INT", "int(11)", "BIGINT", "TINYINT(1)", "SMALLINT UNSIGNED", "MEDIUMINT", "INTEGER"] {
+            assert!(mysql_auto_increment_type_supported(supported, &DatabaseType::Mysql), "{supported}");
+        }
+        for rejected in ["DECIMAL(10,0)", "NUMBER(10)", "VARCHAR(32)", "TEXT", "POINT", "DATETIME"] {
+            assert!(!mysql_auto_increment_type_supported(rejected, &DatabaseType::Mysql), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn mysql_auto_increment_type_supported_narrows_doris_and_starrocks_to_bigint() {
+        // Doris/StarRocks share the MySQL family but require the auto-increment column
+        // to be BIGINT; INT must stay a legal plain column (#11994 review).
+        for target in [DatabaseType::Doris, DatabaseType::StarRocks] {
+            assert!(mysql_auto_increment_type_supported("BIGINT", &target), "{target:?}");
+            assert!(mysql_auto_increment_type_supported("bigint unsigned", &target), "{target:?}");
+            for rejected in ["INT", "int(11)", "SMALLINT", "TINYINT(1)", "INTEGER"] {
+                assert!(!mysql_auto_increment_type_supported(rejected, &target), "{target:?} {rejected}");
+            }
+        }
+        // The other MySQL-family targets keep accepting every MySQL integer.
+        for target in [DatabaseType::Mysql, DatabaseType::Goldendb, DatabaseType::Sundb] {
+            assert!(mysql_auto_increment_type_supported("INT", &target), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn transfer_create_table_keeps_int_identity_plain_on_doris_and_starrocks() {
+        for target in [DatabaseType::Doris, DatabaseType::StarRocks] {
+            let int_cols = vec![db::ColumnInfo {
+                is_primary_key: true,
+                is_nullable: false,
+                extra: Some("identity(1,1)".to_string()),
+                ..test_column("id", "int")
+            }];
+            let int_ddl = generate_create_table_ddl(
+                &int_cols,
+                "users",
+                "source",
+                "shop",
+                &target,
+                &DatabaseType::SqlServer,
+                None,
+                None,
+            );
+            assert!(!int_ddl.contains("AUTO_INCREMENT"), "{target:?}: {int_ddl}");
+
+            let bigint_cols = vec![db::ColumnInfo {
+                is_primary_key: true,
+                is_nullable: false,
+                extra: Some("identity(1,1)".to_string()),
+                ..test_column("id", "bigint")
+            }];
+            let bigint_ddl = generate_create_table_ddl(
+                &bigint_cols,
+                "users",
+                "source",
+                "shop",
+                &target,
+                &DatabaseType::SqlServer,
+                None,
+                None,
+            );
+            assert!(bigint_ddl.contains("AUTO_INCREMENT"), "{target:?}: {bigint_ddl}");
+        }
+    }
+
+    #[test]
+    fn transfer_create_table_skips_identity_default_on_mysql_targets() {
+        // MySQL rejects `DEFAULT` on an `AUTO_INCREMENT` column; identity metadata from
+        // SQL Server can still carry a synthetic default (#11994 review).
+        let cols = vec![
+            db::ColumnInfo {
+                is_primary_key: true,
+                is_nullable: false,
+                extra: Some("identity(1,1)".to_string()),
+                column_default: Some("((0))".to_string()),
+                ..test_column("id", "int")
+            },
+            db::ColumnInfo {
+                is_nullable: false,
+                column_default: Some("'new'".to_string()),
+                ..test_column("status", "varchar(16)")
+            },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "shop",
+            &DatabaseType::Mysql,
+            &DatabaseType::SqlServer,
+            None,
+            None,
+        );
+
+        let id_line = ddl.lines().find(|line| line.contains("`id`")).expect("id line");
+        assert!(id_line.contains("AUTO_INCREMENT"), "ddl: {ddl}");
+        assert!(!id_line.to_ascii_uppercase().contains("DEFAULT"), "ddl: {ddl}");
+        let status_line = ddl.lines().find(|line| line.contains("`status`")).expect("status line");
+        assert!(status_line.to_ascii_uppercase().contains("DEFAULT"), "ddl: {ddl}");
     }
 
     #[test]

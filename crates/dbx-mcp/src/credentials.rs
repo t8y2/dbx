@@ -131,7 +131,7 @@ fn validate_signature_info(info: &str) -> Result<(), &'static str> {
         value.replace("/* exists */", "exists").chars().filter(|c| !c.is_whitespace() && *c != '"').collect()
     };
     let mut designated = info.lines().filter_map(|line| line.strip_prefix("designated => "));
-    if !designated.next().is_some_and(|value| normalize(value) == normalize(RELEASE_REQUIREMENT))
+    if designated.next().is_none_or(|value| normalize(value) != normalize(RELEASE_REQUIREMENT))
         || designated.next().is_some()
     {
         return Err("a stable Developer ID designated requirement is required");

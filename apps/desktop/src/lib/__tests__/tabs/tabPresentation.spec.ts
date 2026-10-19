@@ -310,6 +310,26 @@ describe("query result grid identity", () => {
     expect(resultGridColumnWidthCacheKey(rerun)).toBe(resultGridColumnWidthCacheKey(first));
     expect(resultGridColumnWidthCacheKey({ ...first, activeResultIndex: 1 })).not.toBe(resultGridColumnWidthCacheKey(first));
   });
+
+  it("identifies external SQL file tabs stably across different tab IDs and normalizes paths", () => {
+    const tab1 = queryTab({ id: "tab-uuid-1", externalSqlPath: "/workspace/query.sql", activeResultIndex: 0 });
+    const tab2 = queryTab({ id: "tab-uuid-2", externalSqlPath: "\\workspace\\query.sql", activeResultIndex: 0 });
+    const tabOtherResult = queryTab({ id: "tab-uuid-3", externalSqlPath: "/workspace/query.sql", activeResultIndex: 1 });
+
+    expect(resultGridColumnWidthCacheKey(tab1)).toBe("result-column-width-file-/workspace/query.sql-0");
+    expect(resultGridColumnWidthCacheKey(tab2)).toBe(resultGridColumnWidthCacheKey(tab1));
+    expect(resultGridColumnWidthCacheKey(tabOtherResult)).toBe("result-column-width-file-/workspace/query.sql-1");
+  });
+
+  it("identifies saved SQL queries stably across different tab IDs", () => {
+    const tab1 = queryTab({ id: "tab-uuid-1", savedSqlId: "saved-sql-42", activeResultIndex: 0 });
+    const tab2 = queryTab({ id: "tab-uuid-2", savedSqlId: "saved-sql-42", activeResultIndex: 0 });
+    const tabOtherResult = queryTab({ id: "tab-uuid-3", savedSqlId: "saved-sql-42", activeResultIndex: 2 });
+
+    expect(resultGridColumnWidthCacheKey(tab1)).toBe("result-column-width-saved-saved-sql-42-0");
+    expect(resultGridColumnWidthCacheKey(tab2)).toBe(resultGridColumnWidthCacheKey(tab1));
+    expect(resultGridColumnWidthCacheKey(tabOtherResult)).toBe("result-column-width-saved-saved-sql-42-2");
+  });
 });
 
 describe("result run labels", () => {

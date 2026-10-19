@@ -52,7 +52,9 @@ import { sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect"
 import { oracleDatabaseLinkCompletionItems } from "@/lib/sql/oracleDatabaseLinkCompletion";
 import { isOracleCompletionDatabase, isSequenceCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument } from "@/lib/redis/redisCompletion";
-import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject } from "@/lib/sql/sqlCompletion";
+import { buildGraphCompletionItems, getGraphCompletionContext, graphCompletionValidFor, shouldAutoOpenGraphCompletion } from "@/lib/graph/graphCompletion";
+import { isGraphQueryDatabase, type GraphQueryDatabase } from "@/lib/graph/graphQueryLanguage";
+import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import type { CompletionAssistantObjectKind, SqlServerCompletionContext } from "@/types/database";
 import type { ShallowRef, ComputedRef } from "vue";
 import type { Composer } from "vue-i18n";
@@ -371,7 +373,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return mergeSqlCompletionQualifierNames(currentSchema ? [currentSchema] : [], connectionStore.lookupLocalCompletionSchemas(props.connectionId, currentDatabase, completionContext.qualifier, MAX_COMPLETION_TABLES));
   }
 
-  function shouldInsertSqlCompletionSpace(): boolean {
+  function shouldInsertSqlCompletionSpace(item: QueryCompletionItem): boolean {
+    if (isGraphQueryDatabase(props.databaseType)) return item.type === "keyword";
     return (
       props.databaseType !== "mongodb" &&
       props.databaseType !== "redis" &&
@@ -481,7 +484,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           replaceSelectWildcard: "replaceSelectWildcard" in item ? item.replaceSelectWildcard : undefined,
         });
         let insert = appendSqlCompletionSpace(item.apply ?? item.label, {
-          enabled: ("appendSpace" in item && item.appendSpace === true) || (shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion),
+          enabled: ("appendSpace" in item && item.appendSpace === true) || (shouldInsertSqlCompletionSpace(item) && settingsStore.editorSettings.insertSpaceAfterCompletion),
           itemType: item.type,
           nextCharacter: view.state.sliceDoc(replaceTo, replaceTo + 1),
         });
@@ -691,6 +694,56 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     };
   }
 
+  async function provideGraphCompletions(context: CompletionContext, databaseType: GraphQueryDatabase) {
+    const { connectionId, database } = props;
+    if (!connectionId) return null;
+    const fullDoc = context.state.doc.toString();
+    const completionContext = getGraphCompletionContext(fullDoc, context.pos, databaseType);
+    if (completionContext.mode === "none") return null;
+    if (!context.explicit) {
+      const mode = settingsStore.editorSettings.completionTriggerMode;
+      if (mode === "manual" || (mode === "require-prefix" && !completionContext.prefix) || !shouldAutoOpenGraphCompletion(fullDoc, context.pos, databaseType)) return null;
+    }
+    const epoch = ++completionEpoch;
+    const isCurrent = () => !context.aborted && epoch === completionEpoch && props.connectionId === connectionId && props.database === database && props.databaseType === databaseType;
+    let tables: SqlCompletionTable[] = [];
+    let columns: SqlCompletionColumn[] = [];
+    let databases: string[] = [];
+    try {
+      if (completionContext.mode === "database") databases = await connectionStore.listCompletionDatabases(connectionId);
+      else if (database != null && ["label", "relationship", "object"].includes(completionContext.mode) && !(databaseType === "neo4j" && completionContext.mode === "relationship")) {
+        tables = await connectionStore.listCompletionTables(connectionId, database, completionContext.prefix, MAX_COMPLETION_TABLES, undefined, false, undefined, undefined, { activateConnection: false });
+      } else if (database != null && completionContext.mode === "property") {
+        for (const object of completionContext.objects) {
+          if (!isCurrent()) return null;
+          columns.push(...(await connectionStore.listCompletionColumns(connectionId, database, object)));
+        }
+      }
+    } catch {
+      // Native syntax remains available when a connection cannot supply metadata.
+    }
+    if (!isCurrent()) return null;
+    const result = buildCompletionResult(
+      buildGraphCompletionItems(
+        completionContext,
+        databaseType,
+        { tables, columns, databases },
+        {
+          keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
+          functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
+          functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
+          snippets: settingsStore.editorSettings.snippets,
+        },
+      ),
+      completionContext.from,
+      graphCompletionValidFor(completionContext),
+      completionContext.prefix,
+    );
+    // Candidates already match the typed prefix; the replacement can also cover an old suffix.
+    if (result && completionContext.to > context.pos) return { ...result, to: completionContext.to, filter: false as const, validFor: undefined };
+    return result ? { ...result, to: completionContext.to } : null;
+  }
+
   async function provideSqlCompletions(context: CompletionContext) {
     const currentState = context.state;
     const position = context.pos;
@@ -698,6 +751,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     const typedActivation = isTypedCompletionActivation(explicit);
     if (runtime.imeCompositionActive || view.value?.compositionStarted || view.value?.composing) return null;
     if (!props.connectionId) return null;
+    if (isGraphQueryDatabase(props.databaseType)) return provideGraphCompletions(context, props.databaseType);
     const fullDoc = currentState.doc.toString();
     if (props.databaseType === "mongodb") {
       return provideMongoCompletions(currentState, position, explicit);
@@ -1023,6 +1077,10 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
   async function shouldTriggerSqlCompletionForPosition(fullDoc: string, position: number): Promise<boolean> {
     const mode = settingsStore.editorSettings.completionTriggerMode;
     if (mode === "manual") return false;
+    if (isGraphQueryDatabase(props.databaseType)) {
+      const context = getGraphCompletionContext(fullDoc, position, props.databaseType);
+      return (mode !== "require-prefix" || !!context.prefix) && shouldAutoOpenGraphCompletion(fullDoc, position, props.databaseType);
+    }
     const currentView = view.value;
     const expectedDoc = currentView?.state.doc;
     const analysis = await getEditorSqlCompletionAnalysis(fullDoc, position, currentView?.state);

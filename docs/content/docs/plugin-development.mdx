@@ -10,7 +10,8 @@ DBX plugins are independently installed `.dbxp` packages that can contribute con
 </Callout>
 
 <Callout type="warn">
-  **Marketplace listing pull requests go to [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store), not `t8y2/dbx`.** A plugin's feature code normally remains in its author's source repository. Open a PR against [`t8y2/dbx`](https://github.com/t8y2/dbx) only when changing the DBX host, SDK, CLI, protocol, schemas, documentation, or official examples.
+  **Marketplace listing pull requests go to [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store), not `t8y2/dbx`.** A plugin's feature code normally remains in its author's source repository. Open a PR against [`t8y2/dbx`](https://github.com/t8y2/dbx) only when changing the DBX host, SDK, CLI,
+  protocol, schemas, documentation, or official examples.
 </Callout>
 
 ## Plugin Shortcuts
@@ -33,15 +34,15 @@ Position affects icons only: content retains its existing `panel/tab` presentati
 
 ## Which Repository Receives the Change
 
-| Change | Destination | Official DBX PR? |
-| --- | --- | --- |
-| Your plugin frontend, Rust/Go backend, tests, and release scripts | The plugin's source repository | Do not submit it to `dbx`; develop and release it in its own repository |
-| A new Marketplace listing, version update, icon, or description | [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) | Yes, target `main` |
-| DBX plugin host, Manifest/Marketplace schemas, SDK, CLI, or packager | [`t8y2/dbx`](https://github.com/t8y2/dbx) | Yes, target `main` |
-| Official examples or plugin-development documentation | [`t8y2/dbx`](https://github.com/t8y2/dbx) | Yes |
-| A bug in a specific third-party plugin | That plugin's source repository | Do not submit it to `dbx-store` |
-| A custom or enterprise private repository | Your private repository | No official Marketplace submission is required |
-| A vendor JDBC driver JAR | Do not commit it to either repository | Users import it locally or on the server |
+| Change                                                               | Destination                                           | Official DBX PR?                                                        |
+| -------------------------------------------------------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------- |
+| Your plugin frontend, Rust/Go backend, tests, and release scripts    | The plugin's source repository                        | Do not submit it to `dbx`; develop and release it in its own repository |
+| A new Marketplace listing, version update, icon, or description      | [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) | Yes, target `main`                                                      |
+| DBX plugin host, Manifest/Marketplace schemas, SDK, CLI, or packager | [`t8y2/dbx`](https://github.com/t8y2/dbx)             | Yes, target `main`                                                      |
+| Official examples or plugin-development documentation                | [`t8y2/dbx`](https://github.com/t8y2/dbx)             | Yes                                                                     |
+| A bug in a specific third-party plugin                               | That plugin's source repository                       | Do not submit it to `dbx-store`                                         |
+| A custom or enterprise private repository                            | Your private repository                               | No official Marketplace submission is required                          |
+| A vendor JDBC driver JAR                                             | Do not commit it to either repository                 | Users import it locally or on the server                                |
 
 DBX-maintained plugins that need an independent release cadence should normally use separate source repositories as well. Only tightly coupled host examples, SDK verification projects, or components explicitly accepted by maintainers belong in `t8y2/dbx`.
 
@@ -84,31 +85,29 @@ my-plugin/
   "engines": { "host_api": "1" },
   "permissions": [],
   "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
-  "contributions": [
-    { "type": "workbench", "id": "com.example.files.main", "label": "Files", "icon": "assets/plugin.svg" }
-  ]
+  "contributions": [{ "type": "workbench", "id": "com.example.files.main", "label": "Files", "icon": "assets/plugin.svg" }]
 }
 ```
 
 Manifest paths are relative to the package root. They cannot start with `/`, contain `..`, backslashes, or duplicate slashes. `ui.entry` must be inside `ui.root`: with root `ui`, use `ui/index.html`, not `index.html`. `signingKeyId` belongs to Marketplace artifact metadata, not the Manifest.
 
-| Field | Required | Meaning |
-| --- | --- | --- |
-| `$schema` | No | JSON Schema URL for editor support; it does not establish identity. |
-| `manifest_version` | Yes | Must currently be the number `1`. |
-| `id` | Yes | Stable global ID using lowercase letters, digits, `.`, `_`, and `-`, such as `io.github.example.files`; never change it after publishing. |
-| `name` | Yes | Default display name. |
-| `icon` | No | Relative path to the default package icon; SVG or PNG is recommended. |
-| `version` | Yes | Semantic version `major.minor.patch`, optionally with prerelease/build suffixes. Official packages cannot overwrite the same ID and version. |
-| `publisher` | Yes | Publisher identifier; keep it stable after the first listing. |
-| `description` | No | Plugin description. |
-| `source` | No | HTTPS source repository URL, also shown from installed-plugin details. |
-| `homepage` | No | Project, documentation, or support URL. |
-| `engines` | Yes | Compatibility declaration; it must contain `host_api`. |
-| `permissions` | No | Minimal capability set, described below. |
-| `entrypoints` | No | UI and native-sidecar entrypoints. |
-| `contributions` | No | Connection, workbench, filesystem, connection-menu, result-view, command/menu, and MCP tool-surface declarations. |
-| `localizations` | No | Locale-specific names, descriptions, fields, and action labels. |
+| Field              | Required | Meaning                                                                                                                                      |
+| ------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$schema`          | No       | JSON Schema URL for editor support; it does not establish identity.                                                                          |
+| `manifest_version` | Yes      | Must currently be the number `1`.                                                                                                            |
+| `id`               | Yes      | Stable global ID using lowercase letters, digits, `.`, `_`, and `-`, such as `io.github.example.files`; never change it after publishing.    |
+| `name`             | Yes      | Default display name.                                                                                                                        |
+| `icon`             | No       | Relative path to the default package icon; SVG or PNG is recommended.                                                                        |
+| `version`          | Yes      | Semantic version `major.minor.patch`, optionally with prerelease/build suffixes. Official packages cannot overwrite the same ID and version. |
+| `publisher`        | Yes      | Publisher identifier; keep it stable after the first listing.                                                                                |
+| `description`      | No       | Plugin description.                                                                                                                          |
+| `source`           | No       | HTTPS source repository URL, also shown from installed-plugin details.                                                                       |
+| `homepage`         | No       | Project, documentation, or support URL.                                                                                                      |
+| `engines`          | Yes      | Compatibility declaration; it must contain `host_api`.                                                                                       |
+| `permissions`      | No       | Minimal capability set, described below.                                                                                                     |
+| `entrypoints`      | No       | UI and native-sidecar entrypoints.                                                                                                           |
+| `contributions`    | No       | Connection, workbench, filesystem, connection-menu, result-view, command/menu, and MCP tool-surface declarations.                            |
+| `localizations`    | No       | Locale-specific names, descriptions, fields, and action labels.                                                                              |
 
 ### Engines, Permissions, and Entrypoints
 
@@ -125,6 +124,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.storage",
     "host.clipboard:read",
     "host.data:read",
+    "host.connections:read",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -146,6 +146,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `host.ai` lets a plugin use the global DBX AI panel for Ask snapshot conversations, optional Agent conversations backed by live plugin tools, and workbench-specific quick-question recommendations. Older DBX builds reject the unknown permission at install time, so plugins that must install everywhere should treat `host.ai` as optional and check `capabilities.ai` / `capabilities.aiRecommendations` at runtime.
 - `host.clipboard:read` allows reading the system clipboard from the workbench UI (see [System Clipboard](#system-clipboard)). Clipboard writes need no permission; reads hand user data (passwords, tokens) to plugin code, so they are gated.
 - `host.data:read` allows `window.dbxPlugin.queryData` to run one read-only SQL statement on a connection the user granted to the plugin (see [Read-only Data Queries](#read-only-data-queries)). Every connection needs the user's consent; it never grants writes, DDL, or reconnects.
+- `host.connections:read` allows `window.dbxPlugin.getConnections()` or `window.dbxPlugin.connections.list()` to read secret-free summary metadata for all configured connections (see [Connection Enumeration](#connection-enumeration)).
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -166,14 +167,21 @@ A connection provider declares a form; DBX renders the form and owns the connect
     { "key": "display_name", "label": "Name", "type": "text", "binding": "name", "required": true },
     { "key": "endpoint", "label": "Endpoint", "type": "text", "binding": "host", "required": true },
     { "key": "port", "label": "Port", "type": "number", "binding": "port", "default": 443 },
-    { "key": "region", "label": "Region", "type": "radio", "options": [{ "label": "US", "value": "us" }, { "label": "EU", "value": "eu" }], "binding": "config" },
+    {
+      "key": "region",
+      "label": "Region",
+      "type": "radio",
+      "options": [
+        { "label": "US", "value": "us" },
+        { "label": "EU", "value": "eu" }
+      ],
+      "binding": "config"
+    },
     { "key": "token", "label": "Access token", "type": "password", "binding": "secret", "required": true }
   ],
   "workbench": "com.example.files.main",
   "capabilities": ["test", "connect", "disconnect"],
-  "actions": [
-    { "id": "refresh", "label": "Refresh metadata", "variant": "outline", "when": "edit", "requires_valid_form": true, "timeout_ms": 30000 }
-  ]
+  "actions": [{ "id": "refresh", "label": "Refresh metadata", "variant": "outline", "when": "edit", "requires_valid_form": true, "timeout_ms": 30000 }]
 }
 ```
 
@@ -234,12 +242,12 @@ Action `when` accepts `always`, `create`, or `edit`; `variant` accepts `default`
 
 ### Other Contributions
 
-| Type | Required fields | Purpose |
-| --- | --- | --- |
-| `workbench` | `type`, `id`, `label` | Registers a workbench opened from the sidebar or plugin entry. |
-| `filesystem-provider` | `type`, `id`, `label`, `schemes` | Registers a virtual filesystem; `root_uri` can be `s3://bucket`, with optional `read`, `write`, `delete`, `rename`, and `mkdir` capabilities. |
-| `context-menu` | `type`, `id`, `label`, `menu: "connection"` or `"table"`, optional `action` | Adds a backend action or opens a declared Workbench from a Sidebar Tree context menu. |
-| `result-view` | `type`, `id`, `label` | Registers a query or task result view. |
+| Type                  | Required fields                                                             | Purpose                                                                                                                                       |
+| --------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workbench`           | `type`, `id`, `label`                                                       | Registers a workbench opened from the sidebar or plugin entry.                                                                                |
+| `filesystem-provider` | `type`, `id`, `label`, `schemes`                                            | Registers a virtual filesystem; `root_uri` can be `s3://bucket`, with optional `read`, `write`, `delete`, `rename`, and `mkdir` capabilities. |
+| `context-menu`        | `type`, `id`, `label`, `menu: "connection"` or `"table"`, optional `action` | Adds a backend action or opens a declared Workbench from a Sidebar Tree context menu.                                                         |
+| `result-view`         | `type`, `id`, `label`                                                       | Registers a query or task result view.                                                                                                        |
 
 A `menu: "table"` contribution is currently exposed when the user opens a context menu on a concrete table node in the Sidebar Tree. A legacy contribution without `action` invokes the required backend entrypoint as `contextMenu/<contribution-id>` with the table identity:
 
@@ -280,14 +288,14 @@ Choose `workbench` for a custom file browser: the plugin owns its list, virtuali
 
 Implement these backend methods when using the DBX generic file manager. A custom workbench can use them through its own RPC calls as well; declaring a contribution does not implement business logic.
 
-| Method | Parameters and return values |
-| --- | --- |
-| `filesystem/list` | `providerId`, optional `connectionId`, `uri`, optional `cursor`, `limit`; returns `{ entries, nextCursor? }`. |
-| `filesystem/read` | The same identity fields, `uri`, `maxBytes`; returns `{ dataBase64, contentType?, truncated, etag? }`. |
-| `filesystem/write` | `uri`, `dataBase64`, `create`, `overwrite`, optional `etag`; requires `write`. |
-| `filesystem/createDirectory` | `uri`; requires `mkdir`. |
-| `filesystem/delete` | `uri`, `recursive`; requires `delete`. |
-| `filesystem/rename` | `sourceUri`, `targetUri`, `overwrite`; requires `rename`. |
+| Method                       | Parameters and return values                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `filesystem/list`            | `providerId`, optional `connectionId`, `uri`, optional `cursor`, `limit`; returns `{ entries, nextCursor? }`. |
+| `filesystem/read`            | The same identity fields, `uri`, `maxBytes`; returns `{ dataBase64, contentType?, truncated, etag? }`.        |
+| `filesystem/write`           | `uri`, `dataBase64`, `create`, `overwrite`, optional `etag`; requires `write`.                                |
+| `filesystem/createDirectory` | `uri`; requires `mkdir`.                                                                                      |
+| `filesystem/delete`          | `uri`, `recursive`; requires `delete`.                                                                        |
+| `filesystem/rename`          | `sourceUri`, `targetUri`, `overwrite`; requires `rename`.                                                     |
 
 Every method carries `providerId` and optional `connectionId`. Entries contain a single filename `name`, full `uri`, `kind` (`file`, `directory`, `symlink`, or `other`), and optional `size`, `modifiedAt`, and `contentType`. Names cannot include `/` or `\\`, or equal `.`/`..`; put full paths in `uri`. Omit `nextCursor` on the last page and never repeat a consumed cursor. Image previews need the actual MIME type and base64 bytes, not UTF-8-decoded binary content.
 
@@ -299,17 +307,17 @@ Use locale keys such as `zh-CN` and `en` in `localizations`. You can override th
 
 ```json
 {
-"localizations": {
-  "zh-CN": {
-    "name": "示例文件",
-    "contributions": {
-      "com.example.files.connection": {
-        "label": "示例服务",
-        "fields": { "token": { "label": "访问令牌" } }
+  "localizations": {
+    "zh-CN": {
+      "name": "示例文件",
+      "contributions": {
+        "com.example.files.connection": {
+          "label": "示例服务",
+          "fields": { "token": { "label": "访问令牌" } }
+        }
       }
     }
   }
-}
 }
 ```
 
@@ -350,35 +358,37 @@ await window.dbxPlugin.notify("objects/changed", { count: result.items.length })
 const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 ```
 
-| API | Purpose |
-| --- | --- |
-| `ready` | Waits for Host initialization; start application logic after `await dbxPlugin.ready`. |
-| `contributionId` | Read-only identity of the contribution opened by the Host; available after `await ready` and independent of `context`. |
-| `context` / `onContext(fn)` | Reads or observes the current workbench context. |
-| `locale` | Reads the current DBX locale; the plugin translates its own UI. |
-| `theme` | Reads `appearance` and DBX design tokens for light/dark support. |
-| `request(method, params)` | Calls a Host API method, including `host.getContext` and `ui.readAsset`. |
-| `invoke(method, params, { timeoutMs })` | Sends an RPC request to the plugin's Sidecar. |
-| `notify(method, params)` | Sends a notification without a business result. |
-| `sendBinary(channel, data)` / `onBinary(fn)` | Sends or receives binary data; requires framed transport and `host.binary`. |
-| `readAsset(path)` / `readAssetUrl(path)` | Reads a packaged asset within the plugin resource root. |
-| `openWorkbench(id, context)` | Opens another workbench from this plugin; requires `host.workbench`. |
-| `closeWorkbench()` | Closes the surface hosting this UI — a workbench tab, a dock entry, or this plugin's floating window. It is the same path as the `Ctrl/Cmd+W` shortcut, so a plugin can offer its own close or minimize affordance. |
-| `executeCommand(commandId, context?)` | Executes one of this plugin's own declared commands through the same path as a menu placement — re-checks `enablement`, applies singleton reuse, and follows the declared `presentation` (panel commands dock, tab commands open tabs). `context` merges over the command context and scopes `instance_key` `{{path}}` placeholders, so `instance_key: "logs:{{connectionId}}"` yields one panel instance per connection. Resolves `{ error }` for expected outcomes; requires `host.workbench`. |
-| `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
-| `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
-| `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
-| `getTableMetadata({ connectionId, database?, schema?, table })` | Reads narrow table schema metadata from an already-open connection; requires `host.schema:read`. |
-| `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` | Runs one read-only SQL statement on a connection the user granted to the plugin; requires `host.data:read`. |
-| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, aiRecommendations, clipboardWrite, clipboardRead, floating }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
-| `ai.openConversation({ title, prompt, context, send?, mode? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false` and `mode` defaults to `ask`. `mode: "agent"` uses live plugin tools when context includes an open plugin connection; requires `host.ai` and is advertised as `capabilities.ai`. |
-| `ai.setRecommendations({ context, items })` | Replaces the current workbench's default recommendations and refreshes the global AI panel; up to five items are shown and `{{path.to.value}}` placeholders are supported; requires `host.ai` and `capabilities.aiRecommendations`. |
-| `ai.clearRecommendations()` | Clears recommendations for the current workbench; requires `host.ai` and `capabilities.aiRecommendations`. |
-| `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
-| `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
-| `fileTransfer` | Streams local files, downloads, and (desktop) OS drops; see below. |
-| `clipboard` | System clipboard access from the sandbox; see below. |
-| `floating` | Opens and drives a floating desktop widget window (desktop hosts only); see [Floating Windows](#floating-windows). |
+| API                                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ready`                                                                      | Waits for Host initialization; start application logic after `await dbxPlugin.ready`.                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `contributionId`                                                             | Read-only identity of the contribution opened by the Host; available after `await ready` and independent of `context`.                                                                                                                                                                                                                                                                                                                                                                           |
+| `context` / `onContext(fn)`                                                  | Reads or observes the current workbench context.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `locale`                                                                     | Reads the current DBX locale; the plugin translates its own UI.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `theme`                                                                      | Reads `appearance` and DBX design tokens for light/dark support.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `request(method, params)`                                                    | Calls a Host API method, including `host.getContext` and `ui.readAsset`.                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `invoke(method, params, { timeoutMs })`                                      | Sends an RPC request to the plugin's Sidecar.                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `notify(method, params)`                                                     | Sends a notification without a business result.                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `sendBinary(channel, data)` / `onBinary(fn)`                                 | Sends or receives binary data; requires framed transport and `host.binary`.                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `readAsset(path)` / `readAssetUrl(path)`                                     | Reads a packaged asset within the plugin resource root.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `openWorkbench(id, context)`                                                 | Opens another workbench from this plugin; requires `host.workbench`.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `setTitle(title)`                                                            | Updates the current workbench tab title (pass `null` to reset to default); requires `host.workbench`.                                                                                                                                                                                                                                                                                                                                                                                            |
+| `getTitle()`                                                                 | Reads the current workbench tab title; requires `host.workbench`.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `closeWorkbench()`                                                           | Closes the surface hosting this UI — a workbench tab, a dock entry, or this plugin's floating window. It is the same path as the `Ctrl/Cmd+W` shortcut, so a plugin can offer its own close or minimize affordance.                                                                                                                                                                                                                                                                              |
+| `executeCommand(commandId, context?)`                                        | Executes one of this plugin's own declared commands through the same path as a menu placement — re-checks `enablement`, applies singleton reuse, and follows the declared `presentation` (panel commands dock, tab commands open tabs). `context` merges over the command context and scopes `instance_key` `{{path}}` placeholders, so `instance_key: "logs:{{connectionId}}"` yields one panel instance per connection. Resolves `{ error }` for expected outcomes; requires `host.workbench`. |
+| `openFilesystem(id, context)`                                                | Opens a filesystem entry; requires `host.filesystem`.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `getPlanCapabilities(connectionId)`                                          | Reads what the host and this connection can plan; requires `host.plans:read`.                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })`   | Returns the estimated plan for `sql`; requires `host.plans:read`.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `getTableMetadata({ connectionId, database?, schema?, table })`              | Reads narrow table schema metadata from an already-open connection; requires `host.schema:read`.                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` | Runs one read-only SQL statement on a connection the user granted to the plugin; requires `host.data:read`.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `capabilities`                                                               | `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, aiRecommendations, clipboardWrite, clipboardRead, floating, workbenchTitle }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request.                                                                                                                                                                             |
+| `ai.openConversation({ title, prompt, context, send?, mode? })`              | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false` and `mode` defaults to `ask`. `mode: "agent"` uses live plugin tools when context includes an open plugin connection; requires `host.ai` and is advertised as `capabilities.ai`.                                                                                                                                                                                                                            |
+| `ai.setRecommendations({ context, items })`                                  | Replaces the current workbench's default recommendations and refreshes the global AI panel; up to five items are shown and `{{path.to.value}}` placeholders are supported; requires `host.ai` and `capabilities.aiRecommendations`.                                                                                                                                                                                                                                                              |
+| `ai.clearRecommendations()`                                                  | Clears recommendations for the current workbench; requires `host.ai` and `capabilities.aiRecommendations`.                                                                                                                                                                                                                                                                                                                                                                                       |
+| `onInit(fn)` / `onEvent(fn)`                                                 | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`.                                                                                                                                                                                                                                                                                                                                                                               |
+| `storage`                                                                    | Persistent per-plugin key-value state; requires `host.storage`; see below.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `fileTransfer`                                                               | Streams local files, downloads, and (desktop) OS drops; see below.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `clipboard`                                                                  | System clipboard access from the sandbox; see below.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `floating`                                                                   | Opens and drives a floating desktop widget window (desktop hosts only); see [Floating Windows](#floating-windows).                                                                                                                                                                                                                                                                                                                                                                               |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
 
@@ -444,7 +454,7 @@ if (window.dbxPlugin.capabilities.schemaMetadataApi) {
     connectionId,
     database,
     schema,
-    table: "users"
+    table: "users",
   });
   for (const column of metadata.columns) {
     renderColumn(column.name, column.dataType, column.nullable);
@@ -498,7 +508,7 @@ if (window.dbxPlugin.capabilities.dataApi) {
     connectionId,
     database,
     sql: "SELECT status, count(*) AS total FROM orders GROUP BY status",
-    maxRows: 200
+    maxRows: 200,
   });
   renderChart(result.columns, result.rows);
 }
@@ -509,8 +519,14 @@ if (window.dbxPlugin.capabilities.dataApi) {
 ```json
 {
   "dbType": "postgres",
-  "columns": [{ "name": "status", "dataType": "text" }, { "name": "total", "dataType": "int8" }],
-  "rows": [["paid", 1204], ["refunded", 37]],
+  "columns": [
+    { "name": "status", "dataType": "text" },
+    { "name": "total", "dataType": "int8" }
+  ],
+  "rows": [
+    ["paid", 1204],
+    ["refunded", 37]
+  ],
   "truncated": false,
   "elapsedMs": 12
 }
@@ -523,6 +539,37 @@ if (window.dbxPlugin.capabilities.dataApi) {
 - **No credentials.** The response carries columns and rows only. A revoked grant fails with an error that starts with `PLUGIN_DATA_ACCESS_NOT_GRANTED`; the next query asks the user again.
 
 This API is Host API 1.4. Keep both the `engines.host_api` floor and the `capabilities.dataApi` runtime check; web hosts that cannot show a consent dialog deny the request instead of granting it.
+
+### Connection Enumeration
+
+Plugins that display connection pickers or perform connection-specific tasks (e.g. running queries through `host.data:read`) can enumerate all configured connections with the `host.connections:read` permission:
+
+```json
+{
+  "permissions": ["host.connections:read"]
+}
+```
+
+```js
+await window.dbxPlugin.ready;
+if (window.dbxPlugin.capabilities.connectionsApi) {
+  const connections = await window.dbxPlugin.getConnections();
+  // or await window.dbxPlugin.connections.list();
+  for (const conn of connections) {
+    console.log(conn.id, conn.name, conn.dialect, conn.connected);
+  }
+}
+```
+
+Each returned connection object includes:
+- `id`: unique connection identifier, accepted by `queryData`, `getPlanCapabilities`, etc.;
+- `name`: user-configured display name;
+- `dialect` / `dbType`: database dialect or type (e.g. `mysql`, `postgres`, `sqlite`);
+- `connected` / `isConnected`: whether the connection is currently open;
+- `readOnly`: whether the connection is marked read-only;
+- `database` / `schema`: default database or schema if configured.
+
+> **Security Boundary**: The returned list is completely sanitized and never contains passwords, usernames, hostnames, ports, or raw connection strings.
 
 ### System Clipboard
 
@@ -582,15 +629,15 @@ const offDrop = fileTransfer.onDrop((files) => uploadAll(files));
 const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 ```
 
-| API | Purpose |
-| --- | --- |
-| `pick({ multiple })` | Native open dialog; resolves opened read handles `{ handleId, name, size, contentType }`. |
-| `read(handleId, offset, length?)` | Streams a chunk `{ dataBase64, length, eof }` from a read handle. |
-| `beginSave({ name, contentType?, size? })` | Native save dialog + write handle; resolves `{ handleId, chunkBytes }`, or `null` when the user cancels. |
-| `write(handleId, offset, data)` | Writes one chunk (transferred binary or base64); resolves `{ written, nextOffset }`. |
-| `finish(handleId)` / `cancel(handleId)` | Flush-closes a write handle / discards any handle. |
-| `onDrop(fn)` | Files dropped onto this workbench arrive as read handles. A dropped folder is expanded into the regular files it contains (dotfiles and dot-directories like `.git` are skipped); each expanded file carries `relativePath` — its '/'-separated path starting with the dropped folder's own name (`folder/nested/a.csv`) — so the plugin can rebuild the dragged structure and tell same-named files under different dropped roots apart. Listeners receive `(files, { dropId, truncated })`: `dropId` groups this drop's entries (cancellation and progress bookkeeping), `truncated` is `true` when the 2000-file or 8-depth expansion cap cut the delivery short. |
-| `onDragState(fn)` | Whether an OS drag is currently over this workbench; drive drop overlays with it. |
+| API                                        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pick({ multiple })`                       | Native open dialog; resolves opened read handles `{ handleId, name, size, contentType }`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `read(handleId, offset, length?)`          | Streams a chunk `{ dataBase64, length, eof }` from a read handle.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `beginSave({ name, contentType?, size? })` | Native save dialog + write handle; resolves `{ handleId, chunkBytes }`, or `null` when the user cancels.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `write(handleId, offset, data)`            | Writes one chunk (transferred binary or base64); resolves `{ written, nextOffset }`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `finish(handleId)` / `cancel(handleId)`    | Flush-closes a write handle / discards any handle.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `onDrop(fn)`                               | Files dropped onto this workbench arrive as read handles. A dropped folder is expanded into the regular files it contains (dotfiles and dot-directories like `.git` are skipped); each expanded file carries `relativePath` — its '/'-separated path starting with the dropped folder's own name (`folder/nested/a.csv`) — so the plugin can rebuild the dragged structure and tell same-named files under different dropped roots apart. Listeners receive `(files, { dropId, truncated })`: `dropId` groups this drop's entries (cancellation and progress bookkeeping), `truncated` is `true` when the 2000-file or 8-depth expansion cap cut the delivery short. |
+| `onDragState(fn)`                          | Whether an OS drag is currently over this workbench; drive drop overlays with it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Desktop and web hosts differ in what the namespace can do — gate on the additive `capabilities.fileTransfer` flags (`pick`, `beginSave`, `read`, `drop`, `folderExpansion`) instead of probing calls. On desktop, `pick` / `beginSave` use native dialogs and `onDrop` receives OS drops; dropped entries are opened lazily and streamed in chunks, so very large folders and multi-gigabyte files never exhaust handles or memory, and picking more files than the shared handle registry holds downgrades them to lazily-opened entries instead of dropping any. On the web host, `pick` falls back to a browser file input, `beginSave` buffers in memory and downloads through the browser, `onDrop` / `onDragState` never fire (`drop`/`folderExpansion` are `false` there), and handles carry no `relativePath`. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
 
@@ -607,11 +654,11 @@ if (window.dbxPlugin.capabilities.storage) {
 }
 ```
 
-| API | Purpose |
-| --- | --- |
-| `get(key)` | Resolves the stored JSON value, or `null` when the key is unset. |
-| `set(key, value)` | Persists any JSON value (`undefined` normalizes to `null`). |
-| `delete(key)` | Removes one key; deleting an unset key succeeds. |
+| API               | Purpose                                                          |
+| ----------------- | ---------------------------------------------------------------- |
+| `get(key)`        | Resolves the stored JSON value, or `null` when the key is unset. |
+| `set(key, value)` | Persists any JSON value (`undefined` normalizes to `null`).      |
+| `delete(key)`     | Removes one key; deleting an unset key succeeds.                 |
 
 Keys are strings up to 256 characters; values are capped at 256 KiB serialized and the whole store at 1 MiB — this is UI state, not a data sink. Entries live in the plugin's own `plugin-data/<id>` directory, isolated per plugin, and survive upgrades and uninstall. Bulk data, caches, and anything the sidecar produces belong in the sidecar's data directory instead (see [Native Sidecars and RPC](#native-sidecars-and-rpc)). On the web host the same API is backed by the browser profile, so identical code works in both hosts.
 
@@ -730,15 +777,15 @@ grip.addEventListener("pointerup", async () => {
 });
 ```
 
-| API | Purpose |
-| --- | --- |
-| `floating.open(options)` | Opens (or focuses) the floating window for one of this plugin's `workbench` contributions. `options`: `contributionId` (required), `title`, `width`/`height` in logical pixels, `x`/`y` in physical screen pixels, `alwaysOnTop` (default `true`), `skipTaskbar` (default `true`), `resizable` (default `false`), `context`. Resolves `{ windowId, reused }`; requires `host.workbench`. |
-| `floating.close(contributionId?)` | Closes this plugin's floating window — one contribution, or every floating window of this plugin when the id is omitted. Inside a widget, calling it without an argument closes the widget itself. |
-| `floating.beginDrag()` | Hands the window to the host's drag loop. Call it from `pointermove` once your drag threshold trips, while the button is still down. The host reads the native cursor itself from here on, so there is no per-move call to make. |
-| `floating.endDrag({ snap? })` | Ends the drag. With `snap` (default `true`) the host pulls the window flush onto a work-area edge it reached or passed — docking it there, capsule first and tucked behind a thin strip once the cursor has been away — or clamps it fully on screen otherwise, and remembers the position (and the dock) for the next open. Resolves the final rect in physical pixels. Optional in practice: the host also ends a drag on its own once the cursor goes quiet, so a widget that never sees the pointerup cannot leave the window glued to it. |
-| `floating.setSize(width, height)` | Resizes the hosting window in logical pixels; the host clamps to its own bounds. |
+| API                               | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `floating.open(options)`          | Opens (or focuses) the floating window for one of this plugin's `workbench` contributions. `options`: `contributionId` (required), `title`, `width`/`height` in logical pixels, `x`/`y` in physical screen pixels, `alwaysOnTop` (default `true`), `skipTaskbar` (default `true`), `resizable` (default `false`), `context`. Resolves `{ windowId, reused }`; requires `host.workbench`.                                                                                                                                                       |
+| `floating.close(contributionId?)` | Closes this plugin's floating window — one contribution, or every floating window of this plugin when the id is omitted. Inside a widget, calling it without an argument closes the widget itself.                                                                                                                                                                                                                                                                                                                                             |
+| `floating.beginDrag()`            | Hands the window to the host's drag loop. Call it from `pointermove` once your drag threshold trips, while the button is still down. The host reads the native cursor itself from here on, so there is no per-move call to make.                                                                                                                                                                                                                                                                                                               |
+| `floating.endDrag({ snap? })`     | Ends the drag. With `snap` (default `true`) the host pulls the window flush onto a work-area edge it reached or passed — docking it there, capsule first and tucked behind a thin strip once the cursor has been away — or clamps it fully on screen otherwise, and remembers the position (and the dock) for the next open. Resolves the final rect in physical pixels. Optional in practice: the host also ends a drag on its own once the cursor goes quiet, so a widget that never sees the pointerup cannot leave the window glued to it. |
+| `floating.setSize(width, height)` | Resizes the hosting window in logical pixels; the host clamps to its own bounds.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
-The widget decides *when* a drag starts (which element is a grip, how far the pointer must travel first); the host moves the window and owns the snap and the remembered position. There is deliberately no per-move bridge call: the host polls the native cursor, which keeps the widget under the pointer even when the webview is busy, and ends the drag on a quiet cursor if the pointerup never arrives. Geometry calls (`beginDrag`/`endDrag`/`setSize`) only work inside a floating window and reject elsewhere, so a tab can never move a window it is not in.
+The widget decides _when_ a drag starts (which element is a grip, how far the pointer must travel first); the host moves the window and owns the snap and the remembered position. There is deliberately no per-move bridge call: the host polls the native cursor, which keeps the widget under the pointer even when the webview is busy, and ends the drag on a quiet cursor if the pointerup never arrives. Geometry calls (`beginDrag`/`endDrag`/`setSize`) only work inside a floating window and reject elsewhere, so a tab can never move a window it is not in.
 
 A few rules make the surface predictable:
 
@@ -771,16 +818,16 @@ Listen with `window.addEventListener("dbx-plugin-env", handler)` for locale/them
 
 The env message's `theme` is `{ appearance, tokens, editor? }`. `appearance` is `"light" | "dark"`; `tokens` are the resolved root design variables swept by prefix (`--color-*`, `--radius-*`, `--font-*`); `editor` is a structured snapshot of the SQL editor settings that have no CSS-token carrier. Delivered settings:
 
-| DBX setting | Delivered as |
-| --- | --- |
-| Light/dark/system mode | `theme.appearance` |
-| Palette + custom color sets | `--color-*` tokens |
-| Corner style | `--radius-*` tokens |
-| UI font family | `--font-sans` token |
-| Editor (mono) font family | `--font-mono` token + `theme.editor.fontFamily` |
-| Editor font size | `theme.editor.fontSize` |
-| SQL editor syntax theme | `theme.editor.theme` |
-| UI scale (host window zoom) | not delivered — plugins own their own zoom |
+| DBX setting                                           | Delivered as                                                             |
+| ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| Light/dark/system mode                                | `theme.appearance`                                                       |
+| Palette + custom color sets                           | `--color-*` tokens                                                       |
+| Corner style                                          | `--radius-*` tokens                                                      |
+| UI font family                                        | `--font-sans` token                                                      |
+| Editor (mono) font family                             | `--font-mono` token + `theme.editor.fontFamily`                          |
+| Editor font size                                      | `theme.editor.fontSize`                                                  |
+| SQL editor syntax theme                               | `theme.editor.theme`                                                     |
+| UI scale (host window zoom)                           | not delivered — plugins own their own zoom                               |
 | Data-grid font / type colors, editor background image | not delivered — DB-domain (`--dbx-*` tokens are excluded from the sweep) |
 
 Treat `terminal.fontSize`-style concerns as plugin-owned: the host never dictates your font size; consume `theme.editor.fontSize` as a default only if it suits your UI. All payload changes push live on the env channel — font-family edits via the theme revision, size/theme via the explicit editor watcher — so no refresh is needed.
@@ -1040,12 +1087,14 @@ The candidate's essential shape is below. It references unsigned assets from the
   "name": "Example Files",
   "source": "https://github.com/example/dbx-plugin-files/tree/v0.1.0",
   "license": "Apache-2.0",
-  "targets": [{
-    "target": "universal",
-    "url": "https://github.com/example/dbx-plugin-files/releases/download/v0.1.0/com.example.files-0.1.0-universal.dbxp",
-    "sha256": "<64 hexadecimal SHA-256 characters>",
-    "size": 123456
-  }]
+  "targets": [
+    {
+      "target": "universal",
+      "url": "https://github.com/example/dbx-plugin-files/releases/download/v0.1.0/com.example.files-0.1.0-universal.dbxp",
+      "sha256": "<64 hexadecimal SHA-256 characters>",
+      "size": 123456
+    }
+  ]
 }
 ```
 

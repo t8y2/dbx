@@ -8,6 +8,7 @@ import itLocale from "../locales/it";
 import ja from "../locales/ja";
 import ko from "../locales/ko";
 import ptBR from "../locales/pt-BR";
+import pl from "../locales/pl";
 import ru from "../locales/ru";
 import tr from "../locales/tr";
 import th from "../locales/th";
@@ -22,9 +23,9 @@ import zhTW from "../locales/zh-TW";
 vi.mock("../locales/fallback", () => ({ withEnglishFallback: (messages: Record<string, unknown>) => messages }));
 
 type Messages = Record<string, unknown>;
-type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "th" | "tr" | "zh-CN" | "zh-TW";
+type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "pl" | "ru" | "th" | "tr" | "zh-CN" | "zh-TW";
 
-const declared: Record<Locale, Messages> = { az, en, es, id, it: itLocale, ja, ko, "pt-BR": ptBR, ru, th, tr, "zh-CN": zhCN, "zh-TW": zhTW };
+const declared: Record<Locale, Messages> = { az, en, es, id, it: itLocale, ja, ko, "pt-BR": ptBR, pl, ru, th, tr, "zh-CN": zhCN, "zh-TW": zhTW };
 const ALL_LOCALES = Object.keys(declared) as Locale[];
 const EXCEPT_AZ_TR = ALL_LOCALES.filter((locale) => locale !== "az" && locale !== "tr");
 

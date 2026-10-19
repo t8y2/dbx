@@ -1873,6 +1873,14 @@ export async function buildDatabaseSearchSql(options: DatabaseSearchSqlOptions):
   return post("/api/query/build-database-search-sql", { options });
 }
 
+export async function buildDatabaseSearchColumnsSql(options: import("@/lib/database/databaseSearchColumns").DatabaseSearchColumnsSqlOptions): Promise<{ sql: string } | null> {
+  return post("/api/query/build-database-search-columns-sql", { options });
+}
+
+export async function buildDatabaseSearchProbeSql(options: import("@/lib/database/databaseSearchProbe").DatabaseSearchProbeSqlOptions): Promise<{ sql: string; includedIndices: number[] } | null> {
+  return post("/api/query/build-database-search-probe-sql", { options });
+}
+
 export async function buildDatabaseStructureSearchSql(options: DatabaseStructureSearchSqlOptions): Promise<DatabaseStructureSearchSql | null> {
   return post("/api/query/build-database-structure-search-sql", { options });
 }

@@ -118,7 +118,7 @@ import { isXuguSyntheticTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
 import { buildXuguSchedulerJobSql, type XuguSchedulerJobAction } from "@/lib/database/xuguSchedulerJobSql";
 import { canViewDatabaseObjectDependencies, databaseDependencyProviderFor } from "@/lib/database/databaseObjectDependencies";
 import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
-import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
+import { sidebarObjectTemplateForGroup } from "@/lib/sidebar/databaseObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate, insertTemplatePrimaryKeyConflicts } from "@/lib/table/tableSqlTemplates";
 import SqlTemplateInsertRowsDialog from "@/components/sidebar/SqlTemplateInsertRowsDialog.vue";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
@@ -964,7 +964,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   // Keep the click path aligned with every object-group definition. In
   // particular, schema-level trigger/type groups have no tableName, so they
   // must use the generic object loader rather than the table-trigger loader.
-  const databaseObjectGroup = !!objectTypesForGroupNode(node.type);
+  const databaseObjectGroup = !!objectTypesForGroupNode(node.type) && !node.tableName;
   const needsConfiguredTablePageDrain = node.type === "group-tables" && connectionStore.getConfig(node.connectionId || "")?.sidebar_auto_load_all_tables === true && hasTableTreeLoadMore(node.children ?? []);
   if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node) && !needsConfiguredTablePageDrain) {
     node.isExpanded = !node.isExpanded;
@@ -3070,6 +3070,17 @@ async function executeXuguSchedulerJobAction(action: XuguSchedulerJobAction) {
   }
 }
 
+function findTreeNodeById(nodes: readonly TreeNode[], id: string): TreeNode | null {
+  for (const item of nodes) {
+    if (item.id === id) return item;
+    if (item.children?.length) {
+      const found = findTreeNodeById(item.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 async function toggleTriggerState(node: TreeNode, enabled: boolean) {
   if (!node.connectionId || !node.database) return;
   const databaseType = databaseTypeForNode(node);
@@ -3089,8 +3100,18 @@ async function toggleTriggerState(node: TreeNode, enabled: boolean) {
     await connectionStore.ensureConnected(node.connectionId);
     const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     if (!executed) return;
-    if (node.meta && typeof node.meta === "object") {
-      (node.meta as TriggerInfo).enabled = enabled;
+    const updatedMeta: TriggerInfo = {
+      // The fallback must satisfy TriggerInfo; the spread ternary's narrower
+      // arm is what tripped vue-tsc (TS2322) in CI.
+      ...(node.meta && typeof node.meta === "object" ? (node.meta as TriggerInfo) : { name: triggerName, event: "", timing: "" }),
+      enabled,
+    };
+    // `node` may be a frozen action-target copy (createSidebarActionTarget);
+    // assigning to it throws in strict mode, and the live node below is the
+    // only assignment that matters.
+    const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? findTreeNodeById(connectionStore.treeNodes, node.id);
+    if (liveNode) {
+      liveNode.meta = updatedMeta;
     }
     toast(t(enabled ? "contextMenu.enableTriggerSuccess" : "contextMenu.disableTriggerSuccess", { name: triggerName }), 3000);
     await connectionStore.refreshTreeNode(node);
@@ -5688,10 +5709,10 @@ async function confirmDeleteHBaseTable() {
   }
 }
 
-function createMysqlObjectTemplate() {
+function createSidebarObjectTemplate() {
   const node = activeNode.value;
   if (!node.connectionId || !node.database) return;
-  const template = mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node);
+  const template = sidebarObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node);
   if (!template) return;
   connectionStore.activeConnectionId = node.connectionId;
   const tabId = queryStore.createTab(node.connectionId, node.database, t(template.titleKey), "query", node.schema, undefined, node.catalog);
@@ -7752,11 +7773,11 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
   appendTableVGroupContainerItems(node, items);
   // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
-    const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
+    const objectTemplate = node.connectionId ? sidebarObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
     const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
     const canCreateGroupView = node.type === "group-views" && !!node.connectionId && !!node.database && !["neo4j", "nebula"].includes(currentDatabaseType() || "");
-    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateGroupView || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
+    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateGroupView || !!objectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -7773,8 +7794,8 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     if (node.type === "group-events" && node.connectionId && node.database) {
       items.push({ label: t("contextMenu.createEvent"), action: openMysqlEventCreateEditor, icon: Plus });
     }
-    if (mysqlObjectTemplate) {
-      items.push({ label: t(mysqlObjectTemplate.titleKey), action: createMysqlObjectTemplate, icon: Plus });
+    if (objectTemplate) {
+      items.push({ label: t(objectTemplate.titleKey), action: createSidebarObjectTemplate, icon: Plus });
     }
     if (hasMongoCreateIndexAction) {
       items.push({ label: t("contextMenu.createMongoIndex"), action: openCreateMongoIndexDialog, icon: Plus });

@@ -277,6 +277,23 @@ describe("tableStructureEditorState", () => {
     });
   });
 
+  describe("Dameng temporal precision", () => {
+    it("restores timestamp and time precision reported in DATA_SCALE", () => {
+      const drafts = createColumnDrafts(
+        [
+          { name: "updated_at", data_type: "TIMESTAMP", numeric_scale: 6, is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "created_at", data_type: "TIMESTAMP", numeric_scale: 0, is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "clock_time", data_type: "TIME", numeric_scale: 3, is_nullable: true, column_default: null, is_primary_key: false },
+        ],
+        "dameng",
+      );
+
+      expect(drafts.map((column) => column.dataType)).toEqual(["TIMESTAMP(6)", "TIMESTAMP(0)", "TIME(3)"]);
+      expect(drafts.map((column) => column.original?.data_type)).toEqual(drafts.map((column) => column.dataType));
+      expect(hasExistingColumnTypeChange(drafts)).toBe(false);
+    });
+  });
+
   describe("PostgreSQL temporal precision", () => {
     it("keeps the time-zone qualifier returned by PostgreSQL metadata", () => {
       const drafts = createColumnDrafts(

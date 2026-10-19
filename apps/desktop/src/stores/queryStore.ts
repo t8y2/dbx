@@ -101,6 +101,7 @@ import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeo
 import { queryResultNameFromPreamble, queryResultSourceLabel, queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
 import { sqlServerCountUsesLocalTempTable } from "@/lib/query/queryResultCountSession";
 import { stripPaginationRowNumber, trimQueryPageProbe } from "@/lib/query/queryPaginationResult";
+import { prepareBatchQueryPagination, type BatchQueryPaginationPlan } from "@/lib/query/batchQueryPagination";
 import { mysqlTablePageBaseSql } from "@/lib/table/tableDataPageProbe";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 import { appendLargeValueCells, canUseTableDataLargeValuePreview, remapLargeValueCells, supportsTableDataLargeValuePreview, tableDataLargeValuePreviewOptions, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
@@ -427,6 +428,8 @@ export function appendQueryResultSegment(previous: QueryResult, segment: QueryRe
   // remains valid, while bounding the in-memory result by the configured cap.
   return markQueryResultRowsRaw({
     ...segment,
+    statement_index: previous.statement_index ?? segment.statement_index,
+    sqlPage: segment.sqlPage ? { ...segment.sqlPage, limit: previous.sqlPage?.limit ?? segment.sqlPage.limit, offset: previous.sqlPage?.offset ?? segment.sqlPage.offset } : undefined,
     appended_from_row_count: previous.rows.length,
     rows: [...previous.rows, ...segment.rows.slice(0, appendedRowCount)],
     neo4j_node_cells: appendNeo4jNodeCells(previous, segment, appendedRowCount),
@@ -4118,10 +4121,11 @@ export const useQueryStore = defineStore("query", () => {
         return suffix ? Math.max(highest, Number(suffix[1])) : highest;
       }, 0) + 1;
     const baseTitle = options.title || contributionId;
+    const title = siblingTabs.length >= 1 ? `${baseTitle} (${nextSessionNumber})` : baseTitle;
     const id = uuid();
     const tab: QueryTab = {
       id,
-      title: siblingTabs.length >= 1 ? `${baseTitle} (${nextSessionNumber})` : baseTitle,
+      title,
       connectionId,
       database: options.database || "",
       sql: "",
@@ -4133,6 +4137,7 @@ export const useQueryStore = defineStore("query", () => {
         commandId: options.commandId,
         pluginId,
         contributionId,
+        defaultTitle: title,
         context: options.context ? snapshotPluginWorkbenchContext(options.context) : undefined,
       },
     };
@@ -4161,7 +4166,30 @@ export const useQueryStore = defineStore("query", () => {
       if (!localizedTitle) continue;
       const suffix = / \((\d+)\)$/.exec(tab.title)?.[0] || "";
       tab.title = `${localizedTitle}${suffix}`;
+      if (tab.pluginWorkbench) {
+        tab.pluginWorkbench.defaultTitle = tab.title;
+      }
     }
+  }
+
+  function setPluginWorkbenchTabTitle(id: string, title: string | null): boolean {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "plugin-workbench" || !tab.pluginWorkbench) return false;
+    const trimmed = typeof title === "string" ? title.trim().slice(0, 256) : "";
+    if (trimmed) {
+      tab.title = trimmed;
+      tab.customTitle = true;
+    } else {
+      tab.title = tab.pluginWorkbench.defaultTitle || tab.pluginWorkbench.contributionId;
+      tab.customTitle = false;
+    }
+    return true;
+  }
+
+  function getPluginWorkbenchTabTitle(id: string): string | undefined {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "plugin-workbench") return undefined;
+    return tab.title;
   }
 
   function openPluginFilesystem(pluginId: string, providerId: string, options: { title?: string; connectionId?: string; rootUri?: string; currentUri?: string; forceNew?: boolean } = {}) {
@@ -6474,7 +6502,7 @@ export const useQueryStore = defineStore("query", () => {
     const executionTabId = options?.tabId ?? activeTabId.value;
     if (!executionTabId) return;
     const tab = tabs.value.find((item) => item.id === executionTabId);
-    if (tab && pendingResultRunPreparations.has(tab)) return false;
+    if (tab && (tab.isExecuting || pendingResultRunPreparations.has(tab))) return false;
     const previousGridKey = tab ? resultGridInstanceKey(tab) : undefined;
     if (tab?.mode === "query") {
       tab.resultSortColumn = undefined;
@@ -7727,6 +7755,7 @@ export const useQueryStore = defineStore("query", () => {
     let requestedPageLimit: number | undefined;
     let pageLimit: number | undefined;
     let pageProbeLimit: number | undefined;
+    let batchPagination: BatchQueryPaginationPlan | undefined;
     let pageOffset: number | undefined;
     let countSql: string | undefined;
     let exactQueryRowBound: number | undefined;
@@ -8539,7 +8568,7 @@ export const useQueryStore = defineStore("query", () => {
           // Older backends omit pageProbeSql and retain their original behavior.
           const probeSql = effectiveDbType === "mysql" && !plan.useAgentResultSession && plan.pageSql && typeof plan.pageLimit === "number" ? plan.pageProbeSql : undefined;
           sqlToExecute = sqlServerUseScript ? replaceSqlServerLeadingUseQuery(sqlBeforePagination, sqlServerUseScript, plan.sqlToExecute) : (probeSql ?? plan.sqlToExecute);
-          pageSql = sqlServerUseScript && plan.pageSql ? replaceSqlServerLeadingUseQuery(sqlBeforePagination, sqlServerUseScript, plan.pageSql) : (probeSql ?? plan.pageSql);
+          pageSql = sqlServerUseScript && plan.pageSql ? replaceSqlServerLeadingUseQuery(sqlBeforePagination, sqlServerUseScript, plan.pageSql) : plan.pageSql;
           pageProbeLimit = probeSql && typeof plan.pageLimit === "number" ? plan.pageLimit + 1 : undefined;
           pageLimit = plan.pageLimit;
           pageOffset = plan.pageOffset;
@@ -8548,7 +8577,23 @@ export const useQueryStore = defineStore("query", () => {
           useAgentResultSession = plan.useAgentResultSession;
           paginationRowNumberColumn = plan.paginationRowNumberColumn;
         }
-        const hasBoundedPagination = typeof pageLimit === "number" && typeof pageOffset === "number";
+        if (!plan.pageSql && !plan.useAgentResultSession && !sqlServerUseScript) {
+          batchPagination = await prepareBatchQueryPagination(
+            { sql: sqlBeforePagination, queryBaseSql, databaseType: effectiveDbType, pagination, useAgentCursor, executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined },
+            api.prepareQueryPaginationExecutionPlan,
+            sqlStatementParameterOptions,
+            () => tab.executionId !== executionId || tab.isCancelling === true,
+          );
+          if (batchPagination) {
+            sqlToExecute = batchPagination.sql;
+            // The batch SQL already contains each statement's LIMIT/OFFSET;
+            // expose one logical page bound to the common execution options so
+            // append/load-all paths do not mistake this for an unbounded run.
+            pageLimit = pagination.limit;
+            pageOffset = pagination.offset;
+          }
+        }
+        const hasBoundedPagination = batchPagination || (typeof pageLimit === "number" && typeof pageOffset === "number");
         if (options?.appendResult && !hasBoundedPagination && !useAgentResultSession) {
           const current = findExecutionTab(id);
           if (current?.executionId === executionId && current.result) {
@@ -8588,6 +8633,7 @@ export const useQueryStore = defineStore("query", () => {
             });
             if (plan.pageProbeSql) {
               sqlToExecute = plan.pageProbeSql;
+              pageSql = plan.pageSql;
               pageProbeLimit = pageLimit + 1;
             }
           }
@@ -8636,7 +8682,14 @@ export const useQueryStore = defineStore("query", () => {
                   pageSize: pageLimit,
                   resultSessionId: options?.pagination?.sessionId,
                 }
-              : { maxRows: pageProbeLimit ?? pageLimit, fetchSize: pageProbeLimit ?? pageLimit }
+              : {
+                  // Each supported batch statement is bounded in its SQL. Keep
+                  // the driver cap at the normal global limit so an unsupported
+                  // statement in the same batch is not accidentally truncated
+                  // to the probe size of another statement.
+                  maxRows: batchPagination ? agentProtocolQueryResultMaxRows(queryResultMaxRows) : (pageProbeLimit ?? pageLimit),
+                  fetchSize: pageProbeLimit ?? pageLimit,
+                }
             : { maxRows: agentProtocolQueryResultMaxRows(queryResultMaxRows) }),
           ...(useJdbcDriverRowOffset && typeof pageOffset === "number" && pageOffset > 0 ? { rowOffset: pageOffset } : {}),
           ...(executionClientSessionId ? { clientSessionId: executionClientSessionId } : {}),
@@ -8782,7 +8835,7 @@ export const useQueryStore = defineStore("query", () => {
                 sqlToExecute,
                 executionDatabase,
                 executionSchema,
-                cursor ? agentProtocolQueryResultMaxRows(queryResultMaxRows) : (pageProbeLimit ?? pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows)),
+                cursor ? agentProtocolQueryResultMaxRows(queryResultMaxRows) : batchPagination ? agentProtocolQueryResultMaxRows(queryResultMaxRows) : (pageProbeLimit ?? pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows)),
                 useLargeValuePreview,
                 cursor ? pageLimit : undefined,
                 cursor ? options?.pagination?.sessionId : undefined,
@@ -8863,12 +8916,53 @@ export const useQueryStore = defineStore("query", () => {
       }
       const resultProcessingStartedAt = performance.now();
       const annotatedResults = annotateQueryResultSources(markQueryResultsRowsRaw(responseResults), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset, sqlStatementParameterOptions, sqlToExecute, options?.sourceOffset === undefined ? undefined : tab.sql);
+      // Attach page state before applying recovery's statement-index offset.
+      // Multiple result sets from an unplanned statement must not shift the
+      // next query's plan; prefer the backend's explicit statement index.
+      if (batchPagination) {
+        const statementPlans = batchPagination.statements;
+        annotatedResults.results = annotatedResults.results.map((result, index) => {
+          const statementIndex = result.statement_index ?? (annotatedResults.results.length === statementPlans.length ? index : undefined);
+          const plan = statementIndex === undefined ? undefined : statementPlans[statementIndex];
+          if (!plan?.pageSql || plan.pageLimit === undefined || plan.pageOffset === undefined || result.execution_error || result.server_message || result.columns.length === 0) return result;
+          const probe = effectiveDbType === "mysql" && !!plan.pageProbeSql;
+          const pagedResult = stripPaginationRowNumber(probe ? trimQueryPageProbe(result, plan.pageLimit) : result, plan.paginationRowNumberColumn);
+          return markQueryResultRowsRaw({
+            ...pagedResult,
+            statement_index: statementIndex,
+            sqlPage: {
+              sql: plan.pageSql,
+              executedSql: probe ? plan.pageProbeSql! : plan.sqlToExecute,
+              limit: requestedPageLimit ?? plan.pageLimit,
+              offset: plan.pageOffset,
+              executedLimit: plan.pageLimit,
+              executedOffset: plan.pageOffset,
+              probe,
+              countSql: plan.countSql,
+              exactQueryRowBound: plan.exactQueryRowBound,
+            },
+          });
+        });
+      }
       const results = offsetBatchQueryResultIndexes(annotatedResults.results, batchResume?.startStatementIndex ?? 0);
-      if (pageProbeLimit !== undefined && pageLimit !== undefined && results.length === 1) {
+      if (!batchPagination && pageProbeLimit !== undefined && pageLimit !== undefined && results.length === 1) {
         results[0] = markQueryResultRowsRaw(trimQueryPageProbe(results[0]!, pageLimit));
       }
-      if (paginationRowNumberColumn && results.length === 1) {
+      if (!batchPagination && paginationRowNumberColumn && results.length === 1) {
         results[0] = markQueryResultsRowsRaw([stripPaginationRowNumber(results[0]!, paginationRowNumberColumn)])[0]!;
+      }
+      if (!batchPagination && results.length === 1 && pageSql !== undefined && !useAgentResultSession && pageLimit !== undefined && pageOffset !== undefined && !results[0]!.execution_error) {
+        results[0]!.sqlPage = {
+          sql: pageSql,
+          executedSql: sqlToExecute,
+          limit: requestedPageLimit ?? pageLimit,
+          offset: pageOffset,
+          executedLimit: pageLimit,
+          executedOffset: pageOffset,
+          probe: pageProbeLimit !== undefined,
+          countSql,
+          exactQueryRowBound,
+        };
       }
       reconcileBatchSqlResults(tab, executionId, results);
       // Sticky proven-read-only aggregation (Oracle/OceanBase-Oracle/MySQL/PG).
@@ -8980,6 +9074,7 @@ export const useQueryStore = defineStore("query", () => {
           }
           current.result = appendedResult;
         } else if (shouldReplaceActiveResultInGroup) {
+          results[0]!.statement_index = current.result?.statement_index ?? results[0]!.statement_index;
           current.results = activeGroupResults.slice();
           current.results[activeGroupIndex] = results[0];
           current.result = results[0];
@@ -9002,6 +9097,14 @@ export const useQueryStore = defineStore("query", () => {
         // the same dataset; every other branch above replaces it.
         publishResultGeneration(current, shouldAppendResult ? "append" : (options?.publicationOrigin ?? "execute"));
         producedResult = current.result !== undefined;
+        if (batchPagination) {
+          const activePage = current.result?.sqlPage;
+          pageSql = activePage?.sql;
+          pageLimit = activePage?.executedLimit;
+          pageOffset = activePage?.executedOffset;
+          countSql = activePage?.countSql;
+          exactQueryRowBound = activePage?.exactQueryRowBound;
+        }
         current.resultBaseSql = batchResume ? batchResume.batch.submittedSql : shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? queryBaseSql) : queryBaseSql;
         current.resultEditorFingerprint = batchResume ? batchResume.batch.editorFingerprint : shouldReplaceActiveResultInGroup ? (current.resultEditorFingerprint ?? executionEditorFingerprint) : executionEditorFingerprint;
         current.resultSortedSql = resultSortedSql;
@@ -9068,6 +9171,7 @@ export const useQueryStore = defineStore("query", () => {
               })()
             : undefined;
         const canAutoCalculateTotalRows =
+          !batchPagination &&
           !options?.appendResult &&
           !!current.result &&
           resultRowCount > 0 &&
@@ -9088,7 +9192,7 @@ export const useQueryStore = defineStore("query", () => {
         }
         touchResult(current);
         syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
-        if (!options?.appendResult && !resultLimitReached && !totalRowCountResolved && (current.mode === "query" || current.mode === "data") && current.result) {
+        if (!batchPagination && !options?.appendResult && !resultLimitReached && !totalRowCountResolved && (current.mode === "query" || current.mode === "data") && current.result) {
           countQueryTotalRowsInBackground({
             tabId: id,
             connectionId: executionConnectionId,
@@ -9828,8 +9932,20 @@ export const useQueryStore = defineStore("query", () => {
   function setActiveResultIndex(id: string, index: number) {
     const tab = findExecutionTab(id);
     if (!tab?.results || index < 0 || index >= tab.results.length) return;
+    const previousPage = tab.result?.sqlPage;
     tab.activeResultIndex = index;
     tab.result = tab.results[index];
+    const page = tab.result?.sqlPage;
+    if (page || previousPage) {
+      tab.resultPageSql = page?.sql;
+      tab.resultPageLimit = page?.limit;
+      tab.resultPageOffset = page?.offset;
+      tab.resultExecutedPageLimit = page?.executedLimit;
+      tab.resultExecutedPageOffset = page?.executedOffset;
+      tab.resultCountSql = page?.countSql;
+      tab.resultSessionId = tab.result?.session_id ?? undefined;
+      if (!tab.resultSessionId) tab.resultClientSessionId = undefined;
+    }
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalLargeValueCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
@@ -10722,6 +10838,8 @@ export const useQueryStore = defineStore("query", () => {
     openMqttAdmin,
     openNacosAdmin,
     openPluginWorkbench,
+    setPluginWorkbenchTabTitle,
+    getPluginWorkbenchTabTitle,
     pluginWorkbenchTitles,
     localizePluginTabTitles,
     openPluginFilesystem,

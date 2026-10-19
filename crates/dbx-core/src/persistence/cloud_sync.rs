@@ -1430,13 +1430,13 @@ pub async fn apply_sync_snapshot_with_selection(
                                                 .and_then(serde_json::Value::as_str)
                                                 == Some("none"))
                                 });
-                        !forbidden_rocketmq_auth
-                            && !(matches!(
-                                secret.key.as_str(),
-                                "password" | NACOS_AUTH_PASSWORD_KEY | NACOS_RNACOS_CONSOLE_PASSWORD_KEY
-                            ) && connections
-                                .iter()
-                                .any(|config| config.id == secret.connection_id && !config.save_password))
+                        let password_like_secret_unsaved = matches!(
+                            secret.key.as_str(),
+                            "password" | NACOS_AUTH_PASSWORD_KEY | NACOS_RNACOS_CONSOLE_PASSWORD_KEY
+                        ) && connections
+                            .iter()
+                            .any(|config| config.id == secret.connection_id && !config.save_password);
+                        !(forbidden_rocketmq_auth || password_like_secret_unsaved)
                     })
                     .map(|secret| SyncImportSecret {
                         connection_id: secret.connection_id.clone(),

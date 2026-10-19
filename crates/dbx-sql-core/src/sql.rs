@@ -875,9 +875,9 @@ impl SqlStatementSplitter {
             }
 
             match ch {
-                '\'' if !self.in_double_quote
-                    && !self.in_backtick
-                    && !(self.single_quote_backslash_escapes() && has_odd_trailing_backslashes(&self.buffer)) =>
+                '\'' if !(self.in_double_quote
+                    || self.in_backtick
+                    || self.single_quote_backslash_escapes() && has_odd_trailing_backslashes(&self.buffer)) =>
                 {
                     self.in_single_quote = !self.in_single_quote;
                     self.single_quote_escape_string = self.in_single_quote
@@ -886,9 +886,9 @@ impl SqlStatementSplitter {
                                 && ends_with_escape_string_prefix(&self.buffer)));
                     self.buffer.push(ch);
                 }
-                '"' if !self.in_single_quote
-                    && !self.in_backtick
-                    && !(self.options.profile.supports_backslash_escaped_quotes
+                '"' if !(self.in_single_quote
+                    || self.in_backtick
+                    || self.options.profile.supports_backslash_escaped_quotes
                         && has_odd_trailing_backslashes(&self.buffer)) =>
                 {
                     self.in_double_quote = !self.in_double_quote;
@@ -1541,9 +1541,9 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
         };
 
         match ch {
-            '\'' if !in_double_quote
-                && !in_backtick
-                && !(single_quote_backslash_escapes && has_odd_trailing_backslashes(&sql[start..i])) =>
+            '\'' if !(in_double_quote
+                || in_backtick
+                || single_quote_backslash_escapes && has_odd_trailing_backslashes(&sql[start..i])) =>
             {
                 in_single_quote = !in_single_quote;
                 single_quote_escape_string = in_single_quote
@@ -1552,9 +1552,9 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                             && ends_with_escape_string_prefix(&sql[start..i])));
                 i += ch.len_utf8();
             }
-            '"' if !in_single_quote
-                && !in_backtick
-                && !(options.profile.supports_backslash_escaped_quotes
+            '"' if !(in_single_quote
+                || in_backtick
+                || options.profile.supports_backslash_escaped_quotes
                     && has_odd_trailing_backslashes(&sql[start..i])) =>
             {
                 in_double_quote = !in_double_quote;
@@ -2627,9 +2627,9 @@ impl SqlScanner {
             self.profile.supports_backslash_escaped_quotes
         };
         match ch {
-            '\'' if !self.in_double_quote
-                && !self.in_backtick
-                && !(single_quote_backslash_escapes && self.previous == Some('\\')) =>
+            '\'' if !(self.in_double_quote
+                || self.in_backtick
+                || single_quote_backslash_escapes && self.previous == Some('\\')) =>
             {
                 self.in_single_quote = !self.in_single_quote;
                 self.single_quote_escape_string = self.in_single_quote
@@ -2637,9 +2637,9 @@ impl SqlScanner {
                         || (self.profile.supports_postgres_escape_strings
                             && ends_with_escape_string_prefix(&sql[..idx])));
             }
-            '"' if !self.in_single_quote
-                && !self.in_backtick
-                && !(self.profile.supports_backslash_escaped_quotes && self.previous == Some('\\')) =>
+            '"' if !(self.in_single_quote
+                || self.in_backtick
+                || self.profile.supports_backslash_escaped_quotes && self.previous == Some('\\')) =>
             {
                 self.in_double_quote = !self.in_double_quote;
             }

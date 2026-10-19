@@ -1119,6 +1119,8 @@ export default withEnglishFallback({
     gaussdbConnectionModeMJdbc: "M modu (üreticinin JDBC sürücüsü)",
     gaussdbConnectionModeNativeHint: "GaussDB A/PG/Oracle uyumluluk modları için DBX'in yerleşik PostgreSQL uyumlu protokolünü kullanır.",
     gaussdbConnectionModeMJdbcHint: "GaussDB M modu için com.huawei.gaussdb.jdbc.Driver ile jdbc:gaussdb kullanır.",
+    gaussdbConnectionModeDws: "Huawei DWS (yerel PostgreSQL uyumlu sürücü)",
+    gaussdbConnectionModeDwsHint: "Bu bağlantıyı açıkça Huawei DWS olarak işaretler. Plugin Host Estimated Plan API'si bu profil için GaussDB alt sürümüne sabitlenmeden etkinleşir; genel GaussDB ve M-JDBC bağlantıları desteklenmez. Yerleşik PostgreSQL uyumlu sürücü kullanılmaya devam eder.",
     gaussdbMJdbcDriver: "GaussDB JDBC sürücüsü",
     gaussdbMJdbcDriverPlaceholder: "Sunucu sürümüyle eşleşen gaussdbjdbc.jar dosyasını seçin",
     gaussdbMJdbcDriverHint: "Sürücü her GaussDB sunucu sürümüyle birlikte yayımlanır. gaussdbjdbc.jar dosyasını eşleşen GaussDB sürücü paketinden alın.",
@@ -6708,6 +6710,8 @@ export default withEnglishFallback({
     fileProgress: "Dosya {current} / {total}",
     fileColumn: "Dosya",
     totalFiles: "{count} dosya",
+    executeSuccess: "SQL dosyası başarıyla çalıştırıldı",
+    completedWithErrors: "Çalıştırma tamamlandı: {succeeded} başarılı, {failed} başarısız",
   },
   sqlFileTree: {
     folderNameInvalid: "Yol yerine tek bir klasör adı girin.",

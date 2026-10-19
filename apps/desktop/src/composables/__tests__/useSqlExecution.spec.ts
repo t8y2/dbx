@@ -221,6 +221,30 @@ describe("useSqlExecution", () => {
     expect(refreshObjects).toHaveBeenCalledWith("conn-1", "app", "public");
   });
 
+  it("rejects execution when the target tab is already executing", async () => {
+    const sql = "SELECT 1;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql, isExecuting: true });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql");
+    const onExecutionCancelled = vi.fn();
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+      onExecutionCancelled,
+    });
+
+    const outcome = await execution.tryExecute(undefined, { editorViewportRequestId: 123 });
+
+    expect(outcome).toEqual({ status: "not-started", reason: "busy", tabId: "tab-1" });
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(onExecutionCancelled).toHaveBeenCalledWith(123);
+  });
+
   it("sends every placeholder syntax and @set unchanged when substitution is disabled", async () => {
     const sql = ["@set tenant = 42;", "SELECT ?, :named, ${shell}, #{mybatis}, @sqlserver, @tenant;"].join("\n");
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });

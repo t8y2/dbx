@@ -542,6 +542,68 @@ describe("DataGridConditionEditor quote completion", () => {
     await nextTick();
 
     expect(expandedHighlight?.style.getPropertyValue("--data-grid-condition-highlight-scrollbar")).toBe("10px");
+
+    // When the overlay fits without a scrollbar, the compensation resets to 0px
+    Object.defineProperties(overlay as HTMLTextAreaElement, {
+      offsetWidth: { configurable: true, value: 168 },
+      clientWidth: { configurable: true, value: 168 },
+    });
+    overlay?.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+    await nextTick();
+
+    expect(expandedHighlight?.style.getPropertyValue("--data-grid-condition-highlight-scrollbar")).toBe("0px");
+    vi.unstubAllGlobals();
+  });
+
+  it("resets scrollbar compensation after fitExpandedHeightToOverlay eliminates overflow", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { input } = mountEditor("where", "test_item_id=12 and test_item_name=''");
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+
+    const overlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement | null;
+    const expandedHighlight = document.body.querySelector(".data-grid-condition-highlight--expanded") as HTMLElement | null;
+    expect(overlay).toBeTruthy();
+    expect(expandedHighlight).toBeTruthy();
+
+    let clientW = 160;
+    Object.defineProperties(overlay as HTMLTextAreaElement, {
+      offsetWidth: { configurable: true, value: 177 },
+      clientWidth: { configurable: true, get: () => clientW },
+      scrollHeight: { configurable: true, value: 80 },
+      clientHeight: { configurable: true, value: 56 },
+    });
+
+    overlay?.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    // After fitExpandedHeightToOverlay increases height, the scrollbar disappears and clientWidth widens
+    clientW = 177;
+    Object.defineProperties(overlay as HTMLTextAreaElement, {
+      clientHeight: { configurable: true, value: 80 },
+    });
+
+    await nextTick();
+    await nextTick();
+
+    expect(expandedHighlight?.style.getPropertyValue("--data-grid-condition-highlight-scrollbar")).toBe("0px");
     vi.unstubAllGlobals();
   });
 });

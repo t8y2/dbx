@@ -5,6 +5,7 @@ import { uuid } from "@/lib/common/utils";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { ref, computed, watch, markRaw, reactive } from "vue";
 import { DEFAULT_QUERY_TIMEOUT_SECS, normalizeManualTransactionTimeoutSecs } from "@/lib/connection/timeoutLimits";
+import { gaussdbConnectionMode } from "@/lib/database/jdbcDialect";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import type {
   ColumnInfo,
@@ -4760,6 +4761,14 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       await syncMongoLegacyDriverFallback(id, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
+      const refreshDwsMetadataBeforeReady = config.db_type === "gaussdb" && gaussdbConnectionMode(config) === "dws";
+      if (config.db_type !== "plugin" && refreshDwsMetadataBeforeReady) {
+        // Refresh the product version before exposing the connection so `dbVersion`
+        // is current. Support comes from the explicit profile, not the version.
+        // Metadata remains optional: refreshConnectedDatabaseInfo swallows failures.
+        await refreshConnectedDatabaseInfo(id, { ...config, id });
+        await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
+      }
       passwordChangeReconnectRequired.delete(config.id);
       activeConnectionId.value = id;
       markConnectionConnected(id);
@@ -4767,7 +4776,7 @@ export const useConnectionStore = defineStore("connection", () => {
       clearConnectionClosedByUser(config.id);
       clearConnectionClosedByUser(id);
       if (config.db_type !== "plugin") {
-        void refreshConnectedDatabaseInfo(id, { ...config, id });
+        if (!refreshDwsMetadataBeforeReady) void refreshConnectedDatabaseInfo(id, { ...config, id });
         await refreshConnectionIdentifierQuote(id, { ...config, id });
         ensureLocalConnectionAttemptActive(config.id, localAttempt);
         // Compatibility modes warm asynchronously; the QueryEditor watcher and the
@@ -5228,11 +5237,18 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       await syncMongoLegacyDriverFallback(connectionId, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
+      const refreshDwsMetadataBeforeReady = config.db_type === "gaussdb" && gaussdbConnectionMode(config) === "dws";
+      if (config.db_type !== "plugin" && refreshDwsMetadataBeforeReady) {
+        // Refresh the product version before reconnect completion so `dbVersion`
+        // reflects the new server session; support comes from the explicit profile.
+        await refreshConnectedDatabaseInfo(connectionId, config);
+        await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
+      }
       markConnectionConnected(connectionId);
       // 任何路径真的连上之后，"用户已关闭"标记就不能再拦后续的被动唤醒。
       clearConnectionClosedByUser(connectionId);
       if (config.db_type !== "plugin") {
-        void refreshConnectedDatabaseInfo(connectionId, config);
+        if (!refreshDwsMetadataBeforeReady) void refreshConnectedDatabaseInfo(connectionId, config);
         await refreshConnectionIdentifierQuote(connectionId, config);
         ensureLocalConnectionAttemptActive(connectionId, localAttempt);
         void refreshConnectionDatabaseModes(connectionId, config);
@@ -7413,7 +7429,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadAllObjectGroupChildren(parent: TreeNode, initialLoadOptions?: LoadTreeOptions) {
     if (!parent.connectionId || !hasTreeNodeDatabaseContext(parent)) return;
-    if (!objectTypesForGroupNode(parent.type)) return;
+    if (!objectTypesForGroupNode(parent.type) || parent.tableName) return;
     const liveParent = treeNodeInSidebarTree(parent);
     if (!liveParent) return;
     if (initialLoadOptions?.force || !isTreeNodeChildrenLoaded(liveParent.id) || filteredObjectGroupChildrenIds.has(liveParent.id)) {
@@ -8069,7 +8085,14 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     invalidateCompletionCachesForNode(node);
     invalidateMetadataCachesForNode(node, options);
-    if (objectTypesForGroupNode(node.type)) {
+    if (node.type === "trigger") {
+      const parentNode = findParentNode(treeNodes.value, node.id) ?? (node.id.lastIndexOf(":") > 0 ? findNode(treeNodes.value, node.id.slice(0, node.id.lastIndexOf(":"))) : null);
+      if (parentNode) {
+        await refreshTreeNode(parentNode, options);
+        return;
+      }
+    }
+    if (objectTypesForGroupNode(node.type) && !node.tableName) {
       clearLoadedChildrenCache(node.id, { deletePersisted: false });
       await loadObjectGroupChildren(node, { force: true });
       await invalidateSidebarTableSearchIndexesForTreeRefresh(node);
@@ -8145,7 +8168,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function refreshTreeNodeForTableNameFilter(node: TreeNode, scopeKey: string, revision: number) {
     invalidateMetadataCachesForNode(node);
-    if (objectTypesForGroupNode(node.type)) {
+    if (objectTypesForGroupNode(node.type) && !node.tableName) {
       clearLoadedChildrenCache(node.id);
       await loadObjectGroupChildren(node, {
         force: true,
@@ -10124,7 +10147,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (node.children) await refreshNodes(node.children);
           continue;
         }
-        if (objectTypesForGroupNode(node.type)) {
+        if (objectTypesForGroupNode(node.type) && !node.tableName) {
           if (node.connectionId && connectedIds.value.has(node.connectionId)) {
             clearLoadedChildrenCache(node.id);
             if (node.isExpanded) {

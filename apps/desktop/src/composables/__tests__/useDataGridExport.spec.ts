@@ -2966,4 +2966,25 @@ describe("useDataGridExport MySQL BLOB 文本复制 (#12413)", () => {
 
     expect(extractDataGridSelection).toHaveBeenLastCalledWith(expect.objectContaining({ extractor: "raw", rows: [["0x616263"]] }));
   });
+
+  it("copies text-like Oracle-family blobs as text, matching the grid preview", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "abc", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(blobTable, ["id", "secret"], matrix, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1, "oracle");
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["abc"]] }));
+    expect(copyToClipboard).toHaveBeenCalledWith("abc");
+
+    // The SQL extractor keeps the canonical hex even for a text-like blob, mirroring
+    // the MySQL #12413 case: copy-as-INSERT must not decode bytes (#12679 review).
+    const sqlMatrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["secret"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "INSERT INTO `test_blob` (`secret`) VALUES (0x616263);", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+    const sqlState = createExportState(blobTable, ["id", "secret"], sqlMatrix, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1, "oracle");
+
+    await expect(sqlState.copyWithExtractor("sql-inserts")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenLastCalledWith(expect.objectContaining({ extractor: "sql-inserts", rows: [[1, "0x616263"]] }));
+  });
 });

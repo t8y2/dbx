@@ -146,6 +146,39 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     expect(resolveCanvasBackingStoreMetrics({ width: 801, height: 399, pixelRatio: 5 })).toEqual({ pixelWidth: 3204, pixelHeight: 1596, scaleX: 4, scaleY: 4, measured: false });
   });
 
+  it("resolves crisp 1:1 backing store metrics under fractional webview zoom when devicePixelSize is not supported", () => {
+    // WebKitGTK on Linux and WKWebView on macOS do not support devicePixelContentBoxSize,
+    // so devicePixelSize is null/undefined. The backing store must match the webview's
+    // devicePixelRatio (which already incorporates uiScale / zoom level) 1:1.
+    const metrics125 = resolveCanvasBackingStoreMetrics({
+      width: 1000,
+      height: 600,
+      pixelRatio: 1.25,
+      devicePixelSize: null,
+    });
+    expect(metrics125).toEqual({
+      pixelWidth: 1250,
+      pixelHeight: 750,
+      scaleX: 1.25,
+      scaleY: 1.25,
+      measured: false,
+    });
+
+    const metrics150 = resolveCanvasBackingStoreMetrics({
+      width: 1000,
+      height: 600,
+      pixelRatio: 1.5,
+      devicePixelSize: null,
+    });
+    expect(metrics150).toEqual({
+      pixelWidth: 1500,
+      pixelHeight: 900,
+      scaleX: 1.5,
+      scaleY: 1.5,
+      measured: false,
+    });
+  });
+
   it("reports a completed draw only after obtaining a Canvas context", () => {
     const canvas = createMockCanvas();
     const options = createBaseOptions({ canvas, rowCount: 0, rowAt: () => undefined });

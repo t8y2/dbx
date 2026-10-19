@@ -2095,7 +2095,8 @@ async fn connect_db_inner(
     config: ConnectionConfig,
     client_attempt: Option<u64>,
 ) -> Result<String, String> {
-    let config = config.canonicalized();
+    let mut config = config.canonicalized();
+    dbx_core::query::plugin_plan::invalidate_gaussdb_dws_product_version(&mut config);
     if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_remote_worker_requested(&config) {
         db::sqlite::validate_persistent_attachments(
             &config.host,

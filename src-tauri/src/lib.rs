@@ -796,6 +796,7 @@ enum LocaleFamily {
     Indonesian,
     Italian,
     Portuguese,
+    Polish,
     Russian,
     Turkish,
 }
@@ -833,6 +834,8 @@ fn locale_family(locale: &str) -> LocaleFamily {
         LocaleFamily::Italian
     } else if is_language("pt") {
         LocaleFamily::Portuguese
+    } else if is_language("pl") {
+        LocaleFamily::Polish
     } else if is_language("ru") {
         LocaleFamily::Russian
     } else {
@@ -854,6 +857,7 @@ fn tray_menu_labels_for_locale(locale: &str) -> (&'static str, &'static str) {
         LocaleFamily::Turkish => ("DBX'i Göster", "DBX'ten Çık"),
         LocaleFamily::Portuguese => ("Mostrar DBX", "Sair do DBX"),
         LocaleFamily::Russian => ("Показать DBX", "Выйти из DBX"),
+        LocaleFamily::Polish => ("Pokaż DBX", "Zakończ DBX"),
         LocaleFamily::English => ("Show DBX", "Quit DBX"),
     }
 }
@@ -874,6 +878,7 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
         LocaleFamily::Turkish => "Destek bilgilerini kopyala",
         LocaleFamily::Portuguese => "Copiar informações",
         LocaleFamily::Russian => "Копировать сведения о поддержке",
+        LocaleFamily::Polish => "Kopiuj informacje o pomocy technicznej",
         LocaleFamily::English => "Copy Support Info",
     }
 }
@@ -893,6 +898,7 @@ fn app_menu_close_tab_label(locale: &str) -> &'static str {
         LocaleFamily::Turkish => "Sekmeyi kapat",
         LocaleFamily::Portuguese => "Fechar aba",
         LocaleFamily::Russian => "Закрыть вкладку",
+        LocaleFamily::Polish => "Zamknij kartę",
         LocaleFamily::English => "Close Tab",
     }
 }
@@ -911,6 +917,7 @@ fn app_menu_quit_label(locale: &str, app_name: &str) -> String {
         LocaleFamily::Turkish => format!("{app_name} Uygulamasından Çık"),
         LocaleFamily::Portuguese => format!("Sair do {app_name}"),
         LocaleFamily::Russian => format!("Выйти из {app_name}"),
+        LocaleFamily::Polish => format!("Zakończ {app_name}"),
         LocaleFamily::English => format!("Quit {app_name}"),
     }
 }
@@ -1275,6 +1282,8 @@ mod tests {
         assert_eq!(tray_menu_labels_for_locale("pt-BR"), ("Mostrar DBX", "Sair do DBX"));
         assert_eq!(tray_menu_labels_for_locale("tr-TR"), ("DBX'i Göster", "DBX'ten Çık"));
         assert_eq!(tray_menu_labels_for_locale("ru-RU"), ("Показать DBX", "Выйти из DBX"));
+        assert_eq!(tray_menu_labels_for_locale("pl-PL"), ("Pokaż DBX", "Zakończ DBX"));
+        assert_eq!(tray_menu_labels_for_locale("pl_PL"), ("Pokaż DBX", "Zakończ DBX"));
         assert_eq!(tray_menu_labels_for_locale("en-US"), ("Show DBX", "Quit DBX"));
         // Unknown and empty locales fall back to English; "ita" must not match "it".
         assert_eq!(tray_menu_labels_for_locale("ita"), ("Show DBX", "Quit DBX"));
@@ -2356,6 +2365,8 @@ pub fn run() {
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
             commands::query::build_database_search_sql,
+            commands::query::build_database_search_columns_sql,
+            commands::query::build_database_search_probe_sql,
             commands::query::build_database_structure_search_sql,
             commands::query::supports_database_structure_search,
             commands::query::build_search_result_where,

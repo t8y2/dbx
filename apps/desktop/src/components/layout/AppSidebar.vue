@@ -220,7 +220,11 @@ function openTableStructureForSelection(): boolean {
   return connectionTreeRef.value?.openTableStructureForSelection?.() ?? false;
 }
 
-defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, openTableStructureForSelection });
+async function focusSelectedNode() {
+  await connectionTreeRef.value?.focusSelectedNode?.();
+}
+
+defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, focusSelectedNode, openTableStructureForSelection });
 </script>
 
 <template>
@@ -319,7 +323,7 @@ defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, 
           </span>
         </template>
       </div>
-      <div class="flex-1 min-h-0" data-sidebar-tree>
+      <div data-sidebar-connection-tree class="flex-1 min-h-0">
         <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(nodes) => emit('add-to-ai', nodes)" />
       </div>
       <div v-if="activeConnectionEndpoint" data-sidebar-connection-endpoint class="flex shrink-0 items-center gap-1.5 border-t border-border/60 px-2.5 py-1.5 text-[11px] leading-none text-muted-foreground" :title="activeWindowConnection?.name">

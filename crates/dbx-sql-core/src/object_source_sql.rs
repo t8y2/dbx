@@ -471,6 +471,32 @@ pub fn rewrite_oracle_table_references(input: OracleTableReferenceRewriteInput) 
 }
 
 pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlInput) -> Result<Vec<String>, String> {
+    build_executable_object_source_statements_with_mysql_validation_name(input, None, true)
+}
+
+/// Builds executable MySQL routine replacement statements using a caller-owned
+/// validation name. Transfer callers pass a per-run name and preflight its
+/// absence, so validation never drops an unrelated user routine.
+pub fn build_mysql_routine_replacement_statements(
+    input: EditableObjectSourceSqlInput,
+    validation_name: &str,
+) -> Result<Vec<String>, String> {
+    if !is_mysql_like(input.database_type)
+        || !matches!(input.object_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function)
+    {
+        return Err("MySQL routine replacement is supported only for MySQL procedures and functions.".to_string());
+    }
+    if validation_name.trim().is_empty() {
+        return Err("MySQL routine validation name must not be empty.".to_string());
+    }
+    build_executable_object_source_statements_with_mysql_validation_name(input, Some(validation_name), false)
+}
+
+fn build_executable_object_source_statements_with_mysql_validation_name(
+    input: EditableObjectSourceSqlInput,
+    mysql_validation_name: Option<&str>,
+    drop_mysql_validation_before_create: bool,
+) -> Result<Vec<String>, String> {
     if input.database_type == DatabaseType::OceanbaseOracle && input.object_type == ObjectSourceKind::Sequence {
         return Ok(vec![oceanbase_sequence_edit_sql(&input)?]);
     }
@@ -544,7 +570,12 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
     if is_mysql_like(input.database_type)
         && matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
     {
-        return Ok(executable_mysql_routine_statements(&input, source));
+        return Ok(executable_mysql_routine_statements(
+            &input,
+            source,
+            mysql_validation_name,
+            drop_mysql_validation_before_create,
+        ));
     }
 
     let create_statement = ensure_semicolon(source);
@@ -1261,7 +1292,12 @@ fn drop_informix_view_if_exists(name: &str) -> String {
     format!("DROP VIEW IF EXISTS {};", name.trim())
 }
 
-fn executable_mysql_routine_statements(input: &EditableObjectSourceSqlInput, source: &str) -> Vec<String> {
+fn executable_mysql_routine_statements(
+    input: &EditableObjectSourceSqlInput,
+    source: &str,
+    custom_validation_name: Option<&str>,
+    drop_validation_before_create: bool,
+) -> Vec<String> {
     if !mysql_source_starts_with_create_routine(source) {
         return vec![ensure_semicolon(source)];
     }
@@ -1275,18 +1311,26 @@ fn executable_mysql_routine_statements(input: &EditableObjectSourceSqlInput, sou
     // MySQL has no cross-version CREATE OR REPLACE for stored routines. Validate the CREATE
     // body under a temporary name first (same idea as Informix view saves) so a syntax error
     // cannot leave the original routine deleted after DROP.
-    let validation_name = mysql_validation_routine_name(create_name);
-    if let Some(validation_source) = replace_mysql_routine_declaration_name(source, &validation_name) {
-        statements.push(mysql_drop_routine_if_exists(
-            input.object_type.clone(),
-            input.schema.as_deref(),
-            &validation_name,
-        ));
+    let owned_validation_name;
+    let validation_name = if let Some(validation_name) = custom_validation_name {
+        validation_name
+    } else {
+        owned_validation_name = mysql_validation_routine_name(create_name);
+        &owned_validation_name
+    };
+    if let Some(validation_source) = replace_mysql_routine_declaration_name(source, validation_name) {
+        if drop_validation_before_create {
+            statements.push(mysql_drop_routine_if_exists(
+                input.object_type.clone(),
+                input.schema.as_deref(),
+                validation_name,
+            ));
+        }
         statements.push(ensure_semicolon(&validation_source));
         statements.push(mysql_drop_routine_if_exists(
             input.object_type.clone(),
             input.schema.as_deref(),
-            &validation_name,
+            validation_name,
         ));
     }
 
@@ -2941,6 +2985,27 @@ mod tests {
                 "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`() BEGIN SELECT 1; END;".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn mysql_transfer_routine_replacement_uses_scoped_validation_name() {
+        let statements = build_mysql_routine_replacement_statements(
+            EditableObjectSourceSqlInput {
+                database_type: DatabaseType::Mysql,
+                object_type: ObjectSourceKind::Procedure,
+                schema: Some("app".to_string()),
+                name: "refresh_cache".to_string(),
+                source: "CREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END".to_string(),
+            },
+            "dbx_transfer_check_0123456789abcdef",
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 4);
+        assert!(statements[0].contains("CREATE PROCEDURE `dbx_transfer_check_0123456789abcdef`"));
+        assert!(statements[1].contains("DROP PROCEDURE IF EXISTS `app`.`dbx_transfer_check_0123456789abcdef`"));
+        assert!(statements[2].contains("DROP PROCEDURE IF EXISTS `app`.`refresh_cache`"));
+        assert!(!statements[0].contains("DROP"));
     }
 
     #[test]

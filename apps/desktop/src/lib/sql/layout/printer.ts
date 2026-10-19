@@ -78,10 +78,35 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
   }
 
   items.forEach((item, index) => {
+    // A line comment written after the previous field's comma is a trailing
+    // annotation for that field, not a separate heading. sql-formatter keeps
+    // its original preceding whitespace; only comments that did not start a
+    // new source line are moved back onto the preceding output line. Comments
+    // that were on their own line keep their own line.
+    const leadingComments = index > 0 && ctx.options.commaPosition !== "before" ? leadingTrailingComments(item) : 0;
+    let itemNodes = item;
+    let leadingText: string | null = null;
+    if (leadingComments > 0) {
+      // `renderInline` intentionally drops comments; a trailing comment is
+      // copied verbatim, and only when it fits the remaining line width.
+      const commentText = item
+        .slice(0, leadingComments)
+        .map((node) => ("text" in node ? node.text : ""))
+        .join(" ");
+      if (commentText && writer.column + 1 + commentText.length <= ctx.options.lineWidth) {
+        leadingText = commentText;
+        itemNodes = item.slice(leadingComments);
+      }
+    }
     if (index === 0) {
       writer.write(keyword);
       if (sourceOnOwnLine) writer.newline(baseColumn + ctx.options.indentWidth);
       else writer.space();
+    } else if (leadingText) {
+      writer.space();
+      writer.write(leadingText);
+      if (itemNodes.length === 0) return;
+      writer.newline(itemColumn);
     } else {
       if (ctx.options.commaPosition === "before") {
         const leadingIndent = sourceOnOwnLine ? baseColumn + ctx.options.indentWidth : Math.max(baseColumn, itemColumn - 2);
@@ -91,20 +116,32 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
         writer.newline(itemColumn);
       }
     }
-    if (alignedAliases) {
+    if (alignedAliases && !leadingText) {
       const aligned = alignedAliases[index];
       if (aligned) {
         writer.write(aligned.expression);
         writer.write(" ".repeat(aligned.aliasColumn - aligned.expression.length));
         writer.write(`${aligned.asKeyword} ${aligned.alias}`);
       } else {
-        printElement(writer, item, baseColumn, childCtx);
+        printElement(writer, itemNodes, baseColumn, childCtx);
       }
     } else {
-      printElement(writer, item, baseColumn, childCtx);
+      printElement(writer, itemNodes, baseColumn, childCtx);
     }
     if (ctx.options.commaPosition !== "before" && index < items.length - 1) writer.write(",");
   });
+}
+
+/** Count leading comments that were written on the previous source line. */
+function leadingTrailingComments(item: AstNode[]): number {
+  let count = 0;
+  while (count < item.length) {
+    const node = item[count];
+    if (!node || (node.type !== "line_comment" && node.type !== "block_comment")) break;
+    if (/[\r\n]/.test(node.precedingWhitespace ?? "")) break;
+    count += 1;
+  }
+  return count;
 }
 
 interface AlignedProjectionItem {

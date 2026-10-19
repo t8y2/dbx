@@ -691,4 +691,46 @@ describe("UpdateDialog aggregate update center", () => {
     expect(rowFor("moved plugin")?.textContent).toContain(hint);
     expect(rowFor("same plugin")?.textContent).not.toContain(hint);
   });
+
+  it("renders driver install progress circle and batch counter during driver update", async () => {
+    const driver = {
+      db_type: "mysql",
+      label: "MySQL",
+      version: "0.1.50",
+      installed: true,
+      installed_version: "0.1.40",
+      update_available: true,
+    };
+
+    await mountDialog(0, {}, undefined, {
+      updateInfo: null,
+      driverUpdates: [driver],
+      componentUpdatesUpdating: true,
+      updatingComponent: "drivers",
+      driverBatchCompleted: 1,
+      driverBatchTotal: 3,
+      driverProgressMap: {
+        mysql: {
+          step: "driver",
+          db_type: "mysql",
+          downloaded: 45 * 1024 * 1024,
+          total: 100 * 1024 * 1024,
+        },
+      },
+    });
+
+    const driversTab = document.body.querySelector<HTMLButtonElement>('[data-update-tab="drivers"]');
+    driversTab?.click();
+    await flushDialog();
+
+    // Driver row shows progress circle with percentage 45 and status role
+    const progressStatus = document.body.querySelector('[role="status"]');
+    expect(progressStatus).not.toBeNull();
+    expect(progressStatus?.textContent).toContain("45");
+    expect(progressStatus?.getAttribute("title")).toContain("45%");
+
+    // Footer button shows batch progress Upgrading (1/3) or Updating (1/3)
+    const footer = document.body.querySelector("[data-update-footer]");
+    expect(footer?.textContent).toMatch(/1\/3/);
+  });
 });

@@ -17,6 +17,7 @@ describe("triggerToggleSql", () => {
       expect(supportsTriggerToggle("gaussdb")).toBe(true);
       expect(supportsTriggerToggle("kwdb")).toBe(true);
       expect(supportsTriggerToggle("xugu")).toBe(true);
+      expect(supportsTriggerToggle("firebird")).toBe(true);
     });
 
     it("returns false for unsupported database types or undefined", () => {
@@ -145,6 +146,25 @@ describe("triggerToggleSql", () => {
           }),
         ).toBe('ALTER TABLE "public"."orders" DISABLE TRIGGER "trg_orders_audit";');
       }
+    });
+
+    it("generates Firebird trigger enable/disable SQL", () => {
+      expect(
+        buildTriggerToggleSql({
+          databaseType: "firebird",
+          tableName: "orders",
+          triggerName: "trg_orders_audit",
+          enabled: true,
+        }),
+      ).toBe('ALTER TRIGGER "trg_orders_audit" ACTIVE;');
+
+      expect(
+        buildTriggerToggleSql({
+          databaseType: "firebird",
+          triggerName: 'trg_"orders"_audit',
+          enabled: false,
+        }),
+      ).toBe('ALTER TRIGGER "trg_""orders""_audit" INACTIVE;');
     });
 
     it("returns null for PostgreSQL when tableName is missing", () => {

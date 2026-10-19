@@ -3185,13 +3185,17 @@ async function openPendingPluginInstallLinks() {
   }
 }
 
-function setConnectionDialogOpen(value: boolean) {
+function setConnectionDialogOpen(value: boolean, options?: { restoreFocus?: boolean }) {
   showConnectionDialog.value = value;
   if (!value) {
     connectionDialogPrefill.value = null;
     connectionDialogUpdate.value = null;
     connectionPluginProvider.value = null;
     connectionDialogInitialTab.value = undefined;
+    // Handlers that immediately open another surface (driver store page,
+    // settings, or a reopened connection dialog) opt out: the delayed tree
+    // refocus would steal focus back from the new surface's autofocus.
+    if (options?.restoreFocus !== false) void appSidebarRef.value?.focusSelectedNode();
   }
 }
 
@@ -4747,19 +4751,19 @@ async function handleKeydown(e: KeyboardEvent) {
   if (isExecuteSqlShortcut(e, shortcuts) && defaultQueryShortcutTarget) {
     e.preventDefault();
     e.stopPropagation();
-    void newQuery({ preferredSource: "sidebar", openDefault: true });
+    if (!e.repeat) void newQuery({ preferredSource: "sidebar", openDefault: true });
     return;
   }
   if (activeTab.value?.mode === "query" && isExecuteSqlInNewResultTabShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
-    if (!contentAreaRef.value?.shouldBlockQueryEditorExecutionShortcut?.(e)) requestActiveEditorExecuteInNewResultTab();
+    if (!e.repeat && !activeTab.value.isExecuting && !contentAreaRef.value?.shouldBlockQueryEditorExecutionShortcut?.(e)) requestActiveEditorExecuteInNewResultTab();
     return;
   }
   if (activeTab.value?.mode === "query" && isExecuteSqlShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
-    if (!contentAreaRef.value?.shouldBlockQueryEditorExecutionShortcut?.(e)) requestActiveEditorExecute();
+    if (!e.repeat && !activeTab.value.isExecuting && !contentAreaRef.value?.shouldBlockQueryEditorExecutionShortcut?.(e)) requestActiveEditorExecute();
     return;
   }
   if (activeTab.value?.mode === "query" && isSendSelectionToAiShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
@@ -5562,6 +5566,7 @@ onUnmounted(() => {
                 <div v-for="workbenchTab in mountedPluginWorkbenchTabs" :key="workbenchTab.id" v-show="activeTab && workbenchTab.id === activeTab.id" class="flex min-h-0 flex-1 flex-col">
                   <PluginWorkbenchTab
                     :ref="(element) => setPluginWorkbenchTabRef(workbenchTab.id, element)"
+                    :tab-id="workbenchTab.id"
                     :plugin-id="workbenchTab.pluginWorkbench!.pluginId"
                     :contribution-id="workbenchTab.pluginWorkbench!.contributionId"
                     :context="workbenchTab.pluginWorkbench!.context"
@@ -5686,15 +5691,15 @@ onUnmounted(() => {
               )
           "
           @open-driver-store="
-            setConnectionDialogOpen(false);
+            setConnectionDialogOpen(false, { restoreFocus: false });
             openDriverStorePage($event);
           "
           @open-tunnel-profile-settings="
-            setConnectionDialogOpen(false);
+            setConnectionDialogOpen(false, { restoreFocus: false });
             openSettings('tunnels');
           "
           @open-connection-settings="
-            setConnectionDialogOpen(false);
+            setConnectionDialogOpen(false, { restoreFocus: false });
             openConnectionSettings($event, 'advanced');
           "
           @open-lineage-target="openLineageTarget"
@@ -5731,6 +5736,9 @@ onUnmounted(() => {
           :is-ignoring-update="isIgnoringUpdate"
           :active-task-count="activeUpdateTaskCount"
           :driver-updates="componentUpdates.driverUpdates.value"
+          :driver-batch-completed="componentUpdates.driverBatchCompleted.value"
+          :driver-batch-total="componentUpdates.driverBatchTotal.value"
+          :driver-progress-map="componentUpdates.driverProgressMap.value"
           :jdbc-update="componentUpdates.jdbcPluginStatus.value"
           :mcp-update="componentUpdates.mcpStatus.value"
           :plugin-updates="componentUpdates.pluginUpdates.value"

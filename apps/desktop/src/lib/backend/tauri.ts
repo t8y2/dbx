@@ -2310,6 +2310,14 @@ export async function buildDatabaseSearchSql(options: DatabaseSearchSqlOptions):
   return invoke("build_database_search_sql", { options });
 }
 
+export async function buildDatabaseSearchColumnsSql(options: import("@/lib/database/databaseSearchColumns").DatabaseSearchColumnsSqlOptions): Promise<{ sql: string } | null> {
+  return invoke("build_database_search_columns_sql", { options });
+}
+
+export async function buildDatabaseSearchProbeSql(options: import("@/lib/database/databaseSearchProbe").DatabaseSearchProbeSqlOptions): Promise<{ sql: string; includedIndices: number[] } | null> {
+  return invoke("build_database_search_probe_sql", { options });
+}
+
 export async function buildDatabaseStructureSearchSql(options: DatabaseStructureSearchSqlOptions): Promise<DatabaseStructureSearchSql | null> {
   return invoke("build_database_structure_search_sql", { options });
 }
@@ -5894,6 +5902,8 @@ export interface TransferStructurePreview {
   sql: string;
   tables: TransferStructurePreviewTable[];
   operations: TransferStructureOperation[];
+  /** Whether selected non-table schema objects are expanded in the SQL preview. */
+  schemaObjectsExpanded: boolean;
 }
 
 export interface TransferOwnershipPreview {

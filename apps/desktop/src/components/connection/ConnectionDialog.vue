@@ -680,6 +680,7 @@ const gaussdbDriverMode = computed<GaussdbConnectionMode>({
   },
 });
 const isGaussdbMJdbcConnection = computed(() => gaussdbDriverMode.value === "m-jdbc");
+const isGaussdbDwsConnection = computed(() => gaussdbDriverMode.value === "dws");
 const showGaussdbIdentifierQuoteStyle = computed(() => supportsGaussdbIdentifierQuoteStyle(form.value));
 const gaussdbQuoteStyle = computed<GaussdbIdentifierQuoteStyle>({
   get: () => gaussdbIdentifierQuoteStyle(form.value),
@@ -10239,10 +10240,11 @@ function openExternalUrl(url: string) {
                       <SelectContent>
                         <SelectItem value="native">{{ t("connection.gaussdbConnectionModeNative") }}</SelectItem>
                         <SelectItem value="m-jdbc">{{ t("connection.gaussdbConnectionModeMJdbc") }}</SelectItem>
+                        <SelectItem value="dws">{{ t("connection.gaussdbConnectionModeDws") }}</SelectItem>
                       </SelectContent>
                     </Select>
                     <p class="text-xs leading-5 text-muted-foreground">
-                      {{ isGaussdbMJdbcConnection ? t("connection.gaussdbConnectionModeMJdbcHint") : t("connection.gaussdbConnectionModeNativeHint") }}
+                      {{ isGaussdbMJdbcConnection ? t("connection.gaussdbConnectionModeMJdbcHint") : isGaussdbDwsConnection ? t("connection.gaussdbConnectionModeDwsHint") : t("connection.gaussdbConnectionModeNativeHint") }}
                     </p>
                   </div>
                 </div>

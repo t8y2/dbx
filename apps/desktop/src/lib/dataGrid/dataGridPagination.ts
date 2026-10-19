@@ -41,6 +41,15 @@ export interface DataGridLoadAllSegment {
   limit: number;
 }
 
+export interface DataGridSurfaceBusyOptions {
+  isRefreshingData: boolean;
+  loading: boolean;
+  pageJumpBusy: boolean;
+  rowPreparationBusy?: boolean;
+  manualTotalRowCountLoading?: boolean;
+  manualTotalRowCountCoversSurface?: boolean;
+}
+
 export type DataGridInexactTotalRowCountMode = "at-least" | "estimated";
 
 export const ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS = 100;
@@ -70,6 +79,17 @@ export function dataGridTotalRowCountLabelKey(totalRowCountIsExact: boolean, ine
 export function showDataGridRerunTotalCountAction(options: { canCalculateTotalRowCount: boolean; displayedTotalRowCount?: number; totalRowCountIsExact: boolean }): boolean {
   if (!options.canCalculateTotalRowCount || options.totalRowCountIsExact !== true) return false;
   return typeof options.displayedTotalRowCount === "number" && Number.isFinite(options.displayedTotalRowCount) && options.displayedTotalRowCount >= 0;
+}
+
+/**
+ * The full-surface overlay (translucent cover + spinner + elapsed timer) is for
+ * real data reloads and page navigation only. A plain "count total rows" click
+ * runs in the background and reports progress in the result footer; covering
+ * the grid made it look like the table itself was being refreshed.
+ */
+export function isDataGridSurfaceBusy(options: DataGridSurfaceBusyOptions): boolean {
+  const manualCountCoversSurface = options.manualTotalRowCountLoading === true && options.manualTotalRowCountCoversSurface === true;
+  return options.isRefreshingData || options.loading || manualCountCoversSurface || options.pageJumpBusy || options.rowPreparationBusy === true;
 }
 
 export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean; maxRows?: number }): number | undefined {

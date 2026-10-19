@@ -1650,6 +1650,22 @@ async function focusSidebarTreeNode(nodeId: string) {
   row.focus({ preventScroll: true });
 }
 
+function sidebarDialogOpen(): boolean {
+  return sidebarDdlOpen.value || sidebarElasticsearchIndexMetadataOpen.value || sidebarObjectSourceOpen.value || sidebarProcedureOpen.value || sidebarVisibleDatabasesOpen.value || sidebarVisibleSchemasOpen.value || sidebarVisibleNacosNamespacesOpen.value || sidebarTableNameFilterOpen.value;
+}
+
+function restoreSidebarTreeFocusAfterDialog(nodeId: string | null | undefined) {
+  if (!nodeId) return;
+  void nextTick(() => {
+    if (!sidebarDialogOpen()) void focusSidebarTreeNode(nodeId);
+  });
+}
+
+async function focusSelectedNode() {
+  const nodeId = store.selectedTreeNodeId;
+  if (nodeId) await focusSidebarTreeNode(nodeId);
+}
+
 function clearSidebarSelection() {
   // Clicking the blank area of the tree clears the current selection. Row
   // clicks call event.stopPropagation(), so this only fires for blank clicks
@@ -2372,27 +2388,51 @@ watch(sidebarElasticsearchIndexMetadataOpen, (open) => {
 });
 
 watch(sidebarObjectSourceOpen, (open) => {
-  if (!open) sidebarObjectSourceTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarObjectSourceTarget.value?.node.id;
+    sidebarObjectSourceTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarProcedureOpen, (open) => {
-  if (!open) sidebarProcedureTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarProcedureTarget.value?.id;
+    sidebarProcedureTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarVisibleDatabasesOpen, (open) => {
-  if (!open) sidebarVisibleDatabasesTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarVisibleDatabasesTarget.value?.id;
+    sidebarVisibleDatabasesTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarVisibleSchemasOpen, (open) => {
-  if (!open) sidebarVisibleSchemasTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarVisibleSchemasTarget.value?.id;
+    sidebarVisibleSchemasTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarVisibleNacosNamespacesOpen, (open) => {
-  if (!open) sidebarVisibleNacosNamespacesTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarVisibleNacosNamespacesTarget.value?.id;
+    sidebarVisibleNacosNamespacesTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarTableNameFilterOpen, (open) => {
-  if (!open) sidebarTableNameFilterTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarTableNameFilterTarget.value?.id;
+    sidebarTableNameFilterTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 function collapseAllTreeNodes() {
@@ -2705,7 +2745,15 @@ onUnmounted(() => {
   if (sidebarTreeContentMeasureFrame) window.cancelAnimationFrame(sidebarTreeContentMeasureFrame);
 });
 
-defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSidebar, disconnectAllActiveConnections, openTableStructureForSelection: openSidebarTableStructureForSelection });
+defineExpose({
+  focusSearch,
+  createNewGroup,
+  collapseAllTreeNodes,
+  locateTabInSidebar,
+  disconnectAllActiveConnections,
+  focusSelectedNode,
+  openTableStructureForSelection: openSidebarTableStructureForSelection,
+});
 </script>
 
 <template>

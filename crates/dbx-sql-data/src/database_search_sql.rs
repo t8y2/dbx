@@ -75,42 +75,68 @@ pub fn is_numeric_search_column(column: &DatabaseSearchColumn) -> bool {
     NUMBER_TYPES.iter().any(|number_type| data_type.contains(number_type))
 }
 
-pub fn build_database_search_sql(options: DatabaseSearchSqlOptions) -> Option<DatabaseSearchSql> {
-    let term = clean_term(&options.term);
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableSearchConditions {
+    pub where_clause: String,
+    pub searchable_columns: Vec<String>,
+}
+
+/// 单表搜索条件拼装：数据搜索单表查询与多表探测分支共用，
+/// 保证两条路径对同一表同一关键词产出完全一致的 WHERE 条件。
+pub fn build_table_search_conditions(
+    database_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+    columns: &[DatabaseSearchColumn],
+    term: &str,
+) -> Option<TableSearchConditions> {
+    let term = clean_term(term);
     if term.is_empty() {
         return None;
     }
 
-    let text_columns: Vec<_> = options.columns.iter().filter(|column| is_text_search_column(column)).collect();
+    let text_columns: Vec<_> = columns.iter().filter(|column| is_text_search_column(column)).collect();
     let numeric_term = parse_numeric_term(&term);
     let numeric_columns: Vec<_> = if numeric_term.is_some() {
-        options.columns.iter().filter(|column| is_numeric_search_column(column)).collect()
+        columns.iter().filter(|column| is_numeric_search_column(column)).collect()
     } else {
         Vec::new()
     };
 
     let mut conditions = Vec::new();
     for column in &text_columns {
-        let identifier = quote_table_identifier(options.database_type, &column.name);
-        conditions.push(format!(
-            "{} LIKE {} ESCAPE '~'",
-            text_cast_expression(options.database_type, options.driver_profile.as_deref(), &identifier),
-            sql_string_literal(&like_pattern(&term))
-        ));
+        let identifier = quote_table_identifier(database_type, &column.name);
+        conditions.push(text_search_condition(database_type, driver_profile, column, &identifier, &term));
     }
     for column in &numeric_columns {
-        let identifier = quote_table_identifier(options.database_type, &column.name);
+        let identifier = quote_table_identifier(database_type, &column.name);
         conditions.push(format!("{identifier} = {}", numeric_term.as_deref().unwrap_or_default()));
     }
     if conditions.is_empty() {
         return None;
     }
 
+    Some(TableSearchConditions {
+        where_clause: conditions.join(" OR "),
+        searchable_columns: text_columns
+            .iter()
+            .chain(numeric_columns.iter())
+            .map(|column| column.name.clone())
+            .collect(),
+    })
+}
+
+pub fn build_database_search_sql(options: DatabaseSearchSqlOptions) -> Option<DatabaseSearchSql> {
+    let conditions = build_table_search_conditions(
+        options.database_type,
+        options.driver_profile.as_deref(),
+        &options.columns,
+        &options.term,
+    )?;
     let table = qualified_table_name(options.database_type, options.schema.as_deref(), &options.table_name);
-    let where_clause = conditions.join(" OR ");
+    let where_clause = conditions.where_clause;
     let limit = clamp_limit(options.limit);
-    let searchable_columns =
-        text_columns.iter().chain(numeric_columns.iter()).map(|column| column.name.clone()).collect();
+    let searchable_columns = conditions.searchable_columns;
 
     let sql = match pagination_strategy(options.database_type, PaginationContext::BoundedRead) {
         TablePaginationStrategy::SqlServerTop => format!("SELECT TOP {limit} * FROM {table} WHERE ({where_clause})"),
@@ -179,7 +205,7 @@ fn clean_term(term: &str) -> String {
     term.trim().to_string()
 }
 
-fn clamp_limit(limit: Option<usize>) -> usize {
+pub(crate) fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(20).clamp(1, 100)
 }
 
@@ -248,6 +274,35 @@ fn text_cast_expression(database_type: Option<DatabaseType>, driver_profile: Opt
     }
 }
 
+/// Oracle 家族的 CLOB 列不能走 CAST AS VARCHAR2(4000)：内容超 4000 字符时直接抛
+/// ORA-22835（整表不可搜）。改用 DBMS_LOB.INSTR 全量搜索——不截断、不报错；
+/// LOWER(CLOB) 返回 CLOB，INSTR 对 CLOB 直接可用。DM8/OB Oracle 模式均提供 DBMS_LOB。
+/// INSTR 按字面子串匹配，与 LIKE '%term%' ESCAPE（通配符已被转义为字面量）语义一致。
+fn is_oracle_family_clob(database_type: Option<DatabaseType>, data_type: &str) -> bool {
+    matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng))
+        && data_type.to_ascii_lowercase().contains("clob")
+}
+
+fn text_search_condition(
+    database_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+    column: &DatabaseSearchColumn,
+    identifier: &str,
+    term: &str,
+) -> String {
+    if is_oracle_family_clob(database_type, &column.data_type) {
+        return format!(
+            "DBMS_LOB.INSTR(LOWER({identifier}), {}) > 0",
+            sql_string_literal(&clean_term(term).to_ascii_lowercase())
+        );
+    }
+    format!(
+        "{} LIKE {} ESCAPE '~'",
+        text_cast_expression(database_type, driver_profile, identifier),
+        sql_string_literal(&like_pattern(term))
+    )
+}
+
 fn sql_value_literal(database_type: Option<DatabaseType>, column: &DatabaseSearchColumn, value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
@@ -279,6 +334,51 @@ mod tests {
 
     fn col(name: &str, data_type: &str, is_primary_key: bool) -> DatabaseSearchColumn {
         DatabaseSearchColumn { name: name.to_string(), data_type: data_type.to_string(), is_primary_key }
+    }
+
+    #[test]
+    fn oracle_family_clob_columns_use_dbms_lob_instr() {
+        let query = build_database_search_sql(DatabaseSearchSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            driver_profile: None,
+            schema: Some("ZOEDM".to_string()),
+            table_name: "CLOSED_LOOP_VIEW_LOG".to_string(),
+            columns: vec![col("ID", "number", true), col("TITLE", "varchar2", false), col("CONTENT", "clob", false)],
+            term: "closed_loop".to_string(),
+            limit: Some(20),
+        })
+        .unwrap();
+
+        // CLOB 列走 DBMS_LOB.INSTR(全量、不抛 ORA-22835),varchar2 列保持 CAST+LIKE
+        assert!(query.sql.contains("DBMS_LOB.INSTR(LOWER(\"CONTENT\"), 'closed_loop') > 0"));
+        // LIKE 侧通配符照常转义(_ → ~_)
+        assert!(query.sql.contains("LOWER(CAST(\"TITLE\" AS VARCHAR2(4000))) LIKE '%closed~_loop%' ESCAPE '~'"));
+
+        // Dameng / OceanBase Oracle 同为 Oracle 家族
+        let dameng = build_database_search_sql(DatabaseSearchSqlOptions {
+            database_type: Some(DatabaseType::Dameng),
+            driver_profile: None,
+            schema: None,
+            table_name: "t".to_string(),
+            columns: vec![col("BODY", "clob", false)],
+            term: "x".to_string(),
+            limit: None,
+        })
+        .unwrap();
+        assert!(dameng.sql.contains("DBMS_LOB.INSTR(LOWER(\"BODY\"), 'x') > 0"));
+
+        // 其他方言的 clob/text 列不受影响,仍走 CAST+LIKE
+        let mysql = build_database_search_sql(DatabaseSearchSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            driver_profile: None,
+            schema: None,
+            table_name: "t".to_string(),
+            columns: vec![col("body", "longtext", false)],
+            term: "x".to_string(),
+            limit: None,
+        })
+        .unwrap();
+        assert!(mysql.sql.contains("LIKE '%x%'"));
     }
 
     #[test]

@@ -16,6 +16,8 @@ import { canDownloadAndInstallUpdate, isNewerRemoteVersion, resolveReleaseTagUrl
 import type { ComponentUpdateCategory } from "@/composables/useComponentUpdates";
 import { currentLocale } from "@/i18n";
 import { changelogLangFromLocale, createLatestRequestGuard, fetchChangelog, type ChangelogRelease } from "@/lib/app/changelog";
+import DriverInstallProgressCircle from "@/components/config/DriverInstallProgressCircle.vue";
+import { driverInstallProgressPercent, formatDriverInstallProgressText, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 
 type UpdateTab = "app" | ComponentUpdateCategory;
 
@@ -37,6 +39,9 @@ const props = withDefaults(
     updateCheckFailed: boolean;
     updateDownloadSource: UpdateDownloadSource;
     driverUpdates?: AgentDriverInfo[];
+    driverBatchCompleted?: number;
+    driverBatchTotal?: number;
+    driverProgressMap?: Record<string, DriverInstallProgress | null | undefined>;
     jdbcUpdate?: JdbcPluginStatus | null;
     mcpUpdate?: McpServerStatus | null;
     pluginUpdates?: MarketplacePluginListing[];
@@ -48,6 +53,9 @@ const props = withDefaults(
   }>(),
   {
     driverUpdates: () => [],
+    driverBatchCompleted: 0,
+    driverBatchTotal: 0,
+    driverProgressMap: () => ({}),
     jdbcUpdate: null,
     mcpUpdate: null,
     pluginUpdates: () => [],
@@ -122,6 +130,33 @@ const selectedCategoryHasUpdate = computed(() => {
   return false;
 });
 const isAnyComponentUpdating = computed(() => props.componentUpdatesUpdating || props.updatingComponent !== null);
+
+function getDriverProgress(dbType: string): DriverInstallProgress | null {
+  return props.driverProgressMap?.[dbType] ?? null;
+}
+
+function isDriverProgressActive(dbType: string): boolean {
+  const p = getDriverProgress(dbType);
+  return Boolean(p && p.step !== "done" && p.step !== "all-done");
+}
+
+function getDriverProgressPercent(dbType: string): number | null {
+  return driverInstallProgressPercent(getDriverProgress(dbType));
+}
+
+function getDriverProgressTitle(dbType: string): string {
+  return formatDriverInstallProgressText(getDriverProgress(dbType), t) || t("driverStore.updating");
+}
+
+const updatingButtonText = computed(() => {
+  if (props.driverBatchTotal > 0) {
+    return t("driverStore.upgradingProgress", {
+      current: props.driverBatchCompleted,
+      total: props.driverBatchTotal,
+    });
+  }
+  return t("updates.updating");
+});
 // Component update tasks are owned by the app-level composable. Closing the
 // dialog only leaves them running in the background; replacing an app update
 // is the only operation that must keep the modal open.
@@ -407,7 +442,8 @@ watch(
                     <span class="min-w-0 truncate font-medium">{{ driver.label }}</span>
                     <span class="flex shrink-0 items-center gap-3">
                       <span class="text-xs tabular-nums text-muted-foreground">{{ driver.installed_version || driver.version }} → {{ driver.version }}</span>
-                      <span class="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
+                      <DriverInstallProgressCircle v-if="isDriverProgressActive(driver.db_type)" :percent="getDriverProgressPercent(driver.db_type)" :title="getDriverProgressTitle(driver.db_type)" />
+                      <span v-else class="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
                     </span>
                   </div>
                 </div>
@@ -512,7 +548,7 @@ watch(
             <Button variant="ghost" class="shrink-0" @click="handleOpenChange(false)">{{ t("updates.updateInBackground") }}</Button>
             <Button class="shrink-0" disabled>
               <Loader2 class="h-4 w-4 animate-spin" />
-              {{ t("updates.updating") }}
+              {{ updatingButtonText }}
             </Button>
           </template>
           <Button v-else-if="selectedCategory" :disabled="!selectedCategoryHasUpdate || isInstallingUpdate || isUpdatingAll" @click="emit('install-component-updates', selectedCategory)">

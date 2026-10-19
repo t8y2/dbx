@@ -1,4 +1,5 @@
 import { joinedSaveOptions } from "@/lib/dataGrid/joinedRowChanges";
+import { isAiPromptImeCompositionEvent } from "@/lib/ai/aiPromptKeyboard";
 import { ref, shallowRef, triggerRef, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, toRaw, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
 import type { DataGridSaveGuard } from "@/lib/backend/tauri";
@@ -1248,7 +1249,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     restoreScrollAcrossFrames(restoreScroll);
   }
 
-  function onEditKeydown(e: KeyboardEvent) {
+  function onEditKeydown(e: KeyboardEvent, compositionActive = false) {
+    // Enter/Escape can also be the key that commits an IME candidate. Never
+    // treat that key as the grid shortcut; otherwise a Chinese/Japanese input
+    // commits the cell before the composition is inserted (#12470).
+    if (isAiPromptImeCompositionEvent(e, compositionActive)) return;
     const isExpandedTextarea = typeof HTMLTextAreaElement !== "undefined" && e.target instanceof HTMLTextAreaElement && e.target.dataset.expandedCellEditor === "true";
     if (e.key === "Enter" && (!isExpandedTextarea || e.metaKey || e.ctrlKey)) {
       e.preventDefault();

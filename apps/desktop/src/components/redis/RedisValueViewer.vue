@@ -1898,8 +1898,14 @@ async function loadMore() {
   if (!collectionSearchSupported.value) return;
   const scope = collectionScope();
   if (!scope) return;
-  if (activeCollectionSearchQuery.value) await collectionSearchController.start();
-  else await collectionSearchController.browse(scope, collectionItems.value, scanCursor.value!);
+  if (activeCollectionSearchQuery.value) {
+    await collectionSearchController.start();
+  } else {
+    await collectionSearchController.browse(scope, collectionItems.value, scanCursor.value!);
+    if (collectionSearchState.value.status === "failed" && collectionSearchState.value.error) {
+      toast(errorMessage(collectionSearchState.value.error), 3000);
+    }
+  }
 }
 
 async function saveString() {

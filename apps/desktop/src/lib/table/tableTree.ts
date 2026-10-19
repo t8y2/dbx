@@ -897,6 +897,7 @@ export function buildObjectGroupPlaceholderNodes({
 }
 
 export function objectGroupRefreshParentId(node: TreeNode): string | null {
+  if (node.tableName) return null;
   if (!objectGroupNodeTypes.has(node.type)) return null;
   const suffixStart = node.id.lastIndexOf(":__");
   if (suffixStart < 0) return null;

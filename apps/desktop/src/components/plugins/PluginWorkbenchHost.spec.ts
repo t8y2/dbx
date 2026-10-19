@@ -41,9 +41,19 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     repushPluginConnection: mocks.repushPluginConnection,
     reopenPluginConnection: mocks.reopenPluginConnection,
+    connections: [
+      { id: "conn-mysql", name: "Prod MySQL", db_type: "mysql", plugin_connection_provider: undefined, plugin_connection_type: undefined, read_only: false },
+      { id: "conn-sample", name: "Sample Connection", db_type: "plugin", plugin_connection_provider: "sample.provider", plugin_connection_type: "sample", read_only: true },
+    ],
+    connectedIds: new Set(["conn-mysql"]),
   }),
 }));
-vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openPluginWorkbench: mocks.openPluginWorkbench }) }));
+vi.mock("@/stores/queryStore", () => ({
+  useQueryStore: () => ({
+    openPluginWorkbench: mocks.openPluginWorkbench,
+    pluginWorkbenchTitles: vi.fn((_id: string) => ["Terminal 1"]),
+  }),
+}));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ locale: ref("en"), t: (key: string) => key }) }));
 
 import { clearPluginUiHtmlCache } from "@/lib/plugins/pluginUiHtmlCache";
@@ -318,5 +328,39 @@ describe("PluginWorkbenchHost initialization", () => {
     document.dispatchEvent(payload("leave"));
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "dragstate", active: false }), "*");
     elementFromPoint.mockRestore();
+  });
+
+  it("serves all connections with connected status when plugin has host.connections:read", async () => {
+    const pluginWithPerm: InstalledPlugin = {
+      manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions: ["host.connections:read"], drivers: [], contributions: [] },
+      compatibility: { compatible: true },
+    };
+    app = createApp(PluginWorkbenchHost, { plugin: pluginWithPerm, contribution, context: { connectionId: "connection" } });
+    app.mount(root);
+    await flushWorkbenchLoad();
+    const frame = root.querySelector("iframe")!;
+    const target = frame.contentWindow!;
+    const postMessage = vi.spyOn(target, "postMessage").mockImplementation(() => {});
+    window.dispatchEvent(new MessageEvent("message", { source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } }));
+    await vi.waitFor(() => expect(mocks.repushPluginConnection).toHaveBeenCalled());
+    postMessage.mockClear();
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: target,
+        data: { source: "dbx-plugin", version: 1, type: "request", id: "conn-req-1", method: "host.getConnections", params: {} },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: "dbx-host",
+          type: "response",
+          id: "conn-req-1",
+          result: expect.arrayContaining([expect.objectContaining({ id: "conn-mysql", name: "Prod MySQL", dbType: "mysql", dialect: "mysql", connected: true, isConnected: true }), expect.objectContaining({ id: "conn-sample", name: "Sample Connection", connected: false, isConnected: false })]),
+        }),
+        "*",
+      ),
+    );
   });
 });

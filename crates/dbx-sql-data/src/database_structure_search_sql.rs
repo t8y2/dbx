@@ -285,7 +285,7 @@ fn oracle_family_structure_search_sql(
          LEFT JOIN ALL_COL_COMMENTS m ON c.OWNER = m.OWNER AND c.TABLE_NAME = m.TABLE_NAME AND c.COLUMN_NAME = m.COLUMN_NAME \
          WHERE c.OWNER = {owner} \
          AND ({name_expr} LIKE LOWER({pattern}) ESCAPE '~' OR LOWER(COALESCE(m.COMMENTS, '')) LIKE LOWER({pattern}) ESCAPE '~') \
-         ORDER BY object_schema, object_name, column_name) WHERE ROWNUM <= {limit} \
+         ORDER BY 1, 2, 3) WHERE ROWNUM <= {limit} \
          UNION ALL \
          SELECT * FROM ( \
          SELECT t.OWNER AS object_schema, t.TABLE_NAME AS object_name, CAST(NULL AS VARCHAR2(128)) AS column_name \
@@ -293,8 +293,8 @@ fn oracle_family_structure_search_sql(
          FROM ALL_TAB_COMMENTS t \
          WHERE t.OWNER = {owner} \
          AND LOWER(COALESCE(t.COMMENTS, '')) LIKE LOWER({pattern}) ESCAPE '~' \
-         ORDER BY object_schema, object_name) WHERE ROWNUM <= {table_limit} \
-         ORDER BY object_schema, object_name, column_name) WHERE ROWNUM <= {total_limit}",
+         ORDER BY 1, 2) WHERE ROWNUM <= {table_limit} \
+         ORDER BY 1, 2, 3) WHERE ROWNUM <= {total_limit}",
         owner = owner_literal,
         name_expr = name_expr,
         pattern = pattern_literal,

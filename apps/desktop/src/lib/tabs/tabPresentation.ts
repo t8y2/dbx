@@ -12,6 +12,7 @@ import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { SqlErrorPosition } from "@/lib/backend/errorUtils";
 import { queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
+import { normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, QueryResult, QueryResultRun, QueryTab } from "@/types/database";
 import type { ResultTabNamingMode } from "@/stores/settingsStore";
 
@@ -664,8 +665,15 @@ export function resultGridCacheKey(tab: Pick<QueryTab, "id" | "activeResultRunId
   return `${tab.id}-${tab.activeResultRunId ?? "current"}-${tab.activeResultIndex ?? 0}`;
 }
 
-export function resultGridColumnWidthCacheKey(tab: Pick<QueryTab, "id"> & Partial<Pick<QueryTab, "activeResultIndex">>): string {
-  return `result-column-width-${tab.id}-${tab.activeResultIndex ?? 0}`;
+export function resultGridColumnWidthCacheKey(tab: Pick<QueryTab, "id"> & Partial<Pick<QueryTab, "activeResultIndex" | "externalSqlPath" | "savedSqlId">>): string {
+  const resultIndex = tab.activeResultIndex ?? 0;
+  if (tab.externalSqlPath) {
+    return `result-column-width-file-${normalizeExternalSqlPath(tab.externalSqlPath)}-${resultIndex}`;
+  }
+  if (tab.savedSqlId) {
+    return `result-column-width-saved-${tab.savedSqlId}-${resultIndex}`;
+  }
+  return `result-column-width-${tab.id}-${resultIndex}`;
 }
 
 export function resultGridInstanceKey(tab: Pick<QueryTab, "id" | "activeResultRunId" | "activeResultIndex" | "resultGridRevision">): string {

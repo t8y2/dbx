@@ -76,14 +76,13 @@ test("rejects very large SQL before loading formatter work", async () => {
   await assert.rejects(() => formatSqlText("x".repeat(MAX_SQL_FORMAT_CHARS + 1), "generic"), /too large/i);
 });
 
-test("keeps a trailing line comment from swallowing the column after it", async () => {
-  // Oracle stores a view's text as written, so a comment at the end of a column
-  // line is followed by the next column on its own line. A `--` comment consumes
-  // the rest of its line, so the next column has to start a new line instead of
-  // being appended to that comment.
+test("keeps a trailing line comment on its field line without swallowing the next column", async () => {
+  // A `--` comment consumes the rest of its source line. When the comment was
+  // written after the field's comma, keep it there and put the next column on
+  // a new line so it is still valid SQL (#12615).
   const formatted = await formatSqlText('CREATE VIEW "TEMP_TEST_VIEW" AS SELECT trunc(sysdate) AS dates, -- 测试\n(SELECT sysdate FROM dual t) AS nows\nFROM dual;', "oracle", { keywordCase: "upper" });
 
-  assert.equal(formatted, 'CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates,\n       -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;');
+  assert.equal(formatted, 'CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates, -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;');
 });
 
 test("keeps a line comment from swallowing the separator after it", async () => {
@@ -98,10 +97,10 @@ test("keeps a line comment from swallowing the statement terminator", async () =
   assert.equal(formatted, "SELECT a -- c\n;");
 });
 
-test("formats a comment on its own line without extra breaks", async () => {
+test("keeps a source trailing comment on the field line", async () => {
   const formatted = await formatSqlText("select a, -- c\nb from t", "postgres", { keywordCase: "upper" });
 
-  assert.equal(formatted, "SELECT a,\n       -- c\n       b\nFROM t");
+  assert.equal(formatted, "SELECT a, -- c\n       b\nFROM t");
 });
 
 test("compressSqlText collapses whitespace into single spaces", () => {

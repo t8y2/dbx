@@ -154,6 +154,18 @@ pub struct BuildDatabaseStructureSearchSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildDatabaseSearchColumnsSqlRequest {
+    pub options: dbx_core::database_search_columns_sql::DatabaseSearchColumnsSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildDatabaseSearchProbeSqlRequest {
+    pub options: dbx_core::database_search_probe_sql::DatabaseSearchProbeSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SupportsDatabaseStructureSearchRequest {
     pub database_type: Option<dbx_core::models::connection::DatabaseType>,
     pub driver_profile: Option<String>,
@@ -1152,6 +1164,18 @@ pub async fn build_database_structure_search_sql(
     Json(req): Json<BuildDatabaseStructureSearchSqlRequest>,
 ) -> Json<Option<dbx_core::database_structure_search_sql::DatabaseStructureSearchSql>> {
     Json(dbx_core::database_structure_search_sql::build_database_structure_search_sql(req.options))
+}
+
+pub async fn build_database_search_columns_sql(
+    Json(req): Json<BuildDatabaseSearchColumnsSqlRequest>,
+) -> Json<Option<dbx_core::database_search_columns_sql::DatabaseSearchColumnsSql>> {
+    Json(dbx_core::database_search_columns_sql::build_database_search_columns_sql(req.options))
+}
+
+pub async fn build_database_search_probe_sql(
+    Json(req): Json<BuildDatabaseSearchProbeSqlRequest>,
+) -> Json<Option<dbx_core::database_search_probe_sql::DatabaseSearchProbeSql>> {
+    Json(dbx_core::database_search_probe_sql::build_database_search_probe_sql(req.options))
 }
 
 pub async fn supports_database_structure_search(Json(req): Json<SupportsDatabaseStructureSearchRequest>) -> Json<bool> {

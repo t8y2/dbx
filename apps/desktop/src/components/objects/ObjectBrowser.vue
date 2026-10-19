@@ -277,6 +277,7 @@ const compileErrorMessage = ref("");
 const sidePanelRow = ref<ObjectBrowserRow | null>(null);
 const openedInitialEvent = ref("");
 const isEventEditor = computed(() => sidePanelMode.value === "event-editor");
+const isSidePanelOpen = computed(() => !!sidePanelRow.value || isEventEditor.value);
 const sidePanelMode = ref<"table-info" | "source" | "type-info" | "event-editor">("source");
 const eventEditorKey = computed(() =>
   eventEditorInstanceKey({
@@ -1189,13 +1190,13 @@ function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
       clearTimeout(singleClickTimer);
       singleClickTimer = null;
     }
-    const firstClickRan = settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel !== false;
+    const firstClickRan = settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel !== false || isSidePanelOpen.value;
     if (!firstClickRan || action !== singleClickRowAction(row, effectiveDatabaseType.value)) {
       executeRowAction(row, action);
     }
     return;
   }
-  if (settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel === false) {
+  if (settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel === false && !isSidePanelOpen.value) {
     return;
   }
   // Single click: defer when the row has a distinct double-click action so a
@@ -1314,11 +1315,15 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   selectedRowId.value = row.id;
   // Toggle off if clicking the same table
   if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "table-info" && !initialTab) {
+    if (settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel === false) {
+      return;
+    }
     closeSidePanel();
     return;
   }
   sidePanelRow.value = row;
   sidePanelMode.value = "table-info";
+  sourceRow.value = null;
   const epoch = sidePanelGuard.start();
   // Reset state
   tableColumns.value = [];
@@ -1706,11 +1711,10 @@ function onSidePanelResizeEnd() {
 
 function closeSidePanel() {
   sidePanelRow.value = null;
+  sourceRow.value = null;
   sidePanelMode.value = "source";
   sidePanelGuard.bump();
 }
-
-const isSidePanelOpen = computed(() => !!sidePanelRow.value || isEventEditor.value);
 
 function toggleSidePanel() {
   if (isSidePanelOpen.value) {
@@ -1740,11 +1744,15 @@ function toggleAutoOpenDetailPanel() {
 async function openTypeInfo(row: ObjectBrowserRow) {
   selectedRowId.value = row.id;
   if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "type-info") {
+    if (settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel === false) {
+      return;
+    }
     closeSidePanel();
     return;
   }
   sidePanelRow.value = row;
   sidePanelMode.value = "type-info";
+  sourceRow.value = null;
   sidePanelGuard.bump();
 }
 
@@ -1752,6 +1760,7 @@ function openTypeDdl(row: ObjectBrowserRow) {
   selectedRowId.value = row.id;
   sidePanelRow.value = row;
   sidePanelMode.value = "type-info";
+  sourceRow.value = null;
   sidePanelGuard.bump();
   // DDL tab is selected by the panel once details load; switching the tab is
   // deferred via a dedicated request so the panel can focus it.
@@ -1790,6 +1799,9 @@ function openSourceTab(row: ObjectBrowserRow) {
 async function openSource(row: ObjectBrowserRow) {
   // Toggle off if clicking the same source row
   if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "source") {
+    if (settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel === false) {
+      return;
+    }
     closeSidePanel();
     return;
   }

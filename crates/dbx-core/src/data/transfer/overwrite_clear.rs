@@ -28,11 +28,7 @@ pub async fn clear_foreign_key_linked_overwrite_targets(
     target_db_type: DatabaseType,
     target_pool_key: &str,
 ) -> Result<HashSet<String>, String> {
-    if request.mode != TransferMode::Overwrite
-        || request.drop_target_before_create
-        || tables.len() < 2
-        || is_mongodb_transfer_type(&target_db_type)
-    {
+    if !overwrite_clear_prepass_enabled(request, tables.len(), &target_db_type) {
         return Ok(HashSet::new());
     }
 
@@ -141,6 +137,20 @@ pub async fn clear_foreign_key_linked_overwrite_targets(
     Ok(cleared)
 }
 
+fn overwrite_clear_prepass_enabled(
+    request: &TransferRequest,
+    table_count: usize,
+    target_db_type: &DatabaseType,
+) -> bool {
+    request.mode == TransferMode::Overwrite
+        // Structure-only transfers use overwrite for selected schema objects
+        // (for example MySQL routines), but must never mutate table rows.
+        && should_copy_data(&request.content)
+        && !request.drop_target_before_create
+        && table_count >= 2
+        && !is_mongodb_transfer_type(target_db_type)
+}
+
 pub(super) fn overwrite_pre_pass_clear_sql(
     table: &str,
     schema: &str,
@@ -159,6 +169,32 @@ pub(super) fn overwrite_pre_pass_clear_sql(
 mod tests {
     use super::*;
 
+    fn request(content: TransferContent) -> TransferRequest {
+        TransferRequest {
+            transfer_id: "transfer-test".into(),
+            source_connection_id: "source".into(),
+            source_database: "source".into(),
+            source_schema: "source".into(),
+            source_catalog: None,
+            target_connection_id: "target".into(),
+            target_database: "target".into(),
+            target_schema: "target".into(),
+            target_catalog: None,
+            tables: vec!["parent".into(), "child".into()],
+            create_table: true,
+            content,
+            objects: None,
+            mode: TransferMode::Overwrite,
+            target_table_name_case: TransferTableNameCase::Preserve,
+            quote_target_column_names: true,
+            ownership_policy: TransferOwnershipPolicy::Preserve,
+            batch_size: 1000,
+            table_filters: HashMap::new(),
+            drop_target_before_create: false,
+            drop_target_confirmed: false,
+        }
+    }
+
     #[test]
     fn referenced_targets_are_deleted_instead_of_truncated() {
         assert_eq!(
@@ -173,5 +209,13 @@ mod tests {
             overwrite_pre_pass_clear_sql("EVENTS", "APP", &DatabaseType::Db2, None, false),
             "TRUNCATE TABLE \"APP\".\"EVENTS\" IMMEDIATE"
         );
+    }
+
+    #[test]
+    fn structure_only_overwrite_does_not_clear_table_rows() {
+        let structure_request = request(TransferContent::StructureOnly);
+        assert!(!overwrite_clear_prepass_enabled(&structure_request, 2, &DatabaseType::Mysql));
+        let data_request = request(TransferContent::StructureAndData);
+        assert!(overwrite_clear_prepass_enabled(&data_request, 2, &DatabaseType::Mysql));
     }
 }

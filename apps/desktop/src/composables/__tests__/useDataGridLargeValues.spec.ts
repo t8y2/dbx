@@ -421,6 +421,19 @@ describe("useDataGridLargeValues", () => {
     expect(result.value.rows[0]).toEqual([1, "first complete", "second complete"]);
     expect(result.value.large_value_cells).toEqual([]);
   });
+  it("hydrates every large value cell on the current page in one batch", async () => {
+    const result = previewResult("text", "preview", 9);
+    result.value.large_value_context = { connectionId: "postgres-1", database: "MAXIMO" };
+    result.value.large_value_cells![0]!.value_ref = "page-locator";
+    mocks.readLargeValueChunk.mockResolvedValue({ status: "ok", data: "full text", next_offset: 9, eof: true, value_kind: "text" });
+    const { largeValues } = mountLargeValues("postgres", result);
+
+    await expect(largeValues.hydrateLargeValueCells([1], [0, 1])).resolves.toBe(1);
+
+    expect(result.value.rows[0]).toEqual([1, "full text"]);
+    expect(result.value.large_value_cells).toEqual([]);
+    expect(result.value.large_value_refs).toContain("page-locator");
+  });
   it.each([
     ["postgres", 3],
     ["mysql", 1],

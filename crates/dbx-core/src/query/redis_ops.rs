@@ -153,28 +153,18 @@ pub async fn redis_get_value_in_db_with_preview_limit_core(
     match &pool {
         PoolKind::Redis(redis) => {
             let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            let scope = redis_driver::RedisOperationScope { connection_id: connection_id.to_string(), db };
             match redis.as_ref() {
                 RedisConnection::Direct(con) => {
                     let mut con = con.lock().await;
                     redis_driver::select_db(&mut *con, db).await?;
-                    redis_driver::get_value_scoped_with_preview_limit(
-                        &mut *con,
-                        &key,
-                        &redis_driver::RedisOperationScope { connection_id: connection_id.to_string(), db },
-                        preview_limit_bytes,
-                    )
-                    .await
+                    redis_driver::get_value_scoped_with_preview_limit(&mut *con, &key, &scope, preview_limit_bytes)
+                        .await
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_database(cluster, db).await?;
                     let mut con = redis_driver::cluster_key_connection_in_db(cluster, &key, db).await?;
-                    redis_driver::get_value_scoped_with_preview_limit(
-                        &mut con,
-                        &key,
-                        &redis_driver::RedisOperationScope { connection_id: connection_id.to_string(), db },
-                        preview_limit_bytes,
-                    )
-                    .await
+                    redis_driver::get_value_scoped_with_preview_limit(&mut con, &key, &scope, preview_limit_bytes).await
                 }
             }
         }
@@ -1300,12 +1290,22 @@ pub async fn redis_load_more_in_db_core(
     match &pool {
         PoolKind::Redis(redis) => {
             let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            let scope = redis_driver::RedisOperationScope { connection_id: connection_id.to_string(), db };
             match redis.as_ref() {
                 RedisConnection::Direct(con) => {
                     let mut con = con.lock().await;
                     redis_driver::select_db(&mut *con, db).await?;
-                    redis_driver::load_more_collection(&mut *con, &key, key_type, cursor, count, filter, sort_direction)
-                        .await
+                    redis_driver::load_more_collection_scoped(
+                        &mut *con,
+                        &key,
+                        key_type,
+                        cursor,
+                        count,
+                        filter,
+                        sort_direction,
+                        &scope,
+                    )
+                    .await
                 }
                 RedisConnection::Cluster(cluster) => {
                     redis_driver::ensure_cluster_database(cluster, db).await?;
@@ -1318,7 +1318,7 @@ pub async fn redis_load_more_in_db_core(
                         count,
                         filter,
                         sort_direction,
-                        &redis_driver::RedisOperationScope { connection_id: connection_id.to_string(), db },
+                        &scope,
                     )
                     .await
                 }

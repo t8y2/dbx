@@ -1496,6 +1496,31 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.executionId).toBeUndefined();
   });
 
+  it("rejects executeCurrentSql when another query is currently executing", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("mysql-1", "app", "ConcurrentRun");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    const gate = deferred<QueryResult[]>();
+    mocks.executeMulti.mockReturnValueOnce(gate.promise);
+
+    const firstRun = store.executeCurrentSql("SELECT 1", { tabId: id });
+    expect(tab.isExecuting).toBe(true);
+
+    const secondRun = await store.executeCurrentSql("SELECT 2", { tabId: id });
+    expect(secondRun).toBe(false);
+
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(1));
+
+    const thirdRun = await store.executeCurrentSql("SELECT 3", { tabId: id });
+    expect(thirdRun).toBe(false);
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+
+    gate.resolve([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    await firstRun;
+    expect(tab.isExecuting).toBe(false);
+  });
+
   it("cancels result restoration without dispatch and ignores its late payload", async () => {
     const { store, id, tab, read, snapshot } = await prepareDiskBackedAutoKeptResult();
     const execution = store.executeCurrentSql("SELECT 2");

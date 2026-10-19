@@ -2339,6 +2339,46 @@ describe("useDataGridEditor saveChanges reload", () => {
   });
 });
 
+describe("useDataGridEditor IME composition", () => {
+  it("does not commit or cancel the cell while Enter/Escape belongs to an IME composition", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "hidden", "Lovelace"]]);
+    editor.startEdit(0, 0);
+    editor.editValue.value = "中";
+
+    const composing = { key: "Enter", isComposing: true, keyCode: 229, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyboardEvent;
+    editor.onEditKeydown(composing);
+    expect(composing.preventDefault).not.toHaveBeenCalled();
+    expect(editor.editingCell.value).not.toBeNull();
+
+    const escape = { key: "Escape", isComposing: true, keyCode: 229, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyboardEvent;
+    editor.onEditKeydown(escape);
+    expect(escape.preventDefault).not.toHaveBeenCalled();
+    expect(editor.editingCell.value).not.toBeNull();
+  });
+
+  it("keeps the guard for the Process key without keyCode 229", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "hidden", "Lovelace"]]);
+    editor.startEdit(0, 0);
+    const process = { key: "Process", isComposing: false, keyCode: 13, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyboardEvent;
+    editor.onEditKeydown(process);
+    expect(process.preventDefault).not.toHaveBeenCalled();
+    expect(editor.editingCell.value).not.toBeNull();
+  });
+
+  it("defers to the composition tracking flag when the keydown itself carries no composition signal", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "hidden", "Lovelace"]]);
+    editor.startEdit(0, 0);
+    // WebKit fires compositionend before the committing keydown, so the input's
+    // composition tracking ref is the only reliable signal in that window.
+    const enter = { key: "Enter", isComposing: false, keyCode: 13, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyboardEvent;
+    editor.onEditKeydown(enter, true);
+    expect(enter.preventDefault).not.toHaveBeenCalled();
+    expect(editor.editingCell.value).not.toBeNull();
+    editor.onEditKeydown(enter, false);
+    expect(enter.preventDefault).toHaveBeenCalled();
+  });
+});
+
 describe("useDataGridEditor cell edit focus", () => {
   it("selects the editor value only on the first frame so fast typing is not clobbered (#7336)", async () => {
     const editor = createEditor(undefined, true, undefined, undefined, [["long json value", "hidden", "last"]]);

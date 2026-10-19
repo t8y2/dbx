@@ -30,7 +30,7 @@
       "uniqueItems": true,
       "items": {
         "anyOf": [
-          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai", "host.clipboard:read", "host.data:read"] },
+          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai", "host.clipboard:read", "host.data:read", "host.connections:read", "host.connections::read"] },
           { "type": "string", "pattern": "^host\\.network:https://[A-Za-z0-9._-]+(:[0-9]+)?$" }
         ]
       }
@@ -60,7 +60,16 @@
     "contributions": {
       "type": "array",
       "items": {
-        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }, { "$ref": "#/$defs/commandContribution" }, { "$ref": "#/$defs/menusContribution" }, { "$ref": "#/$defs/mcpContribution" }]
+        "oneOf": [
+          { "$ref": "#/$defs/connectionProviderContribution" },
+          { "$ref": "#/$defs/workbenchContribution" },
+          { "$ref": "#/$defs/filesystemProviderContribution" },
+          { "$ref": "#/$defs/contextMenuContribution" },
+          { "$ref": "#/$defs/resultViewContribution" },
+          { "$ref": "#/$defs/commandContribution" },
+          { "$ref": "#/$defs/menusContribution" },
+          { "$ref": "#/$defs/mcpContribution" }
+        ]
       }
     },
     "localizations": {
@@ -182,12 +191,7 @@
       }
     },
     "fieldCondition": {
-      "oneOf": [
-        { "$ref": "#/$defs/fieldConditionClause" },
-        { "$ref": "#/$defs/fieldConditionAllOf" },
-        { "$ref": "#/$defs/fieldConditionAnyOf" },
-        { "$ref": "#/$defs/fieldConditionNot" }
-      ]
+      "oneOf": [{ "$ref": "#/$defs/fieldConditionClause" }, { "$ref": "#/$defs/fieldConditionAllOf" }, { "$ref": "#/$defs/fieldConditionAnyOf" }, { "$ref": "#/$defs/fieldConditionNot" }]
     },
     "fieldConditionClause": {
       "type": "object",

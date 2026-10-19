@@ -85,6 +85,7 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
         originalHtml: sqlContainer.innerHTML,
         placeholder: t("grid.hoverSearchPlaceholder"),
         noResultLabel: t("grid.hoverSearchNoResult"),
+        debounceMs: 120,
       });
       dom.appendChild(searchController.element);
 

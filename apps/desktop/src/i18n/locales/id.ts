@@ -1384,6 +1384,9 @@ export default withEnglishFallback({
     gaussdbConnectionModeMJdbc: "Mode M (driver JDBC vendor)",
     gaussdbConnectionModeNativeHint: "Menggunakan protokol kompatibel PostgreSQL bawaan DBX untuk mode kompatibilitas GaussDB A/PG/Oracle.",
     gaussdbConnectionModeMJdbcHint: "Menggunakan jdbc:gaussdb dengan com.huawei.gaussdb.jdbc.Driver untuk mode M GaussDB.",
+    gaussdbConnectionModeDws: "Huawei DWS (driver bawaan kompatibel PostgreSQL)",
+    gaussdbConnectionModeDwsHint:
+      "Menandai koneksi ini secara eksplisit sebagai Huawei DWS. API Estimated Plan Plugin Host aktif untuk profil ini tanpa membatasi versi minor GaussDB; koneksi GaussDB umum dan M-JDBC tetap tidak didukung. Koneksi menggunakan driver bawaan yang kompatibel dengan PostgreSQL.",
     gaussdbMJdbcDriver: "Driver JDBC GaussDB",
     gaussdbMJdbcDriverPlaceholder: "Pilih gaussdbjdbc.jar yang sesuai dengan versi server",
     gaussdbMJdbcDriverHint: "Driver dirilis bersama setiap versi server GaussDB. Dapatkan gaussdbjdbc.jar dari paket driver GaussDB yang sesuai.",
@@ -7526,6 +7529,8 @@ export default withEnglishFallback({
     },
     fileColumn: "File",
     totalFiles: "{count} file",
+    executeSuccess: "File SQL berhasil dijalankan",
+    completedWithErrors: "Eksekusi selesai: {succeeded} berhasil, {failed} gagal",
   },
   sqlFileTree: {
     folderNameInvalid: "Masukkan satu nama folder, bukan jalur.",

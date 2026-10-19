@@ -493,7 +493,8 @@ pub async fn connect_db(
     // 只有本次请求确实写入/替换了会话凭据（输入了非空密码）时，才需要在连接
     // 失败时回滚它；无密码重连复用的是既有有效凭据，失败不应清掉它，否则瞬时的
     // 数据库/网络抖动就会让"本次会话内记住密码"失效、下次又弹窗。
-    let (runtime_config, runtime_secrets) = prepare_runtime_config(config.clone());
+    let (mut runtime_config, runtime_secrets) = prepare_runtime_config(config.clone());
+    dbx_core::query::plugin_plan::invalidate_gaussdb_dws_product_version(&mut runtime_config);
     let session_credential_writes = record_session_credentials(
         app,
         &owner,

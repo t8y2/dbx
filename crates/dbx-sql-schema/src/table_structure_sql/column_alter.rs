@@ -221,7 +221,7 @@ fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
     !extra.auto_increment.unwrap_or(false)
         && !extra.on_update_current_timestamp.unwrap_or(false)
         && is_column_identity_empty(&extra.identity)
-        && !extra.generated.as_ref().is_some_and(|generated| !generated.expression.trim().is_empty())
+        && extra.generated.as_ref().is_none_or(|generated| generated.expression.trim().is_empty())
         && !extra.manticore_indexed.unwrap_or(false)
         && !extra.manticore_stored.unwrap_or(false)
         && !extra.manticore_attribute.unwrap_or(false)
@@ -752,11 +752,24 @@ pub(super) fn build_oracle_like_existing_column_sql(
     let mut statements = Vec::new();
     let mut current_name = original.name.clone();
     if column.name != original.name {
-        statements.push(format!(
-            "ALTER TABLE {table} RENAME COLUMN {} TO {};",
-            quote_ident(dialect, &original.name),
-            quote_ident(dialect, &column.name)
-        ));
+        // Dameng accepts the Oracle-style MODIFY (…) but not `RENAME COLUMN`:
+        // the supported form is `ALTER COLUMN old RENAME TO new` (verified on
+        // DM8 8.1.3.62). Oracle and the other Oracle-compatible dialects keep
+        // the RENAME COLUMN form.
+        let rename = if dialect == StructureDialect::Dameng {
+            format!(
+                "ALTER TABLE {table} ALTER COLUMN {} RENAME TO {};",
+                quote_ident(dialect, &original.name),
+                quote_ident(dialect, &column.name)
+            )
+        } else {
+            format!(
+                "ALTER TABLE {table} RENAME COLUMN {} TO {};",
+                quote_ident(dialect, &original.name),
+                quote_ident(dialect, &column.name)
+            )
+        };
+        statements.push(rename);
         current_name = column.name.clone();
     }
     let type_changed = column.data_type.trim() != original.data_type.trim();

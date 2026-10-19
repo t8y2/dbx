@@ -122,6 +122,7 @@ function onEditorScroll(event: Event) {
   if (target === overlayRef.value) {
     expandedHighlightScrollLeft.value = target.scrollLeft;
     expandedHighlightScrollTop.value = target.scrollTop;
+    syncExpandedHighlightScrollbar();
   } else {
     collapsedHighlightScrollLeft.value = target.scrollLeft;
   }
@@ -182,7 +183,8 @@ function measureExpandedHeight(input: HTMLTextAreaElement, rect: typeof expanded
   const contentHeight = probe.scrollHeight;
   probe.remove();
   const availableHeight = Math.max(56, window.innerHeight - input.getBoundingClientRect().top - 12);
-  return Math.min(Math.max(56, lineHeight * 2.5, contentHeight), Math.min(260, availableHeight));
+  const verticalInsets = Math.ceil(rect.inputTop) + 4;
+  return Math.min(Math.max(56, lineHeight * 2.5, contentHeight + verticalInsets), Math.min(260, availableHeight));
 }
 
 function maxExpandedHeight() {
@@ -196,10 +198,16 @@ function fitExpandedHeightToOverlay() {
   if (!overlay) return;
   const overflow = overlay.scrollHeight - overlay.clientHeight;
   if (overflow > 4) {
-    expandedHeight.value = Math.min(maxExpandedHeight(), expandedHeight.value + overflow);
+    const nextHeight = Math.min(maxExpandedHeight(), expandedHeight.value + overflow);
+    if (nextHeight !== expandedHeight.value) {
+      expandedHeight.value = nextHeight;
+      void nextTick(syncExpandedHighlightScrollbar);
+      return;
+    }
   } else if (overflow <= 0) {
     overlay.scrollTop = 0;
   }
+  syncExpandedHighlightScrollbar();
 }
 
 function syncExpandedHighlightScrollbar() {
@@ -210,11 +218,7 @@ function syncExpandedHighlightScrollbar() {
 }
 
 function syncExpandedLayout() {
-  syncExpandedHighlightScrollbar();
-  // Re-fit once the compensation has been applied: the highlight layer now
-  // wraps exactly like the textarea, so the pane can size itself to the real
-  // content height instead of leaving a scrollbar that only the textarea sees.
-  void nextTick(fitExpandedHeightToOverlay);
+  fitExpandedHeightToOverlay();
 }
 
 function measureExpandedRect(input: HTMLTextAreaElement) {
@@ -274,11 +278,14 @@ function resizeEditor(forceExpand = false) {
       if (!wasExpanded) {
         expandedHighlightScrollLeft.value = 0;
         expandedHighlightScrollTop.value = 0;
+        expandedHighlightScrollbarWidth.value = 0;
       }
       const nextRect = measureExpandedRect(input);
       expandedRect.value = nextRect;
       expandedHeight.value = measureExpandedHeight(input, nextRect);
       void nextTick(syncExpandedLayout);
+    } else {
+      expandedHighlightScrollbarWidth.value = 0;
     }
     expanded.value = nextExpanded;
     updateSuggestionPosition();
@@ -431,6 +438,7 @@ function scheduleCollapse() {
     editorFocused.value = false;
     editor.dismiss();
     expanded.value = false;
+    expandedHighlightScrollbarWidth.value = 0;
   }, 0);
 }
 
@@ -491,6 +499,7 @@ async function clearCondition() {
   modelValue.value = "";
   editor.dismiss();
   expanded.value = false;
+  expandedHighlightScrollbarWidth.value = 0;
   if (props.clear) await props.clear();
   else emit("clear");
 }
@@ -913,7 +922,6 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
 
 .data-grid-topbar-condition-input--expanded {
   top: var(--data-grid-condition-input-top);
-  right: 0.5rem;
   bottom: 0.125rem;
   left: 0.5rem;
   height: auto;

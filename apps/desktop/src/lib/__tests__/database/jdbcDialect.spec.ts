@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionConfig } from "@/types/database";
 import { databaseObjectTreeNodeSchema } from "@/lib/database/databaseFeatureSupport";
 import {
+  GAUSSDB_DWS_PRODUCT_PROFILE,
+  GAUSSDB_DWS_PRODUCT_PROFILE_KEY,
   GAUSSDB_M_JDBC_DRIVER_CLASS,
   connectionDatabaseMetadataSchema,
   connectionObjectTreeNodeSchema,
@@ -83,6 +85,27 @@ describe("jdbc dialect inference", () => {
         connection_string: "jdbc:IRIS://localhost:1972/USER",
       }),
     ).toBe("iris");
+  });
+
+  it("detects Firebird JDBC connections", () => {
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        connection_string: "jdbc:firebirdsql://localhost:3050/data/test.fdb",
+      }),
+    ).toBe("firebird");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        jdbc_driver_class: "org.firebirdsql.jdbc.FBDriver",
+      }),
+    ).toBe("firebird");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        driver_profile: "firebird",
+      }),
+    ).toBe("firebird");
   });
 
   it("uses JDBC driver profiles when inferring dialect", () => {
@@ -366,6 +389,25 @@ describe("GaussDB connection mode", () => {
     setGaussdbConnectionMode(connection, "native");
     expect(connection.driver_profile).toBe("gaussdb");
     expect(connection.jdbc_driver_class).toBeUndefined();
+  });
+
+  it("marks DWS explicitly while retaining the native GaussDB driver profile", () => {
+    const connection = { db_type: "gaussdb", driver_profile: "gaussdb", external_config: { retained: true } } as ConnectionConfig;
+
+    setGaussdbConnectionMode(connection, "dws");
+    expect(gaussdbConnectionMode(connection)).toBe("dws");
+    expect(connection.driver_profile).toBe("gaussdb");
+    expect(connection.jdbc_driver_class).toBeUndefined();
+    expect(connection.external_config).toEqual({ retained: true, [GAUSSDB_DWS_PRODUCT_PROFILE_KEY]: GAUSSDB_DWS_PRODUCT_PROFILE });
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("gaussdb");
+
+    setGaussdbConnectionMode(connection, "m-jdbc");
+    expect(gaussdbConnectionMode(connection)).toBe("m-jdbc");
+    expect(connection.external_config).toEqual({ retained: true });
+
+    setGaussdbConnectionMode(connection, "native");
+    expect(gaussdbConnectionMode(connection)).toBe("native");
+    expect(connection.external_config).toEqual({ retained: true });
   });
 
   it("uses the driver default and preserves targetServerType from legacy URL fields", () => {

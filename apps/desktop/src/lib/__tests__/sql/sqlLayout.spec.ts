@@ -285,10 +285,10 @@ describe("sql layout", () => {
     expect(await format("SELECT a FROM t UNION ALL SELECT b FROM u;")).toBe(lines("SELECT a", "FROM t", "UNION ALL", "SELECT b", "FROM u;"));
   });
 
-  it("keeps comments and does not fold them onto a line", async () => {
+  it("keeps a trailing comment on its line without swallowing the next item", async () => {
     const sql = lines("-- heading", "SELECT a, -- why", "       b", "FROM t; /* trailing */");
 
-    expect(await format(sql)).toBe(lines("-- heading", "SELECT a,", "       -- why", "       b", "FROM t;", "", "/* trailing */"));
+    expect(await format(sql)).toBe(lines("-- heading", "SELECT a, -- why", "       b", "FROM t;", "", "/* trailing */"));
   });
 
   it("keeps PostgreSQL casts tight", async () => {

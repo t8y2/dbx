@@ -7,6 +7,7 @@ const apiMock = vi.hoisted(() => ({
   getColumns: vi.fn(),
   listIndexes: vi.fn(),
   listForeignKeys: vi.fn(),
+  loadDocsAnnotations: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => apiMock);
@@ -68,6 +69,7 @@ describe("Solr AI context", () => {
     apiMock.getColumns.mockResolvedValue([]);
     apiMock.listIndexes.mockResolvedValue([]);
     apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.loadDocsAnnotations.mockResolvedValue(null);
   });
 
   it("loads Solr cores as schema tables through the generic metadata path", async () => {

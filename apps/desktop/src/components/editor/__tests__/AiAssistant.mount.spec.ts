@@ -196,6 +196,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     getColumns: empty,
     listIndexes: empty,
     listForeignKeys: empty,
+    loadDocsAnnotations: () => Promise.resolve(null),
   };
 });
 

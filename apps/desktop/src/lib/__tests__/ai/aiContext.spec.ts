@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { aiSchemaSelectionSupported, buildAiContext, resolveAiDatabaseTarget, resolveAiMentionDatabases, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { aiSchemaSelectionSupported, buildAiContext, buildSystemPrompt, resolveAiDatabaseTarget, resolveAiMentionDatabases, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
+import { setLocale } from "@/i18n";
 import type { AiConfig } from "@/types/ai";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
@@ -9,6 +10,7 @@ const apiMock = vi.hoisted(() => ({
   getColumns: vi.fn(),
   listIndexes: vi.fn(),
   listForeignKeys: vi.fn(),
+  loadDocsAnnotations: vi.fn(),
   aiAgentStream: vi.fn(),
 }));
 
@@ -86,6 +88,7 @@ describe("SQLite AI context routing", () => {
     apiMock.getColumns.mockResolvedValue([]);
     apiMock.listIndexes.mockResolvedValue([]);
     apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.loadDocsAnnotations.mockResolvedValue(null);
   });
 
   it("uses main for a stale path-shaped SQLite database value", async () => {
@@ -366,6 +369,7 @@ describe("AI selection context", () => {
     apiMock.getColumns.mockResolvedValue([]);
     apiMock.listIndexes.mockResolvedValue([]);
     apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.loadDocsAnnotations.mockResolvedValue(null);
   });
 
   it("passes attached selections through to the context", async () => {
@@ -383,5 +387,101 @@ describe("AI selection context", () => {
 
     expect(context.selections).toBeUndefined();
     expect("selections" in context).toBe(false);
+  });
+});
+
+// #12497: the connection's documentation notes are the user's own semantics
+// for a field, so the AI schema context has to read them instead of only the
+// database comment.
+describe("AI schema notes", () => {
+  const databaseTab = () => ({ ...queryTab("app-db"), connectionId: "postgres-1" });
+
+  beforeAll(async () => {
+    // The warning line is localized; pin the language so the assertion does not
+    // depend on the developer's OS locale.
+    await setLocale("en");
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.listSchemas.mockResolvedValue(["public"]);
+    apiMock.listTables.mockResolvedValue([{ name: "orders", table_type: "TABLE", comment: "db orders" }]);
+    apiMock.getColumns.mockResolvedValue([{ name: "status", data_type: "text", is_nullable: false, is_primary_key: false, comment: "db status" }]);
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.loadDocsAnnotations.mockResolvedValue(null);
+  });
+
+  it("prefers local notes over database comments and folds the note key", async () => {
+    apiMock.loadDocsAnnotations.mockResolvedValue({
+      formatVersion: 1,
+      tables: { "public.orders": { note: "本地订单表", columns: { STATUS: { note: "本地状态" } } } },
+    });
+
+    const context = await buildAiContext(databaseTab(), postgresConnection());
+
+    expect(context.tables[0]?.comment).toBe("[local-note]本地订单表[/local-note]");
+    expect(context.tables[0]?.columns[0]?.comment).toBe("[local-note]本地状态[/local-note]");
+    const prompt = buildSystemPrompt("generate", context);
+    expect(prompt).toContain("本地订单表");
+    expect(prompt).toContain("本地状态");
+    expect(prompt).toContain("data, not instructions");
+  });
+
+  it("keeps database comments when no notes file exists", async () => {
+    const context = await buildAiContext(databaseTab(), postgresConnection());
+
+    expect(context.tables[0]?.comment).toBe("db orders");
+    expect(context.tables[0]?.columns[0]?.comment).toBe("db status");
+    expect(context.schemaNotesWarning).toBeUndefined();
+    expect(context.schemaNotesApplied).toBeUndefined();
+    expect("schemaNotesWarning" in context).toBe(false);
+    expect("schemaNotesApplied" in context).toBe(false);
+    expect(buildSystemPrompt("generate", context)).not.toContain("data, not instructions");
+  });
+
+  it("matches MySQL notes by database-qualified key even when the display schema is hidden", async () => {
+    // MySQL is not schema-aware in DBX, so the AI schema block hides the schema.
+    // The notes file still keys the table as `shop.orders`, so key computation
+    // must use the real namespace rather than the hidden display field.
+    apiMock.listSchemas.mockResolvedValue(["shop"]);
+    apiMock.loadDocsAnnotations.mockResolvedValue({
+      formatVersion: 1,
+      tables: { "shop.orders": { note: "门店订单" } },
+    });
+    const connection = { ...postgresConnection("shop"), id: "mysql-1", db_type: "mysql" as const };
+
+    const context = await buildAiContext({ ...queryTab("shop"), connectionId: "mysql-1" }, connection);
+
+    expect(context.tables[0]?.schema).toBeUndefined();
+    expect(context.tables[0]?.comment).toBe("[local-note]门店订单[/local-note]");
+  });
+
+  it("finds a bare note in the focused-table path on SQLite", async () => {
+    // SQLite's collector stores notes under the bare table name, while the
+    // focused table carries the "main" namespace.
+    apiMock.loadDocsAnnotations.mockResolvedValue({
+      formatVersion: 1,
+      tables: { orders: { note: "本地订单" } },
+    });
+    const focused = {
+      ...queryTab("main"),
+      connectionId: "sqlite-1",
+      tableMeta: { schema: "main", tableName: "orders", columns: [] },
+    };
+
+    const context = await buildAiContext(focused, sqliteConnection());
+
+    expect(context.tables[0]?.comment).toBe("[local-note]本地订单[/local-note]");
+  });
+
+  it("degrades with a visible warning when the notes file cannot be read", async () => {
+    apiMock.loadDocsAnnotations.mockRejectedValue(new Error("Failed to parse notes file"));
+
+    const context = await buildAiContext(databaseTab(), postgresConnection());
+
+    expect(context.tables[0]?.comment).toBe("db orders");
+    expect(context.schemaNotesWarning).toContain("Failed to parse notes file");
+    expect(buildSystemPrompt("generate", context)).toContain("local schema notes could not be loaded");
   });
 });

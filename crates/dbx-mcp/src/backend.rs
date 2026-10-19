@@ -502,6 +502,16 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, options);
         Err("Documentation snapshots are not supported by this backend.".to_string())
     }
+    /// Local documentation notes for a connection. The default keeps backends
+    /// without notes support working: AI schema tools then use database
+    /// comments only.
+    async fn load_docs_annotations(
+        &self,
+        connection: &ConnectionConfig,
+    ) -> Result<Option<dbx_core::docs::annotations::AnnotationFile>, String> {
+        let _ = connection;
+        Ok(None)
+    }
     /// Tool-capable plugins for the external `dbx` MCP surface, with their
     /// discovered `mcp/tools` listings. Author opt-in: installed +
     /// compatible + backend entrypoint + a manifest `external_tools: true`
@@ -1099,6 +1109,21 @@ fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
 
 #[async_trait]
 impl DbxBackend for LocalBackend {
+    async fn load_docs_annotations(
+        &self,
+        connection: &ConnectionConfig,
+    ) -> Result<Option<dbx_core::docs::annotations::AnnotationFile>, String> {
+        // Resolve against the same data directory the desktop app uses: an
+        // explicit docs_notes_path wins, otherwise the connection's notes file
+        // lives under <data_dir>/docs-notes.
+        let path = dbx_core::docs::annotations::resolve_notes_path(
+            &connection.id,
+            connection.docs_notes_path.as_deref(),
+            &self.data_dir,
+        );
+        dbx_core::docs::annotations::load_annotations(&path)
+    }
+
     async fn approve_high_risk_sql(&self, connection_id: &str, database: &str, sql: &str) -> Result<String, String> {
         let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
             .await
@@ -1569,6 +1594,22 @@ impl DbxBackend for LocalBackend {
 
 #[async_trait]
 impl DbxBackend for WebBackend {
+    async fn load_docs_annotations(
+        &self,
+        connection: &ConnectionConfig,
+    ) -> Result<Option<dbx_core::docs::annotations::AnnotationFile>, String> {
+        self.ensure_connected(connection).await?;
+        self.request(
+            reqwest::Method::POST,
+            "/api/docs/annotations/load",
+            Some(json!({ "connectionId": connection.id })),
+        )
+        .await?
+        .json::<Option<dbx_core::docs::annotations::AnnotationFile>>()
+        .await
+        .map_err(|error| format!("Invalid docs annotations response: {error}"))
+    }
+
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
         self.request(reqwest::Method::GET, "/api/app-settings/mcp-policy", None)
             .await?

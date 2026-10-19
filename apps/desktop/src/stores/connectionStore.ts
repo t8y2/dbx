@@ -154,6 +154,7 @@ import {
   objectGroupRefreshParentId,
   objectTypesForGroupNode,
   tablePartitionGroups,
+  syncTablePartitionGroups,
   withoutTableTreeLoadMoreNodes,
   tablePageRowAnchorKey,
   type TableTreeLoadMoreParent,
@@ -728,6 +729,11 @@ export const useConnectionStore = defineStore("connection", () => {
   const connectionConnectedAtMs = new Map<string, number>();
   const connectionErrorRevisions = new Map<string, number>();
   const tableListSourceRevisions = new Map<string, number>();
+  // Only TDengine table groups reuse persisted snapshots without a background
+  // refresh. Keep invalidation/write ordering explicit; these maps hold no trees.
+  const tdengineTreeCacheRevisions = new Map<string, number>();
+  const tdengineTreeCacheSavedRevisions = new Map<string, number>();
+  const tdengineTreeCacheWrites = new Map<string, Promise<void>>();
   const treeNodeLoads = new TreeNodeLoadRegistry();
   const filteredObjectGroupChildrenIds = new Set<string>();
   // A remote sidebar search swaps an object group's children for a filtered
@@ -2470,7 +2476,12 @@ export const useConnectionStore = defineStore("connection", () => {
     const objectTreeProfileCacheKey = driverProfileObjectTreeProfileForConnection(config)?.cacheKey;
     // objects-v9: table nodes now carry canonical tableName metadata for
     // table-scoped plugin context; older cached nodes lack that identity.
-    const baseCacheVersion = objectTreeCacheVersion(config, node.database, node.schema, config?.db_type === "oracle" ? "objects-v8" : "objects-v9");
+    // Old TDengine snapshots can have already lost full visible partitions and
+    // retain only a self-consistent first-page hidden group without a cursor.
+    // Neither v3 nor objectCount proves completeness. Only reuse snapshots saved
+    // by the reconciled page pipeline; leave other database/object keys unchanged.
+    const defaultCacheVersion = config?.db_type === "tdengine" && node.type === "group-tables" ? "objects-tdengine-v1" : config?.db_type === "oracle" ? "objects-v8" : "objects-v9";
+    const baseCacheVersion = objectTreeCacheVersion(config, node.database, node.schema, defaultCacheVersion);
     const cacheVersion = objectTreeProfileCacheKey ? `${baseCacheVersion}:${objectTreeProfileCacheKey}` : baseCacheVersion;
     return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, cacheVersion);
   }
@@ -2641,6 +2652,11 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function invalidateMetadataCaches(match: MetadataCacheInvalidation): number {
+    for (const config of connections.value) {
+      if (config.db_type === "tdengine" && (!match.connectionId || match.connectionId === config.id)) {
+        tdengineTreeCacheRevisions.set(config.id, (tdengineTreeCacheRevisions.get(config.id) ?? 0) + 1);
+      }
+    }
     return metadataListPageCache.invalidate(match) + invalidateTableMetadataCache(match) + invalidateObjectBrowserRowsCache(match);
   }
 
@@ -3175,7 +3191,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }));
   }
 
-  async function loadPersistedTreeChildren(node: TreeNode, cacheKey: string, load: TreeNodeLoadHandle): Promise<PersistedTreeChildrenLoadResult> {
+  async function loadPersistedTreeChildren(node: TreeNode, cacheKey: string, load: TreeNodeLoadHandle, options?: { freshOnly?: boolean; isCurrent?: () => boolean; acceptChildren?: (children: TreeNode[]) => boolean }): Promise<PersistedTreeChildrenLoadResult> {
     const trace = createMetadataLoadTrace({
       kind: "persisted-tree-cache",
       connectionId: node.connectionId,
@@ -3186,7 +3202,7 @@ export const useConnectionStore = defineStore("connection", () => {
     });
     const payload = await api.loadSchemaCache<unknown>(cacheKey).catch(() => null);
     const decoded = decodeSchemaTreeCache<TreeNode[]>(payload);
-    if (!decoded) {
+    if (!decoded || (options?.freshOnly && (decoded.isStale || (payload as { version?: unknown })?.version !== 3)) || options?.isCurrent?.() === false || options?.acceptChildren?.(decoded.children) === false) {
       logMetadataLoadTrace(metadataTraceLogger, trace, "cache-miss", { cacheStatus: "miss" });
       return { hit: false, isStale: false };
     }
@@ -3215,10 +3231,71 @@ export const useConnectionStore = defineStore("connection", () => {
     return { hit: true, isStale: decoded.isStale };
   }
 
-  async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[]) {
+  function isTdengineTableGroup(node: TreeNode): boolean {
+    return node.type === "group-tables" && !!node.connectionId && getConfig(node.connectionId)?.db_type === "tdengine";
+  }
+
+  function tdengineTreeCacheRevision(node: TreeNode): number {
+    return node.connectionId ? (tdengineTreeCacheRevisions.get(node.connectionId) ?? 0) : 0;
+  }
+
+  function isReusableTdengineTreeSnapshot(parent: TreeNode, children: TreeNode[]): boolean {
+    const pending: unknown[] = [...children];
+    while (pending.length) {
+      const value = pending.pop();
+      if (!value || typeof value !== "object") return false;
+      const node = value as TreeNode;
+      if (typeof node.id !== "string" || typeof node.type !== "string" || typeof node.label !== "string") return false;
+      if (node.connectionId !== parent.connectionId || node.database !== parent.database) return false;
+      if (node.type === "load-more") {
+        const cursor = node.loadMore;
+        if (!cursor || cursor.parentId !== parent.id || !Number.isSafeInteger(cursor.offset) || cursor.offset <= 0 || !Number.isSafeInteger(cursor.pageSize) || cursor.pageSize <= 0 || cursor.searchFilter || cursor.searchQuery) return false;
+      }
+      if (node.type === "group-partitions" && (!Array.isArray(node.children) || node.objectCount !== node.children.filter((child) => child?.type === "table").length)) return false;
+      for (const descendants of [node.children, node.hiddenChildren]) {
+        if (descendants === undefined) continue;
+        if (!Array.isArray(descendants)) return false;
+        for (const child of descendants) pending.push(child);
+      }
+    }
+    return true;
+  }
+
+  async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[], parent?: TreeNode) {
     // 分组是显示层投影，绝不写入元数据缓存——否则重启后会随缓存复现。
     const cacheChildren = stripTableVGroupsFromChildren(children);
-    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(stripTreeNodeExpansionState(stripDatabaseSavedSqlTreeNodes(cacheChildren)))).catch(() => undefined);
+    const payload = encodeSchemaTreeCache(stripTreeNodeExpansionState(stripDatabaseSavedSqlTreeNodes(cacheChildren)));
+    if (!parent || !isTdengineTableGroup(parent)) {
+      await api.saveSchemaCache(cacheKey, payload).catch(() => undefined);
+      return;
+    }
+    const revision = tdengineTreeCacheRevision(parent);
+    const isCurrent = () => isTdengineTableGroup(parent) && revision === tdengineTreeCacheRevision(parent);
+    const pending = (tdengineTreeCacheWrites.get(cacheKey) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        if (!isCurrent()) return;
+        // A failed save must not make an older snapshot reusable in this session.
+        tdengineTreeCacheSavedRevisions.set(cacheKey, -1);
+        try {
+          await api.saveSchemaCache(cacheKey, payload);
+          if (!isCurrent()) {
+            // Invalidation can finish while this backend save is in flight. Delete
+            // its late result *before* a newer queued save, never after it.
+            await api.deleteSchemaCachePrefix(cacheKey).catch(() => undefined);
+            return;
+          }
+          tdengineTreeCacheSavedRevisions.set(cacheKey, revision);
+        } catch {
+          // Tree loading remains usable if persistence is unavailable.
+        }
+      });
+    tdengineTreeCacheWrites.set(cacheKey, pending);
+    try {
+      await pending;
+    } finally {
+      if (tdengineTreeCacheWrites.get(cacheKey) === pending) tdengineTreeCacheWrites.delete(cacheKey);
+    }
   }
 
   function sidebarTableSearchTreeCacheKey(parent: TreeNode): string | null {
@@ -3720,6 +3797,8 @@ export const useConnectionStore = defineStore("connection", () => {
     if (countTreeNodeDescendants(node, RELEASE_COLLAPSED_SUBTREE_MIN_DESCENDANTS) < RELEASE_COLLAPSED_SUBTREE_MIN_DESCENDANTS) {
       return false;
     }
+    // Also reconcile legacy persisted trees that have not loaded another page.
+    syncTablePartitionGroups(node);
     forgetLoadedChildrenIdsForSubtree(node);
     node.children = [];
     return true;
@@ -4177,6 +4256,13 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const id of removedIds) {
       clearConnectionError(id);
       connectionErrorRevisions.delete(id);
+      tdengineTreeCacheRevisions.delete(id);
+      const cachePrefix = `${schemaCacheKey(id)}:`;
+      for (const key of tdengineTreeCacheSavedRevisions.keys()) {
+        if (key.startsWith(cachePrefix)) tdengineTreeCacheSavedRevisions.delete(key);
+      }
+      // Pending writes retain their queue until settlement. Their configuration
+      // guard rejects the removed connection and retires the queue in finally.
       clearEtcdAccessCapabilities(id);
       connectedIds.value.delete(id);
       clearSidebarStorageCaches(id);
@@ -6965,6 +7051,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
 
+          const cacheRevision = tdengineTreeCacheRevision(node);
           const wantsOnlyTablesOrViews = objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW");
           let children: TreeNode[];
           let nextObjectCount: number;
@@ -7000,6 +7087,7 @@ export const useConnectionStore = defineStore("connection", () => {
             children = page.hasMore && (!searchFilter || globalPageSearch !== undefined) ? [...page.children, buildLoadMoreNode(node, page.nextOffset, pageSize, page.nextAnchor, globalPageSearch)] : page.children;
             nextObjectCount = page.objectCount;
           }
+          if (isTdengineTableGroup(node) && cacheRevision !== tdengineTreeCacheRevision(node)) return;
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
           if (!tableNameFilterRevisionMatches(options)) return;
           const targetNode = treeNodeLoadTarget(load);
@@ -7013,12 +7101,35 @@ export const useConnectionStore = defineStore("connection", () => {
             });
           }
           targetNode.objectCount = nextObjectCount;
+          if (isTdengineTableGroup(targetNode) && options?.force) {
+            // setChildren preserves expanded table subtrees. For an authoritative
+            // first page, keep their unrelated metadata/expansion, but replace
+            // partition membership so old children cannot shadow the new page.
+            for (const child of children) {
+              if (child.type !== "table") continue;
+              const old = findNode(targetNode.children ?? [], child.id);
+              if (!old) continue;
+              const oldGroups = tablePartitionGroups(old);
+              const nextGroups = tablePartitionGroups(child);
+              for (const group of oldGroups) {
+                forgetLoadedChildrenIdsForSubtree(group);
+                treeNodeLoads.invalidatePrefix(group.id);
+              }
+              for (const group of nextGroups) {
+                const previous = oldGroups.find((candidate) => candidate.id === group.id);
+                if (previous) group.isExpanded = previous.isExpanded;
+              }
+              old.children = [...(old.children ?? []).filter((node) => node.type !== "group-partitions"), ...nextGroups];
+              old.hiddenChildren = [...(old.hiddenChildren ?? []).filter((node) => node.type !== "group-partitions"), ...nextGroups];
+            }
+          }
           setChildren(targetNode, children);
           if (searchFilter) filteredObjectGroupChildrenIds.add(targetNode.id);
           else forgetFilteredObjectGroupChildren(targetNode.id);
           options?.onChildrenApplied?.(targetNode);
           if (!searchFilter && !isSidebarTableSearch && !tableNameFilter) {
-            await savePersistedTreeChildren(cacheKey, children);
+            await savePersistedTreeChildren(cacheKey, children, targetNode);
+            if (isTdengineTableGroup(node) && cacheRevision !== tdengineTreeCacheRevision(node)) return;
             pruneTableVGroupStaleMembers(targetNode, children, tableVGroupKindOfContainerNode(targetNode) !== null);
           }
           const currentTargetNode = treeNodeLoadTarget(load);
@@ -7075,7 +7186,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadMoreObjectGroupChildren(node: TreeNode, options?: { searchFilter?: string }) {
+  async function loadMoreObjectGroupChildren(node: TreeNode, options?: { searchFilter?: string; force?: boolean }) {
     if (node.type !== "load-more" || !node.loadMore) return;
     const loadMore = node.loadMore;
     const parent = findNode(treeNodes.value, node.loadMore.parentId);
@@ -7122,6 +7233,8 @@ export const useConnectionStore = defineStore("connection", () => {
         // Parent writes must honor the parent's generation too — load-more begins on the
         // placeholder node, so a replaced/invalidated parent must reject the merge.
         const parentEpoch = treeNodeLoads.observe(parent.id);
+        const cacheRevision = tdengineTreeCacheRevision(parent);
+        const cacheIsCurrent = () => !isTdengineTableGroup(parent) || cacheRevision === tdengineTreeCacheRevision(parent);
         try {
           await ensureConnected(parentConnectionId);
           if (!searchIsCurrent()) return;
@@ -7144,11 +7257,11 @@ export const useConnectionStore = defineStore("connection", () => {
                 pageSize,
                 searchFilter,
                 pagedSearch: !!searchFilter,
-                force: false,
+                force: options?.force,
               }),
             );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
+            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             const mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
             const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor, loadMore.searchFilter), page.loadMoreParent) : mergedChildren;
@@ -7187,11 +7300,11 @@ export const useConnectionStore = defineStore("connection", () => {
                 pageSize,
                 searchFilter,
                 pagedSearch: !!searchFilter,
-                force: false,
+                force: options?.force,
               }),
             );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
+            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
             nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor, loadMore.searchFilter), page.loadMoreParent) : mergedChildren;
@@ -7206,11 +7319,11 @@ export const useConnectionStore = defineStore("connection", () => {
                 offset,
                 pageSize,
                 searchFilter,
-                force: false,
+                force: options?.force,
               }),
             );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
+            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
             const currentChildren = withoutLoadMoreNodes(targetParent.children);
             mergedChildren = mergeLocatedTreeChildren(targetParent, currentChildren, page.children, parentConnectionId, parentDatabase);
             nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor, loadMore.searchFilter)] : mergedChildren;
@@ -7227,11 +7340,12 @@ export const useConnectionStore = defineStore("connection", () => {
             return;
           }
           const targetParent = treeNodeLoadRelatedTarget(load, parent);
-          if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
+          if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
           targetParent.objectCount = mergedChildren.length;
           setChildren(targetParent, nextChildren);
           if (!searchFilter) {
-            await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
+            await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren, targetParent);
+            if (!parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
             // 各分组容器按自身类别回收完整列表的失效成员；分页中间态（含
             // load-more）由 prune 内部再挡一次。
             pruneTableVGroupStaleMembers(targetParent, nextChildren, tableVGroupKindOfContainerNode(parent) !== null);
@@ -7239,13 +7353,14 @@ export const useConnectionStore = defineStore("connection", () => {
           const currentTargetParent = treeNodeLoadRelatedTarget(load, parent);
           if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
         } catch (e) {
-          if (!searchIsCurrent() || !parentEpoch.isCurrent()) return;
+          if (!searchIsCurrent() || !parentEpoch.isCurrent() || !cacheIsCurrent()) return;
           recordMetadataLoadError(parentConnectionId, e, load);
           throw e;
         } finally {
           finishTreeNodeLoad(load);
         }
       },
+      options,
     );
   }
 
@@ -7432,32 +7547,97 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!objectTypesForGroupNode(parent.type) || parent.tableName) return;
     const liveParent = treeNodeInSidebarTree(parent);
     if (!liveParent) return;
+    const tdengine = isTdengineTableGroup(liveParent);
+    const searchQuery = sidebarSearchQuery.value || "";
+    const scopedSearchQuery = sidebarTableSearchQueries.value[liveParent.id]?.trim() || "";
+    if (tdengine && scopedSearchQuery) return;
+    const searchIsCurrent = () => (sidebarSearchQuery.value || "") === searchQuery && (sidebarTableSearchQueries.value[liveParent.id]?.trim() || "") === scopedSearchQuery;
+    let forcePages = false;
     if (initialLoadOptions?.force || !isTreeNodeChildrenLoaded(liveParent.id) || filteredObjectGroupChildrenIds.has(liveParent.id)) {
-      let isPreparedPageCurrent: (() => boolean) | undefined;
-      await loadObjectGroupFirstPage(liveParent, {
-        ...initialLoadOptions,
-        force: true,
-        searchFilter: "",
-        allowGlobalSearchMismatch: true,
-        onChildrenApplied: (targetNode) => {
-          const epoch = treeNodeLoads.observe(targetNode.id);
-          isPreparedPageCurrent = () => epoch.isCurrent();
-        },
-      });
-      if (!isPreparedPageCurrent?.()) return;
+      let cacheHit = false;
+      // Do not use the generic first-page hydration path here: it unconditionally
+      // starts a background refresh, racing the full/partial snapshot's drain.
+      const canReuseCache =
+        tdengine &&
+        shouldAutoLoadAllTableGroupChildren(liveParent, initialLoadOptions) &&
+        !initialLoadOptions?.force &&
+        !filteredObjectGroupChildrenIds.has(liveParent.id) &&
+        connectedIds.value.has(parent.connectionId) &&
+        !scopedSearchQuery &&
+        !activeTableNameFilterForScope({
+          connectionId: liveParent.connectionId,
+          database: liveParent.database,
+          schema: liveParent.schema,
+          nodeKind: liveParent.type,
+          catalog: liveParent.catalog,
+        });
+      if (canReuseCache) {
+        const cacheKey = objectGroupCacheKey(liveParent);
+        const revision = tdengineTreeCacheRevision(liveParent);
+        const configFingerprint = connectionConfigFingerprint(getConfig(parent.connectionId)!);
+        const cacheLoad = beginTreeNodeLoad(liveParent);
+        const isCurrent = () => {
+          const config = getConfig(parent.connectionId!);
+          return (
+            !!config &&
+            connectionConfigFingerprint(config) === configFingerprint &&
+            shouldAutoLoadAllTableGroupChildren(liveParent, initialLoadOptions) &&
+            searchIsCurrent() &&
+            revision === tdengineTreeCacheRevision(liveParent) &&
+            tableNameFilterRevisionMatches(initialLoadOptions) &&
+            !activeTableNameFilterForScope({ connectionId: liveParent.connectionId, database: liveParent.database, schema: liveParent.schema, nodeKind: liveParent.type, catalog: liveParent.catalog })
+          );
+        };
+        try {
+          await tdengineTreeCacheWrites.get(cacheKey);
+          if (!treeNodeLoadTarget(cacheLoad) || !isCurrent()) return;
+          if ((tdengineTreeCacheSavedRevisions.get(cacheKey) ?? 0) === revision) {
+            cacheHit = (await loadPersistedTreeChildren(liveParent, cacheKey, cacheLoad, { freshOnly: true, isCurrent, acceptChildren: (children) => isReusableTdengineTreeSnapshot(liveParent, children) })).hit;
+          }
+          // A cancelled/superseded cache miss must not fall through and restart
+          // page zero, or re-expand a node the user collapsed while awaiting I/O.
+          if (!treeNodeLoadTarget(cacheLoad) || !isCurrent()) return;
+          if (cacheHit) forgetFilteredObjectGroupChildren(liveParent.id);
+        } finally {
+          finishTreeNodeLoad(cacheLoad);
+        }
+      }
+      if (!cacheHit) {
+        if (tdengine) {
+          // A controlled reload must not mix a fresh first page with old cached
+          // later pages, nor allow a previously-started save to revive old data.
+          invalidateMetadataCaches({ connectionId: parent.connectionId, database: parent.database });
+          forcePages = true;
+        }
+        let isPreparedPageCurrent: (() => boolean) | undefined;
+        await loadObjectGroupFirstPage(liveParent, {
+          ...initialLoadOptions,
+          force: true,
+          searchFilter: "",
+          expectedSidebarSearchQuery: tdengine ? searchQuery : initialLoadOptions?.expectedSidebarSearchQuery,
+          allowGlobalSearchMismatch: true,
+          onChildrenApplied: (targetNode) => {
+            const epoch = treeNodeLoads.observe(targetNode.id);
+            const revision = tdengineTreeCacheRevision(targetNode);
+            isPreparedPageCurrent = () => epoch.isCurrent() && (!tdengine || (searchIsCurrent() && revision === tdengineTreeCacheRevision(targetNode)));
+          },
+        });
+        if (!isPreparedPageCurrent?.()) return;
+      }
     }
 
     const refreshedParent = treeNodeInSidebarTree(parent);
     if (!refreshedParent) return;
     const load = beginTreeNodeLoad(refreshedParent);
+    const cacheRevision = tdengineTreeCacheRevision(refreshedParent);
     try {
       const liveParent = treeNodeLoadTarget(load);
       if (!liveParent) return;
 
       let loadMoreNode = findTreeNodes(liveParent.children ?? [], (child) => child.type === "load-more")[0];
       while (loadMoreNode?.loadMore) {
-        await loadMoreObjectGroupChildren(loadMoreNode, { searchFilter: "" });
-        if (!load.isCurrent()) return;
+        await loadMoreObjectGroupChildren(loadMoreNode, { searchFilter: "", force: forcePages });
+        if (!load.isCurrent() || (tdengine && (!searchIsCurrent() || cacheRevision !== tdengineTreeCacheRevision(refreshedParent)))) return;
         const currentParent = treeNodeLoadTarget(load);
         if (!currentParent) return;
         loadMoreNode = findTreeNodes(currentParent.children ?? [], (child) => child.type === "load-more")[0];

@@ -75,6 +75,8 @@ const POSTGRES_COPY_MAX_ROWS: usize = 50_000;
 // NVARCHAR staging values. The source JSON batch remains owned by the parser;
 // the bulk path must never add a second, batch-sized string matrix beside it.
 const SQLSERVER_BULK_ROW_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+const SQL_IMPORT_EXPRESSION_KEY: &str = "$dbxSqlImportExpression";
+const SQL_IMPORT_CURRENT_TIMESTAMP: &str = "currentTimestamp";
 
 pub fn table_import_client_session_id(import_id: &str) -> String {
     task_client_session_id("table-import", import_id)
@@ -1833,6 +1835,43 @@ fn sql_import_number_value(raw: &str, context: &str) -> Result<serde_json::Value
     Err(format!("{context}: unsupported numeric literal '{raw}'"))
 }
 
+// SQL imports round-trip rows through the preview and prepared-source JSON. Keep
+// allowlisted server-evaluated expressions as a fixed marker so the SQL builder
+// can emit only its own canonical expression, never arbitrary frontend text.
+fn sql_import_current_timestamp_value() -> serde_json::Value {
+    serde_json::json!({ SQL_IMPORT_EXPRESSION_KEY: SQL_IMPORT_CURRENT_TIMESTAMP })
+}
+
+fn sql_import_is_current_timestamp_value(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == 1
+            && object.get(SQL_IMPORT_EXPRESSION_KEY).and_then(serde_json::Value::as_str)
+                == Some(SQL_IMPORT_CURRENT_TIMESTAMP)
+    })
+}
+
+fn sql_import_is_current_timestamp_function(function: &sqlparser::ast::Function) -> bool {
+    let name = function.name.to_string().to_ascii_lowercase();
+    if !matches!(name.as_str(), "now" | "sysdate" | "current_timestamp" | "localtime" | "localtimestamp") {
+        return false;
+    }
+    match &function.args {
+        FunctionArguments::None => true,
+        FunctionArguments::List(list) => {
+            list.args.is_empty() && list.clauses.is_empty() && list.duplicate_treatment.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn sql_import_current_timestamp_sql(db_type: &DatabaseType) -> &'static str {
+    if *db_type == DatabaseType::ClickHouse {
+        "now()"
+    } else {
+        "CURRENT_TIMESTAMP"
+    }
+}
+
 fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value, String> {
     match expr {
         Expr::Value(value) => match &value.value {
@@ -1875,7 +1914,13 @@ fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value
         // `DATE '...'`、`TIMESTAMP '...'`、`TIME '...'` 等标准字面量：值就是引号里的字符串，无损导入。
         Expr::TypedString(typed) => sql_import_typed_string(typed, context),
         // 白名单字面量日期函数（TO_DATE/TO_TIMESTAMP/...）：参数全为字符串字面量时按第一个参数导入。
-        Expr::Function(function) => sql_import_literal_temporal_function(function, context),
+        Expr::Function(function) => {
+            if sql_import_is_current_timestamp_function(function) {
+                Ok(sql_import_current_timestamp_value())
+            } else {
+                sql_import_literal_temporal_function(function, context)
+            }
+        }
         _ => Err(sql_import_unsupported_expression(context)),
     }
 }
@@ -4881,6 +4926,10 @@ fn import_value_rows_sql(
             }
             let source_value = row.get(*source_index).unwrap_or(&serde_json::Value::Null);
             let data_type = plan.column_types.get(target_index).and_then(|data_type| data_type.as_deref());
+            if sql_import_is_current_timestamp_value(source_value) {
+                values.push_str(sql_import_current_timestamp_sql(db_type));
+                continue;
+            }
             let normalized =
                 normalize_import_value_cow(source_value, data_type, db_type, kingbase_oracle_mode, date_time_format);
             values.push_str(&escape_value_typed(normalized.as_ref(), db_type, data_type));
@@ -5254,6 +5303,9 @@ fn infer_string_type(value: &str) -> ImportInferredType {
 }
 
 fn infer_value_type(value: &serde_json::Value) -> Option<ImportInferredType> {
+    if sql_import_is_current_timestamp_value(value) {
+        return Some(ImportInferredType::Timestamp);
+    }
     match value {
         serde_json::Value::Null => None,
         serde_json::Value::Bool(_) => Some(ImportInferredType::Boolean),
@@ -10554,6 +10606,54 @@ mod tests {
     }
 
     #[test]
+    fn sql_import_preserves_current_timestamp_functions() {
+        let options = sql_import_options(DatabaseType::Mysql);
+        let script = b"INSERT INTO sai_user (id, created_at, updated_at) VALUES (1, NOW(), SYSDATE());";
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+
+        assert_eq!(
+            parsed.rows[0],
+            vec![
+                serde_json::json!(1),
+                serde_json::json!({ "$dbxSqlImportExpression": "currentTimestamp" }),
+                serde_json::json!({ "$dbxSqlImportExpression": "currentTimestamp" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn sql_import_emits_current_timestamp_without_quoting_the_marker() {
+        let options = sql_import_options(DatabaseType::Mysql);
+        let parsed =
+            parse_sql_bytes_with_options(b"INSERT INTO sai_user (id, created_at) VALUES (1, NOW());", &options, 10)
+                .unwrap();
+        let mappings = parsed
+            .columns
+            .iter()
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+            })
+            .collect::<Vec<_>>();
+        let target_types =
+            vec![("id".to_string(), "bigint".to_string()), ("created_at".to_string(), "datetime".to_string())];
+
+        let batches =
+            build_import_insert_batches(&parsed, &mappings, &target_types, "sai_user", "", &DatabaseType::Mysql, 500)
+                .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        let generated_sql = batches[0].sql.replace('\n', " ");
+        assert!(
+            generated_sql.contains("VALUES (1, CURRENT_TIMESTAMP)"),
+            "generated SQL should preserve the server-side time expression: {}",
+            batches[0].sql
+        );
+        assert!(!batches[0].sql.contains(SQL_IMPORT_EXPRESSION_KEY));
+    }
+
+    #[test]
     fn sql_import_rejects_replace() {
         let error = parse_sql_bytes(b"REPLACE INTO users (id) VALUES (1);", 10).unwrap_err();
         assert!(error.contains("REPLACE"));
@@ -10561,7 +10661,7 @@ mod tests {
 
     #[test]
     fn sql_import_rejects_expressions() {
-        let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (NOW());", 10).unwrap_err();
+        let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (UUID());", 10).unwrap_err();
         assert!(error.contains("not supported"));
     }
 
@@ -10606,9 +10706,9 @@ mod tests {
 
     #[test]
     fn sql_import_rejects_unlisted_function_still() {
-        // 非白名单函数（如 NOW()）仍按表达式拒绝。
+        // 非白名单函数（如 RAND()）仍按表达式拒绝。
         let options = sql_import_options(DatabaseType::Mysql);
-        let error = parse_sql_bytes_with_options(b"INSERT INTO t (a) VALUES (NOW());", &options, 10).unwrap_err();
+        let error = parse_sql_bytes_with_options(b"INSERT INTO t (a) VALUES (RAND());", &options, 10).unwrap_err();
         assert!(error.contains("not supported"));
     }
 

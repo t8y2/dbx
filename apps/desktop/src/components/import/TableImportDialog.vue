@@ -18,6 +18,7 @@ import {
   autoMapImportColumns,
   buildTableImportParseOptions,
   defaultTableImportEmptyStringAsNull,
+  formatTableImportPreviewCell,
   formatTableImportElapsed,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
@@ -973,12 +974,6 @@ function updateColumnDataType(sourceColumn: string, value: any) {
   };
 }
 
-function formatCell(value: unknown) {
-  if (value === null) return "NULL";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
-
 function goBack() {
   wizardStep.value = previousTableImportWizardStep(wizardStep.value);
 }
@@ -1836,7 +1831,7 @@ watch(rawProgressPercent, (percent) => {
                   <tbody>
                     <tr v-for="(row, rowIndex) in preview.rows" :key="rowIndex">
                       <td v-for="(cell, colIndex) in row" :key="colIndex" class="max-w-[180px] border-b border-r px-2 py-1.5 font-mono" :class="{ 'text-muted-foreground': cell === null }">
-                        <span class="block truncate">{{ formatCell(cell) }}</span>
+                        <span class="block truncate">{{ formatTableImportPreviewCell(cell) }}</span>
                       </td>
                     </tr>
                   </tbody>

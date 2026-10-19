@@ -1842,7 +1842,7 @@ fn sql_import_current_timestamp_value() -> serde_json::Value {
     serde_json::json!({ SQL_IMPORT_EXPRESSION_KEY: SQL_IMPORT_CURRENT_TIMESTAMP })
 }
 
-fn sql_import_is_current_timestamp_value(value: &serde_json::Value) -> bool {
+pub(crate) fn sql_import_is_current_timestamp_value(value: &serde_json::Value) -> bool {
     value.as_object().is_some_and(|object| {
         object.len() == 1
             && object.get(SQL_IMPORT_EXPRESSION_KEY).and_then(serde_json::Value::as_str)

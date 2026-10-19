@@ -2290,11 +2290,12 @@ fn transfer_column_names_match(
 /// column exists. Reusing the catalog's declared name keeps the statement on a
 /// column that really exists; an exact match still wins so case-sensitive
 /// targets that do have the source-cased column keep addressing it.
+#[cfg(test)]
 fn resolve_transfer_target_column_names(col_names: &[String], target_columns: &[db::ColumnInfo]) -> Vec<String> {
     resolve_transfer_target_column_names_or(col_names, target_columns, col_names)
 }
 
-/// Like [`resolve_transfer_target_column_names`], but a name the target does not declare
+/// Maps source names to declared target names. A name the target does not declare
 /// falls back to the matching entry of `fallbacks` (the requested target column case).
 fn resolve_transfer_target_column_names_or(
     col_names: &[String],

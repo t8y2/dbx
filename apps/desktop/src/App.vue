@@ -3192,6 +3192,7 @@ function setConnectionDialogOpen(value: boolean) {
     connectionDialogUpdate.value = null;
     connectionPluginProvider.value = null;
     connectionDialogInitialTab.value = undefined;
+    void appSidebarRef.value?.focusSelectedNode();
   }
 }
 

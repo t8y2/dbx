@@ -220,7 +220,11 @@ function openTableStructureForSelection(): boolean {
   return connectionTreeRef.value?.openTableStructureForSelection?.() ?? false;
 }
 
-defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, openTableStructureForSelection });
+async function focusSelectedNode() {
+  await connectionTreeRef.value?.focusSelectedNode?.();
+}
+
+defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, focusSelectedNode, openTableStructureForSelection });
 </script>
 
 <template>

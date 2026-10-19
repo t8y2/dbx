@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, inject, shallowRef, watch, onBeforeUnmount } from "vue";
+import { ref, computed, inject, nextTick, shallowRef, watch, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Database,
@@ -1114,6 +1114,10 @@ const renameInputRef = ref<HTMLInputElement>();
 /** Snapshot of the row being renamed: reprojecting the tree mid-rename recycles activeNode. */
 const renameTargetNode = shallowRef<TreeNode | null>(null);
 
+function restoreRowFocus() {
+  void nextTick(() => rowRef.value?.focus({ preventScroll: true }));
+}
+
 function startRenameGroup() {
   renameTargetNode.value = activeNode.value;
   renameInput.value = activeNode.value.label;
@@ -1172,12 +1176,17 @@ function finishRenameGroup() {
   const trimmed = renameInput.value.trim();
   // An empty name cancels the rename and keeps the group as-is — never delete
   // here. Deleting a group is done explicitly via the context menu (issue #681).
-  if (!trimmed || trimmed === target.label) return;
+  if (!trimmed || trimmed === target.label) {
+    restoreRowFocus();
+    return;
+  }
   if (target.type === "table-vgroup" && target.vgroupId) {
     connectionStore.renameTableVGroup(target, target.vgroupId, trimmed);
+    restoreRowFocus();
     return;
   }
   connectionStore.renameConnectionGroup(target.id, trimmed);
+  restoreRowFocus();
 }
 
 async function finishRenameSavedSql() {
@@ -1185,13 +1194,17 @@ async function finishRenameSavedSql() {
   isRenamingSavedSql.value = false;
   const fileId = activeNode.value.savedSqlId;
   const trimmed = renameInput.value.trim();
-  if (!fileId || !trimmed || ensureSqlExtension(trimmed) === activeNode.value.label) return;
+  if (!fileId || !trimmed || ensureSqlExtension(trimmed) === activeNode.value.label) {
+    restoreRowFocus();
+    return;
+  }
   try {
     const savedSqlStore = useSavedSqlStore();
     await savedSqlStore.renameFile(fileId, ensureSqlExtension(trimmed));
   } catch (e: any) {
     toast(t("savedSql.renameFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
   }
+  restoreRowFocus();
 }
 
 async function finishRenameConnection() {
@@ -1199,12 +1212,16 @@ async function finishRenameConnection() {
   isRenamingConnection.value = false;
   const connectionId = activeNode.value.connectionId;
   const trimmed = renameInput.value.trim();
-  if (!connectionId || !trimmed || trimmed === activeNode.value.label) return;
+  if (!connectionId || !trimmed || trimmed === activeNode.value.label) {
+    restoreRowFocus();
+    return;
+  }
   try {
     await connectionStore.renameConnection(connectionId, trimmed);
   } catch (e: any) {
     toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
   }
+  restoreRowFocus();
 }
 
 function finishRename() {
@@ -1217,6 +1234,7 @@ function cancelRename() {
   isRenamingGroup.value = false;
   isRenamingSavedSql.value = false;
   isRenamingConnection.value = false;
+  restoreRowFocus();
 }
 
 const PINNED_TREE_NODE_DRAG_TYPE = "__pinned-tree-node__";

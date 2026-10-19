@@ -160,6 +160,19 @@ describe("TreeItem connection quick rename", () => {
     expect(renameConnection).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["Enter", connection.name],
+    ["Escape", "Reporting EU"],
+  ])("restores focus to the connection row after %s dismisses rename", async (key, value) => {
+    const { container, input } = await mountConnectionRename();
+    typeName(input, value);
+
+    press(input, key);
+
+    const row = container.querySelector<HTMLElement>(`[data-node-id="${connection.id}"]`);
+    await vi.waitFor(() => expect(document.activeElement).toBe(row));
+  });
+
   it.each(["", "   ", connection.name])("cancels blank or unchanged input %j", async (name) => {
     const { input } = await mountConnectionRename();
     typeName(input, name);

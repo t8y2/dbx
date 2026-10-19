@@ -35,6 +35,9 @@ use crate::transfer::{
     supports_primary_key_upsert, SqlBatchLimits,
 };
 
+mod excel_blank_cells;
+use excel_blank_cells::ExcelImportPolicy;
+
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
 pub const DEFAULT_BATCH_SIZE: usize = 500;
 pub const CREATE_TABLE_INFERENCE_ROWS: usize = 100;
@@ -96,6 +99,21 @@ pub struct ParsedImportFile {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub total_rows: usize,
     pub effective_encoding: Option<TableImportTextEncoding>,
+    pub excel_metadata: Option<ExcelImportMetadata>,
+}
+
+/// Provenance is kept outside JSON cell values: a blank cell and an explicit
+/// empty string converted to NULL must never share the default-value policy.
+#[derive(Debug, Clone, Default)]
+pub struct ExcelImportMetadata {
+    pub blank_cells: Vec<Vec<usize>>,
+    pub row_numbers: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct ExcelImportRows {
+    rows: Vec<Vec<serde_json::Value>>,
+    metadata: ExcelImportMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,6 +431,10 @@ pub struct TableImportPreview {
     pub size_bytes: u64,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blank_cells: Vec<Vec<usize>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub row_numbers: Vec<usize>,
     pub total_rows: usize,
     pub total_rows_exact: bool,
     pub source_fingerprint: String,
@@ -1286,7 +1308,13 @@ fn parse_csv_reader_inner<R: IoRead>(
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: Some(effective_encoding) })
+    Ok(ParsedImportFile {
+        columns,
+        rows,
+        total_rows,
+        effective_encoding: Some(effective_encoding),
+        excel_metadata: None,
+    })
 }
 
 fn parse_delimited_preview_file_with_options(
@@ -1394,7 +1422,13 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            total_rows: items.len(),
+            effective_encoding: None,
+            excel_metadata: None,
+        });
     }
 
     if all_arrays {
@@ -1413,7 +1447,13 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            total_rows: items.len(),
+            effective_encoding: None,
+            excel_metadata: None,
+        });
     }
 
     Err(JSON_IMPORT_MIXED_ROW_SHAPES.to_string())
@@ -1673,7 +1713,7 @@ fn parse_json_file_streaming(
     let (scan, preview_rows) = scan_json_file_rows(path, options, preview_limit, None)?;
     let (layout, columns) = json_scan_layout_and_columns(&scan)?;
     let rows = preview_rows.iter().map(|value| project_json_row(value, &columns, layout)).collect::<Vec<_>>();
-    Ok(ParsedImportFile { columns, rows, total_rows: scan.total_rows, effective_encoding: None })
+    Ok(ParsedImportFile { columns, rows, total_rows: scan.total_rows, effective_encoding: None, excel_metadata: None })
 }
 
 // ---------------------------------------------------------------------------
@@ -2127,7 +2167,13 @@ pub fn parse_sql_bytes_with_options(
     )?;
 
     let target = target.ok_or_else(|| "No INSERT statements found in SQL file".to_string())?;
-    Ok(ParsedImportFile { columns: target.columns, rows, total_rows, effective_encoding: Some(encoding) })
+    Ok(ParsedImportFile {
+        columns: target.columns,
+        rows,
+        total_rows,
+        effective_encoding: Some(encoding),
+        excel_metadata: None,
+    })
 }
 
 /// 逐条语句把 INSERT 数据行登记到 `target` / `rows`。
@@ -2443,6 +2489,8 @@ enum ImportRowSource {
         columns: Vec<String>,
         rows: std::vec::IntoIter<Vec<serde_json::Value>>,
         total_rows: usize,
+        excel_metadata: Option<ExcelImportMetadata>,
+        rows_read: usize,
     },
     Sql {
         stream: Box<SqlImportRowStream>,
@@ -2495,7 +2543,13 @@ impl ImportRowSource {
             text_source_columns,
         )
         .await?;
-        Ok(Self::Materialized { columns: parsed.columns, rows: parsed.rows.into_iter(), total_rows: parsed.total_rows })
+        Ok(Self::Materialized {
+            columns: parsed.columns,
+            rows: parsed.rows.into_iter(),
+            total_rows: parsed.total_rows,
+            excel_metadata: parsed.excel_metadata,
+            rows_read: 0,
+        })
     }
 
     fn columns(&self) -> Result<Vec<String>, String> {
@@ -2541,8 +2595,9 @@ impl ImportRowSource {
 
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<Vec<Vec<serde_json::Value>>>, String> {
         match self {
-            Self::Materialized { rows, .. } => {
+            Self::Materialized { rows, rows_read, .. } => {
                 let batch = rows.by_ref().take(max_rows).collect::<Vec<_>>();
+                *rows_read += batch.len();
                 Ok((!batch.is_empty()).then_some(batch))
             }
             Self::Sql { stream, pending, .. } => {
@@ -2554,6 +2609,33 @@ impl ImportRowSource {
             Self::Json { stream, .. } => stream.receiver.recv().await.transpose(),
             #[cfg(feature = "duckdb-sidecar")]
             Self::DuckDb { stream } => stream.next_batch(max_rows).await,
+        }
+    }
+
+    fn validate_excel_cells(&self, policy: &ExcelImportPolicy) -> Result<(), String> {
+        match self {
+            Self::Materialized { rows, excel_metadata: Some(metadata), .. } => {
+                policy.validate(rows.as_slice(), metadata)
+            }
+            _ => Err("Excel import cell provenance is unavailable".to_string()),
+        }
+    }
+
+    fn excel_batch_metadata(&self, row_count: usize) -> Result<ExcelImportMetadata, String> {
+        match self {
+            Self::Materialized { excel_metadata: Some(metadata), rows_read, .. } => {
+                let start = rows_read.saturating_sub(row_count);
+                let blank_cells = metadata
+                    .blank_cells
+                    .get(start..*rows_read)
+                    .ok_or_else(|| "Excel import cell provenance is incomplete".to_string())?;
+                let row_numbers = metadata
+                    .row_numbers
+                    .get(start..*rows_read)
+                    .ok_or_else(|| "Excel import row numbers are incomplete".to_string())?;
+                Ok(ExcelImportMetadata { blank_cells: blank_cells.to_vec(), row_numbers: row_numbers.to_vec() })
+            }
+            _ => Err("Excel import cell provenance is unavailable".to_string()),
         }
     }
 }
@@ -2581,6 +2663,7 @@ async fn parse_sql_streaming_preview(
         rows,
         total_rows: stream.total_rows(),
         effective_encoding: Some(stream.effective_encoding()),
+        excel_metadata: None,
     })
 }
 
@@ -3668,9 +3751,22 @@ fn parse_xlsx_preview_file_with_options(
     // data and are skipped here as well so the preview matches what the import writes (#8604).
     let rows_with_content =
         raw_cells.iter().filter(|(_, cell)| cell.has_content()).map(|((row, _), _)| *row).collect::<HashSet<_>>();
-    let rows = (first_preview_row..=last_preview_row)
+    let row_numbers = (first_preview_row..=last_preview_row)
         .filter(|absolute_row| rows_with_content.contains(absolute_row))
+        .collect::<Vec<_>>();
+    let blank_cells = row_numbers
+        .iter()
         .map(|absolute_row| {
+            (0..columns.len())
+                .filter(|index| {
+                    raw_cells.get(&(*absolute_row, start_column + index)).is_none_or(|cell| !cell.has_content())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let rows = row_numbers
+        .iter()
+        .map(|&absolute_row| {
             (0..columns.len())
                 .map(|index| {
                     raw_cells
@@ -3686,7 +3782,16 @@ fn parse_xlsx_preview_file_with_options(
     if rows.is_empty() {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok((ParsedImportFile { columns, total_rows: rows.len(), rows, effective_encoding: None }, sheets))
+    Ok((
+        ParsedImportFile {
+            columns,
+            total_rows: rows.len(),
+            rows,
+            effective_encoding: None,
+            excel_metadata: Some(ExcelImportMetadata { blank_cells, row_numbers }),
+        },
+        sheets,
+    ))
 }
 
 fn xlsx_cell_styles(
@@ -3842,7 +3947,7 @@ fn parse_xlsx_file_with_options_and_text_columns(
 #[derive(Debug)]
 enum XlsxStreamMessage {
     Header(Vec<String>),
-    Rows(Vec<Vec<serde_json::Value>>),
+    Rows(ExcelImportRows),
     Progress(u64),
     Done,
 }
@@ -3904,9 +4009,11 @@ struct XlsxStreamRowsState {
     columns: Vec<String>,
     header_sent: bool,
     pending_rows: Vec<Vec<serde_json::Value>>,
+    pending_metadata: ExcelImportMetadata,
     rows_seen: usize,
     current_row: Option<usize>,
     current_values: Vec<serde_json::Value>,
+    current_cell_content: Vec<bool>,
     current_row_has_content: bool,
     batch_size: usize,
 }
@@ -3932,9 +4039,11 @@ impl XlsxStreamRowsState {
             columns: expected_columns.unwrap_or_default(),
             header_sent: false,
             pending_rows: Vec::with_capacity(batch_size),
+            pending_metadata: ExcelImportMetadata::default(),
             rows_seen: 0,
             current_row: None,
             current_values: Vec::new(),
+            current_cell_content: Vec::new(),
             current_row_has_content: false,
             batch_size,
         }
@@ -3977,6 +4086,9 @@ impl XlsxStreamRowsState {
                 let mut shifted = vec![serde_json::Value::Null; shift];
                 shifted.append(&mut self.current_values);
                 self.current_values = shifted;
+                let mut shifted_content = vec![false; shift];
+                shifted_content.append(&mut self.current_cell_content);
+                self.current_cell_content = shifted_content;
                 if !self.has_expected_columns && !self.columns.is_empty() {
                     let mut shifted_columns: Vec<String> = (1..=shift).map(|index| format!("column_{index}")).collect();
                     shifted_columns.append(&mut self.columns);
@@ -4027,8 +4139,10 @@ impl XlsxStreamRowsState {
         }
         if column_offset >= self.current_values.len() {
             self.current_values.resize(column_offset + 1, serde_json::Value::Null);
+            self.current_cell_content.resize(column_offset + 1, false);
         }
         self.current_values[column_offset] = value;
+        self.current_cell_content[column_offset] = has_content;
         Ok(())
     }
 
@@ -4037,14 +4151,16 @@ impl XlsxStreamRowsState {
             return Ok(());
         };
         let values = std::mem::take(&mut self.current_values);
+        let cell_content = std::mem::take(&mut self.current_cell_content);
         let has_content = std::mem::take(&mut self.current_row_has_content);
-        self.flush_row(absolute_row, values, has_content, progress)
+        self.flush_row(absolute_row, values, cell_content, has_content, progress)
     }
 
     fn flush_row(
         &mut self,
         absolute_row: usize,
         mut values: Vec<serde_json::Value>,
+        cell_content: Vec<bool>,
         has_content: bool,
         progress: u64,
     ) -> Result<(), String> {
@@ -4090,6 +4206,10 @@ impl XlsxStreamRowsState {
         }
         values.resize(self.columns.len(), serde_json::Value::Null);
         values.truncate(self.columns.len());
+        self.pending_metadata.blank_cells.push(
+            (0..self.columns.len()).filter(|&index| !cell_content.get(index).copied().unwrap_or(false)).collect(),
+        );
+        self.pending_metadata.row_numbers.push(absolute_row);
         self.pending_rows.push(values);
         self.rows_seen = self.rows_seen.saturating_add(1);
         if self.pending_rows.len() >= self.batch_size {
@@ -4103,7 +4223,10 @@ impl XlsxStreamRowsState {
             return Ok(());
         }
         self.sender
-            .blocking_send(Ok(XlsxStreamMessage::Rows(std::mem::take(&mut self.pending_rows))))
+            .blocking_send(Ok(XlsxStreamMessage::Rows(ExcelImportRows {
+                rows: std::mem::take(&mut self.pending_rows),
+                metadata: std::mem::take(&mut self.pending_metadata),
+            })))
             .map_err(|_| "Excel import consumer closed before the stream finished".to_string())?;
         self.sender
             .blocking_send(Ok(XlsxStreamMessage::Progress(progress)))
@@ -4368,6 +4491,7 @@ fn xlsx_import_pass_progress(bytes_read: u64, total_bytes: u64, second_pass: boo
     )
 }
 
+#[cfg(test)]
 async fn validate_xlsx_worksheet_for_import(
     path: String,
     options: TableImportParseOptions,
@@ -4376,6 +4500,30 @@ async fn validate_xlsx_worksheet_for_import(
     import_id: &str,
     is_cancelled: &impl Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>,
     mut on_progress: impl FnMut(u64),
+) -> Result<Vec<String>, String> {
+    validate_xlsx_worksheet_for_import_with_target(
+        path,
+        options,
+        expected_columns,
+        text_source_columns,
+        import_id,
+        is_cancelled,
+        &mut on_progress,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn validate_xlsx_worksheet_for_import_with_target(
+    path: String,
+    options: TableImportParseOptions,
+    expected_columns: Option<Vec<String>>,
+    text_source_columns: HashSet<String>,
+    import_id: &str,
+    is_cancelled: &impl Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>,
+    mut on_progress: impl FnMut(u64),
+    target: Option<(&[TableImportColumnMapping], &[crate::db::ColumnInfo], &DatabaseType)>,
 ) -> Result<Vec<String>, String> {
     // Drain bounded row batches without writing. Full-sheet mode keeps parsing through the
     // worksheet EOF even when the selected import range ends earlier.
@@ -4396,6 +4544,7 @@ async fn validate_xlsx_worksheet_for_import(
     });
 
     let mut columns = None;
+    let mut policy = None;
     loop {
         let message =
             match receive_xlsx_stream_message(&mut receiver, import_id, is_cancelled, &producer_cancelled).await {
@@ -4407,16 +4556,31 @@ async fn validate_xlsx_worksheet_for_import(
                     return Err("Import cancelled".to_string());
                 }
             };
-        match message {
-            Ok(XlsxStreamMessage::Header(header)) => columns = Some(header),
-            Ok(XlsxStreamMessage::Progress(bytes_read)) => on_progress(bytes_read),
-            Ok(XlsxStreamMessage::Rows(_) | XlsxStreamMessage::Done) => {}
-            Err(error) => {
-                producer_cancelled.store(true, Ordering::Release);
-                drop(receiver);
-                let _ = validation.await;
-                return Err(error);
+        let validation_result = match message {
+            Ok(XlsxStreamMessage::Header(header)) => {
+                let result = target
+                    .map(|(mappings, target_columns, db_type)| {
+                        ExcelImportPolicy::new(&header, mappings, target_columns, db_type)
+                    })
+                    .transpose();
+                columns = Some(header);
+                result.map(|compiled| policy = compiled)
             }
+            Ok(XlsxStreamMessage::Progress(bytes_read)) => {
+                on_progress(bytes_read);
+                Ok(())
+            }
+            Ok(XlsxStreamMessage::Rows(batch)) => {
+                policy.as_ref().map_or(Ok(()), |policy| policy.validate(&batch.rows, &batch.metadata))
+            }
+            Ok(XlsxStreamMessage::Done) => Ok(()),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = validation_result {
+            producer_cancelled.store(true, Ordering::Release);
+            drop(receiver);
+            let _ = validation.await;
+            return Err(error);
         }
     }
 
@@ -4452,6 +4616,7 @@ where
     let empty_string_as_null = options.empty_string_as_null.unwrap_or(true);
     let mut columns = Vec::new();
     let mut rows = Vec::new();
+    let mut excel_metadata = ExcelImportMetadata::default();
     let mut total_rows = 0;
     for (index, source_row) in range.rows().enumerate() {
         // Row options and XLSX style coordinates are worksheet-absolute; Calamine indices are range-relative.
@@ -4507,6 +4672,10 @@ where
                 .unwrap_or(serde_json::Value::Null);
             row.push(value);
         }
+        excel_metadata
+            .blank_cells
+            .push((0..columns.len()).filter(|&index| source_row.get(index).is_none_or(&is_empty)).collect());
+        excel_metadata.row_numbers.push(row_number);
         rows.push(row);
     }
     if columns.is_empty() {
@@ -4515,7 +4684,7 @@ where
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: None })
+    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: None, excel_metadata: Some(excel_metadata) })
 }
 
 pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -4660,7 +4829,13 @@ async fn parse_duckdb_parquet_preview(
     if total_rows > 0 && result.rows.is_empty() {
         return Err("DuckDB Parquet scan returned no rows for a non-empty file".to_string());
     }
-    Ok(ParsedImportFile { columns: result.columns, rows: result.rows, total_rows, effective_encoding: None })
+    Ok(ParsedImportFile {
+        columns: result.columns,
+        rows: result.rows,
+        total_rows,
+        effective_encoding: None,
+        excel_metadata: None,
+    })
 }
 
 async fn parse_import_preview_file_with_context(
@@ -6156,11 +6331,17 @@ async fn execute_import_rows_batch(
     primary_key_columns: &[String],
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
+    excel_policy: Option<(&ExcelImportPolicy, &ExcelImportMetadata)>,
     db_write_ms: &mut u128,
     statement_count: &mut usize,
 ) -> Result<usize, ImportRowsBatchError> {
     let execution_policy = import_batch_execution_policy(mode, pending_truncate, db_type);
-    if conflict_policy == TableImportConflictPolicy::Error {
+    // Bulk/COPY retain their identity handling and throughput when every mapped
+    // column is present. Batches needing database defaults use the reduced INSERT plan.
+    let full_column_plan = excel_policy
+        .map_or(Ok(true), |(policy, metadata)| policy.can_use_full_column_plan(rows, metadata))
+        .map_err(ImportRowsBatchError::before_write)?;
+    if full_column_plan && conflict_policy == TableImportConflictPolicy::Error {
         if let Some((import_plan, bulk_plan)) = sqlserver_bulk_plans_for_rows(db_type, plan, sqlserver_bulk_plan, rows)
         {
             return execute_sqlserver_bulk_rows_batch(
@@ -6181,7 +6362,8 @@ async fn execute_import_rows_batch(
     }
     // COPY is used only for plain scalar PostgreSQL rows and ordinary tables. Any unsupported
     // value or table feature falls through to the portable INSERT generator below.
-    if conflict_policy == TableImportConflictPolicy::Error
+    if full_column_plan
+        && conflict_policy == TableImportConflictPolicy::Error
         && execution_policy.allow_postgres_copy
         && *db_type == DatabaseType::Postgres
         && !rows
@@ -6215,21 +6397,35 @@ async fn execute_import_rows_batch(
         statement_count,
     )
     .await?;
-    let batches = build_import_execution_batches(
-        rows,
-        plan,
-        columns,
-        mappings,
-        target_column_types,
-        table,
-        schema,
-        db_type,
-        kingbase_oracle_mode,
-        conflict_policy,
-        primary_key_columns,
-        date_time_format,
-        hard_sql_bytes,
-    )
+    let batches = match excel_policy {
+        Some((policy, metadata)) => policy.sql_batches(
+            rows,
+            metadata,
+            table,
+            schema,
+            db_type,
+            kingbase_oracle_mode,
+            conflict_policy,
+            primary_key_columns,
+            date_time_format,
+            hard_sql_bytes,
+        ),
+        None => build_import_execution_batches(
+            rows,
+            plan,
+            columns,
+            mappings,
+            target_column_types,
+            table,
+            schema,
+            db_type,
+            kingbase_oracle_mode,
+            conflict_policy,
+            primary_key_columns,
+            date_time_format,
+            hard_sql_bytes,
+        ),
+    }
     .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
     if let Some(transaction) = sqlite_append_transaction.as_mut() {
         for batch in batches {
@@ -6557,6 +6753,7 @@ fn validated_prepared_import_source(
         rows: prepared.rows.clone(),
         total_rows: prepared.total_rows,
         effective_encoding: prepared.effective_encoding,
+        excel_metadata: None,
     })
 }
 
@@ -6588,6 +6785,8 @@ async fn preview_table_import_file_with_context(
         size_bytes: metadata.len(),
         columns: parsed.columns,
         rows: parsed.rows,
+        blank_cells: parsed.excel_metadata.as_ref().map(|metadata| metadata.blank_cells.clone()).unwrap_or_default(),
+        row_numbers: parsed.excel_metadata.map(|metadata| metadata.row_numbers).unwrap_or_default(),
         total_rows: parsed.total_rows,
         total_rows_exact,
         source_fingerprint,
@@ -7548,6 +7747,7 @@ where
                         &primary_key_columns,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
+                        None,
                         &mut db_write_ms,
                         &mut statement_count,
                     )
@@ -7736,7 +7936,7 @@ where
         let text_source_columns = textual_source_columns_for_import(&request.mappings, &target_column_types);
         // No truncate, INSERT, or COPY may run until the selected worksheet parses to EOF.
         let mut last_xlsx_read_bytes = 0u64;
-        let validated_columns = match validate_xlsx_worksheet_for_import(
+        let validated_columns = match validate_xlsx_worksheet_for_import_with_target(
             request.file_path.clone(),
             request.parse_options.clone(),
             expected_columns.clone(),
@@ -7759,6 +7959,7 @@ where
                     None,
                 ));
             },
+            Some((&request.mappings, &target_columns, db_type)),
         )
         .await
         {
@@ -7782,6 +7983,8 @@ where
                 return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error));
             }
         };
+        let excel_policy = ExcelImportPolicy::new(&validated_columns, &request.mappings, &target_columns, db_type)
+            .map_err(|error| emit_import_error(&mut progress_callback, request, 0, 0, started_at, error))?;
         let expected_columns = Some(validated_columns);
         // Full-sheet validation can take long enough for the user to cancel. Recheck before
         // starting the producer or executing a non-transactional truncate.
@@ -7987,7 +8190,7 @@ where
             };
             match message {
                 Ok(XlsxStreamMessage::Header(_)) => {}
-                Ok(XlsxStreamMessage::Rows(rows)) => {
+                Ok(XlsxStreamMessage::Rows(excel_rows)) => {
                     if is_cancelled(&request.import_id).await {
                         producer_cancelled.store(true, Ordering::Release);
                         drop(receiver);
@@ -8013,7 +8216,7 @@ where
                         &is_cancelled,
                         &request.connection_id,
                         &request.database,
-                        &rows,
+                        &excel_rows.rows,
                         compiled_plan.as_ref(),
                         sqlserver_bulk_plan.as_ref(),
                         &columns,
@@ -8031,6 +8234,7 @@ where
                         &primary_key_columns,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
+                        Some((&excel_policy, &excel_rows.metadata)),
                         &mut db_write_ms,
                         &mut statement_count,
                     )
@@ -8272,6 +8476,21 @@ where
     }
     let mut last_progress_emit = Instant::now();
 
+    let excel_policy = if source_format == TableImportSourceFormat::Excel {
+        match ExcelImportPolicy::new(&source_columns, &request.mappings, &target_columns, db_type) {
+            Ok(policy) => {
+                if let Err(error) = row_source.validate_excel_cells(&policy) {
+                    return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, started_at, error));
+                }
+                Some(policy)
+            }
+            Err(error) => {
+                return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, started_at, error))
+            }
+        }
+    } else {
+        None
+    };
     let compiled_plan = if *db_type == DatabaseType::CloudflareD1 {
         None
     } else {
@@ -8340,6 +8559,23 @@ where
             return Err("Import cancelled".to_string());
         }
 
+        let excel_metadata = if excel_policy.is_some() {
+            match row_source.excel_batch_metadata(rows.len()) {
+                Ok(metadata) => Some(metadata),
+                Err(error) => {
+                    return Err(emit_import_error(
+                        &mut progress_callback,
+                        request,
+                        rows_imported,
+                        total_rows,
+                        started_at,
+                        error,
+                    ))
+                }
+            }
+        } else {
+            None
+        };
         let row_count = match execute_import_rows_batch(
             state,
             pool_key,
@@ -8365,6 +8601,7 @@ where
             &primary_key_columns,
             request.date_time_format.as_deref(),
             import_sql_hard_limit,
+            excel_policy.as_ref().zip(excel_metadata.as_ref()),
             &mut db_write_ms,
             &mut statement_count,
         )
@@ -9008,7 +9245,7 @@ mod tests {
                                 while let Some(message) = receiver.blocking_recv() {
                                     match message.unwrap() {
                                         XlsxStreamMessage::Header(header) => columns = header,
-                                        XlsxStreamMessage::Rows(batch) => rows.extend(batch),
+                                        XlsxStreamMessage::Rows(batch) => rows.extend(batch.rows),
                                         _ => {}
                                     }
                                 }
@@ -9124,7 +9361,7 @@ mod tests {
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
             if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
-                streamed_rows.extend(rows);
+                streamed_rows.extend(rows.rows);
             }
         }
         assert_eq!(streamed_rows, parsed.rows);
@@ -9197,7 +9434,7 @@ mod tests {
         while let Some(message) = receiver.blocking_recv() {
             match message.unwrap() {
                 XlsxStreamMessage::Header(header) => streamed_header = Some(header),
-                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows.rows),
                 _ => {}
             }
         }
@@ -9236,7 +9473,7 @@ mod tests {
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
             if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
-                streamed_rows.extend(rows);
+                streamed_rows.extend(rows.rows);
             }
         }
         assert_eq!(streamed_rows, vec![vec![serde_json::json!(1), serde_json::json!(2)]]);
@@ -9320,7 +9557,7 @@ mod tests {
         while let Some(message) = receiver.blocking_recv() {
             match message.unwrap() {
                 XlsxStreamMessage::Header(header) => streamed_header = Some(header),
-                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows.rows),
                 _ => {}
             }
         }
@@ -9375,7 +9612,7 @@ mod tests {
         while let Some(message) = receiver.blocking_recv() {
             match message.unwrap() {
                 XlsxStreamMessage::Header(header) => streamed_header = Some(header),
-                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows.rows),
                 _ => {}
             }
         }
@@ -9424,7 +9661,7 @@ mod tests {
         while let Some(message) = receiver.blocking_recv() {
             match message.unwrap() {
                 XlsxStreamMessage::Header(columns) => streamed_columns = columns,
-                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows.rows),
                 _ => {}
             }
         }
@@ -9551,7 +9788,7 @@ mod tests {
             while let Some(message) = receiver.blocking_recv() {
                 match message.unwrap() {
                     XlsxStreamMessage::Header(columns) => streamed_columns = columns,
-                    XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                    XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows.rows),
                     _ => {}
                 }
             }
@@ -9595,7 +9832,7 @@ mod tests {
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
             if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
-                streamed_rows.extend(rows);
+                streamed_rows.extend(rows.rows);
             }
         }
 
@@ -11233,7 +11470,7 @@ mod tests {
         let streamed_rows = messages
             .into_iter()
             .filter_map(|message| match message {
-                XlsxStreamMessage::Rows(rows) => Some(rows),
+                XlsxStreamMessage::Rows(rows) => Some(rows.rows),
                 _ => None,
             })
             .flatten()
@@ -11336,6 +11573,292 @@ mod tests {
         let rows =
             crate::db::sqlite::execute_query(&sqlite, "SELECT id, name FROM items ORDER BY id").await.unwrap().rows;
         assert_eq!(rows, vec![vec![serde_json::json!(999), serde_json::json!("old")]]);
+    }
+
+    #[tokio::test]
+    async fn truncate_xlsx_with_blank_required_cell_preserves_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "xlsx-blank-required";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(
+            &sqlite,
+            "CREATE TABLE items (id INTEGER, name TEXT NOT NULL); INSERT INTO items VALUES (999, 'old')",
+        )
+        .await
+        .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "XLSX truncate tail test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:B4"/>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c><c r="B1" t="inlineStr"><is><t>name</t></is></c></row>
+    <row r="2"><c r="A2"><v>1</v></c><c r="B2" t="inlineStr"><is><t>Ada</t></is></c></row>
+    <row r="3"><c r="A3"><v>2</v></c><c r="B3" t="inlineStr"><is><t>Grace</t></is></c></row>
+    <row r="4"><c r="A4"><v>3</v></c><c r="B4"/></row>
+  </sheetData>
+</worksheet>"#;
+        let xlsx_path = dir.path().join("blank-required.xlsx");
+        std::fs::write(&xlsx_path, build_preview_test_xlsx(sheet_xml, None)).unwrap();
+        let request = TableImportRequest {
+            import_id: "blank-required".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: xlsx_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Excel),
+            parse_options: TableImportParseOptions::default(),
+            mappings: vec![
+                TableImportColumnMapping {
+                    source_column: "id".to_string(),
+                    target_column: "id".to_string(),
+                    target_data_type: None,
+                },
+                TableImportColumnMapping {
+                    source_column: "name".to_string(),
+                    target_column: "name".to_string(),
+                    target_data_type: None,
+                },
+            ],
+            mode: TableImportMode::Truncate,
+            create_table: false,
+            batch_size: 1,
+            date_time_format: None,
+            prepared_source: None,
+            skip_duplicate_rows: false,
+            conflict_policy: None,
+            retain_source: false,
+        };
+
+        let error = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("Excel row 4"));
+        assert!(error.contains("name"));
+        assert!(error.contains("without a default"));
+
+        let rows =
+            crate::db::sqlite::execute_query(&sqlite, "SELECT id, name FROM items ORDER BY id").await.unwrap().rows;
+        assert_eq!(rows, vec![vec![serde_json::json!(999), serde_json::json!("old")]]);
+    }
+
+    #[tokio::test]
+    async fn truncate_xlsx_with_unmapped_required_column_preserves_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "xlsx-unmapped-required";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(
+            &sqlite,
+            "CREATE TABLE items (id INTEGER, name TEXT NOT NULL); INSERT INTO items VALUES (999, 'old')",
+        )
+        .await
+        .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "XLSX truncate tail test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:B4"/>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c><c r="B1" t="inlineStr"><is><t>name</t></is></c></row>
+    <row r="2"><c r="A2"><v>1</v></c><c r="B2" t="inlineStr"><is><t>Ada</t></is></c></row>
+    <row r="3"><c r="A3"><v>2</v></c><c r="B3" t="inlineStr"><is><t>Grace</t></is></c></row>
+    <row r="4"><c r="A4"><v>3</v></c><c r="B4"/></row>
+  </sheetData>
+</worksheet>"#;
+        let xlsx_path = dir.path().join("unmapped-required.xlsx");
+        std::fs::write(&xlsx_path, build_preview_test_xlsx(sheet_xml, None)).unwrap();
+        let request = TableImportRequest {
+            import_id: "unmapped-required".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: xlsx_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Excel),
+            parse_options: TableImportParseOptions::default(),
+            mappings: vec![TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "id".to_string(),
+                target_data_type: None,
+            }],
+            mode: TableImportMode::Truncate,
+            create_table: false,
+            batch_size: 1,
+            date_time_format: None,
+            prepared_source: None,
+            skip_duplicate_rows: false,
+            conflict_policy: None,
+            retain_source: false,
+        };
+
+        let error = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("no mapping"));
+        assert!(error.contains("name"));
+        assert!(error.contains("no default"));
+
+        let rows =
+            crate::db::sqlite::execute_query(&sqlite, "SELECT id, name FROM items ORDER BY id").await.unwrap().rows;
+        assert_eq!(rows, vec![vec![serde_json::json!(999), serde_json::json!("old")]]);
+    }
+
+    #[tokio::test]
+    async fn truncate_xlsx_blank_cell_uses_live_database_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "xlsx-blank-default";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(
+            &sqlite,
+            "CREATE TABLE items (id INTEGER, name TEXT NOT NULL DEFAULT 'fallback'); INSERT INTO items VALUES (999, 'old')",
+        )
+        .await
+        .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "XLSX truncate tail test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:B4"/>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c><c r="B1" t="inlineStr"><is><t>name</t></is></c></row>
+    <row r="2"><c r="A2"><v>1</v></c><c r="B2" t="inlineStr"><is><t>Ada</t></is></c></row>
+    <row r="3"><c r="A3"><v>2</v></c><c r="B3" t="inlineStr"><is><t>Grace</t></is></c></row>
+    <row r="4"><c r="A4"><v>3</v></c><c r="B4"/></row>
+  </sheetData>
+</worksheet>"#;
+        let xlsx_path = dir.path().join("blank-default.xlsx");
+        std::fs::write(&xlsx_path, build_preview_test_xlsx(sheet_xml, None)).unwrap();
+        let request = TableImportRequest {
+            import_id: "blank-default".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: xlsx_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Excel),
+            parse_options: TableImportParseOptions::default(),
+            mappings: vec![
+                TableImportColumnMapping {
+                    source_column: "id".to_string(),
+                    target_column: "id".to_string(),
+                    target_data_type: None,
+                },
+                TableImportColumnMapping {
+                    source_column: "name".to_string(),
+                    target_column: "name".to_string(),
+                    target_data_type: None,
+                },
+            ],
+            mode: TableImportMode::Truncate,
+            create_table: false,
+            batch_size: 1,
+            date_time_format: None,
+            prepared_source: None,
+            skip_duplicate_rows: false,
+            conflict_policy: None,
+            retain_source: false,
+        };
+
+        let summary = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.rows_imported, 3);
+
+        let rows =
+            crate::db::sqlite::execute_query(&sqlite, "SELECT id, name FROM items ORDER BY id").await.unwrap().rows;
+        assert_eq!(
+            rows,
+            vec![
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
+                vec![serde_json::json!(3), serde_json::json!("fallback")]
+            ]
+        );
     }
 
     #[tokio::test]
@@ -11531,7 +12054,7 @@ mod tests {
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
             if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
-                streamed_rows.extend(rows);
+                streamed_rows.extend(rows.rows);
             }
         }
         assert_eq!(
@@ -11562,7 +12085,7 @@ mod tests {
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
             if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
-                streamed_rows.extend(rows);
+                streamed_rows.extend(rows.rows);
             }
         }
         assert_eq!(streamed_rows, vec![vec![serde_json::json!("10.0")]]);
@@ -11605,7 +12128,7 @@ mod tests {
         while let Some(message) = receiver.blocking_recv() {
             match message.unwrap() {
                 XlsxStreamMessage::Header(header) => columns = header,
-                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows.rows),
                 _ => {}
             }
         }
@@ -11677,7 +12200,7 @@ mod tests {
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
             if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
-                streamed_rows.extend(rows);
+                streamed_rows.extend(rows.rows);
             }
         }
         assert_eq!(streamed_rows, vec![vec![serde_json::json!(7), serde_json::Value::Null, serde_json::json!("Ada")]]);
@@ -11852,6 +12375,7 @@ mod tests {
             rows,
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let mappings = target_types
             .iter()
@@ -12435,6 +12959,7 @@ mod tests {
             ],
             total_rows: 2,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let mappings = data
             .columns
@@ -12473,6 +12998,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "id".to_string(),
@@ -12492,6 +13018,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("long text")]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "notes".to_string(),
@@ -12511,6 +13038,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1), serde_json::json!("long text")]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let mappings = data
             .columns
@@ -12546,6 +13074,7 @@ mod tests {
             ]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let mappings = data
             .columns
@@ -12577,6 +13106,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("1001"), serde_json::json!("12.5")]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let mappings = vec![
             TableImportColumnMapping {
@@ -12610,6 +13140,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("Ada")]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "name".to_string(),
@@ -12642,6 +13173,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("Ada")]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "name".to_string(),
@@ -12677,6 +13209,7 @@ mod tests {
             ],
             total_rows: 3,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches =
@@ -12716,6 +13249,7 @@ mod tests {
             ],
             total_rows: 2,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches = build_import_insert_batches(
@@ -12761,6 +13295,7 @@ mod tests {
                 .collect(),
             total_rows: 205,
             effective_encoding: None,
+            excel_metadata: None,
         };
         let batches =
             build_import_insert_batches(&data, &mappings, &[], "events", "analytics", &DatabaseType::Transwarp, 500)
@@ -12894,6 +13429,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
             total_rows: 2,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches =
@@ -12918,6 +13454,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)], vec![serde_json::json!(3)]],
             total_rows: 3,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches =
@@ -12944,6 +13481,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches =
@@ -13539,6 +14077,7 @@ mod tests {
             // Pin the legacy 512 KiB cap so the two 300 KiB rows form separate
             // batches and the cancellation check lands between writes.
             Some(512 * 1024),
+            None,
             &mut db_write_ms,
             &mut statement_count,
         )
@@ -13756,6 +14295,7 @@ mod tests {
                 false,
                 TableImportConflictPolicy::Error,
                 &[],
+                None,
                 None,
                 None,
                 &mut self.db_write_ms,
@@ -14135,6 +14675,7 @@ mod tests {
             ],
             total_rows: 3,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches =
@@ -14153,6 +14694,7 @@ mod tests {
             rows: (0..4).map(|index| vec![serde_json::json!(format!("{index}{}", "x".repeat(180 * 1024)))]).collect(),
             total_rows: 4,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let plan = CompiledImportPlan {
@@ -14203,6 +14745,7 @@ mod tests {
             ]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches = build_import_insert_batches(
@@ -14237,6 +14780,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("2024/2/25 13:02:15")]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches = build_import_insert_batches(
@@ -14299,6 +14843,7 @@ mod tests {
             ],
             total_rows: 2,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches = build_import_insert_batches(
@@ -14335,6 +14880,7 @@ mod tests {
             rows: vec![vec![imported_value]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches = build_import_insert_batches_with_format(
@@ -14429,6 +14975,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("Tiếng Việt")]],
             total_rows: 1,
             effective_encoding: None,
+            excel_metadata: None,
         };
 
         let batches = build_import_insert_batches(
@@ -14449,5 +14996,64 @@ mod tests {
                 row_count: 1,
             }]
         );
+    }
+    #[test]
+    fn xlsx_left_shift_keeps_cell_provenance_aligned() {
+        for rows in [
+            r#"<row r="1"><c r="B1" t="inlineStr"><is><t>x</t></is></c><c r="A1"><v>7</v></c></row>"#,
+            r#"<row r="1"><c r="B1" s="0"/></row><row r="2"><c r="A2"><v>7</v></c><c r="B2" t="inlineStr"><is><t>x</t></is></c></row>"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("left-shift.xlsx");
+            let xml = format!(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>"#
+            );
+            std::fs::write(&path, build_preview_test_xlsx(&xml, None)).unwrap();
+            let options = TableImportParseOptions { title_row: Some(0), data_start_row: Some(1), ..Default::default() };
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+            stream_xlsx_rows_to_channel(path.to_str().unwrap(), &options, 500, None, HashSet::new(), false, sender)
+                .unwrap();
+            let mut count = 0;
+            while let Some(message) = receiver.blocking_recv() {
+                if let XlsxStreamMessage::Rows(batch) = message.unwrap() {
+                    assert_eq!(batch.rows, vec![vec![serde_json::json!(7), serde_json::json!("x")]]);
+                    assert_eq!(batch.metadata.blank_cells, vec![Vec::<usize>::new()]);
+                    count += batch.rows.len();
+                }
+            }
+            assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn xlsx_blank_provenance_is_preserved_across_preview_parse_and_streaming() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blanks.xlsx");
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B4"/><sheetData>
+        <row r="1"><c r="A1" t="inlineStr"><is><t>id</t></is></c><c r="B1" t="inlineStr"><is><t>icon</t></is></c></row>
+        <row r="2"><c r="A2"><v>1</v></c><c r="B2" t="inlineStr"><is><t></t></is></c></row>
+        <row r="3"><c r="A3" s="0"/><c r="B3" s="0"/></row>
+        <row r="4"><c r="A4"><v>2</v></c></row>
+        </sheetData></worksheet>"#;
+        std::fs::write(&path, build_preview_test_xlsx(xml, None)).unwrap();
+        for empty_as_null in [false, true] {
+            let options = TableImportParseOptions { empty_string_as_null: Some(empty_as_null), ..Default::default() };
+            let parsed = parse_xlsx_file_with_options(path.to_str().unwrap(), &options, 10).unwrap();
+            let (preview, _) = parse_xlsx_preview_file_with_options(path.to_str().unwrap(), &options, 10).unwrap();
+            for metadata in [parsed.excel_metadata.as_ref().unwrap(), preview.excel_metadata.as_ref().unwrap()] {
+                assert_eq!(metadata.blank_cells, vec![vec![], vec![1]]);
+                assert_eq!(metadata.row_numbers, vec![2, 4]);
+            }
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+            stream_xlsx_rows_to_channel(path.to_str().unwrap(), &options, 500, None, HashSet::new(), false, sender)
+                .unwrap();
+            while let Some(message) = receiver.blocking_recv() {
+                if let XlsxStreamMessage::Rows(batch) = message.unwrap() {
+                    assert_eq!(batch.rows, preview.rows);
+                    assert_eq!(batch.metadata.blank_cells, vec![vec![], vec![1]]);
+                    assert_eq!(batch.metadata.row_numbers, vec![2, 4]);
+                }
+            }
+        }
     }
 }

@@ -5100,7 +5100,7 @@ impl InsertSqlTemplate {
     }
 }
 
-fn sql_text_bytes(sql: &str, db_type: &DatabaseType) -> usize {
+pub(crate) fn sql_text_bytes(sql: &str, db_type: &DatabaseType) -> usize {
     if matches!(db_type, DatabaseType::SqlServer) {
         sql.encode_utf16().count().saturating_mul(2)
     } else {
@@ -6537,11 +6537,30 @@ pub(crate) fn generate_primary_key_upsert_sql_batches_from_value_rows(
     limits: SqlBatchLimits,
     pk_columns: &[String],
 ) -> Result<Vec<(String, usize)>, String> {
+    generate_primary_key_upsert_sql_batches_from_value_rows_with_update_columns(
+        columns, columns, value_rows, table, schema, db_type, catalog, limits, pk_columns,
+    )
+}
+
+/// INSERT can omit defaulted columns while EXCLUDED/VALUES still exposes the
+/// defaults evaluated by the database for update-existing conflict handling.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_primary_key_upsert_sql_batches_from_value_rows_with_update_columns(
+    columns: &[String],
+    update_columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    pk_columns: &[String],
+) -> Result<Vec<(String, usize)>, String> {
     if !supports_primary_key_upsert(db_type) {
         return Err(format!("Update-existing import conflict policy is not supported for {}", db_type.as_str()));
     }
 
-    let clause = primary_key_upsert_clause(columns, pk_columns, db_type, true)?;
+    let clause = primary_key_upsert_clause(update_columns, pk_columns, db_type, true)?;
     let clause_bytes = sql_text_bytes(&clause, db_type);
     let adjusted_limits = SqlBatchLimits {
         max_rows: limits.max_rows,

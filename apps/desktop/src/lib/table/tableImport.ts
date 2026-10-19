@@ -21,6 +21,26 @@ export interface ImportTargetColumnLike {
   column_default?: string | null;
   extra?: string | null;
   is_primary_key?: boolean;
+  data_type?: string;
+}
+
+export type ExcelImportCellAction = "value" | "null" | "default" | "missing" | "explicitNull";
+
+function importColumnHasGeneratedValue(column: ImportTargetColumnLike, databaseType?: DatabaseType): boolean {
+  return /auto_increment|autoincrement|identity|generated|computed/i.test(column.extra || "") || (databaseType === "sqlserver" && /^(rowversion|timestamp)$/i.test(column.data_type?.trim() || ""));
+}
+
+export function excelImportCellAction(value: unknown, blank: boolean, column: ImportTargetColumnLike | undefined, databaseType?: DatabaseType): ExcelImportCellAction {
+  if (!column || column.is_nullable === undefined) return "value";
+  const computed =
+    /computed/i.test(column.extra || "") ||
+    (/^(generated\s|(?:virtual|stored|persistent)\s+generated)/i.test(column.extra?.trim() || "") && !/^generated\s+(?:always|by\s+default)\s+as\s+identity(?:\s|$)/i.test(column.extra?.trim() || "")) ||
+    (databaseType === "sqlserver" && /^(rowversion|timestamp)$/i.test(column.data_type?.trim() || ""));
+  if (blank && computed) return "default";
+  if (column.is_nullable) return blank ? "null" : "value";
+  if (!blank) return value === null ? "explicitNull" : "value";
+  const generated = importColumnHasGeneratedValue(column, databaseType);
+  return column.column_default != null || generated ? "default" : "missing";
 }
 
 export interface TableImportProgressLike {
@@ -180,18 +200,11 @@ export function validateImportMappings(mappings: ImportColumnMappingLike[]): Imp
   return { valid: errors.length === 0, errors, duplicateTargets };
 }
 
-export function requiredImportTargetColumns(columns: ImportTargetColumnLike[], mappedTargetColumns: string[]): string[] {
+export function requiredImportTargetColumns(columns: ImportTargetColumnLike[], mappedTargetColumns: string[], databaseType?: DatabaseType): string[] {
   const mapped = new Set(mappedTargetColumns.map((column) => column.toLowerCase()));
   return columns
     .filter((column) => !mapped.has(column.name.toLowerCase()))
-    .filter(
-      (column) =>
-        column.is_nullable === false &&
-        !column.column_default &&
-        !String(column.extra || "")
-          .toLowerCase()
-          .includes("auto"),
-    )
+    .filter((column) => column.is_nullable === false && column.column_default == null && !importColumnHasGeneratedValue(column, databaseType))
     .map((column) => column.name);
 }
 

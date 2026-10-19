@@ -916,6 +916,14 @@ async function toggle(requestId = beginNavigationRequest()) {
   emit("search-toggle", node);
   const wasExpanded = !!node.isExpanded;
 
+  // A search result is a projection over children that are already loaded for
+  // the query. Expanding a collapsed result must only remove it from the
+  // projection's collapsed set; entering the normal load path here can replace
+  // the live subtree with the filtered projection and leave the sidebar blank.
+  if (!wasExpanded && node.children?.length && sidebarTreeContext?.isSearchProjectionActive?.()) {
+    return;
+  }
+
   if (node.type === "connection-group") {
     node.isExpanded = !node.isExpanded;
     if (!node.isExpanded) collapseSubtreeDescendants(node);

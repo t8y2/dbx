@@ -744,6 +744,57 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
   });
 
+  it("expands a collapsed search projection without reloading its live subtree", async () => {
+    const tableGroup: TreeNode = {
+      id: "mysql:basic:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: true,
+      children: [{ id: "mysql:basic:__tables:json_orders", label: "json_orders", type: "table", connectionId: "mysql", database: "basic" }],
+    };
+    const database: TreeNode = {
+      id: "mysql:basic",
+      label: "basic",
+      type: "database",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [tableGroup],
+    };
+    connectionStore.sidebarSearchQuery = "json";
+    const searchToggle = vi.fn();
+    const nodeToggled = vi.fn();
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, {
+            getVisibleNodes: () => [database],
+            getVisibleNodeIndex: () => 0,
+            isSearchProjectionActive: () => true,
+          });
+          return () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0, onSearchToggle: searchToggle, onNodeToggled: nodeToggled });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(database);
+    await nextTick();
+
+    expect(searchToggle).toHaveBeenCalledWith(database);
+    expect(nodeToggled).not.toHaveBeenCalled();
+    expect(connectionStore.loadTables).not.toHaveBeenCalled();
+    expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
+  });
+
   it("expands an unloaded object group without leaking a matching connection name", async () => {
     const group: TreeNode = {
       id: "mysql:basic:__tables",

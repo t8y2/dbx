@@ -186,10 +186,14 @@ fn linux_desktop_supports_floating_frame(current_desktop: Option<&std::ffi::OsSt
         .unwrap_or(false)
 }
 
-/// `DBX_LINUX_FLOATING_FRAME=1|0` is an optional override; without it the desktop decides.
+/// `DBX_LINUX_FLOATING_FRAME=1|0` is an optional override; without it the frame is only used on
+/// GNOME running as a native Wayland client. GNOME on X11 ("GNOME on Xorg") keeps the opaque
+/// window: there the transparent WebKitGTK window stays see-through and only repaints the regions
+/// that get damaged (e.g. under the mouse).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn should_enable_linux_floating_frame(
     compositing: bool,
+    native_wayland: bool,
     override_value: Option<&std::ffi::OsStr>,
     current_desktop: Option<&std::ffi::OsStr>,
 ) -> bool {
@@ -199,23 +203,34 @@ fn should_enable_linux_floating_frame(
     match override_value.and_then(|value| value.to_str()) {
         Some("1") => true,
         Some("0") => false,
-        _ => linux_desktop_supports_floating_frame(current_desktop),
+        _ => native_wayland && linux_desktop_supports_floating_frame(current_desktop),
     }
 }
 
 /// The Linux config declares the main window with `create: false` so its transparency can
-/// depend at runtime on the desktop and on whether a compositor is available.
+/// depend at runtime on the desktop, the Wayland/X11 session and whether a compositor is available.
 #[cfg(target_os = "linux")]
 fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
     let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main").cloned() else {
         return Ok(());
     };
     let compositing = linux_compositing_available();
+    let native_wayland = linux_uses_native_wayland(
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("XDG_SESSION_TYPE").as_deref(),
+        std::env::var_os("GDK_BACKEND").as_deref(),
+    );
     let override_value = std::env::var_os("DBX_LINUX_FLOATING_FRAME");
     let current_desktop = std::env::var_os("XDG_CURRENT_DESKTOP");
-    let floating_frame =
-        should_enable_linux_floating_frame(compositing, override_value.as_deref(), current_desktop.as_deref());
-    log::info!("[WINDOW] Linux main window compositing={compositing}; floating_frame={floating_frame}");
+    let floating_frame = should_enable_linux_floating_frame(
+        compositing,
+        native_wayland,
+        override_value.as_deref(),
+        current_desktop.as_deref(),
+    );
+    log::info!(
+        "[WINDOW] Linux main window compositing={compositing}; native_wayland={native_wayland}; floating_frame={floating_frame}"
+    );
     let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.transparent(floating_frame);
     if floating_frame {
         // Read by index.html before first paint to draw the rounded, shadowed frame.
@@ -1236,30 +1251,38 @@ mod tests {
     }
 
     #[test]
-    fn linux_floating_frame_is_enabled_by_default_on_gnome_only() {
+    fn linux_floating_frame_is_enabled_by_default_on_gnome_wayland_only() {
         for desktop in ["GNOME", "ubuntu:GNOME", "gnome", "GNOME-Classic:GNOME"] {
-            assert!(should_enable_linux_floating_frame(true, None, Some(OsStr::new(desktop))), "{desktop}");
+            assert!(should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop))), "{desktop}");
         }
         for desktop in ["KDE", "XFCE", "X-Cinnamon", "sway", "", "GNOMEISH"] {
-            assert!(!should_enable_linux_floating_frame(true, None, Some(OsStr::new(desktop))), "{desktop}");
+            assert!(!should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop))), "{desktop}");
         }
-        assert!(!should_enable_linux_floating_frame(true, None, None));
+        assert!(!should_enable_linux_floating_frame(true, true, None, None));
+    }
+
+    #[test]
+    fn linux_floating_frame_is_disabled_by_default_on_gnome_x11() {
+        for desktop in ["GNOME", "ubuntu:GNOME", "GNOME-Classic:GNOME"] {
+            assert!(!should_enable_linux_floating_frame(true, false, None, Some(OsStr::new(desktop))), "{desktop}");
+        }
+        assert!(should_enable_linux_floating_frame(true, false, Some(OsStr::new("1")), Some(OsStr::new("GNOME"))));
     }
 
     #[test]
     fn linux_floating_frame_override_wins_over_desktop() {
-        assert!(should_enable_linux_floating_frame(true, Some(OsStr::new("1")), Some(OsStr::new("KDE"))));
-        assert!(!should_enable_linux_floating_frame(true, Some(OsStr::new("0")), Some(OsStr::new("GNOME"))));
+        assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new("1")), Some(OsStr::new("KDE"))));
+        assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new("0")), Some(OsStr::new("GNOME"))));
         for value in ["", "true", "auto", "01"] {
-            assert!(should_enable_linux_floating_frame(true, Some(OsStr::new(value)), Some(OsStr::new("GNOME"))));
-            assert!(!should_enable_linux_floating_frame(true, Some(OsStr::new(value)), Some(OsStr::new("KDE"))));
+            assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new(value)), Some(OsStr::new("GNOME"))));
+            assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new(value)), Some(OsStr::new("KDE"))));
         }
     }
 
     #[test]
     fn linux_floating_frame_requires_compositing() {
-        assert!(!should_enable_linux_floating_frame(false, Some(OsStr::new("1")), Some(OsStr::new("GNOME"))));
-        assert!(!should_enable_linux_floating_frame(false, None, Some(OsStr::new("GNOME"))));
+        assert!(!should_enable_linux_floating_frame(false, true, Some(OsStr::new("1")), Some(OsStr::new("GNOME"))));
+        assert!(!should_enable_linux_floating_frame(false, true, None, Some(OsStr::new("GNOME"))));
     }
 
     #[test]

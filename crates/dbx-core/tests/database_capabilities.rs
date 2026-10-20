@@ -543,3 +543,20 @@ fn db2_declares_table_import_support() {
 
     assert!(db2.capabilities.table_import);
 }
+
+#[test]
+fn opengauss_declares_table_import_support() {
+    let manifest = driver_manifest();
+    let opengauss = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::OpenGauss)
+        .expect("openGauss manifest entry");
+
+    assert!(opengauss.capabilities.table_import);
+    // The import wizard relies on these neighbouring capabilities; keep the
+    // openGauss block coherent so the entry surfaces stay reachable.
+    assert!(opengauss.capabilities.table_data_edit);
+    assert!(opengauss.capabilities.sql_file_execution);
+    assert!(opengauss.capabilities.data_transfer);
+}

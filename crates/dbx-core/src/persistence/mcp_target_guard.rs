@@ -14,20 +14,20 @@
 use std::path::{Path, PathBuf};
 
 use crate::database_manifest;
-use crate::models::connection::ConnectionConfig;
+use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::path_utils::expand_tilde;
 
 /// Error code returned to MCP callers when a connection targets the config DB.
 pub const CONFIG_DB_PATH_FORBIDDEN: &str = "CONFIG_DB_PATH_FORBIDDEN";
 
 /// Returns `Err(CONFIG_DB_PATH_FORBIDDEN: ...)` when `config` is a local-file
-/// database whose target — its own file or one of its saved
-/// `attached_databases` — resolves to `config_db_path` or one of its SQLite
-/// sidecars (`-wal`, `-shm`, `-journal`).
+/// database whose target — its own file, one of its saved `attached_databases`,
+/// or an `ATTACH` inside the DuckDB `init_script` — resolves to `config_db_path`
+/// or one of its SQLite sidecars (`-wal`, `-shm`, `-journal`).
 ///
-/// Saved attachments matter as much as the main file: DBX restores them during
-/// pool creation, so a legacy connection whose main file is harmless could still
-/// expose `dbx.db` under another schema name.
+/// Saved attachments and init scripts matter as much as the main file: DBX
+/// restores both during pool creation, so a connection whose main file is
+/// harmless could still expose `dbx.db` under another schema name.
 ///
 /// Only the configuration database is protected, not its whole directory: an
 /// agent may legitimately work with other SQLite/DuckDB files stored next to
@@ -48,14 +48,39 @@ pub fn ensure_mcp_target_allowed(config_db_path: &Path, config: &ConnectionConfi
             continue;
         };
         if is_config_db_path(&config_db_path, &target) {
-            // Do not echo the resolved path: the point is to keep the agent from
-            // learning where the configuration database lives.
-            return Err(format!(
-                "{CONFIG_DB_PATH_FORBIDDEN}: MCP connections cannot target DBX's own configuration database, which stores DBX's settings and credentials."
-            ));
+            return Err(config_db_forbidden());
+        }
+    }
+    // DuckDB executes its init script when the pool is created, so an ATTACH
+    // there opens a local file without ever naming it as the connection target.
+    if config.db_type == DatabaseType::DuckDb {
+        let script = config.init_script.as_deref().unwrap_or_default();
+        for statement in crate::db::duckdb_sql::split_sql_statements(script) {
+            if !crate::db::duckdb_sql::is_attach_statement(&statement) {
+                continue;
+            }
+            // Fail closed: an ATTACH whose target cannot be read could hide a
+            // local file, and the connection is only reachable through MCP here.
+            let Some(target) = crate::db::duckdb_sql::attached_target_from_attach_sql(&statement) else {
+                return Err(config_db_forbidden());
+            };
+            let Some(target) = resolve_local_target(&target) else {
+                continue;
+            };
+            if is_config_db_path(&config_db_path, &target) {
+                return Err(config_db_forbidden());
+            }
         }
     }
     Ok(())
+}
+
+/// Shared message for every rejected target; the resolved path is deliberately
+/// omitted so the agent cannot learn where the configuration database lives.
+fn config_db_forbidden() -> String {
+    format!(
+        "{CONFIG_DB_PATH_FORBIDDEN}: MCP connections cannot target DBX's own configuration database, which stores DBX's settings and credentials."
+    )
 }
 
 /// Matches `dbx.db` itself and the SQLite sidecars that share its file-name
@@ -135,7 +160,6 @@ fn canonicalize_allow_missing(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::connection::DatabaseType;
 
     fn sqlite_connection(host: &str) -> ConnectionConfig {
         // `ConnectionConfig` has defaults for most fields but no `Default` impl,
@@ -155,6 +179,64 @@ mod tests {
 
     fn temp_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("temporary directory")
+    }
+
+    fn duckdb_connection(host: &str, init_script: &str) -> ConnectionConfig {
+        let mut config = sqlite_connection(host);
+        config.db_type = DatabaseType::DuckDb;
+        config.init_script = Some(init_script.to_string());
+        config
+    }
+
+    #[test]
+    fn rejects_a_duckdb_init_script_that_attaches_the_config_database() {
+        let directory = temp_dir();
+        let config_db = directory.path().join("dbx.db");
+        let host = directory.path().join("lake.duckdb").to_string_lossy().into_owned();
+        for script in [
+            format!("INSTALL httpfs;\nATTACH '{}' AS cfg;", config_db.display()),
+            format!("ATTACH DATABASE '{}' AS cfg", config_db.display()),
+            format!("attach if not exists '{}' as cfg", config_db.display()),
+            format!("-- note\n/* block */ ATTACH '{}' AS cfg", config_db.display()),
+        ] {
+            let error = ensure_mcp_target_allowed(&config_db, &duckdb_connection(&host, &script)).unwrap_err();
+            assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{script}: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_duckdb_init_script_attach_it_cannot_parse() {
+        let directory = temp_dir();
+        let config_db = directory.path().join("dbx.db");
+        let host = directory.path().join("lake.duckdb").to_string_lossy().into_owned();
+        let error = ensure_mcp_target_allowed(&config_db, &duckdb_connection(&host, "ATTACH some_expression AS cfg"))
+            .unwrap_err();
+        assert!(error.starts_with(CONFIG_DB_PATH_FORBIDDEN), "{error}");
+    }
+
+    #[test]
+    fn allows_duckdb_init_scripts_that_attach_other_files() {
+        let directory = temp_dir();
+        let config_db = directory.path().join("dbx.db");
+        let host = directory.path().join("lake.duckdb").to_string_lossy().into_owned();
+        let sibling = directory.path().join("sales.duckdb");
+        let script = format!(
+            "INSTALL httpfs; LOAD httpfs; ATTACH '{}' AS sales; ATTACH 'ducklake:postgres:dbname=lake' AS lake",
+            sibling.display()
+        );
+        assert!(ensure_mcp_target_allowed(&config_db, &duckdb_connection(&host, &script)).is_ok());
+    }
+
+    #[test]
+    fn ignores_init_scripts_for_non_duckdb_connections() {
+        // `init_script` is a DuckDB-only field; SQLite never executes it, so the
+        // same text must not turn a valid SQLite connection into a rejection.
+        let directory = temp_dir();
+        let config_db = directory.path().join("dbx.db");
+        let host = directory.path().join("app.db").to_string_lossy().into_owned();
+        let mut config = sqlite_connection(&host);
+        config.init_script = Some(format!("ATTACH '{}' AS cfg", config_db.display()));
+        assert!(ensure_mcp_target_allowed(&config_db, &config).is_ok());
     }
 
     #[test]

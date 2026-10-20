@@ -465,6 +465,17 @@ pub async fn ensure_sql(
     let group_path = group_paths.get(connection_id);
     ensure_allowed(&policy, group_path, connection_id)?;
     let config = load_connection(state, connection_id).await?;
+    // #9108: this is the trusted boundary for MCP SQL forwarded by a standalone
+    // MCP process. That process may resolve a different data directory, so the
+    // check runs here against the Web server's own configuration database.
+    dbx_core::persistence::mcp_target_guard::ensure_mcp_target_allowed(state.app.storage.storage_db_path(), &config)
+        .map_err(AppError::from)?;
+    if dbx_core::sql_risk::mcp_sql_has_forbidden_file_attach(sql, config.db_type) {
+        return Err(AppError::from(
+            "SQL_BLOCKED: MCP does not allow ATTACH or DETACH. Configure attached databases on the connection instead."
+                .to_string(),
+        ));
+    }
     let database = dbx_core::mcp_policy::resolve_database(database, config.database.as_deref());
     ensure_database_in_scope(&policy, connection_id, &database)?;
     if !allow_database_switch && dbx_core::sql_risk::mcp_sql_has_forbidden_database_switch(sql, config.db_type) {
@@ -501,9 +512,59 @@ pub async fn ensure_sql(
 mod tests {
     use super::{
         connection_read_only_error, effective_database_execution_policy, ensure_mongo_database_execution_scope,
-        mongo_filter_is_effectively_unbounded, mongo_pipeline_has_write_stage,
+        ensure_sql, mongo_filter_is_effectively_unbounded, mongo_pipeline_has_write_stage,
     };
     use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
+    use std::sync::Arc;
+
+    use axum::http::HeaderMap;
+
+    use crate::state::WebState;
+
+    #[tokio::test]
+    async fn mcp_sql_refuses_the_configuration_database_but_not_the_web_editor() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_db = directory.path().join("dbx.db");
+        let storage = dbx_core::persistence::test_storage::open(&config_db).await.unwrap();
+        let sqlite_config = |id: &str, host: &std::path::Path| {
+            serde_json::from_value::<dbx_core::models::connection::ConnectionConfig>(serde_json::json!({
+                "id": id,
+                "name": id,
+                "db_type": "sqlite",
+                "host": host.to_string_lossy(),
+                "port": 0,
+                "username": "",
+                "password": "",
+                "database": "main",
+            }))
+            .unwrap()
+        };
+        let sibling = directory.path().join("sibling.db");
+        storage
+            .save_connections(&[sqlite_config("protected", &config_db), sqlite_config("allowed", &sibling)])
+            .await
+            .unwrap();
+        let state = Arc::new(WebState::for_tests(
+            Arc::new(dbx_core::connection::AppState::new(storage)),
+            directory.path().to_path_buf(),
+        ));
+
+        let mut mcp_headers = HeaderMap::new();
+        mcp_headers.insert("x-dbx-mcp-request", "1".parse().unwrap());
+
+        // The Web process owns the storage path, so a standalone MCP process
+        // pointing at a different data directory cannot bypass this check.
+        let error = ensure_sql(&state, &mcp_headers, "protected", "main", "SELECT 1", false).await.unwrap_err();
+        assert!(error.to_string().contains("CONFIG_DB_PATH_FORBIDDEN"), "{error}");
+
+        assert!(ensure_sql(&state, &mcp_headers, "allowed", "main", "SELECT 1", false).await.is_ok());
+        // The Web SQL editor (no MCP marker) keeps its existing behaviour.
+        assert!(ensure_sql(&state, &HeaderMap::new(), "protected", "main", "SELECT 1", false).await.is_ok());
+
+        let attach = "ATTACH DATABASE '/tmp/other.db' AS other";
+        let error = ensure_sql(&state, &mcp_headers, "allowed", "main", attach, false).await.unwrap_err();
+        assert!(error.to_string().contains("SQL_BLOCKED"), "{error}");
+    }
 
     fn database_policy() -> McpGlobalPolicy {
         McpGlobalPolicy {

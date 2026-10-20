@@ -388,7 +388,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     iconSlug: "minimax",
     provider: "minimax",
     endpoint: "https://api.minimax.io/v1",
-    model: "MiniMax-M3",
+    model: "MiniMax-M3.1-Flash",
     apiStyle: "completions",
     authMethod: "bearer",
     requiresApiKey: true,

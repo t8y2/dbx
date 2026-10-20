@@ -1038,7 +1038,7 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS.deepseek.endpoint, "https://api.deepseek.com/v1");
   assert.equal(AI_PROVIDER_PRESETS.deepseek.model, "deepseek-v4-flash");
   assert.equal(AI_PROVIDER_PRESETS.minimax.endpoint, "https://api.minimax.io/v1");
-  assert.equal(AI_PROVIDER_PRESETS.minimax.model, "MiniMax-M3");
+  assert.equal(AI_PROVIDER_PRESETS.minimax.model, "MiniMax-M3.1-Flash");
   assert.equal(AI_PROVIDER_PRESETS.minimax.authMethod, "bearer");
   assert.equal(AI_PROVIDER_PRESETS.minimax.requiresApiKey, true);
   assert.equal(AI_PROVIDER_PRESETS.minimax.iconSlug, "minimax");

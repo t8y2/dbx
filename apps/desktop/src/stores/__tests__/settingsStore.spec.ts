@@ -1475,6 +1475,13 @@ describe("settingsStore AI API key normalization", () => {
     expect(AI_PROVIDER_PRESETS).not.toHaveProperty(CC_SWITCH_PROVIDER_ID);
   });
 
+  it("defaults new MiniMax configurations to Flash and preserves explicit models", () => {
+    expect(normalizeAiConfig({ provider: "minimax" }).model).toBe("MiniMax-M3.1-Flash");
+    for (const model of ["MiniMax-M3", "MiniMax-M2.7", "private-model", ""]) {
+      expect(normalizeAiConfig({ provider: "minimax", model }).model).toBe(model);
+    }
+  });
+
   it("preserves saved MiniMax endpoints during normalization", () => {
     expect(normalizeAiConfig({ provider: "minimax", endpoint: "https://api.minimaxi.com/v1" }).endpoint).toBe("https://api.minimaxi.com/v1");
     expect(normalizeAiConfig({ provider: "minimax", endpoint: "https://minimax.example.com/v1" }).endpoint).toBe("https://minimax.example.com/v1");

@@ -4534,7 +4534,7 @@ func TestDetectMySQLCompatModeProbesBacktickSyntaxWhenDatabaseModeMissing(t *tes
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.queries) != 2 || !strings.Contains(state.queries[1], "dbx_identifier_probe") {
+	if len(state.queries) != 4 || !strings.Contains(state.queries[3], "dbx_identifier_probe") {
 		t.Fatalf("expected database_mode probe followed by backtick syntax probe, got: %v", state.queries)
 	}
 }

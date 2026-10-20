@@ -4408,6 +4408,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function refreshConnectedDatabaseInfo(connectionId: string, config: ConnectionConfig): Promise<void> {
     const expectedConfigFingerprint = connectionConfigFingerprint(config);
+    const current = getConfig(connectionId);
+    if (config.db_type === "kingbase" && current?.database_info && connectionConfigFingerprint(current) === expectedConfigFingerprint) {
+      current.database_info = { ...current.database_info, compatibilityMode: undefined };
+    }
     try {
       const detected = await api.connectionDatabaseInfo(connectionId);
       const normalized = normalizeDatabaseConnectionInfo(detected, configuredDatabaseProductName(config), config.database);
@@ -4859,10 +4863,9 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       await syncMongoLegacyDriverFallback(id, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
-      const refreshDwsMetadataBeforeReady = config.db_type === "gaussdb" && gaussdbConnectionMode(config) === "dws";
-      if (config.db_type !== "plugin" && refreshDwsMetadataBeforeReady) {
-        // Refresh the product version before exposing the connection so `dbVersion`
-        // is current. Support comes from the explicit profile, not the version.
+      const refreshMetadataBeforeReady = config.db_type === "kingbase" || (config.db_type === "gaussdb" && gaussdbConnectionMode(config) === "dws");
+      if (config.db_type !== "plugin" && refreshMetadataBeforeReady) {
+        // Kingbase parsing needs the live mode; DWS needs the current product version.
         // Metadata remains optional: refreshConnectedDatabaseInfo swallows failures.
         await refreshConnectedDatabaseInfo(id, { ...config, id });
         await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
@@ -4874,7 +4877,7 @@ export const useConnectionStore = defineStore("connection", () => {
       clearConnectionClosedByUser(config.id);
       clearConnectionClosedByUser(id);
       if (config.db_type !== "plugin") {
-        if (!refreshDwsMetadataBeforeReady) void refreshConnectedDatabaseInfo(id, { ...config, id });
+        if (!refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(id, { ...config, id });
         await refreshConnectionIdentifierQuote(id, { ...config, id });
         ensureLocalConnectionAttemptActive(config.id, localAttempt);
         // Compatibility modes warm asynchronously; the QueryEditor watcher and the
@@ -5335,10 +5338,9 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       await syncMongoLegacyDriverFallback(connectionId, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
-      const refreshDwsMetadataBeforeReady = config.db_type === "gaussdb" && gaussdbConnectionMode(config) === "dws";
-      if (config.db_type !== "plugin" && refreshDwsMetadataBeforeReady) {
-        // Refresh the product version before reconnect completion so `dbVersion`
-        // reflects the new server session; support comes from the explicit profile.
+      const refreshMetadataBeforeReady = config.db_type === "kingbase" || (config.db_type === "gaussdb" && gaussdbConnectionMode(config) === "dws");
+      if (config.db_type !== "plugin" && refreshMetadataBeforeReady) {
+        // Refresh mode/version before reconnect completion, never infer mode from version.
         await refreshConnectedDatabaseInfo(connectionId, config);
         await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       }
@@ -5346,7 +5348,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // 任何路径真的连上之后，"用户已关闭"标记就不能再拦后续的被动唤醒。
       clearConnectionClosedByUser(connectionId);
       if (config.db_type !== "plugin") {
-        if (!refreshDwsMetadataBeforeReady) void refreshConnectedDatabaseInfo(connectionId, config);
+        if (!refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(connectionId, config);
         await refreshConnectionIdentifierQuote(connectionId, config);
         ensureLocalConnectionAttemptActive(connectionId, localAttempt);
         void refreshConnectionDatabaseModes(connectionId, config);

@@ -42,4 +42,12 @@ describe("quickConnectionOpenTarget", () => {
       database: "app",
     });
   });
+
+  it("carries the connection's default schema into the query tab (#11844)", () => {
+    expect(quickConnectionOpenTarget({ ...connection("oracle"), database: "XE", default_schema: "REPORTING" })).toEqual({
+      kind: "query",
+      database: "XE",
+      schema: "REPORTING",
+    });
+  });
 });

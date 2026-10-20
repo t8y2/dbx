@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import DatabaseActionsMenu from "@/components/objects/DatabaseActionsMenu.vue";
 import FirebirdObjectManager from "@/components/objects/FirebirdObjectManager.vue";
@@ -542,7 +543,7 @@ const singleKindFilter = computed<ObjectFilter | null>(() => (objectFilters.valu
 // filter there and drops the database chip. See useToolbarOverflow for the
 // tier contract.
 const toolbarRef = ref<HTMLElement | null>(null);
-const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.database, () => selectedSchema.value, () => needsSchema.value, () => showObjectFilter.value, () => singleKindFilter.value]);
+const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.database, () => selectedSchema.value, () => needsSchema.value, () => showObjectFilter.value, () => singleKindFilter.value, () => settingsStore.editorSettings.objectBrowserViewMode]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
 const showInlineSortAndView = computed(() => toolbarTier.value < 1);
 const showInlineCheckboxToggle = computed(() => toolbarTier.value < 1);
@@ -556,6 +557,11 @@ const viewMode = computed<ObjectBrowserViewMode>(() => settingsStore.editorSetti
 const isListView = computed(() => viewMode.value === "list");
 const isGridView = computed(() => viewMode.value === "grid");
 const isCompactView = computed(() => viewMode.value === "compact");
+const compactCardWidth = computed(() => normalizeObjectBrowserCompactWidth(settingsStore.editorSettings.objectBrowserCompactWidth));
+
+function setCompactCardWidth(width: ObjectBrowserCompactWidth) {
+  settingsStore.updateEditorSettings({ objectBrowserCompactWidth: width });
+}
 
 type ObjectBrowserScroller =
   | HTMLElement
@@ -777,7 +783,6 @@ const selectableRows = computed(() => rows.value);
 // The previous flat `v-for` rendered every card (plus its CustomContextMenu)
 // at once, which stalls the UI on schemas with thousands of objects.
 const OBJECT_GRID_MIN_CARD_WIDTH = 160; // former `minmax(160px, 1fr)` floor
-const OBJECT_COMPACT_MIN_CARD_WIDTH = 128;
 const OBJECT_GRID_GAP = 12; // 0.75rem, former grid gap (both axes)
 const OBJECT_COMPACT_GAP = 4;
 // Card height is dataset-stable: if any object has timestamps/comments, every card
@@ -804,7 +809,7 @@ const gridColumns = ref(1);
 let gridResizeObserver: ResizeObserver | null = null;
 
 function recomputeGridColumns(width: number) {
-  const minWidth = isCompactView.value ? OBJECT_COMPACT_MIN_CARD_WIDTH : OBJECT_GRID_MIN_CARD_WIDTH;
+  const minWidth = isCompactView.value ? compactCardWidth.value : OBJECT_GRID_MIN_CARD_WIDTH;
   const gap = isCompactView.value ? OBJECT_COMPACT_GAP : OBJECT_GRID_GAP;
   gridColumns.value = Math.max(1, Math.floor((width + gap) / (minWidth + gap)));
 }
@@ -832,7 +837,7 @@ watch(
   },
   { flush: "post" },
 );
-watch(viewMode, () =>
+watch([viewMode, compactCardWidth], () =>
   nextTick(() => {
     const el = gridContainerRef.value;
     if (el) recomputeGridColumns(el.clientWidth - parseFloat(getComputedStyle(el).paddingLeft) - parseFloat(getComputedStyle(el).paddingRight));
@@ -4724,6 +4729,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': isCompactView }" :title="t('objects.viewCompact')" @click="setViewMode('compact')">
           <Grid3X3 class="h-3.5 w-3.5" />
         </button>
+        <select
+          v-if="isCompactView"
+          data-compact-width-select
+          class="ml-1 h-6 shrink-0 cursor-pointer rounded-sm border-l bg-transparent px-1 text-xs text-muted-foreground outline-none hover:text-foreground focus:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+          :value="compactCardWidth"
+          :aria-label="t('objects.compactCardWidth')"
+          :title="t('objects.compactCardWidth')"
+          @change="setCompactCardWidth(normalizeObjectBrowserCompactWidth(Number(($event.target as HTMLSelectElement).value)))"
+        >
+          <option v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" :value="width" class="bg-background text-foreground">{{ width }}px</option>
+        </select>
       </div>
       <Button v-if="showInlineCheckboxToggle && supportsBatchTableActions" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': settingsStore.editorSettings.objectBrowserShowCheckbox }" :title="t('objects.toggleCheckbox')" @click="toggleCheckboxColumn">
         <CheckSquare v-if="settingsStore.editorSettings.objectBrowserShowCheckbox" class="h-3.5 w-3.5" />
@@ -4770,6 +4786,15 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <Grid3X3 class="h-3.5 w-3.5" />
           {{ t("objects.viewCompact") }}
         </DropdownMenuItem>
+        <DropdownMenuSub v-if="isCompactView">
+          <DropdownMenuSubTrigger>{{ t("objects.compactCardWidth") }}</DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <DropdownMenuItem v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" @select="setCompactCardWidth(width)">
+              <Check v-if="compactCardWidth === width" class="h-3.5 w-3.5" />
+              {{ width }}px
+            </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
         <DropdownMenuCheckboxItem v-if="supportsBatchTableActions" :model-value="settingsStore.editorSettings.objectBrowserShowCheckbox" @select.prevent @update:model-value="toggleCheckboxColumn()">{{ t("objects.toggleCheckbox") }}</DropdownMenuCheckboxItem>
         <DropdownMenuItem @select="toggleSidePanel">
           <PanelRight class="h-3.5 w-3.5" />

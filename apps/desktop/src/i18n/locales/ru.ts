@@ -5542,6 +5542,7 @@ export default withEnglishFallback({
     sortDesc: "По убыванию",
     sortBy: "Сортировать по",
     viewCompact: "Компактный вид сетки",
+    compactCardWidth: "Минимальная ширина компактной карточки",
     configureColumns: "Настроить отображаемые столбцы",
   },
   structureEditor: {

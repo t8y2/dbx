@@ -5062,6 +5062,7 @@ export default withEnglishFallback({
     sortBy: "정렬 기준",
     refreshDiscardConfirm: "새로 고침하면 저장되지 않은 소스 코드 변경 사항이 삭제됩니다. 계속하시겠습니까?",
     viewCompact: "컴팩트 3x3 그리드 뷰",
+    compactCardWidth: "컴팩트 카드 최소 너비",
     configureColumns: "표시 열 구성",
   },
   structureEditor: {

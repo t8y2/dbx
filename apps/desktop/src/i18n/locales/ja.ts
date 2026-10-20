@@ -5083,6 +5083,7 @@ export default withEnglishFallback({
     invalid: "無効",
     refreshDiscardConfirm: "更新すると、保存されていないソースコードの変更が破棄されます。続行しますか？",
     viewCompact: "コンパクトグリッドビュー",
+    compactCardWidth: "コンパクトカードの最小幅",
     configureColumns: "表示列を設定",
   },
   structureEditor: {

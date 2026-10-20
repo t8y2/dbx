@@ -142,6 +142,36 @@ test("table DDL wrapping defaults on and normalizes saved booleans independently
   assert.equal(settings.wordWrap, true);
 });
 
+test("compact browser width defaults safely and preserves supported saved widths", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.objectBrowserCompactWidth, 160);
+  for (const width of [160, 200, 240] as const) {
+    assert.equal(normalizeEditorSettings({ objectBrowserCompactWidth: width }).objectBrowserCompactWidth, width);
+  }
+  for (const value of [undefined, null, "200", 0, -1, 180, Infinity, NaN]) {
+    assert.equal(normalizeEditorSettings({ objectBrowserCompactWidth: value as any }).objectBrowserCompactWidth, 160);
+  }
+});
+
+test("compact browser width persists and reloads through editor settings", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({ objectBrowserCompactWidth: 240 });
+    assert.equal(store.editorSettings.objectBrowserCompactWidth, 240);
+    await vi.waitFor(() => {
+      assert.equal(saveEditorSettingsMock.mock.calls.at(-1)?.[0]?.objectBrowserCompactWidth, 240);
+      assert.equal(JSON.parse(localStorage.getItem("dbx-app-state:editor_settings") || "{}").objectBrowserCompactWidth, 240);
+    });
+    setActivePinia(createPinia());
+    const restored = useSettingsStore();
+    await restored.initEditorSettings();
+    assert.equal(restored.editorSettings.objectBrowserCompactWidth, 240);
+    restored.updateEditorSettings({ objectBrowserCompactWidth: -1 as any });
+    assert.equal(restored.editorSettings.objectBrowserCompactWidth, 160);
+  });
+});
+
 test("data grid column width mode defaults to content and normalizes saved values", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridColumnWidthMode, "content");
   assert.equal(normalizeEditorSettings({}).dataGridColumnWidthMode, "content");

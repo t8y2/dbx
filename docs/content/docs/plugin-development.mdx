@@ -903,6 +903,14 @@ What the host adds on top:
 
 The built-in agent treats tool output as untrusted data. Return facts, not instructions, and never echo secrets in results.
 
+### Lifecycle and failure semantics for stateful tools
+
+For plugins that manage listeners, background sessions, or disposable fault experiments, keep resource ownership separate from tool discovery:
+
+- **Discovery describes; explicit calls act.** Keep `mcp/tools` free of plugin-owned listener creation, database connections, and fault injection. The host may start a sidecar to discover its tools; that is not permission to start the plugin's workload. Expose explicit mutating start/stop tools when external clients need to manage a session, and bound session count, duration, and cleanup. Do not mark lifecycle changes as read-only.
+- **Check policy when executing.** Hiding a write tool during discovery is not authorization. In `mcp/call`, validate the host-bound connection identity and the policy available for that call before acting. A fault-lab plugin should reject injection when its connection is read-only or its own injection opt-in is off. These are plugin checks, not extra permissions granted by an MCP annotation. The built-in agent uses the open connection's lifecycle snapshot; the external MCP backend builds it from the host's saved-connection configuration at call time. Do not assume an open session's configuration refreshes when a saved connection changes; require a stop/restart if your plugin cannot safely reconcile the change.
+- **Report uncertain outcomes honestly.** A timeout or broken connection after forwarding PostgreSQL `COMMIT` does not prove rollback. Report the transaction outcome as `unknown` unless it has been established independently; do not automatically retry a possibly committed write. Distinguish the injected transport event from the database outcome, and test committed data and lock cleanup separately. This is a design pattern for transaction-aware plugins, not a generic transaction-status API supplied by DBX.
+
 ## Create a Plugin
 
 Install the precompiled CLI without Rust or a DBX source checkout:

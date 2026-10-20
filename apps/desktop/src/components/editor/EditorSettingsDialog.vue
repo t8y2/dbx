@@ -387,6 +387,7 @@ import {
 } from "@/lib/settings/settingsSearch";
 import { findSettingsSearchHighlightTarget } from "@/lib/settings/settingsSearchHighlight";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
+import LocaleFlag from "@/components/icons/LocaleFlag.vue";
 import {
   DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES,
   DEFAULT_WEB_DAV_REMOTE_PATH,
@@ -8293,22 +8294,18 @@ onUnmounted(() => {
                     <Label class="whitespace-normal leading-tight">{{ t("settings.languageTitle") }}</Label>
                   </div>
                   <Select :model-value="currentLocale()" @update:model-value="onLocaleChange" @update:open="onLocaleOpenChange">
-                    <SelectTrigger class="h-8 w-full gap-0.5 px-0.5">
+                    <SelectTrigger class="h-8 w-full gap-0.5 px-0.5" :aria-label="t('settings.languageTitle')">
                       <SelectValue>
                         <span v-if="selectedLocaleOption" class="flex min-w-0 items-center gap-0.5">
-                          <span class="inline-flex h-5 shrink-0 items-center justify-center text-sm font-medium leading-none">
-                            {{ selectedLocaleOption.flag }}
-                          </span>
+                          <LocaleFlag :option="selectedLocaleOption" />
                           <span class="truncate">{{ selectedLocaleOption.label }}</span>
                         </span>
                       </SelectValue>
                     </SelectTrigger>
                     <SelectContent class="w-[150px]" @pointerleave="restoreLocaleOptionPreview">
-                      <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value" @pointerenter="scheduleLocaleOptionPreview(locale.value)" @focus="previewLocaleOption(locale.value)">
+                      <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value" :text-value="locale.label" @pointerenter="scheduleLocaleOptionPreview(locale.value)" @focus="previewLocaleOption(locale.value)">
                         <div class="flex items-center gap-1">
-                          <span class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
-                            {{ locale.flag }}
-                          </span>
+                          <LocaleFlag :option="locale" />
                           <span>{{ locale.label }}</span>
                         </div>
                       </SelectItem>

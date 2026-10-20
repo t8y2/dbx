@@ -2433,12 +2433,14 @@ const {
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: scheduleColumnLayoutRefresh,
 });
+// The go-to-column list mirrors the column filter panel, so both follow the
+// user's local column order instead of the database order.
 const goToColumnItems = computed(() =>
   buildDataGridColumnLookupItems({
     columns: props.result.columns,
     sourceColumns: props.sourceColumns,
     columnComments: props.resultColumnComments,
-    displayableIndexes: displayableColumnIndexes.value,
+    displayableIndexes: orderedDisplayableColumnIndexes.value,
     commentByColumn: columnCommentMap.value,
   }),
 );

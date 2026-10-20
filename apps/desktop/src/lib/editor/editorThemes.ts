@@ -10,6 +10,13 @@ import { tags } from "@lezer/highlight";
 // sync with what the SQL tokenizer actually emits.
 export const SQL_BUILTIN_HIGHLIGHT_TAG = tags.standard(tags.name);
 
+// @codemirror/lang-sql tags quoted identifiers (e.g. `col`, "col", [col]) as
+// special(string) by default. In SQL, quoted identifiers represent columns, tables,
+// and database objects — not string literals (#12122). Both the SQL dialect parser
+// configuration and DBX theme highlight styles map this token to identifier/variable
+// color instead of string literal color.
+export const SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG = tags.special(tags.string);
+
 type CodeMirrorStyleSpec = Parameters<typeof import("@codemirror/view").EditorView.theme>[0];
 type LucideIconNode = Array<[string, Record<string, string>]>;
 
@@ -160,7 +167,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
     { tag: tags.moduleKeyword, color: c.keyword },
     { tag: tags.operatorKeyword, color: c.keyword },
     { tag: tags.string, color: c.string },
-    { tag: tags.special(tags.string), color: c.string },
+    { tag: SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG, color: c.variable },
     { tag: tags.number, color: c.number },
     { tag: tags.integer, color: c.number },
     { tag: tags.float, color: c.number },
@@ -204,7 +211,6 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
     { tag: tags.namespace, color: c.className },
     { tag: tags.macroName, color: c.function },
     { tag: tags.literal, color: c.string },
-    { tag: tags.special(tags.string), color: c.string },
     { tag: tags.regexp, color: c.string },
     { tag: tags.escape, color: c.string },
     { tag: tags.processingInstruction, color: c.keyword },
@@ -569,11 +575,11 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
 
   const highlightStyle = HighlightStyle.define([
     { tag: [tags.keyword, tags.controlKeyword, tags.definitionKeyword, tags.moduleKeyword, tags.operatorKeyword, tags.modifier, tags.bool, tags.null], color: c.keyword, ...(c.keywordBold ? { fontWeight: "bold" } : {}) },
-    { tag: [tags.string, tags.special(tags.string), tags.regexp, tags.escape, tags.inserted], color: c.string, ...(c.stringBold ? { fontWeight: "bold" } : {}) },
+    { tag: [tags.string, tags.regexp, tags.escape, tags.inserted], color: c.string, ...(c.stringBold ? { fontWeight: "bold" } : {}) },
     { tag: [tags.number, tags.integer, tags.float], color: c.number, ...(c.numberBold ? { fontWeight: "bold" } : {}) },
     { tag: [tags.comment, tags.lineComment, tags.blockComment, tags.quote], color: c.comment, fontStyle: "italic" },
     { tag: [tags.typeName, tags.typeOperator, tags.unit], color: c.type },
-    { tag: [tags.name, tags.variableName, tags.definition(tags.variableName)], color: c.variable },
+    { tag: [tags.name, tags.variableName, tags.definition(tags.variableName), SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG], color: c.variable },
     { tag: [tags.function(tags.variableName), tags.function(tags.propertyName), tags.function(tags.name), tags.macroName], color: c.function },
     { tag: [SQL_BUILTIN_HIGHLIGHT_TAG, tags.special(tags.name)], color: c.builtin },
     { tag: [tags.propertyName, tags.labelName, tags.annotation], color: c.property },

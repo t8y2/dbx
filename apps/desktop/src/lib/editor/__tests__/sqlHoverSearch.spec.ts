@@ -517,4 +517,58 @@ describe("createHoverSearch", () => {
     input.dispatchEvent(new Event("input"));
     expect(target.firstChild).toBe(initialFirstChild);
   });
+
+  describe("pinTooltip", () => {
+    function mountPinnedSearch() {
+      const host = document.createElement("div");
+      const target = document.createElement("div");
+      target.textContent = DDL;
+      const controller = createHoverSearch({ target, originalHtml: target.innerHTML, placeholder: "Search columns…", noResultLabel: "No matching columns" });
+      host.append(controller.element, target);
+      document.body.appendChild(host);
+      controller.pinTooltip(host);
+      const leave = vi.fn();
+      host.addEventListener("mouseleave", leave);
+      const input = controller.element.querySelector<HTMLInputElement>('[data-sql-hover-search-input="true"]')!;
+      return { controller, host, input, leave };
+    }
+
+    it("keeps the tooltip from seeing mouseleave while the search input is focused", () => {
+      const { host, input, leave } = mountPinnedSearch();
+      input.focus();
+      input.dispatchEvent(new CompositionEvent("compositionstart"));
+
+      host.dispatchEvent(new MouseEvent("mouseleave"));
+
+      expect(leave).not.toHaveBeenCalled();
+    });
+
+    it("lets mouseleave through when the search input is not focused", () => {
+      const { host, leave } = mountPinnedSearch();
+
+      host.dispatchEvent(new MouseEvent("mouseleave"));
+
+      expect(leave).toHaveBeenCalledTimes(1);
+    });
+
+    it("replays the missed mouseleave when the search input loses focus off the tooltip", () => {
+      const { host, input, leave } = mountPinnedSearch();
+      input.focus();
+      host.dispatchEvent(new MouseEvent("mouseleave"));
+
+      input.blur();
+
+      expect(leave).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops pinning after destroy", () => {
+      const { controller, host, input, leave } = mountPinnedSearch();
+      input.focus();
+      controller.destroy();
+
+      host.dispatchEvent(new MouseEvent("mouseleave"));
+
+      expect(leave).toHaveBeenCalledTimes(1);
+    });
+  });
 });

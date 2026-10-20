@@ -118,6 +118,12 @@ export interface HoverSearchController {
   status: HTMLElement;
   /** Focus the search input. */
   focus(): void;
+  /**
+   * Keep the hover tooltip open while the search input has focus. CodeMirror
+   * closes hover tooltips on `mouseleave`, which Windows IME candidate windows
+   * trigger when they pop up over the pointer mid-composition.
+   */
+  pinTooltip(host: HTMLElement): void;
   /** Remove listeners; safe to call once when the tooltip is destroyed. */
   destroy(): void;
 }
@@ -310,14 +316,32 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
   input.addEventListener("pointerdown", stopPointer);
   input.addEventListener("mousedown", stopPointer);
 
+  let pinnedHost: HTMLElement | null = null;
+  const keepPinnedTooltipOpen = (event: Event) => {
+    if (event.target === pinnedHost && document.activeElement === input) event.stopImmediatePropagation();
+  };
+  const releasePinnedTooltip = () => {
+    // Hand the leave CodeMirror missed back to it once typing is over.
+    if (pinnedHost && !pinnedHost.matches(":hover")) pinnedHost.dispatchEvent(new MouseEvent("mouseleave"));
+  };
+
   return {
     element,
     status,
     focus() {
       input.focus();
     },
+    pinTooltip(host) {
+      pinnedHost = host;
+      // Capture on the document runs before CodeMirror's listener on the host.
+      document.addEventListener("mouseleave", keepPinnedTooltipOpen, true);
+      input.addEventListener("blur", releasePinnedTooltip);
+    },
     destroy() {
       cancelPending();
+      document.removeEventListener("mouseleave", keepPinnedTooltipOpen, true);
+      input.removeEventListener("blur", releasePinnedTooltip);
+      pinnedHost = null;
       input.removeEventListener("input", scheduleSearch);
       input.removeEventListener("keydown", stopKeyboard);
       input.removeEventListener("keyup", stopKeyboard);

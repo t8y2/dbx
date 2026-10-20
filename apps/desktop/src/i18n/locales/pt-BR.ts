@@ -5021,6 +5021,7 @@ export default withEnglishFallback({
     invalid: "Inválido",
     refreshDiscardConfirm: "Atualizar descartará as modificações não salvas no código-fonte. Deseja continuar?",
     viewCompact: "Visualização compacta em grade",
+    compactCardWidth: "Largura mínima do cartão compacto",
     configureColumns: "Configurar colunas de exibição",
   },
   structureEditor: {

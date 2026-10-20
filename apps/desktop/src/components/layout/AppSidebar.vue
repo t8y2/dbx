@@ -228,8 +228,8 @@ defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, 
 </script>
 
 <template>
-  <div data-app-sidebar class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'rounded-md border border-border/80 bg-background'" :style="{ width: sidebarWidth + 'px' }" @keydown="onSidebarKeydown">
-    <div class="h-full flex flex-col overflow-hidden">
+  <div data-app-sidebar class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'dbx-panel bg-background'" :style="{ width: sidebarWidth + 'px' }" @keydown="onSidebarKeydown">
+    <div class="h-full flex flex-col overflow-hidden rounded-[inherit]">
       <div class="app-sidebar-toolbar flex items-center gap-px px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20" :class="classicLayout ? 'h-9' : 'h-10'">
         <span v-if="showConnectionMultiSelectToolbar" class="flex min-w-0 self-stretch items-center" data-tauri-drag-region>
           <span class="truncate" data-tauri-drag-region>{{ t("sidebar.connections") }}</span>

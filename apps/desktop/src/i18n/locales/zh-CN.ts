@@ -5878,6 +5878,7 @@ export default withEnglishFallback({
     viewList: "列表视图",
     viewGrid: "平铺视图",
     viewCompact: "紧凑九宫格视图",
+    compactCardWidth: "紧凑卡片最小宽度",
     configureColumns: "配置显示列",
     sortAsc: "升序",
     sortDesc: "降序",

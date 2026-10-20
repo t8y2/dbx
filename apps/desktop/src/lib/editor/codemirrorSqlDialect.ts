@@ -1,6 +1,15 @@
+import { styleTags, tags } from "@lezer/highlight";
 import type { SQLDialect } from "@codemirror/lang-sql";
 import type { DatabaseType } from "@/types/database";
 import { driverProfileSqlBuiltinTerms } from "@/lib/database/driverProfileExtensions";
+
+// In SQL, quoted identifiers (e.g. `col`, "col", [col]) represent column, table,
+// and schema names — not string literals (#12122). CodeMirror's SQL grammar tags
+// QuotedIdentifier as special(string) by default, which themes highlight as a
+// string literal. We retag QuotedIdentifier as tags.name so all themes (both DBX
+// custom/IDE themes and standard third-party themes) highlight quoted identifiers
+// identically to unquoted identifiers.
+const SQL_DIALECT_LANGUAGE_PROPS = [styleTags({ QuotedIdentifier: tags.name })];
 
 export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "clickhouse" | "soql";
 
@@ -368,6 +377,8 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
       caseInsensitiveIdentifiers: true,
       identifierQuotes: "",
       doubleDollarQuotedStrings: false,
+    }).configureLanguage({
+      props: SQL_DIALECT_LANGUAGE_PROPS,
     });
   }
   const baseDialect = codeMirrorBaseDialect(langSql, dialectName, databaseType);
@@ -409,5 +420,7 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
       : {}),
     ...(isPlsql ? { doubleQuotedStrings: false } : {}),
     doubleDollarQuotedStrings: false,
+  }).configureLanguage({
+    props: SQL_DIALECT_LANGUAGE_PROPS,
   });
 }

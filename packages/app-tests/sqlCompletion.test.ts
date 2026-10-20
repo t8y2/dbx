@@ -4771,3 +4771,94 @@ test("CTE table completions follow identifierCase (#11400)", () => {
   assert.equal(cteItem?.apply, "my_cte", "should apply lowercase CTE name");
 });
 
+test("table and column completions can be searched by comments (#12033)", () => {
+  const tables = [
+    { name: "t_user", type: "table" as const, comment: "用户基础信息表" },
+    { name: "t_order", type: "table" as const, comment: "订单表" },
+    { name: "t_account", type: "table" as const, detail: "→ 账户中心" },
+    { name: "customer_summary", type: "table" as const, comment: "customer billing summary" },
+  ];
+  const columnsByTable = new Map([
+    [
+      "t_user",
+      [
+        { name: "user_id", table: "t_user", comment: "用户主键ID" },
+        { name: "nickname", table: "t_user", comment: "用户昵称" },
+        { name: "created_at", table: "t_user", comment: "创建时间" },
+        { name: "email_address", table: "t_user", comment: "user electronic mail" },
+      ],
+    ],
+  ]);
+
+  // Table matching by Chinese comment substring
+  const hanTableItems = buildSqlCompletionItems("select * from 用", "select * from 用".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(hanTableItems.some((item) => item.label === "t_user"));
+  assert.equal(hanTableItems.some((item) => item.label === "t_order"), false);
+
+  // Table matching by pinyin initials of comment
+  const pinyinTableItems = buildSqlCompletionItems("select * from ddb", "select * from ddb".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(pinyinTableItems.some((item) => item.label === "t_order"));
+
+  // Table matching from detail
+  const detailTableItems = buildSqlCompletionItems("select * from 账户", "select * from 账户".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(detailTableItems.some((item) => item.label === "t_account"));
+
+  // Table matching by English comment
+  const enCommentTableItems = buildSqlCompletionItems("select * from billing", "select * from billing".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(enCommentTableItems.some((item) => item.label === "customer_summary"));
+
+  // Column matching by Chinese comment
+  const hanColItems = buildSqlCompletionItems("select cj from t_user", "select cj".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(hanColItems.some((item) => item.label === "created_at"));
+
+  const hanColSubstringItems = buildSqlCompletionItems("select 昵称 from t_user", "select 昵称".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(hanColSubstringItems.some((item) => item.label === "nickname"));
+
+  // Column matching by English comment
+  const enColItems = buildSqlCompletionItems("select mail from t_user", "select mail".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(enColItems.some((item) => item.label === "email_address"));
+
+  // Name match takes priority over comment match when query matches both
+  const nameVsCommentTables = [
+    { name: "user_log", type: "table" as const, comment: "系统操作日志" },
+    { name: "t_history", type: "table" as const, comment: "user login history" },
+  ];
+  const priorityItems = buildSqlCompletionItems("select * from user", "select * from user".length, {
+    tables: nameVsCommentTables,
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const userLogIndex = priorityItems.findIndex((item) => item.label === "user_log");
+  const historyIndex = priorityItems.findIndex((item) => item.label === "t_history");
+  assert.ok(userLogIndex >= 0 && historyIndex >= 0);
+  assert.ok(userLogIndex < historyIndex, "Name match should rank ahead of comment match");
+});
+

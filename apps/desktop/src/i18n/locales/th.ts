@@ -5875,6 +5875,7 @@ export default withEnglishFallback({
     sortDesc: "เรียงจากมากไปน้อย",
     sortBy: "เรียงตาม",
     viewCompact: "มุมมองกริดแบบกะทัดรัด",
+    compactCardWidth: "ความกว้างขั้นต่ำของการ์ดแบบกะทัดรัด",
     configureColumns: "กำหนดค่าคอลัมน์ที่แสดง",
   },
   structureEditor: {

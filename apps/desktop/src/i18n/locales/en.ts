@@ -5890,6 +5890,7 @@ export default {
     viewList: "List view",
     viewGrid: "Grid view",
     viewCompact: "Compact grid view",
+    compactCardWidth: "Compact card minimum width",
     configureColumns: "Configure columns",
     sortAsc: "Ascending",
     sortDesc: "Descending",

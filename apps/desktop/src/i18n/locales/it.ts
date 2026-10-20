@@ -5021,6 +5021,7 @@ export default withEnglishFallback({
     invalid: "non valido",
     refreshDiscardConfirm: "L'aggiornamento eliminerà le modifiche non salvate al codice sorgente. Continuare?",
     viewCompact: "Vista compatta a griglia",
+    compactCardWidth: "Larghezza minima scheda compatta",
     configureColumns: "Configura colonne visualizzate",
   },
   structureEditor: {

@@ -1598,6 +1598,8 @@ export interface QueryResultSourceColumnRef {
 
 export interface QueryResultRun {
   id: string;
+  /** Source connection retained when the editor switches to another connection. */
+  connectionId?: string;
   title: string;
   sequence: number;
   sql: string;

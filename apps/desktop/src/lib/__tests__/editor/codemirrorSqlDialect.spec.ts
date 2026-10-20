@@ -145,4 +145,26 @@ describe("codemirrorSqlDialect", () => {
     expect(nodeNameAt(dialect, doubleQuoteStatement, '"escaped\\"quote"')).toBe("String");
     expect(nodeNameAt(dialect, doubleQuoteStatement, "col")).toBe("Identifier");
   });
+
+  it("tags QuotedIdentifier as tags.name so quoted columns/tables match unquoted identifiers (#12122)", async () => {
+    const { highlightTree, tags } = await import("@lezer/highlight");
+    const { HighlightStyle } = await import("@codemirror/language");
+
+    const style = HighlightStyle.define([
+      { tag: tags.keyword, color: "keyword" },
+      { tag: tags.string, color: "string" },
+      { tag: tags.name, color: "identifier" },
+    ]);
+
+    const mysqlDialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "mysql");
+    const doc = "SELECT `quoted_col`, plain_col, 'literal_string' FROM `tbl`";
+    const tree = mysqlDialect.language.parser.parse(doc);
+    const classes = new Map<string, string>();
+    highlightTree(tree, style, (from, to, cls) => classes.set(doc.slice(from, to), cls));
+
+    expect(classes.get("`quoted_col`")).toBeDefined();
+    expect(classes.get("`quoted_col`")).toBe(classes.get("plain_col"));
+    expect(classes.get("`quoted_col`")).toBe(classes.get("`tbl`"));
+    expect(classes.get("`quoted_col`")).not.toBe(classes.get("'literal_string'"));
+  });
 });

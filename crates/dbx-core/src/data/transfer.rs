@@ -2295,7 +2295,7 @@ fn resolve_transfer_target_column_names(col_names: &[String], target_columns: &[
     resolve_transfer_target_column_names_or(col_names, target_columns, col_names)
 }
 
-/// Maps source names to declared target names. A name the target does not declare
+/// Maps source names to target names; a name the target does not declare
 /// falls back to the matching entry of `fallbacks` (the requested target column case).
 fn resolve_transfer_target_column_names_or(
     col_names: &[String],
@@ -4857,12 +4857,15 @@ fn generate_create_table_ddl_with_column_quoting(
                     // an integer column qualifies - MySQL requires the auto-increment
                     // column to be a key and rejects the clause on other types;
                     // Doris/StarRocks narrow the accepted type to `BIGINT`.
-                    let mysql_identity_source = is_mysql_family
-                        && c.is_primary_key
-                        && column_is_auto_increment(c)
-                        && mysql_auto_increment_type_supported(&mapped_type, target_db);
-                    let mysql_auto_increment =
-                        mysql_identity_source || mysql_extra_clauses.as_ref().is_some_and(|extra| extra.auto_increment);
+                    let mysql_auto_increment_type_ok = mysql_auto_increment_type_supported(&mapped_type, target_db);
+                    let mysql_identity_source = is_mysql_family && c.is_primary_key && column_is_auto_increment(c);
+                    // Both the MySQL-spelled `auto_increment` metadata and identity-style
+                    // sources must pass the same target type gate: Doris/StarRocks accept
+                    // only BIGINT auto-increment columns, so an `INT AUTO_INCREMENT` from a
+                    // MySQL source must stay a plain column there too (#12691 review).
+                    let mysql_auto_increment = mysql_auto_increment_type_ok
+                        && (mysql_identity_source
+                            || mysql_extra_clauses.as_ref().is_some_and(|extra| extra.auto_increment));
                     if !skip_default && !mysql_auto_increment {
                         if let Some(default_clause) =
                             column_default_clause(c, source_schema, schema, source_db, target_db)
@@ -23715,6 +23718,69 @@ SELECT 1 FROM dual"#
             );
             assert!(bigint_ddl.contains("AUTO_INCREMENT"), "{target:?}: {bigint_ddl}");
         }
+    }
+
+    #[test]
+    fn transfer_create_table_keeps_mysql_int_auto_increment_plain_on_doris_and_starrocks() {
+        // MySQL-spelled `auto_increment` metadata must pass the same target type gate:
+        // Doris/StarRocks accept only BIGINT auto-increment columns, so an INT source
+        // column stays a plain column there too (#12691 review).
+        for target in [DatabaseType::Doris, DatabaseType::StarRocks] {
+            let int_cols = vec![db::ColumnInfo {
+                is_primary_key: true,
+                is_nullable: false,
+                extra: Some("auto_increment".to_string()),
+                ..test_column("id", "int")
+            }];
+            let int_ddl = generate_create_table_ddl(
+                &int_cols,
+                "users",
+                "source",
+                "shop",
+                &target,
+                &DatabaseType::Mysql,
+                None,
+                None,
+            );
+            assert!(!int_ddl.contains("AUTO_INCREMENT"), "{target:?}: {int_ddl}");
+
+            let bigint_cols = vec![db::ColumnInfo {
+                is_primary_key: true,
+                is_nullable: false,
+                extra: Some("auto_increment".to_string()),
+                ..test_column("id", "bigint")
+            }];
+            let bigint_ddl = generate_create_table_ddl(
+                &bigint_cols,
+                "users",
+                "source",
+                "shop",
+                &target,
+                &DatabaseType::Mysql,
+                None,
+                None,
+            );
+            assert!(bigint_ddl.contains("AUTO_INCREMENT"), "{target:?}: {bigint_ddl}");
+        }
+
+        // A MySQL target keeps AUTO_INCREMENT for the same source.
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "users",
+            "source",
+            "shop",
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        assert!(ddl.contains("AUTO_INCREMENT"), "ddl: {ddl}");
     }
 
     #[test]

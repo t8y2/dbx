@@ -96,7 +96,16 @@ import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
-import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint, jdbcConnectionUsesDriverRowOffset, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
+import {
+  connectionObjectTreeNodeSchema,
+  connectionQueryExecutionSchema,
+  connectionUsesDatabaseObjectTreeMode,
+  effectiveDatabaseTypeForConnection,
+  gaussdbCountQueryDopHint,
+  jdbcConnectionUsesDriverRowOffset,
+  metadataSchemaForConnection,
+  sqlServerQualifiesSqlWithTabSchema,
+} from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel, queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
 import { sqlServerCountUsesLocalTempTable } from "@/lib/query/queryResultCountSession";
@@ -326,6 +335,8 @@ function isViewOnlySourceWithoutEditablePayload(initialEditing: boolean | undefi
 
 interface UpdateExecutionTargetOptions {
   persistSavedSqlTarget?: boolean;
+  /** 用户显式选择了该 Schema（工具栏/对象选择器），允许 SQL Server 改写。 */
+  schemaQualifiesSql?: boolean;
 }
 
 type DroppedTableObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW";
@@ -1671,12 +1682,23 @@ export const useQueryStore = defineStore("query", () => {
     return run?.multiDbExecution?.kind === "multi-db" ? run.multiDbExecution.target : undefined;
   }
 
+  /**
+   * SQL Server 的 Schema 参数会触发后端把未限定表名改写为 `[schema].[table]`。
+   * 只有用户显式选择的 Schema 才能参与该改写；默认/恢复/保存的 Schema 继续用于
+   * 浏览与补全，但不再改变 SQL 语义。其它数据库原样返回。
+   */
+  function queryExecutionSchemaForTab(tab: QueryTab): string | undefined {
+    if (!tab.schema) return undefined;
+    const connection = useConnectionStore().getConfig(tab.connectionId);
+    return sqlServerQualifiesSqlWithTabSchema(connection) && tab.schemaQualifiesSql !== true ? undefined : tab.schema;
+  }
+
   function queryResultExecutionLocation(tab: QueryTab) {
     const target = activeResultExecutionTarget(tab.id);
     return {
       connectionId: target?.connectionId ?? tab.connectionId,
       database: target?.database ?? tab.database,
-      schema: target?.schema ?? tab.schema,
+      schema: target?.schema ?? queryExecutionSchemaForTab(tab),
       catalog: target?.catalog ?? tab.catalog,
     };
   }
@@ -3010,12 +3032,13 @@ export const useQueryStore = defineStore("query", () => {
     schema?: string,
     initialSql?: string,
     catalog?: string,
-    options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean; sourceView?: boolean; reuseQueryTabByScope?: boolean } = {},
+    options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean; sourceView?: boolean; reuseQueryTabByScope?: boolean; schemaQualifiesSql?: boolean } = {},
   ) {
     if (title && !options.forceNew) {
       const existing = findTabByIdentity(connectionId, database, title, mode, schema, catalog);
       if (existing) {
         if (options.sourceView) existing.sourceView = true;
+        if (options.schemaQualifiesSql && existing.schema) existing.schemaQualifiesSql = true;
         switchTab(existing.id);
         return existing.id;
       }
@@ -3028,6 +3051,7 @@ export const useQueryStore = defineStore("query", () => {
       // in their own right and never take over the activation slot.
       const existing = tabs.value.find((tab) => tab.mode === "query" && !tab.savedSqlId && !tab.externalSqlPath && !tab.objectSource && tab.connectionId === connectionId && tab.database === database && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
       if (existing) {
+        if (options.schemaQualifiesSql && existing.schema) existing.schemaQualifiesSql = true;
         switchTab(existing.id);
         return existing.id;
       }
@@ -3044,6 +3068,7 @@ export const useQueryStore = defineStore("query", () => {
       connectionId,
       database,
       schema,
+      schemaQualifiesSql: schema && options.schemaQualifiesSql ? true : undefined,
       catalog,
       sql: initialSql ?? "",
       isExecuting: false,
@@ -3096,7 +3121,7 @@ export const useQueryStore = defineStore("query", () => {
       return existing.id;
     }
 
-    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true, sourceView: true });
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true, sourceView: true, schemaQualifiesSql: true });
     setObjectSource(id, options.objectSource);
     return id;
   }
@@ -3160,7 +3185,7 @@ export const useQueryStore = defineStore("query", () => {
       return existing.id;
     }
 
-    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, "", options.catalog, { forceNew: true, sourceView: true });
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, "", options.catalog, { forceNew: true, sourceView: true, schemaQualifiesSql: true });
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (tab) tab.sourceLoad = { startedAt: Date.now(), initialEditing: options.initialEditing, request: { ...options.request } };
     void loadObjectSourceIntoTab(id);
@@ -6246,6 +6271,7 @@ export const useQueryStore = defineStore("query", () => {
     void closeClientConnectionSession(tab);
     tab.database = database;
     tab.schema = undefined;
+    tab.schemaQualifiesSql = undefined;
     tab.objectBrowser = undefined;
     clearResultPayload(tab);
     tab.lastExecutedSql = undefined;
@@ -6280,6 +6306,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.catalog = catalog;
     tab.database = database;
     tab.schema = undefined;
+    tab.schemaQualifiesSql = undefined;
     tab.objectBrowser = undefined;
     clearResultPayload(tab);
     tab.lastExecutedSql = undefined;
@@ -6292,7 +6319,12 @@ export const useQueryStore = defineStore("query", () => {
 
   function updateSchema(id: string, schema: string | undefined, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
-    if (!tab || tab.schema === schema) return;
+    if (!tab) return;
+    if (tab.schema === schema) {
+      // 同一个 Schema 再次被显式选择时，也要把它提升为执行作用域。
+      if (schema !== undefined && options.schemaQualifiesSql) tab.schemaQualifiesSql = true;
+      return;
+    }
     if (tab.isExplaining) {
       void cancelTabExplain(id);
       clearExplain(tab);
@@ -6308,6 +6340,9 @@ export const useQueryStore = defineStore("query", () => {
       clearExplain(tab);
     }
     tab.schema = schema;
+    // 只有显式选择才允许参与 SQL Server 的未限定表名改写；隐式来源（连接默认、
+    // 恢复的页签、保存的 SQL、外部文件）只更新浏览/补全上下文。
+    tab.schemaQualifiesSql = schema !== undefined && options.schemaQualifiesSql === true ? true : undefined;
     if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, filter: undefined, viewport: undefined };
     persistSavedSqlExecutionTarget(tab, options);
   }
@@ -6325,6 +6360,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.catalog = undefined;
     tab.objectBrowser = undefined;
     tab.schema = undefined;
+    tab.schemaQualifiesSql = undefined;
     clearResultPayload(tab);
     tab.lastExecutedSql = undefined;
     tab.resultBaseSql = undefined;
@@ -7831,6 +7867,12 @@ export const useQueryStore = defineStore("query", () => {
         await connStore.ensureDatabaseCompatibilityMode(executionConnectionId, targetDatabase || conn?.database);
       }
       const targetSchema = resumedExecutionTarget ? resumedExecutionTarget.schema : targetContext?.scope === "connection" ? undefined : (databaseTargetContext?.schema ?? executionTarget?.schema ?? tab.schema);
+      // SQL Server 没有会话级 Schema：schema 参数只用于把未限定表名改写成
+      // `[schema].[table]`。多库/批量恢复目标里的 schema 是上次真正下发过的值，
+      // 页签 schema 则必须由用户显式选择，避免默认/恢复的 schema 改变 SQL 语义。
+      const schemaFromExplicitTarget = resumedExecutionTarget?.schema !== undefined || databaseTargetContext?.schema !== undefined || executionTarget?.schema !== undefined;
+      const schemaQualifiesSql = schemaFromExplicitTarget || tab.schemaQualifiesSql === true;
+      const executionSchema = connectionQueryExecutionSchema(conn, targetDatabase, sqlServerQualifiesSqlWithTabSchema(conn) && !schemaQualifiesSql ? undefined : targetSchema, tab.mode === "data");
       const executionDatabase = targetDatabase;
       const sqlStatementParameterOptions = sqlStatementParameterOptionsForCompatibility(effectiveDbType, effectiveDbType === "opengauss" ? connStore.databaseCompatibilityMode(executionConnectionId, targetDatabase || conn?.database) : undefined);
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
@@ -7848,7 +7890,7 @@ export const useQueryStore = defineStore("query", () => {
                   connectionId: executionConnectionId,
                   catalog: executionCatalog,
                   database: targetDatabase,
-                  schema: targetSchema,
+                  schema: executionSchema,
                 },
                 sqlStatementParameterOptions,
               )
@@ -8652,7 +8694,6 @@ export const useQueryStore = defineStore("query", () => {
         executedSql: sqlToExecute,
       };
 
-      const executionSchema = connectionQueryExecutionSchema(conn, targetDatabase, targetSchema, tab.mode === "data");
       // Jumping to a non-zero offset without a live cursor session: the plan
       // could not rewrite the SQL for these engines, so a plain execution
       // would return the first page again (#8993).
@@ -9202,7 +9243,7 @@ export const useQueryStore = defineStore("query", () => {
             tabId: id,
             connectionId: executionConnectionId,
             database: executionDatabase,
-            schema: executionTarget?.schema ?? current.schema,
+            schema: executionSchema,
             catalog: executionCatalog,
             countSql,
             countSqlTarget: dataCountTarget
@@ -9507,7 +9548,7 @@ export const useQueryStore = defineStore("query", () => {
       }
       try {
         const mode = databaseType === "dameng" && explainMode === "autotrace" ? "autotrace" : "explain";
-        const planText = (await api.getExplainInfo(tab.connectionId, tab.database, tab.schema, sql, mode)) as string | undefined;
+        const planText = (await api.getExplainInfo(tab.connectionId, tab.database, queryExecutionSchemaForTab(tab), sql, mode)) as string | undefined;
         const current = tabs.value.find((t) => t.id === id);
         if (current?.explainExecutionId === executionId) {
           if (planText && planText.length > 0) {
@@ -9576,7 +9617,7 @@ export const useQueryStore = defineStore("query", () => {
         let tableResult: QueryResult | undefined;
         let tableError: unknown;
         try {
-          tableResult = await api.executeQuery(tab.connectionId, tab.database, tableSql, tab.schema, executionId, {
+          tableResult = await api.executeQuery(tab.connectionId, tab.database, tableSql, queryExecutionSchemaForTab(tab), executionId, {
             clientSessionId,
             catalog: tab.catalog,
             timeoutSecs: queryTimeoutSecs,
@@ -9588,7 +9629,7 @@ export const useQueryStore = defineStore("query", () => {
             tableSql = compatibility.fallbackSql;
             tab.explainTableSql = tableSql;
             try {
-              tableResult = await api.executeQuery(tab.connectionId, tab.database, tableSql, tab.schema, executionId, {
+              tableResult = await api.executeQuery(tab.connectionId, tab.database, tableSql, queryExecutionSchemaForTab(tab), executionId, {
                 clientSessionId,
                 catalog: tab.catalog,
                 timeoutSecs: queryTimeoutSecs,
@@ -9629,7 +9670,7 @@ export const useQueryStore = defineStore("query", () => {
         try {
           const latest = tabs.value.find((t) => t.id === id);
           if (latest?.explainExecutionId === executionId) latest.explainSql = jsonBuilt.sql;
-          const jsonResult = await api.executeQuery(tab.connectionId, tab.database, jsonBuilt.sql, tab.schema, executionId, {
+          const jsonResult = await api.executeQuery(tab.connectionId, tab.database, jsonBuilt.sql, queryExecutionSchemaForTab(tab), executionId, {
             clientSessionId,
             catalog: tab.catalog,
             timeoutSecs: queryTimeoutSecs,
@@ -9688,7 +9729,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.explainClientSessionId = clientSessionId;
       let planCaptureEnabled = false;
       try {
-        await api.executeQuery(tab.connectionId, tab.database, planCaptureOn, tab.schema, executionId, {
+        await api.executeQuery(tab.connectionId, tab.database, planCaptureOn, queryExecutionSchemaForTab(tab), executionId, {
           clientSessionId,
           timeoutSecs: queryTimeoutSecs,
           executionMode: "simple",
@@ -9698,7 +9739,7 @@ export const useQueryStore = defineStore("query", () => {
           return { ok: true as const, sql: built.sql };
         }
 
-        const results = await api.executeMulti(tab.connectionId, tab.database, sql, tab.schema, executionId, {
+        const results = await api.executeMulti(tab.connectionId, tab.database, sql, queryExecutionSchemaForTab(tab), executionId, {
           clientSessionId,
           timeoutSecs: queryTimeoutSecs,
           executionMode: "simple",
@@ -9726,7 +9767,7 @@ export const useQueryStore = defineStore("query", () => {
       } finally {
         if (planCaptureEnabled) {
           try {
-            await api.executeQuery(tab.connectionId, tab.database, planCaptureOff, tab.schema, undefined, {
+            await api.executeQuery(tab.connectionId, tab.database, planCaptureOff, queryExecutionSchemaForTab(tab), undefined, {
               clientSessionId,
               timeoutSecs: queryTimeoutSecs > 0 ? Math.min(queryTimeoutSecs, 5) : 5,
               executionMode: "simple",
@@ -9760,7 +9801,7 @@ export const useQueryStore = defineStore("query", () => {
     const clientSessionId = postgresAnalyze ? `${tabClientSessionId(tab, "explain")}:${executionId}` : tabClientSessionId(tab, "explain");
     if (postgresAnalyze) tab.explainClientSessionId = clientSessionId;
     try {
-      const result = await api.executeQuery(tab.connectionId, tab.database, built.sql, tab.schema, executionId, {
+      const result = await api.executeQuery(tab.connectionId, tab.database, built.sql, queryExecutionSchemaForTab(tab), executionId, {
         clientSessionId,
         catalog: tab.catalog,
         timeoutSecs: queryTimeoutSecs,
@@ -10668,7 +10709,7 @@ export const useQueryStore = defineStore("query", () => {
       exportId,
       connectionId: tab.connectionId,
       database: tab.database,
-      schema: tab.schema,
+      schema: queryExecutionSchemaForTab(tab),
       sql: executableSql,
       queryBaseSql: executableSql,
       databaseType: effectiveDbType,

@@ -3309,7 +3309,7 @@ async function newQuery(options: NewQueryOptions = {}) {
     includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
     quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
   });
-  const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
+  const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog, { schemaQualifiesSql: target.schemaQualifiesSql === true });
   if (initialSql) {
     const prefilledTab = queryStore.tabs.find((t) => t.id === tabId);
     if (prefilledTab) {
@@ -3636,7 +3636,8 @@ async function clearActiveDefaultDatabase(tabId?: string) {
 function changeActiveSchema(tabId: string, schema: string | undefined) {
   const tab = resolveToolbarTab(tabId);
   if (!tab) return;
-  queryStore.updateSchema(tab.id, schema);
+  // 工具栏选择是显式执行作用域：SQL Server 未限定表名会按它改写（#8951）。
+  queryStore.updateSchema(tab.id, schema, { schemaQualifiesSql: true });
   if (tab.externalSqlPath) rememberExternalSqlFileTarget(tab.externalSqlPath, { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema });
 }
 
@@ -5506,7 +5507,7 @@ onUnmounted(() => {
                       }
                     "
                     @open-database-search-target="(_tabId: string, target: any) => openDatabaseSearchTarget(target)"
-                    @object-schema-change="(tabId: string, schema: string | undefined) => queryStore.updateSchema(tabId, schema)"
+                    @object-schema-change="(tabId: string, schema: string | undefined) => queryStore.updateSchema(tabId, schema, { schemaQualifiesSql: true })"
                     @object-browser-viewport-change="(tabId: string, viewport: any) => queryStore.updateObjectBrowserViewport(tabId, viewport)"
                     @object-browser-search-change="(tabId: string, query: string) => queryStore.updateObjectBrowserSearch(tabId, query)"
                     @object-browser-filter-change="(tabId: string, filter: ObjectBrowserFilter) => queryStore.updateObjectBrowserFilter(tabId, filter)"

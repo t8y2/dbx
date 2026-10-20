@@ -277,6 +277,16 @@ export function connectionUsesSchemaExecutionContext(connection?: JdbcDialectCon
   return connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend";
 }
 
+/**
+ * SQL Server 没有会话级 Schema 切换：后端会把 SQL 文本里未限定的表名改写成
+ * `[schema].[table]`（#8951）。因此页签 Schema 一旦随执行下发就会改变 SQL 语义，
+ * 只有用户显式选择的 Schema 才可以参与改写；连接默认 / 恢复 / 保存的 Schema
+ * 仅用于浏览与补全。IRIS/Kingbase 复用同一改写机制，但本次只收紧 SQL Server。
+ */
+export function sqlServerQualifiesSqlWithTabSchema(connection?: JdbcDialectConnection): boolean {
+  return effectiveDatabaseTypeForConnection(connection) === "sqlserver";
+}
+
 export function connectionQueryExecutionSchema(connection: JdbcDialectConnection | undefined, database: string | undefined, schema: string | undefined, dataMode: boolean): string | undefined {
   if (connectionUsesSchemaExecutionContext(connection)) return schema || database || undefined;
   if (dataMode || connectionUsesDatabaseObjectTreeMode(connection)) return undefined;

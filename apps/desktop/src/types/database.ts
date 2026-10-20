@@ -2173,6 +2173,17 @@ export interface QueryTab {
   /** Optional branch context for a driver-profile database workspace. */
   workspaceBranch?: string;
   schema?: string;
+  /**
+   * 该 Schema 是否由用户为当前页签显式选择（工具栏 / 侧栏 Schema 节点）。
+   *
+   * SQL Server 没有会话级 Schema 切换，后端会把未限定的表名按页签 Schema
+   * 改写（#8951）。只有显式选择才能参与改写：连接默认 Schema、恢复的页签、
+   * 保存的 SQL、外部文件带来的 Schema 只用于浏览/补全/预填，否则
+   * `SELECT * FROM t` 会被错误地限定到非默认 Schema。
+   *
+   * 该字段是运行时状态，不随页签持久化，恢复的页签因此回到服务器默认解析。
+   */
+  schemaQualifiesSql?: boolean;
   /** Doris / StarRocks multi-catalog: the external catalog this tab's
    * database belongs to (undefined for internal/default catalog). */
   catalog?: string;

@@ -29,6 +29,7 @@ import {
   setGaussdbCountQueryDop,
   setGaussdbIdentifierQuoteStyle,
   setGaussdbTargetServerType,
+  sqlServerQualifiesSqlWithTabSchema,
   supportsGaussdbIdentifierQuoteStyle,
   transferDatabaseTypeForConnection,
 } from "@/lib/database/jdbcDialect";
@@ -655,5 +656,16 @@ describe("object list schema", () => {
 
   it.each(["oracle", "oceanbase-oracle", "postgres", "mysql"] as const)("does not fall back to the username for %s", (dbType) => {
     expect(objectListSchemaForConnection({ db_type: dbType, username: "app_user" })).toBe("");
+  });
+});
+
+describe("schema qualification scope", () => {
+  it("only scopes the SQL rewrite for SQL Server", () => {
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "sqlserver" })).toBe(true);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "sqlserver", driver_profile: "sqlserver-legacy" })).toBe(true);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "postgres" })).toBe(false);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "iris" })).toBe(false);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "kingbase" })).toBe(false);
+    expect(sqlServerQualifiesSqlWithTabSchema(undefined)).toBe(false);
   });
 });

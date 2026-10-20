@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
+import { parseSettingsExport, serializeSettingsExport, settingsExportFileName, type SettingsExportErrorCode } from "@/lib/app/settingsExport";
+import { saveTextFile } from "@/lib/export/saveTextFile";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
 import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
 import type { Ref } from "vue";
@@ -2598,6 +2600,67 @@ async function restartDbxForDuckDbIsolation() {
     toast(t("settings.restartDbxFailed", { error: e?.message || String(e) }), 5000);
   } finally {
     duckDbRestarting.value = false;
+  }
+}
+
+const settingsExportInput = ref<HTMLInputElement | null>(null);
+
+function settingsImportErrorMessage(code: SettingsExportErrorCode, schemaVersion?: number): string {
+  switch (code) {
+    case "empty":
+      return t("settings.settingsImportEmpty");
+    case "invalidJson":
+      return t("settings.settingsImportInvalidJson");
+    case "notAnObject":
+      return t("settings.settingsImportNotAnObject");
+    case "missingSchemaVersion":
+      return t("settings.settingsImportMissingSchema");
+    case "unsupportedSchemaVersion":
+      return t("settings.settingsImportNewerSchema", { version: schemaVersion ?? "" });
+    case "missingEditorSettings":
+      return t("settings.settingsImportMissingSettings");
+  }
+}
+
+/** Export every preference in this dialog to a plain JSON file (issue #12111). */
+async function exportSettingsFile() {
+  try {
+    const exportedAt = new Date();
+    await saveTextFile(serializeSettingsExport({ editorSettings: settingsStore.editorSettings, exportedAt }), settingsExportFileName(exportedAt), "JSON", "json", { operation: "settings-export" });
+    toast(t("settings.settingsExportDone"), 2500);
+  } catch (e: any) {
+    toast(`${t("settings.settingsExportFailed")}: ${e?.message || String(e)}`, 5000);
+  }
+}
+
+function chooseSettingsImportFile() {
+  settingsExportInput.value?.click();
+}
+
+async function onSettingsImportFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  let text: string;
+  try {
+    text = await file.text();
+  } catch (e: any) {
+    toast(`${t("settings.settingsImportFailed")}: ${e?.message || String(e)}`, 5000);
+    return;
+  }
+  const result = parseSettingsExport(text);
+  if (!result.ok) {
+    toast(settingsImportErrorMessage(result.code, result.schemaVersion), 5000);
+    return;
+  }
+  try {
+    // Only keys the store knows about are applied, and each one goes through its
+    // own normalizer, so a hand-edited file cannot push invalid values.
+    await settingsStore.updateEditorSettingsAndPersist(result.settings);
+    toast(t("settings.settingsImportDone"), 3000);
+  } catch (e: any) {
+    toast(`${t("settings.settingsImportFailed")}: ${e?.message || String(e)}`, 5000);
   }
 }
 
@@ -13156,6 +13219,9 @@ LIMIT 100;</pre>
        * 恢复默认/关闭/应用/应用并关闭 无法点击）。
        -->
       <DialogFooter v-if="hasSettingsApplyFooter(activeSettingsTab as SettingsCategory)" class="shrink-0 mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
+        <input ref="settingsExportInput" type="file" accept="application/json,.json" class="hidden" data-settings-import-input @change="onSettingsImportFile" />
+        <Button variant="outline" @click="exportSettingsFile">{{ t("settings.settingsExport") }}</Button>
+        <Button variant="outline" @click="chooseSettingsImportFile">{{ t("settings.settingsImport") }}</Button>
         <Button variant="outline" @click="resetDefaultsForTab(activeSettingsTab as SettingsCategory)">
           {{ t("settings.resetDefaults") }}
         </Button>

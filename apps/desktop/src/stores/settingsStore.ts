@@ -820,6 +820,8 @@ export interface TabGroupCustomization {
 }
 const TAB_SORT_MODES = ["manual", "created-asc", "title-asc"] as const;
 export type TabSortMode = (typeof TAB_SORT_MODES)[number];
+const TAB_GROUP_ROW_MODES = ["single", "two-row"] as const;
+export type TabGroupRowMode = (typeof TAB_GROUP_ROW_MODES)[number];
 const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
@@ -1029,6 +1031,8 @@ export interface EditorSettings {
   tabSortMode: TabSortMode;
   /** 水平标签页最大显示宽度（像素，0 表示不限制）。 */
   tabMaxWidth: number;
+  /** 分组标签在水平标签栏中的行数：single 为分组与标签混排一行，two-row 为分组独占一行。 */
+  tabGroupRows: TabGroupRowMode;
   appLayout: "separated" | "classic";
   webLogoPosition: WebLogoPosition;
   pageSize: number;
@@ -1409,6 +1413,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tabGroupCustomizations: {},
   tabSortMode: "manual",
   tabMaxWidth: 0,
+  tabGroupRows: "single",
   appLayout: "classic",
   webLogoPosition: "left",
   pageSize: 100,
@@ -1664,6 +1669,10 @@ export function normalizeTabMaxWidth(value: unknown): number {
     return Math.round(value);
   }
   return DEFAULT_EDITOR_SETTINGS.tabMaxWidth;
+}
+
+function normalizeTabGroupRows(value: unknown): TabGroupRowMode {
+  return TAB_GROUP_ROW_MODES.includes(value as TabGroupRowMode) ? (value as TabGroupRowMode) : DEFAULT_EDITOR_SETTINGS.tabGroupRows;
 }
 
 function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
@@ -2077,6 +2086,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tabGroupCustomizations: normalizeTabGroupCustomizations(settings.tabGroupCustomizations),
     tabSortMode: normalizeTabSortMode(settings.tabSortMode),
     tabMaxWidth: normalizeTabMaxWidth(settings.tabMaxWidth),
+    tabGroupRows: normalizeTabGroupRows(settings.tabGroupRows),
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     webLogoPosition: normalizeWebLogoPosition(settings.webLogoPosition),
     pageSize: normalizeResultPageSize(settings.pageSize),
@@ -3000,6 +3010,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tabGroupCustomizations !== undefined) editorSettings.value.tabGroupCustomizations = normalizeTabGroupCustomizations(partial.tabGroupCustomizations);
     if (partial.tabSortMode !== undefined) editorSettings.value.tabSortMode = normalizeTabSortMode(partial.tabSortMode);
     if (partial.tabMaxWidth !== undefined) editorSettings.value.tabMaxWidth = normalizeTabMaxWidth(partial.tabMaxWidth);
+    if (partial.tabGroupRows !== undefined) editorSettings.value.tabGroupRows = normalizeTabGroupRows(partial.tabGroupRows);
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.webLogoPosition !== undefined) editorSettings.value.webLogoPosition = normalizeWebLogoPosition(partial.webLogoPosition);
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);

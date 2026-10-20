@@ -723,6 +723,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordKeys: ["settings.tabPlacementTop", "settings.tabPlacementBottom", "settings.tabPlacementLeft", "settings.tabPlacementRight"],
   },
   { id: "appearance-tab-group", category: "appearance", titleKey: "settings.tabGroup", targetId: "appearance", keywordKeys: ["settings.tabGroupNone", "settings.tabGroupDatabaseType", "settings.tabGroupDatabase", "settings.tabGroupConnection", "settings.tabGroupSidebar"] },
+  { id: "appearance-tab-group-rows", category: "appearance", titleKey: "settings.tabGroupRows", descriptionKey: "settings.tabGroupRowsDescription", targetId: "appearance", keywordKeys: ["settings.tabGroupRowsSingle", "settings.tabGroupRowsTwoRow"] },
   { id: "appearance-tab-sort", category: "appearance", titleKey: "settings.tabSort", targetId: "appearance", keywordKeys: ["settings.tabSortManual", "settings.tabSortCreated", "settings.tabSortTitle"] },
   { id: "appearance-background-image", category: "appearance", titleKey: "settings.backgroundImage", descriptionKey: "settings.backgroundImageDescription", targetId: "appearance", visible: desktopOnly },
   {

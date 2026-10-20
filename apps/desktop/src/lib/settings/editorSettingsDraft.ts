@@ -60,6 +60,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "tabGroupMode",
   "tabSortMode",
   "tabMaxWidth",
+  "tabGroupRows",
   "showColumnCommentsInHeader",
   "dataGridColumnCommentsInInfoArea",
   "showColumnTypesInHeader",

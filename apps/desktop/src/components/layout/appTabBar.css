@@ -951,6 +951,69 @@
   transition: none !important;
 }
 
+/* ------------------------------------------------------------------ */
+/* Master-detail two-row group rail (issue #10034)                     */
+/* ------------------------------------------------------------------ */
+
+/* The rail reuses the semantic group header pill on its own scroll row, so a
+ * group can overflow horizontally exactly like the tab strip beneath it. */
+.tab-group-rail {
+  scrollbar-width: none;
+}
+
+/* The scroller is .tab-group-rail-scroll, not .tab-group-rail itself. */
+.tab-group-rail-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Same reveal contract as .app-tab-strip: the rail's drag scrollbar stays
+ * hidden until the row is hovered/focused; --dragging is already global. */
+.tab-group-rail:hover .app-tab-scrollbar,
+.tab-group-rail:focus-within .app-tab-scrollbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Long connection names must not eat the whole rail. Respect the user's tab
+ * width cap when one is configured; otherwise keep a sane 16rem default. */
+.tab-group-rail .tab-group-header-content {
+  max-width: var(--tab-max-width, 16rem);
+}
+
+/* The base ::after pushes the accent 0.2rem past the pill's right edge so a
+ * header's underline visually joins its tabs in the single-row strip. Rail
+ * pills stand alone, so the overlap reads as a stray overhang there. The
+ * :not() prefix keeps specificity above the base header rule. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-rail .tab-group-header::after {
+  right: 0;
+}
+
+/* Group headers carry an asymmetric 0.15rem/0.05rem inline margin tuned for
+ * the single-row strip, while .app-tab-pill pages carry none — mixing them in
+ * the rail produced uneven gaps. Zero the margin here so the container's gap
+ * spaces every pill identically. Same :not() specificity trick as ::after. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-rail .tab-group-header {
+  margin-inline: 0;
+}
+
+/* The rail hides its scrollbar, so clipped pills need another affordance:
+ * fade the overflowing edge(s). Driven by the rail's own useTabScroll state.
+ * -webkit- prefix keeps the fade on older WKWebView (macOS 12). */
+.tab-group-rail-scroll--overflow-start {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 1.25rem);
+  mask-image: linear-gradient(to right, transparent, #000 1.25rem);
+}
+
+.tab-group-rail-scroll--overflow-end {
+  -webkit-mask-image: linear-gradient(to left, transparent, #000 1.25rem);
+  mask-image: linear-gradient(to left, transparent, #000 1.25rem);
+}
+
+.tab-group-rail-scroll--overflow-start.tab-group-rail-scroll--overflow-end {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 1.25rem, #000 calc(100% - 1.25rem), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 1.25rem, #000 calc(100% - 1.25rem), transparent);
+}
+
 .tab-group-color-option,
 .tab-group-custom-color {
   position: relative;

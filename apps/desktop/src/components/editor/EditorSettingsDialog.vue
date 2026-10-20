@@ -104,6 +104,7 @@ import {
   type SavedSqlOpenTargetMode,
   type AiSqlApplyTargetMode,
   type TabGroupMode,
+  type TabGroupRowMode,
   type TabPlacement,
   type TabSortMode,
   type WelcomePageMode,
@@ -800,6 +801,7 @@ const editColorizeConnectionTabs = ref(settingsStore.editorSettings.colorizeConn
 const editTabGroupMode = ref<TabGroupMode>(settingsStore.editorSettings.tabGroupMode);
 const editTabSortMode = ref<TabSortMode>(settingsStore.editorSettings.tabSortMode);
 const editTabMaxWidth = ref<number>(settingsStore.editorSettings.tabMaxWidth);
+const editTabGroupRows = ref<TabGroupRowMode>(settingsStore.editorSettings.tabGroupRows);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
 const desktopCloseBehaviorResetPending = ref(false);
@@ -1198,6 +1200,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     tabGroupMode: editTabGroupMode.value,
     tabSortMode: editTabSortMode.value,
     tabMaxWidth: editTabMaxWidth.value,
+    tabGroupRows: editTabGroupRows.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     dataGridColumnCommentsInInfoArea: editDataGridColumnCommentsInInfoArea.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
@@ -1895,6 +1898,7 @@ function syncEditorSettingsDraftFromStore() {
   editTabGroupMode.value = settingsStore.editorSettings.tabGroupMode;
   editTabSortMode.value = settingsStore.editorSettings.tabSortMode;
   editTabMaxWidth.value = settingsStore.editorSettings.tabMaxWidth;
+  editTabGroupRows.value = settingsStore.editorSettings.tabGroupRows;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
   editDataGridColumnCommentsInInfoArea.value = settingsStore.editorSettings.dataGridColumnCommentsInInfoArea;
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
@@ -2066,6 +2070,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   tabGroupMode: editTabGroupMode,
   tabSortMode: editTabSortMode,
   tabMaxWidth: editTabMaxWidth,
+  tabGroupRows: editTabGroupRows,
   showColumnCommentsInHeader: editShowColumnCommentsInHeader,
   dataGridColumnCommentsInInfoArea: editDataGridColumnCommentsInInfoArea,
   showColumnTypesInHeader: editShowColumnTypesInHeader,
@@ -2670,6 +2675,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editTabGroupMode.value = DEFAULT_EDITOR_SETTINGS.tabGroupMode;
     editTabSortMode.value = DEFAULT_EDITOR_SETTINGS.tabSortMode;
     editTabMaxWidth.value = DEFAULT_EDITOR_SETTINGS.tabMaxWidth;
+    editTabGroupRows.value = DEFAULT_EDITOR_SETTINGS.tabGroupRows;
     editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
     editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
     desktopCloseBehaviorResetPending.value = true;
@@ -3510,6 +3516,10 @@ function setTabSortMode(value: TabSortMode) {
 
 function setTabMaxWidth(value: number) {
   editTabMaxWidth.value = normalizeTabMaxWidth(value);
+}
+
+function setTabGroupRows(value: TabGroupRowMode) {
+  editTabGroupRows.value = value;
 }
 
 function setSidebarActivation(value: "single" | "double") {
@@ -8599,7 +8609,7 @@ onUnmounted(() => {
               </div>
 
               <div class="settings-appearance-group">
-                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
                   <div class="space-y-2">
                     <Label>{{ t("settings.tabPlacement") }}</Label>
                     <Select :model-value="editTabPlacement" @update:model-value="setTabPlacement($event as TabPlacement)">
@@ -8622,6 +8632,16 @@ onUnmounted(() => {
                         <SelectItem value="database">{{ t("settings.tabGroupDatabase") }}</SelectItem>
                         <SelectItem value="connection">{{ t("settings.tabGroupConnection") }}</SelectItem>
                         <SelectItem value="sidebar">{{ t("settings.tabGroupSidebar") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="space-y-2">
+                    <Label>{{ t("settings.tabGroupRows") }}</Label>
+                    <Select :model-value="editTabGroupRows" @update:model-value="setTabGroupRows($event as TabGroupRowMode)">
+                      <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="single">{{ t("settings.tabGroupRowsSingle") }}</SelectItem>
+                        <SelectItem value="two-row">{{ t("settings.tabGroupRowsTwoRow") }}</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -8653,6 +8673,7 @@ onUnmounted(() => {
                 <div class="space-y-1 text-xs text-muted-foreground">
                   <p>{{ t("settings.tabPlacementDescription") }}</p>
                   <p>{{ t("settings.tabOrganizationDescription") }}</p>
+                  <p>{{ t("settings.tabGroupRowsDescription") }}</p>
                   <p>{{ t("settings.tabMaxWidthDescription") }}</p>
                 </div>
               </div>

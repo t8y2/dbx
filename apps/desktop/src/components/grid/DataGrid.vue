@@ -1225,7 +1225,7 @@ const filterBuilderColumns = computed(() =>
     resultColumnTypes: props.result.column_types,
   }),
 );
-const conditionColumns = computed(() => dataGridConditionColumnOptions(props.tableMeta ? filterBuilderColumns.value.map((column) => column.columnInfo ?? column.name) : props.result.columns, resolvedDatabaseType.value));
+const conditionColumns = computed(() => dataGridConditionColumnOptions(props.tableMeta ? filterBuilderColumns.value.map((column) => ({ name: column.name, dataType: column.columnInfo?.data_type, comment: column.columnInfo?.comment ?? undefined })) : props.result.columns, resolvedDatabaseType.value));
 const conditionIdentifierQuote = computed(() => dataGridConditionIdentifierQuote(resolvedDatabaseType.value, connectionStore.connectionIdentifierQuote?.(props.connectionId)));
 const conditionHistoryScope = computed(() => ({
   connectionId: props.connectionId,

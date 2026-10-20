@@ -855,4 +855,161 @@ describe("useDataGridConditionEditor", () => {
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "ILIKE", kind: "keyword" }]));
   });
+
+  it("suggests comparison operators after a complete column and inserts the trailing space", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["status"], historyScope: {}, suggestionDebounceMs: 1 });
+
+    value.value = "status ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["=", "<>", ">", ">=", "<", "<=", "LIKE", "NOT LIKE", "IN", "BETWEEN", "IS NULL", "IS NOT NULL"]));
+    // 运算符不预选：回车仍然是执行查询，不会悄悄改写条件
+    expect(editor.highlightedIndex.value).toBe(-1);
+
+    expect(editor.accept(1)).toBe(true);
+    expect(value.value).toBe("status <> ");
+
+    // 关键字运算符仍然可用，且不会和符号运算符重复
+    value.value = "status li";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["LIKE"]));
+  });
+
+  it("suggests dialect-aware value expressions after an operator for temporal columns", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [
+        { name: "CREATE_TIME", dataType: "TIMESTAMP(6)" },
+        { name: "AMOUNT", dataType: "NUMBER" },
+      ],
+      databaseType: "oracle",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    value.value = "CREATE_TIME > ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["SYSTIMESTAMP", "TRUNC(SYSDATE)", "TRUNC(SYSDATE) - 1", "SYSTIMESTAMP - INTERVAL '7' DAY", "SYSTIMESTAMP - INTERVAL '30' DAY"]));
+
+    expect(editor.accept(3)).toBe(true);
+    expect(value.value).toBe("CREATE_TIME > SYSTIMESTAMP - INTERVAL '7' DAY");
+
+    // 非时间列仍然是空建议：绝不在这里提示列名（issue #10595）
+    value.value = "AMOUNT <> ";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(editor.suggestions.value).toEqual([]);
+  });
+
+  it("keeps offering the next layer after accepting a column and an operator", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "CREATE_TIME", dataType: "DATE" }],
+      databaseType: "oracle",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    value.value = "CREA";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["CREATE_TIME"]));
+    expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("accept");
+    expect(value.value).toBe("CREATE_TIME");
+
+    value.value = "CREATE_TIME ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toContain(">="));
+    expect(editor.accept(3)).toBe(true);
+    expect(value.value).toBe("CREATE_TIME >= ");
+
+    // 接受带尾随空格的运算符后光标已经在值位置，候选要立刻接上，不用再敲一个字
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["SYSTIMESTAMP", "TRUNC(SYSDATE)", "TRUNC(SYSDATE) - 1", "SYSTIMESTAMP - INTERVAL '7' DAY", "SYSTIMESTAMP - INTERVAL '30' DAY"]));
+  });
+
+  it.each([
+    ["mysql", "DATETIME", "NOW()"],
+    ["postgres", "timestamptz", "now()"],
+    ["sqlite", "TEXT DATE", "datetime('now')"],
+    ["sqlserver", "datetime2", "GETDATE()"],
+    ["hive", "TIMESTAMP", "CURRENT_TIMESTAMP"],
+  ] as const)("uses %s value snippets for %s columns", async (databaseType, dataType, firstSnippet) => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "created_at", dataType }],
+      databaseType,
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    value.value = "created_at >= ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value[0]?.value).toBe(firstSnippet));
+  });
+
+  it("suggests numeric literals for SQL Server bit columns", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "enabled", dataType: "bit" }],
+      databaseType: "sqlserver",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+    value.value = "enabled = ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["1", "0"]));
+    expect(editor.accept(0)).toBe(true);
+    expect(value.value).toBe("enabled = 1");
+  });
+
+  it("does not suggest boolean literals for PostgreSQL bit strings", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "mask", dataType: "bit(8)" }],
+      databaseType: "postgres",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+    value.value = "mask = ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestionsLoading.value).toBe(false));
+    expect(editor.suggestions.value).toEqual([]);
+  });
+
+  it("suggests TRUE/FALSE for boolean columns and opens an IN list without value snippets", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "enabled", dataType: "boolean" }],
+      databaseType: "postgres",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    value.value = "enabled = ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["TRUE", "FALSE"]));
+
+    value.value = "enabled ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toContain("IN"));
+    expect(editor.accept(8)).toBe(true);
+    expect(value.value).toBe("enabled IN (");
+
+    // IN 列表里只写值，不再给单个表达式建议
+    value.value = "enabled IN (";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(editor.suggestions.value).toEqual([]);
+  });
 });

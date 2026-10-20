@@ -342,6 +342,7 @@ describe("quoteTableIdentifier", () => {
     expect(requiresEagerTableMetadataForDataOpen("salesforce")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("mysql")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("postgres")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("oracle")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("nebula")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("neo4j")).toBe(true);
     // Drivers whose preview works from `SELECT *` keep loading metadata lazily.

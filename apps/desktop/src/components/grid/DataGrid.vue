@@ -113,6 +113,7 @@ import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
 import * as api from "@/lib/backend/api";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { resolveDataGridBusyStartedAt } from "@/lib/dataGrid/dataGridBusyElapsed";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
@@ -659,6 +660,13 @@ interface DataGridProps {
   cancelling?: boolean;
   cancelDisabled?: boolean;
   revealColumnRequest?: { id: number; columnName: string };
+  /**
+   * Start of the query execution behind the busy overlay, when the busy surface
+   * is driven by one. Switching the result view unmounts this grid, so the
+   * elapsed pill must read the execution start from the tab instead of the
+   * mount time (issue #12821).
+   */
+  busyStartedAt?: number;
 }
 
 const props = withDefaults(defineProps<DataGridProps>(), {
@@ -13449,8 +13457,8 @@ function startLoadingElapsedTimer(reset = false) {
     return;
   }
   if (reset || !_loadingStart) {
-    _loadingStart = Date.now();
-    loadingElapsed.value = 0;
+    _loadingStart = resolveDataGridBusyStartedAt({ now: Date.now(), reset, currentStartedAt: _loadingStart, executionStartedAt: props.busyStartedAt });
+    loadingElapsed.value = Math.max(0, Date.now() - _loadingStart);
   } else {
     loadingElapsed.value = Date.now() - _loadingStart;
   }
@@ -13485,6 +13493,16 @@ watch(gridSurfaceBusy, (isLoading) => {
     });
   }
 });
+
+// A second execution can start while the surface is already busy (a refresh, or
+// a remount that lands after the query started). Re-base the pill on the new
+// execution start instead of keeping the previous baseline.
+watch(
+  () => props.busyStartedAt,
+  () => {
+    if (gridSurfaceBusy.value) startLoadingElapsedTimer();
+  },
+);
 
 onActivated(() => {
   gridClipboardActive = true;

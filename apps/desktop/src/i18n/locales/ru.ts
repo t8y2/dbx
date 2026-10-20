@@ -2204,6 +2204,8 @@ export default withEnglishFallback({
     suffixDuplicateBack: "Изменить суффикс",
     suffixDuplicateUseAnyway: "Всё равно использовать",
     settingsSaveFailed: "Не удалось сохранить настройки вкладок: {message}",
+    ungroupedTabs: "Без группы",
+    pluginTabs: "Плагины",
   },
   databaseBrowser: {
     search: "Поиск баз данных...",
@@ -10691,6 +10693,10 @@ export default withEnglishFallback({
     dataGridColumnCommentsInInfoAreaDescription: "Переносить комментарии выбранных столбцов в нижнюю строку состояния и не отображать их в заголовке таблицы.",
     dataGridTransposeMetadataInInfoColumn: "Отдельный информационный столбец в транспонированном представлении",
     dataGridTransposeMetadataInInfoColumnDescription: "В транспонированном представлении данных таблицы и результатов запроса размещать тип, допустимость NULL и комментарии в отдельном информационном столбце справа от значений; имена полей остаются в одной строке.",
+    tabGroupRows: "Строки групп",
+    tabGroupRowsSingle: "Одна строка",
+    tabGroupRowsTwoRow: "Две строки (группы на отдельной строке)",
+    tabGroupRowsDescription: "Действует только для верхней или нижней панели вкладок с включённой группировкой: группы занимают отдельную строку, а вкладки выбранной группы отображаются на следующей строке.",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

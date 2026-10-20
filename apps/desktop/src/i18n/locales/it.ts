@@ -2193,6 +2193,8 @@ export default withEnglishFallback({
     etcdDashboard: "etcd dashboard",
     etcdAccessControl: "controllo accessi etcd",
     ...nacosAccessControlTabs,
+    ungroupedTabs: "Non raggruppate",
+    pluginTabs: "Plugin",
   },
   executionSummary: {
     empty: "Nessun riepilogo",
@@ -9268,6 +9270,10 @@ export default withEnglishFallback({
     shortcutSelectLineEnds: "Seleziona fine riga",
     openQueryOnConnectionOpen: "Apri la pagina Query all'apertura della connessione",
     openQueryOnConnectionOpenDescription: "Apre la query default.sql quando si apre una connessione o un database e salva automaticamente le modifiche.",
+    tabGroupRows: "Righe dei gruppi",
+    tabGroupRowsSingle: "Riga singola",
+    tabGroupRowsTwoRow: "Due righe (gruppi su una riga dedicata)",
+    tabGroupRowsDescription: "Si applica solo a una barra delle schede superiore o inferiore con raggruppamento attivo: i gruppi occupano una riga dedicata e le schede del gruppo selezionato compaiono nella riga successiva.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

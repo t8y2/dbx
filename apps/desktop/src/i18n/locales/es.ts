@@ -2294,6 +2294,8 @@ export default withEnglishFallback({
     etcdDashboard: "Panel de etcd",
     etcdAccessControl: "Control de acceso de etcd",
     ...nacosAccessControlTabs,
+    ungroupedTabs: "Sin agrupar",
+    pluginTabs: "Plugins",
   },
   executionSummary: {
     empty: "Sin resumen",
@@ -9519,6 +9521,10 @@ export default withEnglishFallback({
     shortcutSelectLineEnds: "Seleccionar finales de línea",
     openQueryOnConnectionOpen: "Abrir la página de consulta al abrir la conexión",
     openQueryOnConnectionOpenDescription: "Al abrir una conexión o base de datos, abre su consulta default.sql y guarda los cambios automáticamente.",
+    tabGroupRows: "Filas de grupos",
+    tabGroupRowsSingle: "Una fila",
+    tabGroupRowsTwoRow: "Dos filas (grupos en su propia fila)",
+    tabGroupRowsDescription: "Solo se aplica a una barra de pestañas superior o inferior con la agrupación activada: los grupos ocupan su propia fila y las pestañas del grupo seleccionado aparecen en la fila siguiente.",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

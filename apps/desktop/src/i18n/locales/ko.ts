@@ -2110,6 +2110,8 @@ export default withEnglishFallback({
     suffixDuplicateBack: "접미사 변경",
     suffixDuplicateUseAnyway: "그대로 사용",
     settingsSaveFailed: "탭 설정을 저장하지 못했습니다: {message}",
+    ungroupedTabs: "그룹 없음",
+    pluginTabs: "플러그인",
   },
   databaseBrowser: {
     search: "데이터베이스 검색...",
@@ -9203,6 +9205,10 @@ export default withEnglishFallback({
     shortcutSelectLineEnds: "줄 끝 선택",
     openQueryOnConnectionOpen: "연결을 열 때 쿼리 페이지로 이동",
     openQueryOnConnectionOpenDescription: "활성화하면 연결 또는 데이터베이스를 열 때 default.sql 쿼리를 열고 변경 사항을 자동 저장합니다.",
+    tabGroupRows: "그룹 행 수",
+    tabGroupRowsSingle: "한 줄",
+    tabGroupRowsTwoRow: "두 줄 (그룹을 별도 줄에 표시)",
+    tabGroupRowsDescription: "탭 표시줄이 위쪽 또는 아래쪽에 있고 그룹화가 활성화된 경우에만 적용됩니다. 그룹은 별도의 줄에 표시되고 선택한 그룹의 탭은 다음 줄에 표시됩니다.",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

@@ -2400,6 +2400,8 @@ export default withEnglishFallback({
     suffixDuplicateBack: "เปลี่ยน Suffix",
     suffixDuplicateUseAnyway: "ใช้ต่อไป",
     settingsSaveFailed: "บันทึกการตั้งค่าแท็บไม่สำเร็จ: {message}",
+    ungroupedTabs: "ไม่ได้จัดกลุ่ม",
+    pluginTabs: "ปลั๊กอิน",
   },
   databaseBrowser: {
     search: "ค้นหาฐานข้อมูล...",
@@ -11109,6 +11111,10 @@ export default withEnglishFallback({
     dataGridColumnCommentsInInfoAreaDescription: "ย้ายคำอธิบายของคอลัมน์ที่เลือกไปยังแถบสถานะด้านล่าง และไม่แสดงในส่วนหัวอีกต่อไป",
     dataGridTransposeMetadataInInfoColumn: "มุมมองทรานสโพสใช้คอลัมน์ข้อมูลแยกต่างหาก",
     dataGridTransposeMetadataInInfoColumnDescription: "ในมุมมองทรานสโพสของข้อมูลตารางและผลลัพธ์คิวรี ให้วางประเภท การเป็นค่าว่างได้ และคำอธิบายไว้ในคอลัมน์ข้อมูลแยกทางด้านขวาของค่า โดยชื่อคอลัมน์คงอยู่ในบรรทัดเดียว",
+    tabGroupRows: "จำนวนแถวกลุ่ม",
+    tabGroupRowsSingle: "แถวเดียว",
+    tabGroupRowsTwoRow: "สองแถว (กลุ่มแสดงในแถวของตัวเอง)",
+    tabGroupRowsDescription: "ใช้เฉพาะเมื่อแถบแท็บอยู่ด้านบนหรือด้านล่างและเปิดใช้งานการจัดกลุ่ม: กลุ่มจะแสดงในแถวของตัวเอง และแท็บของกลุ่มที่เลือกจะแสดงในแถวถัดไป",
   },
   driverStore: {
     jreDirRemoveFailed: "ลบไดเรกทอรี JRE เก่าไม่สำเร็จ: {path} (ข้อผิดพลาดเดิม: {error})",

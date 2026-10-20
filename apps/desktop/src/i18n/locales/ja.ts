@@ -2215,6 +2215,8 @@ export default withEnglishFallback({
     etcdDashboard: "etcd ダッシュボード",
     etcdAccessControl: "etcd アクセス制御",
     ...nacosAccessControlTabs,
+    ungroupedTabs: "未グループ",
+    pluginTabs: "プラグイン",
   },
   executionSummary: {
     empty: "サマリーはありません",
@@ -9305,6 +9307,10 @@ export default withEnglishFallback({
     shortcutSelectLineEnds: "行末を選択",
     openQueryOnConnectionOpen: "接続を開いたときにクエリページを開く",
     openQueryOnConnectionOpenDescription: "有効にすると、接続またはデータベースを開いたときに default.sql を開き、変更を自動保存します。",
+    tabGroupRows: "グループ行数",
+    tabGroupRowsSingle: "1行",
+    tabGroupRowsTwoRow: "2行（グループを独立した行に表示）",
+    tabGroupRowsDescription: "タブバーが上または下に配置されていて、グループ化が有効な場合にのみ適用されます。グループは専用の行に表示され、選択したグループのタブは次の行に表示されます。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

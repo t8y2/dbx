@@ -112,6 +112,7 @@ import {
 } from "@/lib/table/tableVGroup";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
+import { objectNavigatorTargetForTreeNode } from "@/lib/sidebar/objectNavigatorTarget";
 import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchFocus";
 import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguSyntheticTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
@@ -1958,6 +1959,14 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
     if (connection.db_type === "plugin") {
       await queryStore.openPluginConnection(node.connectionId);
       return;
+    }
+    if (!openEventEditor && !eventReadOnly) {
+      const target = objectNavigatorTargetForTreeNode(node, connection);
+      if (target) {
+        const tabId = queryStore.openObjectNavigator(target.connectionId, target.database, target.filter, target.schema, target.catalog, target.selectedObjectName);
+        if (focusSearch) await nextTick(() => requestObjectBrowserSearchFocus(tabId));
+        return;
+      }
     }
     if (hasTreeNodeDatabaseContext(node)) {
       const database = node.schema && connectionUsesVisibleSchemaFilter(connection) ? connection.database || node.database : node.database;

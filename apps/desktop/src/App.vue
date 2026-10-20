@@ -90,6 +90,7 @@ import { parseRecentConnectionIds, rankRecentConnections, RECENT_CONNECTION_IDS_
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql, type NewQueryContextSource } from "@/lib/sql/newQueryContext";
+import { objectNavigatorTargetForTreeNode } from "@/lib/sidebar/objectNavigatorTarget";
 import { isSqlObjectNavigationRoutineType, normalizeOracleNavigationTarget, sqlObjectNavigationSourceKind, sqlObjectNavigationSourceName, sqlObjectNavigationSourceSchema, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { assertSourceIdentity, beginSourceSave } from "@/lib/table/objectSourceIdentity";
@@ -197,7 +198,7 @@ import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTargets";
 import { aiTargetFromTab, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 import type { AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
-import { isSchemaAware, isSingleDatabase, supportsConnectionQueryActions, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, isSingleDatabase, supportsConnectionDatabaseBrowser, supportsConnectionQueryActions, supportsObjectBrowser, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { formatSqlSnapshotForSave } from "@/lib/sql/sqlFormatOnSave";
@@ -1650,6 +1651,22 @@ function rememberRecentConnection(connectionId: string | null) {
 }
 
 watch(() => connectionStore.activeConnectionId, rememberRecentConnection);
+
+watch(
+  () => connectionStore.selectedTreeNodeId,
+  (nodeId) => {
+    if (!appReady.value || !nodeId || connectionStore.selectedTreeNodeIds.length > 1) return;
+    const node = findTreeNodeById(connectionStore.treeNodes, nodeId);
+    if (!node?.connectionId) return;
+    const config = connectionStore.getConfig(node.connectionId);
+    if (!supportsObjectBrowser(config?.db_type)) return;
+    if (node.type === "connection" && !supportsConnectionDatabaseBrowser(config?.db_type)) return;
+    const target = objectNavigatorTargetForTreeNode(node, config);
+    // Individual objects keep their existing single-click data/source behavior.
+    if (!target || target.selectedObjectName) return;
+    queryStore.openObjectNavigator(target.connectionId, target.database, target.filter, target.schema, target.catalog, target.selectedObjectName);
+  },
+);
 
 const savedSqlHistoryItems = computed(() => {
   if (welcomePageMode.value !== "workspace") return [];

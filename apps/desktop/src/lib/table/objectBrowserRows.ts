@@ -23,6 +23,9 @@ export type ObjectBrowserRow = {
   partitionParentName?: string;
   estimatedRows?: number | null;
   totalBytes?: number | null;
+  dataLength?: number | null;
+  engine?: string | null;
+  autoIncrement?: string | null;
 };
 
 export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";

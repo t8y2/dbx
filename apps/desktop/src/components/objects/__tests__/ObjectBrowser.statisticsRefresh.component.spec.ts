@@ -96,6 +96,9 @@ const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  connection.db_type = "postgres";
+  localStorage.removeItem(`dbx-object-browser-columns:v1:${connection.id}:pgdemo:public`);
+  localStorage.removeItem(`dbx-object-browser-columns:v1:${connection.id}:pgdemo:`);
   mocks.listObjects.mockResolvedValue([{ name: "orders", object_type: "TABLE" }]);
   mocks.listSchemas.mockResolvedValue(["public"]);
   mocks.ensureConnected.mockResolvedValue(undefined);
@@ -111,10 +114,10 @@ afterEach(() => {
   invalidateObjectBrowserRowsCache({});
 });
 
-async function mountBrowser() {
+async function mountBrowser(navigator = false) {
   const host = document.createElement("div");
   document.body.append(host);
-  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: "pgdemo", schema: "public" }) });
+  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: "pgdemo", schema: connection.db_type === "mysql" ? undefined : "public", navigator, selectedObjectFilter: navigator ? "tables" : undefined }) });
   mountedApps.push({ app, host });
   app.mount(host);
   return host;
@@ -125,6 +128,21 @@ function primeRowsCache(cachedAt: number) {
 }
 
 describe("ObjectBrowser table statistics on a cached scaffold (#10461)", () => {
+  it.each([false, true])("honors persisted visibility for MySQL navigator detail columns (hidden: %s)", async (hidden) => {
+    connection.db_type = "mysql";
+    mocks.listObjectStatistics.mockResolvedValue([{ name: "orders", schema: "pgdemo", estimated_rows: 901, total_bytes: 196_608, data_length: 65_536, engine: "InnoDB", auto_increment: "712" }]);
+    if (hidden) localStorage.setItem(`dbx-object-browser-columns:v1:${connection.id}:pgdemo:`, JSON.stringify({ dataLength: false, engine: false, autoIncrement: false }));
+
+    const host = await mountBrowser(true);
+
+    await vi.waitFor(() => expect(host.textContent).toContain("901"));
+    for (const text of ["grid.tableInfoDataLength", "grid.tableInfoEngine", "grid.tableInfoAutoIncrement", "64.0 KB", "InnoDB", "712"]) {
+      if (hidden) expect(host.textContent).not.toContain(text);
+      else expect(host.textContent).toContain(text);
+    }
+    expect(host.textContent).toContain("orders");
+  });
+
   it("backfills row/size statistics when the restored scaffold is stale", async () => {
     primeRowsCache(Date.now() - 31_000);
 

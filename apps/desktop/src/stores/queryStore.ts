@@ -3485,9 +3485,46 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openObjectNavigator(connectionId: string, database: string, filter: ObjectBrowserFilter = "all", schema?: string, catalog?: string, selectedObjectName?: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "objects" && tab.objectBrowser?.navigator);
+    if (existing) {
+      const scopeChanged = existing.connectionId !== connectionId || existing.database !== database || existing.objectBrowser?.schema !== schema || existing.objectBrowser?.catalog !== catalog;
+      existing.connectionId = connectionId;
+      existing.database = database;
+      existing.schema = schema;
+      existing.objectBrowser = {
+        ...existing.objectBrowser,
+        navigator: true,
+        schema,
+        catalog,
+        filter,
+        initialObjectFilter: filter === "tables" || filter === "events" ? filter : undefined,
+        selectedObjectName,
+        searchQuery: scopeChanged ? undefined : existing.objectBrowser?.searchQuery,
+        viewport: scopeChanged ? undefined : existing.objectBrowser?.viewport,
+      };
+      switchTab(existing.id);
+      return existing.id;
+    }
+    return registerOpenTab({
+      id: uuid(),
+      title: t("tabs.objects"),
+      connectionId,
+      database,
+      schema,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "objects",
+      pinned: true,
+      objectBrowser: { navigator: true, schema, catalog, filter, initialObjectFilter: filter === "tables" || filter === "events" ? filter : undefined, selectedObjectName },
+    });
+  }
+
   function openObjectBrowser(connectionId: string, database: string, schema?: string, catalog?: string, eventName?: string, eventReadOnly = false, initialObjectFilter?: "tables" | "events", eventCreateRequestId?: number) {
     const title = catalog ? `${catalog}.${database} objects` : schema ? `${schema} objects` : `${database} objects`;
-    const existing = tabs.value.find((tab) => tab.mode === "objects" && tab.connectionId === connectionId && tab.database === database && (tab.objectBrowser?.catalog || "") === (catalog || "") && (tab.objectBrowser?.schema || "") === (schema || ""));
+    const existing = tabs.value.find((tab) => tab.mode === "objects" && !tab.objectBrowser?.navigator && tab.connectionId === connectionId && tab.database === database && (tab.objectBrowser?.catalog || "") === (catalog || "") && (tab.objectBrowser?.schema || "") === (schema || ""));
     if (existing) {
       if (eventCreateRequestId !== undefined) {
         // 新建事件：显式 CREATE 请求优先，并清掉可能残留的"编辑已有事件"状态，
@@ -4785,6 +4822,7 @@ export const useQueryStore = defineStore("query", () => {
   function closeTab(id: string, { force = false, skipHistory = false }: { force?: boolean; skipHistory?: boolean } = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
+    if (tab.objectBrowser?.navigator && !force) return;
     if (needsDefaultQuerySave(tab) || (tab.isDefaultQuery && defaultQuerySaves.has(id))) {
       void flushDefaultQuery(tab)
         .then(() => closeTab(id, { force, skipHistory }))
@@ -10825,6 +10863,7 @@ export const useQueryStore = defineStore("query", () => {
     openDatabaseSearch,
     openDriverProfileWorkspace,
     openObjectBrowser,
+    openObjectNavigator,
     openMongoGridFs,
     openMongoBucket,
     openUserAdmin,

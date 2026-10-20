@@ -3568,12 +3568,19 @@ defineExpose({
       </div>
     </template>
 
+    <!-- The persistent object navigator shows databases at connection scope. -->
+    <template v-else-if="activeTab.mode === 'objects' && activeTab.objectBrowser?.navigator && !activeTab.database && activeConnection">
+      <div class="min-w-0 flex-1 min-h-0">
+        <DatabaseBrowser ref="databaseBrowserRef" :key="`${activeTab.id}-${activeTab.connectionId}`" :connection="activeConnection" />
+      </div>
+    </template>
+
     <!-- Objects mode: virtualized database object browser -->
     <template v-else-if="activeTab.mode === 'objects' && activeConnection">
       <div class="min-w-0 flex-1 min-h-0">
         <ObjectBrowser
           ref="objectBrowserRef"
-          :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
+          :key="`${activeTab.id}-${activeTab.connectionId}-${activeTab.database}-${activeTab.objectBrowser?.schema || ''}-${activeTab.objectBrowser?.navigator ? activeTab.objectBrowser?.filter || 'all' : ''}-${activeTab.objectBrowser?.selectedObjectName || ''}`"
           :connection="activeConnection"
           :database="activeTab.database"
           :catalog="activeTab.objectBrowser?.catalog"
@@ -3584,6 +3591,8 @@ defineExpose({
           :initial-event-create-request-id="activeTab.objectBrowser?.eventCreateRequestId"
           :initial-object-filter="activeTab.objectBrowser?.initialObjectFilter"
           :selected-object-filter="activeTab.objectBrowser?.filter"
+          :navigator="activeTab.objectBrowser?.navigator"
+          :selected-object-name="activeTab.objectBrowser?.selectedObjectName"
           :initial-search-query="activeTab.objectBrowser?.searchQuery"
           :viewport="activeTab.objectBrowser?.viewport"
           @open-table="emit('openObjectTable', activeTab.id, $event)"

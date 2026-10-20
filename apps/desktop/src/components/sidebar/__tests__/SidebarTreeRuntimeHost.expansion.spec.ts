@@ -41,6 +41,7 @@ const queryStore = {
   setTableMeta: vi.fn(),
   openNacosAdmin: vi.fn(),
   openObjectBrowser: vi.fn(() => "object-browser-tab"),
+  openObjectNavigator: vi.fn(() => "object-browser-tab"),
 };
 
 const toast = vi.fn();
@@ -131,7 +132,7 @@ describe("SidebarTreeRuntimeHost expansion", () => {
       host.value?.handleRowDoubleClick(database, new MouseEvent("dblclick"));
     }
 
-    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledWith("mysql", "dbx_test", undefined, undefined, undefined, false, undefined, undefined));
+    await vi.waitFor(() => expect(queryStore.openObjectNavigator).toHaveBeenCalledWith("mysql", "dbx_test", "all", undefined, undefined, undefined));
     await vi.waitFor(() => expect(focusRequested).toHaveBeenCalledOnce());
     expect((focusRequested.mock.calls[0]?.[0] as CustomEvent<{ tabId: string }>).detail.tabId).toBe("object-browser-tab");
 
@@ -327,8 +328,8 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     // Reading the cancellation proves the original request still owns its
     // completion; a stale request returns before classifying the failure.
     await vi.waitFor(() => expect(cancellationHandled).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledOnce());
-    expect(queryStore.openObjectBrowser).toHaveBeenCalledWith("mysql", "inventory", undefined, undefined, undefined, false, undefined, undefined);
+    await vi.waitFor(() => expect(queryStore.openObjectNavigator).toHaveBeenCalledOnce());
+    expect(queryStore.openObjectNavigator).toHaveBeenCalledWith("mysql", "inventory", "all", undefined, undefined, undefined);
     expect(toast).not.toHaveBeenCalled();
   });
 

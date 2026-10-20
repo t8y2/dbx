@@ -6427,6 +6427,32 @@ done
         }
     }
 
+    #[test]
+    fn mysql_jdbc_table_status_maps_overview_fields() {
+        let mut result = statistics_query_result(vec![vec![
+            serde_json::json!("orders"),
+            serde_json::json!(834086),
+            serde_json::json!(84426752),
+            serde_json::json!(51511296),
+            serde_json::json!("InnoDB"),
+            serde_json::json!(860743),
+            serde_json::json!("2026-10-15 11:15:50"),
+        ]]);
+        result.columns = ["Name", "Rows", "Data_length", "Index_length", "Engine", "Auto_increment", "Update_time"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let stats = super::mysql_jdbc_object_statistics_from_query_result(result, "app");
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].name, "orders");
+        assert_eq!(stats[0].schema.as_deref(), Some("app"));
+        assert_eq!(stats[0].estimated_rows, Some(834086));
+        assert_eq!(stats[0].total_bytes, Some(135938048));
+        assert_eq!(stats[0].engine.as_deref(), Some("InnoDB"));
+        assert_eq!(stats[0].auto_increment.as_deref(), Some("860743"));
+        assert_eq!(stats[0].updated_at.as_deref(), Some("2026-10-15 11:15:50"));
+    }
+
     #[tokio::test]
     async fn kingbase_object_statistics_falls_back_when_size_function_is_missing() {
         let mut queries = Vec::new();
@@ -7301,6 +7327,24 @@ async fn list_object_statistics_once(
     let pool_handle = state.pool_handle(&pool_key).await;
     try_sqlserver!(pool_handle, list_object_statistics, schema);
     if let Some(PoolKind::ExternalDriver { config, session, .. }) = pool_handle.as_ref() {
+        if is_mysql_external_driver_config(config.as_ref()) {
+            let sql = format!("SHOW TABLE STATUS FROM {}", mysql_ident(database));
+            let result: db::QueryResult = session
+                .invoke_with_timeout(
+                    "executeQuery",
+                    serde_json::json!({
+                        "connection": config.as_ref(),
+                        "database": database,
+                        "schema": schema,
+                        "sql": sql,
+                        "maxRows": 10_000,
+                        "fetchSize": 1000,
+                    }),
+                    agent_metadata_timeout(Some(config.as_ref())),
+                )
+                .await?;
+            return Ok(mysql_jdbc_object_statistics_from_query_result(result, database));
+        }
         // Generic JDBC connections have no `listObjectStatistics` RPC, so the
         // vendor statistics SQL is issued over the plugin's query channel.
         if let Some(dialect) = external_driver_statistics_dialect(config.as_ref()) {
@@ -7382,6 +7426,50 @@ async fn list_object_statistics_once(
         PoolKind::MongoDb(client) => db::mongo_driver::list_object_statistics(client, database).await,
         _ => Ok(vec![]),
     }
+}
+
+fn mysql_jdbc_object_statistics_from_query_result(
+    result: db::QueryResult,
+    database: &str,
+) -> Vec<db::ObjectStatistics> {
+    let column = |name: &str| result.columns.iter().position(|candidate| candidate.eq_ignore_ascii_case(name));
+    let Some(name_index) = column("Name") else { return Vec::new() };
+    let rows_index = column("Rows");
+    let data_length_index = column("Data_length");
+    let index_length_index = column("Index_length");
+    result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(row, name_index)?;
+            if name.is_empty() {
+                return None;
+            }
+            let data_length = data_length_index.and_then(|index| query_result_cell_i64(row, index));
+            let index_length = index_length_index.and_then(|index| query_result_cell_i64(row, index));
+            let text = |name| column(name).and_then(|index| query_result_cell_string(row, index));
+            let number = |name| column(name).and_then(|index| query_result_cell_i64(row, index));
+            Some(db::ObjectStatistics {
+                name,
+                schema: Some(database.to_string()),
+                estimated_rows: rows_index.and_then(|index| query_result_cell_i64(row, index)),
+                total_bytes: (data_length.is_some() || index_length.is_some())
+                    .then(|| data_length.unwrap_or(0).saturating_add(index_length.unwrap_or(0))),
+                data_length,
+                engine: text("Engine"),
+                created_at: text("Create_time"),
+                updated_at: text("Update_time"),
+                collation: text("Collation"),
+                row_format: text("Row_format"),
+                avg_row_length: number("Avg_row_length"),
+                max_data_length: number("Max_data_length"),
+                check_time: text("Check_time"),
+                index_length,
+                auto_increment: text("Auto_increment"),
+                data_free: number("Data_free"),
+            })
+        })
+        .collect()
 }
 
 struct ObjectListOutcome {

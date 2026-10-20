@@ -20,6 +20,24 @@ describe("queryStore database open state", () => {
     setActivePinia(createPinia());
   });
 
+  it("keeps the persistent navigator open while allowing ordinary object tabs to close", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const navigatorId = store.openObjectNavigator("pg-1", "app", "tables", "public");
+    const ordinaryId = store.openObjectBrowser("pg-1", "app", "public");
+
+    store.closeTab(navigatorId);
+    store.closeTab(ordinaryId);
+
+    expect(store.tabs.some((tab) => tab.id === navigatorId)).toBe(true);
+    expect(store.tabs.some((tab) => tab.id === ordinaryId)).toBe(false);
+    expect(store.openObjectNavigator("pg-2", "analytics", "views")).toBe(navigatorId);
+    expect(store.tabs.find((tab) => tab.id === navigatorId)?.database).toBe("analytics");
+
+    store.closeTab(navigatorId, { force: true });
+    expect(store.tabs.some((tab) => tab.id === navigatorId)).toBe(false);
+  });
+
   it("tracks whether a connection database has open tabs", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

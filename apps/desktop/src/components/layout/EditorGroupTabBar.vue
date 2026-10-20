@@ -2016,7 +2016,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             </span>
                             <ReadOnlySessionControl v-if="!isTabBarCollapsed" :connection-id="entry.tab.connectionId" compact />
                             <button
-                              v-if="entry.tab.pinned && !isTabBarCollapsed"
+                              v-if="entry.tab.pinned && !entry.tab.objectBrowser?.navigator && !isTabBarCollapsed"
                               class="rounded p-0.5 text-primary hover:bg-muted-foreground/20 shrink-0"
                               :aria-label="t('contextMenu.unpinTab')"
                               :title="t('contextMenu.unpinTab')"
@@ -2025,7 +2025,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             >
                               <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
                             </button>
-                            <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
+                            <button v-if="!isTabBarCollapsed && !entry.tab.objectBrowser?.navigator" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
                               <X class="h-3 w-3" />
                             </button>
                           </div>
@@ -2190,7 +2190,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                   </span>
                   <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
                   <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
-                  <span class="w-5 shrink-0">
+                  <span v-if="!tab.objectBrowser?.navigator" class="w-5 shrink-0">
                     <button
                       type="button"
                       class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"

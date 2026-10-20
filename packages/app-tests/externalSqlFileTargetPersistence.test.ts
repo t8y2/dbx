@@ -56,7 +56,7 @@ test("external SQL catalog changes persist their complete target", () => {
 
 test("external SQL schema changes persist their complete target", () => {
   const source = functionSource(appSource, "function changeActiveSchema", "function openGitHub");
-  assert.ok(source.includes("queryStore.updateSchema(tab.id, schema)"));
+  assert.ok(source.includes("queryStore.updateSchema(tab.id, schema, { schemaQualifiesSql: true })"));
   assert.ok(source.includes("rememberExternalSqlFileTarget"));
   assert.ok(source.includes("{ connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema }"));
 });

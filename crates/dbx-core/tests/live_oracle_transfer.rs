@@ -2,8 +2,9 @@ use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::execute_sql_statement;
 use dbx_core::transfer::{
-    ensure_transfer_pool, transfer_schema_objects, transfer_table, TransferContent, TransferMode, TransferObjectKind,
-    TransferObjectSelection, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
+    ensure_transfer_pool, transfer_schema_objects, transfer_table, TransferColumnNameCase, TransferContent,
+    TransferMode, TransferObjectKind, TransferObjectSelection, TransferOwnershipPolicy, TransferRequest,
+    TransferTableNameCase,
 };
 use std::sync::Arc;
 
@@ -113,6 +114,7 @@ async fn live_oracle_transfer_creates_table_with_index_comment_and_trigger() {
         ]),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        target_column_name_case: TransferColumnNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,

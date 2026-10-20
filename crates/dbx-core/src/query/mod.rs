@@ -883,11 +883,15 @@ fn statement_split_database_type(config: &ConnectionConfig) -> DatabaseType {
     }
 }
 
-async fn connection_sql_compatibility_mode(
+pub(crate) async fn connection_sql_compatibility_mode(
     state: &AppState,
     pool_key: &str,
     db_type: Option<DatabaseType>,
 ) -> Option<String> {
+    if db_type == Some(DatabaseType::Kingbase) {
+        let Some(PoolKind::Agent(client)) = state.pool_handle(pool_key).await else { return None };
+        return client.compatibility_mode().map(str::to_owned);
+    }
     if db_type != Some(DatabaseType::OpenGauss) {
         return None;
     }
@@ -5119,23 +5123,11 @@ pub async fn execute_schema_diff_deploy(
     let now = chrono::Utc::now().to_rfc3339();
     let db_type = connection_database_type(state, connection_id).await;
 
-    // openGauss A-mode deploy scripts may contain CREATE PACKAGE … / blocks
-    // that must stay intact. Probe the database compatibility mode when a pool
-    // is available; on failure fall back to the plain openGauss splitter.
-    let compatibility_mode = if db_type == Some(DatabaseType::OpenGauss) {
-        let pool = match state
-            .get_or_create_pool(connection_id, if database.is_empty() { None } else { Some(database) })
-            .await
-        {
-            Ok(pool_key) => match state.pool_handle(&pool_key).await {
-                Some(PoolKind::Postgres(pool)) => Some(pool),
-                _ => None,
-            },
+    // Resolve the live session mode, not the potentially stale saved UI metadata.
+    let compatibility_mode = if matches!(db_type, Some(DatabaseType::OpenGauss | DatabaseType::Kingbase)) {
+        match state.get_or_create_pool(connection_id, if database.is_empty() { None } else { Some(database) }).await {
+            Ok(pool_key) => connection_sql_compatibility_mode(state, &pool_key, db_type).await,
             Err(_) => None,
-        };
-        match pool {
-            Some(pool) => db::postgres::opengauss_compatibility_mode(&pool).await.ok().flatten(),
-            None => None,
         }
     } else {
         None

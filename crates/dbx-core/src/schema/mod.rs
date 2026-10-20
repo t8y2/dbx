@@ -10030,6 +10030,7 @@ async fn get_table_ddl_once(
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
         PoolKind::Turso(client) => db::turso_driver::table_ddl(client, table).await,
         PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::table_ddl(client, table).await,
+        PoolKind::InfluxDb(client) => db::influxdb_driver::table_ddl(client, database, table).await,
         _ => Err("DDL not supported for this database type".to_string()),
     }
 }

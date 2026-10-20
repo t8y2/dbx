@@ -34,6 +34,7 @@ interface QueryEditorCompletionMetadataOptions {
   view: ShallowRef<EditorView | null>;
   connectionStore: ReturnType<typeof useConnectionStore>;
   sqlBehaviorDialect: () => QueryEditorProps["dialect"];
+  syntaxDialect?: () => QueryEditorProps["syntaxDialect"];
   remoteLatencyBudgetMs: number;
   maxCompletionTables: number;
   onDemandMinPrefix: number;
@@ -121,6 +122,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     const dialect = sqlBehaviorDialect();
     const doc = editorState?.doc;
     const driverProfile = props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined;
+    const syntaxDialect = options.syntaxDialect?.() ?? props.syntaxDialect;
     if (
       doc &&
       editorCompletionAnalysisCache?.doc === doc &&
@@ -129,7 +131,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
       editorCompletionAnalysisCache.databaseType === props.databaseType &&
       editorCompletionAnalysisCache.dialect === dialect &&
       editorCompletionAnalysisCache.driverProfile === driverProfile &&
-      editorCompletionAnalysisCache.syntaxDialect === props.syntaxDialect
+      editorCompletionAnalysisCache.syntaxDialect === syntaxDialect
     ) {
       return editorCompletionAnalysisCache.result;
     }
@@ -140,7 +142,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
       databaseType: props.databaseType,
       dialect,
       semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED,
-      syntaxDialect: props.syntaxDialect,
+      syntaxDialect,
       driverProfile,
     };
     const result = editorState && shouldUseQueryEditorLargeDocumentModeForSize(editorState.doc.length, editorState.doc.lines) ? completionAnalysisWorker.analyze(request, editorState) : Promise.resolve(analyzeSqlCompletion(request, editorState));
@@ -152,7 +154,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
         databaseType: props.databaseType,
         dialect,
         driverProfile,
-        syntaxDialect: props.syntaxDialect,
+        syntaxDialect,
         result,
       };
     }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionConfig } from "@/types/database";
 import { databaseObjectTreeNodeSchema } from "@/lib/database/databaseFeatureSupport";
 import {
+  GAUSSDB_DWS_PRODUCT_PROFILE,
+  GAUSSDB_DWS_PRODUCT_PROFILE_KEY,
   GAUSSDB_M_JDBC_DRIVER_CLASS,
   connectionDatabaseMetadataSchema,
   connectionObjectTreeNodeSchema,
@@ -27,11 +29,41 @@ import {
   setGaussdbCountQueryDop,
   setGaussdbIdentifierQuoteStyle,
   setGaussdbTargetServerType,
+  sqlServerQualifiesSqlWithTabSchema,
   supportsGaussdbIdentifierQuoteStyle,
   transferDatabaseTypeForConnection,
+  codeMirrorSqlDialectForConnection,
+  sqlSnippetDatabaseTypeForConnection,
+  kingbaseSqlDatabaseType,
 } from "@/lib/database/jdbcDialect";
 import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
 import { transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
+
+describe("Kingbase compatibility mode routing", () => {
+  it.each([undefined, "", "future_mode"])("does not infer a mode from a version, URL, or unknown mode (%s)", (mode) => {
+    const config = { db_type: "kingbase" as const, connection_string: "jdbc:kingbase8://example.test/demo", database_info: { compatibilityMode: mode, productVersion: "KingbaseES V009R001" } };
+    expect(kingbaseSqlDatabaseType(config)).toBeUndefined();
+    expect(codeMirrorSqlDialectForConnection(config)).toBe("postgres");
+    expect(effectiveDatabaseTypeForConnection(config)).toBe("kingbase");
+  });
+
+  it.each(["postgres", "mysql", "oracle", "sqlserver", "jdbc"] as const)("ignores Kingbase mode metadata on a %s connection", (db_type) => {
+    expect(kingbaseSqlDatabaseType({ db_type, database_info: { compatibilityMode: "oracle" } })).toBeUndefined();
+  });
+
+  it.each([
+    ["pg", "postgres", "postgres"],
+    ["postgresql", "postgres", "postgres"],
+    ["oracle", "oracle", "oracle"],
+    ["mysql", "mysql", "mysql"],
+    ["sqlserver", "sqlserver", "sqlserver"],
+  ] as const)("keeps the %s editor profile separate from the physical database", (mode, type, syntax) => {
+    const connection = { db_type: "kingbase" as const, database_info: { compatibilityMode: mode } };
+    expect(sqlSnippetDatabaseTypeForConnection(connection)).toBe(type);
+    expect(codeMirrorSqlDialectForConnection(connection)).toBe(syntax);
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("kingbase");
+  });
+});
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -83,6 +115,27 @@ describe("jdbc dialect inference", () => {
         connection_string: "jdbc:IRIS://localhost:1972/USER",
       }),
     ).toBe("iris");
+  });
+
+  it("detects Firebird JDBC connections", () => {
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        connection_string: "jdbc:firebirdsql://localhost:3050/data/test.fdb",
+      }),
+    ).toBe("firebird");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        jdbc_driver_class: "org.firebirdsql.jdbc.FBDriver",
+      }),
+    ).toBe("firebird");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        driver_profile: "firebird",
+      }),
+    ).toBe("firebird");
   });
 
   it("uses JDBC driver profiles when inferring dialect", () => {
@@ -368,6 +421,25 @@ describe("GaussDB connection mode", () => {
     expect(connection.jdbc_driver_class).toBeUndefined();
   });
 
+  it("marks DWS explicitly while retaining the native GaussDB driver profile", () => {
+    const connection = { db_type: "gaussdb", driver_profile: "gaussdb", external_config: { retained: true } } as ConnectionConfig;
+
+    setGaussdbConnectionMode(connection, "dws");
+    expect(gaussdbConnectionMode(connection)).toBe("dws");
+    expect(connection.driver_profile).toBe("gaussdb");
+    expect(connection.jdbc_driver_class).toBeUndefined();
+    expect(connection.external_config).toEqual({ retained: true, [GAUSSDB_DWS_PRODUCT_PROFILE_KEY]: GAUSSDB_DWS_PRODUCT_PROFILE });
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("gaussdb");
+
+    setGaussdbConnectionMode(connection, "m-jdbc");
+    expect(gaussdbConnectionMode(connection)).toBe("m-jdbc");
+    expect(connection.external_config).toEqual({ retained: true });
+
+    setGaussdbConnectionMode(connection, "native");
+    expect(gaussdbConnectionMode(connection)).toBe("native");
+    expect(connection.external_config).toEqual({ retained: true });
+  });
+
   it("uses the driver default and preserves targetServerType from legacy URL fields", () => {
     const connection = { db_type: "gaussdb", driver_profile: "gaussdb-m" } as ConnectionConfig;
 
@@ -613,5 +685,16 @@ describe("object list schema", () => {
 
   it.each(["oracle", "oceanbase-oracle", "postgres", "mysql"] as const)("does not fall back to the username for %s", (dbType) => {
     expect(objectListSchemaForConnection({ db_type: dbType, username: "app_user" })).toBe("");
+  });
+});
+
+describe("schema qualification scope", () => {
+  it("only scopes the SQL rewrite for SQL Server", () => {
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "sqlserver" })).toBe(true);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "sqlserver", driver_profile: "sqlserver-legacy" })).toBe(true);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "postgres" })).toBe(false);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "iris" })).toBe(false);
+    expect(sqlServerQualifiesSqlWithTabSchema({ db_type: "kingbase" })).toBe(false);
+    expect(sqlServerQualifiesSqlWithTabSchema(undefined)).toBe(false);
   });
 });

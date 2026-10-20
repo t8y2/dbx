@@ -160,6 +160,7 @@ describe("dataGridContextMenu", () => {
     hiddenColumnCount?: number;
     canHideIdenticalColumns?: boolean;
     canCopyComment?: boolean;
+    canCopyMetadata?: boolean;
   }) {
     const action = vi.fn();
     const filter = createDataGridFilterSubmenu({
@@ -175,6 +176,7 @@ describe("dataGridContextMenu", () => {
       contextColumn: overrides.contextColumn ?? false,
       canCopyAlterSql: false,
       canCopyComment: overrides.canCopyComment ?? false,
+      canCopyMetadata: overrides.canCopyMetadata ?? false,
       canFilter: false,
       hasSort: false,
       sortMode: "database",
@@ -186,6 +188,7 @@ describe("dataGridContextMenu", () => {
       labels: {
         copyName: "copy name",
         copyComment: "copy comment",
+        copyMetadata: "copy metadata",
         copyNames: "copy names",
         details: "details",
         copyAlterSql: "alter",
@@ -206,6 +209,7 @@ describe("dataGridContextMenu", () => {
       actions: {
         copyName: action,
         copyComment: action,
+        copyMetadata: action,
         copyNames: action,
         details: action,
         copyAlterSql: action,
@@ -222,6 +226,10 @@ describe("dataGridContextMenu", () => {
       ...overrides,
     });
   }
+
+  it("offers result column metadata from the header menu", () => {
+    expect(columnMenuItems({ canCopyMetadata: true }).map((item) => item.label)).toContain("copy metadata");
+  });
 
   it("offers copy-column-comment right below copy-column-name only when the column has a comment", () => {
     expect(columnMenuItems({}).map((item) => item.label)).not.toContain("copy comment");

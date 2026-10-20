@@ -151,6 +151,11 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "schema diff deploy ignores foreign key checks", keys: under("diff", ["ignoreForeignKeyChecks", "ignoreForeignKeyChecksHint"]), translated: true },
   { feature: "shortcut recorder", keys: under("settings", ["shortcutRecordKeys", "shortcutRecordKeysRecordingHint", "shortcutRecordKeysWindowInactive"]), locales: ALL_LOCALES.filter((locale) => locale !== "th") },
   { feature: "select current statement", keys: ["settings.shortcutSelectCurrentStatement", "editor.contextMenu.selectCurrentStatement"] },
+  {
+    feature: "statement navigation shortcuts",
+    keys: under("settings", ["shortcutPreviousStatement", "shortcutNextStatement", "shortcutStatementStart"]),
+    translated: true,
+  },
   { feature: "MCP history kind", keys: ["history.kinds.mcp"] },
   { feature: "editor selection to AI (#10058)", keys: under("ai", ["selectionChipLabel", "selectionChipDetail", "externalTargetUnavailable"]) },
   { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },

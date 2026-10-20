@@ -820,6 +820,30 @@
   opacity: 1;
 }
 
+/* With several groups in view, the neutral rail segment above is not enough
+ * to spot the active tab at a glance (issue #12485): every tab already owns a
+ * colored group rail, so the bottom edge cannot carry a unique signal. Mark
+ * the active grouped tab with a primary-colored edge accent on the opposite
+ * edge instead — the same vocabulary as the vertical tab's inset --ring edge.
+ * The var fallback keeps legacy WebViews (no color-mix()) painted. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab[data-active-tab="true"]::before {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  top: -0.5px;
+  right: 0;
+  left: 0;
+  height: 3px;
+  border-radius: 9999px;
+  background: var(--app-tab-active-accent, var(--ring));
+  pointer-events: none;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-tab[data-active-tab="true"]::before {
+  top: auto;
+  bottom: -0.5px;
+}
+
 .app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-tab::after {
   top: -0.5px;
   bottom: auto;

@@ -1335,6 +1335,34 @@ fn selects_hidden_postgres_tuple_identity_only_for_known_unkeyed_base_tables() {
 }
 
 #[test]
+fn hologres_plugin_connections_receive_the_tableoid_locator_for_keyless_tables() {
+    // t8y2/dbx#12647: Hologres connects through the plain PostgreSQL plugin
+    // type, so the frontend gate enables the keyless-table locator and the
+    // click-to-open SELECT projects `tableoid`. Hologres' query translation
+    // layer rejects `tableoid` ("Variable tableoid ... can't be found in query
+    // translation"), so every keyless table fails to open. Hologres also
+    // reports a plain PG-11-style `server_version`, so the gate cannot be
+    // driven off the version string alone. This pins the exact statement the
+    // client emits today; the fix must stop projecting `tableoid` for engines
+    // without system-column support without regressing vanilla PostgreSQL.
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "hologres_keyless_events".to_string(),
+        table_type: Some("TABLE".to_string()),
+        primary_keys: Vec::new(),
+        limit: Some(200),
+        include_row_id: true,
+        ..Default::default()
+    });
+
+    assert_eq!(
+        sql,
+        "SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS \"__DBX_ROWID\", * FROM \"public\".\"hologres_keyless_events\" LIMIT 200;"
+    );
+}
+
+#[test]
 fn builds_iris_table_data_sql_with_literal_top_and_ordinary_object() {
     let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(DatabaseType::Iris),

@@ -367,6 +367,19 @@ export function tablePartitionGroups(node: TreeNode): TreeNode[] {
   return partitionGroupChildren(node);
 }
 
+// Saved-SQL decoration and persisted-tree decoding can clone visible children
+// independently of hiddenChildren. Before mutating or releasing a table, retain
+// its visible partition groups as the authoritative loaded state (including the
+// load-more cursor), rather than resurrecting an older hidden snapshot.
+export function syncTablePartitionGroups(node: TreeNode): void {
+  if (node.type !== "table") return;
+  const groups = node.children?.filter((child) => child.type === "group-partitions") ?? [];
+  if (!groups.length) return;
+  const hiddenGroups = node.hiddenChildren?.filter((child) => child.type === "group-partitions") ?? [];
+  if (groups.length === hiddenGroups.length && groups.every((group, index) => group === hiddenGroups[index])) return;
+  node.hiddenChildren = [...(node.hiddenChildren?.filter((child) => child.type !== "group-partitions") ?? []), ...groups];
+}
+
 export function hasTablePartitionGroups(node: TreeNode): boolean {
   return partitionGroupChildren(node).length > 0;
 }
@@ -411,8 +424,9 @@ export function appendTableTreeLoadMoreNode(children: TreeNode[], loadMoreNode: 
   // paginates the whole schema, so nesting its global cursor under whichever
   // partition happens to end the page can hide all remaining schema objects.
   const childGroup = parentNode && isSuperTable(parentNode) ? tablePartitionGroups(parentNode)[0] : undefined;
-  if (!childGroup) return [...children, loadMoreNode];
+  if (!childGroup || !parentNode) return [...children, loadMoreNode];
 
+  syncTablePartitionGroups(parentNode);
   childGroup.children = [...(childGroup.children ?? []), loadMoreNode];
   return children;
 }
@@ -439,6 +453,9 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
   const nodeKey = (node: TreeNode) => exactObjectIdentityKey("TABLE", node.schema, node.label);
   const collect = (nodes: readonly TreeNode[]) => {
     for (const node of nodes) {
+      // Do not let a cloned hidden parent overwrite its visible counterpart in
+      // the index when a later page adds another level of partitions.
+      syncTablePartitionGroups(node);
       if (node.type === "table") {
         nodesByKey.set(nodeKey(node), node);
       }
@@ -498,12 +515,21 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
     return group;
   };
 
+  // Accumulate a page per parent: scanning/copying/sorting the growing group
+  // for every child makes large STABLEs quadratic, especially through Vue proxies.
+  const pendingGroups = new Map<TreeNode, { children: TreeNode[]; keys: Set<string> }>();
   const addToParent = (parent: TreeNode, child: TreeNode) => {
     const group = ensurePartitionGroup(parent);
-    const children = group.children ?? [];
-    if (!children.some((node) => nodeKey(node) === nodeKey(child))) {
-      group.children = sortDatabaseObjectsByName([...children, child], (node) => node.label);
-      group.objectCount = group.children.length;
+    let pending = pendingGroups.get(group);
+    if (!pending) {
+      const children = [...(group.children ?? [])];
+      pending = { children, keys: new Set(children.map(nodeKey)) };
+      pendingGroups.set(group, pending);
+    }
+    const key = nodeKey(child);
+    if (!pending.keys.has(key)) {
+      pending.keys.add(key);
+      pending.children.push(child);
     }
   };
 
@@ -540,6 +566,10 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
 
   for (const node of incomingNodes) {
     addNode(node);
+  }
+  for (const [group, pending] of pendingGroups) {
+    group.children = sortDatabaseObjectsByName(pending.children, (node) => node.label);
+    group.objectCount = group.children.length;
   }
 
   return sortDatabaseObjectsByName(roots, (node) => node.label);
@@ -897,6 +927,7 @@ export function buildObjectGroupPlaceholderNodes({
 }
 
 export function objectGroupRefreshParentId(node: TreeNode): string | null {
+  if (node.tableName) return null;
   if (!objectGroupNodeTypes.has(node.type)) return null;
   const suffixStart = node.id.lastIndexOf(":__");
   if (suffixStart < 0) return null;

@@ -209,6 +209,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
     case "access":
       return "jdbc:ucanaccess:///absolute/path/to/database.accdb";
 
+    case "h2":
+      return driverProfile === "file" ? "jdbc:h2:file:/path/to/database" : "jdbc:h2:tcp://host:9092/database";
+
     case "mongodb":
       return "mongodb://user:password@host:port/database";
 

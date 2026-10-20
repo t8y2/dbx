@@ -297,7 +297,7 @@ export function createTableVGroup(layout: TableVGroupLayout, name: string, paren
   return {
     groupId,
     layout: {
-      enabled: layout.enabled,
+      enabled: true,
       version: layout.version,
       groups: [...layout.groups, group].map((current) => (parentFound && current.id === parentGroupId ? { ...current, collapsed: false } : current)),
       order,
@@ -505,7 +505,7 @@ function buildVGroupRootNodes(entries: TableVGroupOrderEntry[], layout: TableVGr
  * simply stay absent (sidebar pagination); stale names are skipped.
  */
 export function applyTableVGroupsToChildren(children: TreeNode[], layout: TableVGroupLayout | null | undefined, scope: TableVGroupScope): TreeNode[] {
-  if (!children.length || !layout || !tableVGroupsEnabled(layout)) return children;
+  if (!layout || !tableVGroupsEnabled(layout) || (!children.length && !layout.groups.length)) return children;
   // Idempotence: merge/refresh flows re-feed already-projected children back
   // into setChildren, so always strip existing group containers first —
   // otherwise stale group copies survive alongside the freshly built ones.
@@ -524,7 +524,7 @@ export function applyTableVGroupsToChildren(children: TreeNode[], layout: TableV
       if (!rows.byLabel.has(node.label)) rows.byLabel.set(node.label, { node, flatIndex: i });
     } else passthrough.push({ node, sortIndex: i });
   }
-  if (!rows.byKey.size) return flatChildren;
+  if (!rows.byKey.size && !activeLayout.groups.length) return flatChildren;
 
   const rootBuilt = buildVGroupRootNodes(activeLayout.order, activeLayout, rows, scope);
   // Rows the layout does not reference stay ungrouped at their original slot.

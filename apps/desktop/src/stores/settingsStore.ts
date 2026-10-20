@@ -1,3 +1,4 @@
+import { DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { normalizeModelTemplates, type ModelTemplate } from "@/lib/model/modelTemplates";
 import { normalizePluginGraphicsEngineIds } from "@/lib/plugins/pluginGraphicsEngine";
 import { normalizePluginShortcutSettings, type PluginShortcutSettings } from "@/lib/plugins/pluginShortcuts";
@@ -13,7 +14,16 @@ import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { type ColumnFormatterConfig, type CustomColumnFormatterConfig, normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern } from "@/lib/dataGrid/columnFormatter";
 import { type BooleanCellValueStyle, normalizeBooleanCellValueStyle } from "@/lib/dataGrid/dataGridBooleanColumn";
-import { type DataGridCopyPreference, type DataGridExtractorOptions, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import {
+  type DataGridCopyPreference,
+  type DataGridCopyExtractorId,
+  type DataGridExtractorOptions,
+  DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
+  DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+  normalizeDataGridCopyPreference,
+  normalizeDataGridExtractorOptions,
+  normalizeVisibleDataGridCopyExtractors,
+} from "@/lib/dataGrid/dataGridCopyExtractor";
 import { DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT, normalizeDataGridTextFilterPanelHeight } from "@/lib/dataGrid/dataGridTextFilterPanel";
 import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, type DataGridTypeColorScheme, normalizeActiveDataGridTypeColorSchemeId, normalizeDataGridTypeColorSchemes } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
@@ -387,7 +397,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     iconSlug: "minimax",
     provider: "minimax",
     endpoint: "https://api.minimax.io/v1",
-    model: "MiniMax-M3",
+    model: "MiniMax-M3.1-Flash",
     apiStyle: "completions",
     authMethod: "bearer",
     requiresApiKey: true,
@@ -1097,6 +1107,7 @@ export interface EditorSettings {
   dataGridRowNumberMode: DataGridRowNumberMode;
   dataGridCopyExtractor: DataGridCopyPreference;
   dataGridExtractorOptions: DataGridExtractorOptions;
+  dataGridVisibleCopyExtractors: DataGridCopyExtractorId[];
   dataGridExtractorOptionsMigrationVersion: number;
   resultRunDisplayMode: ResultRunDisplayMode;
   defaultAutoKeepResults: boolean;
@@ -1214,6 +1225,7 @@ export interface EditorSettings {
   toolbarItems: ToolbarItems;
   objectBrowserShowCheckbox: boolean;
   objectBrowserViewMode: "list" | "grid" | "compact";
+  objectBrowserCompactWidth: ObjectBrowserCompactWidth;
   objectBrowserAutoOpenDetailPanel: boolean;
   sqlVariableSubstitutionEnabled: boolean;
   sqlVariableSyntaxOverrides: SqlVariableSyntaxOverrides;
@@ -1446,6 +1458,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridRowNumberMode: "view",
   dataGridCopyExtractor: "smart",
   dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
+  dataGridVisibleCopyExtractors: normalizeVisibleDataGridCopyExtractors(undefined),
   dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
   resultRunDisplayMode: "tabs",
   defaultAutoKeepResults: false,
@@ -1555,6 +1568,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   toolbarItems: { ...DEFAULT_TOOLBAR_ITEMS },
   objectBrowserShowCheckbox: false,
   objectBrowserViewMode: "list",
+  objectBrowserCompactWidth: DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH,
   objectBrowserAutoOpenDetailPanel: true,
   sqlVariableSubstitutionEnabled: true,
   sqlVariableSyntaxOverrides: {},
@@ -2112,6 +2126,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridRowNumberMode: normalizeDataGridRowNumberMode(settings.dataGridRowNumberMode),
     dataGridCopyExtractor: normalizeDataGridCopyPreference(settings.dataGridCopyExtractor),
     dataGridExtractorOptions,
+    dataGridVisibleCopyExtractors: normalizeVisibleDataGridCopyExtractors(settings.dataGridVisibleCopyExtractors),
     dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
     resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
     defaultAutoKeepResults: settings.defaultAutoKeepResults === true,
@@ -2270,6 +2285,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     pluginGraphicsEngineIds: normalizePluginGraphicsEngineIds(settings.pluginGraphicsEngineIds),
     toolbarItems: normalizeToolbarItems(settings.toolbarItems),
     objectBrowserShowCheckbox: typeof settings.objectBrowserShowCheckbox === "boolean" ? settings.objectBrowserShowCheckbox : DEFAULT_EDITOR_SETTINGS.objectBrowserShowCheckbox,
+    objectBrowserCompactWidth: normalizeObjectBrowserCompactWidth(settings.objectBrowserCompactWidth),
     objectBrowserViewMode: settings.objectBrowserViewMode === "grid" || settings.objectBrowserViewMode === "compact" ? settings.objectBrowserViewMode : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
     objectBrowserAutoOpenDetailPanel: typeof settings.objectBrowserAutoOpenDetailPanel === "boolean" ? settings.objectBrowserAutoOpenDetailPanel : DEFAULT_EDITOR_SETTINGS.objectBrowserAutoOpenDetailPanel,
     sqlVariableSubstitutionEnabled: typeof settings.sqlVariableSubstitutionEnabled === "boolean" ? settings.sqlVariableSubstitutionEnabled : DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled,
@@ -2362,6 +2378,13 @@ export const useSettingsStore = defineStore("settings", () => {
   // the user turned the default on in Settings > AI.
   const defaultAutoRouting = ref(false);
   const restoreLastConversation = ref(false);
+  // Whether to include query result data previews in AI context (#12757).
+  // Defaults to false to prevent leaking sensitive row data to AI.
+  const includeQueryResult = ref(false);
+  const excludeQueryResult = computed({
+    get: () => !includeQueryResult.value,
+    set: (val: boolean) => setIncludeQueryResult(!val),
+  });
   // Per-db_type prompt template defaults (explicit opt-in) and last-used
   // fallback; both resolved when an AI panel mounts or its namespace changes.
   const aiDefaultTemplatesByDbType = ref<Record<string, string[]>>({});
@@ -2615,6 +2638,13 @@ export const useSettingsStore = defineStore("settings", () => {
     defaultAiMode.value = savedSelection?.defaultMode ?? "ask";
     defaultAutoRouting.value = savedSelection?.defaultAutoRouting ?? false;
     restoreLastConversation.value = savedSelection?.restoreLastConversation ?? false;
+    if (savedSelection?.includeQueryResult !== undefined) {
+      includeQueryResult.value = Boolean(savedSelection.includeQueryResult);
+    } else if (savedSelection?.excludeQueryResult !== undefined) {
+      includeQueryResult.value = !savedSelection.excludeQueryResult;
+    } else {
+      includeQueryResult.value = false;
+    }
     aiDefaultTemplatesByDbType.value = normalizeTemplateIdsByDbType(savedSelection?.defaultTemplatesByDbType);
     aiLastUsedTemplatesByDbType.value = normalizeTemplateIdsByDbType(savedSelection?.lastUsedTemplatesByDbType);
 
@@ -2764,6 +2794,16 @@ export const useSettingsStore = defineStore("settings", () => {
     persistAiChatSelection();
   }
 
+  function setIncludeQueryResult(value: boolean) {
+    if (value === includeQueryResult.value) return;
+    includeQueryResult.value = value;
+    persistAiChatSelection();
+  }
+
+  function setExcludeQueryResult(value: boolean) {
+    setIncludeQueryResult(!value);
+  }
+
   /** Empty id list clears the db_type entry so unsetting a default is expressible. */
   function setDefaultTemplatesForDbType(dbType: string, templateIds: string[]) {
     if (!dbType) return;
@@ -2826,6 +2866,7 @@ export const useSettingsStore = defineStore("settings", () => {
       defaultMode: defaultAiMode.value,
       defaultAutoRouting: defaultAutoRouting.value,
       restoreLastConversation: restoreLastConversation.value,
+      ...(includeQueryResult.value ? { includeQueryResult: true } : {}),
       // Match the backend's skip_serializing_if(empty): omit the per-db_type
       // records entirely while nothing is configured so the payload stays
       // identical to the pre-defaults format for users without template picks.
@@ -3015,6 +3056,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridRowNumberMode !== undefined) editorSettings.value.dataGridRowNumberMode = normalizeDataGridRowNumberMode(partial.dataGridRowNumberMode);
     if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyPreference(partial.dataGridCopyExtractor);
     if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
+    if (partial.dataGridVisibleCopyExtractors !== undefined) editorSettings.value.dataGridVisibleCopyExtractors = normalizeVisibleDataGridCopyExtractors(partial.dataGridVisibleCopyExtractors);
     if (partial.dataGridExtractorOptionsMigrationVersion !== undefined) editorSettings.value.dataGridExtractorOptionsMigrationVersion = DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
     if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
     if (partial.defaultAutoKeepResults !== undefined) editorSettings.value.defaultAutoKeepResults = partial.defaultAutoKeepResults === true;
@@ -3134,6 +3176,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.pluginGraphicsEngineIds !== undefined) editorSettings.value.pluginGraphicsEngineIds = normalizePluginGraphicsEngineIds(partial.pluginGraphicsEngineIds);
     if (partial.toolbarItems !== undefined) editorSettings.value.toolbarItems = normalizeToolbarItems(partial.toolbarItems);
     if (partial.objectBrowserShowCheckbox !== undefined) editorSettings.value.objectBrowserShowCheckbox = partial.objectBrowserShowCheckbox === true;
+    if (partial.objectBrowserCompactWidth !== undefined) editorSettings.value.objectBrowserCompactWidth = normalizeObjectBrowserCompactWidth(partial.objectBrowserCompactWidth);
     if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" || partial.objectBrowserViewMode === "compact" ? partial.objectBrowserViewMode : "list";
     if (partial.objectBrowserAutoOpenDetailPanel !== undefined) editorSettings.value.objectBrowserAutoOpenDetailPanel = partial.objectBrowserAutoOpenDetailPanel === true;
     if (partial.sqlVariableSubstitutionEnabled !== undefined) editorSettings.value.sqlVariableSubstitutionEnabled = partial.sqlVariableSubstitutionEnabled === true;
@@ -3357,6 +3400,10 @@ export const useSettingsStore = defineStore("settings", () => {
     setDefaultAutoRouting,
     restoreLastConversation,
     setRestoreLastConversation,
+    includeQueryResult,
+    excludeQueryResult,
+    setIncludeQueryResult,
+    setExcludeQueryResult,
     aiDefaultTemplatesByDbType,
     aiLastUsedTemplatesByDbType,
     setDefaultTemplatesForDbType,

@@ -2718,6 +2718,7 @@ fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
         || (lower.contains("1615") && lower.contains("re-prepared"))
         || lower.contains("com_stmt_prepare")
         || lower.contains("can't parse")
+        || lower.contains("1295")
         || lower.contains("buf doesn't have enough data")
         || lower.contains("prepared statement protocol")
         || lower.contains("this command is not supported in the prepared statement protocol yet")
@@ -9552,6 +9553,13 @@ mod tests {
     #[test]
     fn mysql_unsupported_prepare_command_can_retry_with_text_protocol() {
         let error = "ERROR PX000 (3000): [a2jupsonbbv6zai1gomo5whu36ndqy] Unsupported command: COM_STMT_PREPARE";
+
+        assert!(mysql_error_should_retry_with_text_protocol(error));
+    }
+
+    #[test]
+    fn mysql_navicat_unsupported_prepare_error_can_retry_with_text_protocol() {
+        let error = "Server error: ERROR 1295 (HY000): Prepared statements are not supported by Navicat HTTP tunnels";
 
         assert!(mysql_error_should_retry_with_text_protocol(error));
     }

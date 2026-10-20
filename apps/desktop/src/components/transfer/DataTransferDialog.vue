@@ -30,7 +30,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import * as api from "@/lib/backend/api";
-import type { TransferContent, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/api";
+import type { TransferColumnNameCase, TransferContent, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/api";
 import { crossFamilyTransferableKinds, isSameTransferFamily, isTransferPairSupported, transferObjectFamily, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
 import ObjectSelectionTree from "@/components/transfer/ObjectSelectionTree.vue";
 import TransferTaskTree from "@/components/transfer/TransferTaskTree.vue";
@@ -208,6 +208,7 @@ const targetTableStrategy = computed<TransferStrategy>({
   },
 });
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
+const targetColumnNameCase = ref<TransferColumnNameCase>("preserve");
 const quoteTargetColumnNames = ref(true);
 const batchSize = ref(1000);
 const operationTimeoutMode = ref<"inherit" | "custom">("inherit");
@@ -297,7 +298,10 @@ function structureOverwriteSupported(): boolean {
 // The table-name-case selector is hidden for Xugu pairs; reset any earlier choice so the
 // blocking xuguPreserveTableNames hint cannot strand the user without a visible control.
 watch(isXuguTransferPair, (isXuguPair) => {
-  if (isXuguPair) targetTableNameCase.value = "preserve";
+  if (isXuguPair) {
+    targetTableNameCase.value = "preserve";
+    targetColumnNameCase.value = "preserve";
+  }
 });
 const targetStrategyType = computed(() => (targetTransferType.value === "xugu" ? "xugu" : connectionType(targetConnectionId.value)));
 const xuguTransferHint = computed(() => {
@@ -823,6 +827,7 @@ function resetState(cancelTaskLoad = true) {
   transferContent.value = "structureAndData";
   selectedStrategy.value = "append";
   targetTableNameCase.value = "preserve";
+  targetColumnNameCase.value = "preserve";
   quoteTargetColumnNames.value = true;
   batchSize.value = 1000;
   operationTimeoutMode.value = "inherit";
@@ -945,6 +950,7 @@ async function requestStartTransfer() {
     ...buildTransferObjectSelectionField(selectedObjects.value, treeDisabledGroups.value),
     ...transferStrategyOptions(targetTableStrategy.value),
     targetTableNameCase: targetTableNameCase.value,
+    targetColumnNameCase: targetColumnNameCase.value,
     quoteTargetColumnNames: quoteTargetColumnNames.value,
     ownershipPolicy: "preserve",
     batchSize: batchSize.value,
@@ -1029,6 +1035,7 @@ function currentConfig(): TransferTaskConfig {
     content: transferContent.value,
     ...transferStrategyOptions(targetTableStrategy.value),
     targetTableNameCase: targetTableNameCase.value,
+    targetColumnNameCase: targetColumnNameCase.value,
     quoteTargetColumnNames: quoteTargetColumnNames.value,
     batchSize: batchSize.value,
     operationTimeoutSecs: operationTimeoutMode.value === "custom" && operationTimeoutValid.value ? operationTimeoutSecs.value : undefined,
@@ -1083,6 +1090,7 @@ async function loadTaskIntoForm(task: TransferTask) {
   transferContent.value = config.content;
   selectedStrategy.value = resolveTransferStrategy(config);
   targetTableNameCase.value = config.targetTableNameCase;
+  targetColumnNameCase.value = config.targetColumnNameCase ?? "preserve";
   quoteTargetColumnNames.value = config.quoteTargetColumnNames;
   batchSize.value = config.batchSize;
   operationTimeoutMode.value = config.operationTimeoutSecs === undefined ? "inherit" : "custom";
@@ -1622,6 +1630,19 @@ async function saveConfigTask() {
               <div v-if="!isXuguTransferPair" class="flex items-center gap-3">
                 <Label class="text-xs shrink-0">{{ t("transfer.targetTableNameCase") }}</Label>
                 <Select v-model="targetTableNameCase">
+                  <SelectTrigger class="h-7 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="preserve">{{ t("transfer.tableNameCasePreserve") }}</SelectItem>
+                    <SelectItem value="lower">{{ t("transfer.tableNameCaseLower") }}</SelectItem>
+                    <SelectItem value="upper">{{ t("transfer.tableNameCaseUpper") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div v-if="!isXuguTransferPair" class="flex items-center gap-3">
+                <Label class="text-xs shrink-0">{{ t("transfer.targetColumnNameCase") }}</Label>
+                <Select v-model="targetColumnNameCase">
                   <SelectTrigger class="h-7 text-xs">
                     <SelectValue />
                   </SelectTrigger>

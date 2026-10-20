@@ -654,4 +654,54 @@ describe("Redis collection member search", () => {
     expect(document.body.textContent).toContain("1 members");
     expect(document.body.textContent).not.toContain("/ 100 members loaded");
   });
+
+  it("loads more hash fields when clicking load more in hash viewer", async () => {
+    mocks.redisGetValue.mockResolvedValue({
+      key_display: "key",
+      key_raw: "key",
+      ttl: -1,
+      redis_type: "hash",
+      data: {
+        kind: "hash",
+        items: [{ field: blob("f1"), value: blob("v1") }],
+        total: 4000,
+        scan_cursor: 1234,
+      },
+    });
+    mocks.redisLoadMore.mockResolvedValueOnce({
+      kind: "hash",
+      items: [{ field: blob("f2"), value: blob("v2") }],
+      scan_cursor: 5678,
+    });
+    mountViewer();
+    await settle();
+    expect(document.body.textContent).toContain("f1");
+    expect(document.body.textContent).not.toContain("f2");
+    loadMoreButton().click();
+    await settle();
+    expect(mocks.redisLoadMore).toHaveBeenCalledWith("connection", 0, "key", "hash", 1234, 200, undefined, undefined);
+    expect(document.body.textContent).toContain("f1");
+    expect(document.body.textContent).toContain("f2");
+  });
+
+  it("shows error toast when ordinary hash load more fails", async () => {
+    mocks.redisGetValue.mockResolvedValue({
+      key_display: "key",
+      key_raw: "key",
+      ttl: -1,
+      redis_type: "hash",
+      data: {
+        kind: "hash",
+        items: [{ field: blob("f1"), value: blob("v1") }],
+        total: 4000,
+        scan_cursor: 1234,
+      },
+    });
+    mocks.redisLoadMore.mockRejectedValueOnce(new Error("Collection cursor is invalid, expired, or belongs to a different connection/database"));
+    mountViewer();
+    await settle();
+    loadMoreButton().click();
+    await settle();
+    expect(mocks.toast).toHaveBeenCalledWith("Collection cursor is invalid, expired, or belongs to a different connection/database", 3000);
+  });
 });

@@ -11761,6 +11761,7 @@ mod tests {
             enabled: true,
             url: "https://bastion.example.com".to_string(),
             token: "tunnel-token".to_string(),
+            protocol: crate::models::connection::HttpTunnelProtocol::DbxTcp,
             connect_timeout_secs: 5,
             profile_id: String::new(),
         });
@@ -13874,6 +13875,8 @@ mod tests {
             default_mode: Some(AiAssistantMode::Agent),
             default_auto_routing: true,
             restore_last_conversation: true,
+            include_query_result: false,
+            exclude_query_result: false,
             default_templates_by_db_type: BTreeMap::from([("postgresql".to_string(), vec!["tpl-1".to_string()])]),
             last_used_templates_by_db_type: BTreeMap::from([("mysql".to_string(), vec!["tpl-2".to_string()])]),
         };

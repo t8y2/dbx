@@ -290,4 +290,38 @@ describe("ObjectBrowser routine double click", () => {
       }),
     );
   });
+
+  it("switches side panel when clicking different objects while detail panel is open and auto-open is false", async () => {
+    mocks.editorSettings.objectBrowserAutoOpenDetailPanel = false;
+    const host = await mountBrowser();
+    vi.useFakeTimers();
+
+    const spRow = rowFor(host, "sp_daily_report");
+    click(spRow, 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY * 2);
+    expect(mocks.getObjectSource).not.toHaveBeenCalled();
+
+    // Manually open the side panel
+    const toggleBtn = host.querySelector<HTMLButtonElement>('button[title="objects.openDetailPanel"]');
+    expect(toggleBtn).not.toBeNull();
+    toggleBtn?.click();
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY * 2);
+
+    expect(mocks.getObjectSource).toHaveBeenCalledWith("mysql-routines", "app", "app", "sp_daily_report", "PROCEDURE", "IN day DATE");
+    expect(spRow.style.boxShadow).toBe("inset 3px 0 0 var(--primary)");
+
+    // Switch to another object: sequence
+    const seqRow = rowFor(host, "seq_invoice");
+    click(seqRow, 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY * 2);
+
+    expect(mocks.getObjectSource).toHaveBeenCalledWith("mysql-routines", "app", "app", "seq_invoice", "SEQUENCE", undefined);
+    expect(spRow.style.boxShadow).toBe("");
+    expect(seqRow.style.boxShadow).toBe("inset 3px 0 0 var(--primary)");
+
+    // Clicking the same row again does not close the panel when auto-open is false
+    click(seqRow, 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY * 2);
+    expect(seqRow.style.boxShadow).toBe("inset 3px 0 0 var(--primary)");
+  });
 });

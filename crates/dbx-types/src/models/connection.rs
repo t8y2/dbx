@@ -64,6 +64,8 @@ pub struct ConnectionIdleClosedEvent {
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseConnectionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_version: Option<String>,
@@ -570,11 +572,21 @@ pub struct HttpTunnelConfig {
     pub url: String,
     #[serde(default)]
     pub token: String,
+    #[serde(default)]
+    pub protocol: HttpTunnelProtocol,
     #[serde(default = "default_http_tunnel_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
     /// See [`SshTunnelConfig::profile_id`].
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpTunnelProtocol {
+    #[default]
+    DbxTcp,
+    NavicatMysql,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3139,7 +3151,8 @@ mod tests {
                 "productName": "H2",
                 "currentDatabase": "app",
                 "serverCharset": "utf8mb4",
-                "jdbcVersion": "4.2"
+                "jdbcVersion": "4.2",
+                "compatibilityMode": "oracle"
             }
         }))
         .unwrap();
@@ -3147,6 +3160,7 @@ mod tests {
         assert_eq!(parsed.current_database.as_deref(), Some("app"));
         assert_eq!(parsed.server_charset.as_deref(), Some("utf8mb4"));
         assert_eq!(parsed.jdbc_version.as_deref(), Some("4.2"));
+        assert_eq!(parsed.compatibility_mode.as_deref(), Some("oracle"));
         assert_eq!(database_info_from_protocol_value(&serde_json::json!({ "ok": true })), None);
     }
 

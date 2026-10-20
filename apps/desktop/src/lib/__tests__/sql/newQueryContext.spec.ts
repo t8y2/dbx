@@ -467,3 +467,61 @@ describe("resolveNewQueryInitialSql", () => {
     ).toBeUndefined();
   });
 });
+
+describe("resolveNewQueryTarget schema qualification", () => {
+  const connections = [{ id: "sql-1", host: "localhost", database: "app", default_schema: "dbo", db_type: "sqlserver" as const }];
+
+  it("keeps an implicit tab schema for browsing but out of the SQL scope", () => {
+    const target = resolveNewQueryTarget({
+      activeTab: { connectionId: "sql-1", database: "app", schema: "core" },
+      connections,
+      preferredSource: "tab",
+    });
+    expect(target?.schema).toBe("core");
+    expect(target?.schemaQualifiesSql).toBeUndefined();
+  });
+
+  it("propagates a schema the user explicitly selected on the tab", () => {
+    const target = resolveNewQueryTarget({
+      activeTab: { connectionId: "sql-1", database: "app", schema: "core", schemaQualifiesSql: true },
+      connections,
+      preferredSource: "tab",
+    });
+    expect(target?.schema).toBe("core");
+    expect(target?.schemaQualifiesSql).toBe(true);
+  });
+
+  it("treats a sidebar schema node as an explicit selection", () => {
+    const target = resolveNewQueryTarget({
+      selectedTreeNode: { type: "schema", connectionId: "sql-1", database: "app", schema: "core", label: "core" },
+      connections,
+      preferredSource: "sidebar",
+    });
+    expect(target?.schema).toBe("core");
+    expect(target?.schemaQualifiesSql).toBe(true);
+  });
+
+  it("does not promote the connection default schema from a connection node", () => {
+    const target = resolveNewQueryTarget({
+      selectedTreeNode: { type: "database", connectionId: "sql-1", database: "app", label: "app" },
+      connections,
+      preferredSource: "sidebar",
+    });
+    expect(target?.schema).toBe("dbo");
+    expect(target?.schemaQualifiesSql).toBeUndefined();
+  });
+
+  it("treats an object schema from table metadata as explicit", () => {
+    const target = resolveNewQueryTarget({
+      activeTab: {
+        connectionId: "sql-1",
+        database: "app",
+        tableMeta: { schema: "sales", tableName: "orders", columns: [], primaryKeys: [] },
+      },
+      connections,
+      preferredSource: "tab",
+    });
+    expect(target?.schema).toBe("sales");
+    expect(target?.schemaQualifiesSql).toBe(true);
+  });
+});

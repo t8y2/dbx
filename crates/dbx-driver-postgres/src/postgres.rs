@@ -5437,9 +5437,9 @@ fn postgres_indexes_for_relations_compat_sql() -> &'static str {
                  ON a.attrelid = t.oid \
                 AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 \
                 AND a.attnum > 0 \
-               WHERE (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 >= 0 \
                LEFT JOIN pg_opclass oc \
                  ON oc.oid = (string_to_array(ix.indclass::text, ' '))[pos.n]::oid \
+               WHERE (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 >= 0 \
                ORDER BY pos.n \
              ) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
@@ -8104,7 +8104,7 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
                LIMIT 1 \
              ) dep ON TRUE \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
-             WHERE a.attrelid = (CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
+             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -8158,7 +8158,7 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
                ORDER BY sequence_dep.objid \
                LIMIT 1 \
              ) AND serial_seq.relkind = 'S' \
-             WHERE a.attrelid = (CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
+             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -8186,7 +8186,7 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
              CAST(c.character_maximum_length AS int) AS character_maximum_length, \
              NULL::text AS enum_values \
              FROM information_schema.columns c \
-             WHERE c.table_schema = (CASE WHEN coalesce(length($1), 0) = 0 THEN current_schema() ELSE $1 END) \
+             WHERE c.table_schema = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN current_schema() ELSE $1 END) \
              AND c.table_name = $2 \
              ORDER BY c.ordinal_position";
 
@@ -9697,13 +9697,18 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
              LEFT JOIN pg_opclass oc ON oc.oid = k.class_oid \
              LEFT JOIN pg_namespace opcns ON opcns.oid = oc.opcnamespace \
-             WHERE t.oid = (CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
+             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              AND k.attnum >= 0 \
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indisvalid, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
              ORDER BY i.relname";
 
 // Compat-tier sibling of `postgres_indexes_for_relations_compat_sql` (~line
 // 3312) — see the note on `POSTGRES_INDEXES_SQL` above.
+//
+// The opclass subquery has to join `pg_opclass` before its WHERE: a JOIN after
+// WHERE is a syntax error, and this tier is the only one GaussDB / openGauss
+// ever run (`list_indexes_compat_first`), so the misordered join broke every
+// index listing there with `syntax error at or near "LEFT"` (#12650, #12675).
 const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              ARRAY( \
                SELECT COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
@@ -9724,9 +9729,9 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
                  ON a.attrelid = t.oid \
                 AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 \
                 AND a.attnum > 0 \
-               WHERE (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 >= 0 \
                LEFT JOIN pg_opclass oc \
                  ON oc.oid = (string_to_array(ix.indclass::text, ' '))[pos.n]::oid \
+               WHERE (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 >= 0 \
                ORDER BY pos.n \
              ) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
@@ -9753,7 +9758,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_am am ON am.oid = i.relam \
-             WHERE t.oid = (CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
+             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              ORDER BY i.relname";
 
 const POSTGRES_OWNERS_SQL: &str =
@@ -14395,18 +14400,18 @@ mod tests {
     #[test]
     fn postgres_single_relation_metadata_can_resolve_through_search_path() {
         // GaussDB A mode folds `''` to NULL, so `$1 = ''` is never true there and the
-        // unqualified branch was skipped (issue #12198). `coalesce(length($1), 0) = 0`
+        // unqualified branch was skipped (issue #12198). `coalesce(length($1::text), 0) = 0`
         // matches both NULL and the empty string on every PostgreSQL-compatible kernel.
         for sql in [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL] {
-            assert!(sql.contains("CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2)"), "{sql}");
+            assert!(sql.contains("CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2)"), "{sql}");
             assert!(!sql.contains("information_schema.columns"));
         }
         for sql in [POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL] {
-            assert!(sql.contains("t.oid = (CASE WHEN coalesce(length($1), 0) = 0 THEN quote_ident($2)"), "{sql}");
+            assert!(sql.contains("t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2)"), "{sql}");
         }
         assert!(
             POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL
-                .contains("CASE WHEN coalesce(length($1), 0) = 0 THEN current_schema() ELSE $1 END"),
+                .contains("CASE WHEN coalesce(length($1::text), 0) = 0 THEN current_schema() ELSE $1 END"),
             "{POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL}"
         );
     }
@@ -15481,6 +15486,22 @@ mod tests {
     }
 
     #[test]
+    fn compat_index_metadata_sql_has_valid_join_order() {
+        for sql in [POSTGRES_INDEXES_COMPAT_SQL, postgres_indexes_for_relations_compat_sql()] {
+            assert!(
+                !sql.contains("WHERE (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 >= 0 LEFT JOIN"),
+                "WHERE clause must not precede LEFT JOIN in {sql}"
+            );
+            let opclass_pos = sql.find("LEFT JOIN pg_opclass oc").expect("must contain opclass join");
+            let col_opclasses_end = sql.find(") AS column_opclasses").expect("must contain column_opclasses");
+            let where_pos = sql[opclass_pos..col_opclasses_end]
+                .find("WHERE (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 >= 0")
+                .expect("must contain where guard after opclass join");
+            assert!(where_pos > 0, "WHERE guard must appear after LEFT JOIN pg_opclass oc in column_opclasses");
+        }
+    }
+
+    #[test]
     fn postgres_index_metadata_tracks_per_key_ordering_without_include_columns() {
         for sql in [POSTGRES_INDEXES_SQL, postgres_indexes_for_relations_sql()] {
             assert!(sql.contains("ix.indoption[(k.n - 1)::int]"));
@@ -15489,6 +15510,50 @@ mod tests {
         for sql in [POSTGRES_INDEXES_COMPAT_SQL, postgres_indexes_for_relations_compat_sql()] {
             assert!(sql.contains("string_to_array(ix.indoption::text, ' ')") && sql.contains("AS key_options"));
         }
+    }
+
+    #[test]
+    fn compat_index_queries_keep_the_opclass_join_before_the_where_clause() {
+        // Both compat queries used to build the opclass subquery as
+        // `FROM generate_series(...) LEFT JOIN pg_attribute ... WHERE <key filter> LEFT JOIN pg_opclass ...`.
+        // A JOIN after WHERE is a syntax error, and GaussDB / openGauss never run the modern tier
+        // (`list_indexes_compat_first`), so every index listing — and every schema comparison that
+        // loads one — died with `syntax error at or near "LEFT"` on the opclass join (#12650, #12675).
+        for sql in [POSTGRES_INDEXES_COMPAT_SQL, postgres_indexes_for_relations_compat_sql()] {
+            let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(compact.matches("LEFT JOIN pg_opclass oc").count(), 1, "expected one opclass join in {sql}");
+            assert!(!compact.contains(">= 0 LEFT JOIN"), "a JOIN after the key filter's WHERE is invalid: {sql}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn compat_index_query_parses_and_reports_index_columns() {
+        // The compat tier is the only tier GaussDB and openGauss ever run, so it has to be valid
+        // SQL against a real server and not merely a plausible-looking string (#12650, #12675).
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let timeout = crate::db::connection_timeout();
+        let client = checkout_postgres_client(&pool, None, timeout).await.expect("checkout client");
+        let table = format!("dbx_compat_index_{}", std::process::id());
+        client
+            .batch_execute(&format!(
+                "DROP TABLE IF EXISTS public.{table}; \
+                 CREATE TABLE public.{table} (id int PRIMARY KEY, email text, tag text); \
+                 CREATE INDEX {table}_email_tag ON public.{table} (email, tag)"
+            ))
+            .await
+            .expect("create index fixtures");
+        let indexes = list_indexes_compat_first(&pool, "public", &table).await.expect("compat index listing");
+        client.batch_execute(&format!("DROP TABLE IF EXISTS public.{table}")).await.expect("drop index fixtures");
+        let primary_name = format!("{table}_pkey");
+        let primary = indexes.iter().find(|index| index.name == primary_name).expect("primary key index");
+        assert_eq!(primary.columns, vec!["id".to_string()]);
+        assert!(primary.is_primary && primary.is_unique);
+        let composite_name = format!("{table}_email_tag");
+        let composite = indexes.iter().find(|index| index.name == composite_name).expect("composite index");
+        assert_eq!(composite.columns, vec!["email".to_string(), "tag".to_string()]);
+        assert!(!composite.is_primary && !composite.is_unique);
     }
 
     #[test]

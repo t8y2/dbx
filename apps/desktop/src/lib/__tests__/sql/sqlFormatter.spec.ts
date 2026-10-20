@@ -840,3 +840,48 @@ describe("classic layout style (v0.6.15 reproduction)", () => {
     expect(await formatSqlText("select * from t", "mysql", { ...classic, fromClauseLayout: "sameLine" })).toBe(lines("SELECT", "  *", "FROM t"));
   });
 });
+
+describe("PostgreSQL MERGE formatting (#12592)", () => {
+  // sql-formatter 15's postgresql grammar predates PG15 MERGE, so the DBX
+  // layout printer used to emit one token per line for these statements.
+  const merge = "MERGE INTO target t USING source s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name);";
+
+  it("lays out the UPDATE and INSERT actions as clauses", async () => {
+    const formatted = await formatSqlText(merge, "postgres");
+
+    expect(formatted).toBe(["MERGE INTO target t USING source s ON t.id = s.id", "WHEN MATCHED THEN", "UPDATE SET name = s.name", "WHEN NOT MATCHED THEN", "INSERT (id, name)", "VALUES (s.id, s.name);"].join("\n"));
+    // Formatting is idempotent: the clause keywords stay clause boundaries.
+    await expect(formatSqlText(formatted, "postgres")).resolves.toBe(formatted);
+  });
+
+  it("keeps conditions, DELETE actions and RETURNING intact", async () => {
+    const sql = "MERGE INTO products p USING new_products np ON p.product_id = np.product_id WHEN MATCHED AND np.price > p.price THEN UPDATE SET price = np.price WHEN NOT MATCHED THEN INSERT (product_id, product_name, price) VALUES (np.product_id, np.product_name, np.price) RETURNING p.*;";
+
+    await expect(formatSqlText(sql, "postgres")).resolves.toBe(
+      [
+        "MERGE INTO products p USING new_products np ON p.product_id = np.product_id",
+        "WHEN MATCHED AND np.price > p.price THEN",
+        "UPDATE SET price = np.price",
+        "WHEN NOT MATCHED THEN",
+        "INSERT (product_id, product_name, price)",
+        "VALUES (np.product_id, np.product_name, np.price)",
+        "RETURNING p.*;",
+      ].join("\n"),
+    );
+
+    const deleteAction = "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id);";
+    await expect(formatSqlText(deleteAction, "postgres")).resolves.toBe(["MERGE INTO t USING s ON t.id = s.id", "WHEN MATCHED THEN DELETE", "WHEN NOT MATCHED THEN", "INSERT (id)", "VALUES (s.id);"].join("\n"));
+  });
+
+  it("does not change regular INSERT, UPDATE or JOIN formatting", async () => {
+    await expect(formatSqlText("insert into t (a, b) values (1, 2) on conflict (a) do update set b = excluded.b;", "postgres")).resolves.toBe("INSERT INTO t (a, b)\nVALUES (1, 2)\nON CONFLICT (a) DO UPDATE\nSET b = excluded.b;");
+    await expect(formatSqlText("update t set a = 1, b = 2 where id = 3;", "postgres")).resolves.toBe("UPDATE t SET a = 1, b = 2 WHERE id = 3;");
+    await expect(formatSqlText("select a.id, b.name from a join b on a.id = b.id where a.x = 1;", "postgres")).resolves.toBe("SELECT a.id,\n       b.name\nFROM a\n    JOIN b ON a.id = b.id\nWHERE a.x = 1;");
+  });
+
+  it("applies to PostgreSQL-compatible connections too", async () => {
+    // GaussDB / Kingbase / HighGo / openGauss reuse the postgres grammar.
+    expect(sqlFormatDialectForDbType("gaussdb")).toBe("postgres");
+    await expect(formatSqlText(merge, sqlFormatDialectForDbType("kingbase"))).resolves.toContain("WHEN MATCHED THEN\nUPDATE SET name = s.name");
+  });
+});

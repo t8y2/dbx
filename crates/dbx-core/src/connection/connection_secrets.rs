@@ -1199,6 +1199,7 @@ mod tests {
             enabled: true,
             url: "https://dbx.example.com/dbx_tunnel.php".to_string(),
             token: token.to_string(),
+            protocol: crate::models::connection::HttpTunnelProtocol::DbxTcp,
             connect_timeout_secs: 10,
         })
     }

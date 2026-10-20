@@ -90,6 +90,7 @@ import DataGridToolbar from "@/components/grid/DataGridToolbar.vue";
 import DataGridVirtualRowIdentifier from "@/components/grid/DataGridVirtualRowIdentifier.vue";
 import DataGridExtractorDialog from "@/components/grid/DataGridExtractorDialog.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
+import { formatDataGridColumnMetadataForCopy } from "@/lib/dataGrid/dataGridColumnMetadataCopy";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridFilterModeOrderDialog from "@/components/grid/DataGridFilterModeOrderDialog.vue";
@@ -113,6 +114,7 @@ import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
 import * as api from "@/lib/backend/api";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { resolveDataGridBusyStartedAt } from "@/lib/dataGrid/dataGridBusyElapsed";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
@@ -206,7 +208,18 @@ import {
 import { adjacentDataGridDetailIndex, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
 import { applyColumnFormatter, DataGridDateTimePatterns, displayTimeZoneOption, formatIoTDBTimestampEditorValue, iotdbTimestampFractionDigits, iotdbTimestampPrecision, parseIoTDBTimestampEditorValue, type ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
-import { BOOLEAN_CELL_EDITOR_VALUES, booleanCellDisplayText, booleanCellEditorValue, isBooleanCellValue, isBooleanColumnType, isPointInBooleanCheckbox, nextBooleanCellValue, normalizeBooleanCellValue, parseBooleanCellEditorValue } from "@/lib/dataGrid/dataGridBooleanColumn";
+import {
+  BOOLEAN_CELL_EDITOR_VALUES,
+  booleanCellDisplayText,
+  booleanCellEditorDisplayValues,
+  booleanCellEditorValue,
+  isBooleanCellValue,
+  isBooleanColumnType,
+  isPointInBooleanCheckbox,
+  nextBooleanCellValue,
+  normalizeBooleanCellValue,
+  parseBooleanCellEditorValue,
+} from "@/lib/dataGrid/dataGridBooleanColumn";
 import { resolveDataGridColumnNullability, resolveDataGridColumnsByResultIndex } from "@/lib/dataGrid/dataGridColumnMetadata";
 import { resolveDataGridNewRowCellPlaceholder } from "@/lib/dataGrid/dataGridDefaultPlaceholder";
 import {
@@ -241,6 +254,7 @@ import {
   elasticsearchCursorPageJumpRequestCount,
   hasCompleteLocalDataGridResult,
   hasShortDataGridSqlPage,
+  isDataGridSurfaceBusy,
   reconcileDataGridExactTotalWithObservedPage,
   resolveDataGridPaginationTotal,
   showDataGridRerunTotalCountAction,
@@ -473,6 +487,7 @@ const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHide
 const hideEmptyColumns = computed(() => settingsStore.editorSettings.dataGridHideEmptyColumns);
 const booleanCellsUseCheckbox = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode === "checkbox");
 const booleanCellValueStyle = computed(() => settingsStore.editorSettings.dataGridBooleanValueStyle);
+const booleanEditorDisplayValues = computed(() => booleanCellEditorDisplayValues(booleanCellValueStyle.value));
 const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
 const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.colorizeDataGridCellTypes);
 const { isDark, themePalette } = useTheme();
@@ -646,6 +661,13 @@ interface DataGridProps {
   cancelling?: boolean;
   cancelDisabled?: boolean;
   revealColumnRequest?: { id: number; columnName: string };
+  /**
+   * Start of the query execution behind the busy overlay, when the busy surface
+   * is driven by one. Switching the result view unmounts this grid, so the
+   * elapsed pill must read the execution start from the tab instead of the
+   * mount time (issue #12821).
+   */
+  busyStartedAt?: number;
 }
 
 const props = withDefaults(defineProps<DataGridProps>(), {
@@ -1203,7 +1225,7 @@ const filterBuilderColumns = computed(() =>
     resultColumnTypes: props.result.column_types,
   }),
 );
-const conditionColumns = computed(() => dataGridConditionColumnOptions(props.tableMeta ? filterBuilderColumns.value.map((column) => column.columnInfo ?? column.name) : props.result.columns, resolvedDatabaseType.value));
+const conditionColumns = computed(() => dataGridConditionColumnOptions(props.tableMeta ? filterBuilderColumns.value.map((column) => ({ name: column.name, dataType: column.columnInfo?.data_type, comment: column.columnInfo?.comment ?? undefined })) : props.result.columns, resolvedDatabaseType.value));
 const conditionIdentifierQuote = computed(() => dataGridConditionIdentifierQuote(resolvedDatabaseType.value, connectionStore.connectionIdentifierQuote?.(props.connectionId)));
 const conditionHistoryScope = computed(() => ({
   connectionId: props.connectionId,
@@ -2420,12 +2442,14 @@ const {
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: scheduleColumnLayoutRefresh,
 });
+// The go-to-column list mirrors the column filter panel, so both follow the
+// user's local column order instead of the database order.
 const goToColumnItems = computed(() =>
   buildDataGridColumnLookupItems({
     columns: props.result.columns,
     sourceColumns: props.sourceColumns,
     columnComments: props.resultColumnComments,
-    displayableIndexes: displayableColumnIndexes.value,
+    displayableIndexes: orderedDisplayableColumnIndexes.value,
     commentByColumn: columnCommentMap.value,
   }),
 );
@@ -2731,12 +2755,11 @@ const columnWidthMode = computed(() => settingsStore.editorSettings.dataGridColu
 const tableFontFamily = computed(() => settingsStore.editorSettings.tableFontFamily);
 const columnWidthCacheKey = computed(() => props.columnWidthCacheKey?.trim() || props.cacheKey?.trim() || undefined);
 const columnStructureSignature = computed(() => createDataGridColumnStructureSignature(props.result.columns, props.result.column_types));
-// Bumped once the configured header font is ready, so widths measured against a temporary fallback
-// font get re-measured without reacting to unrelated fonts loaded elsewhere in the application.
-const dataGridFontReadyTick = ref(0);
-const columnFormatterReadyTick = ref(0);
-const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFontFamily.value, dataGridFontReadyTick.value, columnFormatterReadyTick.value]);
+// The configured header font is re-measured once ready (grown-only, never clearing user
+// adjustments), without reacting to unrelated fonts loaded elsewhere in the application.
+const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFontFamily.value]);
 let columnHeaderMeasureContext: CanvasRenderingContext2D | null | undefined;
+let triggerGrowColumnWidths: (() => void) | undefined;
 
 if (typeof document !== "undefined" && document.fonts) {
   let fontLoadRequestId = 0;
@@ -2749,7 +2772,9 @@ if (typeof document !== "undefined" && document.fonts) {
       } catch {
         return;
       }
-      if (requestId === fontLoadRequestId) dataGridFontReadyTick.value++;
+      if (requestId === fontLoadRequestId) {
+        triggerGrowColumnWidths?.();
+      }
     },
     { immediate: true },
   );
@@ -2774,7 +2799,7 @@ function columnWidthDisplayValue(value: CellValue, columnIndex: number): CellVal
   return showWhitespaceEnabled.value && typeof display === "string" ? gridCellDisplayValue(display, flatteningMultiLineEnabled.value, true) : display;
 }
 
-const { initColumnWidths, onResizeStart, autoFitColumn, autoFitAllColumns, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
+const { initColumnWidths, growColumnWidthsToFitSamples, onResizeStart, autoFitColumn, autoFitAllColumns, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
   columns: visibleColumns,
   sourceRows: computed(() => props.result.rows),
   columnIndexes: visibleColumnIndexes,
@@ -2790,6 +2815,7 @@ const { initColumnWidths, onResizeStart, autoFitColumn, autoFitAllColumns, rende
   viewportWidth: gridViewportWidth,
   displayValue: columnWidthDisplayValue,
 });
+triggerGrowColumnWidths = growColumnWidthsToFitSamples;
 const gridStyle = computed(() => ({
   ...columnVars.value,
   "--header-total-w": dataGridHeaderContentWidth("var(--total-w)", gridScrollbarGutter.value),
@@ -3644,6 +3670,8 @@ watch(
 );
 const manualTotalRowCount = ref<number | undefined>(undefined);
 const manualTotalRowCountLoading = ref(false);
+/** True only for count-then-navigate flows (e.g. jump to last page), where the grid must stay covered. */
+const manualTotalRowCountCoversSurface = ref(false);
 let manualTotalRowCountGeneration = 0;
 function invalidateManualTotalRowCount() {
   manualTotalRowCountGeneration++;
@@ -3772,8 +3800,20 @@ const rowPreparationProgress = shallowRef<DataGridRowPreparationProgress | null>
 let rowPreparationController: AbortController | null = null;
 let gridClipboardLifecycle = 0;
 let gridClipboardActive = true;
-/** Automatic background counts keep rows interactive; explicit count navigation still blocks the surface. */
-const gridSurfaceBusy = computed(() => isRefreshingData.value || props.loading === true || manualTotalRowCountLoading.value || pageJumpBusy.value || rowPreparationProgress.value !== null);
+/**
+ * Automatic background counts keep rows interactive. A manual footer count only covers the grid when it is
+ * part of a navigation flow; counting total rows on demand must not look like a table refresh.
+ */
+const gridSurfaceBusy = computed(() =>
+  isDataGridSurfaceBusy({
+    isRefreshingData: isRefreshingData.value,
+    loading: props.loading === true,
+    pageJumpBusy: pageJumpBusy.value,
+    rowPreparationBusy: rowPreparationProgress.value !== null,
+    manualTotalRowCountLoading: manualTotalRowCountLoading.value,
+    manualTotalRowCountCoversSurface: manualTotalRowCountCoversSurface.value,
+  }),
+);
 const gridPaginationBusy = computed(() => gridSurfaceBusy.value || totalRowCountBusy.value);
 const dataGridNativeSelectionBlockOwner = {};
 watch(
@@ -4251,20 +4291,26 @@ function jumpToCountedLastPage(total: number) {
   requestServerPageJump(lastPageNum);
 }
 
-async function beginManualTotalRowCount(): Promise<number | undefined> {
+async function beginManualTotalRowCount(coversSurface = false): Promise<number | undefined> {
   if (manualTotalRowCountLoading.value) return undefined;
   const generation = manualTotalRowCountGeneration;
+  manualTotalRowCountCoversSurface.value = coversSurface;
   manualTotalRowCountLoading.value = true;
-  // Flush busy UI (overlay / spinner) before the slow COUNT starts.
+  // Flush the button spinner (and the overlay for count-then-navigate flows) before the slow COUNT starts.
   await nextTick();
   return generation;
+}
+
+function finishManualTotalRowCount() {
+  manualTotalRowCountLoading.value = false;
+  manualTotalRowCountCoversSurface.value = false;
 }
 
 async function lastPage() {
   if (infiniteScrollEnabled.value || allRowsLoaded.value) return;
   // Navicat-style: always re-COUNT when jumping to the last page.
   if (props.countTotalRows) {
-    const generation = await beginManualTotalRowCount();
+    const generation = await beginManualTotalRowCount(true);
     if (generation === undefined) return;
     try {
       if (generation !== manualTotalRowCountGeneration) return;
@@ -4283,12 +4329,12 @@ async function lastPage() {
         5000,
       );
     } finally {
-      manualTotalRowCountLoading.value = false;
+      finishManualTotalRowCount();
     }
     return;
   }
   if (props.connectionId && (props.countSql || canCountTableRows.value)) {
-    const generation = await beginManualTotalRowCount();
+    const generation = await beginManualTotalRowCount(true);
     if (generation === undefined) return;
     try {
       if (generation !== manualTotalRowCountGeneration) return;
@@ -4306,7 +4352,7 @@ async function lastPage() {
     } catch {
       // COUNT query failed — ignore silently
     } finally {
-      manualTotalRowCountLoading.value = false;
+      finishManualTotalRowCount();
     }
     return;
   }
@@ -4378,7 +4424,7 @@ async function calculateTotalRowCount() {
   } catch (e: any) {
     toast(t("grid.calculateTotalRowsFailed", { message: e?.message || String(e) }), 5000);
   } finally {
-    manualTotalRowCountLoading.value = false;
+    finishManualTotalRowCount();
   }
 }
 
@@ -5647,7 +5693,6 @@ const {
   toast,
 });
 columnFormatterForWidth = columnFormatter;
-columnFormatterReadyTick.value++;
 
 initColumnWidths();
 watch([visibleColumnIndexes, () => renderedColumnWidths.value.length], () => scheduleColumnLayoutRefresh());
@@ -8989,6 +9034,9 @@ function changeExportQueryTimeout() {
 
 const userFacingSql = ref("");
 let userFacingSqlGeneration = 0;
+// Legacy snapshots may retain a display page without the actual execution text.
+// Do not present the original, unpaginated statement as the executed SQL there.
+const actualExecutionSql = computed(() => props.result.sqlPage?.executedSql || props.result.executedStatement || (!props.pageSql ? props.result.sourceStatement || props.sql || "" : ""));
 
 function sqlWithDisplayDatabaseName(sql: string): string {
   const database = props.tableMeta?.database ?? props.database;
@@ -9002,7 +9050,7 @@ function sqlWithDisplayDatabaseName(sql: string): string {
 
 async function syncUserFacingSql() {
   const generation = ++userFacingSqlGeneration;
-  const executionSql = (props.pageSql || props.sql)?.trim() ?? "";
+  const executionSql = (props.result.sqlPage?.sql || props.pageSql || props.sql)?.trim() ?? "";
   const includeDatabaseName = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
   const shouldRebuildSql = executionSql.includes("__DBX_LARGE_VALUE_BYTES_") || includeDatabaseName;
   if (props.context !== "table-data" || !shouldRebuildSql || !props.tableMeta?.tableName) {
@@ -9044,7 +9092,7 @@ async function syncUserFacingSql() {
 }
 
 watch(
-  () => [props.sql, props.pageSql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, currentWhereInput(), effectiveOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
+  () => [props.sql, props.pageSql, props.result.sqlPage, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, currentWhereInput(), effectiveOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
   () => void syncUserFacingSql(),
   { immediate: true },
 );
@@ -9108,6 +9156,7 @@ const {
   columnComments: visibleColumnComments,
   allColumnComments,
   displayValue: (value, index) => formatCell(value, index, undefined, false),
+  editValue: (value, index) => cellEditorTextForValue(value, index),
   hasColumnFormatter: (index: number) => Boolean(resolvedColumnFormatters.value[index]),
   applyColumnFormattersOnExport: computed(() => settingsStore.editorSettings.applyColumnFormattersOnExport),
   cellClipboardText: (value) => (usesMongoDocumentGridValues.value ? mongoDocumentGridClipboardText(value) : undefined),
@@ -9176,6 +9225,8 @@ function copyExtractorLabel(extractor: DataGridCopyExtractorId): string {
     html: "HTML",
     xml: "XML",
     pretty: t("grid.copyExtractorPretty"),
+    dbunit: "DbUnit",
+    php: "PHP",
   };
   return labels[extractor];
 }
@@ -9195,6 +9246,86 @@ function sqlInsertModeLabel(mode: DataGridPrimaryKeyMode): string {
 const selectedCopyPreference = computed(() => settingsStore.editorSettings.dataGridCopyExtractor);
 const defaultCopyPreferenceLabel = computed(() => copyPreferenceLabel(selectedCopyPreference.value));
 const extractorConfigOpen = ref(false);
+const advancedCopyOpen = ref(false);
+let advancedCopySession = 0;
+const advancedCopyGeneration = ref(0);
+let advancedCopyBinding: ReturnType<typeof advancedCopySnapshot> | undefined;
+
+const advancedCopySelectionKey = computed(() =>
+  JSON.stringify({
+    rows: [...selectedRowIds.value].sort((a, b) => a - b),
+    columns: [...selectedColumnIndexes.value].sort((a, b) => a - b),
+    cells: [...selectedCellKeys.value].sort(),
+    range: selectedRange.value,
+    anchor: selectionAnchor.value,
+    focus: selectionFocus.value,
+  }),
+);
+
+watch(
+  [() => props.result, advancedCopySelectionKey],
+  () => {
+    advancedCopyGeneration.value += 1;
+  },
+  { flush: "sync" },
+);
+
+function advancedCopySnapshot() {
+  return {
+    result: props.result,
+    rows: props.result.rows,
+    columns: props.result.columns,
+    selection: advancedCopySelectionKey.value,
+    generation: advancedCopyGeneration.value,
+  };
+}
+
+function isAdvancedCopySessionValid(session: number, binding: ReturnType<typeof advancedCopySnapshot>): boolean {
+  const current = advancedCopySnapshot();
+  return advancedCopyOpen.value && session === advancedCopySession && current.result === binding.result && current.rows === binding.rows && current.columns === binding.columns && current.selection === binding.selection && current.generation === binding.generation;
+}
+
+function openAdvancedCopy() {
+  advancedCopySession += 1;
+  advancedCopyBinding = advancedCopySnapshot();
+  advancedCopyOpen.value = true;
+}
+
+watch(advancedCopyOpen, (open) => {
+  if (open) return;
+  advancedCopySession += 1;
+  advancedCopyBinding = undefined;
+});
+onUnmounted(() => {
+  advancedCopySession += 1;
+  advancedCopyOpen.value = false;
+});
+
+function canCopyAdvancedFormat(preference: DataGridCopyPreference): boolean {
+  if (preference === "smart") return canCopyWithExtractor("raw") || canCopyWithExtractor("tsv");
+  return canCopyWithExtractor(preference);
+}
+
+async function copyAdvancedFormat(preference: DataGridCopyPreference, extractorOptions: typeof settingsStore.editorSettings.dataGridExtractorOptions): Promise<boolean> {
+  const session = advancedCopySession;
+  const binding = advancedCopyBinding;
+  const isValid = () => !!binding && isAdvancedCopySessionValid(session, binding);
+  if (!isValid()) throw new Error(t("grid.copyExtractorSelectionChanged"));
+  const copied = await copyWithPreference(preference, extractorOptions, isValid);
+  if (!copied && !isValid()) throw new Error(t("grid.copyExtractorSelectionChanged"));
+  return copied;
+}
+
+async function previewAdvancedCopy(preference: DataGridCopyPreference, extractorOptions: typeof settingsStore.editorSettings.dataGridExtractorOptions) {
+  const session = advancedCopySession;
+  const binding = advancedCopyBinding;
+  const isValid = () => !!binding && isAdvancedCopySessionValid(session, binding);
+  if (!isValid()) throw new Error(t("grid.copyExtractorSelectionChanged"));
+  const preview = await previewWithPreference(preference, extractorOptions);
+  if (!isValid()) throw new Error(t("grid.copyExtractorSelectionChanged"));
+  return preview;
+}
+
 const copyPreferenceMenuItems = computed(() =>
   DATA_GRID_DEFAULT_COPY_PREFERENCES.map((preference) => {
     const extractor = preference === "smart" ? undefined : preference;
@@ -9205,6 +9336,13 @@ const copyPreferenceMenuItems = computed(() =>
       separatorBefore: extractor ? DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].separatorBefore : false,
     };
   }),
+);
+const visibleCopyExtractorItems = computed(() =>
+  DATA_GRID_COPY_EXTRACTOR_IDS.map((extractor) => ({
+    value: extractor,
+    label: copyExtractorLabel(extractor),
+    disabled: extractorUnavailableForDatabase(extractor, props.databaseType) || ((extractor === "sql-updates" || extractor === "sql-deletes-inserts") && !props.tableMeta?.primaryKeys.length),
+  })),
 );
 function openExtractorConfiguration() {
   extractorConfigOpen.value = true;
@@ -9226,10 +9364,11 @@ function sqlInsertExtractorOptions(primaryKeyMode: DataGridPrimaryKeyMode) {
   };
 }
 
-function saveExtractorConfiguration(value: { preference: DataGridCopyPreference; options: typeof settingsStore.editorSettings.dataGridExtractorOptions }) {
+function saveExtractorConfiguration(value: { preference: DataGridCopyPreference; options: typeof settingsStore.editorSettings.dataGridExtractorOptions; visibleCopyExtractors: typeof settingsStore.editorSettings.dataGridVisibleCopyExtractors }) {
   settingsStore.updateEditorSettings({
     dataGridCopyExtractor: value.preference,
     dataGridExtractorOptions: value.options,
+    dataGridVisibleCopyExtractors: value.visibleCopyExtractors,
   });
   // The dialog closes on save; without this the write is invisible and users
   // report the save button as doing nothing (#9872).
@@ -9683,6 +9822,12 @@ function clipboardShortcut(event: KeyboardEvent, key: string): boolean {
   return isPlainClipboardShortcut(event, key);
 }
 
+// The copy/extract "NULL text" a copy writes for a NULL cell, so a paste can
+// turn the very same text back into NULL instead of the literal string
+// (issue #12727). Empty means "no configured sentinel": empty clipboard fields
+// then stay empty strings, which is what the DBX grid copies for both.
+const clipboardNullText = computed(() => settingsStore.editorSettings.dataGridExtractorOptions.dsv.nullText);
+
 async function pasteClipboardIntoSelection() {
   if (!props.editable) return;
   const operation = dataGridResultLifecycle.beginOperation();
@@ -9707,7 +9852,7 @@ async function pasteClipboardAsNewRows() {
     const result = await prepareGridRows(async (options) => {
       const insertPaste = await parseInsertStatementPasteInBatches(text, options, limits);
       if (options.signal?.aborted || options.isCurrent?.() === false) return undefined;
-      const rows = insertPaste?.rows ?? (await parseDataGridClipboardInBatches(text, options, limits));
+      const rows = insertPaste?.rows ?? (await parseDataGridClipboardInBatches(text, options, limits, clipboardNullText.value));
       if (!rows) return undefined;
       return appendPastedRowsAsNewRowsInBatches(rows, columnIndexes, insertPaste?.columnNames, options);
     });
@@ -9809,7 +9954,7 @@ function pasteTextIntoGrid(text: string): boolean | Promise<boolean> {
     return prepareGridRows(async (options) => {
       const insertPaste = await parseInsertStatementPasteInBatches(text, options, limits);
       if (options.signal?.aborted || options.isCurrent?.() === false) return false;
-      const rows = insertPaste?.rows ?? (await parseDataGridClipboardInBatches(text, options, limits));
+      const rows = insertPaste?.rows ?? (await parseDataGridClipboardInBatches(text, options, limits, clipboardNullText.value));
       if (!rows || options.signal?.aborted || options.isCurrent?.() === false) return false;
       return applyParsedGridPaste(rows, insertPaste?.columnNames, options);
     })
@@ -9821,7 +9966,7 @@ function pasteTextIntoGrid(text: string): boolean | Promise<boolean> {
   }
   try {
     const insertPaste = parseInsertStatementPaste(text, limits);
-    return applyParsedGridPaste(insertPaste?.rows ?? parseDataGridClipboard(text, limits), insertPaste?.columnNames);
+    return applyParsedGridPaste(insertPaste?.rows ?? parseDataGridClipboard(text, limits, clipboardNullText.value), insertPaste?.columnNames);
   } catch (error) {
     reportGridPasteError(error);
     return false;
@@ -9845,7 +9990,7 @@ function applyParsedGridPaste(rows: readonly (readonly (string | null)[])[], col
 function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[]): boolean {
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
 
-  if (rows.length === 1 && rows[0]?.length === 1 && fillSelectionWithValue(rows[0][0])) {
+  if (rows.length === 1 && rows[0]?.length === 1 && fillSelectionWithValue(rows[0][0], { preserveEmptyString: true })) {
     toast(t("grid.pasted"));
     return true;
   }
@@ -9863,7 +10008,9 @@ function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[]): 
       const item = displayItemAt(rowIndex);
       if (!item) continue;
       const visibleCol = start.colIndex + cell.columnOffset;
-      applied = applyVisibleSelectedCellValue(item, visibleCol, cell.value, allowDraftSelectionValue) || applied;
+      // Pasting is a literal value transfer, so an empty field stays an empty
+      // string instead of clearing the cell to NULL (issue #12727).
+      applied = applyVisibleSelectedCellValue(item, visibleCol, cell.value, allowDraftSelectionValue, { preserveEmptyString: true }) || applied;
     }
   } finally {
     commitBatch();
@@ -12114,6 +12261,29 @@ function copyHeaderColumnOrSelected() {
   void copyHeaderColumn();
 }
 
+function copyContextColumnMetadata() {
+  const visibleIndexes =
+    contextHeaderVisibleColIdx.value !== null && selectedColumnIndexes.value.has(contextHeaderVisibleColIdx.value) && selectedColumnIndexes.value.size > 1 ? [...selectedColumnIndexes.value].sort((a, b) => a - b) : contextHeaderVisibleColIdx.value !== null ? [contextHeaderVisibleColIdx.value] : [];
+  const rows = visibleIndexes
+    .map((visibleIndex) => {
+      const actualIndex = visibleColumnIndexes.value[visibleIndex];
+      const name = visibleColumns.value[visibleIndex];
+      if (actualIndex === undefined || name === undefined) return undefined;
+      const info = tableColumnForGridColumn(actualIndex);
+      const sourceName = props.sourceColumns?.[actualIndex] ?? info?.name;
+      return {
+        name,
+        type: allColumnTypes.value[actualIndex],
+        source: sourceName,
+        nullable: info ? info.is_nullable : undefined,
+        comment: resolvedColumnComment(name, actualIndex) || undefined,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== undefined);
+  if (rows.length === 0) return;
+  void copyText(formatDataGridColumnMetadataForCopy(rows));
+}
+
 // 「复制列注释」的目标列：显式多选时按选中列，否则用右键命中的那列。
 function contextCommentActualColumnIndexes(): number[] {
   if (contextHeaderColumnIndex.value === null) return [];
@@ -12405,8 +12575,9 @@ async function copyUserFacingSqlWithoutComments() {
 }
 
 const statusSqlContextMenuItems = computed<ContextMenuItem[]>(() => [
-  { label: t("grid.copyQuerySql"), icon: Copy, action: () => void copyUserFacingSql() },
+  { label: t(props.result.sqlPage ? "grid.copyCurrentPageSql" : "grid.copyQuerySql"), icon: Copy, action: () => void copyUserFacingSql() },
   { label: t("grid.copyExecutableSql"), icon: Copy, action: () => void copyUserFacingSqlWithoutComments() },
+  ...(actualExecutionSql.value ? [{ label: t("grid.copyActualExecutionSql"), icon: Copy, action: () => void copyText(actualExecutionSql.value) }] : []),
 ]);
 
 type TableInfoTabItem = {
@@ -13401,8 +13572,8 @@ function startLoadingElapsedTimer(reset = false) {
     return;
   }
   if (reset || !_loadingStart) {
-    _loadingStart = Date.now();
-    loadingElapsed.value = 0;
+    _loadingStart = resolveDataGridBusyStartedAt({ now: Date.now(), reset, currentStartedAt: _loadingStart, executionStartedAt: props.busyStartedAt });
+    loadingElapsed.value = Math.max(0, Date.now() - _loadingStart);
   } else {
     loadingElapsed.value = Date.now() - _loadingStart;
   }
@@ -13437,6 +13608,16 @@ watch(gridSurfaceBusy, (isLoading) => {
     });
   }
 });
+
+// A second execution can start while the surface is already busy (a refresh, or
+// a remount that lands after the query started). Re-base the pill on the new
+// execution start instead of keeping the previous baseline.
+watch(
+  () => props.busyStartedAt,
+  () => {
+    if (gridSurfaceBusy.value) startLoadingElapsedTimer(true);
+  },
+);
 
 onActivated(() => {
   gridClipboardActive = true;
@@ -13656,6 +13837,7 @@ defineExpose({
   onToolbarRefresh,
   onToolbarCommit,
   onToolbarRollback,
+  prepareFullReload,
   resetInfiniteScrollState,
   showDdl: showTableInfo,
   toggleDdl: toggleTableInfo,
@@ -13847,6 +14029,7 @@ function buildExtractorContextItems(destination: "copy" | "export" = "copy"): Co
   const items: ContextMenuItem[] = [];
   let separatorPending = false;
   for (const extractor of DATA_GRID_COPY_EXTRACTOR_IDS) {
+    if (destination === "copy" && !settingsStore.editorSettings.dataGridVisibleCopyExtractors.includes(extractor)) continue;
     if (extractor === "raw" && !canCopyWithExtractor(extractor)) continue;
     const descriptor = DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor];
     if (descriptor.separatorBefore) {
@@ -13903,6 +14086,12 @@ function copySubmenu(): ContextMenuItem {
       label: t("grid.copyExtractorConfigure"),
       icon: Settings2,
       action: openExtractorConfiguration,
+    },
+    {
+      label: t("grid.copyExtractorAdvancedCopy"),
+      icon: Copy,
+      action: openAdvancedCopy,
+      disabled: !copyPreferenceMenuItems.value.some((item) => !item.disabled && canCopyAdvancedFormat(item.value)),
     },
     defaultCopyPreferenceContextItem(),
     { label: "", separator: true },
@@ -14082,6 +14271,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       headerColumn: !!contextHeaderColumn.value,
       contextColumn: !!contextColumn.value,
       canCopyAlterSql: canCopyAlterColumnSql.value,
+      canCopyMetadata: true,
       canCopyComment: contextCopyableColumnComments.value.length > 0,
       canFilter: canUseWhereSearch.value,
       hasSort: !!sortCol.value,
@@ -14101,6 +14291,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 count: selectedColumnNamesForCopy.value.length,
               })
             : t("grid.copyColumnName"),
+        copyMetadata: t("grid.copyColumnMetadata"),
         copyComment: t("grid.copyColumnComment"),
         copyNames: t("grid.copyColumnNames"),
         details: t("grid.openColumnDetailsDialog"),
@@ -14134,6 +14325,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         copyNames: openCopyAllColumnNamesDialog,
         details: openContextColumnDetailDialog,
         copyAlterSql: copyAlterColumnSql,
+        copyMetadata: copyContextColumnMetadata,
         sort: applyContextSort,
         freezeToColumn: () => {
           const idx = contextHeaderVisibleColIdx.value;
@@ -14889,6 +15081,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                             v-else-if="isBooleanGridCell(displayItems[cell.recordIndex], cell.valueIndex)"
                             v-model="booleanEditorModelValue"
                             :values="BOOLEAN_CELL_EDITOR_VALUES"
+                            :display-values="booleanEditorDisplayValues"
                             :nullable="isBooleanGridColumnNullable(cell.valueIndex)"
                             :initial-null="isGridCellInitialNull(displayItems[cell.recordIndex]?.id, cell.valueIndex)"
                             cell-layout="transpose"
@@ -15595,6 +15788,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           v-else-if="isBooleanGridCell(getRowItem(canvasEditingCell.rowId), canvasEditingCell.actualColIdx)"
                           v-model="booleanEditorModelValue"
                           :values="BOOLEAN_CELL_EDITOR_VALUES"
+                          :display-values="booleanEditorDisplayValues"
                           :nullable="isBooleanGridColumnNullable(canvasEditingCell.actualColIdx)"
                           :initial-null="isGridCellInitialNull(canvasEditingCell.rowId, canvasEditingCell.actualColIdx)"
                           @cancel="cancelEdit"
@@ -15823,6 +16017,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               v-else-if="isBooleanGridCell(item, col.actualColIdx)"
                               v-model="booleanEditorModelValue"
                               :values="BOOLEAN_CELL_EDITOR_VALUES"
+                              :display-values="booleanEditorDisplayValues"
                               :nullable="isBooleanGridColumnNullable(col.actualColIdx)"
                               :initial-null="isGridCellInitialNull(item.id, col.actualColIdx)"
                               @cancel="cancelEdit"
@@ -16381,11 +16576,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           <Tooltip>
             <TooltipTrigger as-child>
               <span class="block min-w-0 max-w-full truncate opacity-60 cursor-pointer hover:opacity-100" data-result-sql @click="copyUserFacingSql" @contextmenu="onContextMenu">
+                <span v-if="result.sqlPage">{{ t("grid.currentPageSql") }}: </span>
                 {{ sqlOneLiner }}
               </span>
             </TooltipTrigger>
             <TooltipContent side="top" class="max-w-md">
+              <div v-if="result.sqlPage" class="mb-1 font-medium">{{ t("grid.currentPageSql") }}</div>
               <pre class="text-xs font-mono whitespace-pre-wrap">{{ userFacingSql }}</pre>
+              <p v-if="result.sqlPage?.probe" class="mt-2 text-xs">{{ t("grid.pageProbeDescription", { count: result.sqlPage.executedLimit }) }}</p>
+              <template v-if="actualExecutionSql && actualExecutionSql.trim() !== userFacingSql.trim()">
+                <div class="mt-3 mb-1 font-medium">{{ t("grid.actualExecutionSql") }}</div>
+                <pre class="max-h-48 overflow-auto text-xs font-mono whitespace-pre-wrap">{{ actualExecutionSql }}</pre>
+              </template>
             </TooltipContent>
           </Tooltip>
         </CustomContextMenu>
@@ -16451,6 +16653,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       v-model:column-open="columnDetailDialogOpen"
       :row-detail="rowDetail"
       :column-detail="columnDetail"
+      :database-type="resolvedDatabaseType"
       :type-color-class="typeColorClass"
       @navigate-row="navigateRowDetail"
       @navigate-column="navigateColumnDetail"
@@ -16531,7 +16734,32 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       </DialogContent>
     </Dialog>
 
-    <DataGridExtractorDialog v-model:open="extractorConfigOpen" :preference="selectedCopyPreference" :options="settingsStore.editorSettings.dataGridExtractorOptions" :items="copyPreferenceMenuItems" :preview="previewWithPreference" @save="saveExtractorConfiguration" />
+    <DataGridExtractorDialog
+      v-model:open="extractorConfigOpen"
+      mode="configure"
+      :preference="selectedCopyPreference"
+      :source-table-name="props.tableMeta?.tableName"
+      :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
+      :options="settingsStore.editorSettings.dataGridExtractorOptions"
+      :items="copyPreferenceMenuItems"
+      :visible-items="visibleCopyExtractorItems"
+      :preview="previewWithPreference"
+      @save="saveExtractorConfiguration"
+    />
+    <DataGridExtractorDialog
+      v-model:open="advancedCopyOpen"
+      mode="copy"
+      :preference="selectedCopyPreference"
+      :source-table-name="props.tableMeta?.tableName"
+      :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
+      :options="settingsStore.editorSettings.dataGridExtractorOptions"
+      :items="copyPreferenceMenuItems"
+      :visible-items="visibleCopyExtractorItems"
+      :preview="previewAdvancedCopy"
+      :preview-session-key="advancedCopyGeneration"
+      :can-copy="canCopyAdvancedFormat"
+      :copy="copyAdvancedFormat"
+    />
     <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />
     <GridSnapshotDialog v-model:open="gridSnapshotOpen" :source="gridSnapshotSource" />
     <DataGridFilterModeOrderDialog v-model:open="filterModeOrderDialogOpen" :database-type="resolvedDatabaseType" :options="supportedFilterModeOptions" @saved="onFilterModeOrderSaved" />

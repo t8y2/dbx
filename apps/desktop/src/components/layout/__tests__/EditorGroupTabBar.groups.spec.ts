@@ -222,6 +222,102 @@ describe("EditorGroupTabBar group behavior", () => {
     }
   });
 
+  it("marks the active horizontal grouped tab with a primary edge accent", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres", color: "#3b82f6" } as ConnectionConfig];
+    settings.editorSettings.appLayout = "separated";
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabPlacement = "top";
+    const activeTabId = store.createTab("pg-1", "app", "PG 1", "query");
+    store.createTab("pg-1", "app", "PG 2", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), activeTabId, pinia);
+    const styles = document.createElement("style");
+    styles.textContent = `html { font-size: 16px; } .h-full { height: 100%; }\n${sharedStyles}`;
+    document.head.appendChild(styles);
+
+    try {
+      await settle();
+      // Exactly one pill carries the active state; the CSS accent keys off it.
+      const activeTabs = host.querySelectorAll('.tab-group-tab[data-active-tab="true"]');
+      expect(activeTabs).toHaveLength(1);
+      expect(activeTabs[0]!.getAttribute("data-tab-id")).toBe(activeTabId);
+      // The accent is a ::before pseudo-element, so assert it on the parsed
+      // stylesheet rather than a computed style: it must paint the active
+      // grouped tab with the primary accent, not the group color, so it
+      // stays findable among several groups (issue #12485).
+      const selectors: string[] = [];
+      const heights = new Set<string>();
+      for (const sheet of document.styleSheets) {
+        for (const rule of sheet.cssRules) {
+          const styleRule = rule as CSSStyleRule;
+          if (styleRule.selectorText?.includes(".tab-group-tab") && styleRule.selectorText.includes('[data-active-tab="true"]') && styleRule.selectorText.endsWith("::before")) {
+            selectors.push(styleRule.selectorText);
+            // Geometry survives happy-dom's parser; var() paints do not.
+            heights.add(styleRule.style.getPropertyValue("height"));
+          }
+        }
+      }
+      expect(selectors.length).toBeGreaterThan(0);
+      expect([...heights]).toContain("3px");
+      // The paint itself: the rule block must use the primary accent token so
+      // the active tab reads as "the chosen one", distinct from every group's
+      // own colored rail.
+      const ruleStart = sharedStyles.indexOf('.tab-group-tab[data-active-tab="true"]::before');
+      expect(ruleStart).toBeGreaterThan(-1);
+      const ruleBlock = sharedStyles.slice(ruleStart, sharedStyles.indexOf("}", ruleStart) + 1);
+      expect(ruleBlock).toContain("--app-tab-active-accent");
+    } finally {
+      app.unmount();
+      host.remove();
+      styles.remove();
+    }
+  });
+
+  it.each(["classic", "separated"] as const)("keeps configured connection colors on inactive horizontal tabs when grouping is off in %s layout", async (layout) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres", color: "#3b82f6" } as ConnectionConfig, { id: "pg-2", name: "Auto", db_type: "postgres", driver_profile: "postgres", color: "" } as ConnectionConfig];
+    settings.editorSettings.appLayout = layout;
+    settings.editorSettings.tabGroupMode = "none";
+    settings.editorSettings.tabPlacement = "top";
+    settings.editorSettings.colorizeConnectionTabs = true;
+    const activeTabId = store.createTab("pg-1", "app", "PG 1", "query");
+    const configuredTabId = store.createTab("pg-1", "app", "PG 2", "query");
+    const autoTabId = store.createTab("pg-2", "app", "PG 3", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), activeTabId, pinia);
+
+    try {
+      for (const placement of ["top", "bottom"] as const) {
+        settings.editorSettings.tabPlacement = placement;
+        await settle();
+        const activeTab = host.querySelector<HTMLElement>(`[data-tab-id="${activeTabId}"]`)!;
+        const configuredTab = host.querySelector<HTMLElement>(`[data-tab-id="${configuredTabId}"]`)!;
+        const autoTab = host.querySelector<HTMLElement>(`[data-tab-id="${autoTabId}"]`)!;
+        const activeBackground = activeTab.style.getPropertyValue("--app-tab-background");
+        const configuredBackground = configuredTab.style.getPropertyValue("--app-tab-background");
+        expect(configuredTab.getAttribute("data-active-tab")).toBe("false");
+        // A color the user picked in the connection settings keeps marking its
+        // tabs when no group header/rail carries it; auto-generated hues stay
+        // quiet and the active tab still reads stronger than its peers.
+        expect(configuredBackground).toBe(layout === "classic" ? "rgba(59, 130, 246, 0.07)" : "rgba(59, 130, 246, 0.09)");
+        expect(autoTab.style.getPropertyValue("--app-tab-background")).toBe("");
+        expect(activeBackground).toBe("rgba(59, 130, 246, 0.24)");
+      }
+
+      // Turning the connection-tab colors off must silence the inactive wash
+      // even for a configured connection color.
+      settings.editorSettings.colorizeConnectionTabs = false;
+      await settle();
+      expect(host.querySelector<HTMLElement>(`[data-tab-id="${configuredTabId}"]`)!.style.getPropertyValue("--app-tab-background")).toBe("");
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
   it("renders one header per connection cluster and collapses it to a count badge", async () => {
     const store = useQueryStore();
     const settings = useSettingsStore();

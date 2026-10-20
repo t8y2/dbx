@@ -905,7 +905,19 @@ export interface AiContextTarget extends AiNamespaceSource {
 export async function buildAiContext(
   tab: AiContextTarget,
   connection: ConnectionConfig,
-  options: { maxTables?: number; maxColumnsPerTable?: number; maxIndexesPerTable?: number; maxFksPerTable?: number; databases?: string[]; mentionedTables?: AiTableMention[]; sqlFiles?: AiSqlFileContext[]; csvFiles?: AiCsvFileContext[]; selections?: AiSelectionContext[] } = {},
+  options: {
+    maxTables?: number;
+    maxColumnsPerTable?: number;
+    maxIndexesPerTable?: number;
+    maxFksPerTable?: number;
+    databases?: string[];
+    mentionedTables?: AiTableMention[];
+    sqlFiles?: AiSqlFileContext[];
+    csvFiles?: AiCsvFileContext[];
+    selections?: AiSelectionContext[];
+    includeQueryResult?: boolean;
+    excludeQueryResult?: boolean;
+  } = {},
 ): Promise<AiContext> {
   const maxTables = options.maxTables ?? 50;
   const maxColumnsPerTable = options.maxColumnsPerTable ?? 40;
@@ -1063,7 +1075,7 @@ export async function buildAiContext(
     schema,
     currentSql: currentCollectionName ?? tab.sql ?? "",
     lastError: extractLastError(tab.result),
-    lastResultPreview: formatResultPreview(tab.result),
+    lastResultPreview: (options.includeQueryResult !== undefined ? options.includeQueryResult : options.excludeQueryResult !== undefined ? !options.excludeQueryResult : false) ? formatResultPreview(tab.result) : undefined,
     tables,
     sqlFiles: options.sqlFiles ?? [],
     csvFiles: options.csvFiles ?? [],

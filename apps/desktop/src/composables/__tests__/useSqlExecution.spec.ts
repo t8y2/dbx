@@ -141,6 +141,22 @@ describe("useSqlExecution", () => {
     vi.mocked(objectMetadataCache.invalidateObjectMetadataCache).mockClear();
   });
 
+  it.each([
+    ["pg", "SELECT data ? 'name' FROM events"],
+    ["oracle", "SELECT 1 FROM DUAL@remote_db"],
+    ["mysql", "CREATE PROCEDURE p() BEGIN label_1: LOOP LEAVE label_1; END LOOP; END"],
+    ["sqlserver", "DECLARE @id int; SET @id = 1; SELECT @id;"],
+  ])("does not mistake Kingbase %s server syntax for template parameters", async (mode, sql) => {
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>({ ...connection("kingbase"), database_info: { compatibilityMode: mode } });
+    const execute = vi.spyOn(useQueryStore(), "executeCurrentSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => activeConnection.value), executableSql: computed(() => sql), activeOutputView: ref("result") });
+    await execution.tryExecute();
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(execute).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+  });
+
   it("executes Neo4j graph patterns without a SQL parameter dialog", async () => {
     const sql = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"})\nRETURN p.name, p.job, c.name';
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("neo4j"), sql });
@@ -219,6 +235,30 @@ describe("useSqlExecution", () => {
 
     expect(invalidateObjectMetadata).toHaveBeenCalledWith({ connectionId: "conn-1", database: "app", schema: "public" });
     expect(refreshObjects).toHaveBeenCalledWith("conn-1", "app", "public");
+  });
+
+  it("rejects execution when the target tab is already executing", async () => {
+    const sql = "SELECT 1;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql, isExecuting: true });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql");
+    const onExecutionCancelled = vi.fn();
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+      onExecutionCancelled,
+    });
+
+    const outcome = await execution.tryExecute(undefined, { editorViewportRequestId: 123 });
+
+    expect(outcome).toEqual({ status: "not-started", reason: "busy", tabId: "tab-1" });
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(onExecutionCancelled).toHaveBeenCalledWith(123);
   });
 
   it("sends every placeholder syntax and @set unchanged when substitution is disabled", async () => {

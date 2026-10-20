@@ -9,6 +9,7 @@ use redis::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    fs,
     future::Future,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -405,6 +406,7 @@ pub fn redis_connection_test_stub() -> RedisConnection {
         node_routes: Vec::new(),
         tls: false,
         tls_insecure: false,
+        tls_certificates: None,
         username: String::new(),
         password: String::new(),
         scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
@@ -423,6 +425,7 @@ pub struct RedisClusterPool {
     pub node_routes: Vec<RedisNodeRoute>,
     pub tls: bool,
     pub tls_insecure: bool,
+    pub tls_certificates: Option<Box<redis::TlsCertificates>>,
     pub username: String,
     pub password: String,
     scan_sessions: Box<Mutex<RedisClusterScanSessions>>,
@@ -717,9 +720,10 @@ pub async fn connect_standalone(
     port: u16,
     timeout: std::time::Duration,
 ) -> Result<redis::aio::MultiplexedConnection, String> {
+    let certificates = load_redis_tls_certificates(config)?;
     let mut last_error = None;
     for info in standalone_connection_infos(config, host, port)? {
-        let client = redis::Client::open(info).map_err(|e| format!("Redis connection failed: {e}"))?;
+        let client = build_redis_client(info, certificates.as_ref())?;
         match connect_client_with_timeout(client, timeout, "Redis").await {
             Ok(con) => return Ok(con),
             Err(err) if last_error.is_none() || is_redis_auth_error(&err) => {
@@ -813,18 +817,22 @@ async fn sentinel_master_client(
     nodes: &[ConnectionInfo],
     service_name: &str,
 ) -> Result<redis::Client, String> {
-    let masters = sentinel_masters(nodes).await.map_err(|error| error.to_string())?;
+    let certificates = load_redis_tls_certificates(config)?;
+    let masters = sentinel_masters(nodes, certificates.as_ref()).await.map_err(|error| error.to_string())?;
     for master in masters {
         let Some(endpoint) = sentinel_eligible_master(&master, service_name) else { continue };
-        let client = redis::Client::open(connection_info(
-            &endpoint.host,
-            endpoint.port,
-            config.ssl,
-            config.redis_tls_insecure(),
-            &config.username,
-            &config.password,
-            0,
-        )?)
+        let client = build_redis_client(
+            connection_info(
+                &endpoint.host,
+                endpoint.port,
+                config.ssl,
+                config.redis_tls_insecure(),
+                &config.username,
+                &config.password,
+                0,
+            )?,
+            certificates.as_ref(),
+        )
         .map_err(|error| error.to_string())?;
         let mut con = client
             .get_multiplexed_async_connection_with_config(&redis_async_connection_config())
@@ -837,22 +845,30 @@ async fn sentinel_master_client(
     Err(format!("Master '{service_name}' not found among healthy Sentinel masters"))
 }
 
-async fn sentinel_masters(nodes: &[ConnectionInfo]) -> redis::RedisResult<Vec<HashMap<String, String>>> {
+async fn sentinel_masters(
+    nodes: &[ConnectionInfo],
+    certificates: Option<&redis::TlsCertificates>,
+) -> Result<Vec<HashMap<String, String>>, String> {
     let mut last_error = None;
     for info in nodes {
         let result = async {
-            let client = redis::Client::open(info.clone())?;
-            let mut con = client.get_multiplexed_async_connection_with_config(&redis_async_connection_config()).await?;
+            let client = build_redis_client(info.clone(), certificates)?;
+            let mut con = client
+                .get_multiplexed_async_connection_with_config(&redis_async_connection_config())
+                .await
+                .map_err(|error| error.to_string())?;
             let result = redis::cmd("SENTINEL").arg("MASTERS").query_async(&mut con).await;
             match result {
                 // Match the old Sentinel client's single reconnect on an I/O
                 // query failure, followed by trying the next configured node.
                 Err(error) if error.is_io_error() || error.is_unrecoverable_error() => {
-                    let mut con =
-                        client.get_multiplexed_async_connection_with_config(&redis_async_connection_config()).await?;
-                    redis::cmd("SENTINEL").arg("MASTERS").query_async(&mut con).await
+                    let mut con = client
+                        .get_multiplexed_async_connection_with_config(&redis_async_connection_config())
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    redis::cmd("SENTINEL").arg("MASTERS").query_async(&mut con).await.map_err(|error| error.to_string())
                 }
-                result => result,
+                result => result.map_err(|error| error.to_string()),
             }
         }
         .await;
@@ -861,9 +877,7 @@ async fn sentinel_masters(nodes: &[ConnectionInfo]) -> redis::RedisResult<Vec<Ha
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| {
-        redis::RedisError::from((redis::ErrorKind::EmptySentinelList, "At least one Sentinel is required"))
-    }))
+    Err(last_error.unwrap_or_else(|| "At least one Sentinel is required".to_string()))
 }
 
 fn sentinel_eligible_master(metadata: &HashMap<String, String>, service_name: &str) -> Option<RedisNodeEndpoint> {
@@ -916,15 +930,19 @@ pub async fn discover_sentinel_master(
         return Err("Redis Sentinel master name is required".to_string());
     }
 
-    let client = redis::Client::open(connection_info(
-        host,
-        port,
-        config.redis_sentinel_tls,
-        config.redis_tls_insecure(),
-        &config.redis_sentinel_username,
-        &config.redis_sentinel_password,
-        0,
-    )?)
+    let certificates = load_redis_tls_certificates(config)?;
+    let client = build_redis_client(
+        connection_info(
+            host,
+            port,
+            config.redis_sentinel_tls,
+            config.redis_tls_insecure(),
+            &config.redis_sentinel_username,
+            &config.redis_sentinel_password,
+            0,
+        )?,
+        certificates.as_ref(),
+    )
     .map_err(|e| format!("Redis Sentinel connect failed: {e}"))?;
     let mut con = connect_client_with_timeout(client, connection_timeout(), "Redis Sentinel").await?;
     let raw = tokio::time::timeout(
@@ -941,6 +959,7 @@ pub async fn discover_sentinel_master(
 pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPool, String> {
     let seed_nodes = redis_cluster_seed_nodes(config)?;
     let timeout = Duration::from_secs(config.effective_connect_timeout_secs());
+    let certificates = load_redis_tls_certificates(config)?;
     let mut last_error = None;
     for auth in redis_auth_candidates(&config.username, &config.password) {
         let cluster_nodes: Vec<ConnectionInfo> = seed_nodes
@@ -957,10 +976,11 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
                 )
             })
             .collect::<Result<_, _>>()?;
-        let client = ClusterClient::builder(cluster_nodes)
-            .connection_timeout(timeout)
-            .build()
-            .map_err(|e| format!("Redis cluster connection failed: {e}"))?;
+        let mut builder = ClusterClient::builder(cluster_nodes).connection_timeout(timeout);
+        if let Some(certificates) = &certificates {
+            builder = builder.certs(certificates.clone());
+        }
+        let client = builder.build().map_err(|e| format!("Redis cluster connection failed: {e}"))?;
         let mut con = match tokio::time::timeout(timeout, client.get_async_connection())
             .await
             .map_err(|_| format!("Redis cluster connection timed out ({}s)", timeout.as_secs()))?
@@ -993,6 +1013,7 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
                     &seed_routes,
                     config.ssl,
                     config.redis_tls_insecure(),
+                    certificates.as_ref(),
                     &auth.username,
                     &auth.password,
                 )
@@ -1009,6 +1030,7 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
                     node_routes,
                     tls: config.ssl,
                     tls_insecure: config.redis_tls_insecure(),
+                    tls_certificates: certificates.clone().map(Box::new),
                     username: auth.username,
                     password: auth.password,
                     scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
@@ -1032,11 +1054,13 @@ pub async fn discover_cluster_slot_ranges_from_routes(
     seed_routes: &[RedisNodeRoute],
 ) -> Result<(RedisClusterAuth, Vec<RedisClusterSlotRange>), String> {
     let mut last_error = None;
+    let certificates = load_redis_tls_certificates(config)?;
     for auth in redis_auth_candidates(&config.username, &config.password) {
         match cluster_slot_ranges_from_routes(
             seed_routes,
             config.ssl,
             config.redis_tls_insecure(),
+            certificates.as_ref(),
             &auth.username,
             &auth.password,
         )
@@ -1079,6 +1103,7 @@ pub async fn connect_routed_cluster(
         node_routes,
         tls: config.ssl,
         tls_insecure: config.redis_tls_insecure(),
+        tls_certificates: load_redis_tls_certificates(config)?.map(Box::new),
         username: auth.username,
         password: auth.password,
         scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
@@ -1246,6 +1271,50 @@ fn redis_sentinel_master_endpoint(value: RedisRawValue) -> Result<RedisNodeEndpo
     Ok(RedisNodeEndpoint { host, port })
 }
 
+/// Loads Redis TLS material from the connection's certificate paths.
+///
+/// `None` keeps redis-rs on its default trust store. A CA file adds a private
+/// root without disabling verification, and a client cert/key pair enables
+/// mutual TLS (Redis 6+ `tls-auth-clients yes`). The paths are loaded whenever
+/// they are configured because Sentinel nodes can use their own TLS switch
+/// (`redis_sentinel_tls`) independently of the data connection.
+fn load_redis_tls_certificates(config: &ConnectionConfig) -> Result<Option<redis::TlsCertificates>, String> {
+    let ca_path = config.ca_cert_path.trim();
+    let client_cert_path = config.client_cert_path.trim();
+    let client_key_path = config.client_key_path.trim();
+    if client_cert_path.is_empty() != client_key_path.is_empty() {
+        return Err("Redis TLS client certificate and key must be configured together".to_string());
+    }
+    if ca_path.is_empty() && client_cert_path.is_empty() {
+        return Ok(None);
+    }
+    let read = |path: &str, label: &str| {
+        fs::read(path).map_err(|error| format!("Failed to read Redis TLS {label} '{path}': {error}"))
+    };
+    let root_cert = if ca_path.is_empty() { None } else { Some(read(ca_path, "CA certificate")?) };
+    let client_tls = if client_cert_path.is_empty() {
+        None
+    } else {
+        Some(redis::ClientTlsConfig {
+            client_cert: read(client_cert_path, "client certificate")?,
+            client_key: read(client_key_path, "client key")?,
+        })
+    };
+    Ok(Some(redis::TlsCertificates { client_tls, root_cert }))
+}
+
+fn build_redis_client(
+    info: ConnectionInfo,
+    certificates: Option<&redis::TlsCertificates>,
+) -> Result<redis::Client, String> {
+    let tls_addr = matches!(info.addr(), ConnectionAddr::TcpTls { .. });
+    let result = match (tls_addr, certificates) {
+        (true, Some(certificates)) => redis::Client::build_with_tls(info, certificates.clone()),
+        _ => redis::Client::open(info),
+    };
+    result.map_err(|error| format!("Redis connection failed: {error}"))
+}
+
 fn connection_info(
     host: &str,
     port: u16,
@@ -1363,30 +1432,26 @@ pub async fn connect_direct_node(
     endpoint: &RedisNodeEndpoint,
     tls: bool,
     insecure: bool,
+    certificates: Option<&redis::TlsCertificates>,
     username: &str,
     password: &str,
 ) -> Result<redis::aio::MultiplexedConnection, String> {
-    connect_direct_node_in_db(endpoint, tls, insecure, username, password, 0).await
+    connect_direct_node_in_db(endpoint, tls, insecure, certificates, username, password, 0).await
 }
 
 async fn connect_direct_node_in_db(
     endpoint: &RedisNodeEndpoint,
     tls: bool,
     insecure: bool,
+    certificates: Option<&redis::TlsCertificates>,
     username: &str,
     password: &str,
     db: u32,
 ) -> Result<redis::aio::MultiplexedConnection, String> {
-    let client = redis::Client::open(connection_info(
-        &endpoint.host,
-        endpoint.port,
-        tls,
-        insecure,
-        username,
-        password,
-        i64::from(db),
-    )?)
-    .map_err(|e| format!("Redis connection failed: {e}"))?;
+    let client = build_redis_client(
+        connection_info(&endpoint.host, endpoint.port, tls, insecure, username, password, i64::from(db))?,
+        certificates,
+    )?;
     connect_client(client).await
 }
 
@@ -1397,8 +1462,9 @@ pub async fn connect_monitor(
     timeout: std::time::Duration,
 ) -> Result<redis::aio::Monitor, String> {
     let mut last_error = String::new();
+    let certificates = load_redis_tls_certificates(config)?;
     for info in standalone_connection_infos(config, host, port)? {
-        let client = redis::Client::open(info).map_err(|error| error.to_string())?;
+        let client = build_redis_client(info, certificates.as_ref())?;
         let connect = async {
             let mut validation =
                 client.get_multiplexed_async_connection_with_config(&redis_async_connection_config()).await?;
@@ -1427,17 +1493,20 @@ pub async fn connect_pubsub(
     timeout: std::time::Duration,
 ) -> Result<redis::aio::PubSub, String> {
     let mut last_error = None;
+    let certificates = load_redis_tls_certificates(config)?;
     for auth in redis_auth_candidates(&config.username, &config.password) {
-        let client = redis::Client::open(connection_info(
-            host,
-            port,
-            config.ssl,
-            config.redis_tls_insecure(),
-            &auth.username,
-            &auth.password,
-            redis_database_index(config),
-        )?)
-        .map_err(|e| format!("Redis connection failed: {e}"))?;
+        let client = build_redis_client(
+            connection_info(
+                host,
+                port,
+                config.ssl,
+                config.redis_tls_insecure(),
+                &auth.username,
+                &auth.password,
+                redis_database_index(config),
+            )?,
+            certificates.as_ref(),
+        )?;
         match tokio::time::timeout(timeout, client.get_async_pubsub()).await {
             Ok(Ok(pubsub)) => return Ok(pubsub),
             Ok(Err(err)) => {
@@ -2175,15 +2244,23 @@ pub async fn cluster_master_nodes(pool: &RedisClusterPool) -> Result<Vec<RedisNo
             &pool.seed_routes,
             pool.tls,
             pool.tls_insecure,
+            pool.tls_certificates.as_deref(),
             &pool.username,
             &pool.password,
         )
         .await
         .map(|slot_ranges| unique_master_nodes(&slot_ranges));
     }
-    cluster_slot_ranges_from_seeds(&pool.seed_nodes, pool.tls, pool.tls_insecure, &pool.username, &pool.password)
-        .await
-        .map(|slot_ranges| unique_master_nodes(&slot_ranges))
+    cluster_slot_ranges_from_seeds(
+        &pool.seed_nodes,
+        pool.tls,
+        pool.tls_insecure,
+        pool.tls_certificates.as_deref(),
+        &pool.username,
+        &pool.password,
+    )
+    .await
+    .map(|slot_ranges| unique_master_nodes(&slot_ranges))
 }
 
 pub async fn flush_cluster(pool: &RedisClusterPool) -> Result<(), String> {
@@ -2204,23 +2281,25 @@ async fn cluster_slot_ranges_from_seeds(
     seed_nodes: &[RedisNodeEndpoint],
     tls: bool,
     insecure: bool,
+    certificates: Option<&redis::TlsCertificates>,
     username: &str,
     password: &str,
 ) -> Result<Vec<RedisClusterSlotRange>, String> {
     let seed_routes = identity_routes(seed_nodes);
-    cluster_slot_ranges_from_routes(&seed_routes, tls, insecure, username, password).await
+    cluster_slot_ranges_from_routes(&seed_routes, tls, insecure, certificates, username, password).await
 }
 
 async fn cluster_slot_ranges_from_routes(
     seed_routes: &[RedisNodeRoute],
     tls: bool,
     insecure: bool,
+    certificates: Option<&redis::TlsCertificates>,
     username: &str,
     password: &str,
 ) -> Result<Vec<RedisClusterSlotRange>, String> {
     let mut last_error = None;
     for route in seed_routes {
-        let mut con = match connect_direct_node(&route.connect, tls, insecure, username, password).await {
+        let mut con = match connect_direct_node(&route.connect, tls, insecure, certificates, username, password).await {
             Ok(con) => con,
             Err(err) => {
                 last_error = Some(err);
@@ -2345,7 +2424,11 @@ async fn native_cluster_database_connection(pool: &RedisClusterPool, db: u32) ->
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let client = ClusterClient::builder(nodes).database_id(i64::from(db)).build().map_err(|error| error.to_string())?;
+    let mut builder = ClusterClient::builder(nodes).database_id(i64::from(db));
+    if let Some(certificates) = &pool.tls_certificates {
+        builder = builder.certs((**certificates).clone());
+    }
+    let client = builder.build().map_err(|error| error.to_string())?;
     let initialized = tokio::time::timeout(connection_timeout(), client.get_async_connection())
         .await
         .map_err(|_| format!("Redis cluster db{db} connection timed out"))?
@@ -2409,8 +2492,10 @@ pub async fn connect_cluster_node_in_db(
     advertised_endpoint: &RedisNodeEndpoint,
     db: u32,
 ) -> Result<redis::aio::MultiplexedConnection, String> {
-    let client = redis::Client::open(cluster_node_connection_info(pool, advertised_endpoint, db)?)
-        .map_err(|error| format!("Redis connection failed: {error}"))?;
+    let client = build_redis_client(
+        cluster_node_connection_info(pool, advertised_endpoint, db)?,
+        pool.tls_certificates.as_deref(),
+    )?;
     connect_client(client).await
 }
 
@@ -5448,16 +5533,16 @@ mod tests {
 
     use super::{
         classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_auth_error,
-        is_redis_command_denied_error, is_redis_json_type, parse_cluster_slots, parse_command_argv,
-        parse_database_count, parse_redis_endpoint, parse_scan_keys, parse_stream_consumers, parse_stream_entries,
-        parse_stream_groups, parse_stream_pending_entries, redis_auth_candidates, redis_blob_display_text,
-        redis_blob_from_bytes, redis_cluster_slot, redis_command_raw_to_json, redis_database_index,
-        redis_key_bytes_to_display, redis_key_bytes_to_raw, redis_key_matches_query, redis_key_raw_to_bytes,
-        redis_key_value_preview, redis_sentinel_master_endpoint, redis_value_matches_query, redis_value_to_bytes,
-        standalone_connection_infos, RedisAuthCandidate, RedisBlob, RedisBlobEncoding, RedisClusterSlotRange,
-        RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisListItem, RedisNodeEndpoint, RedisNodeRoute,
-        RedisRawValue, RedisSetItem, RedisStreamConsumer, RedisStreamEntry, RedisStreamField, RedisStreamGroup,
-        RedisStreamPendingEntry, RedisValue, RedisValueData, RedisZsetItem,
+        is_redis_command_denied_error, is_redis_json_type, load_redis_tls_certificates, parse_cluster_slots,
+        parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys, parse_stream_consumers,
+        parse_stream_entries, parse_stream_groups, parse_stream_pending_entries, redis_auth_candidates,
+        redis_blob_display_text, redis_blob_from_bytes, redis_cluster_slot, redis_command_raw_to_json,
+        redis_database_index, redis_key_bytes_to_display, redis_key_bytes_to_raw, redis_key_matches_query,
+        redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint, redis_value_matches_query,
+        redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob, RedisBlobEncoding,
+        RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisListItem,
+        RedisNodeEndpoint, RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamConsumer, RedisStreamEntry,
+        RedisStreamField, RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData, RedisZsetItem,
     };
     use dbx_types::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -5958,6 +6043,86 @@ mod tests {
         .await
         .is_err());
         assert!(expired.commands.is_empty());
+    }
+
+    /// Replays the standalone-Redis pagination sequence from issue #12640: a large
+    /// hash is read once through the scoped value API, then continued through the
+    /// scoped load-more API with the same scope (the pairing the desktop app uses).
+    /// Every field must eventually arrive exactly once, and a continuation under a
+    /// different (unseoped) scope must fail instead of restarting the walk.
+    #[tokio::test]
+    async fn scoped_hash_pagination_walks_large_collections_without_repeating_the_first_page() {
+        const FIELDS: usize = 4000;
+        const PAGE: usize = 200;
+        let scope = super::RedisOperationScope { connection_id: "issue-12640-standalone".to_string(), db: 0 };
+
+        // Real HSCAN cursors: one batch of `PAGE` fields per server round trip.
+        let mut responses = vec![bulk("hash"), RedisRawValue::Int(-1), RedisRawValue::Int(FIELDS as i64)];
+        let pages = FIELDS.div_ceil(PAGE);
+        for page in 0..pages {
+            let cursor = if page + 1 == pages { "0".to_string() } else { (page + 1).to_string() };
+            let pairs = (page * PAGE..((page + 1) * PAGE).min(FIELDS))
+                .map(|index| (format!("field:{index}"), format!("value:{index}")))
+                .collect();
+            responses.push(hscan_response_owned(&cursor, pairs));
+            responses.push(httl_response(PAGE, -1));
+        }
+        let mut con = FakeRedisConnection::new(responses);
+
+        let value = super::get_value_scoped(&mut con, b"issue-12640-hash", &scope).await.unwrap();
+        let RedisValueData::Hash { items: mut seen, scan_cursor, total } = value.data else {
+            panic!("expected hash");
+        };
+        assert_eq!(total, FIELDS as u64);
+        assert_eq!(seen.len(), PAGE, "the first page defaults to the configured page size");
+        let mut cursor = scan_cursor.expect("a 4000-field hash must offer a continuation");
+        assert!(cursor >= super::COLLECTION_OVERFLOW_CURSOR_START, "the continuation is an overflow session marker");
+
+        // The old desktop path continued under the default (unseoped) connection,
+        // which rejected the marker and stopped pagination at the first page.
+        let mut mismatched = FakeRedisConnection::new(vec![]);
+        let error = super::load_more_collection(&mut mismatched, b"issue-12640-hash", "hash", cursor, PAGE, None, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("invalid, expired"), "{error}");
+        assert!(mismatched.commands.is_empty(), "a foreign cursor must not reach the server");
+
+        let mut pages_seen = 1;
+        while cursor != 0 {
+            let page = super::load_more_collection_scoped(
+                &mut con,
+                b"issue-12640-hash",
+                "hash",
+                cursor,
+                PAGE,
+                None,
+                None,
+                &scope,
+            )
+            .await
+            .unwrap();
+            let RedisCollectionPage::Hash { items, scan_cursor: next } = page else {
+                panic!("expected hash");
+            };
+            seen.extend(items);
+            pages_seen += 1;
+            assert!(pages_seen <= pages, "pagination must terminate");
+            match next {
+                Some(next) => {
+                    assert_ne!(next, cursor, "each page must continue with a fresh marker");
+                    cursor = next;
+                }
+                None => break,
+            }
+        }
+
+        assert_eq!(pages_seen, pages);
+        assert_eq!(seen.len(), FIELDS);
+        let unique: std::collections::HashSet<_> = seen.iter().map(|item| item.field.raw_base64.clone()).collect();
+        assert_eq!(unique.len(), FIELDS, "every field arrives exactly once");
+        // Every page came from a fresh HSCAN round trip — no page was re-served from
+        // the start of the hash, which is what a foreign or replayed cursor would do.
+        assert_eq!(con.command_count("HSCAN"), pages);
     }
 
     #[tokio::test]
@@ -7026,7 +7191,7 @@ mod tests {
             .into_iter()
             .map(|node| connection_info("127.0.0.1", node.port(), false, false, "", "", 0).unwrap())
             .collect::<Vec<_>>();
-        assert!(super::sentinel_masters(&nodes).await.unwrap().is_empty());
+        assert!(super::sentinel_masters(&nodes, None).await.unwrap().is_empty());
         first_server.await.unwrap();
         second_server.await.unwrap();
     }
@@ -8692,6 +8857,7 @@ mod tests {
             node_routes: vec![RedisNodeRoute { advertised: advertised.clone(), connect: forwarded.clone() }],
             tls: false,
             tls_insecure: false,
+            tls_certificates: None,
             username: String::new(),
             password: String::new(),
             scan_sessions: Box::new(tokio::sync::Mutex::new(super::RedisClusterScanSessions::default())),
@@ -10715,6 +10881,54 @@ mod tests {
         config.url_params = Some("tls_insecure=true".to_string());
         let mut tls = super::connect_standalone(&config, &config.host, tls_port, timeout).await.unwrap();
         assert_eq!(redis::cmd("PING").query_async::<String>(&mut tls).await.unwrap(), "PONG");
+    }
+
+    #[test]
+    fn redis_tls_certificates_are_loaded_from_configured_paths() {
+        let dir = std::env::temp_dir().join(format!("dbx-redis-tls-{}-{}", std::process::id(), "load"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = dir.join("ca.pem");
+        let cert = dir.join("client.pem");
+        let key = dir.join("client-key.pem");
+        std::fs::write(&ca, b"ca").unwrap();
+        std::fs::write(&cert, b"cert").unwrap();
+        std::fs::write(&key, b"key").unwrap();
+
+        let mut config = redis_test_connection_config();
+        assert!(super::load_redis_tls_certificates(&config).unwrap().is_none());
+
+        config.ca_cert_path = ca.to_string_lossy().to_string();
+        config.client_cert_path = cert.to_string_lossy().to_string();
+        config.client_key_path = key.to_string_lossy().to_string();
+        // Sentinel nodes can enable TLS without enabling it for the data connection.
+        assert!(load_redis_tls_certificates(&config).unwrap().is_some());
+        config.ssl = true;
+        let certificates = load_redis_tls_certificates(&config).unwrap().unwrap();
+        assert_eq!(certificates.root_cert.as_deref(), Some(b"ca".as_slice()));
+        let client_tls = certificates.client_tls.unwrap();
+        assert_eq!(client_tls.client_cert, b"cert");
+        assert_eq!(client_tls.client_key, b"key");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn redis_tls_certificates_require_both_client_files() {
+        let mut config = redis_test_connection_config();
+        config.ssl = true;
+        config.client_cert_path = "/tmp/only-cert.pem".to_string();
+        let error = load_redis_tls_certificates(&config).err().expect("expected certificate error");
+        assert!(error.contains("configured together"), "{error}");
+    }
+
+    #[test]
+    fn redis_tls_certificates_report_unreadable_files() {
+        let mut config = redis_test_connection_config();
+        config.ssl = true;
+        config.ca_cert_path = "/tmp/dbx-missing-ca-certificate.pem".to_string();
+        let error = load_redis_tls_certificates(&config).err().expect("expected certificate error");
+        assert!(error.contains("Failed to read Redis TLS CA certificate"), "{error}");
+        assert!(error.contains("/tmp/dbx-missing-ca-certificate.pem"), "{error}");
     }
 
     fn redis_test_connection_config() -> ConnectionConfig {

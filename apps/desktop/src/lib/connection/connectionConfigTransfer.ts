@@ -1,5 +1,6 @@
 import type { ConnectionConfig, SidebarLayout, TunnelProfile } from "@/types/database";
 import { filterSidebarLayoutByConnectionIds as filterLayoutByConnectionIds, remapSidebarLayoutConnectionIds } from "@/lib/sidebar/sidebarLayout";
+import { buildOracleTnsConnectionString, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
 
 export type ConnectionExportProtection = { mode: "encrypted"; passphrase: string } | { mode: "plaintext" };
 
@@ -66,7 +67,12 @@ export function scrubConnectionForPlaintextExport(connection: ConnectionConfig):
   scrubbed.password = "";
   scrubbed.url_params = scrubUrlParams(scrubbed.url_params);
   scrubbed.init_script = undefined;
-  scrubbed.connection_string = undefined;
+  // An Oracle TNS connection keeps its alias and the TNS_ADMIN directory that
+  // resolves it in `connection_string`. Blanking it drops the directory, so a
+  // re-imported link cannot resolve the alias and has to be reconfigured from
+  // scratch (issue #12672). The value DBX builds carries no credentials, and
+  // the guard below refuses to keep anything else.
+  scrubbed.connection_string = preservedOracleTnsConnectionString(connection);
   scrubbed.redis_sentinel_password = "";
   scrubbed.connection_secrets = {};
   scrubbed.transport_layers = (scrubbed.transport_layers ?? []).map((layer) => {
@@ -126,6 +132,26 @@ function scrubUrlParams(value: string | undefined): string | undefined {
       return /password|passphrase|secret|token|apikey|privatekey|clientsecret/.test(normalized) ? key + "=" : part;
     })
     .join("&");
+}
+
+/**
+ * The only `connection_string` a plaintext bundle keeps: a DBX-built Oracle TNS
+ * string (`jdbc:oracle:thin:@<alias>?TNS_ADMIN=<dir>`), which holds no
+ * credentials of its own — username and password live in their own fields.
+ * Anything else (JDBC URLs, DSNs, ad-hoc strings) is credential-bearing and is
+ * still dropped.
+ */
+function preservedOracleTnsConnectionString(connection: ConnectionConfig): string | undefined {
+  if (connection.db_type !== "oracle" || connection.oracle_connection_type !== "tns") return undefined;
+  const parsed = parseOracleTnsConnectionString(connection.connection_string);
+  if (!parsed?.tnsAdmin) return undefined;
+  // Rebuild the string from the only two fields a plaintext bundle may carry
+  // instead of forwarding the stored one. A query name only has to *decode* to
+  // `user`/`password` to be read as a credential by the JDBC layer, which decodes
+  // every name with URLDecoder and trims it (`?%70assword=`, `?+password=`,
+  // `?password%20=`), so matching names in the raw text cannot prove the string
+  // credential-free. Rebuilding drops every parameter but TNS_ADMIN.
+  return buildOracleTnsConnectionString(parsed.alias, parsed.tnsAdmin);
 }
 
 export function buildConnectionConfigBundle(connections: ConnectionConfig[], layout: SidebarLayout | null | undefined, tunnelProfiles: TunnelProfile[], selectedIds?: Iterable<string>): ConnectionConfigBundle {

@@ -34,6 +34,7 @@ export const contentSurfaceEventNames = [
   "viewTableDdl",
   "editTableStructure",
   "openObjectSource",
+  "openDependencyObject",
   "openObjectTable",
   "openDatabaseSearchTarget",
   "objectSchemaChange",

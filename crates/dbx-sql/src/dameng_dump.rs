@@ -46,29 +46,65 @@ pub struct DamengDumpRequest {
     pub table_exists_action: Option<String>,
 }
 
+/// A bounded trailing slice of a tool's output, for appending to a failure message.
+///
+/// The tool's own log is preferred when it exists, but a parameter error stops the run
+/// before the LOG file is written; the console capture then carries the only copy of the
+/// real reason. Either way the tail is what matters — dexp prints its cause last.
+pub fn diagnostic_tail(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim_end_matches(['\n', '\r']);
+    if trimmed.len() <= max_chars {
+        return trimmed.to_string();
+    }
+    let floor = trimmed.len() - max_chars;
+    let start = floor + trimmed[floor..].find('\n').map_or(0, |i| i + 1);
+    trimmed[start..].to_string()
+}
+
 /// The `USERID` token, always the first argument: `USERID=<user>/<password>@<host>:<port>`.
 /// Password is NOT URL-escaped; Dameng accepts it verbatim. A `/` or `@` inside the user or
-/// password would be parsed as a field separator (the tool parses up to the first `@`), so
-/// callers must reject those up front via [`userid_field_error`] instead of launching.
+/// password would be parsed as a field separator (the tool parses up to the first `@`), and a
+/// space would end the token early, so callers must reject those up front via
+/// [`userid_field_error`] instead of launching.
 pub fn userid_token(user: &str, password: &str, host: &str, port: u16) -> String {
     format!("USERID={user}/{password}@{host}:{port}")
 }
 
 /// Returns the field name whose value cannot be encoded in the `USERID` token
-/// (`/` separates user/password, `@` starts the host part), or `None` if both
-/// are safe to pass.
+/// (`/` separates user/password, `@` starts the host part, a space ends the token),
+/// or `None` if both are safe to pass.
 pub fn userid_field_error(user: &str, password: &str) -> Option<&'static str> {
-    [(user, "username"), (password, "password")]
-        .into_iter()
-        .find_map(|(field, name)| (field.contains('/') || field.contains('@')).then_some(name))
+    [(user, "username"), (password, "password")].into_iter().find_map(|(field, name)| {
+        (field.contains('/') || field.contains('@') || field.contains(char::is_whitespace)).then_some(name)
+    })
+}
+
+/// Render a file/log path for a PARFILE line.
+///
+/// Dameng's PARFILE parser treats a value verbatim: its own documentation lists `"` and `\`
+/// among the characters a FILE/LOG name may not contain, and the documented form is
+/// `FILE=db_str.dmp` (no quotes, forward slashes). Emitting the raw Windows path therefore
+/// breaks in two ways at once — the surrounding quotes are read as part of the file name, and
+/// a Drive letter's `\` can be consumed as an escape. Both failures happen before the tool
+/// writes its LOG file, so the caller only sees an empty log and cannot tell why.
+///
+/// Normalising to forward slashes removes the escape problem (both Windows and the tool accept
+/// them), and quotes are kept only when a space makes the value ambiguous.
+fn parfile_path_value(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    if normalized.contains(' ') {
+        format!("\"{normalized}\"")
+    } else {
+        normalized
+    }
 }
 
 /// Contents of the PARFILE: the non-sensitive parameters, one `KEY=value` per line.
-/// File/log paths are double-quoted so spaces and Windows backslashes survive.
+/// File/log paths are normalised to forward slashes (see [`parfile_path_value`]).
 pub fn build_parfile_contents(req: &DamengDumpRequest) -> String {
     let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("FILE=\"{}\"", req.file_path));
-    lines.push(format!("LOG=\"{}\"", req.log_path));
+    lines.push(format!("FILE={}", parfile_path_value(&req.file_path)));
+    lines.push(format!("LOG={}", parfile_path_value(&req.log_path)));
     if !req.schemas.is_empty() {
         lines.push(format!("SCHEMAS={}", req.schemas.join(",")));
     }
@@ -104,6 +140,35 @@ pub fn build_command(req: &DamengDumpRequest, parfile_path: &str) -> Vec<String>
         format!("PARFILE={parfile_path}"),
     ]
 }
+
+/// Build the message the user sees for a run that did not report success.
+///
+/// `parse_dump_log` can only classify the text it was handed. Two cases leave it without a
+/// usable classification: the tool stops before writing its log file (log and console are
+/// both empty or generic), or it writes a log whose tail carries no recognised marker. The
+/// exit status and the raw output are the only evidence left, so both are folded in here —
+/// a bare "did not report success" tells the user nothing about which parameter upset dexp.
+pub fn failure_message(outcome: &DamengDumpOutcome, exit_code: Option<i32>, text: &str) -> String {
+    let mut message = outcome.error.clone().unwrap_or_else(|| "dexp/dimp did not report success".to_string());
+
+    if let Some(code) = exit_code {
+        if code != 0 {
+            message.push_str(&format!(" (exit code {code})"));
+        }
+    }
+
+    let tail = diagnostic_tail(text, DIAGNOSTIC_TAIL_MAX_CHARS);
+    if !tail.is_empty() && !message.contains(&tail) {
+        message.push_str("\n\n dexp/dimp output:\n");
+        message.push_str(&tail);
+    }
+
+    message
+}
+
+/// How much of the tool's output to attach to a failure message. dexp is chatty on success
+/// and quiet on failure, so a small slice still carries the cause while keeping the UI sane.
+const DIAGNOSTIC_TAIL_MAX_CHARS: usize = 4000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DamengDumpOutcome {
@@ -195,7 +260,79 @@ mod tests {
     #[test]
     fn export_parfile_matches_real_invocation() {
         let par = build_parfile_contents(&req(DamengDumpKind::Export));
-        assert_eq!(par, "FILE=\"/tmp/dbx_dcss.dmp\"\nLOG=\"/tmp/dbx_dcss.log\"\nSCHEMAS=DCSS\nTABLESPACE=N\nDROP=N\n");
+        assert_eq!(par, "FILE=/tmp/dbx_dcss.dmp\nLOG=/tmp/dbx_dcss.log\nSCHEMAS=DCSS\nTABLESPACE=N\nDROP=N\n");
+    }
+
+    #[test]
+    fn export_parfile_normalises_windows_paths() {
+        let mut r = req(DamengDumpKind::Export);
+        r.file_path = r"C:\Users\dbx\dump.dcss.dmp".to_string();
+        r.log_path = r"C:\Users\dbx\AppData\Local\Temp\dbx-dameng-dump\task.log".to_string();
+        let par = build_parfile_contents(&r);
+        // Backslashes become forward slashes and the quotes are dropped: `"` is on Dameng's
+        // list of characters a FILE/LOG name may not contain (#12837).
+        assert!(par.contains(r"FILE=C:/Users/dbx/dump.dcss.dmp"), "got: {par}");
+        assert!(par.contains("LOG=C:/Users/dbx/AppData/Local/Temp/dbx-dameng-dump/task.log"), "got: {par}");
+        assert!(!par.contains('"'), "no quotes: {par}");
+    }
+
+    #[test]
+    fn export_parfile_quotes_only_when_a_space_needs_it() {
+        let mut r = req(DamengDumpKind::Export);
+        r.file_path = r"C:\Users\John Smith\dump.dmp".to_string();
+        let par = build_parfile_contents(&r);
+        assert!(par.contains(r#"FILE="C:/Users/John Smith/dump.dmp""#), "got: {par}");
+        assert!(!par.contains('\\'), "no backslashes survive: {par}");
+    }
+
+    #[test]
+    fn import_parfile_normalises_paths_too() {
+        let mut r = req(DamengDumpKind::Import);
+        r.file_path = r"D:\dumps\dcss.dmp".to_string();
+        let par = build_parfile_contents(&r);
+        assert!(par.contains("FILE=D:/dumps/dcss.dmp"), "got: {par}");
+    }
+
+    #[test]
+    fn userid_field_error_rejects_whitespace() {
+        assert_eq!(userid_field_error("SYSDBA", "Pass word01"), Some("password"));
+        assert_eq!(userid_field_error("SYSDBA", "Dameng+123"), None);
+    }
+
+    #[test]
+    fn diagnostic_tail_keeps_the_cause_and_stays_bounded() {
+        // trailing newlines go, the whole text comes back when it fits
+        assert_eq!(diagnostic_tail("a\nb\n", 10), "a\nb");
+        assert_eq!(diagnostic_tail("a\nb", 3), "a\nb");
+        // a zero budget asks for nothing
+        assert_eq!(diagnostic_tail("a\nb", 0), "");
+        let long = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let tail = diagnostic_tail(&long, 20);
+        assert!(tail.len() <= 24, "bounded: {tail}");
+        assert!(tail.ends_with("line 99"), "keeps the cause: {tail}");
+        assert!(tail.starts_with("line "), "cuts on a line boundary: {tail}");
+    }
+
+    #[test]
+    fn failure_message_carries_exit_code_and_raw_output() {
+        // The #12837 shape: an empty log plus an unrecognised-parameter line on the console.
+        let empty_parse = parse_dump_log("", DamengDumpKind::Export);
+        assert!(!empty_parse.success);
+        let message =
+            failure_message(&empty_parse, Some(3), "dexp: unrecognized parameter TABLESPACE\nusage: dexp ...");
+        assert!(message.contains("(exit code 3)"), "got: {message}");
+        assert!(message.contains("unrecognized parameter TABLESPACE"), "got: {message}");
+        assert!(message.contains("dexp/dimp output:"), "got: {message}");
+    }
+
+    #[test]
+    fn failure_message_stays_quiet_on_success_parse() {
+        let log = "dexp V8\n成功终止导出, 没有出现警告\n";
+        let outcome = parse_dump_log(log, DamengDumpKind::Export);
+        assert!(outcome.success);
+        // Not called on the success path, but it must not fabricate output for a parsed log.
+        let message = failure_message(&outcome, Some(0), log);
+        assert!(!message.contains("exit code"), "got: {message}");
     }
 
     #[test]

@@ -72,6 +72,12 @@ describe("compareDataGridValues numeric ordering", () => {
     expect(compareDataGridValues("-9007199254740992", "42", columnType)).toBeLessThan(0);
     expect(compareDataGridValues("1391198305898897409", "1391198305898897409", columnType)).toBe(0);
   });
+
+  it("orders exact decimal strings without converting them to rounded JavaScript numbers", () => {
+    const columnType = "NUMBER(38,12)";
+    expect(compareDataGridValues("9007199254740993.123456789012", "9007199254740993.123456789013", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("-9007199254740993.123456789013", "-9007199254740993.123456789012", columnType)).toBeLessThan(0);
+  });
 });
 
 describe("compareDataGridValues datetime ordering", () => {

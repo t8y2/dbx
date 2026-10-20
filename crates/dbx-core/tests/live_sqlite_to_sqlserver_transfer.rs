@@ -8,7 +8,8 @@
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::transfer::{
-    transfer_table, TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
+    transfer_table, TransferColumnNameCase, TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest,
+    TransferTableNameCase,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -177,6 +178,7 @@ async fn live_sqlite_to_sqlserver_keeps_sixty_four_bit_integer_values() {
         objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        target_column_name_case: TransferColumnNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,

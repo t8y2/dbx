@@ -83,6 +83,12 @@ describe("tableVGroup layout ops", () => {
     expect(toggleTableVGroupCollapsed(toggled, created.groupId).groups[0]?.collapsed).toBe(false);
   });
 
+  it("ensures layout is enabled when creating a new group", () => {
+    const disabledLayout: TableVGroupLayout = { version: 1, enabled: false, groups: [], order: [] };
+    const created = createTableVGroup(disabledLayout, "新分组");
+    expect(created.layout.enabled).toBe(true);
+  });
+
   it("reorders a group into another group and refuses cycles", () => {
     const a = createTableVGroup(emptyTableVGroupLayout(), "A");
     const b = createTableVGroup(a.layout, "B");
@@ -170,6 +176,15 @@ describe("applyTableVGroupsToChildren", () => {
     expect(applyTableVGroupsToChildren(children, emptyTableVGroupLayout(), SCOPE)).toBe(children);
     expect(applyTableVGroupsToChildren([], emptyTableVGroupLayout(), SCOPE)).toEqual([]);
     expect(applyTableVGroupsToChildren(children, undefined, SCOPE)).toBe(children);
+  });
+
+  it("projects empty groups even when container has no tables", () => {
+    const created = createTableVGroup(emptyTableVGroupLayout(), "空组");
+    const projected = applyTableVGroupsToChildren([], created.layout, SCOPE);
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?.label).toBe("空组");
+    expect(projected[0]?.type).toBe("table-vgroup");
+    expect(projected[0]?.children).toEqual([]);
   });
 
   it("strips projected groups back into a flat list preserving table identity", () => {

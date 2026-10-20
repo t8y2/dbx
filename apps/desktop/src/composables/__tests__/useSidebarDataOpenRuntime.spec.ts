@@ -109,6 +109,10 @@ vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({ editorSettings: { tableOpenSortMode: mocks.tableOpenSortMode, tableDatabaseSortDirection: "desc", tableLocalSortDirection: "asc", dataTabReuseMode: mocks.dataTabReuseMode, openDataTabsNextToActive: mocks.openDataTabsNextToActive, pageSize: 100 } }),
 }));
 
+vi.mock("@/stores/tunnelProfileStore", () => ({
+  useTunnelProfileStore: () => ({ profileById: () => undefined }),
+}));
+
 vi.mock("@/lib/database/jdbcDialect", () => ({
   effectiveDatabaseTypeForConnection: () => mocks.databaseType,
   connectionObjectTreeNodeSchema: (_config: unknown, _database: string, schema?: string) => schema,

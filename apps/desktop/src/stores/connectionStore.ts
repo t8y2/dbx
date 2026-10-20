@@ -5,6 +5,7 @@ import { uuid } from "@/lib/common/utils";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { ref, computed, watch, markRaw, reactive } from "vue";
 import { DEFAULT_QUERY_TIMEOUT_SECS, normalizeManualTransactionTimeoutSecs } from "@/lib/connection/timeoutLimits";
+import { gaussdbConnectionMode } from "@/lib/database/jdbcDialect";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import type {
   ColumnInfo,
@@ -32,10 +33,12 @@ import type {
 } from "@/types/database";
 import {
   inheritNaturalTreeNodeOrder,
+  isPinnedKeyPresent,
   migrateLegacyPinnedTreeNodeOrder,
   normalizePinnedTreeNodeOrder,
   orderItemsByPinnedTreeNodeOrder,
   pinnedTreeNodeIdentityMatches,
+  pinnedTreeNodeOrderKeyMatchesNode,
   removePinnedTreeNodesFromOrder,
   reorderPinnedTreeNodeOrder,
   replacePinnedTreeNodeInOrder,
@@ -153,6 +156,7 @@ import {
   objectGroupRefreshParentId,
   objectTypesForGroupNode,
   tablePartitionGroups,
+  syncTablePartitionGroups,
   withoutTableTreeLoadMoreNodes,
   tablePageRowAnchorKey,
   type TableTreeLoadMoreParent,
@@ -727,6 +731,11 @@ export const useConnectionStore = defineStore("connection", () => {
   const connectionConnectedAtMs = new Map<string, number>();
   const connectionErrorRevisions = new Map<string, number>();
   const tableListSourceRevisions = new Map<string, number>();
+  // Only TDengine table groups reuse persisted snapshots without a background
+  // refresh. Keep invalidation/write ordering explicit; these maps hold no trees.
+  const tdengineTreeCacheRevisions = new Map<string, number>();
+  const tdengineTreeCacheSavedRevisions = new Map<string, number>();
+  const tdengineTreeCacheWrites = new Map<string, Promise<void>>();
   const treeNodeLoads = new TreeNodeLoadRegistry();
   const filteredObjectGroupChildrenIds = new Set<string>();
   // A remote sidebar search swaps an object group's children for a filtered
@@ -1898,10 +1907,10 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function isTreeNodePinned(node: TreeNode | string): boolean {
-    if (typeof node !== "string") return pinnedTreeNodeIds.value.has(treeNodePinKey(node)) || pinnedTreeNodeIds.value.has(node.id);
+    if (typeof node !== "string") return isPinnedKeyPresent(node, pinnedTreeNodeIds.value);
     if (pinnedTreeNodeIds.value.has(node)) return true;
     const loadedNode = findLoadedTreeNodeById(treeNodes.value, node);
-    return !!loadedNode && pinnedTreeNodeIds.value.has(treeNodePinKey(loadedNode));
+    return !!loadedNode && isPinnedKeyPresent(loadedNode, pinnedTreeNodeIds.value);
   }
 
   function isFixedPriorityTreeNode(node: TreeNode): boolean {
@@ -2469,7 +2478,12 @@ export const useConnectionStore = defineStore("connection", () => {
     const objectTreeProfileCacheKey = driverProfileObjectTreeProfileForConnection(config)?.cacheKey;
     // objects-v9: table nodes now carry canonical tableName metadata for
     // table-scoped plugin context; older cached nodes lack that identity.
-    const baseCacheVersion = objectTreeCacheVersion(config, node.database, node.schema, config?.db_type === "oracle" ? "objects-v8" : "objects-v9");
+    // Old TDengine snapshots can have already lost full visible partitions and
+    // retain only a self-consistent first-page hidden group without a cursor.
+    // Neither v3 nor objectCount proves completeness. Only reuse snapshots saved
+    // by the reconciled page pipeline; leave other database/object keys unchanged.
+    const defaultCacheVersion = config?.db_type === "tdengine" && node.type === "group-tables" ? "objects-tdengine-v1" : config?.db_type === "oracle" ? "objects-v8" : "objects-v9";
+    const baseCacheVersion = objectTreeCacheVersion(config, node.database, node.schema, defaultCacheVersion);
     const cacheVersion = objectTreeProfileCacheKey ? `${baseCacheVersion}:${objectTreeProfileCacheKey}` : baseCacheVersion;
     return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, cacheVersion);
   }
@@ -2640,6 +2654,11 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function invalidateMetadataCaches(match: MetadataCacheInvalidation): number {
+    for (const config of connections.value) {
+      if (config.db_type === "tdengine" && (!match.connectionId || match.connectionId === config.id)) {
+        tdengineTreeCacheRevisions.set(config.id, (tdengineTreeCacheRevisions.get(config.id) ?? 0) + 1);
+      }
+    }
     return metadataListPageCache.invalidate(match) + invalidateTableMetadataCache(match) + invalidateObjectBrowserRowsCache(match);
   }
 
@@ -2795,6 +2814,16 @@ export const useConnectionStore = defineStore("connection", () => {
   function completionTableDetail(comment: string | null | undefined): string | undefined {
     const normalized = comment?.trim();
     return normalized ? `→ ${normalized}` : undefined;
+  }
+
+  function tableCommentFromDetail(detail: string | null | undefined): string | undefined {
+    if (!detail) return undefined;
+    const arrowIndex = detail.indexOf("→");
+    if (arrowIndex >= 0) {
+      const comment = detail.slice(arrowIndex + 1).trim();
+      if (comment) return comment;
+    }
+    return undefined;
   }
 
   function tableInfosToCompletionTables(tables: readonly TableInfo[], schema?: string, catalog?: string): SqlCompletionTable[] {
@@ -3174,7 +3203,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }));
   }
 
-  async function loadPersistedTreeChildren(node: TreeNode, cacheKey: string, load: TreeNodeLoadHandle): Promise<PersistedTreeChildrenLoadResult> {
+  async function loadPersistedTreeChildren(node: TreeNode, cacheKey: string, load: TreeNodeLoadHandle, options?: { freshOnly?: boolean; isCurrent?: () => boolean; acceptChildren?: (children: TreeNode[]) => boolean }): Promise<PersistedTreeChildrenLoadResult> {
     const trace = createMetadataLoadTrace({
       kind: "persisted-tree-cache",
       connectionId: node.connectionId,
@@ -3185,7 +3214,7 @@ export const useConnectionStore = defineStore("connection", () => {
     });
     const payload = await api.loadSchemaCache<unknown>(cacheKey).catch(() => null);
     const decoded = decodeSchemaTreeCache<TreeNode[]>(payload);
-    if (!decoded) {
+    if (!decoded || (options?.freshOnly && (decoded.isStale || (payload as { version?: unknown })?.version !== 3)) || options?.isCurrent?.() === false || options?.acceptChildren?.(decoded.children) === false) {
       logMetadataLoadTrace(metadataTraceLogger, trace, "cache-miss", { cacheStatus: "miss" });
       return { hit: false, isStale: false };
     }
@@ -3214,10 +3243,71 @@ export const useConnectionStore = defineStore("connection", () => {
     return { hit: true, isStale: decoded.isStale };
   }
 
-  async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[]) {
+  function isTdengineTableGroup(node: TreeNode): boolean {
+    return node.type === "group-tables" && !!node.connectionId && getConfig(node.connectionId)?.db_type === "tdengine";
+  }
+
+  function tdengineTreeCacheRevision(node: TreeNode): number {
+    return node.connectionId ? (tdengineTreeCacheRevisions.get(node.connectionId) ?? 0) : 0;
+  }
+
+  function isReusableTdengineTreeSnapshot(parent: TreeNode, children: TreeNode[]): boolean {
+    const pending: unknown[] = [...children];
+    while (pending.length) {
+      const value = pending.pop();
+      if (!value || typeof value !== "object") return false;
+      const node = value as TreeNode;
+      if (typeof node.id !== "string" || typeof node.type !== "string" || typeof node.label !== "string") return false;
+      if (node.connectionId !== parent.connectionId || node.database !== parent.database) return false;
+      if (node.type === "load-more") {
+        const cursor = node.loadMore;
+        if (!cursor || cursor.parentId !== parent.id || !Number.isSafeInteger(cursor.offset) || cursor.offset <= 0 || !Number.isSafeInteger(cursor.pageSize) || cursor.pageSize <= 0 || cursor.searchFilter || cursor.searchQuery) return false;
+      }
+      if (node.type === "group-partitions" && (!Array.isArray(node.children) || node.objectCount !== node.children.filter((child) => child?.type === "table").length)) return false;
+      for (const descendants of [node.children, node.hiddenChildren]) {
+        if (descendants === undefined) continue;
+        if (!Array.isArray(descendants)) return false;
+        for (const child of descendants) pending.push(child);
+      }
+    }
+    return true;
+  }
+
+  async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[], parent?: TreeNode) {
     // 分组是显示层投影，绝不写入元数据缓存——否则重启后会随缓存复现。
     const cacheChildren = stripTableVGroupsFromChildren(children);
-    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(stripTreeNodeExpansionState(stripDatabaseSavedSqlTreeNodes(cacheChildren)))).catch(() => undefined);
+    const payload = encodeSchemaTreeCache(stripTreeNodeExpansionState(stripDatabaseSavedSqlTreeNodes(cacheChildren)));
+    if (!parent || !isTdengineTableGroup(parent)) {
+      await api.saveSchemaCache(cacheKey, payload).catch(() => undefined);
+      return;
+    }
+    const revision = tdengineTreeCacheRevision(parent);
+    const isCurrent = () => isTdengineTableGroup(parent) && revision === tdengineTreeCacheRevision(parent);
+    const pending = (tdengineTreeCacheWrites.get(cacheKey) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        if (!isCurrent()) return;
+        // A failed save must not make an older snapshot reusable in this session.
+        tdengineTreeCacheSavedRevisions.set(cacheKey, -1);
+        try {
+          await api.saveSchemaCache(cacheKey, payload);
+          if (!isCurrent()) {
+            // Invalidation can finish while this backend save is in flight. Delete
+            // its late result *before* a newer queued save, never after it.
+            await api.deleteSchemaCachePrefix(cacheKey).catch(() => undefined);
+            return;
+          }
+          tdengineTreeCacheSavedRevisions.set(cacheKey, revision);
+        } catch {
+          // Tree loading remains usable if persistence is unavailable.
+        }
+      });
+    tdengineTreeCacheWrites.set(cacheKey, pending);
+    try {
+      await pending;
+    } finally {
+      if (tdengineTreeCacheWrites.get(cacheKey) === pending) tdengineTreeCacheWrites.delete(cacheKey);
+    }
   }
 
   function sidebarTableSearchTreeCacheKey(parent: TreeNode): string | null {
@@ -3719,6 +3809,8 @@ export const useConnectionStore = defineStore("connection", () => {
     if (countTreeNodeDescendants(node, RELEASE_COLLAPSED_SUBTREE_MIN_DESCENDANTS) < RELEASE_COLLAPSED_SUBTREE_MIN_DESCENDANTS) {
       return false;
     }
+    // Also reconcile legacy persisted trees that have not loaded another page.
+    syncTablePartitionGroups(node);
     forgetLoadedChildrenIdsForSubtree(node);
     node.children = [];
     return true;
@@ -3889,12 +3981,12 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function toggleTreeNodePin(node: TreeNode) {
     const pinKey = treeNodePinKey(node);
-    const wasPinned = pinnedTreeNodeIds.value.has(pinKey) || pinnedTreeNodeIds.value.has(node.id);
+    const wasPinned = isPinnedKeyPresent(node, pinnedTreeNodeIds.value);
     // Remove the legacy bare id as part of every toggle so old ambiguous pins
     // cannot continue matching objects in a different database. Newly pinned
     // nodes append to the persisted order, placing them last in their sibling
     // pin section until the user explicitly reorders them.
-    const next = pinnedTreeNodeOrder.value.filter((id) => id !== node.id && id !== pinKey);
+    const next = pinnedTreeNodeOrder.value.filter((id) => !pinnedTreeNodeOrderKeyMatchesNode(id, node));
     if (!wasPinned) next.push(pinKey);
     setPinnedTreeNodeOrder(next);
     persistPinnedTreeNodeIds();
@@ -4176,6 +4268,13 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const id of removedIds) {
       clearConnectionError(id);
       connectionErrorRevisions.delete(id);
+      tdengineTreeCacheRevisions.delete(id);
+      const cachePrefix = `${schemaCacheKey(id)}:`;
+      for (const key of tdengineTreeCacheSavedRevisions.keys()) {
+        if (key.startsWith(cachePrefix)) tdengineTreeCacheSavedRevisions.delete(key);
+      }
+      // Pending writes retain their queue until settlement. Their configuration
+      // guard rejects the removed connection and retires the queue in finally.
       clearEtcdAccessCapabilities(id);
       connectedIds.value.delete(id);
       clearSidebarStorageCaches(id);
@@ -4309,6 +4408,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function refreshConnectedDatabaseInfo(connectionId: string, config: ConnectionConfig): Promise<void> {
     const expectedConfigFingerprint = connectionConfigFingerprint(config);
+    const current = getConfig(connectionId);
+    if (config.db_type === "kingbase" && current?.database_info && connectionConfigFingerprint(current) === expectedConfigFingerprint) {
+      current.database_info = { ...current.database_info, compatibilityMode: undefined };
+    }
     try {
       const detected = await api.connectionDatabaseInfo(connectionId);
       const normalized = normalizeDatabaseConnectionInfo(detected, configuredDatabaseProductName(config), config.database);
@@ -4760,6 +4863,13 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       await syncMongoLegacyDriverFallback(id, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
+      const refreshMetadataBeforeReady = config.db_type === "kingbase" || (config.db_type === "gaussdb" && gaussdbConnectionMode(config) === "dws");
+      if (config.db_type !== "plugin" && refreshMetadataBeforeReady) {
+        // Kingbase parsing needs the live mode; DWS needs the current product version.
+        // Metadata remains optional: refreshConnectedDatabaseInfo swallows failures.
+        await refreshConnectedDatabaseInfo(id, { ...config, id });
+        await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
+      }
       passwordChangeReconnectRequired.delete(config.id);
       activeConnectionId.value = id;
       markConnectionConnected(id);
@@ -4767,7 +4877,7 @@ export const useConnectionStore = defineStore("connection", () => {
       clearConnectionClosedByUser(config.id);
       clearConnectionClosedByUser(id);
       if (config.db_type !== "plugin") {
-        void refreshConnectedDatabaseInfo(id, { ...config, id });
+        if (!refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(id, { ...config, id });
         await refreshConnectionIdentifierQuote(id, { ...config, id });
         ensureLocalConnectionAttemptActive(config.id, localAttempt);
         // Compatibility modes warm asynchronously; the QueryEditor watcher and the
@@ -5228,11 +5338,17 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       await syncMongoLegacyDriverFallback(connectionId, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
+      const refreshMetadataBeforeReady = config.db_type === "kingbase" || (config.db_type === "gaussdb" && gaussdbConnectionMode(config) === "dws");
+      if (config.db_type !== "plugin" && refreshMetadataBeforeReady) {
+        // Refresh mode/version before reconnect completion, never infer mode from version.
+        await refreshConnectedDatabaseInfo(connectionId, config);
+        await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
+      }
       markConnectionConnected(connectionId);
       // 任何路径真的连上之后，"用户已关闭"标记就不能再拦后续的被动唤醒。
       clearConnectionClosedByUser(connectionId);
       if (config.db_type !== "plugin") {
-        void refreshConnectedDatabaseInfo(connectionId, config);
+        if (!refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(connectionId, config);
         await refreshConnectionIdentifierQuote(connectionId, config);
         ensureLocalConnectionAttemptActive(connectionId, localAttempt);
         void refreshConnectionDatabaseModes(connectionId, config);
@@ -6949,6 +7065,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
 
+          const cacheRevision = tdengineTreeCacheRevision(node);
           const wantsOnlyTablesOrViews = objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW");
           let children: TreeNode[];
           let nextObjectCount: number;
@@ -6984,6 +7101,7 @@ export const useConnectionStore = defineStore("connection", () => {
             children = page.hasMore && (!searchFilter || globalPageSearch !== undefined) ? [...page.children, buildLoadMoreNode(node, page.nextOffset, pageSize, page.nextAnchor, globalPageSearch)] : page.children;
             nextObjectCount = page.objectCount;
           }
+          if (isTdengineTableGroup(node) && cacheRevision !== tdengineTreeCacheRevision(node)) return;
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
           if (!tableNameFilterRevisionMatches(options)) return;
           const targetNode = treeNodeLoadTarget(load);
@@ -6997,12 +7115,35 @@ export const useConnectionStore = defineStore("connection", () => {
             });
           }
           targetNode.objectCount = nextObjectCount;
+          if (isTdengineTableGroup(targetNode) && options?.force) {
+            // setChildren preserves expanded table subtrees. For an authoritative
+            // first page, keep their unrelated metadata/expansion, but replace
+            // partition membership so old children cannot shadow the new page.
+            for (const child of children) {
+              if (child.type !== "table") continue;
+              const old = findNode(targetNode.children ?? [], child.id);
+              if (!old) continue;
+              const oldGroups = tablePartitionGroups(old);
+              const nextGroups = tablePartitionGroups(child);
+              for (const group of oldGroups) {
+                forgetLoadedChildrenIdsForSubtree(group);
+                treeNodeLoads.invalidatePrefix(group.id);
+              }
+              for (const group of nextGroups) {
+                const previous = oldGroups.find((candidate) => candidate.id === group.id);
+                if (previous) group.isExpanded = previous.isExpanded;
+              }
+              old.children = [...(old.children ?? []).filter((node) => node.type !== "group-partitions"), ...nextGroups];
+              old.hiddenChildren = [...(old.hiddenChildren ?? []).filter((node) => node.type !== "group-partitions"), ...nextGroups];
+            }
+          }
           setChildren(targetNode, children);
           if (searchFilter) filteredObjectGroupChildrenIds.add(targetNode.id);
           else forgetFilteredObjectGroupChildren(targetNode.id);
           options?.onChildrenApplied?.(targetNode);
           if (!searchFilter && !isSidebarTableSearch && !tableNameFilter) {
-            await savePersistedTreeChildren(cacheKey, children);
+            await savePersistedTreeChildren(cacheKey, children, targetNode);
+            if (isTdengineTableGroup(node) && cacheRevision !== tdengineTreeCacheRevision(node)) return;
             pruneTableVGroupStaleMembers(targetNode, children, tableVGroupKindOfContainerNode(targetNode) !== null);
           }
           const currentTargetNode = treeNodeLoadTarget(load);
@@ -7059,7 +7200,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadMoreObjectGroupChildren(node: TreeNode, options?: { searchFilter?: string }) {
+  async function loadMoreObjectGroupChildren(node: TreeNode, options?: { searchFilter?: string; force?: boolean }) {
     if (node.type !== "load-more" || !node.loadMore) return;
     const loadMore = node.loadMore;
     const parent = findNode(treeNodes.value, node.loadMore.parentId);
@@ -7106,6 +7247,8 @@ export const useConnectionStore = defineStore("connection", () => {
         // Parent writes must honor the parent's generation too — load-more begins on the
         // placeholder node, so a replaced/invalidated parent must reject the merge.
         const parentEpoch = treeNodeLoads.observe(parent.id);
+        const cacheRevision = tdengineTreeCacheRevision(parent);
+        const cacheIsCurrent = () => !isTdengineTableGroup(parent) || cacheRevision === tdengineTreeCacheRevision(parent);
         try {
           await ensureConnected(parentConnectionId);
           if (!searchIsCurrent()) return;
@@ -7128,11 +7271,11 @@ export const useConnectionStore = defineStore("connection", () => {
                 pageSize,
                 searchFilter,
                 pagedSearch: !!searchFilter,
-                force: false,
+                force: options?.force,
               }),
             );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
+            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             const mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
             const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor, loadMore.searchFilter), page.loadMoreParent) : mergedChildren;
@@ -7171,11 +7314,11 @@ export const useConnectionStore = defineStore("connection", () => {
                 pageSize,
                 searchFilter,
                 pagedSearch: !!searchFilter,
-                force: false,
+                force: options?.force,
               }),
             );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
+            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
             nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor, loadMore.searchFilter), page.loadMoreParent) : mergedChildren;
@@ -7190,11 +7333,11 @@ export const useConnectionStore = defineStore("connection", () => {
                 offset,
                 pageSize,
                 searchFilter,
-                force: false,
+                force: options?.force,
               }),
             );
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
+            if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
             const currentChildren = withoutLoadMoreNodes(targetParent.children);
             mergedChildren = mergeLocatedTreeChildren(targetParent, currentChildren, page.children, parentConnectionId, parentDatabase);
             nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize, page.nextAnchor, loadMore.searchFilter)] : mergedChildren;
@@ -7211,11 +7354,12 @@ export const useConnectionStore = defineStore("connection", () => {
             return;
           }
           const targetParent = treeNodeLoadRelatedTarget(load, parent);
-          if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent()) return;
+          if (!targetParent || !parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
           targetParent.objectCount = mergedChildren.length;
           setChildren(targetParent, nextChildren);
           if (!searchFilter) {
-            await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
+            await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren, targetParent);
+            if (!parentEpoch.isCurrent() || !searchIsCurrent() || !cacheIsCurrent()) return;
             // 各分组容器按自身类别回收完整列表的失效成员；分页中间态（含
             // load-more）由 prune 内部再挡一次。
             pruneTableVGroupStaleMembers(targetParent, nextChildren, tableVGroupKindOfContainerNode(parent) !== null);
@@ -7223,13 +7367,14 @@ export const useConnectionStore = defineStore("connection", () => {
           const currentTargetParent = treeNodeLoadRelatedTarget(load, parent);
           if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
         } catch (e) {
-          if (!searchIsCurrent() || !parentEpoch.isCurrent()) return;
+          if (!searchIsCurrent() || !parentEpoch.isCurrent() || !cacheIsCurrent()) return;
           recordMetadataLoadError(parentConnectionId, e, load);
           throw e;
         } finally {
           finishTreeNodeLoad(load);
         }
       },
+      options,
     );
   }
 
@@ -7413,35 +7558,100 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadAllObjectGroupChildren(parent: TreeNode, initialLoadOptions?: LoadTreeOptions) {
     if (!parent.connectionId || !hasTreeNodeDatabaseContext(parent)) return;
-    if (!objectTypesForGroupNode(parent.type)) return;
+    if (!objectTypesForGroupNode(parent.type) || parent.tableName) return;
     const liveParent = treeNodeInSidebarTree(parent);
     if (!liveParent) return;
+    const tdengine = isTdengineTableGroup(liveParent);
+    const searchQuery = sidebarSearchQuery.value || "";
+    const scopedSearchQuery = sidebarTableSearchQueries.value[liveParent.id]?.trim() || "";
+    if (tdengine && scopedSearchQuery) return;
+    const searchIsCurrent = () => (sidebarSearchQuery.value || "") === searchQuery && (sidebarTableSearchQueries.value[liveParent.id]?.trim() || "") === scopedSearchQuery;
+    let forcePages = false;
     if (initialLoadOptions?.force || !isTreeNodeChildrenLoaded(liveParent.id) || filteredObjectGroupChildrenIds.has(liveParent.id)) {
-      let isPreparedPageCurrent: (() => boolean) | undefined;
-      await loadObjectGroupFirstPage(liveParent, {
-        ...initialLoadOptions,
-        force: true,
-        searchFilter: "",
-        allowGlobalSearchMismatch: true,
-        onChildrenApplied: (targetNode) => {
-          const epoch = treeNodeLoads.observe(targetNode.id);
-          isPreparedPageCurrent = () => epoch.isCurrent();
-        },
-      });
-      if (!isPreparedPageCurrent?.()) return;
+      let cacheHit = false;
+      // Do not use the generic first-page hydration path here: it unconditionally
+      // starts a background refresh, racing the full/partial snapshot's drain.
+      const canReuseCache =
+        tdengine &&
+        shouldAutoLoadAllTableGroupChildren(liveParent, initialLoadOptions) &&
+        !initialLoadOptions?.force &&
+        !filteredObjectGroupChildrenIds.has(liveParent.id) &&
+        connectedIds.value.has(parent.connectionId) &&
+        !scopedSearchQuery &&
+        !activeTableNameFilterForScope({
+          connectionId: liveParent.connectionId,
+          database: liveParent.database,
+          schema: liveParent.schema,
+          nodeKind: liveParent.type,
+          catalog: liveParent.catalog,
+        });
+      if (canReuseCache) {
+        const cacheKey = objectGroupCacheKey(liveParent);
+        const revision = tdengineTreeCacheRevision(liveParent);
+        const configFingerprint = connectionConfigFingerprint(getConfig(parent.connectionId)!);
+        const cacheLoad = beginTreeNodeLoad(liveParent);
+        const isCurrent = () => {
+          const config = getConfig(parent.connectionId!);
+          return (
+            !!config &&
+            connectionConfigFingerprint(config) === configFingerprint &&
+            shouldAutoLoadAllTableGroupChildren(liveParent, initialLoadOptions) &&
+            searchIsCurrent() &&
+            revision === tdengineTreeCacheRevision(liveParent) &&
+            tableNameFilterRevisionMatches(initialLoadOptions) &&
+            !activeTableNameFilterForScope({ connectionId: liveParent.connectionId, database: liveParent.database, schema: liveParent.schema, nodeKind: liveParent.type, catalog: liveParent.catalog })
+          );
+        };
+        try {
+          await tdengineTreeCacheWrites.get(cacheKey);
+          if (!treeNodeLoadTarget(cacheLoad) || !isCurrent()) return;
+          if ((tdengineTreeCacheSavedRevisions.get(cacheKey) ?? 0) === revision) {
+            cacheHit = (await loadPersistedTreeChildren(liveParent, cacheKey, cacheLoad, { freshOnly: true, isCurrent, acceptChildren: (children) => isReusableTdengineTreeSnapshot(liveParent, children) })).hit;
+          }
+          // A cancelled/superseded cache miss must not fall through and restart
+          // page zero, or re-expand a node the user collapsed while awaiting I/O.
+          if (!treeNodeLoadTarget(cacheLoad) || !isCurrent()) return;
+          if (cacheHit) forgetFilteredObjectGroupChildren(liveParent.id);
+        } finally {
+          finishTreeNodeLoad(cacheLoad);
+        }
+      }
+      if (!cacheHit) {
+        if (tdengine) {
+          // A controlled reload must not mix a fresh first page with old cached
+          // later pages, nor allow a previously-started save to revive old data.
+          invalidateMetadataCaches({ connectionId: parent.connectionId, database: parent.database });
+          forcePages = true;
+        }
+        let isPreparedPageCurrent: (() => boolean) | undefined;
+        await loadObjectGroupFirstPage(liveParent, {
+          ...initialLoadOptions,
+          force: true,
+          searchFilter: "",
+          expectedSidebarSearchQuery: tdengine ? searchQuery : initialLoadOptions?.expectedSidebarSearchQuery,
+          allowGlobalSearchMismatch: true,
+          onChildrenApplied: (targetNode) => {
+            const epoch = treeNodeLoads.observe(targetNode.id);
+            const revision = tdengineTreeCacheRevision(targetNode);
+            isPreparedPageCurrent = () => epoch.isCurrent() && (!tdengine || (searchIsCurrent() && revision === tdengineTreeCacheRevision(targetNode)));
+          },
+        });
+        if (!isPreparedPageCurrent?.()) return;
+      }
     }
 
     const refreshedParent = treeNodeInSidebarTree(parent);
     if (!refreshedParent) return;
     const load = beginTreeNodeLoad(refreshedParent);
+    const cacheRevision = tdengineTreeCacheRevision(refreshedParent);
     try {
       const liveParent = treeNodeLoadTarget(load);
       if (!liveParent) return;
 
       let loadMoreNode = findTreeNodes(liveParent.children ?? [], (child) => child.type === "load-more")[0];
       while (loadMoreNode?.loadMore) {
-        await loadMoreObjectGroupChildren(loadMoreNode, { searchFilter: "" });
-        if (!load.isCurrent()) return;
+        await loadMoreObjectGroupChildren(loadMoreNode, { searchFilter: "", force: forcePages });
+        if (!load.isCurrent() || (tdengine && (!searchIsCurrent() || cacheRevision !== tdengineTreeCacheRevision(refreshedParent)))) return;
         const currentParent = treeNodeLoadTarget(load);
         if (!currentParent) return;
         loadMoreNode = findTreeNodes(currentParent.children ?? [], (child) => child.type === "load-more")[0];
@@ -8069,7 +8279,14 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     invalidateCompletionCachesForNode(node);
     invalidateMetadataCachesForNode(node, options);
-    if (objectTypesForGroupNode(node.type)) {
+    if (node.type === "trigger") {
+      const parentNode = findParentNode(treeNodes.value, node.id) ?? (node.id.lastIndexOf(":") > 0 ? findNode(treeNodes.value, node.id.slice(0, node.id.lastIndexOf(":"))) : null);
+      if (parentNode) {
+        await refreshTreeNode(parentNode, options);
+        return;
+      }
+    }
+    if (objectTypesForGroupNode(node.type) && !node.tableName) {
       clearLoadedChildrenCache(node.id, { deletePersisted: false });
       await loadObjectGroupChildren(node, { force: true });
       await invalidateSidebarTableSearchIndexesForTreeRefresh(node);
@@ -8145,7 +8362,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function refreshTreeNodeForTableNameFilter(node: TreeNode, scopeKey: string, revision: number) {
     invalidateMetadataCachesForNode(node);
-    if (objectTypesForGroupNode(node.type)) {
+    if (objectTypesForGroupNode(node.type) && !node.tableName) {
       clearLoadedChildrenCache(node.id);
       await loadObjectGroupChildren(node, {
         force: true,
@@ -8714,36 +8931,47 @@ export const useConnectionStore = defineStore("connection", () => {
     return 1_000 - gaps - text.length;
   }
 
+  function textMatchScore(text: string, normalized: string): number {
+    if (!normalized) return 0;
+    if (text === normalized) return 9_000 - text.length;
+    if (text.startsWith(normalized)) return 7_500 - text.length;
+    const segments = completionNameSegments(text);
+    if (segments.some((segment) => segment.startsWith(normalized))) return 7_200 - text.length;
+    const acronym = completionNameAcronym(text);
+    if (acronym === normalized) return 7_100 - text.length;
+    if (acronym.startsWith(normalized)) return 6_900 - text.length;
+    // DataGrip-style pinyin initials for Han names, e.g. "zzj" → 总租金,
+    // including ordered subsequences like "zj" → 总租金.
+    if (/^[a-z0-9]+$/.test(normalized) && containsHan(text)) {
+      const pinyinInitials = pinyinFirstLetters(text);
+      if (pinyinInitials === normalized) return 7_050 - text.length;
+      if (pinyinInitials.startsWith(normalized)) return 6_850 - text.length;
+      const subsequence = orderedSubsequenceSpan(pinyinInitials, normalized);
+      if (subsequence) return 5_000 - subsequence.first * 30 - subsequence.span * 10 - text.length;
+    }
+    if (normalized.length <= segments.length && segments.every((segment, index) => segment.startsWith(normalized[index] ?? ""))) return 6_700 - text.length;
+    if (text.includes(normalized)) return 4_000 - text.length;
+    const subsequenceScore = orderedSubsequenceScore(text, normalized);
+    return subsequenceScore;
+  }
+
   function tableMatchScore(table: SqlCompletionTable, filter: string, preferredSchema?: string): number {
     const text = table.name.toLowerCase();
     const schema = table.schema?.toLowerCase();
     const normalized = filter.trim().toLowerCase();
     const score = schema && preferredSchema && schema === preferredSchema.toLowerCase() ? 10_000 : 0;
     if (!normalized) return score;
-    if (text === normalized) return score + 9_000 - text.length;
-    if (text.startsWith(normalized)) return score + 7_500 - text.length;
-    const segments = completionNameSegments(table.name);
-    if (segments.some((segment) => segment.startsWith(normalized))) return score + 7_200 - text.length;
-    const acronym = completionNameAcronym(table.name);
-    if (acronym === normalized) return score + 7_100 - text.length;
-    if (acronym.startsWith(normalized)) return score + 6_900 - text.length;
-    // DataGrip-style pinyin initials for Han names, e.g. "zzj" → 总租金,
-    // including ordered subsequences like "zj" → 总租金.
-    if (/^[a-z0-9]+$/.test(normalized) && containsHan(text)) {
-      const pinyinInitials = pinyinFirstLetters(text);
-      if (pinyinInitials === normalized) return score + 7_050 - text.length;
-      if (pinyinInitials.startsWith(normalized)) return score + 6_850 - text.length;
-      const subsequence = orderedSubsequenceSpan(pinyinInitials, normalized);
-      if (subsequence) return score + 5_000 - subsequence.first * 30 - subsequence.span * 10 - text.length;
-    }
-    if (normalized.length <= segments.length && segments.every((segment, index) => segment.startsWith(normalized[index] ?? ""))) return score + 6_700 - text.length;
-    if (text.includes(normalized)) return score + 4_000 - text.length;
-    const subsequenceScore = orderedSubsequenceScore(text, normalized);
-    return subsequenceScore < 0 ? -1 : score + subsequenceScore;
+
+    const nameScore = textMatchScore(text, normalized);
+    const comment = table.comment?.trim() || tableCommentFromDetail(table.detail);
+    const commentScore = comment ? textMatchScore(comment.toLowerCase(), normalized) : -1;
+
+    const bestScore = Math.max(nameScore, commentScore > 0 ? commentScore - 50 : -1);
+    return bestScore < 0 ? -1 : score + bestScore;
   }
 
   function objectMatchScore(object: SqlCompletionObject, filter: string, preferredSchema?: string): number {
-    const tableLike: SqlCompletionTable = { name: object.name, schema: object.schema };
+    const tableLike: SqlCompletionTable = { name: object.name, schema: object.schema, comment: object.comment };
     return tableMatchScore(tableLike, filter, preferredSchema);
   }
 
@@ -8887,7 +9115,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     if (!reusable) return undefined;
     return {
-      columns: reusable.columns.filter((column) => column.name.toLowerCase().startsWith(normalizedPrefix)),
+      columns: reusable.columns.filter((column) => column.name.toLowerCase().startsWith(normalizedPrefix) || Boolean(column.comment?.toLowerCase().startsWith(normalizedPrefix))),
       complete: true,
     };
   }
@@ -10124,7 +10352,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (node.children) await refreshNodes(node.children);
           continue;
         }
-        if (objectTypesForGroupNode(node.type)) {
+        if (objectTypesForGroupNode(node.type) && !node.tableName) {
           if (node.connectionId && connectedIds.value.has(node.connectionId)) {
             clearLoadedChildrenCache(node.id);
             if (node.isExpanded) {
@@ -10593,6 +10821,7 @@ export const useConnectionStore = defineStore("connection", () => {
     connectionMultiSelectActive,
     treeClipboard,
     treeNodes,
+    findConnectionNode,
     removePinnedTreeNodes,
     replacePinnedTreeNode,
     removeTreeNode,

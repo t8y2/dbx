@@ -2988,6 +2988,38 @@ mod tests {
     }
 
     #[test]
+    fn mysql_routine_replace_sequence_keeps_the_create_last_for_the_desktop_run_path() {
+        // The desktop Run path of a routine source tab (issue #12855) executes every statement before the last one
+        // as the replace preparation and then runs the tab's own CREATE through the normal query pipeline. That only
+        // holds while the CREATE stays last; a rename ends with the cleanup DROP instead and is never prepared.
+        for (object_type, source) in [
+            (ObjectSourceKind::Procedure, "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`() BEGIN SELECT 1; END"),
+            (ObjectSourceKind::Function, "CREATE FUNCTION `refresh_cache`() RETURNS INT RETURN 1"),
+        ] {
+            let keyword = object_type_keyword(&object_type);
+            let input = |name: &str| EditableObjectSourceSqlInput {
+                database_type: DatabaseType::Mysql,
+                object_type: object_type.clone(),
+                schema: Some("app".to_string()),
+                name: name.to_string(),
+                source: source.to_string(),
+            };
+
+            let statements = build_executable_object_source_statements(input("refresh_cache")).unwrap();
+            let (create, preparation) = statements.split_last().unwrap();
+            assert_eq!(create, &format!("{source};"));
+            assert_eq!(preparation.len(), 4);
+            assert!(preparation[0].starts_with(&format!("DROP {keyword} IF EXISTS `app`.`dbx_routine_check_")));
+            assert!(preparation[1].starts_with("CREATE") && preparation[1].contains("`dbx_routine_check_"));
+            assert_eq!(preparation[2], preparation[0]);
+            assert_eq!(preparation[3], format!("DROP {keyword} IF EXISTS `app`.`refresh_cache`;"));
+
+            let renamed = build_executable_object_source_statements(input("refresh_cache_old")).unwrap();
+            assert_eq!(renamed.last().unwrap(), &format!("DROP {keyword} IF EXISTS `app`.`refresh_cache_old`;"));
+        }
+    }
+
+    #[test]
     fn mysql_transfer_routine_replacement_uses_scoped_validation_name() {
         let statements = build_mysql_routine_replacement_statements(
             EditableObjectSourceSqlInput {

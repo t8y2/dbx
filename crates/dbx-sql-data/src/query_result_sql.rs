@@ -201,6 +201,20 @@ pub fn build_query_pagination_execution_plan(
         return plan;
     }
 
+    // DB2's OFFSET clause is unavailable on older server families (for
+    // example Db2 for z/OS before V12). DBX connections use the Agent/JDBC
+    // cursor for DB2, so keep every page on that cursor path instead of
+    // generating OFFSET ... FETCH FIRST SQL that fails with SQLCODE -104.
+    if options.database_type == Some(DatabaseType::Db2) && options.use_agent_cursor {
+        if !options.first_page_uses_actual_sql && options.sql == options.query_base_sql {
+            plan.sql_to_execute = options.query_base_sql;
+        }
+        plan.page_limit = Some(options.pagination.limit);
+        plan.page_offset = Some(options.pagination.offset);
+        plan.use_agent_result_session = true;
+        return plan;
+    }
+
     if options.database_type == Some(DatabaseType::OceanbaseOracle)
         && (!rownum_wrapper_projection_is_safe(&options.sql) || has_top_level_rownum(&options.sql))
     {
@@ -220,20 +234,18 @@ pub fn build_query_pagination_execution_plan(
     }
 
     let can_use_first_page_cursor = options.use_agent_cursor && options.pagination.offset == 0;
-    // DB2, GoldenDB, HighGo, OceanBase Oracle, and Xugu can spend substantially more time
+    // GoldenDB, HighGo, OceanBase Oracle, and Xugu can spend substantially more time
     // executing an unbounded query before the Agent exposes its first cursor
     // page. Prefer a bounded SQL query whenever it can be rewritten safely.
+    // DB2 is handled above on the Agent cursor path because OFFSET was added
+    // only in newer DB2 families (and older servers reject OFFSET/FETCH).
     // Independent pages of an unordered query do not have a stable row order;
     // callers should add ORDER BY when that matters.
     // Kingbase keeps the cursor for unordered queries to preserve its behavior.
     let prefer_server_pagination = match options.database_type {
-        Some(
-            DatabaseType::Db2
-            | DatabaseType::Goldendb
-            | DatabaseType::Highgo
-            | DatabaseType::OceanbaseOracle
-            | DatabaseType::Xugu,
-        ) => true,
+        Some(DatabaseType::Goldendb | DatabaseType::Highgo | DatabaseType::OceanbaseOracle | DatabaseType::Xugu) => {
+            true
+        }
         Some(DatabaseType::Kingbase) => kingbase_server_pagination_is_stable(&options.query_base_sql),
         _ => false,
     };
@@ -5916,7 +5928,7 @@ WHERE u.id = picked.id;
     }
 
     #[test]
-    fn db2_prefers_server_pagination_over_agent_cursor() {
+    fn db2_uses_agent_cursor_for_compatible_offset_pagination() {
         let first_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
             sql: "SELECT * FROM events".to_string(),
             query_base_sql: "SELECT * FROM events".to_string(),
@@ -5927,27 +5939,27 @@ WHERE u.id = picked.id;
             execution_hint: None,
         });
 
-        assert_eq!(first_page.sql_to_execute, "SELECT * FROM events FETCH FIRST 500 ROWS ONLY;");
-        assert_eq!(first_page.page_sql, Some(first_page.sql_to_execute.clone()));
+        assert_eq!(first_page.sql_to_execute, "SELECT * FROM events");
+        assert!(first_page.page_sql.is_none());
         assert_eq!(first_page.page_limit, Some(500));
         assert_eq!(first_page.page_offset, Some(0));
-        assert!(!first_page.use_agent_result_session);
+        assert!(first_page.use_agent_result_session);
 
         let second_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
             sql: "SELECT * FROM events".to_string(),
             query_base_sql: "SELECT * FROM events".to_string(),
             database_type: Some(DatabaseType::Db2),
-            pagination: QueryPagination { limit: 500, offset: 500, session_id: None },
+            pagination: QueryPagination { limit: 500, offset: 500, session_id: Some("db2-session".to_string()) },
             use_agent_cursor: true,
             first_page_uses_actual_sql: false,
             execution_hint: None,
         });
 
-        assert_eq!(second_page.sql_to_execute, "SELECT * FROM events OFFSET 500 ROWS FETCH FIRST 500 ROWS ONLY;");
-        assert_eq!(second_page.page_sql, Some(second_page.sql_to_execute.clone()));
+        assert_eq!(second_page.sql_to_execute, "SELECT * FROM events");
+        assert!(second_page.page_sql.is_none());
         assert_eq!(second_page.page_limit, Some(500));
         assert_eq!(second_page.page_offset, Some(500));
-        assert!(!second_page.use_agent_result_session);
+        assert!(second_page.use_agent_result_session);
 
         let sql = "SELECT * FROM events; SELECT 1";
         let fallback = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
@@ -5963,6 +5975,22 @@ WHERE u.id = picked.id;
         assert_eq!(fallback.sql_to_execute, sql);
         assert!(fallback.page_sql.is_none());
         assert!(fallback.use_agent_result_session);
+
+        let offset_jump = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Db2),
+            pagination: QueryPagination { limit: 500, offset: 500, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+            execution_hint: None,
+        });
+
+        assert_eq!(offset_jump.sql_to_execute, "SELECT * FROM events");
+        assert!(offset_jump.page_sql.is_none());
+        assert_eq!(offset_jump.page_limit, Some(500));
+        assert_eq!(offset_jump.page_offset, Some(500));
+        assert!(offset_jump.use_agent_result_session);
     }
 
     #[test]

@@ -22,7 +22,9 @@ export function sidebarMenuScope(type: SidebarMenuTargetType): SidebarMenuScope 
 
 const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
   connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.openDatabaseBrowser", "contextMenu.editConnection", "contextMenu.refreshChildren"],
-  database: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
+  // Closing a database hides itself once the database is already closed, so it leads the database menu
+  // and "browse objects" stays first for databases that cannot be closed.
+  database: ["contextMenu.closeDatabaseConnection", "contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
   schema: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
   table: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editStructure", "contextMenu.newQuery", "contextMenu.refreshChildren"],
   view: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editView", "contextMenu.newQuery", "contextMenu.refreshChildren"],
@@ -89,7 +91,6 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "connectionGroup.moveToNewGroup",
     "contextMenu.duplicateConnection",
     "connection.disconnectAndForgetPassword",
-    "contextMenu.closeDatabaseConnection",
     "contextMenu.revealDatabaseFile",
     "contextMenu.changeOpenMode",
     "tableVGroup.moveToGroup",

@@ -1,7 +1,7 @@
 import type { GridCellValue } from "@/lib/dataGrid/dataGridSql";
 import type { DatabaseType, ColumnInfo } from "@/types/database";
 import { binaryCellBytesToHexValue, binaryCellUtf8Text, isBlobCellColumnType, isBlobTextPreviewDatabase } from "@/lib/dataGrid/binaryCellDownload";
-import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
+import { isNumericColumnType, resolveDataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
 import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
 
 export interface CoerceDataGridCellValueOptions {
@@ -25,7 +25,7 @@ let cachedRuntimeNumberFormat: NumericInputNumberFormat | undefined;
 export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions): GridCellValue {
   const { value, oldValue } = options;
   if (value === "" && options.emptyStringAsNull) return null;
-  if (value === "" && oldValue === null && !options.preserveEmptyString) return null;
+  if (value === "" && oldValue === null && !keepsEmptyStringInColumn(options)) return null;
   const blobValue = coerceBlobTextValue(options);
   if (blobValue !== undefined) return blobValue;
   const postgresArrayValue = coercePostgresArrayValue(options);
@@ -59,6 +59,16 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
     }
   }
   return normalizeSmartQuotedJsonInput(numericText);
+}
+
+// A literal empty string only exists in columns that store text. Every other
+// type — numeric, boolean, temporal, uuid, JSON, binary, arrays — has no ''
+// value of its own, so a blank cell in one of them has to stay NULL instead of
+// coercing to 0 / false / '' (issue #12727). Types the grid cannot classify
+// stay on the conservative NULL side as well.
+function keepsEmptyStringInColumn(options: CoerceDataGridCellValueOptions): boolean {
+  if (!options.preserveEmptyString) return false;
+  return resolveDataGridTypeVisualKind(options.columnInfo?.data_type, options.databaseType) === "string";
 }
 
 function isBooleanInputColumn(options: CoerceDataGridCellValueOptions): boolean {

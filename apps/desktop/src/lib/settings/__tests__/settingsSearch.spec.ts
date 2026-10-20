@@ -140,33 +140,39 @@ describe("settings search", () => {
   });
 
   it("indexes the multi-statement default view and its settings control", () => {
-    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
-      id: "multi-statement-default-view",
-      category: "data",
-      titleKey: "settings.multiStatementDefaultView",
-      descriptionKey: "settings.multiStatementDefaultViewDescription",
-      targetId: "multi-statement-default-view",
-    });
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual(
+      expect.objectContaining({
+        id: "multi-statement-default-view",
+        category: "data",
+        titleKey: "settings.multiStatementDefaultView",
+        descriptionKey: "settings.multiStatementDefaultViewDescription",
+        targetId: "multi-statement-default-view",
+      }),
+    );
   });
 
   it("indexes the default explain view and its settings control", () => {
-    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
-      id: "default-explain-view",
-      category: "data",
-      titleKey: "settings.defaultExplainView",
-      descriptionKey: "settings.defaultExplainViewDescription",
-      targetId: "default-explain-view",
-    });
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual(
+      expect.objectContaining({
+        id: "default-explain-view",
+        category: "data",
+        titleKey: "settings.defaultExplainView",
+        descriptionKey: "settings.defaultExplainViewDescription",
+        targetId: "default-explain-view",
+      }),
+    );
   });
 
   it("indexes the query result export file name source setting (#12092)", () => {
-    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
-      id: "data-export-file-name-source",
-      category: "data",
-      titleKey: "settings.queryResultExportFileNameSource",
-      descriptionKey: "settings.queryResultExportFileNameSourceDescription",
-      targetId: "data",
-    });
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual(
+      expect.objectContaining({
+        id: "data-export-file-name-source",
+        category: "data",
+        titleKey: "settings.queryResultExportFileNameSource",
+        descriptionKey: "settings.queryResultExportFileNameSourceDescription",
+        targetId: "data-export-file-name-source",
+      }),
+    );
   });
 
   it("places SQL file limits in their owning settings categories", () => {
@@ -240,7 +246,19 @@ describe("settings search", () => {
   it("exposes WebDAV sync in Web settings without exposing snippet sync", () => {
     const webEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["sync"]) }, translate, categoryLabels);
 
-    expect(webEntries.map((entry) => entry.id)).toEqual(["sync-webdav", "sync-webdav-endpoint", "sync-webdav-username", "sync-webdav-password", "sync-webdav-remote-path", "sync-webdav-user-agent", "sync-webdav-auto-upload", "sync-secrets", "sync-secrets-passphrase"]);
+    expect(webEntries.map((entry) => entry.id)).toEqual([
+      "sync-webdav",
+      "sync-webdav-endpoint",
+      "sync-webdav-username",
+      "sync-webdav-password",
+      "sync-webdav-remote-path",
+      "sync-webdav-user-agent",
+      "sync-webdav-auto-upload",
+      "sync-secrets",
+      "sync-secrets-passphrase",
+      "sync-sync-remember-web-dav-password",
+      "sync-sync-auto-upload",
+    ]);
   });
 
   it("matches Chinese text as a Unicode substring", () => {
@@ -396,6 +414,7 @@ describe("settings search", () => {
       { titleKey: "settings.queryExportKeysetOptimizationEnabled", category: "data", targetId: "data" },
       { titleKey: "ai.defaultAiMode", category: "ai", targetId: "ai" },
       { titleKey: "ai.defaultAutoRouting", category: "ai", targetId: "ai" },
+      { titleKey: "ai.includeQueryResult", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxAgentTurns", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxRetriesGlobal", category: "ai", targetId: "ai" },
       { titleKey: "ai.globalInstructions", category: "ai", targetId: "ai" },

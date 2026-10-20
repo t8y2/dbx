@@ -180,6 +180,10 @@ export function isExecuteSqlInNewResultTabShortcut(event: ShortcutLikeEvent, sho
   return matchesShortcut(event, actionShortcut("executeSqlInNewResultTab", shortcuts));
 }
 
+export function isExplainSqlShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("explainSql", shortcuts));
+}
+
 export function isCloseTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("closeTab", shortcuts));
 }

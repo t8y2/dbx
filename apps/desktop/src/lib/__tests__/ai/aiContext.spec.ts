@@ -485,3 +485,52 @@ describe("AI schema notes", () => {
     expect(buildSystemPrompt("generate", context)).toContain("local schema notes could not be loaded");
   });
 });
+
+describe("AI query result privacy (#12757)", () => {
+  const sampleResult = {
+    columns: ["id", "username", "salary"],
+    rows: [
+      [1, "alice", 100000],
+      [2, "bob", 95000],
+    ],
+  };
+
+  const errorResult = {
+    columns: ["error"],
+    rows: [["syntax error at or near 'FORM'"]],
+    execution_error: true,
+  };
+
+  it("omits lastResultPreview by default to prevent sending row data to AI", async () => {
+    const tab = { ...queryTab("analytics"), result: sampleResult };
+    const context = await buildAiContext(tab, sqliteConnection());
+
+    expect(context.lastResultPreview).toBeUndefined();
+  });
+
+  it("includes lastResultPreview when includeQueryResult is explicitly true", async () => {
+    const tab = { ...queryTab("analytics"), result: sampleResult };
+    const context = await buildAiContext(tab, sqliteConnection(), { includeQueryResult: true });
+
+    expect(context.lastResultPreview).toBeDefined();
+    expect(context.lastResultPreview).toContain("alice");
+    expect(context.lastResultPreview).toContain("100000");
+  });
+
+  it("omits lastResultPreview when excludeQueryResult is true or includeQueryResult is false", async () => {
+    const tab = { ...queryTab("analytics"), result: sampleResult };
+    const context1 = await buildAiContext(tab, sqliteConnection(), { excludeQueryResult: true });
+    const context2 = await buildAiContext(tab, sqliteConnection(), { includeQueryResult: false });
+
+    expect(context1.lastResultPreview).toBeUndefined();
+    expect(context2.lastResultPreview).toBeUndefined();
+  });
+
+  it("always preserves lastError from execution errors even when query result data is excluded", async () => {
+    const tab = { ...queryTab("analytics"), result: errorResult };
+    const context = await buildAiContext(tab, sqliteConnection(), { includeQueryResult: false });
+
+    expect(context.lastError).toBe("syntax error at or near 'FORM'");
+    expect(context.lastResultPreview).toBeUndefined();
+  });
+});

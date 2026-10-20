@@ -34,6 +34,9 @@ pub(super) async fn prepare_table_ddl(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
 ) -> Result<PreparedTableDdl, String> {
     let rebuild = request.drop_target_before_create;
+    // Every column reference below (CREATE TABLE, keys) uses the target-side names.
+    let target_columns = request.target_columns(columns);
+    let columns = target_columns.as_slice();
 
     let foreign_keys = if let Some(foreign_keys) = known_foreign_keys.get(table) {
         foreign_keys.clone()
@@ -84,7 +87,7 @@ pub(super) async fn prepare_table_ddl(
         target_db_type,
         source_driver_profile.as_deref(),
         target_driver_profile.as_deref(),
-        target_table == table,
+        target_table == table && request.preserves_column_names(),
     ) && (request.quote_target_column_names
         || !matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss));
 

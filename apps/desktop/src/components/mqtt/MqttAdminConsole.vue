@@ -35,6 +35,7 @@ interface MqttTabUiState {
   formEnabled?: boolean;
   editingTopic?: string | null;
   publishPanelCollapsed?: boolean;
+  pollingIntervalMs?: number;
 }
 
 interface MqttMessagePreview extends MqttMessage {
@@ -43,6 +44,14 @@ interface MqttMessagePreview extends MqttMessage {
 }
 
 type MqttMessageDirectionFilter = "all" | MqttMessageDirection;
+
+const DEFAULT_MQTT_POLLING_INTERVAL_MS = 1000;
+const MQTT_POLLING_INTERVAL_OPTIONS = [
+  { value: 1000, label: "1s" },
+  { value: 2000, label: "2s" },
+  { value: 3000, label: "3s" },
+  { value: 5000, label: "5s" },
+] as const;
 
 const { initialState: restoredUiState, track: trackUiState } = useTabUiState<MqttTabUiState>({}, "MqttAdminConsole");
 
@@ -55,6 +64,7 @@ const noLocalSubscribe = ref(false);
 const selectedTopic = ref<string>(restoredUiState.selectedTopic ?? props.initialTopic ?? "");
 const loading = ref(true);
 const error = ref<string | null>(null);
+const pollingIntervalMs = ref<number>(MQTT_POLLING_INTERVAL_OPTIONS.some((opt) => opt.value === restoredUiState.pollingIntervalMs) ? restoredUiState.pollingIntervalMs! : DEFAULT_MQTT_POLLING_INTERVAL_MS);
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null);
 const messageListRef = ref<HTMLElement | null>(null);
 const contextMenuMessage = ref<MqttMessagePreview | null>(null);
@@ -105,6 +115,7 @@ trackUiState(() => ({
   formEnabled: formEnabled.value,
   editingTopic: editingTopic.value,
   publishPanelCollapsed: publishPanelCollapsed.value,
+  pollingIntervalMs: pollingIntervalMs.value,
 }));
 
 const connected = computed(() => brokerInfo.value?.connected ?? false);
@@ -431,7 +442,11 @@ function startPolling() {
     } catch {
       /* ignore polling errors */
     }
-  }, 3000);
+  }, pollingIntervalMs.value);
+}
+
+function handlePollingIntervalChange() {
+  startPolling();
 }
 
 function stopPolling() {
@@ -613,6 +628,18 @@ onUnmounted(stopPolling);
               </span>
               <select v-model="displayEncoding" class="h-6 rounded border bg-transparent px-1.5 text-[11px] text-muted-foreground outline-none">
                 <option v-for="enc in PAYLOAD_ENCODINGS" :key="enc" :value="enc">{{ PAYLOAD_ENCODING_LABELS[enc] }}</option>
+              </select>
+              <select
+                v-model.number="pollingIntervalMs"
+                data-testid="mqtt-refresh-interval"
+                class="h-6 rounded border bg-transparent px-1.5 text-[11px] text-muted-foreground outline-none"
+                :aria-label="t('connection.mqttRefreshInterval')"
+                :title="t('connection.mqttRefreshInterval')"
+                @change="handlePollingIntervalChange"
+              >
+                <option v-for="option in MQTT_POLLING_INTERVAL_OPTIONS" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
               </select>
               <Button size="sm" variant="ghost" class="h-6 gap-1 px-2 text-[11px] font-normal normal-case" :title="messagesPaused ? t('connection.mqttResumeMessages') : t('connection.mqttPauseMessages')" @click="toggleMessagesPaused">
                 <Play v-if="messagesPaused" class="h-3.5 w-3.5" />

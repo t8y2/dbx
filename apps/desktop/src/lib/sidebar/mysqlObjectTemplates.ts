@@ -8,7 +8,7 @@ export interface MysqlObjectTemplate {
   sql: string;
 }
 
-type MysqlTemplateConnection = Pick<ConnectionConfig, "db_type" | "driver_profile">;
+type MysqlTemplateConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile">>;
 type MysqlTemplateNode = Pick<TreeNode, "type" | "database" | "tableName">;
 
 const templateKindByGroup: Partial<Record<TreeNodeType, MysqlObjectTemplateKind>> = {

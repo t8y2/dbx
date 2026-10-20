@@ -55,7 +55,7 @@ function mountColumnFilters(rows: CellValue[][]) {
   app.mount(document.createElement("div"));
   disposers.push(() => app.unmount());
   if (!filters) throw new Error("useDataGridColumnFilters was not mounted");
-  return filters;
+  return Object.assign(filters, { state });
 }
 
 afterEach(() => {
@@ -108,5 +108,48 @@ describe("useDataGridColumnFilters local filter sort", () => {
     filters.toggleLocalFilterSort("count");
 
     expect(filters.localFilterSort.value).toEqual({ field: "value", direction: "asc" });
+  });
+
+  it("filters local filter options by count query (>1, =1, count>1)", () => {
+    const filters = mountColumnFilters([["beta"], ["beta"], ["beta"], ["alpha"], ["alpha"], ["zulu"]]);
+
+    filters.openLocalFilter(0);
+    expect(filters.localFilterOptions.value.map((opt) => [opt.label, opt.count])).toEqual([
+      ["alpha", 2],
+      ["beta", 3],
+      ["zulu", 1],
+    ]);
+
+    // Filter duplicates (>1)
+    filters.state.localFilterSearch.value = ">1";
+    expect(filters.localFilterOptions.value.map((opt) => opt.label)).toEqual(["alpha", "beta"]);
+
+    // Filter unique (=1)
+    filters.state.localFilterSearch.value = "=1";
+    expect(filters.localFilterOptions.value.map((opt) => opt.label)).toEqual(["zulu"]);
+
+    // Filter by count with prefix: count >= 3
+    filters.state.localFilterSearch.value = "count >= 3";
+    expect(filters.localFilterOptions.value.map((opt) => opt.label)).toEqual(["beta"]);
+
+    // Clear draft values, then toggle to select only visible filtered options
+    filters.state.localFilterDraft.value!.values.clear();
+    filters.toggleAllLocalFilterOptions();
+    expect([...filters.state.localFilterDraft.value!.values]).toEqual(["str:beta"]);
+
+    // Bare number searches by label substring, not count
+    filters.state.localFilterSearch.value = "bet";
+    expect(filters.localFilterOptions.value.map((opt) => opt.label)).toEqual(["beta"]);
+  });
+
+  it("treats count queries as non-typeable where filter values", () => {
+    const filters = mountColumnFilters([["beta"]]);
+    filters.openLocalFilter(0);
+
+    filters.state.localFilterSearch.value = ">1";
+    expect(filters.canApplyTypedLocalFilterValue.value).toBe(false);
+
+    filters.state.localFilterSearch.value = "count>1";
+    expect(filters.canApplyTypedLocalFilterValue.value).toBe(false);
   });
 });

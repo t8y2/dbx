@@ -17,6 +17,7 @@ import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEv
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, StatementRange } from "./querySurfaces";
 import type { QueryTab, TableInfoTab } from "@/types/database";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 
 defineOptions({ inheritAttrs: false });
 
@@ -161,7 +162,7 @@ const showResultPane = computed({
     if (tab?.mode === "query") queryStore.updateTabUiState(tab.id, { resultPaneOpen: open });
   },
 });
-const isResultPaneVisible = computed(() => hasSharedOutput.value && showResultPane.value);
+const isResultPaneVisible = computed(() => hasSharedOutput.value && showResultPane.value && !isObjectDependencySection(activeQueryTab.value!));
 // Keep the pane mounted, but apply its target size immediately so available
 // results never wait for an expansion animation before becoming visible.
 const resultPaneTargetSize = computed(() => (isResultPaneVisible.value ? resultPaneSize.value : 0));

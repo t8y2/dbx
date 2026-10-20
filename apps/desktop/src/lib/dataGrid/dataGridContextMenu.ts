@@ -115,6 +115,7 @@ export function createDataGridColumnContextMenuItems(options: {
   headerColumn: boolean;
   contextColumn: boolean;
   canCopyAlterSql: boolean;
+  canCopyMetadata?: boolean;
   /** 当前列（或选中列）解析到了非空注释时才提供「复制列注释」。 */
   canCopyComment?: boolean;
   canFilter: boolean;
@@ -135,7 +136,7 @@ export function createDataGridColumnContextMenuItems(options: {
     "copyName" | "copyComment" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
     string
   > &
-    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns", string>>;
+    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata", string>>;
   icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort">;
   actions: {
     copyName: () => void;
@@ -143,6 +144,7 @@ export function createDataGridColumnContextMenuItems(options: {
     copyNames: () => void;
     details: () => void;
     copyAlterSql: () => void;
+    copyMetadata?: () => void;
     sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void;
     freezeToColumn: () => void;
     freezeSelectedColumns: () => void;
@@ -160,6 +162,7 @@ export function createDataGridColumnContextMenuItems(options: {
   const items: DataGridContextMenuItem[] = [];
   if (options.headerColumn) {
     items.push({ label: options.labels.copyName, action: options.actions.copyName, icon: options.icons.copy });
+    if (options.canCopyMetadata) items.push({ label: options.labels.copyMetadata ?? "Copy column metadata", action: options.actions.copyMetadata!, icon: options.icons.copy });
     // 只有解析到注释时才给出入口：无元数据的查询结果里永远为空，展示反而误导。
     if (options.canCopyComment) items.push({ label: options.labels.copyComment, action: options.actions.copyComment, icon: options.icons.copy });
     items.push({ label: options.labels.copyNames, action: options.actions.copyNames, icon: options.icons.copy });

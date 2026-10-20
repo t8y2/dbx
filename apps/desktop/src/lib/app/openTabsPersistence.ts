@@ -6,6 +6,7 @@ export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
 
 export interface SavedQueryResultRun {
   id: string;
+  connectionId?: string;
   title: string;
   sequence: number;
   sql: string;
@@ -71,6 +72,7 @@ export interface SavedOpenTab {
   databaseSearchState?: QueryTab["databaseSearchState"];
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
+  objectDetails?: QueryTab["objectDetails"];
   sourceView?: boolean;
   ddlViewer?: QueryTab["ddlViewer"];
   tableComment?: QueryTab["tableComment"];
@@ -221,6 +223,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.databaseSearchState ? { databaseSearchState: tab.databaseSearchState } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
+    ...(tab.objectDetails ? { objectDetails: { ...tab.objectDetails } } : {}),
     ...(tab.sourceView ? { sourceView: true } : {}),
     ...(tab.ddlViewer ? { ddlViewer: { ...tab.ddlViewer } } : {}),
     ...(tab.tableComment !== undefined ? { tableComment: tab.tableComment } : {}),
@@ -232,6 +235,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
       ? {
           resultRuns: tab.resultRuns.map((run) => ({
             id: run.id,
+            ...(run.multiDbExecution?.kind === "multi-db" ? { connectionId: run.multiDbExecution.target.connectionId } : run.connectionId !== undefined ? { connectionId: run.connectionId } : {}),
             title: run.title,
             sequence: run.sequence,
             sql: run.sql,

@@ -80,6 +80,10 @@ pub struct SqlReferenceScope {
     pub parent_id: Option<usize>,
 }
 
+/// 1-based line and column range in SQL text.
+/// Both `start_column` and `end_column` are 1-based and inclusive.
+/// For example, a 1-character token at line 1, column 5 has
+/// `start_line: 1, start_column: 5, end_line: 1, end_column: 5`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlTextSpan {
     pub start_line: usize,
@@ -90,12 +94,23 @@ pub struct SqlTextSpan {
 
 impl From<Span> for SqlTextSpan {
     fn from(span: Span) -> Self {
-        Self {
-            start_line: span.start.line as usize,
-            start_column: span.start.column as usize,
-            end_line: span.end.line as usize,
-            end_column: span.end.column as usize,
-        }
+        let start_line = span.start.line as usize;
+        let start_column = span.start.column as usize;
+        let end_line = span.end.line as usize;
+        // sqlparser's `Span.end.column` is 1-based exclusive. Convert to 1-based
+        // inclusive so that downstream consumers (both in Rust and TypeScript)
+        // receive precise token bounds that do not overshoot into trailing
+        // delimiters (e.g. commas or semicolons).
+        let end_column = if span.end.column > 0 {
+            if end_line == start_line && start_column > 0 {
+                (span.end.column as usize).saturating_sub(1).max(start_column)
+            } else {
+                (span.end.column as usize).saturating_sub(1)
+            }
+        } else {
+            0
+        };
+        Self { start_line, start_column, end_line, end_column }
     }
 }
 
@@ -1920,5 +1935,78 @@ mod group_by_violation_tests {
                 "dialect {dialect}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sql_text_span_tests {
+    use super::*;
+    use sqlparser::tokenizer::Location;
+
+    #[test]
+    fn span_conversion_produces_inclusive_end_column() {
+        // sqlparser's exclusive column 15 for 7-char token starting at 8 maps to inclusive 14.
+        let span = Span { start: Location { line: 1, column: 8 }, end: Location { line: 1, column: 15 } };
+        let text_span: SqlTextSpan = span.into();
+        assert_eq!(text_span, SqlTextSpan { start_line: 1, start_column: 8, end_line: 1, end_column: 14 });
+
+        // 1-character token at column 5: start 5, exclusive end 6 maps to inclusive 5.
+        let single_char = Span { start: Location { line: 1, column: 5 }, end: Location { line: 1, column: 6 } };
+        let single_span: SqlTextSpan = single_char.into();
+        assert_eq!(single_span, SqlTextSpan { start_line: 1, start_column: 5, end_line: 1, end_column: 5 });
+
+        // Multi-line span: end column 10 maps to inclusive 9 on line 2.
+        let multiline = Span { start: Location { line: 1, column: 1 }, end: Location { line: 2, column: 10 } };
+        let multiline_span: SqlTextSpan = multiline.into();
+        assert_eq!(multiline_span, SqlTextSpan { start_line: 1, start_column: 1, end_line: 2, end_column: 9 });
+
+        // Empty span stays zeroed.
+        let empty_span: SqlTextSpan = Span::empty().into();
+        assert_eq!(empty_span, SqlTextSpan { start_line: 0, start_column: 0, end_line: 0, end_column: 0 });
+    }
+
+    #[test]
+    fn reference_analysis_emits_inclusive_spans_before_semicolon() {
+        let sql = "SELECT id, name AS user_name FROM users GROUP BY user_name;";
+        let analysis = analyze_sql_references(sql, Some("generic")).expect("query should analyze");
+
+        // "users" starts at 1-based column 35, length 5 ("users" -> 35..=39).
+        assert_eq!(analysis.tables[0].name, "users");
+        assert_eq!(analysis.tables[0].span.start_line, 1);
+        assert_eq!(analysis.tables[0].span.start_column, 35);
+        assert_eq!(analysis.tables[0].span.end_line, 1);
+        assert_eq!(analysis.tables[0].span.end_column, 39);
+
+        // "id" at col 8..=9 (length 2).
+        let id_col = analysis.columns.iter().find(|col| col.name == "id").unwrap();
+        assert_eq!(id_col.span.start_column, 8);
+        assert_eq!(id_col.span.end_column, 9);
+
+        // "name" at col 12..=15 (length 4).
+        let name_col = analysis.columns.iter().find(|col| col.name == "name").unwrap();
+        assert_eq!(name_col.span.start_column, 12);
+        assert_eq!(name_col.span.end_column, 15);
+
+        // The GROUP BY column reference "user_name" directly before ';' at column 60:
+        // "user_name" starts at column 50, length 9 (50..=58).
+        // It must NOT overshoot to column 59 (which is ';').
+        let group_col = analysis.columns.iter().rfind(|col| col.name == "user_name").unwrap();
+        assert_eq!(group_col.span.start_column, 50);
+        assert_eq!(group_col.span.end_column, 58);
+    }
+
+    #[test]
+    fn group_by_violations_emit_inclusive_spans() {
+        let sql = "SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_NAME;";
+        let analysis = analyze_sql_references(sql, Some("postgres")).expect("query should analyze");
+        assert_eq!(analysis.group_by_violations.len(), 1);
+        let violation = &analysis.group_by_violations[0];
+        assert_eq!(violation.column, "USER_ID");
+        // "USER_ID" starts at column 8, length 7 (8..=14).
+        // Must NOT overshoot to column 15 (which is the comma ',').
+        assert_eq!(violation.span.start_line, 1);
+        assert_eq!(violation.span.start_column, 8);
+        assert_eq!(violation.span.end_line, 1);
+        assert_eq!(violation.span.end_column, 14);
     }
 }

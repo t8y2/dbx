@@ -3106,3 +3106,15 @@ html.dbx-bg-active .cm-scroller {
   background-color: transparent !important;
 }
 
+/* Inner workbench panels. One radius step above the old rounded-md (still driven by the
+ * Corner style setting) and an opaque border in dark themes: a translucent 1px border on a
+ * small arc nearly vanishes against the same-coloured shell, and the anti-aliased corner
+ * then reads as stray pixels (most visible on Linux). */
+.dbx-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--dbx-radius-lg);
+}
+
+html.dark .dbx-panel {
+  border-color: color-mix(in srgb, rgb(104 112 126) 40%, var(--background));
+}

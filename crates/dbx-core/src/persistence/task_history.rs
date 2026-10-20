@@ -932,7 +932,7 @@ fn to_sqlite_count(value: u64) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::data::transfer::{
-        TransferMode, TransferObjectSelection, TransferOwnershipPolicy, TransferTableNameCase,
+        TransferColumnNameCase, TransferMode, TransferObjectSelection, TransferOwnershipPolicy, TransferTableNameCase,
     };
 
     #[tokio::test]
@@ -959,6 +959,7 @@ mod tests {
             objects: Some(vec![TransferObjectSelection::default()]),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            target_column_name_case: TransferColumnNameCase::Preserve,
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 500,

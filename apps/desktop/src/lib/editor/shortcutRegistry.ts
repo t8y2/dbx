@@ -28,6 +28,9 @@ export type ShortcutActionId =
   | "redo"
   | "selectAll"
   | "selectCurrentStatement"
+  | "previousStatement"
+  | "nextStatement"
+  | "statementStart"
   | "extendSelection"
   | "addNextSelectionOccurrence"
   | "selectAllSelectionOccurrences"
@@ -341,6 +344,24 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutSelectCurrentStatement",
     scope: "editor",
     defaultShortcut: "Mod+Shift+E",
+  },
+  {
+    id: "previousStatement",
+    labelKey: "settings.shortcutPreviousStatement",
+    scope: "editor",
+    defaultShortcut: "Ctrl+Shift+ArrowUp",
+  },
+  {
+    id: "nextStatement",
+    labelKey: "settings.shortcutNextStatement",
+    scope: "editor",
+    defaultShortcut: "Ctrl+Shift+ArrowDown",
+  },
+  {
+    id: "statementStart",
+    labelKey: "settings.shortcutStatementStart",
+    scope: "editor",
+    defaultShortcut: "Alt+Home",
   },
   {
     id: "extendSelection",

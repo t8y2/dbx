@@ -27,7 +27,7 @@ import {
   COMPACT_TAB_TITLE_DEFAULT_VERSION,
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
-import { DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
@@ -655,6 +655,8 @@ describe("normalizeEditorSettings", () => {
       quote: '"',
       quotePolicy: "minimal",
     });
+    expect(defaults.valueFormat).toBe("default");
+    expect(normalizeEditorSettings({}).dataGridVisibleCopyExtractors).toEqual(DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS);
     expect(defaults.sql).toMatchObject({
       skipComputedColumns: true,
       skipGeneratedColumns: true,
@@ -672,6 +674,9 @@ describe("normalizeEditorSettings", () => {
     expect(configured.dsv.quotePolicy).toBe("always");
     expect(configured.sql.insertMode).toBe("row-by-row");
     expect(configured.json.pretty).toBe(false);
+    const visible = normalizeEditorSettings({ dataGridVisibleCopyExtractors: ["php", "php", "unknown"] }).dataGridVisibleCopyExtractors;
+    expect(visible).toEqual(["php"]);
+    expect(normalizeEditorSettings({ dataGridVisibleCopyExtractors: [] }).dataGridVisibleCopyExtractors).toEqual([]);
   });
 
   it("migrates the legacy NULL clipboard sentinel once", () => {
@@ -1473,6 +1478,13 @@ describe("settingsStore AI API key normalization", () => {
       requiresApiKey: false,
     });
     expect(AI_PROVIDER_PRESETS).not.toHaveProperty(CC_SWITCH_PROVIDER_ID);
+  });
+
+  it("defaults new MiniMax configurations to Flash and preserves explicit models", () => {
+    expect(normalizeAiConfig({ provider: "minimax" }).model).toBe("MiniMax-M3.1-Flash");
+    for (const model of ["MiniMax-M3", "MiniMax-M2.7", "private-model", ""]) {
+      expect(normalizeAiConfig({ provider: "minimax", model }).model).toBe(model);
+    }
   });
 
   it("preserves saved MiniMax endpoints during normalization", () => {
@@ -2860,5 +2872,33 @@ describe("settingsStore defaultAiMode lifecycle", () => {
     store.setDefaultAutoRouting(true);
 
     await vi.waitFor(() => expect(saveAiChatSelection).toHaveBeenLastCalledWith(expect.objectContaining({ defaultAutoRouting: true })));
+  });
+
+  it("restores and persists the include/exclude query result preference (#12757)", async () => {
+    const saveAiChatSelection = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({
+      loadAiConfigs: vi.fn().mockResolvedValue([]),
+      loadAiConfig: vi.fn().mockResolvedValue(null),
+      loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue({ version: 1, effortPreferences: [], includeQueryResult: true }),
+      saveAiChatSelection,
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initAiConfigs();
+
+    expect(store.includeQueryResult).toBe(true);
+    expect(store.excludeQueryResult).toBe(false);
+
+    store.setIncludeQueryResult(false);
+    expect(store.includeQueryResult).toBe(false);
+    expect(store.excludeQueryResult).toBe(true);
+
+    store.setExcludeQueryResult(false);
+    expect(store.includeQueryResult).toBe(true);
+    expect(store.excludeQueryResult).toBe(false);
+
+    await vi.waitFor(() => expect(saveAiChatSelection).toHaveBeenLastCalledWith(expect.objectContaining({ includeQueryResult: true })));
   });
 });

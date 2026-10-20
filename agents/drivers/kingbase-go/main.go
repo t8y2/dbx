@@ -143,10 +143,12 @@ type server struct {
 	usePgFunctionDefinition         bool
 	useLegacyRoutineDefinition      bool
 	catalogIdentityUnsupported      bool
+	catalogGeneratedUnsupported     bool
 	catalogOIDUnsupported           bool
 	infoColumnTypeUnsupported       bool
 	infoUdtNameUnsupported          bool
 	indexOrdinalityUnsupported      bool
+	indexKeyCountUnsupported        bool
 	triggerPrettyUnsupported        bool
 	triggerInternalUnsupported      bool
 	constraintDefinitionUnsupported bool
@@ -488,10 +490,12 @@ func (s *server) connect(cp connectParams) error {
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false
@@ -688,10 +692,12 @@ func (s *server) disconnect() error {
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false
@@ -1394,7 +1400,13 @@ func isNativeDSNSpace(value byte) bool {
 }
 
 func isKingbaseJDBCURL(value string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "jdbc:kingbase8://")
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, prefix := range []string{"jdbc:kingbase://", "jdbc:kingbase8://", "jdbc:kingbase83://", "jdbc:kingbase86://"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func quoteDSNValue(value string) string {

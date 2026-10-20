@@ -250,6 +250,7 @@ enum ConnectionDatabaseInfoSource {
         session: Arc<PluginDriverSession>,
     },
     NativeMysql(db::mysql::MySqlPool),
+    NativeGaussdbDws(deadpool_postgres::Pool),
     NativeHBase(db::hbase_driver::HBaseClient),
     NativeMongo(mongodb::Client, Option<String>),
     Meilisearch(db::meilisearch_driver::MeilisearchClient),
@@ -259,6 +260,12 @@ enum ConnectionDatabaseInfoSource {
     Consul(Box<crate::consul::ConsulClient>),
     #[cfg(feature = "mq-admin")]
     MessageQueue,
+}
+
+async fn gaussdb_dws_product_version_from_pool(pool: &deadpool_postgres::Pool) -> Option<String> {
+    let result = db::postgres::execute_query_with_max_rows(pool, "SELECT version()", Some(1)).await.ok()?;
+    let server_version = result.rows.first()?.first()?.as_str()?;
+    crate::query::plugin_plan::gaussdb_product_version_from_server_version(server_version)
 }
 
 /// Held connection for a manual transaction session
@@ -1567,6 +1574,21 @@ impl AppState {
     pub async fn update_connection_pools<R>(&self, update: impl FnOnce(&mut ConnectionPoolRegistry) -> R) -> R {
         let mut connections = self.connections.write().await;
         update(&mut connections)
+    }
+
+    /// Test-only: the pool key a workload session uses. Tests that inject a
+    /// pool instead of opening a real connection need the exact session key the
+    /// executor will look up.
+    #[cfg(test)]
+    pub(crate) async fn session_pool_key_for_test(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: &str,
+    ) -> String {
+        let config = self.configs.read().await.get(connection_id).cloned();
+        let base_pool_key = base_pool_key_for_config(config.as_ref(), connection_id, database, None, false);
+        pool_key_for_session_role(config.as_ref(), base_pool_key, Some(client_session_id), AgentSessionRole::Workload)
     }
 
     fn pool_routing_control(&self) -> PoolRoutingControl {
@@ -3363,14 +3385,17 @@ impl AppState {
                         }
                     };
                     if db_config.db_type == DatabaseType::Kingbase {
-                        let identifier_quote = client
-                            .connection_info(Some(agent_connect_timeout(&db_config)))
-                            .await
-                            .ok()
-                            .map(|info| info.identifier_quote);
-                        client.set_identifier_quote(identifier_quote);
+                        let info = client.connection_info(Some(agent_connect_timeout(&db_config))).await.ok();
+                        client.set_identifier_quote(info.as_ref().map(|info| info.identifier_quote.clone()));
+                        // database_mode is fixed for the instance. Cache it on the
+                        // live pool, never reuse the saved frontend metadata.
+                        let mode = info.and_then(|info| info.compatibility_mode);
+                        PoolKind::Agent(Arc::new(
+                            db::agent_driver::PooledAgentClient::new(client).with_compatibility_mode(mode),
+                        ))
+                    } else {
+                        PoolKind::agent(client)
                     }
-                    PoolKind::agent(client)
                 } else {
                     // ZooKeeper JVM properties are connection-scoped; shared agent daemons must not inherit them.
                     let mut client = self
@@ -3710,8 +3735,69 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<ConnectionEndpoint, String> {
         let transport_layers = self.resolved_transport_layers(config).await?;
+        let transport_summary = transport_layers
+            .iter()
+            .map(|layer| match layer {
+                TransportLayerConfig::Ssh(_) => "ssh".to_string(),
+                TransportLayerConfig::Proxy(_) => "proxy".to_string(),
+                TransportLayerConfig::HttpTunnel(http) => {
+                    format!("http_tunnel:{:?}:{}", http.protocol, redact_transport_url(&http.url))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        log::info!(
+            "[transport] connection_id={} db_type={:?} layer_count={} layers=[{}] target={}:{}",
+            connection_id,
+            config.db_type,
+            transport_layers.len(),
+            transport_summary,
+            config.host,
+            config.port
+        );
+        let navicat_layer = transport_layers.iter().enumerate().find_map(|(index, layer)| match layer {
+            TransportLayerConfig::HttpTunnel(http)
+                if http.protocol == crate::models::connection::HttpTunnelProtocol::NavicatMysql =>
+            {
+                Some(index)
+            }
+            _ => None,
+        });
+        if let Some(index) = navicat_layer {
+            if config.db_type != DatabaseType::Mysql {
+                return Err("Navicat HTTP tunnel protocol is only supported for MySQL connections.".to_string());
+            }
+            if index != 0 || transport_layers.len() != 1 {
+                return Err("Navicat MySQL HTTP tunnel must be the only transport layer.".to_string());
+            }
+            if config.ssl
+                || !config.ca_cert_path.is_empty()
+                || !config.client_cert_path.is_empty()
+                || !config.client_key_path.is_empty()
+            {
+                return Err("Navicat MySQL HTTP tunnel does not support MySQL TLS settings. Disable MySQL SSL or remove the TLS certificate paths.".to_string());
+            }
+        }
         if transport_layers.is_empty() || db::sqlite_worker::sqlite_remote_worker_requested(config) {
             return Ok(ConnectionEndpoint::direct(config.host.clone(), config.port));
+        }
+        if let Some(TransportLayerConfig::HttpTunnel(http)) = transport_layers.first() {
+            if http.protocol == crate::models::connection::HttpTunnelProtocol::NavicatMysql {
+                let local_port = self
+                    .http_tunnels
+                    .start_navicat_mysql_tunnel(
+                        connection_id,
+                        &http.url,
+                        http.connect_timeout_secs,
+                        &config.host,
+                        config.port,
+                        &config.username,
+                        &config.password,
+                        config.database.as_deref(),
+                    )
+                    .await?;
+                return Ok(ConnectionEndpoint::direct("127.0.0.1".to_string(), local_port));
+            }
         }
         if config.db_type == DatabaseType::ClickHouse
             || config.db_type == DatabaseType::CloudflareD1
@@ -5469,6 +5555,11 @@ impl AppState {
                         session: session.clone(),
                     })
                 }
+                Some(PoolKind::Postgres(pool))
+                    if crate::query::plugin_plan::is_explicit_gaussdb_dws_profile(&config) =>
+                {
+                    Some(ConnectionDatabaseInfoSource::NativeGaussdbDws(pool.clone()))
+                }
                 Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
                 Some(PoolKind::HBase(client)) => Some(ConnectionDatabaseInfoSource::NativeHBase(client.clone())),
                 Some(PoolKind::MongoDb(client)) => {
@@ -5515,6 +5606,21 @@ impl AppState {
             }
             Some(ConnectionDatabaseInfoSource::NativeMysql(pool)) => {
                 db::mysql::database_connection_info(&pool, db::mysql::protocol_product_name(&config)).await.map(Some)
+            }
+            Some(ConnectionDatabaseInfoSource::NativeGaussdbDws(pool)) => {
+                // Version discovery is optional metadata. If the query or product
+                // marker is unavailable, return versionless info; plan support is
+                // determined by the explicit DWS profile, not the product version.
+                let product_version = gaussdb_dws_product_version_from_pool(&pool).await;
+                Ok(Some(DatabaseConnectionInfo {
+                    product_name: Some("GaussDB".to_string()),
+                    product_version: product_version.map(|version| format!("GaussDB {version}")),
+                    current_database: database
+                        .map(str::to_string)
+                        .or_else(|| config.effective_database().map(str::to_string)),
+                    driver_name: Some("DBX PostgreSQL-compatible driver".to_string()),
+                    ..Default::default()
+                }))
             }
             Some(ConnectionDatabaseInfoSource::NativeHBase(client)) => {
                 db::hbase_driver::database_connection_info(&client).await
@@ -6362,6 +6468,18 @@ impl AppState {
         let configs = self.configs.read().await;
         configs.get(connection_id).is_some_and(|config| config.has_effective_transport_layers())
     }
+}
+
+fn redact_transport_url(raw: &str) -> String {
+    reqwest::Url::parse(raw)
+        .map(|mut url| {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        })
+        .unwrap_or_else(|_| "<invalid-url>".to_string())
 }
 
 fn gaussdb_identifier_quote_from_query_result(result: &db::QueryResult) -> Option<String> {
@@ -7561,12 +7679,12 @@ mod tests {
         gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
         kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
         metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
-        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
-        redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
-        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id,
-        transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
-        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        prestosql_jdbc_config_for_endpoint, redact_transport_url, redacted_connection_url_for_endpoint,
+        redis_sentinel_transport_id, redis_sentinel_transport_prefix, report_connection_liveness_lost,
+        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
+        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        TxnConnection, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -7585,6 +7703,15 @@ mod tests {
     use crate::schema;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn transport_url_redaction_removes_credentials_query_and_fragment() {
+        assert_eq!(
+            redact_transport_url("https://alice:secret@example.test/tunnel.php?token=secret#fragment"),
+            "https://example.test/tunnel.php"
+        );
+        assert_eq!(redact_transport_url("https://alice:secret@%/"), "<invalid-url>");
+    }
 
     pub(super) fn mysql_config(database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
@@ -11848,6 +11975,7 @@ for line in sys.stdin:
             enabled: true,
             url: String::new(),
             token: String::new(),
+            protocol: crate::models::connection::HttpTunnelProtocol::DbxTcp,
             connect_timeout_secs: 10,
             profile_id: profile_id.to_string(),
         }

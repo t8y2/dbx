@@ -1592,6 +1592,44 @@ AND ts = toDateTime('2026-07-15 12:00:00');`;
     expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([expected, "SELECT 2"]);
   });
 
+  it("does not merge a query after an inline EXPLAIN statement without semicolons (#12811)", () => {
+    const sql = "SELECT 1\nEXPLAIN SELECT 2\nSELECT 3";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe("EXPLAIN SELECT 2");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["SELECT 1", "EXPLAIN SELECT 2", "SELECT 3"]);
+  });
+
+  it("does not merge a query after an inline EXPLAIN ANALYZE statement (#12811)", () => {
+    const sql = "SELECT 1\nEXPLAIN ANALYZE SELECT 2\nSELECT 3";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe("EXPLAIN ANALYZE SELECT 2");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["SELECT 1", "EXPLAIN ANALYZE SELECT 2", "SELECT 3"]);
+  });
+
+  it("does not merge a query after an inline EXPLAIN with parenthesized options (#12811)", () => {
+    const sql = "EXPLAIN (ANALYZE, BUFFERS) SELECT 1\nSELECT 2";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe("EXPLAIN (ANALYZE, BUFFERS) SELECT 1");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["EXPLAIN (ANALYZE, BUFFERS) SELECT 1", "SELECT 2"]);
+  });
+
+  it("does not merge a query after MySQL EXPLAIN with options", () => {
+    const sql = "EXPLAIN FORMAT = JSON SELECT 1\nSELECT 2";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "mysql")?.sql.trim()).toBe("EXPLAIN FORMAT = JSON SELECT 1");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["EXPLAIN FORMAT = JSON SELECT 1", "SELECT 2"]);
+  });
+
+  it("does not merge a query after a plain MySQL EXPLAIN table statement", () => {
+    const sql = "EXPLAIN users\nSELECT * FROM users;";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "mysql")?.sql.trim()).toBe("EXPLAIN users");
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "mysql")?.sql.trim()).toBe("SELECT * FROM users");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["EXPLAIN users", "SELECT * FROM users"]);
+  });
+
+  it("does not merge a query after an EXPLAIN UPDATE statement", () => {
+    const sql = "EXPLAIN UPDATE test_orders a\nJOIN test_users b ON a.id=b.id\nSET a.name = '张三'\nWHERE b.id > 10\nSELECT 1";
+    const expectedExplain = "EXPLAIN UPDATE test_orders a\nJOIN test_users b ON a.id=b.id\nSET a.name = '张三'\nWHERE b.id > 10";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "mysql")?.sql.trim()).toBe(expectedExplain);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([expectedExplain, "SELECT 1"]);
+  });
+
   it("keeps EXPLAIN options CTE UPDATE assignments as one statement", () => {
     const sql = "EXPLAIN (ANALYZE)\nWITH tmp AS (SELECT 1)\nUPDATE t\nSET x = 1;";
 

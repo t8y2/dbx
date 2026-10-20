@@ -2,7 +2,7 @@
  * Utilities for SQL identifier navigation (Ctrl/Cmd + click on table/column names).
  */
 
-import type { ObjectSourceKind } from "@/types/database";
+import type { ObjectSourceKind, QueryTab } from "@/types/database";
 
 const SQL_KEYWORDS_SET = new Set([
   "select",
@@ -135,7 +135,7 @@ export interface ExtractedSqlIdentifierPart {
   quoted: boolean;
 }
 
-export type SqlObjectNavigationType = "table" | "view" | "materialized_view" | "procedure" | "function" | "package" | "trigger";
+export type SqlObjectNavigationType = "table" | "view" | "materialized_view" | "procedure" | "function" | "package" | "package_body" | "sequence" | "trigger";
 
 /**
  * Semantic role of a Ctrl/Cmd+clicked identifier for navigation.
@@ -161,6 +161,20 @@ export interface SqlObjectNavigationTarget {
   schemaQuoted?: boolean;
   parentNameQuoted?: boolean;
   parentSchemaQuoted?: boolean;
+}
+
+export type SqlObjectNavigationContext = Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "tableMeta">;
+
+/** Resolve a structured object against its captured origin, without reparsing quoted dots. */
+export function sqlObjectNavigationContextTarget(table: SqlObjectNavigationTarget, context: SqlObjectNavigationContext) {
+  return {
+    connectionId: context.connectionId,
+    database: table.database || context.database,
+    catalog: context.tableMeta?.catalog || context.catalog,
+    schema: table.schema || context.schema,
+    tableName: table.name,
+    tableType: table.type ? sqlObjectNavigationTableType(table) : undefined,
+  };
 }
 
 /**
@@ -208,11 +222,11 @@ export function sqlObjectNavigationTarget(table: SqlObjectNavigationTarget): Sql
 }
 
 export function isSqlObjectNavigationRoutineType(type?: SqlObjectNavigationType): boolean {
-  return type === "procedure" || type === "function" || type === "package" || type === "trigger";
+  return type === "procedure" || type === "function" || type === "package" || type === "package_body" || type === "sequence" || type === "trigger";
 }
 
 export function sqlObjectHoverDetail(table: SqlObjectNavigationTarget): string {
-  const objectType = table.type === "materialized_view" ? "materialized view" : table.type === "view" ? "view" : table.type === "procedure" ? "procedure" : table.type === "function" ? "function" : table.type === "package" ? "package" : table.type === "trigger" ? "trigger" : "table";
+  const objectType = table.type === "materialized_view" ? "materialized view" : table.type === "package_body" ? "package body" : (table.type ?? "table");
   if (table.parentName) {
     const owner = table.parentSchema ? `${table.parentSchema}.${table.parentName}` : table.parentName;
     return `${objectType} in ${owner}`;
@@ -246,6 +260,10 @@ export function sqlObjectNavigationSourceKind(table: SqlObjectNavigationTarget):
       return "FUNCTION";
     case "package":
       return "PACKAGE";
+    case "package_body":
+      return "PACKAGE_BODY";
+    case "sequence":
+      return "SEQUENCE";
     case "trigger":
       return "TRIGGER";
     default:

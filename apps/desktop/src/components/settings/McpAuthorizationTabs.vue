@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -14,7 +14,7 @@ const sections = computed<Array<{ id: SectionId; title: string }>>(() => [
   { id: "capabilities", title: t("settings.mcpAuthTabCapabilitiesTitle") },
 ]);
 
-const currentSection = ref<SectionId>("overrides");
+const currentSection = defineModel<SectionId>({ default: "overrides" });
 </script>
 
 <template>
@@ -31,7 +31,7 @@ const currentSection = ref<SectionId>("overrides");
       <TabsList variant="line" class="h-9 w-full justify-start gap-1 overflow-x-auto border-b border-border/60 bg-transparent p-0" :aria-label="t('settings.mcpAuthTitle')">
         <TabsTrigger v-for="section in sections" :key="section.id" :value="section.id" class="flex-none px-3">{{ section.title }}</TabsTrigger>
       </TabsList>
-      <TabsContent v-for="section in sections" :key="section.id" :value="section.id" class="m-0">
+      <TabsContent v-for="section in sections" :key="section.id" :value="section.id" :data-settings-search-id="`mcp-${section.id}`" class="m-0">
         <slot :name="section.id" />
       </TabsContent>
     </Tabs>

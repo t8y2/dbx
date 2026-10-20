@@ -61,6 +61,12 @@ test("shows the vendor KingBase URL scheme in the connection form", () => {
   assert.equal(connectionUrlPlaceholder("kingbase"), "kingbase8://user:password@host:54321/database");
 });
 
+test("shows the H2 URL scheme in the connection form for tcp and file modes", () => {
+  assert.equal(connectionUrlPlaceholder("h2"), "jdbc:h2:tcp://host:9092/database");
+  assert.equal(connectionUrlPlaceholder("h2", "file"), "jdbc:h2:file:/path/to/database");
+  assert.equal(connectionUrlPlaceholder("h2", "h2"), "jdbc:h2:tcp://host:9092/database");
+});
+
 test("applies a credential-free KingBase URL without clearing typed credentials", () => {
   const parsed = parseConnectionUrl("kingbase8://172.21.203.70:443/hq_official");
   const applied = applyParsedConnectionUrl({ name: "hq", db_type: "kingbase", username: "framework", password: "typed-secret" } as any, parsed);

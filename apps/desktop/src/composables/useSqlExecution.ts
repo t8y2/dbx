@@ -31,11 +31,12 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
-import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
 import { MULTI_SOURCE_MAX_ROWS_PER_SOURCE } from "@/lib/query/multiSourceResult";
 import { translateBackendError } from "@/i18n/backend-errors";
 import type { SqlExecutionDeferredReason, SqlExecutionNotStartedReason, SqlExecutionOutcome } from "@/lib/sql/sqlExecutionOutcome";
+import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 
@@ -246,7 +247,7 @@ export function useSqlExecution(deps: {
 
   async function resolvedExecutableSql(source: SqlExecutionOverride | undefined, context: SqlExecutionContext): Promise<{ sql: string; sourceOffset?: number; editorViewportRequestId?: number }> {
     const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, context.connection?.db_type, settingsStore.editorSettings.sqlVariableSubstitutionEnabled).atSet;
-    const databaseType = effectiveDatabaseTypeForConnection(context.connection) ?? context.connection?.db_type;
+    const databaseType = kingbaseSqlDatabaseType(context.connection) ?? effectiveDatabaseTypeForConnection(context.connection) ?? context.connection?.db_type;
     const expand = (sql: string, declarationSql?: string) => (atSetEnabled ? expandSqlVariables(sql, { declarationSql, databaseType }).sql : sql);
     if (typeof source === "string") return { sql: expand(source) };
 
@@ -290,12 +291,18 @@ export function useSqlExecution(deps: {
   }
 
   async function tryExecute(sqlOverride?: SqlExecutionOverride, options: SqlExecutionOptions = {}): Promise<SqlExecutionOutcome> {
+    const sourceTab = resolveExecutionTab(options.tabId);
+    if (sourceTab && isObjectDependencySection(sourceTab)) {
+      cancelEditorViewportRequest(options.editorViewportRequestId);
+      return notStarted("blocked", sourceTab.id);
+    }
     const context = captureExecutionContext(options.tabId);
     if (!context) {
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted("no-tab", options.tabId);
     }
-    const { sql, sourceOffset, editorViewportRequestId } = await resolvedExecutableSql(sqlOverride, context);
+    const { sql, sourceOffset, editorViewportRequestId: snapshotRequestId } = await resolvedExecutableSql(sqlOverride, context);
+    const editorViewportRequestId = snapshotRequestId ?? options.editorViewportRequestId;
     const executionOptions = { ...options, editorViewportRequestId, tabId: context.tabId };
     if (!sql.trim()) {
       cancelEditorViewportRequest(editorViewportRequestId);
@@ -305,6 +312,10 @@ export function useSqlExecution(deps: {
     if (!tab) {
       cancelEditorViewportRequest(editorViewportRequestId);
       return notStarted("no-tab", context.tabId);
+    }
+    if (tab.isExecuting) {
+      cancelEditorViewportRequest(editorViewportRequestId);
+      return notStarted("busy", context.tabId);
     }
     if (requiresDatabaseSelection(tab, context.connection, sql)) {
       deps.onMissingDatabase?.(context.tabId);
@@ -407,13 +418,14 @@ export function useSqlExecution(deps: {
     const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
     const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
     const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
-    const parameters = extractSqlParameterDescriptors(sql, { databaseType, enabledSyntaxes });
+    const parameterDatabaseType = kingbaseSqlDatabaseType(connection) ?? databaseType;
+    const parameters = extractSqlParameterDescriptors(sql, { databaseType: parameterDatabaseType, enabledSyntaxes });
     if (!parameters.length) {
       return false;
     }
     sqlParameterSourceSql.value = sql;
     sqlParameterNames.value = parameters;
-    sqlParameterDatabaseType.value = databaseType;
+    sqlParameterDatabaseType.value = parameterDatabaseType;
     sqlParameterEnabledSyntaxes.value = enabledSyntaxes;
     pendingSourceOffset.value = sourceOffset;
     pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
@@ -480,7 +492,11 @@ export function useSqlExecution(deps: {
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted("missing-database", executionTabId);
     }
-    const statementCount = splitSqlStatementRanges(sql, executionDatabaseType, sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : undefined)).length;
+    const statementCount = splitSqlStatementRanges(
+      sql,
+      executionDatabaseType,
+      sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : executionDatabaseType === "kingbase" ? executionConnection?.database_info?.compatibilityMode : undefined),
+    ).length;
     const redisConsoleSelected = executionDatabaseType === "redis" && tab.uiState?.redisResultViewMode === "console";
     // Output-view switching belongs to the tab the user is looking at — both
     // when the query starts and when it finishes.
@@ -777,7 +793,7 @@ export function useSqlExecution(deps: {
         // expired-session replay, or per-statement retry is allowed for this batch.
         const maxRows = agentProtocolQueryResultMaxRows(effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
         const databaseType = effectiveDatabaseTypeForConnection(connection);
-        const compatibility = databaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(executionTab.connectionId, executionTab.database) : undefined;
+        const compatibility = databaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(executionTab.connectionId, executionTab.database) : databaseType === "kingbase" ? connection?.database_info?.compatibilityMode : undefined;
         const statements = splitSqlStatementRanges(sql, databaseType, sqlStatementParameterOptionsForCompatibility(databaseType, compatibility));
         const results: NonNullable<QueryTab["results"]> = [];
         for (const [statementIndex, statement] of (statements.length ? statements : [{ sql, from: 0, to: sql.length }]).entries()) {
@@ -938,6 +954,8 @@ export function useSqlExecution(deps: {
   }
 
   async function tryExplain(sqlOverride?: SqlExecutionOverride, options: SqlExecutionOptions = {}) {
+    const sourceTab = resolveExecutionTab(options.tabId);
+    if (sourceTab && isObjectDependencySection(sourceTab)) return;
     const context = captureExecutionContext(options.tabId);
     if (!context) {
       return;

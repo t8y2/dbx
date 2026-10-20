@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowDown, ArrowUp, Check, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
@@ -117,11 +118,17 @@ const viewMode = computed(() => settingsStore.editorSettings.objectBrowserViewMo
 const isListView = computed(() => viewMode.value === "list");
 const isGridView = computed(() => viewMode.value === "grid");
 const isCompactView = computed(() => viewMode.value === "compact");
+const compactCardWidth = computed(() => normalizeObjectBrowserCompactWidth(settingsStore.editorSettings.objectBrowserCompactWidth));
+
+function setCompactCardWidth(width: ObjectBrowserCompactWidth) {
+  settingsStore.updateEditorSettings({ objectBrowserCompactWidth: width });
+}
+
 // Measured condensation for the header row: tier 1 moves the sort/view
 // controls into the overflow menu, tier 2 drops the connection chip (the tab
 // title already carries it). See useToolbarOverflow for the tier contract.
 const toolbarRef = ref<HTMLElement | null>(null);
-const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id]);
+const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id, () => settingsStore.editorSettings.objectBrowserViewMode]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
 const showConnectionChip = computed(() => toolbarTier.value < 2);
 const showInlineSortAndView = computed(() => toolbarTier.value < 1);
@@ -554,6 +561,17 @@ defineExpose({ focusSearch, refresh });
         <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': isCompactView }" :title="t('objects.viewCompact')" @click="setViewMode('compact')">
           <Grid3X3 class="h-3.5 w-3.5" />
         </button>
+        <select
+          v-if="isCompactView"
+          data-compact-width-select
+          class="ml-1 h-6 shrink-0 cursor-pointer rounded-sm border-l bg-transparent px-1 text-xs text-muted-foreground outline-none hover:text-foreground focus:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+          :value="compactCardWidth"
+          :aria-label="t('objects.compactCardWidth')"
+          :title="t('objects.compactCardWidth')"
+          @change="setCompactCardWidth(normalizeObjectBrowserCompactWidth(Number(($event.target as HTMLSelectElement).value)))"
+        >
+          <option v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" :value="width" class="bg-background text-foreground">{{ width }}px</option>
+        </select>
       </div>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('contextMenu.refreshTab')" :disabled="loading" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
@@ -589,6 +607,15 @@ defineExpose({ focusSearch, refresh });
           <Grid3X3 class="h-3.5 w-3.5" />
           {{ t("objects.viewCompact") }}
         </DropdownMenuItem>
+        <DropdownMenuSub v-if="isCompactView">
+          <DropdownMenuSubTrigger>{{ t("objects.compactCardWidth") }}</DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <DropdownMenuItem v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" @select="setCompactCardWidth(width)">
+              <Check v-if="compactCardWidth === width" class="h-3.5 w-3.5" />
+              {{ width }}px
+            </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
       </ToolbarOverflowMenu>
     </div>
 
@@ -655,7 +682,14 @@ defineExpose({ focusSearch, refresh });
           </div>
         </div>
       </div>
-      <div v-else ref="gridScrollerRef" class="grid min-h-0 flex-1 content-start overflow-auto" :class="isCompactView ? 'grid-cols-[repeat(auto-fill,minmax(128px,1fr))] gap-1 p-1' : 'grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-3 p-3'" @scroll.passive="onGridScroll">
+      <div
+        v-else
+        ref="gridScrollerRef"
+        class="grid min-h-0 flex-1 content-start overflow-auto"
+        :class="isCompactView ? 'gap-1 p-1' : 'grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-3 p-3'"
+        :style="isCompactView ? { gridTemplateColumns: `repeat(auto-fill, minmax(min(${compactCardWidth}px, 100%), 1fr))` } : undefined"
+        @scroll.passive="onGridScroll"
+      >
         <div
           v-for="row in visibleRows"
           :key="row.name"

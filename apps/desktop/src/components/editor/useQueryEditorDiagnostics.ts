@@ -70,6 +70,7 @@ interface QueryEditorDiagnosticsOptions {
   sqlDriverProfile: ComputedRef<string | undefined>;
   sqlStatementParameterOptions: () => SqlParameterOptions;
   sqlBehaviorDialect: () => QueryEditorProps["dialect"];
+  sqlSyntaxDialect?: () => QueryEditorProps["syntaxDialect"];
   queryEditorSelectionLanguage: () => "sql" | "text";
   semanticCompletionEnabled: boolean;
   maxCompletionTables: number;
@@ -120,9 +121,11 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       line: span.start_line - 1,
       column: span.start_column - 1,
     });
+    const endLine = Math.max(span.end_line - 1, span.start_line - 1);
+    const endColumn = endLine === span.start_line - 1 ? Math.max(span.end_column, span.start_column) : span.end_column;
     const to = lineColumnToOffset(sql, {
-      line: Math.max(span.end_line - 1, span.start_line - 1),
-      column: Math.max(span.end_column, span.start_column),
+      line: endLine,
+      column: endColumn,
     });
     if (from == null || to == null || to <= from) return null;
     return { from, to };
@@ -439,7 +442,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           sqlReferenceAnalysisDialectFor({
             databaseType: props.databaseType,
             identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
-            fallbackDialect: props.formatDialect ?? props.dialect ?? "generic",
+            fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
           }),
         );
         if (runId !== semanticDiagnosticRunId) return;
@@ -581,7 +584,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           sqlReferenceAnalysisDialectFor({
             databaseType: props.databaseType,
             identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
-            fallbackDialect: props.formatDialect ?? props.dialect ?? "generic",
+            fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
           }),
         );
         if (currentView.state.doc !== doc) return [];

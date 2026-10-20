@@ -75,6 +75,8 @@ const POSTGRES_COPY_MAX_ROWS: usize = 50_000;
 // NVARCHAR staging values. The source JSON batch remains owned by the parser;
 // the bulk path must never add a second, batch-sized string matrix beside it.
 const SQLSERVER_BULK_ROW_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+const SQL_IMPORT_EXPRESSION_KEY: &str = "$dbxSqlImportExpression";
+const SQL_IMPORT_CURRENT_TIMESTAMP: &str = "currentTimestamp";
 
 pub fn table_import_client_session_id(import_id: &str) -> String {
     task_client_session_id("table-import", import_id)
@@ -1833,6 +1835,43 @@ fn sql_import_number_value(raw: &str, context: &str) -> Result<serde_json::Value
     Err(format!("{context}: unsupported numeric literal '{raw}'"))
 }
 
+// SQL imports round-trip rows through the preview and prepared-source JSON. Keep
+// allowlisted server-evaluated expressions as a fixed marker so the SQL builder
+// can emit only its own canonical expression, never arbitrary frontend text.
+fn sql_import_current_timestamp_value() -> serde_json::Value {
+    serde_json::json!({ SQL_IMPORT_EXPRESSION_KEY: SQL_IMPORT_CURRENT_TIMESTAMP })
+}
+
+pub(crate) fn sql_import_is_current_timestamp_value(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == 1
+            && object.get(SQL_IMPORT_EXPRESSION_KEY).and_then(serde_json::Value::as_str)
+                == Some(SQL_IMPORT_CURRENT_TIMESTAMP)
+    })
+}
+
+fn sql_import_is_current_timestamp_function(function: &sqlparser::ast::Function) -> bool {
+    let name = function.name.to_string().to_ascii_lowercase();
+    if !matches!(name.as_str(), "now" | "sysdate" | "current_timestamp" | "localtime" | "localtimestamp") {
+        return false;
+    }
+    match &function.args {
+        FunctionArguments::None => true,
+        FunctionArguments::List(list) => {
+            list.args.is_empty() && list.clauses.is_empty() && list.duplicate_treatment.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn sql_import_current_timestamp_sql(db_type: &DatabaseType) -> &'static str {
+    if *db_type == DatabaseType::ClickHouse {
+        "now()"
+    } else {
+        "CURRENT_TIMESTAMP"
+    }
+}
+
 fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value, String> {
     match expr {
         Expr::Value(value) => match &value.value {
@@ -1875,7 +1914,13 @@ fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value
         // `DATE '...'`、`TIMESTAMP '...'`、`TIME '...'` 等标准字面量：值就是引号里的字符串，无损导入。
         Expr::TypedString(typed) => sql_import_typed_string(typed, context),
         // 白名单字面量日期函数（TO_DATE/TO_TIMESTAMP/...）：参数全为字符串字面量时按第一个参数导入。
-        Expr::Function(function) => sql_import_literal_temporal_function(function, context),
+        Expr::Function(function) => {
+            if sql_import_is_current_timestamp_function(function) {
+                Ok(sql_import_current_timestamp_value())
+            } else {
+                sql_import_literal_temporal_function(function, context)
+            }
+        }
         _ => Err(sql_import_unsupported_expression(context)),
     }
 }
@@ -3474,6 +3519,11 @@ fn parse_xlsx_preview_file_with_options(
         let preview_last_row = first_row.saturating_add(preview_limit.saturating_sub(1));
         row_range.last_data_row.map_or(preview_last_row, |last| last.min(preview_last_row))
     };
+    // The preview window is anchored at the first data row that actually carries content.
+    // Until one is found we keep scanning (up to the selected row range) instead of stopping
+    // at the provisional window, so a sheet whose only data sits beyond preview_limit is not
+    // misjudged as empty (see review on PR #12738).
+    let mut first_content_row: Option<usize> = None;
     let mut requested_last_row = preview_end_from(row_range.data_start_row);
 
     let mut dimension = None;
@@ -3508,7 +3558,7 @@ fn parse_xlsx_preview_file_with_options(
                         .unwrap_or_else(|| current_row.saturating_add(1).max(1));
                     current_column = 0;
                     if row_range.last_data_row.is_some_and(|last| current_row > last)
-                        || (observed_min_row != usize::MAX
+                        || (first_content_row.is_some()
                             && current_row > requested_last_row.max(row_range.title_row.unwrap_or_default()))
                     {
                         break;
@@ -3526,7 +3576,6 @@ fn parse_xlsx_preview_file_with_options(
                     current_column = position.1;
                     if current_row >= min_import_row {
                         observed_min_row = observed_min_row.min(position.0);
-                        requested_last_row = preview_end_from(row_range.data_start_row.max(observed_min_row));
                         observed_min_column = observed_min_column.min(position.1);
                         observed_max_row = observed_max_row.max(position.0);
                         observed_max_column = observed_max_column.max(position.1);
@@ -3582,10 +3631,16 @@ fn parse_xlsx_preview_file_with_options(
                     if let Some((row, column)) = current_position.take() {
                         if row >= min_import_row {
                             observed_min_row = observed_min_row.min(row);
-                            requested_last_row = preview_end_from(row_range.data_start_row.max(observed_min_row));
                             observed_min_column = observed_min_column.min(column);
                             observed_max_column = observed_max_column.max(column);
                             observed_max_row = observed_max_row.max(row);
+                            if first_content_row.is_none()
+                                && row >= row_range.data_start_row
+                                && current_cell.has_content()
+                            {
+                                first_content_row = Some(row);
+                                requested_last_row = preview_end_from(row);
+                            }
                             if row == row_range.title_row.unwrap_or_default()
                                 || (row >= row_range.data_start_row && row <= requested_last_row)
                             {
@@ -3611,14 +3666,20 @@ fn parse_xlsx_preview_file_with_options(
         .collect::<HashSet<_>>();
     let shared_strings = read_xlsx_shared_strings(&mut zip, &needed_shared_strings)?;
     if observed_min_row == usize::MAX || observed_min_column == usize::MAX {
-        return Err("Import file has no data rows in the selected row range".to_string());
+        return Ok((
+            ParsedImportFile { columns: Vec::new(), rows: Vec::new(), total_rows: 0, effective_encoding: None },
+            sheets,
+        ));
     }
     let start_row = observed_min_row;
     let start_column = observed_min_column;
     let observed_end_column = observed_max_column.max(start_column);
     let observed_column_count = observed_end_column.saturating_sub(start_column).saturating_add(1);
+    // Count only the anchored preview window: when the first content row sits far below
+    // data_start_row, the row span up to requested_last_row is mostly skipped blank rows
+    // that are never stored in raw_cells, so counting it would falsely trip the cell limit.
     let preview_row_count = requested_last_row
-        .saturating_sub(row_range.data_start_row.max(start_row))
+        .saturating_sub(first_content_row.unwrap_or(row_range.data_start_row).max(start_row))
         .saturating_add(1)
         .saturating_add(usize::from(row_range.title_row.is_some()));
     if observed_column_count.saturating_mul(preview_row_count) > MAX_FAST_PREVIEW_CELLS {
@@ -3662,7 +3723,7 @@ fn parse_xlsx_preview_file_with_options(
     let first_preview_row = row_range.data_start_row.max(start_row);
     let last_preview_row = requested_last_row.min(observed_max_row);
     if last_preview_row < first_preview_row {
-        return Err("Import file has no data rows in the selected row range".to_string());
+        return Ok((ParsedImportFile { columns, rows: Vec::new(), total_rows: 0, effective_encoding: None }, sheets));
     }
     // Rows made of style-only cells (blank rows inserted by a spreadsheet app) carry no
     // data and are skipped here as well so the preview matches what the import writes (#8604).
@@ -3683,9 +3744,6 @@ fn parse_xlsx_preview_file_with_options(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    if rows.is_empty() {
-        return Err("Import file has no data rows in the selected row range".to_string());
-    }
     Ok((ParsedImportFile { columns, total_rows: rows.len(), rows, effective_encoding: None }, sheets))
 }
 
@@ -4627,7 +4685,8 @@ async fn parse_import_preview_file_with_options(
             tokio::task::spawn_blocking(move || parse_xlsx_preview_file_with_options(&path, &options, preview_limit))
                 .await
                 .map_err(|e| e.to_string())??;
-        return Ok((parsed, false, sheets));
+        let total_rows_exact = parsed.total_rows == 0;
+        return Ok((parsed, total_rows_exact, sheets));
     }
 
     let parsed = parse_import_file_with_options(path, Some(format), options, preview_limit).await?;
@@ -4881,6 +4940,10 @@ fn import_value_rows_sql(
             }
             let source_value = row.get(*source_index).unwrap_or(&serde_json::Value::Null);
             let data_type = plan.column_types.get(target_index).and_then(|data_type| data_type.as_deref());
+            if sql_import_is_current_timestamp_value(source_value) {
+                values.push_str(sql_import_current_timestamp_sql(db_type));
+                continue;
+            }
             let normalized =
                 normalize_import_value_cow(source_value, data_type, db_type, kingbase_oracle_mode, date_time_format);
             values.push_str(&escape_value_typed(normalized.as_ref(), db_type, data_type));
@@ -5254,6 +5317,9 @@ fn infer_string_type(value: &str) -> ImportInferredType {
 }
 
 fn infer_value_type(value: &serde_json::Value) -> Option<ImportInferredType> {
+    if sql_import_is_current_timestamp_value(value) {
+        return Some(ImportInferredType::Timestamp);
+    }
     match value {
         serde_json::Value::Null => None,
         serde_json::Value::Bool(_) => Some(ImportInferredType::Boolean),
@@ -9064,7 +9130,10 @@ mod tests {
         assert_eq!(preview.rows, parsed.rows);
         assert_eq!(parsed.total_rows, 2);
         let limited = TableImportParseOptions { last_data_row: Some(99), ..options };
-        assert!(parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &limited, 1).is_err());
+        let (empty_preview, sheets) =
+            parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &limited, 1).unwrap();
+        assert!(empty_preview.rows.is_empty());
+        assert!(!sheets.is_empty());
         assert!(parse_xlsx_file_with_options(&path.to_string_lossy(), &limited, 1).is_err());
         let _ = std::fs::remove_file(path);
     }
@@ -10554,6 +10623,54 @@ mod tests {
     }
 
     #[test]
+    fn sql_import_preserves_current_timestamp_functions() {
+        let options = sql_import_options(DatabaseType::Mysql);
+        let script = b"INSERT INTO sai_user (id, created_at, updated_at) VALUES (1, NOW(), SYSDATE());";
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+
+        assert_eq!(
+            parsed.rows[0],
+            vec![
+                serde_json::json!(1),
+                serde_json::json!({ "$dbxSqlImportExpression": "currentTimestamp" }),
+                serde_json::json!({ "$dbxSqlImportExpression": "currentTimestamp" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn sql_import_emits_current_timestamp_without_quoting_the_marker() {
+        let options = sql_import_options(DatabaseType::Mysql);
+        let parsed =
+            parse_sql_bytes_with_options(b"INSERT INTO sai_user (id, created_at) VALUES (1, NOW());", &options, 10)
+                .unwrap();
+        let mappings = parsed
+            .columns
+            .iter()
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+            })
+            .collect::<Vec<_>>();
+        let target_types =
+            vec![("id".to_string(), "bigint".to_string()), ("created_at".to_string(), "datetime".to_string())];
+
+        let batches =
+            build_import_insert_batches(&parsed, &mappings, &target_types, "sai_user", "", &DatabaseType::Mysql, 500)
+                .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        let generated_sql = batches[0].sql.replace('\n', " ");
+        assert!(
+            generated_sql.contains("VALUES (1, CURRENT_TIMESTAMP)"),
+            "generated SQL should preserve the server-side time expression: {}",
+            batches[0].sql
+        );
+        assert!(!batches[0].sql.contains(SQL_IMPORT_EXPRESSION_KEY));
+    }
+
+    #[test]
     fn sql_import_rejects_replace() {
         let error = parse_sql_bytes(b"REPLACE INTO users (id) VALUES (1);", 10).unwrap_err();
         assert!(error.contains("REPLACE"));
@@ -10561,7 +10678,7 @@ mod tests {
 
     #[test]
     fn sql_import_rejects_expressions() {
-        let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (NOW());", 10).unwrap_err();
+        let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (UUID());", 10).unwrap_err();
         assert!(error.contains("not supported"));
     }
 
@@ -10606,9 +10723,9 @@ mod tests {
 
     #[test]
     fn sql_import_rejects_unlisted_function_still() {
-        // 非白名单函数（如 NOW()）仍按表达式拒绝。
+        // 非白名单函数（如 RAND()）仍按表达式拒绝。
         let options = sql_import_options(DatabaseType::Mysql);
-        let error = parse_sql_bytes_with_options(b"INSERT INTO t (a) VALUES (NOW());", &options, 10).unwrap_err();
+        let error = parse_sql_bytes_with_options(b"INSERT INTO t (a) VALUES (RAND());", &options, 10).unwrap_err();
         assert!(error.contains("not supported"));
     }
 

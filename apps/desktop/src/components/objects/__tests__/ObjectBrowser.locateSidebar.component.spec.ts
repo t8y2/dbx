@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, reactive, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
@@ -33,16 +33,18 @@ vi.mock("@/stores/connectionStore", () => ({
 }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({
-    editorSettings: {
+  useSettingsStore: () => {
+    const editorSettings = reactive({
+      objectBrowserCompactWidth: 160,
       shortcuts: { refreshData: "F5" },
       objectBrowserViewMode: mocks.viewMode,
       objectBrowserShowCheckbox: false,
       sidebarActivation: "double",
       sidebarMenuLayout: mocks.menuLayout,
       sidebarMenuPinnedActions: { table: mocks.pinnedActions },
-    },
-  }),
+    });
+    return { editorSettings, updateEditorSettings: (patch: Partial<typeof editorSettings>) => Object.assign(editorSettings, patch) };
+  },
 }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => (key === "sidebar.locateActiveTab" ? "Locate in sidebar" : key), locale: ref("en-US") }) }));
 vi.mock("@/i18n", () => ({ default: { install: () => undefined } }));
@@ -155,6 +157,32 @@ function menuButton(label: string): HTMLButtonElement {
   expect(buttons[0]!.disabled).toBe(false);
   return buttons[0]!;
 }
+
+it("reflows compact rows immediately when changing width and keeps names and row height", async () => {
+  mocks.viewMode = "compact";
+  const widthSpy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains("object-browser-grid-wrapper") ? 1016 : 0;
+  });
+  try {
+    const host = await mountBrowser();
+    const rows = () => [...host.querySelectorAll<HTMLElement>(".object-browser-grid-row")];
+    const names = () => [...host.querySelectorAll<HTMLElement>("[data-object-compact-card]")].map((card) => card.title);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]!.style.gridTemplateColumns).toBe("repeat(6, minmax(0, 1fr))");
+    const before = names();
+    const select = host.querySelector<HTMLSelectElement>("[data-compact-width-select]")!;
+    expect(select.value).toBe("160");
+    select.value = "240";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+    expect(rows()[0]!.style.gridTemplateColumns).toBe("repeat(4, minmax(0, 1fr))");
+    expect(rows()[0]!.style.height).toBe("28px");
+    expect(names()).toEqual(before);
+    expect(select.value).toBe("240");
+  } finally {
+    widthSpy.mockRestore();
+  }
+});
 
 describe.each(["list", "grid", "compact"] as const)("ObjectBrowser locate in sidebar (%s)", (viewMode) => {
   beforeEach(() => {

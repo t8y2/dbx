@@ -445,6 +445,17 @@ impl SqlParsingOptions {
     }
 
     pub fn for_database_type_and_compatibility(db_type: DatabaseType, compatibility_mode: Option<&str>) -> Self {
+        if db_type == DatabaseType::Kingbase {
+            let mode = compatibility_mode.unwrap_or_default().trim().to_ascii_lowercase();
+            return Self::from_profile(match mode.as_str() {
+                "mysql" => SqlDialectProfile::mysql_compatible(),
+                "sqlserver" => SqlDialectProfile::sql_server(),
+                "pg" | "postgres" | "postgresql" => SqlDialectProfile::postgres_family(),
+                // Preserve PL/SQL blocks while mode detection is unavailable;
+                // the GaussDB profile also preserves dollar-quoted routines.
+                _ => SqlDialectProfile::gaussdb(),
+            });
+        }
         if db_type == DatabaseType::OpenGauss {
             return match compatibility_mode.map(str::trim) {
                 // openGauss stores package specs/bodies as PL/SQL regardless of
@@ -875,9 +886,9 @@ impl SqlStatementSplitter {
             }
 
             match ch {
-                '\'' if !self.in_double_quote
-                    && !self.in_backtick
-                    && !(self.single_quote_backslash_escapes() && has_odd_trailing_backslashes(&self.buffer)) =>
+                '\'' if !(self.in_double_quote
+                    || self.in_backtick
+                    || self.single_quote_backslash_escapes() && has_odd_trailing_backslashes(&self.buffer)) =>
                 {
                     self.in_single_quote = !self.in_single_quote;
                     self.single_quote_escape_string = self.in_single_quote
@@ -886,9 +897,9 @@ impl SqlStatementSplitter {
                                 && ends_with_escape_string_prefix(&self.buffer)));
                     self.buffer.push(ch);
                 }
-                '"' if !self.in_single_quote
-                    && !self.in_backtick
-                    && !(self.options.profile.supports_backslash_escaped_quotes
+                '"' if !(self.in_single_quote
+                    || self.in_backtick
+                    || self.options.profile.supports_backslash_escaped_quotes
                         && has_odd_trailing_backslashes(&self.buffer)) =>
                 {
                     self.in_double_quote = !self.in_double_quote;
@@ -1168,6 +1179,35 @@ fn oracle_q_quote_end(sql: &str, quote_index: usize) -> Option<usize> {
 
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
     split_sql_statements_with_options(sql, SqlParsingOptions::default())
+}
+
+#[cfg(test)]
+#[test]
+fn kingbase_compatibility_profiles_preserve_routine_and_batch_boundaries() {
+    for (mode, db_type, sql) in [
+        ("oracle", DatabaseType::Gaussdb, "BEGIN\n NULL;\n NULL;\nEND;\n/\nSELECT 1;"),
+        (
+            "mysql",
+            DatabaseType::Mysql,
+            "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;\nSELECT 3;",
+        ),
+        (
+            "pg",
+            DatabaseType::Postgres,
+            "CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql; SELECT 2;",
+        ),
+        (
+            "sqlserver",
+            DatabaseType::SqlServer,
+            "CREATE PROCEDURE p AS\nBEGIN\n SELECT 1;\n SELECT 2;\nEND\nGO\nSELECT 3;",
+        ),
+    ] {
+        assert_eq!(
+            split_sql_statements_for_database_with_compatibility(sql, DatabaseType::Kingbase, Some(mode)),
+            split_sql_statements_for_database(sql, db_type),
+            "Kingbase mode {mode}"
+        );
+    }
 }
 
 pub fn split_sql_statements_for_database(sql: &str, db_type: DatabaseType) -> Vec<String> {
@@ -1541,9 +1581,9 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
         };
 
         match ch {
-            '\'' if !in_double_quote
-                && !in_backtick
-                && !(single_quote_backslash_escapes && has_odd_trailing_backslashes(&sql[start..i])) =>
+            '\'' if !(in_double_quote
+                || in_backtick
+                || single_quote_backslash_escapes && has_odd_trailing_backslashes(&sql[start..i])) =>
             {
                 in_single_quote = !in_single_quote;
                 single_quote_escape_string = in_single_quote
@@ -1552,9 +1592,9 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                             && ends_with_escape_string_prefix(&sql[start..i])));
                 i += ch.len_utf8();
             }
-            '"' if !in_single_quote
-                && !in_backtick
-                && !(options.profile.supports_backslash_escaped_quotes
+            '"' if !(in_single_quote
+                || in_backtick
+                || options.profile.supports_backslash_escaped_quotes
                     && has_odd_trailing_backslashes(&sql[start..i])) =>
             {
                 in_double_quote = !in_double_quote;
@@ -2627,9 +2667,9 @@ impl SqlScanner {
             self.profile.supports_backslash_escaped_quotes
         };
         match ch {
-            '\'' if !self.in_double_quote
-                && !self.in_backtick
-                && !(single_quote_backslash_escapes && self.previous == Some('\\')) =>
+            '\'' if !(self.in_double_quote
+                || self.in_backtick
+                || single_quote_backslash_escapes && self.previous == Some('\\')) =>
             {
                 self.in_single_quote = !self.in_single_quote;
                 self.single_quote_escape_string = self.in_single_quote
@@ -2637,9 +2677,9 @@ impl SqlScanner {
                         || (self.profile.supports_postgres_escape_strings
                             && ends_with_escape_string_prefix(&sql[..idx])));
             }
-            '"' if !self.in_single_quote
-                && !self.in_backtick
-                && !(self.profile.supports_backslash_escaped_quotes && self.previous == Some('\\')) =>
+            '"' if !(self.in_single_quote
+                || self.in_backtick
+                || self.profile.supports_backslash_escaped_quotes && self.previous == Some('\\')) =>
             {
                 self.in_double_quote = !self.in_double_quote;
             }

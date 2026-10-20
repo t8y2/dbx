@@ -26,6 +26,20 @@ function mysqlConnection(): ConnectionConfig {
   };
 }
 
+function gaussdbDwsConnection(): ConnectionConfig {
+  return {
+    ...mysqlConnection(),
+    id: "gaussdb-dws-info",
+    name: "Huawei DWS",
+    db_type: "gaussdb",
+    driver_profile: "gaussdb",
+    driver_label: "GaussDB",
+    port: 8000,
+    external_config: { gaussdbProductProfile: "huawei-dws" },
+    database_info: { productName: "GaussDB", productVersion: "PostgreSQL 9.2.4 (GaussDB 9.1.1)" },
+  };
+}
+
 describe("connectionStore database info", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -71,6 +85,73 @@ describe("connectionStore database info", () => {
       jdbcVersion: undefined,
     });
     expect(store.getConfig(config.id)?.database_info?.productVersion).toBe("8.0.34");
+    expect(store.connectedIds.has(config.id)).toBe(true);
+  }, 30_000);
+
+  it.each(["connect", "ensureConnected"] as const)(
+    "refreshes DWS product metadata before %s exposes the connection",
+    async (method) => {
+      const config = gaussdbDwsConnection();
+      let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;
+      const databaseInfo = new Promise<{ productName: string; productVersion: string }>((resolve) => {
+        resolveDatabaseInfo = resolve;
+      });
+      const connectionDatabaseInfo = vi.fn(() => databaseInfo);
+      const connectDb = vi.fn().mockResolvedValue(config.id);
+
+      vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+      vi.doMock("@/lib/backend/api", () => ({
+        connectDb,
+        connectionDatabaseInfo,
+        saveConnectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
+        saveConnections: vi.fn().mockResolvedValue(undefined),
+        saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+        connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      }));
+
+      const { useConnectionStore } = await import("@/stores/connectionStore");
+      const { gaussdbConnectionMode } = await import("@/lib/database/jdbcDialect");
+      const store = useConnectionStore();
+      expect(gaussdbConnectionMode(config)).toBe("dws");
+      await store.addConnection(config);
+      expect(gaussdbConnectionMode(store.getConfig(config.id))).toBe("dws");
+      const connecting = method === "connect" ? store.connect(config) : store.ensureConnected(config.id);
+      await vi.waitFor(() => expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: config.id }), expect.any(Number)));
+      await vi.waitFor(() => expect(connectionDatabaseInfo).toHaveBeenCalledWith(config.id));
+
+      // The connection is not exposed as ready until DBX refreshes its product metadata.
+      expect(store.connectedIds.has(config.id)).toBe(false);
+      resolveDatabaseInfo({ productName: "GaussDB", productVersion: "GaussDB 9.2.0" });
+      await connecting;
+
+      expect(store.connectedIds.has(config.id)).toBe(true);
+      expect(store.getConfig(config.id)?.database_info?.productVersion).toBe("GaussDB 9.2.0");
+    },
+    30_000,
+  );
+
+  it("keeps a DWS connection usable when optional product metadata refresh fails", async () => {
+    const config = gaussdbDwsConnection();
+    const connectionDatabaseInfo = vi.fn().mockRejectedValue(new Error("metadata unavailable"));
+    const saveConnectionDatabaseInfo = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo,
+      saveConnectionDatabaseInfo,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await store.addConnection(config);
+    await expect(store.connect(config)).resolves.toBe(config.id);
+
+    expect(connectionDatabaseInfo).toHaveBeenCalledWith(config.id);
+    expect(saveConnectionDatabaseInfo).not.toHaveBeenCalled();
     expect(store.connectedIds.has(config.id)).toBe(true);
   });
 

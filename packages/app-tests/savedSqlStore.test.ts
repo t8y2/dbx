@@ -915,7 +915,7 @@ test("usage updates do not invalidate the saved SQL database tree", async () => 
   assert.ok(store.version > contentVersion);
 });
 
-test("renaming a saved SQL tab keeps the library file name independent", async () => {
+test("renaming a saved SQL tab renames the library file in sync", async () => {
   const file: SavedSqlFile = {
     id: "sql-1",
     connectionId: "conn-1",
@@ -934,12 +934,11 @@ test("renaming a saved SQL tab keeps the library file name independent", async (
   const queryStore = useQueryStore();
   const tabId = queryStore.openSavedSql(file);
 
-  assert.equal(queryStore.renameTab(tabId, " Revenue checks "), true);
-  await Promise.resolve();
+  assert.equal(await queryStore.renameTab(tabId, " Revenue checks "), true);
 
-  assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.title, "Revenue checks");
-  assert.equal(savedSqlStore.getFile("sql-1")?.name, "draft.sql");
-  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 0);
+  assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.title, "Revenue checks.sql");
+  assert.equal(savedSqlStore.getFile("sql-1")?.name, "Revenue checks.sql");
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 1);
 });
 
 test("renaming a saved SQL tab keeps uppercase .SQL extension without double-appending", async () => {
@@ -961,7 +960,7 @@ test("renaming a saved SQL tab keeps uppercase .SQL extension without double-app
   const queryStore = useQueryStore();
   const tabId = queryStore.openSavedSql(file);
 
-  assert.equal(queryStore.renameTab(tabId, "report.SQL"), true);
+  assert.equal(await queryStore.renameTab(tabId, "report.SQL"), true);
   await Promise.resolve();
 
   assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.title, "report.SQL");
@@ -969,17 +968,17 @@ test("renaming a saved SQL tab keeps uppercase .SQL extension without double-app
   assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 0);
 });
 
-test("renaming a saved SQL tab does not persist or revert the library file", async () => {
+test("renaming a saved SQL tab persists the renamed library file", async () => {
   const file: SavedSqlFile = { id: "sql-1", connectionId: "conn-1", name: "draft.sql", database: "db", sql: "SELECT 1;", sqlLoaded: true, createdAt: "2026-06-27T00:00:00.000Z", updatedAt: "2026-06-27T00:00:00.000Z" };
   apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [file] });
   const savedSqlStore = useSavedSqlStore();
   await savedSqlStore.initFromStorage();
   const queryStore = useQueryStore();
   const tabId = queryStore.openSavedSql(file);
-  assert.equal(queryStore.renameTab(tabId, "broken"), true);
-  assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.title, "broken");
-  assert.equal(savedSqlStore.getFile("sql-1")?.name, "draft.sql");
-  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 0);
+  assert.equal(await queryStore.renameTab(tabId, "broken"), true);
+  assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.title, "broken.sql");
+  assert.equal(savedSqlStore.getFile("sql-1")?.name, "broken.sql");
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 1);
 });
 
 test.each([

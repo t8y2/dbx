@@ -10,11 +10,14 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
-import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { formatError } from "@/lib/backend/errorUtils";
+import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { uuid } from "@/lib/common/utils";
 import { clampInterval, createProcessListLoadCoordinator, DEFAULT_REFRESH_SECONDS, processListExecutionError, processListSessionCount } from "@/lib/database/mysqlProcessList";
 import { resolveProcessListDriverForConnection, type ProcessRow } from "@/lib/database/processListDrivers";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { processListSelectionAfterClick } from "@/lib/database/processListSelection";
+import { oracleMajorVersion } from "@/lib/database/oracleSessionManagement";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
@@ -41,13 +44,16 @@ const numericKeys = computed(() => new Set(columns.value.filter((column) => colu
 
 const rows = ref<ProcessRow[]>([]);
 const truncated = ref(false);
-const ownSessionId = ref<number | null>(null);
+const ownSessionId = ref<number | string | null>(null);
 const ownNodeId = ref<number | null>(null);
+const ownSessionRow = ref<unknown[] | null>(null);
+const versionMajor = ref<number | null>(null);
 const transactionMode = computed(() => driver.value?.mode === "transaction");
 const transactionIdentityUnavailable = computed(() => transactionMode.value && (ownSessionId.value === null || ownNodeId.value === null));
 const loading = ref(false);
 const loadCoordinator = createProcessListLoadCoordinator();
 const loadError = ref("");
+const versionProbeWarning = ref("");
 const search = ref(restoredUiState.search ?? "");
 const restoredSortKey = columns.value.some((column) => column.key === restoredUiState.sortKey) ? restoredUiState.sortKey : undefined;
 const sortKey = ref<string>(restoredSortKey ?? driver.value?.defaultSortKey ?? "time");
@@ -63,29 +69,73 @@ const terminateTarget = ref<ProcessRow | null>(null);
 const terminating = ref(false);
 const batchSupported = computed(() => driver.value?.supportsBatchCancel === true);
 // Engines without a terminate statement only expose query cancellation.
-const terminateSupported = computed(() => typeof driver.value?.buildTerminateSessionSql === "function");
+const terminateSupported = computed(() => typeof driver.value?.buildTerminateSessionSql === "function" || typeof driver.value?.buildTerminateSessionSqlForRow === "function");
+const rowAwareTerminate = computed(() => typeof driver.value?.buildTerminateSessionSqlForRow === "function");
+const cancelSupported = computed(() => (transactionMode.value ? typeof driver.value?.buildKillTransactionSql === "function" : typeof driver.value?.buildCancelQuerySql === "function"));
 // Multi-selection serves batch cancel and/or batch terminate; either enables the checkboxes.
-const selectionSupported = computed(() => batchSupported.value || terminateSupported.value);
-const selectedIds = ref(new Set<number>());
+const selectionSupported = computed(() => batchSupported.value || (terminateSupported.value && driver.value?.supportsBatchTerminate !== false));
+const selectedIds = ref(new Set<number | string>());
 // Anchor row for Shift+click range selection, in the current display order.
-const selectionAnchorId = ref<number | null>(null);
+const selectionAnchorId = ref<number | string | null>(null);
 const batchTargets = ref<ProcessRow[] | null>(null);
 const batchTerminateTargets = ref<ProcessRow[] | null>(null);
-const batchResult = ref<{ kind: "cancel" | "terminate"; succeeded: number; failures: { id: number; message: string }[] } | null>(null);
+const batchResult = ref<{ kind: "cancel" | "terminate"; succeeded: number; failures: { id: number | string; message: string }[] } | null>(null);
 const refreshing = ref(false);
 const actionsLocked = computed(() => canceling.value || cancelTarget.value !== null || terminating.value || terminateTarget.value !== null || batchTargets.value !== null || batchTerminateTargets.value !== null);
 let connectionGeneration = 0;
 let disposed = false;
 const fallbackListSql = ref<string | null>(null);
+type ManagedClientSession = { id: string; connectionId: string; database: string; active: number; closeRequested: boolean };
+let managedClientSession: ManagedClientSession | null = null;
 
 // Full-text preview for long cells (SQL statement / info), opened by clicking them.
 const previewText = ref<string | null>(null);
+const lockTarget = ref<ProcessRow | null>(null);
+const lockColumns = ref<string[]>([]);
+const lockRows = ref<unknown[][]>([]);
+const lockError = ref("");
+const lockTruncated = ref(false);
+const loadingLocks = ref(false);
+let lockRequestGeneration = 0;
 
 trackUiState(() => ({ search: search.value, sortKey: sortKey.value, sortDir: sortDir.value, autoRefresh: autoRefresh.value, intervalSeconds: intervalSeconds.value }));
 
 function openPreview(value: string | number | null) {
   if (value === null || value === undefined || String(value).length === 0) return;
   previewText.value = String(value);
+}
+
+function closeManagedSession(session: ManagedClientSession) {
+  if (!session.closeRequested || session.active > 0) return;
+  session.closeRequested = false;
+  void api.closeClientConnectionSession(session.connectionId, session.database, session.id).catch(() => undefined);
+}
+
+function managedSessionFor(connection: ConnectionConfig, database: string): ManagedClientSession {
+  if (!managedClientSession || managedClientSession.connectionId !== connection.id || managedClientSession.database !== database) {
+    const previous = managedClientSession;
+    managedClientSession = { id: `process-list:${uuid()}`, connectionId: connection.id, database, active: 0, closeRequested: false };
+    if (previous) {
+      previous.closeRequested = true;
+      closeManagedSession(previous);
+    }
+  }
+  return managedClientSession;
+}
+
+async function executeProcessQuery(connectionId: string, database: string, sql: string, maxRows: number, activeDriver: NonNullable<typeof driver.value>) {
+  const connection = { ...props.connection };
+  if (!activeDriver.useClientSession) return api.executeQuery(connectionId, database, sql, undefined, undefined, { maxRows });
+  const session = managedSessionFor(connection, database);
+  session.active++;
+  try {
+    const result = await api.executeQuery(connectionId, database, sql, undefined, undefined, { maxRows, clientSessionId: session.id });
+    if (result.execution_error) throw new Error(result.error ? formatError(result.error) : String(result.rows[0]?.[0] ?? "Query execution failed"));
+    return result;
+  } finally {
+    session.active--;
+    closeManagedSession(session);
+  }
 }
 
 async function copyPreview() {
@@ -114,7 +164,7 @@ const filteredRows = computed(() => {
   });
 });
 
-const selectableRows = computed(() => (ownSessionId.value === null ? [] : filteredRows.value.filter((row) => !isOwnSession(row) && Number.isInteger(row.id) && row.id > 0)));
+const selectableRows = computed(() => (ownSessionId.value === null ? [] : filteredRows.value.filter((row) => !isOwnSession(row) && (typeof row.id === "string" ? /^\d+$/.test(row.id) : Number.isSafeInteger(row.id) && row.id > 0))));
 const allSelected = computed(() => selectableRows.value.length > 0 && selectableRows.value.every((row) => selectedIds.value.has(row.id)));
 const partiallySelected = computed(() => selectedIds.value.size > 0 && !allSelected.value);
 
@@ -134,7 +184,7 @@ function clearSelection() {
 }
 
 /** Row checkbox click: a plain click toggles one row, Shift+click extends from the anchor. */
-function toggleSelection(id: number, event: MouseEvent) {
+function toggleSelection(id: number | string, event: MouseEvent) {
   if (actionsLocked.value || refreshing.value) return;
   // The browser toggles the clicked checkbox before this handler runs, so the
   // next state comes from the selection; both agree because the click is never
@@ -166,7 +216,7 @@ async function confirmBatchCancel() {
   canceling.value = true;
   let executed = false;
   try {
-    const statements = targets.map((row) => ({ id: row.id, sql: activeDriver.buildCancelQuerySql!(row.id) }));
+    const statements = targets.map((row) => ({ id: Number(row.id), sql: activeDriver.buildCancelQuerySql!(Number(row.id)) }));
     const result = await executeWithProductionSqlGuard({
       connection,
       database: "",
@@ -225,7 +275,7 @@ async function confirmBatchTerminate() {
   terminating.value = true;
   let executed = false;
   try {
-    const statements = targets.map((row) => ({ id: row.id, sql: buildTerminateSql.call(activeDriver, row.id) }));
+    const statements = targets.map((row) => ({ id: Number(row.id), sql: buildTerminateSql.call(activeDriver, Number(row.id)) }));
     const executeTerminateSql = async (sql: string) => {
       const results = await api.executeMulti(connection.id, "", sql, undefined, undefined, { maxRows: 1 });
       const executionError = processListExecutionError(results);
@@ -294,19 +344,35 @@ async function load(options: { silent?: boolean } = {}) {
   refreshing.value = true;
   if (!options.silent) loading.value = true;
   loadError.value = "";
+  versionProbeWarning.value = "";
   try {
     await connectionStore.ensureConnected(connectionId, { skipIfClosedByUser: true });
     if (!isCurrent()) return;
+    if (activeDriver.versionSql && versionMajor.value === null) {
+      try {
+        const versionResult = await executeProcessQuery(connectionId, activeDriver.database ?? "", activeDriver.versionSql, 1, activeDriver);
+        if (!isCurrent()) return;
+        const detectedVersion = oracleMajorVersion(String(versionResult.rows?.[0]?.[0] ?? ""));
+        if (detectedVersion === null) versionProbeWarning.value = t("processList.oracleVersionUnknown");
+        else versionMajor.value = detectedVersion;
+      } catch (error) {
+        if (!isCurrent()) return;
+        versionProbeWarning.value = error instanceof Error ? error.message : String(error);
+      }
+      if (!isCurrent()) return;
+    }
     if (ownSessionId.value === null) {
       try {
         let idResult;
+        const ownSql = versionMajor.value === null ? activeDriver.ownSessionSql : (activeDriver.ownSessionSqlForVersion?.(versionMajor.value) ?? activeDriver.ownSessionSql);
         try {
-          idResult = await api.executeQuery(connectionId, activeDriver.database ?? "", activeDriver.ownSessionSql, undefined, undefined, { maxRows: 1 });
+          idResult = await executeProcessQuery(connectionId, activeDriver.database ?? "", ownSql, 1, activeDriver);
         } catch (error) {
           if (!activeDriver.fallbackOwnSessionSql || !activeDriver.shouldUseFallbackOwnSessionSql?.(error)) throw error;
-          idResult = await api.executeQuery(connectionId, activeDriver.database ?? "", activeDriver.fallbackOwnSessionSql, undefined, undefined, { maxRows: 1 });
+          idResult = await executeProcessQuery(connectionId, activeDriver.database ?? "", activeDriver.fallbackOwnSessionSql, 1, activeDriver);
         }
         const ownRow = idResult?.rows?.[0];
+        if (isCurrent()) ownSessionRow.value = ownRow ?? null;
         if (activeDriver.mode === "transaction") {
           const nodeId = Number(ownRow?.[0]);
           const sessionId = Number(ownRow?.[1]);
@@ -315,21 +381,21 @@ async function load(options: { silent?: boolean } = {}) {
             ownSessionId.value = sessionId;
           }
         } else {
-          const parsed = Number(ownRow?.[0]);
-          if (isCurrent() && Number.isInteger(parsed) && parsed > 0) ownSessionId.value = parsed;
+          const parsed = activeDriver.ownSessionMatches ? String(ownRow?.[0] ?? "") : Number(ownRow?.[0]);
+          if (isCurrent() && (typeof parsed === "string" ? /^\d+$/.test(parsed) : Number.isSafeInteger(parsed) && parsed > 0)) ownSessionId.value = parsed;
         }
       } catch {
         // Non-fatal: without our own id we simply cannot dim the self row.
       }
     }
     if (!isCurrent()) return;
-    const listSql = fallbackListSql.value ?? activeDriver.listSql;
+    const listSql = fallbackListSql.value ?? (versionMajor.value === null ? activeDriver.listSql : (activeDriver.listSqlForVersion?.(versionMajor.value) ?? activeDriver.listSql));
     let result;
     try {
-      result = await api.executeQuery(connectionId, activeDriver.database ?? "", listSql, undefined, undefined, { maxRows: activeDriver.maxRows });
+      result = await executeProcessQuery(connectionId, activeDriver.database ?? "", listSql, activeDriver.maxRows, activeDriver);
     } catch (error) {
       if (fallbackListSql.value || !activeDriver.fallbackListSql || !activeDriver.shouldUseFallbackListSql?.(error)) throw error;
-      result = await api.executeQuery(connectionId, activeDriver.database ?? "", activeDriver.fallbackListSql, undefined, undefined, { maxRows: activeDriver.maxRows });
+      result = await executeProcessQuery(connectionId, activeDriver.database ?? "", activeDriver.fallbackListSql, activeDriver.maxRows, activeDriver);
       // Cache the compatible query so old servers do not fail once per refresh.
       if (isCurrent()) fallbackListSql.value = activeDriver.fallbackListSql;
     }
@@ -345,6 +411,8 @@ async function load(options: { silent?: boolean } = {}) {
         truncated.value = false;
         ownSessionId.value = null;
         ownNodeId.value = null;
+        ownSessionRow.value = null;
+        versionMajor.value = null;
       }
       loadError.value = activeDriver.mode === "transaction" ? t("processList.transactionLoadFailed", { message: error?.message || String(error) }) : error?.message || String(error);
     }
@@ -358,7 +426,40 @@ async function load(options: { silent?: boolean } = {}) {
 
 function isOwnSession(row: ProcessRow): boolean {
   if (transactionMode.value) return ownNodeId.value !== null && ownSessionId.value !== null && row.nodeId === ownNodeId.value && row.id === ownSessionId.value;
-  return ownSessionId.value !== null && row.id === ownSessionId.value;
+  if (driver.value?.ownSessionMatches) return driver.value.ownSessionMatches(row, ownSessionRow.value);
+  return ownSessionId.value !== null && String(row.id) === String(ownSessionId.value);
+}
+
+async function showLocks(row: ProcessRow) {
+  const activeDriver = driver.value;
+  if (!activeDriver?.buildLockDetailsSql || loadingLocks.value || actionsLocked.value) return;
+  const requestGeneration = ++lockRequestGeneration;
+  const generation = connectionGeneration;
+  const connection = { ...props.connection };
+  lockTarget.value = row;
+  lockColumns.value = [];
+  lockRows.value = [];
+  lockError.value = "";
+  lockTruncated.value = false;
+  loadingLocks.value = true;
+  try {
+    const sql = activeDriver.buildLockDetailsSql(row, versionMajor.value ?? undefined);
+    const result = await executeProcessQuery(connection.id, activeDriver.database ?? "", sql, 1000, activeDriver);
+    if (disposed || generation !== connectionGeneration || requestGeneration !== lockRequestGeneration) return;
+    lockColumns.value = result.columns;
+    lockRows.value = result.rows;
+    lockTruncated.value = result.truncated === true;
+  } catch (error) {
+    if (!disposed && generation === connectionGeneration && requestGeneration === lockRequestGeneration) lockError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (!disposed && generation === connectionGeneration && requestGeneration === lockRequestGeneration) loadingLocks.value = false;
+  }
+}
+
+function closeLockDialog() {
+  lockRequestGeneration++;
+  lockTarget.value = null;
+  loadingLocks.value = false;
 }
 
 function requestCancel(row: ProcessRow) {
@@ -375,7 +476,7 @@ async function confirmCancel() {
   const isCurrent = () => !disposed && generation === connectionGeneration;
   canceling.value = true;
   try {
-    const cancelSql = transactionMode.value ? activeDriver.buildKillTransactionSql!(target) : activeDriver.buildCancelQuerySql!(target.id);
+    const cancelSql = transactionMode.value ? activeDriver.buildKillTransactionSql!(target) : activeDriver.buildCancelQuerySql!(Number(target.id));
     let usedFallbackCancelSql = false;
     const executeCancelSql = async (sql: string) => {
       if (!isCurrent()) return undefined;
@@ -404,7 +505,7 @@ async function confirmCancel() {
         } catch (error) {
           if (!activeDriver.buildFallbackCancelQuerySql || !activeDriver.shouldUseFallbackCancelQuerySql?.(error)) throw error;
           usedFallbackCancelSql = true;
-          return executeCancelSql(activeDriver.buildFallbackCancelQuerySql(target.id));
+          return executeCancelSql(activeDriver.buildFallbackCancelQuerySql(Number(target.id)));
         }
       },
     });
@@ -422,8 +523,14 @@ async function confirmCancel() {
 }
 
 function requestTerminate(row: ProcessRow) {
-  if (isOwnSession(row) || actionsLocked.value || refreshing.value || !terminateSupported.value) return;
+  if (isOwnSession(row) || (rowAwareTerminate.value && ownSessionId.value === null) || terminateRowDisabledReason(row) || actionsLocked.value || refreshing.value || !terminateSupported.value) return;
   terminateTarget.value = row;
+}
+
+function terminateRowDisabledReason(row: ProcessRow): string | undefined {
+  const activeDriver = driver.value;
+  if (activeDriver?.terminateRowUnavailableReason) return activeDriver.terminateRowUnavailableReason(row);
+  return activeDriver?.canTerminateSessionRow?.(row) === false ? "processList.oracleIdentityUnavailable" : undefined;
 }
 
 /**
@@ -434,43 +541,72 @@ async function confirmTerminate() {
   const target = terminateTarget.value;
   const activeDriver = driver.value;
   const buildTerminateSql = activeDriver?.buildTerminateSessionSql;
-  if (!target || !activeDriver || !buildTerminateSql || terminating.value) return;
+  const buildRowTerminateSql = activeDriver?.buildTerminateSessionSqlForRow;
+  if (!target || (buildRowTerminateSql && ownSessionId.value === null) || isOwnSession(target) || terminateRowDisabledReason(target) || !activeDriver || (!buildTerminateSql && !buildRowTerminateSql) || terminating.value) return;
   const connection = { ...props.connection };
+  const connectionKey = JSON.stringify(connection);
   const generation = connectionGeneration;
   const isCurrent = () => !disposed && generation === connectionGeneration;
+  const isCurrentConnection = () => isCurrent() && JSON.stringify(props.connection) === connectionKey;
+  const rowAware = !!buildRowTerminateSql;
+  const targetKey = activeDriver.rowKey?.(target) ?? String(target.id);
   terminating.value = true;
+  let actionSubmitted = false;
   try {
-    const terminateSql = buildTerminateSql.call(activeDriver, target.id);
+    const terminateSql = buildRowTerminateSql?.(target, versionMajor.value ?? undefined) ?? buildTerminateSql!.call(activeDriver, Number(target.id));
     let usedFallbackTerminateSql = false;
     const executeTerminateSql = async (sql: string) => {
-      if (!isCurrent()) return undefined;
+      if (!isCurrentConnection()) throw new Error(t("processList.oracleConnectionChanged"));
+      actionSubmitted = true;
+      if (activeDriver.useClientSession) {
+        const queryResult = await executeProcessQuery(connection.id, activeDriver.database ?? "", sql, 1, activeDriver);
+        const executionError = processListExecutionError([queryResult]);
+        if (executionError) throw new Error(executionError);
+        return [queryResult];
+      }
       const results = await api.executeMulti(connection.id, "", sql, undefined, undefined, { maxRows: 1 });
       const executionError = processListExecutionError(results);
       if (executionError) throw new Error(executionError);
       return results;
     };
-    const result = await executeWithProductionSqlGuard({
-      connection,
-      database: "",
-      sql: terminateSql,
-      source: t("production.sourceAdmin"),
-      execute: async () => {
-        try {
-          return await executeTerminateSql(terminateSql);
-        } catch (error) {
-          if (!activeDriver.buildFallbackTerminateSessionSql || !activeDriver.shouldUseFallbackTerminateSessionSql?.(error)) throw error;
-          usedFallbackTerminateSql = true;
-          return executeTerminateSql(activeDriver.buildFallbackTerminateSessionSql(target.id));
-        }
-      },
-    });
+    const execute = async () => {
+      if (!isCurrentConnection()) throw new Error(t("processList.oracleConnectionChanged"));
+      try {
+        return await executeTerminateSql(terminateSql);
+      } catch (error) {
+        if (!buildTerminateSql || !activeDriver.buildFallbackTerminateSessionSql || !activeDriver.shouldUseFallbackTerminateSessionSql?.(error)) throw error;
+        usedFallbackTerminateSql = true;
+        return executeTerminateSql(activeDriver.buildFallbackTerminateSessionSql(Number(target.id)));
+      }
+    };
+    const result =
+      activeDriver.productionGuardScope === "connection"
+        ? await executeWithProductionContextGuard({ connection, database: "", reviewText: terminateSql, source: t("production.sourceAdmin"), scope: "connection", execute })
+        : await executeWithProductionSqlGuard({ connection, database: "", sql: terminateSql, source: t("production.sourceAdmin"), execute });
     if (result === undefined || !isCurrent()) return;
     const terminateResultError = usedFallbackTerminateSql ? activeDriver.fallbackTerminateSessionResultError?.(result) : activeDriver.terminateSessionResultError?.(result);
     if (terminateResultError) throw new Error(terminateResultError);
-    toast(t("processList.terminateSuccess", { id: target.id }), 2500);
     terminateTarget.value = null;
+    if (rowAware) {
+      terminating.value = false;
+      await load({ silent: true });
+      if (!isCurrent()) return;
+      if (loadError.value || truncated.value) toast(t("processList.oracleTerminateUnknown"), 5000);
+      else if (rows.value.some((row) => (activeDriver.rowKey?.(row) ?? String(row.id)) === targetKey)) toast(t("processList.oracleTerminatePending"), 4000);
+      else toast(t("processList.terminateSuccess", { id: target.id }), 2500);
+      return;
+    }
+    toast(t("processList.terminateSuccess", { id: target.id }), 2500);
   } catch (error: any) {
-    if (isCurrent()) toast(t("processList.terminateFailed", { message: error?.message || String(error) }), 5000);
+    if (isCurrent()) {
+      if (rowAware && actionSubmitted) {
+        terminateTarget.value = null;
+        toast(`${t("processList.oracleTerminateUnknown")} ${error instanceof Error ? error.message : String(error)}`, 5000);
+        void load({ silent: true });
+      } else {
+        toast(t("processList.terminateFailed", { message: error?.message || String(error) }), 5000);
+      }
+    }
   } finally {
     terminating.value = false;
     if (terminateTarget.value === null) void load({ silent: true });
@@ -507,19 +643,35 @@ watch(intervalSeconds, () => {
 });
 
 watch(
-  () => props.connection.id,
+  () => JSON.stringify(props.connection),
   () => {
     connectionGeneration++;
+    if (managedClientSession) {
+      managedClientSession.closeRequested = true;
+      closeManagedSession(managedClientSession);
+      managedClientSession = null;
+    }
     clearSelection();
     batchTargets.value = null;
     batchTerminateTargets.value = null;
     batchResult.value = null;
     cancelTarget.value = null;
+    terminateTarget.value = null;
     fallbackListSql.value = null;
     rows.value = [];
     truncated.value = false;
     ownSessionId.value = null;
     ownNodeId.value = null;
+    ownSessionRow.value = null;
+    versionMajor.value = null;
+    versionProbeWarning.value = "";
+    lockTarget.value = null;
+    lockColumns.value = [];
+    lockRows.value = [];
+    lockError.value = "";
+    lockTruncated.value = false;
+    loadingLocks.value = false;
+    lockRequestGeneration++;
     search.value = "";
     sortKey.value = driver.value?.defaultSortKey ?? "time";
     sortDir.value = "desc";
@@ -532,6 +684,11 @@ onBeforeUnmount(() => {
   disposed = true;
   connectionGeneration++;
   stopTimer();
+  if (managedClientSession) {
+    managedClientSession.closeRequested = true;
+    closeManagedSession(managedClientSession);
+    managedClientSession = null;
+  }
 });
 </script>
 
@@ -567,7 +724,7 @@ onBeforeUnmount(() => {
           {{ t("processList.batchCancel", { count: selectedIds.size }) }}
         </Button>
         <Button
-          v-if="terminateSupported"
+          v-if="terminateSupported && driver?.supportsBatchTerminate !== false"
           variant="destructive"
           size="sm"
           class="h-7 gap-1.5 px-2 text-xs"
@@ -602,8 +759,10 @@ onBeforeUnmount(() => {
     <div v-if="transactionMode" class="border-b bg-muted/10 px-3 py-2 text-xs text-muted-foreground">{{ t("processList.transactionScope") }}</div>
 
     <div v-if="selectionSupported && ownSessionId === null && !refreshing" class="border-b px-3 py-2 text-xs text-muted-foreground">{{ t("processList.batchNeedsSession") }}</div>
+    <div v-else-if="rowAwareTerminate && ownSessionId === null && !refreshing" class="border-b px-3 py-2 text-xs text-muted-foreground">{{ t("processList.batchNeedsSession") }}</div>
     <div v-if="transactionIdentityUnavailable && !refreshing && !loadError" class="border-b px-3 py-2 text-xs text-muted-foreground">{{ t("processList.transactionNeedsSession") }}</div>
 
+    <div v-if="versionProbeWarning" class="border-b bg-muted/50 px-3 py-2 text-xs text-muted-foreground">{{ versionProbeWarning }}</div>
     <div v-if="loadError" class="border-b bg-destructive/10 px-3 py-2 text-xs text-destructive">{{ loadError }}</div>
 
     <div class="min-h-0 flex-1 overflow-auto">
@@ -639,7 +798,7 @@ onBeforeUnmount(() => {
                 type="checkbox"
                 class="h-3.5 w-3.5 accent-primary"
                 :checked="selectedIds.has(row.id)"
-                :disabled="actionsLocked || refreshing || ownSessionId === null || isOwnSession(row) || !Number.isInteger(row.id) || row.id <= 0"
+                :disabled="actionsLocked || refreshing || ownSessionId === null || isOwnSession(row) || typeof row.id !== 'number' || !Number.isSafeInteger(row.id) || row.id <= 0"
                 :aria-label="t('processList.selectSession', { id: row.id })"
                 @click="toggleSelection(row.id, $event as MouseEvent)"
               />
@@ -660,7 +819,12 @@ onBeforeUnmount(() => {
             </td>
             <td class="px-3 py-1.5 text-right">
               <span class="inline-flex items-center justify-end gap-1">
+                <Button v-if="driver?.buildLockDetailsSql" variant="ghost" size="sm" class="h-6 gap-1 px-1.5 text-[11px]" :disabled="actionsLocked || refreshing || loadingLocks" :title="t('processList.oracleLockDetails')" @click="showLocks(row)">
+                  <Search class="h-3.5 w-3.5" />
+                  {{ t("processList.oracleLockDetails") }}
+                </Button>
                 <Button
+                  v-if="cancelSupported"
                   variant="ghost"
                   size="sm"
                   class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
@@ -676,8 +840,8 @@ onBeforeUnmount(() => {
                   variant="ghost"
                   size="sm"
                   class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                  :disabled="isOwnSession(row) || actionsLocked || refreshing"
-                  :title="isOwnSession(row) ? t('processList.cannotTerminateSelf') : t('processList.terminate')"
+                  :disabled="(rowAwareTerminate && ownSessionId === null) || isOwnSession(row) || !!terminateRowDisabledReason(row) || actionsLocked || refreshing"
+                  :title="isOwnSession(row) ? t('processList.cannotTerminateSelf') : terminateRowDisabledReason(row) ? t(terminateRowDisabledReason(row) ?? '') : t('processList.terminate')"
                   @click="requestTerminate(row)"
                 >
                   <PlugZap class="h-3.5 w-3.5" />
@@ -686,7 +850,7 @@ onBeforeUnmount(() => {
               </span>
             </td>
           </tr>
-          <tr v-if="!loading && filteredRows.length === 0 && (!transactionMode || !loadError)">
+          <tr v-if="!loading && filteredRows.length === 0 && !loadError">
             <td :colspan="columns.length + 1 + (selectionSupported ? 1 : 0)" class="px-3 py-10 text-center text-muted-foreground">
               {{ search ? t("grid.noSearchResults") : t(transactionMode ? "processList.transactionEmpty" : "processList.empty") }}
             </td>
@@ -741,6 +905,20 @@ onBeforeUnmount(() => {
         <p v-if="terminateTarget" class="text-sm text-muted-foreground">
           {{ t("processList.terminateConfirm", { id: terminateTarget.id, user: terminateTarget.user }) }}
         </p>
+        <dl v-if="terminateTarget && driver?.buildTerminateSessionSqlForRow" class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded border bg-muted/20 p-3 text-xs">
+          <template v-for="key in ['container', 'instance', 'serial', 'auditSession', 'logonTime', 'tenant', 'server', 'host', 'proxySessionId']" :key="key">
+            <template v-if="terminateTarget[key] !== undefined && terminateTarget[key] !== null">
+              <dt class="text-muted-foreground">
+                {{
+                  t(
+                    `processList.${key === "container" ? "oracleContainer" : key === "instance" ? "oracleInstance" : key === "serial" ? "oracleSerial" : key === "auditSession" ? "oracleAuditSession" : key === "logonTime" ? "oracleLogonTime" : key === "tenant" ? "oracleTenant" : key === "server" ? "oracleNode" : key === "proxySessionId" ? "oracleProxySession" : "colHost"}`,
+                  )
+                }}
+              </dt>
+              <dd class="break-all font-mono">{{ terminateTarget[key] }}</dd>
+            </template>
+          </template>
+        </dl>
         <DialogFooter>
           <Button variant="outline" :disabled="terminating" @click="terminateTarget = null">{{ t("dangerDialog.cancel") }}</Button>
           <Button variant="destructive" :disabled="terminating" @click="confirmTerminate">
@@ -748,6 +926,36 @@ onBeforeUnmount(() => {
             {{ t("processList.terminate") }}
           </Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog :open="lockTarget !== null" @update:open="(open) => !open && closeLockDialog()">
+      <DialogContent class="max-h-[min(80vh,700px)] max-w-5xl overflow-hidden">
+        <DialogHeader
+          ><DialogTitle>{{ t("processList.oracleLockDetails") }} · {{ lockTarget?.id }}</DialogTitle></DialogHeader
+        >
+        <p v-if="lockTarget" class="text-xs text-muted-foreground">{{ t("processList.oracleLockTarget", { user: lockTarget.user, identity: driver?.rowKey?.(lockTarget) ?? lockTarget.id }) }}</p>
+        <div v-if="loadingLocks" class="flex items-center gap-2 py-8 text-sm text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" />{{ t("common.loading") }}</div>
+        <p v-else-if="lockError" class="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{{ lockError }}</p>
+        <p v-else-if="lockRows.length === 0" class="py-8 text-center text-sm text-muted-foreground">{{ t("processList.oracleLockDetailsEmpty") }}</p>
+        <div v-else class="max-h-[55vh] overflow-auto rounded border">
+          <p v-if="lockTruncated" class="border-b bg-muted/30 p-2 text-xs text-muted-foreground">{{ t("processList.oracleLockDetailsTruncated") }}</p>
+          <table class="w-full border-collapse text-xs">
+            <thead class="sticky top-0 bg-muted/60">
+              <tr>
+                <th v-for="column in lockColumns" :key="column" class="whitespace-nowrap px-2 py-1.5 text-left font-medium">{{ column }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, index) in lockRows" :key="index" class="border-t">
+                <td v-for="(value, columnIndex) in row" :key="columnIndex" class="max-w-sm break-all px-2 py-1.5 font-mono">{{ value === null || value === undefined ? "—" : value }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <DialogFooter
+          ><Button variant="outline" @click="closeLockDialog">{{ t("common.close") }}</Button></DialogFooter
+        >
       </DialogContent>
     </Dialog>
 

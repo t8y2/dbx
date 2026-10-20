@@ -206,6 +206,22 @@ describe("shortcutRegistry editor actions", () => {
     expect(findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS).selectCurrentStatement).toContain("disconnectSidebarConnection");
   });
 
+  it("registers conflict-free statement navigation shortcuts", () => {
+    const previous = SHORTCUT_DEFINITIONS.find((item) => item.id === "previousStatement");
+    const next = SHORTCUT_DEFINITIONS.find((item) => item.id === "nextStatement");
+    const start = SHORTCUT_DEFINITIONS.find((item) => item.id === "statementStart");
+
+    expect(previous).toMatchObject({ labelKey: "settings.shortcutPreviousStatement", scope: "editor", defaultShortcut: "Ctrl+Shift+ArrowUp" });
+    expect(next).toMatchObject({ labelKey: "settings.shortcutNextStatement", scope: "editor", defaultShortcut: "Ctrl+Shift+ArrowDown" });
+    expect(start).toMatchObject({ labelKey: "settings.shortcutStatementStart", scope: "editor", defaultShortcut: "Alt+Home" });
+
+    for (const id of ["previousStatement", "nextStatement", "statementStart"] as const) {
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(SHORTCUT_DEFINITIONS.find((item) => item.id === id)?.defaultShortcut);
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS[id])).not.toBe("");
+      expect(findShortcutConflict(id, DEFAULT_SHORTCUT_SETTINGS[id], DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    }
+  });
+
   it("keeps current-view search and editor find contextual on Mod+F", () => {
     const focusSearch = SHORTCUT_DEFINITIONS.find((item) => item.id === "focusSearch");
     const find = SHORTCUT_DEFINITIONS.find((item) => item.id === "find");

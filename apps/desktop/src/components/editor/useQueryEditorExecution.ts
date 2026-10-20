@@ -53,6 +53,7 @@ export function useQueryEditorExecution(options: QueryEditorExecutionOptions) {
   }
 
   function requestExecute(options: RequestExecuteOptions = {}) {
+    if (props.isExecuting) return false;
     executionViewportOwnership.cancelPendingRequest();
     const currentView = view.value;
     if (!currentView) return false;
@@ -61,6 +62,7 @@ export function useQueryEditorExecution(options: QueryEditorExecutionOptions) {
   }
 
   function requestExecuteInNewResultTab() {
+    if (props.isExecuting) return false;
     return requestExecute({ bypassPicker: true, openInNewResultTab: true });
   }
 

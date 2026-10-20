@@ -284,7 +284,46 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
 };
 
 const WITH_MAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]);
-const EXPLAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP"]);
+const EXPLAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP", "VALUES", "EXECUTE"]);
+const EXPLAIN_OPTION_KEYWORDS = new Set([
+  "ANALYZE",
+  "ANALYSE",
+  "VERBOSE",
+  "COSTS",
+  "BUFFERS",
+  "TIMING",
+  "SUMMARY",
+  "FORMAT",
+  "SETTINGS",
+  "GENERIC_PLAN",
+  "WAL",
+  "MEMORY",
+  "SERIALIZE",
+  "TEXT",
+  "XML",
+  "JSON",
+  "YAML",
+  "TREE",
+  "TRADITIONAL",
+  "EXTENDED",
+  "PARTITIONS",
+  "QUERY",
+  "PLAN",
+  "FOR",
+  "SET",
+  "STATEMENT_ID",
+  "INTO",
+  "AST",
+  "SYNTAX",
+  "PIPELINE",
+  "ESTIMATE",
+  "TABLE",
+  "OVERRIDE",
+  "TRUE",
+  "FALSE",
+  "ON",
+  "OFF",
+]);
 const CREATE_BODY_KEYWORDS = new Set(["SELECT", "WITH", "BEGIN", "DECLARE"]);
 const STARROCKS_CREATE_MATERIALIZED_VIEW_REFRESH_MODIFIERS = new Set(["ASYNC", "MANUAL", "SCHEDULE", "DEFERRED", "IMMEDIATE"]);
 const INSERT_BODY_KEYWORDS = new Set(["SELECT", "WITH"]);
@@ -370,6 +409,7 @@ function isAsciiAlphanumeric(ch: string): boolean {
  * whitespace are excluded so editor highlights stay tight).
  */
 export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
+  databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   if (isHttpJsonRestDatabaseType(databaseType)) {
     const requests = splitElasticsearchRestRequestRanges(sql);
     if (requests) return requests;
@@ -719,6 +759,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
  * which lets the editor highlight a tight preview range.
  */
 export function statementRangeAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange | null {
+  databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   const pos = clampCursor(sql, cursorPos);
   if (isCursorOnBlankLine(sql, pos)) return null;
 
@@ -824,10 +865,11 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
 
   const boundaries: Array<{ hitFrom: number; from: number; keyword: string }> = [];
   let currentKeyword = softStatementKeywordAt(sql, statement.from, databaseType, parameterOptions);
-  let currentExplainTargetKeyword = explainLikeTargetKeywordAt(sql, statement.from, databaseType, parameterOptions);
+  let currentExplain = parseExplainLikePrefixAt(sql, statement.from, databaseType, parameterOptions);
+  let currentExplainTargetKeyword = currentExplain.targetKeyword;
   let currentBodyKeyword = currentExplainTargetKeyword ?? currentKeyword;
   let consumedWithMainStatement = false;
-  let consumedExplainStatement = false;
+  let consumedExplainStatement = currentExplainTargetKeyword !== null || (currentKeyword === "EXPLAIN" && !currentExplain.isPendingPrefix);
 
   boundaries.push({ hitFrom: statement.hitFrom, from: statement.from, keyword: currentKeyword ?? "" });
 
@@ -897,10 +939,11 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
 
     boundaries.push(lineStart);
     currentKeyword = lineStart.keyword;
-    currentExplainTargetKeyword = explainLikeTargetKeywordAt(sql, lineStart.from, databaseType, parameterOptions);
+    currentExplain = parseExplainLikePrefixAt(sql, lineStart.from, databaseType, parameterOptions);
+    currentExplainTargetKeyword = currentExplain.targetKeyword;
     currentBodyKeyword = currentExplainTargetKeyword ?? currentKeyword;
     consumedWithMainStatement = false;
-    consumedExplainStatement = false;
+    consumedExplainStatement = currentExplainTargetKeyword !== null || (currentKeyword === "EXPLAIN" && !currentExplain.isPendingPrefix);
   }
 
   if (boundaries.length <= 1) return [statement];
@@ -1588,25 +1631,103 @@ function explainOptionsParenAt(sql: string, pos: number): number | null {
   return sql[i] === "(" ? i : null;
 }
 
-function explainLikeTargetKeywordAt(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): string | null {
+function parseExplainLikePrefixAt(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): { targetKeyword: string | null; isPendingPrefix: boolean } {
   const prefixMatch = /^[A-Za-z_][\w$]*/.exec(sql.slice(pos));
   const prefix = prefixMatch?.[0]?.toUpperCase();
-  if (!isExplainLikeKeyword(prefix ?? null)) return null;
+  if (!isExplainLikeKeyword(prefix ?? null)) {
+    return { targetKeyword: null, isPendingPrefix: false };
+  }
 
   let i = pos + (prefixMatch?.[0].length ?? 0);
-  while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
-  // Parenthesized EXPLAIN options (e.g. Postgres `EXPLAIN (ANALYZE, BUFFERS) ...`)
-  // sit between the keyword and its target statement. DESC/DESCRIBE take no
-  // options — a paren there is a subquery (ClickHouse `DESCRIBE (SELECT ...)`).
-  if (prefix === "EXPLAIN" && sql[i] === "(") {
-    const optionsEnd = skipBalancedParens(sql, i, databaseType, parameterOptions);
-    if (optionsEnd === null) return null;
-    i = optionsEnd;
-    while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
+
+  const skipInlineWhitespaceAndComments = (): boolean => {
+    while (i < sql.length) {
+      if (sql[i] === " " || sql[i] === "\t") {
+        i += 1;
+        continue;
+      }
+      if (startsBlockComment(sql, i)) {
+        const commentEnd = sql.indexOf("*/", i + 2);
+        if (commentEnd === -1) return false;
+        i = commentEnd + 2;
+        continue;
+      }
+      break;
+    }
+    return true;
+  };
+
+  if (!skipInlineWhitespaceAndComments()) {
+    return { targetKeyword: null, isPendingPrefix: false };
   }
-  const targetMatch = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
-  const targetKeyword = targetMatch?.[0]?.toUpperCase();
-  return targetKeyword && EXPLAIN_STATEMENT_KEYWORDS.has(targetKeyword) ? targetKeyword : null;
+
+  // DESC and DESCRIBE take no options; the very next token is either the target
+  // statement (e.g. `DESC UPDATE ...`) or a table/subquery (e.g. `DESC users`).
+  if (prefix !== "EXPLAIN") {
+    const targetMatch = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
+    const targetKeyword = targetMatch?.[0]?.toUpperCase();
+    return {
+      targetKeyword: targetKeyword && EXPLAIN_STATEMENT_KEYWORDS.has(targetKeyword) ? targetKeyword : null,
+      isPendingPrefix: false,
+    };
+  }
+
+  // Scan EXPLAIN options and possible inline target statement keyword on the current line
+  while (i < sql.length) {
+    if (sql[i] === "\n" || sql[i] === "\r" || sql[i] === ";") break;
+    if (startsLineComment(sql, i, databaseType, parameterOptions)) break;
+
+    if (sql[i] === "(") {
+      const optionsEnd = skipBalancedParens(sql, i, databaseType, parameterOptions);
+      if (optionsEnd === null) return { targetKeyword: null, isPendingPrefix: true };
+      i = optionsEnd;
+      if (!skipInlineWhitespaceAndComments()) return { targetKeyword: null, isPendingPrefix: false };
+      continue;
+    }
+
+    if (sql[i] === "'" || sql[i] === '"') {
+      const quote = sql[i];
+      i += 1;
+      while (i < sql.length && sql[i] !== quote && sql[i] !== "\n") i += 1;
+      if (i < sql.length && sql[i] === quote) i += 1;
+      if (!skipInlineWhitespaceAndComments()) return { targetKeyword: null, isPendingPrefix: false };
+      continue;
+    }
+
+    if (sql[i] === "=" || sql[i] === ",") {
+      i += 1;
+      if (!skipInlineWhitespaceAndComments()) return { targetKeyword: null, isPendingPrefix: false };
+      continue;
+    }
+
+    const digitMatch = /^\d+/.exec(sql.slice(i));
+    if (digitMatch) {
+      i += digitMatch[0].length;
+      if (!skipInlineWhitespaceAndComments()) return { targetKeyword: null, isPendingPrefix: false };
+      continue;
+    }
+
+    const tokenMatch = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
+    if (!tokenMatch) {
+      i += 1;
+      continue;
+    }
+
+    const token = tokenMatch[0].toUpperCase();
+    if (EXPLAIN_STATEMENT_KEYWORDS.has(token)) {
+      return { targetKeyword: token, isPendingPrefix: false };
+    }
+
+    if (EXPLAIN_OPTION_KEYWORDS.has(token)) {
+      i += tokenMatch[0].length;
+      if (!skipInlineWhitespaceAndComments()) return { targetKeyword: null, isPendingPrefix: false };
+      continue;
+    }
+
+    return { targetKeyword: null, isPendingPrefix: false };
+  }
+
+  return { targetKeyword: null, isPendingPrefix: true };
 }
 
 function skipBalancedParens(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
@@ -1700,11 +1821,9 @@ function startsLineComment(sql: string, pos: number, databaseType?: DatabaseType
   return (sql[pos] === "-" && sql[pos + 1] === "-") || startsHashLineComment(sql, pos, databaseType, parameterOptions);
 }
 
-function startsHashLineComment(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
-  // `#` is a MySQL-family line-comment marker. Oracle-family engines also allow
-  // it in unquoted identifiers (for example `V$DATAFILE.FILE#`), so treating it
-  // as a comment there truncates otherwise valid statements.
-  if ((databaseType !== undefined && ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType)) || databaseType === "sqlserver" || sql[pos] !== "#") return false;
+export function startsHashLineComment(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  // Oracle/SQLServer allow # in identifiers; PG uses it in operators such as #>>.
+  if ((databaseType !== undefined && (ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType) || POSTGRES_FAMILY_DATABASES.has(databaseType))) || databaseType === "sqlserver" || sql[pos] !== "#") return false;
   return readSqlBracedParameterAt(sql, pos, parameterOptions)?.syntax !== "mybatis";
 }
 
@@ -1891,7 +2010,26 @@ function isOpenGaussOracleCompatibility(databaseType?: DatabaseType, options?: S
   return mode === undefined || mode === "A";
 }
 
+export function statementParsingDatabaseType(databaseType?: DatabaseType, options?: SqlParameterOptions): DatabaseType | undefined {
+  if (databaseType !== "kingbase") return databaseType;
+  switch (options?.compatibilityMode?.trim().toLowerCase()) {
+    case "oracle":
+      return "gaussdb";
+    case "mysql":
+      return "mysql";
+    case "sqlserver":
+      return "sqlserver";
+    case "pg":
+    case "postgres":
+    case "postgresql":
+      return "postgres";
+    default:
+      return "kingbase";
+  }
+}
+
 export function sqlStatementParameterOptionsForCompatibility(databaseType?: DatabaseType, compatibilityMode?: string): SqlParameterOptions | undefined {
+  if (databaseType === "kingbase") return { compatibilityMode: compatibilityMode?.trim() };
   if (databaseType !== "opengauss") return undefined;
   // Keep the browser-side splitter aligned with the backend's conservative
   // behavior while the compatibility probe is still cold or unavailable.
@@ -1899,7 +2037,10 @@ export function sqlStatementParameterOptionsForCompatibility(databaseType?: Data
 }
 
 export function isOracleLikeDatabase(databaseType?: DatabaseType, options?: SqlParameterOptions): boolean {
-  return !!databaseType && (ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType) || isOpenGaussOracleCompatibility(databaseType, options));
+  databaseType = statementParsingDatabaseType(databaseType, options);
+  // An unresolved Kingbase mode keeps the legacy lexer, but must not split a
+  // recognizable PL/SQL block before mode metadata arrives.
+  return !!databaseType && (databaseType === "kingbase" || ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType) || isOpenGaussOracleCompatibility(databaseType, options));
 }
 
 function isPostgresFamilyDatabase(databaseType?: DatabaseType): boolean {
@@ -2787,6 +2928,7 @@ function normalizeSql(sql: string): string {
  * that case only a single candidate is returned to avoid duplicates.
  */
 export function executableStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange[] {
+  databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   if (databaseType === "redis") return redisExecutableCommandRanges(sql);
   if (databaseType === "mongodb") return splitMongoCommandRanges(sql).map(({ from, to, text }) => ({ from, to, sql: text }));
   return splitSqlStatementRanges(sql, databaseType, parameterOptions).flatMap((statement) => splitStatementRangeAtSoftStarts(sql, statement, databaseType, parameterOptions).map((range) => rangeFor(range, sql)));

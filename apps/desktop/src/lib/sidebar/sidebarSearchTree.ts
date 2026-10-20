@@ -83,9 +83,22 @@ export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: r
 export const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
 const localTableSearchChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
 
-export function filterLocallySearchedTables(nodes: TreeNode[], options: { enabled: boolean; queries: Readonly<Record<string, string>>; indexedResults: Readonly<Record<string, TableInfo[] | null>> }): TreeNode[] {
+interface LocalTableSearchOptions {
+  enabled: boolean;
+  queries: Readonly<Record<string, string>>;
+  indexedResults: Readonly<Record<string, TableInfo[] | null>>;
+}
+
+export function filterLocallySearchedTables(nodes: TreeNode[], options: LocalTableSearchOptions): TreeNode[] {
+  // Avoid cloning and tracking the entire reactive tree when there is no local
+  // search. Check the query map once, not at each recursive subtree.
+  if (!options.enabled || !Object.values(options.queries).some((query) => query.trim())) return nodes;
+  return filterLocallySearchedTableNodes(nodes, options);
+}
+
+function filterLocallySearchedTableNodes(nodes: TreeNode[], options: LocalTableSearchOptions): TreeNode[] {
   return nodes.map((node) => {
-    const children = node.children ? filterLocallySearchedTables(node.children, options) : undefined;
+    const children = node.children ? filterLocallySearchedTableNodes(node.children, options) : undefined;
     const query = options.enabled && localTableSearchParentTypes.has(node.type) ? options.queries[node.id]?.trim() : "";
     if (!query || !children) return children === node.children ? node : { ...node, children };
 

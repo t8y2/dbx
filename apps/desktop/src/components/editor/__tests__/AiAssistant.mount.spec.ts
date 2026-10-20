@@ -1860,4 +1860,56 @@ describe("AiAssistant mount", () => {
     expect(popover.querySelector(".ai-skill-duplicate-note")).toBeNull();
     expect(errors.map(String)).toEqual([]);
   });
+
+  it("supports collapsing and expanding selected skill chips to conserve composer space", async () => {
+    configureSkillCatalog();
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+
+    await selectSkill(container);
+    expect(container.querySelectorAll(".ai-skill-chip").length).toBe(1);
+    const collapseButton = container.querySelector<HTMLButtonElement>(".ai-skills-collapse-toggle");
+    expect(collapseButton).not.toBeNull();
+    expect(collapseButton?.textContent).toContain(i18n.global.t("ai.skillsCollapse"));
+    expect(container.querySelector(".ai-skills-expand-toggle")).toBeNull();
+
+    // Collapse
+    collapseButton!.click();
+    await settle();
+
+    expect(container.querySelectorAll(".ai-skill-chip").length).toBe(0);
+    expect(container.querySelector(".ai-skills-collapse-toggle")).toBeNull();
+    const expandButton = container.querySelector<HTMLButtonElement>(".ai-skills-expand-toggle");
+    expect(expandButton).not.toBeNull();
+    expect(expandButton?.textContent).toContain(i18n.global.t("ai.skillsSelectedCount", { count: 1 }));
+
+    // Expand
+    expandButton!.click();
+    await settle();
+
+    expect(container.querySelectorAll(".ai-skill-chip").length).toBe(1);
+    expect(container.querySelector(".ai-skills-collapse-toggle")).not.toBeNull();
+    expect(container.querySelector(".ai-skills-expand-toggle")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("displays loaded status in collapsed expand button when skills are loaded", async () => {
+    configureSkillCatalog();
+    configureSkillRead();
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+
+    await selectSkill(container);
+    skillChip(container)!.click();
+    await settle();
+    expect(skillChip(container)!.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
+
+    // Collapse
+    container.querySelector<HTMLButtonElement>(".ai-skills-collapse-toggle")!.click();
+    await settle();
+
+    const expandButton = container.querySelector<HTMLButtonElement>(".ai-skills-expand-toggle");
+    expect(expandButton).not.toBeNull();
+    expect(expandButton?.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
+
+    expect(errors.map(String)).toEqual([]);
+  });
 });

@@ -157,7 +157,7 @@ describe("SidebarTreeRuntimeHost saved SQL context menu (#9127)", () => {
     expect(newQueryItem).toBeDefined();
 
     await newQueryItem?.action?.();
-    expect(createTabSpy).toHaveBeenCalledWith("conn-mysql", "app", undefined, "query", "public", undefined, "def");
+    expect(createTabSpy).toHaveBeenCalledWith("conn-mysql", "app", undefined, "query", "public", undefined, "def", { schemaQualifiesSql: true });
   });
 
   it("includes new query option on saved-sql-file node", async () => {
@@ -187,7 +187,7 @@ describe("SidebarTreeRuntimeHost saved SQL context menu (#9127)", () => {
     expect(newQueryItem).toBeDefined();
 
     await newQueryItem?.action?.();
-    expect(createTabSpy).toHaveBeenCalledWith("conn-mysql", "app", undefined, "query", "public", undefined, undefined);
+    expect(createTabSpy).toHaveBeenCalledWith("conn-mysql", "app", undefined, "query", "public", undefined, undefined, { schemaQualifiesSql: true });
   });
 
   it("omits new query option on saved-sql-root when database type does not support queries", async () => {

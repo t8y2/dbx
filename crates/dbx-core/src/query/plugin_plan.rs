@@ -25,8 +25,8 @@ use crate::connection::AppState;
 use crate::db::QueryResult;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::{
-    build_explain_sql, estimated_plan_strategy, supports_explain_plan, EstimatedPlanAcquisition, EstimatedPlanFormat,
-    EstimatedPlanStrategy, ExplainFormat, ExplainSqlOptions,
+    build_explain_sql, build_gaussdb_dws_explain_sql, estimated_plan_strategy, gaussdb_dws_estimated_plan_strategy,
+    EstimatedPlanAcquisition, EstimatedPlanFormat, EstimatedPlanStrategy, ExplainFormat, ExplainSqlOptions,
 };
 
 use super::{execute_sql_statement_with_options_typed, QueryExecutionMode, QueryExecutionOptions};
@@ -65,6 +65,8 @@ const WARNING_PLAN_ROWS_TRUNCATED: &str = "plan_rows_truncated";
 /// connection rejects the capability probe instead of succeeding and leaving
 /// the plan request to fail later.
 const CONNECTION_NOT_OPEN_ERROR: &str = "Connection is not open";
+const GAUSSDB_DWS_PROFILE_KEY: &str = "gaussdbProductProfile";
+const GAUSSDB_DWS_PROFILE_VALUE: &str = "huawei-dws";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanPayload {
@@ -98,8 +100,8 @@ pub struct PluginPlanRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PluginPlanCapabilities {
     pub db_type: String,
-    /// Server product version when DBX already learned it for this connection.
-    /// Absent when unknown — the probe is never run on the plugin's behalf.
+    /// Server product version when DBX already learned and stored it for this
+    /// connection. The Host API never probes the server on the plugin's behalf.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db_version: Option<String>,
     pub supports: PluginPlanSupports,
@@ -135,10 +137,10 @@ pub struct PluginPlanResult {
     pub warnings: Vec<String>,
 }
 
-/// Reports what the plugin may expect from this connection without connecting
-/// to it, running any SQL, or reading anything beyond the stored config. The
-/// connection must already be open, so a closed one is refused here rather than
-/// after a plan request has already been prepared.
+/// Reports what the plugin may expect from this connection without opening a
+/// connection or probing the server. DWS support comes from the explicit
+/// connection profile; product version is reported only from metadata DBX
+/// already stored. A closed connection is refused before any capability is reported.
 pub async fn plugin_plan_capabilities(state: &AppState, connection_id: &str) -> Result<PluginPlanCapabilities, String> {
     let connection_id = require_connection_id(connection_id)?;
     let config = connection_config(state, connection_id).await?;
@@ -147,7 +149,9 @@ pub async fn plugin_plan_capabilities(state: &AppState, connection_id: &str) -> 
     Ok(PluginPlanCapabilities {
         db_type: database_type.as_str().to_string(),
         db_version: database_version(&config),
-        supports: PluginPlanSupports { estimated_plan: supports_explain_plan(Some(database_type)) },
+        supports: PluginPlanSupports {
+            estimated_plan: estimated_plan_strategy_for_connection(&config, database_type).is_some(),
+        },
         limits: PluginPlanLimits {
             max_timeout_ms: plugin_plan_timeout_ceiling_ms(&config),
             max_plan_bytes: MAX_PLUGIN_PLAN_BYTES,
@@ -166,8 +170,8 @@ pub async fn explain_estimated_plan(state: &AppState, request: PluginPlanRequest
     let config = connection_config(state, &request.connection_id).await?;
     require_open_connection(state, &request.connection_id).await?;
     let database_type = explain_database_type(&config);
-    let strategy =
-        estimated_plan_strategy(Some(database_type)).ok_or_else(|| unsupported_dialect_message(database_type))?;
+    let strategy = estimated_plan_strategy_for_connection(&config, database_type)
+        .ok_or_else(|| unsupported_dialect_message(database_type))?;
 
     let timeout_secs = plugin_plan_timeout_secs(request.timeout_ms, &config);
     let (plan_text, rows_truncated) = match strategy.acquisition() {
@@ -217,14 +221,19 @@ async fn native_estimated_plan(
     strategy: EstimatedPlanStrategy,
     timeout_secs: u64,
 ) -> Result<(String, bool), String> {
-    let built = build_explain_sql(ExplainSqlOptions {
+    let explain_options = ExplainSqlOptions {
         database_type: Some(database_type),
         // Estimated only: `analyze` is exactly what turns this into a statement
         // that runs the caller's SQL.
         analyze: None,
         format: Some(ExplainFormat::Json),
         sql: request.sql.clone(),
-    });
+    };
+    let built = if database_type == DatabaseType::Gaussdb {
+        build_gaussdb_dws_explain_sql(explain_options)
+    } else {
+        build_explain_sql(explain_options)
+    };
     if !built.ok {
         return Err(explain_build_error(built.reason.as_deref(), database_type));
     }
@@ -441,13 +450,81 @@ fn unsupported_dialect_message(database_type: DatabaseType) -> String {
     format!("Estimated execution plans are not available for '{}' connections", database_type.as_str())
 }
 
+/// An explicit profile is required in addition to the generic GaussDB type.
+/// The DWS marker is ignored for M-JDBC and other non-native driver profiles.
+pub fn is_explicit_gaussdb_dws_profile(config: &ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::Gaussdb
+        || config.driver_profile.as_deref().is_some_and(|profile| !profile.eq_ignore_ascii_case("gaussdb"))
+    {
+        return false;
+    }
+    config
+        .external_config
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|values| values.get(GAUSSDB_DWS_PROFILE_KEY))
+        .and_then(Value::as_str)
+        == Some(GAUSSDB_DWS_PROFILE_VALUE)
+}
+
+fn estimated_plan_strategy_for_connection(
+    config: &ConnectionConfig,
+    database_type: DatabaseType,
+) -> Option<EstimatedPlanStrategy> {
+    if is_explicit_gaussdb_dws_profile(config) {
+        return Some(gaussdb_dws_estimated_plan_strategy());
+    }
+    estimated_plan_strategy(Some(database_type))
+}
+
+/// Discard a cached DWS product version before reconnecting so the plan API
+/// does not report metadata from the previous connection while fresh metadata is
+/// being learned. DWS support itself is selected by the explicit profile, not
+/// the product version. Other metadata and non-DWS configs remain untouched.
+pub fn invalidate_gaussdb_dws_product_version(config: &mut ConnectionConfig) {
+    if !is_explicit_gaussdb_dws_profile(config) {
+        return;
+    }
+    if let Some(database_info) = config.database_info.as_mut() {
+        database_info.product_version = None;
+    }
+}
+
+/// Extract only the product version, discarding PostgreSQL compatibility and
+/// build/commit metadata from `version()` before it is persisted or exposed.
+pub(crate) fn gaussdb_product_version_from_server_version(version: &str) -> Option<String> {
+    let normalized = version.to_ascii_lowercase();
+    let marker = "gaussdb ";
+    let marker_index = normalized.match_indices(marker).find_map(|(index, _)| {
+        let has_product_boundary = index == 0
+            || !normalized[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        has_product_boundary.then_some(index)
+    })?;
+    let suffix = version.get(marker_index + marker.len()..)?;
+    let version_length = suffix.bytes().take_while(|byte| byte.is_ascii_digit() || *byte == b'.').count();
+    let product_version = &suffix[..version_length];
+    if product_version.is_empty()
+        || !product_version.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(product_version.to_string())
+}
+
 fn database_version(config: &ConnectionConfig) -> Option<String> {
-    config.database_info.as_ref().and_then(|info| info.product_version.clone())
+    let version = config.database_info.as_ref()?.product_version.as_deref()?;
+    if is_explicit_gaussdb_dws_profile(config) {
+        return gaussdb_product_version_from_server_version(version)
+            .map(|product_version| format!("GaussDB {product_version}"));
+    }
+    Some(version.to_string())
 }
 
 async fn connection_config(state: &AppState, connection_id: &str) -> Result<ConnectionConfig, String> {
-    let configs = state.configs.read().await;
-    configs.get(connection_id).cloned().ok_or_else(|| "Connection config not found".to_string())
+    state.configs.read().await.get(connection_id).cloned().ok_or_else(|| "Connection config not found".to_string())
 }
 
 /// Enforces the boundary both plan entry points document: a plugin may plan on
@@ -777,7 +854,6 @@ mod tests {
         ] {
             let strategy = estimated_plan_strategy(Some(database_type))
                 .unwrap_or_else(|| panic!("{database_type:?} must have an acquisition strategy"));
-            assert!(supports_explain_plan(Some(database_type)), "{database_type:?}");
             assert_eq!(strategy.acquisition(), expected_acquisition, "{database_type:?}");
         }
     }
@@ -785,7 +861,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_dialects_and_unsafe_statements() {
         let redis = config(DatabaseType::Redis, 0);
-        assert!(!supports_explain_plan(Some(explain_database_type(&redis))));
+        assert!(estimated_plan_strategy(Some(explain_database_type(&redis))).is_none());
 
         // `build_explain_sql` is the same gate the plugin path relies on.
         for sql in [
@@ -807,6 +883,66 @@ mod tests {
                 "{sql} must not build an estimated plan statement"
             );
         }
+    }
+
+    #[test]
+    fn gaussdb_dws_requires_an_explicit_native_profile_but_not_a_specific_version() {
+        let mut config = config(DatabaseType::Gaussdb, 30);
+        assert!(!is_explicit_gaussdb_dws_profile(&config));
+        assert!(estimated_plan_strategy_for_connection(&config, DatabaseType::Gaussdb).is_none());
+
+        config.external_config = Some(serde_json::json!({
+            GAUSSDB_DWS_PROFILE_KEY: GAUSSDB_DWS_PROFILE_VALUE
+        }));
+        assert!(is_explicit_gaussdb_dws_profile(&config));
+        assert!(estimated_plan_strategy_for_connection(&config, DatabaseType::Gaussdb).is_some());
+        assert_eq!(database_version(&config), None);
+
+        config.database_info = Some(crate::models::connection::DatabaseConnectionInfo {
+            product_name: Some("GaussDB".to_string()),
+            product_version: Some("PostgreSQL 9.2.4 (GaussDB 9.1.1 (Build metadata))".to_string()),
+            ..Default::default()
+        });
+        let strategy = estimated_plan_strategy_for_connection(&config, DatabaseType::Gaussdb).unwrap();
+        assert_eq!(strategy.format(), EstimatedPlanFormat::Json);
+        assert_eq!(strategy.acquisition(), EstimatedPlanAcquisition::GeneratedSql);
+        assert_eq!(database_version(&config).as_deref(), Some("GaussDB 9.1.1"));
+
+        let mut stale_config = config.clone();
+        invalidate_gaussdb_dws_product_version(&mut stale_config);
+        assert!(estimated_plan_strategy_for_connection(&stale_config, DatabaseType::Gaussdb).is_some());
+        assert_eq!(database_version(&stale_config), None);
+        assert_eq!(stale_config.database_info.as_ref().unwrap().product_name.as_deref(), Some("GaussDB"));
+
+        assert_eq!(
+            gaussdb_product_version_from_server_version("PostgreSQL 9.2.4 (GaussDB 9.1.10)"),
+            Some("9.1.10".to_string())
+        );
+        assert_eq!(
+            gaussdb_product_version_from_server_version("PostgreSQL 9.2.4 (GaussDB 9.1.1.2)"),
+            Some("9.1.1.2".to_string())
+        );
+        for unrecognized in ["PostgreSQL 9.2.4", "OpenGaussDB 9.1.1", "PostgreSQL 9.2.4 (GaussDB x.y)"] {
+            assert_eq!(gaussdb_product_version_from_server_version(unrecognized), None, "{unrecognized}");
+        }
+
+        config.database_info.as_mut().unwrap().product_version = Some("GaussDB 9.2.0".to_string());
+        assert!(estimated_plan_strategy_for_connection(&config, DatabaseType::Gaussdb).is_some());
+        assert_eq!(database_version(&config).as_deref(), Some("GaussDB 9.2.0"));
+        config.driver_profile = Some("gaussdb-m".to_string());
+        assert!(!is_explicit_gaussdb_dws_profile(&config));
+        assert!(estimated_plan_strategy_for_connection(&config, DatabaseType::Gaussdb).is_none());
+
+        let mut postgres = config_for(DatabaseType::Postgres, "pg-conn", 30);
+        postgres.external_config = Some(serde_json::json!({
+            GAUSSDB_DWS_PROFILE_KEY: GAUSSDB_DWS_PROFILE_VALUE
+        }));
+        postgres.database_info = Some(crate::models::connection::DatabaseConnectionInfo {
+            product_version: Some("GaussDB 9.1.1".to_string()),
+            ..Default::default()
+        });
+        assert!(estimated_plan_strategy_for_connection(&postgres, DatabaseType::Postgres).is_some());
+        assert!(!is_explicit_gaussdb_dws_profile(&postgres));
     }
 
     #[test]
@@ -862,6 +998,56 @@ mod tests {
             explain_estimated_plan(&state, request).await.unwrap_err(),
             unsupported_dialect_message(DatabaseType::Redis)
         );
+    }
+
+    #[tokio::test]
+    async fn gaussdb_capabilities_use_explicit_dws_profile_without_probing() {
+        let native = config_for(DatabaseType::Gaussdb, "gaussdb-native", 30);
+        let mut dws_without_version = config_for(DatabaseType::Gaussdb, "gaussdb-dws", 30);
+        dws_without_version.external_config = Some(serde_json::json!({
+            GAUSSDB_DWS_PROFILE_KEY: GAUSSDB_DWS_PROFILE_VALUE
+        }));
+
+        let mut dws_versioned = config_for(DatabaseType::Gaussdb, "gaussdb-dws-versioned", 30);
+        dws_versioned.external_config = dws_without_version.external_config.clone();
+        dws_versioned.database_info = Some(crate::models::connection::DatabaseConnectionInfo {
+            product_name: Some("GaussDB".to_string()),
+            product_version: Some("PostgreSQL 9.2.4 (GaussDB 9.1.1)".to_string()),
+            ..Default::default()
+        });
+
+        let mut dws_other_version = config_for(DatabaseType::Gaussdb, "gaussdb-dws-other-version", 30);
+        dws_other_version.external_config = dws_without_version.external_config.clone();
+        dws_other_version.database_info = Some(crate::models::connection::DatabaseConnectionInfo {
+            product_name: Some("GaussDB".to_string()),
+            product_version: Some("PostgreSQL 9.2.4 (GaussDB 9.2.0)".to_string()),
+            ..Default::default()
+        });
+
+        let mut m_jdbc = config_for(DatabaseType::Gaussdb, "gaussdb-m-jdbc", 30);
+        m_jdbc.driver_profile = Some("gaussdb-m".to_string());
+        m_jdbc.external_config = dws_without_version.external_config.clone();
+
+        let configs = [native, dws_without_version, dws_versioned, dws_other_version, m_jdbc];
+        let (state, _dir) = saved_connection_state(&configs).await;
+        for config in &configs {
+            open_connection(&state, &config.id).await;
+        }
+
+        // `open_connection` installs a Redis test stub, not a PostgreSQL pool.
+        // Explicitly profiled DWS remains supported without a version probe;
+        // the other product versions are exposed only when already stored.
+        for (config, expected_support) in configs.iter().zip([false, true, true, true, false]) {
+            let capabilities = plugin_plan_capabilities(&state, &config.id).await.unwrap();
+            assert_eq!(capabilities.db_type, "gaussdb");
+            assert_eq!(capabilities.supports.estimated_plan, expected_support, "{}", config.id);
+            match config.id.as_str() {
+                "gaussdb-dws" => assert_eq!(capabilities.db_version, None),
+                "gaussdb-dws-versioned" => assert_eq!(capabilities.db_version.as_deref(), Some("GaussDB 9.1.1")),
+                "gaussdb-dws-other-version" => assert_eq!(capabilities.db_version.as_deref(), Some("GaussDB 9.2.0")),
+                _ => {}
+            }
+        }
     }
 
     #[tokio::test]

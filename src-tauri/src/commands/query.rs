@@ -705,6 +705,20 @@ pub fn build_database_structure_search_sql(
 }
 
 #[tauri::command]
+pub fn build_database_search_columns_sql(
+    options: dbx_core::database_search_columns_sql::DatabaseSearchColumnsSqlOptions,
+) -> Result<Option<dbx_core::database_search_columns_sql::DatabaseSearchColumnsSql>, String> {
+    Ok(dbx_core::database_search_columns_sql::build_database_search_columns_sql(options))
+}
+
+#[tauri::command]
+pub fn build_database_search_probe_sql(
+    options: dbx_core::database_search_probe_sql::DatabaseSearchProbeSqlOptions,
+) -> Result<Option<dbx_core::database_search_probe_sql::DatabaseSearchProbeSql>, String> {
+    Ok(dbx_core::database_search_probe_sql::build_database_search_probe_sql(options))
+}
+
+#[tauri::command]
 pub fn supports_database_structure_search(
     database_type: Option<dbx_core::models::connection::DatabaseType>,
     driver_profile: Option<String>,

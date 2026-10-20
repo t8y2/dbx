@@ -1,5 +1,6 @@
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { beginSourceSave, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
 
 export type BuildEditableObjectSourceSqlInput = {
   databaseType: DatabaseType;
@@ -126,4 +127,60 @@ export async function executeObjectSourceSave(connectionId: string, database: st
       await api.executeScript(connectionId, database, sql, schema);
     }
   }
+}
+
+// Mirrors the backend's MySQL routine declaration parser: `CREATE [DEFINER = account] {PROCEDURE|FUNCTION} name (`.
+const mysqlCreateRoutineHeader = /^\s*CREATE\s+(?:DEFINER\s*=\s*(?:(?:`(?:``|[^`])+`|'(?:''|[^'])+'|\S+)\s*@\s*(?:`(?:``|[^`])+`|'(?:''|[^'])+'|\S+)|CURRENT_USER(?:\(\))?)\s+)?(FUNCTION|PROCEDURE)\s+(`(?:``|[^`])+`|[A-Za-z_][\w$]*)\s*\(/i;
+
+/**
+ * MySQL has no CREATE OR REPLACE for stored routines, so the CREATE statement a routine source tab shows fails with
+ * "already exists" when it is simply run. Saving replaces the routine safely (validate the new body under a temporary
+ * name, DROP ... IF EXISTS, CREATE); running the tab's CREATE needs the same statements ahead of it.
+ */
+export function supportsRoutineSourceReplaceOnRun(databaseType: DatabaseType | undefined, objectType: ObjectSourceKind): boolean {
+  return (objectType === "PROCEDURE" || objectType === "FUNCTION") && !!databaseType && mysqlLikeRoutineRenameTypes.has(databaseType);
+}
+
+// Only a plain `CREATE <same kind> <same unqualified name>(...)` replaces the tab's routine. Renames, other routines,
+// `IF NOT EXISTS` and schema-qualified targets keep the normal CREATE semantics.
+function createsSourceRoutine(objectType: ObjectSourceKind, name: string, sql: string): boolean {
+  const header = mysqlCreateRoutineHeader.exec(sql);
+  if (!header || header[1].toUpperCase() !== objectType) return false;
+  const declared = header[2].startsWith("`") ? header[2].slice(1, -1).replaceAll("``", "`") : header[2];
+  return declared.toLowerCase() === name.toLowerCase();
+}
+
+export type RoutineSourceRunPreparationInput = {
+  identity: SourceIdentitySnapshot;
+  connectionId: string;
+  database: string;
+  databaseType: DatabaseType;
+  schema: string;
+  objectType: ObjectSourceKind;
+  name: string;
+  /** The single statement about to run. */
+  sql: string;
+};
+
+/**
+ * Executes the Save sequence up to, but excluding, its final CREATE so that `sql` itself can then run through the
+ * normal query pipeline (results, error positions and history stay untouched). The new body is validated under a
+ * temporary name before the existing routine is dropped, so a syntax error never leaves the routine deleted.
+ * Returns false, executing nothing, when `sql` is not a plain CREATE of the tab's routine.
+ */
+export async function prepareRoutineSourceRun(input: RoutineSourceRunPreparationInput): Promise<boolean> {
+  const { databaseType, objectType, name, sql } = input;
+  if (!supportsRoutineSourceReplaceOnRun(databaseType, objectType) || !createsSourceRoutine(objectType, name, sql)) return false;
+
+  const statements = await buildExecutableObjectSourceStatements({ databaseType, objectType, schema: input.schema, name, source: sql });
+  // A trailing DROP means the backend treated the CREATE as a rename, which Run must not turn into a replace.
+  if (statements.length < 2 || !/^\s*CREATE\b/i.test(statements[statements.length - 1])) return false;
+
+  const release = beginSourceSave(input.identity);
+  try {
+    await executeObjectSourceSave(input.connectionId, input.database, databaseType, statements.slice(0, -1), input.schema);
+  } finally {
+    release();
+  }
+  return true;
 }

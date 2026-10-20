@@ -59,6 +59,7 @@ import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
+import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 
 const props = defineProps<{
   activeTab: QueryTab;
@@ -567,7 +568,7 @@ defineExpose({
 </script>
 
 <template>
-  <div ref="toolbarRootRef" class="app-editor-toolbar h-9 min-w-0 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground relative z-10 overflow-hidden" :style="toolbarStyle">
+  <div v-show="!isObjectDependencySection(activeTab)" ref="toolbarRootRef" class="app-editor-toolbar h-9 min-w-0 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground relative z-10 overflow-hidden" :style="toolbarStyle">
     <div ref="toolbarActionsRef" class="min-w-0 flex flex-1 items-center gap-0.5 overflow-hidden">
       <Tooltip>
         <TooltipTrigger as-child>

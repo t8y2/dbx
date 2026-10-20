@@ -53,7 +53,7 @@
     <a href="https://mcptoplist.com/server/io.github.t8y2%2Fdbx"><img src="https://mcptoplist.com/badge/io.github.t8y2%2Fdbx.svg" alt="MCP Toplist" /></a>
   </p>
 	  <p>
-    English | <a href="README.zh-CN.md">前往中文版本</a>
+    English | <a href="README.zh-CN.md">前往中文版本</a> | <a href="README.pl-PL.md">Polski</a>
   </p>
 
   <p>

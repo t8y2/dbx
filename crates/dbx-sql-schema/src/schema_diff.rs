@@ -4262,6 +4262,20 @@ fn column_def(col: &ColumnInfo, db_type: DatabaseType, source_dialect: Option<Di
     column_def_with_charset(col, db_type, source_dialect, false)
 }
 
+fn kingbase_generation_clause(
+    col: &ColumnInfo,
+    db_type: DatabaseType,
+    source_dialect: Option<DialectKind>,
+) -> Option<&str> {
+    if db_type != DatabaseType::Kingbase || !matches!(source_dialect, None | Some(DialectKind::Postgres)) {
+        return None;
+    }
+    col.extra.as_deref().map(str::trim).filter(|extra| {
+        let normalized = extra.to_ascii_lowercase();
+        normalized.starts_with("generated ") || normalized == "identity" || normalized.starts_with("identity(")
+    })
+}
+
 fn column_def_with_charset(
     col: &ColumnInfo,
     db_type: DatabaseType,
@@ -4281,7 +4295,18 @@ fn column_def_with_charset(
             definition.push_str(&format!(" COLLATE {}", quote_id(collation, db_type)));
         }
     }
-    definition.push_str(&column_modifier_tail(&profile, col, &col.data_type, db_type, source_dialect, false));
+    let generation = kingbase_generation_clause(col, db_type, source_dialect);
+    if let Some(clause) = generation {
+        definition.push_str(&format!(" {clause}"));
+    }
+    definition.push_str(&column_modifier_tail(
+        &profile,
+        col,
+        &col.data_type,
+        db_type,
+        source_dialect,
+        generation.is_some(),
+    ));
     // Suffix-style auto-increment is only valid in MySQL-family ALTER clauses
     // (ADD/MODIFY/CHANGE). Other dialects' identity clauses are order-sensitive
     // inside ADD COLUMN, so keep omitting them outside the MySQL family.
@@ -5744,6 +5769,15 @@ fn generate_create_table_sql(
         let mapped_type = map_type(col);
         if db_type == DatabaseType::SqlServer {
             col_defs.push(sqlserver_column_definition(col, &mapped_type, source_dialect, schema));
+            if col.is_primary_key {
+                pk_cols.push(col_name);
+            }
+            continue;
+        }
+        if let Some(clause) = kingbase_generation_clause(col, db_type, source_dialect) {
+            let mut definition = format!("{col_name} {mapped_type} {clause}");
+            definition.push_str(&column_modifier_tail(&profile, col, &mapped_type, db_type, source_dialect, true));
+            col_defs.push(definition);
             if col.is_primary_key {
                 pk_cols.push(col_name);
             }
@@ -9378,6 +9412,39 @@ mod tests {
     }
 
     #[test]
+    fn kingbase_agent_index_metadata_survives_sync_ddl() {
+        let index: IndexInfo = serde_json::from_value(serde_json::json!({
+            "name": "expression_idx", "columns": ["lower(name)", "id"],
+            "is_unique": false, "is_primary": false, "filter": "active = 1",
+            "index_type": "btree", "included_columns": ["payload"], "comment": null,
+            "key_is_expression": [true, false], "key_options": [0, 3]
+        }))
+        .unwrap();
+        let ddl = create_index_sql("orders", &index, DatabaseType::Kingbase, Some("public"));
+        assert!(ddl.contains("(lower(name) ASC NULLS LAST, \"id\" DESC NULLS FIRST)"), "{ddl}");
+        assert!(ddl.contains("INCLUDE (\"payload\") WHERE active = 1"), "{ddl}");
+        assert!(!ddl.contains("\"lower(name)\""), "{ddl}");
+    }
+
+    #[test]
+    fn kingbase_index_ddl_keeps_long_expressions_and_non_btree_option_semantics() {
+        let expression = format!("coalesce(lower(name), '{}')", "synthetic".repeat(20));
+        for index_type in ["btree", "gin", "gist"] {
+            let index: IndexInfo = serde_json::from_value(serde_json::json!({
+                "name": "expression_idx", "columns": [expression],
+                "is_unique": false, "is_primary": false, "filter": "active = 1",
+                "index_type": index_type, "included_columns": [], "comment": null,
+                "key_is_expression": [true], "key_options": [3]
+            }))
+            .unwrap();
+            let ddl = create_index_sql("orders", &index, DatabaseType::Kingbase, Some("public"));
+            assert!(ddl.contains(&expression), "{ddl}");
+            assert_eq!(ddl.contains("DESC NULLS FIRST"), index_type == "btree", "{ddl}");
+            assert!(ddl.ends_with("WHERE active = 1;"), "{ddl}");
+        }
+    }
+
+    #[test]
     fn preserves_bare_expression_in_postgres_family_unique_index_ddl() {
         // Regression for #6295: highgo/postgres-family expression index key parts (e.g. from
         // pg_get_indexdef) arrived as raw expression text in IndexInfo.columns; quoting the
@@ -11760,6 +11827,66 @@ mod tests {
         let sql = gen_sql(wrap_table_diff("users", vec![diff]), DatabaseType::Mysql, Some(DialectKind::Mysql));
 
         assert!(sql.contains("AUTO_INCREMENT"), "MySQL ADD COLUMN must keep AUTO_INCREMENT: {sql}");
+    }
+
+    #[test]
+    fn kingbase_agent_generation_metadata_survives_added_column_ddl() {
+        for clause in [
+            "GENERATED ALWAYS AS ((quantity * price)) STORED",
+            "GENERATED ALWAYS AS IDENTITY",
+            "GENERATED BY DEFAULT AS IDENTITY",
+            "IDENTITY(10,5)",
+        ] {
+            let column: ColumnInfo = serde_json::from_value(serde_json::json!({
+                "name": "value", "data_type": "integer", "is_nullable": false,
+                "column_default": null, "is_primary_key": false, "extra": clause
+            }))
+            .unwrap();
+            assert_eq!(
+                column_def(&column, DatabaseType::Kingbase, None),
+                format!("\"value\" integer {clause} NOT NULL")
+            );
+            let (ddl, missing) = generate_create_table_sql(
+                "orders",
+                &[ColumnDiff {
+                    diff_type: "added".to_string(),
+                    name: column.name.clone(),
+                    source: Some(column.clone()),
+                    target: None,
+                    changes: vec![],
+                    add_position: None,
+                }],
+                &[],
+                &[],
+                None,
+                DatabaseType::Kingbase,
+                Some("public"),
+                Some(DialectKind::Postgres),
+                &[],
+                &[],
+            );
+            assert!(missing.is_empty());
+            assert!(ddl.contains(&format!("{clause} NOT NULL")), "{ddl}");
+            assert!(!ddl.contains(" DEFAULT nextval"), "{ddl}");
+        }
+    }
+
+    #[test]
+    fn kingbase_generation_preservation_does_not_change_other_dialects() {
+        let mut column = column("value", "integer", None);
+        column.extra = Some("GENERATED ALWAYS AS (price * quantity) STORED".to_string());
+        for database_type in
+            [DatabaseType::Postgres, DatabaseType::Mysql, DatabaseType::Oracle, DatabaseType::SqlServer]
+        {
+            assert!(kingbase_generation_clause(&column, database_type, None).is_none());
+        }
+        for source in [DialectKind::Mysql, DialectKind::Oracle, DialectKind::SqlServer] {
+            assert!(kingbase_generation_clause(&column, DatabaseType::Kingbase, Some(source)).is_none());
+        }
+        column.column_default = Some("nextval('legacy_sequence')".to_string());
+        let definition = column_def(&column, DatabaseType::Kingbase, None);
+        assert!(definition.contains("GENERATED ALWAYS AS (price * quantity) STORED"));
+        assert!(!definition.contains("legacy_sequence"), "{definition}");
     }
 
     #[test]

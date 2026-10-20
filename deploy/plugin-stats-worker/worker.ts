@@ -37,7 +37,8 @@ type AnalyticsEngineBinding = {
 
 type KvBinding = {
   get(key: string): Promise<string | null>;
-  put(key: string, value: string): Promise<void>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  delete(key: string): Promise<void>;
 };
 
 type Env = {
@@ -173,10 +174,14 @@ async function fetchDailyUniques(env: Env, from: Date, to: Date): Promise<DailyU
     const key = `${bucket.kind}:${bucket.plugin}:${bucket.day}`;
     byDay.set(key, (byDay.get(key) ?? 0) + bucket.uniq);
   }
-  return [...byDay].map(([key, uniq]) => {
-    const [kind, plugin, day] = key.split(":");
-    return { kind, plugin, day, uniq };
-  });
+  // Stable order across invocations: the resumable cursor is an offset into
+  // this array, and the SQL dialect cannot be trusted with ORDER BY.
+  return [...byDay]
+    .map(([key, uniq]) => {
+      const [kind, plugin, day] = key.split(":");
+      return { kind, plugin, day, uniq };
+    })
+    .sort((a, b) => `${a.kind}:${a.plugin}:${a.day}`.localeCompare(`${b.kind}:${b.plugin}:${b.day}`));
 }
 
 async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<WindowCount[]> {
@@ -196,6 +201,8 @@ async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<Window
     throw new Error(`Analytics SQL API ${response.status}: ${(await response.text()).slice(0, 300)}`);
   }
   const payload = (await response.json()) as unknown;
+  // Stable order across invocations (see fetchDailyUniques): the resumable
+  // cursor indexes into this array.
   return parseSqlRows(payload)
     .map((row) => ({
       kind: String(row.kind ?? ""),
@@ -203,49 +210,140 @@ async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<Window
       version: String(row.version ?? ""),
       events: Number(row.events ?? 0) || 0,
     }))
-    .filter((row) => COUNTED_KINDS.has(row.kind) && PLUGIN_ID_PATTERN.test(row.plugin) && VERSION_PATTERN.test(row.version));
+    .filter((row) => COUNTED_KINDS.has(row.kind) && PLUGIN_ID_PATTERN.test(row.plugin) && VERSION_PATTERN.test(row.version))
+    .sort((a, b) => `${a.kind}:${a.plugin}:${a.version}`.localeCompare(`${b.kind}:${b.plugin}:${b.version}`));
 }
 
-// Aggregates events in (last-success, now] into permanent KV totals. The window
-// marker is only advanced after every write lands, so a failed run retries the
-// same window on the next cron; a crash mid-write can double-count a window,
-// which is acceptable for decorative stats.
-async function runAggregation(env: Env, fromOverride?: string): Promise<{ from: string; to: string; activeKeys: number; uniqueDays: number }> {
-  const to = new Date();
-  // `x-archive-from: reset` re-aggregates from the epoch (backfill after a fix);
-  // totals are additive, so only use it when the archived window is known-empty.
-  const override = fromOverride?.trim().toLowerCase() === "reset" ? new Date(0) : undefined;
-  const lastSuccess = await env.PLUGIN_ARCHIVE.get(ARCHIVE_META_KEY);
-  const from = override ?? (lastSuccess ? new Date(`${lastSuccess.replace(" ", "T")}Z`) : new Date(0));
-  if (Number.isNaN(from.getTime())) throw new Error(`Corrupted ${ARCHIVE_META_KEY}: ${lastSuccess}`);
+// Aggregates events in (last-success, now] into permanent KV totals, chunked
+// and resumable. The pre-2026-10 unchunked loop died mid-run once the window
+// grew past the Workers per-invocation subrequest ceiling (1000 paid / 50
+// free; every versioned total costs a get+put pair). A single failed run then
+// left the watermark behind, the next window grew larger, and the aggregation
+// stalled permanently (2026-09-28 → 2026-10-20). Now every trigger processes
+// at most `chunk` keys, persists a cursor in `agg:state`, and the next cron
+// (daily start + */10 continue) resumes until the pass completes; only then
+// are the summary written and the watermark advanced. `agg:tuning` carries
+// the chunk size across passes — it halves on failure and creeps up on
+// progress, so the worker adapts to whatever subrequest/KV limits the
+// account has. A crash mid-chunk can double-count that chunk's additive
+// totals; acceptable for decorative stats (same stance as v1).
+type AggPhase = "counts" | "pluginTotals" | "uniques";
+type AggState = { windowFrom: string; windowTo: string; phase: AggPhase; offset: number; chunk: number };
 
-  const [counts, uniques] = await Promise.all([fetchWindowCounts(env, from, to), fetchDailyUniques(env, from, to)]);
-  const summary = JSON.parse((await env.PLUGIN_ARCHIVE.get(ARCHIVE_SUMMARY_KEY)) ?? "{}") as Record<string, Record<string, number>>;
+const AGG_STATE_KEY = "agg:state";
+const AGG_LOCK_KEY = "agg:lock";
+const AGG_TUNING_KEY = "agg:tuning";
+const AGG_MIN_CHUNK = 8; // keeps get+put pairs + AE fetches under the free plan's 50 subrequests
+const AGG_MAX_CHUNK = 400; // 400×2 + fetches + state writes stays under the paid plan's 1000
+const AGG_LOCK_TTL_SECONDS = 300;
 
-  const pluginTotals = new Map<string, number>();
-  for (const count of counts) {
-    const totalKey = `total:${count.kind}:${count.plugin}:${count.version}`;
-    const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(totalKey)) ?? "0", 10) || 0;
-    await env.PLUGIN_ARCHIVE.put(totalKey, String(current + count.events));
-    pluginTotals.set(`${count.kind}:${count.plugin}`, (pluginTotals.get(`${count.kind}:${count.plugin}`) ?? 0) + count.events);
-    const byKind = (summary[count.kind] ??= {});
-    byKind[count.plugin] = (byKind[count.plugin] ?? 0) + count.events;
-  }
-  for (const [pair, delta] of pluginTotals) {
-    const [kind, plugin] = pair.split(":");
-    const pluginKey = `total:${kind}:${plugin}`;
-    const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(pluginKey)) ?? "0", 10) || 0;
-    await env.PLUGIN_ARCHIVE.put(pluginKey, String(current + delta));
-  }
-  // Daily uniques overwrite (not add): reruns converge to the full-day value,
-  // and multi-version releases cannot inflate the per-plugin downloader count.
-  for (const unique of uniques) {
-    await env.PLUGIN_ARCHIVE.put(`uniqd:${unique.kind}:${unique.plugin}:${unique.day}`, String(unique.uniq));
-  }
+async function readChunkSize(env: Env): Promise<number> {
+  const chunk = Number.parseInt((await env.PLUGIN_ARCHIVE.get(AGG_TUNING_KEY)) ?? "", 10);
+  return Number.isFinite(chunk) && chunk >= AGG_MIN_CHUNK && chunk <= AGG_MAX_CHUNK ? chunk : AGG_MAX_CHUNK;
+}
 
-  await env.PLUGIN_ARCHIVE.put(ARCHIVE_SUMMARY_KEY, JSON.stringify(summary));
-  await env.PLUGIN_ARCHIVE.put(ARCHIVE_META_KEY, sqlTimestamp(to));
-  return { from: sqlTimestamp(from), to: sqlTimestamp(to), activeKeys: counts.length, uniqueDays: uniques.length };
+async function runAggregation(env: Env, fromOverride?: string): Promise<
+  | { skipped: "locked" }
+  | { completed: true; from: string; to: string; activeKeys: number; uniqueDays: number; writes: number }
+  | { completed: false; phase: AggPhase; offset: number; of: number; writes: number }
+> {
+  // Best-effort mutex: cron triggers may overlap and additive totals race.
+  if (await env.PLUGIN_ARCHIVE.get(AGG_LOCK_KEY)) return { skipped: "locked" };
+  await env.PLUGIN_ARCHIVE.put(AGG_LOCK_KEY, "1", { expirationTtl: AGG_LOCK_TTL_SECONDS });
+  try {
+    let state: AggState | null = null;
+    const rawState = await env.PLUGIN_ARCHIVE.get(AGG_STATE_KEY);
+    if (rawState) {
+      try {
+        state = JSON.parse(rawState) as AggState;
+      } catch {
+        state = null; // corrupted cursor: start over rather than stay stuck
+      }
+    }
+    if (!state) {
+      // `x-archive-from: reset` re-aggregates from the epoch (backfill after
+      // a fix); totals are additive, so only use it when the archived window
+      // is known-empty.
+      const fromOverrideTs = fromOverride?.trim().toLowerCase() === "reset" ? "1970-01-01 00:00:00" : fromOverride?.trim();
+      const windowFrom = fromOverrideTs ?? (await env.PLUGIN_ARCHIVE.get(ARCHIVE_META_KEY)) ?? "1970-01-01 00:00:00";
+      state = { windowFrom, windowTo: sqlTimestamp(new Date()), phase: "counts", offset: 0, chunk: await readChunkSize(env) };
+    }
+    const from = new Date(`${state.windowFrom.replace(" ", "T")}Z`);
+    const to = new Date(`${state.windowTo.replace(" ", "T")}Z`);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) throw new Error(`Corrupted aggregation state: ${JSON.stringify(state)}`);
+
+    // Re-fetched every chunk (2 subrequests) so the persisted cursor stays a
+    // few bytes and AE remains the single source of truth for the window.
+    const [counts, uniques] = await Promise.all([fetchWindowCounts(env, from, to), fetchDailyUniques(env, from, to)]);
+    const pluginTotals = new Map<string, number>();
+    for (const count of counts) {
+      pluginTotals.set(`${count.kind}:${count.plugin}`, (pluginTotals.get(`${count.kind}:${count.plugin}`) ?? 0) + count.events);
+    }
+    const pluginTotalEntries = [...pluginTotals.entries()];
+
+    let writes = 0;
+    if (state.phase === "counts") {
+      for (const count of counts.slice(state.offset, state.offset + state.chunk)) {
+        const totalKey = `total:${count.kind}:${count.plugin}:${count.version}`;
+        const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(totalKey)) ?? "0", 10) || 0;
+        await env.PLUGIN_ARCHIVE.put(totalKey, String(current + count.events));
+        writes += 2;
+      }
+      state.offset += Math.min(state.chunk, Math.max(0, counts.length - state.offset));
+      if (state.offset >= counts.length) state = { ...state, phase: "pluginTotals", offset: 0 };
+    } else if (state.phase === "pluginTotals") {
+      for (const [pair, delta] of pluginTotalEntries.slice(state.offset, state.offset + state.chunk)) {
+        const [kind, plugin] = pair.split(":");
+        const pluginKey = `total:${kind}:${plugin}`;
+        const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(pluginKey)) ?? "0", 10) || 0;
+        await env.PLUGIN_ARCHIVE.put(pluginKey, String(current + delta));
+        writes += 2;
+      }
+      state.offset += Math.min(state.chunk, Math.max(0, pluginTotalEntries.length - state.offset));
+      if (state.offset >= pluginTotalEntries.length) state = { ...state, phase: "uniques", offset: 0 };
+    } else {
+      // Daily uniques overwrite (not add): reruns converge to the full-day
+      // value, and multi-version releases cannot inflate the downloader count.
+      for (const unique of uniques.slice(state.offset, state.offset + state.chunk)) {
+        await env.PLUGIN_ARCHIVE.put(`uniqd:${unique.kind}:${unique.plugin}:${unique.day}`, String(unique.uniq));
+        writes += 1;
+      }
+      state.offset += Math.min(state.chunk, Math.max(0, uniques.length - state.offset));
+      if (state.offset >= uniques.length) {
+        const summary = JSON.parse((await env.PLUGIN_ARCHIVE.get(ARCHIVE_SUMMARY_KEY)) ?? "{}") as Record<string, Record<string, number>>;
+        for (const count of counts) {
+          const byKind = (summary[count.kind] ??= {});
+          byKind[count.plugin] = (byKind[count.plugin] ?? 0) + count.events;
+        }
+        await env.PLUGIN_ARCHIVE.put(ARCHIVE_SUMMARY_KEY, JSON.stringify(summary));
+        await env.PLUGIN_ARCHIVE.put(ARCHIVE_META_KEY, state.windowTo);
+        await env.PLUGIN_ARCHIVE.delete(AGG_STATE_KEY);
+        await env.PLUGIN_ARCHIVE.put(AGG_TUNING_KEY, String(Math.min(AGG_MAX_CHUNK, Math.ceil(state.chunk * 1.25))));
+        return { completed: true, from: state.windowFrom, to: state.windowTo, activeKeys: counts.length, uniqueDays: uniques.length, writes };
+      }
+    }
+
+    state.chunk = Math.min(AGG_MAX_CHUNK, state.chunk + 1);
+    await env.PLUGIN_ARCHIVE.put(AGG_STATE_KEY, JSON.stringify(state));
+    const of = state.phase === "counts" ? counts.length : state.phase === "pluginTotals" ? pluginTotalEntries.length : uniques.length;
+    return { completed: false, phase: state.phase, offset: state.offset, of, writes };
+  } catch (error) {
+    // Halve the persisted chunk so the next trigger retries smaller; the
+    // cursor itself stays put (idempotent enough for decorative counters).
+    try {
+      const rawState = await env.PLUGIN_ARCHIVE.get(AGG_STATE_KEY);
+      if (rawState) {
+        const st = JSON.parse(rawState) as AggState;
+        st.chunk = Math.max(AGG_MIN_CHUNK, Math.floor(st.chunk / 2));
+        await env.PLUGIN_ARCHIVE.put(AGG_STATE_KEY, JSON.stringify(st));
+      }
+    } catch {
+      // best-effort tuning write; the error below is the real signal
+    }
+    throw error;
+  } finally {
+    await env.PLUGIN_ARCHIVE.delete(AGG_LOCK_KEY);
+  }
 }
 
 async function handleInstallBeacon(request: Request, env: Env): Promise<Response> {

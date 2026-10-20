@@ -367,7 +367,7 @@ async fn plan_table_structure(
     pg_compat_transfer: bool,
     index_if_not_exists: bool,
 ) -> Result<PlannedTableStructure, String> {
-    let preserves_target_table_name = target_table == table;
+    let preserves_target_table_name = target_table == table && request.preserves_column_names();
     let columns = source_transfer_columns(state, request, table, source_pool_key).await?;
     let table_comment = source_table_comment(state, request, table, source_db_type).await;
 
@@ -426,15 +426,22 @@ async fn plan_table_structure(
     // metadata below. A statement the create pass filters out must never appear here.
     statements.extend(transfer_ddl_statements(&ddl, target_db_type));
 
+    let target_columns = request.target_columns(&columns);
     let comment_statements = generate_comment_ddl_with_column_quoting(
-        &columns,
+        &target_columns,
         target_table,
         &request.target_schema,
         target_db_type,
         table_comment.as_deref(),
         request.quote_target_column_names,
     );
-    operations.extend(comment_operations(&columns, table, target_table, target_db_type, table_comment.as_deref()));
+    operations.extend(comment_operations(
+        &target_columns,
+        table,
+        target_table,
+        target_db_type,
+        table_comment.as_deref(),
+    ));
     statements.extend(comment_statements);
 
     for sequence in &owned_sequences.owned_sequences {

@@ -8,7 +8,7 @@ export interface TriggerToggleSqlOptions {
   enabled: boolean;
 }
 
-const SUPPORTED_TRIGGER_TOGGLE_DATABASES = new Set<DatabaseType>(["sqlserver", "oracle", "oceanbase-oracle", "dameng", "postgres", "kingbase", "opengauss", "vastbase", "highgo", "uxdb", "gaussdb", "kwdb", "xugu"]);
+const SUPPORTED_TRIGGER_TOGGLE_DATABASES = new Set<DatabaseType>(["sqlserver", "oracle", "oceanbase-oracle", "dameng", "postgres", "kingbase", "opengauss", "vastbase", "highgo", "uxdb", "gaussdb", "kwdb", "xugu", "firebird"]);
 
 export function supportsTriggerToggle(databaseType?: DatabaseType): boolean {
   if (!databaseType) return false;
@@ -62,6 +62,11 @@ export function buildTriggerToggleSql(options: TriggerToggleSqlOptions): string 
       const quotedTable = cleanSchema ? `${quoteDouble(cleanSchema)}.${quoteDouble(cleanTable)}` : quoteDouble(cleanTable);
       const quotedTrigger = quoteDouble(cleanTrigger);
       return `ALTER TABLE ${quotedTable} ${stateKeyword} TRIGGER ${quotedTrigger};`;
+    }
+
+    case "firebird": {
+      const quotedTrigger = quoteDouble(cleanTrigger);
+      return `ALTER TRIGGER ${quotedTrigger} ${enabled ? "ACTIVE" : "INACTIVE"};`;
     }
 
     default:

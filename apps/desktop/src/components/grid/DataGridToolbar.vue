@@ -131,7 +131,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
           {{ autoRefresh?.enabled ? autoRefresh.stopLabel : autoRefresh?.startLabel }}
         </DropdownMenuItem>
         <DropdownMenuItem v-for="seconds in autoRefreshIntervals" :key="seconds" class="gap-2" :disabled="autoRefresh?.disabled" @select="void selectDataGridToolbarAutoRefreshInterval(autoRefresh, seconds)">
-          <Check v-if="autoRefresh?.intervalSeconds === seconds" class="h-3.5 w-3.5" />
+          <Check v-if="autoRefresh?.enabled && autoRefresh.intervalSeconds === seconds" class="h-3.5 w-3.5" />
           <span v-else class="h-3.5 w-3.5" />
           {{ autoRefresh?.intervalLabel(seconds) }}
         </DropdownMenuItem>

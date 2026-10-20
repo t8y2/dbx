@@ -36,7 +36,7 @@
     "apps/desktop/src/i18n/locales/docs/pt-BR.ts": "f92c0b95b1b807c60a5136677808ed5014d9061dffd970aa5866eb1c82300dc5",
     "apps/desktop/src/i18n/locales/docs/zh-CN.ts": "2092c39277f2a6774405124d1f167bbcbc5f633d8f82bbd2b28ff5e12d78f3f7",
     "apps/desktop/src/i18n/locales/docs/zh-TW.ts": "691cf502248dbd09358c6c276990945013b26c52fb682bcd56b26f378daea29c",
-    "apps/desktop/src/lib/app/localeOptions.ts": "f297058fcc4992a2009cbe9c5bda497ce91f09425466423a368f59085819dd35",
+    "apps/desktop/src/lib/app/localeOptions.ts": "1f0e560ee9bcbccab15fb18986a6e427b01a7bec9deaac71cf56cf51ed272991",
     "apps/desktop/src/lib/common/utils.ts": "76c4b2af1e03edeb8db389d9b2c1b56b72a57a1b5198d4e224671c1445c527da",
     "apps/desktop/src/lib/diagram/erDiagram.ts": "c22416a9a5ec5e619acc2d8bc5451254a25abe29fc518e9fb4f611e076fe7b1f",
     "apps/desktop/src/styles/tokens.css": "3fc1ddcc1e65efb9846ca051df1deaf6c21f59114e087799b1d4091348ed6b60",

@@ -171,12 +171,12 @@ test("setErrorResult stops loading and shows the error result", () => {
   assert.deepEqual(tab?.result?.rows, [["metadata failed"]]);
 });
 
-test("renames query tab titles", () => {
+test("renames query tab titles", async () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
   const tabId = store.createTab("conn-1", "db");
 
-  assert.equal(store.renameTab(tabId, " Revenue checks "), true);
+  assert.equal(await store.renameTab(tabId, " Revenue checks "), true);
 
   const tab = store.tabs.find((item) => item.id === tabId);
   assert.equal(tab?.title, "Revenue checks");
@@ -9098,20 +9098,24 @@ test("query results keep readable table source labels with active database conte
       });
     }
     if (url === "/api/query/execute-multi") {
+      // Multi-statement pagination plans each statement separately, so the
+      // prepare mock's shared currentSql may hold the last planned statement
+      // here. Match on the batch this request actually executes instead.
+      const requestSql: string = JSON.parse(String(init?.body ?? "{}")).sql ?? currentSql;
       const results =
-        currentSql === "select * from users; select * from orders"
+        requestSql === "select * from users; select * from orders"
           ? [
               { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
               { columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
             ]
-          : currentSql === "SELECT *\nFROM apis AS ap\nLIMIT 10;\n\nSELECT *\nFROM menus AS mn\nLIMIT 10;"
+          : requestSql === "SELECT *\nFROM apis AS ap\nLIMIT 10;\n\nSELECT *\nFROM menus AS mn\nLIMIT 10;"
             ? [
                 { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
                 { columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
               ]
-            : currentSql === "select * from public.users"
+            : requestSql === "select * from public.users"
               ? [{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]
-              : currentSql === "select u.id from users u join orders o on o.user_id = u.id"
+              : requestSql === "select u.id from users u join orders o on o.user_id = u.id"
                 ? [{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]
                 : [
                     { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 },

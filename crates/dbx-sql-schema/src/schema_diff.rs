@@ -9378,6 +9378,39 @@ mod tests {
     }
 
     #[test]
+    fn kingbase_agent_index_metadata_survives_sync_ddl() {
+        let index: IndexInfo = serde_json::from_value(serde_json::json!({
+            "name": "expression_idx", "columns": ["lower(name)", "id"],
+            "is_unique": false, "is_primary": false, "filter": "active = 1",
+            "index_type": "btree", "included_columns": ["payload"], "comment": null,
+            "key_is_expression": [true, false], "key_options": [0, 3]
+        }))
+        .unwrap();
+        let ddl = create_index_sql("orders", &index, DatabaseType::Kingbase, Some("public"));
+        assert!(ddl.contains("(lower(name) ASC NULLS LAST, \"id\" DESC NULLS FIRST)"), "{ddl}");
+        assert!(ddl.contains("INCLUDE (\"payload\") WHERE active = 1"), "{ddl}");
+        assert!(!ddl.contains("\"lower(name)\""), "{ddl}");
+    }
+
+    #[test]
+    fn kingbase_index_ddl_keeps_long_expressions_and_non_btree_option_semantics() {
+        let expression = format!("coalesce(lower(name), '{}')", "synthetic".repeat(20));
+        for index_type in ["btree", "gin", "gist"] {
+            let index: IndexInfo = serde_json::from_value(serde_json::json!({
+                "name": "expression_idx", "columns": [expression],
+                "is_unique": false, "is_primary": false, "filter": "active = 1",
+                "index_type": index_type, "included_columns": [], "comment": null,
+                "key_is_expression": [true], "key_options": [3]
+            }))
+            .unwrap();
+            let ddl = create_index_sql("orders", &index, DatabaseType::Kingbase, Some("public"));
+            assert!(ddl.contains(&expression), "{ddl}");
+            assert_eq!(ddl.contains("DESC NULLS FIRST"), index_type == "btree", "{ddl}");
+            assert!(ddl.ends_with("WHERE active = 1;"), "{ddl}");
+        }
+    }
+
+    #[test]
     fn preserves_bare_expression_in_postgres_family_unique_index_ddl() {
         // Regression for #6295: highgo/postgres-family expression index key parts (e.g. from
         // pg_get_indexdef) arrived as raw expression text in IndexInfo.columns; quoting the

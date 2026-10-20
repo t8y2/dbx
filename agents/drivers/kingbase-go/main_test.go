@@ -1356,7 +1356,7 @@ func TestConnectAndTestConnectionSharePreferFallback(t *testing.T) {
 }
 
 func TestKingbaseListIndexesQuerySupportsSQLServerMode(t *testing.T) {
-	query := kingbaseListIndexesQuery("sys_catalog", "sys", "public", "orders")
+	query := kingbaseListIndexesQuery("sys_catalog", "sys", "public", "orders", "ix.indnkeyatts", "sys_get_expr")
 	if !strings.Contains(query, "unnest(ix.indkey) WITH ORDINALITY") {
 		t.Fatalf("index query should preserve index column order without array subscripts: %s", query)
 	}
@@ -1436,10 +1436,10 @@ func TestListIndexesFallsBackWhenWithOrdinalityIsUnsupported(t *testing.T) {
 			return nil, &gokb.Error{Code: gokb.ErrorCode("42601"), Message: `syntax error at or near "WITH ORDINALITY"`}
 		case strings.Contains(query, "SELECT i.relname, am.amname") && strings.Contains(query, "ix.indkey"):
 			return &valueRows{
-				columns: []string{"relname", "amname", "indisunique", "indisprimary", "indkey"},
+				columns: []string{"relname", "amname", "indisunique", "indisprimary", "indkey", "indexrelid", "key_count", "filter", "indoption"},
 				rows: [][]driver.Value{
-					{"orders_customer_idx", "btree", false, false, "2 3"},
-					{"orders_pkey", "btree", true, true, []byte("1")},
+					{"orders_customer_idx", "btree", false, false, "2 3", int64(123), int64(2), nil, "0 0"},
+					{"orders_pkey", "btree", true, true, []byte("1"), int64(124), int64(1), nil, "0"},
 				},
 			}, nil
 		case strings.Contains(query, "SELECT a.attnum, a.attname"):

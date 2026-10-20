@@ -147,6 +147,7 @@ type server struct {
 	infoColumnTypeUnsupported       bool
 	infoUdtNameUnsupported          bool
 	indexOrdinalityUnsupported      bool
+	indexKeyCountUnsupported        bool
 	triggerPrettyUnsupported        bool
 	triggerInternalUnsupported      bool
 	constraintDefinitionUnsupported bool
@@ -492,6 +493,7 @@ func (s *server) connect(cp connectParams) error {
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false
@@ -692,6 +694,7 @@ func (s *server) disconnect() error {
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false

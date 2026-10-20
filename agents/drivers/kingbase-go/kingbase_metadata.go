@@ -160,6 +160,8 @@ type indexInfo struct {
 	IndexType       *string  `json:"index_type"`
 	IncludedColumns []string `json:"included_columns"`
 	Comment         *string  `json:"comment"`
+	KeyIsExpression []bool   `json:"key_is_expression,omitempty"`
+	KeyOptions      []int    `json:"key_options,omitempty"`
 }
 
 func (i indexInfo) MarshalJSON() ([]byte, error) {
@@ -2061,10 +2063,14 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	if s.indexOrdinalityUnsupported {
 		return s.listIndexesWithoutOrdinality(catalog, prefix, effective, table)
 	}
-	rows, err := s.metadataQuery(kingbaseListIndexesQuery(catalog, prefix, effective, table))
+	keyCount, expression := s.indexMetadataExpressions(catalog)
+	rows, err := s.metadataQuery(kingbaseListIndexesQuery(catalog, prefix, effective, table, keyCount, expression))
 	if err != nil && isUnsupportedWithOrdinality(err) {
 		s.indexOrdinalityUnsupported = true
 		return s.listIndexesWithoutOrdinality(catalog, prefix, effective, table)
+	}
+	if err != nil && s.cacheMissingIndexMetadataCapability(err) {
+		return s.listIndexes(effective, table)
 	}
 	if err != nil {
 		return nil, err
@@ -2073,25 +2079,67 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	byName := map[string]*indexInfo{}
 	order := []string{}
 	for rows.Next() {
-		var name, kind, column string
-		var unique, primary bool
+		var name, kind string
+		var column, filter sql.NullString
+		var unique, primary, isExpression, included bool
 		var ordinal int
-		if err := rows.Scan(&name, &kind, &unique, &primary, &column, &ordinal); err != nil {
+		var rawOptions any
+		if err := rows.Scan(&name, &kind, &unique, &primary, &column, &ordinal, &isExpression, &included, &filter, &rawOptions); err != nil {
 			return nil, err
+		}
+		if !column.Valid || column.String == "" || (isExpression && strings.TrimSpace(column.String) == "") {
+			return nil, fmt.Errorf("index %q has no definition for key %d", name, ordinal)
 		}
 		item := byName[name]
 		if item == nil {
-			item = &indexInfo{Name: name, IsUnique: unique, IsPrimary: primary, IndexType: stringPtr(kind), Columns: []string{}, IncludedColumns: []string{}}
+			item = &indexInfo{Name: name, IsUnique: unique, IsPrimary: primary, IndexType: stringPtr(kind), Filter: nullStringPtr(filter), Columns: []string{}, IncludedColumns: []string{}}
 			byName[name] = item
 			order = append(order, name)
 		}
-		item.Columns = append(item.Columns, column)
+		if included {
+			item.IncludedColumns = append(item.IncludedColumns, column.String)
+		} else {
+			options, err := parseCatalogAttributeNumbers(rawOptions)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse index %q key options: %w", name, err)
+			}
+			if ordinal < 1 || ordinal > len(options) {
+				return nil, fmt.Errorf("index %q has %d options for key %d", name, len(options), ordinal)
+			}
+			item.Columns = append(item.Columns, column.String)
+			item.KeyIsExpression = append(item.KeyIsExpression, isExpression)
+			item.KeyOptions = append(item.KeyOptions, options[ordinal-1])
+		}
 	}
 	result := make([]indexInfo, 0, len(order))
 	for _, name := range order {
 		result = append(result, *byName[name])
 	}
 	return result, rows.Err()
+}
+
+func (s *server) indexMetadataExpressions(catalog string) (keyCount, expression string) {
+	keyCount = "ix.indnkeyatts"
+	if s.indexKeyCountUnsupported {
+		keyCount = "ix.indnatts"
+	}
+	expression = kingbaseCatalogFunction(catalog, "sys_get_expr", "pg_get_expr")
+	if catalog != "pg_catalog" && s.usePgDefaultExpression {
+		expression = "pg_get_expr"
+	}
+	return keyCount, expression
+}
+
+func (s *server) cacheMissingIndexMetadataCapability(err error) bool {
+	switch {
+	case !s.indexKeyCountUnsupported && isUndefinedColumn(err, "indnkeyatts"):
+		s.indexKeyCountUnsupported = true
+	case !s.usePgDefaultExpression && isUndefinedFunction(err, "sys_get_expr"):
+		s.usePgDefaultExpression = true
+	default:
+		return false
+	}
+	return true
 }
 
 func isUnsupportedWithOrdinality(err error) bool {
@@ -2105,12 +2153,17 @@ func isUnsupportedWithOrdinality(err error) bool {
 }
 
 func (s *server) listIndexesWithoutOrdinality(catalog, prefix, schema, table string) ([]indexInfo, error) {
-	query := fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, ix.indkey
+	keyCount, expression := s.indexMetadataExpressions(catalog)
+	query := fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, ix.indkey,
+ix.indexrelid, %s, %s(ix.indpred, ix.indrelid), ix.indoption
 FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
 JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
 JOIN %s.%s_am am ON am.oid = i.relam
-WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, keyCount, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
+	if err != nil && s.cacheMissingIndexMetadataCapability(err) {
+		return s.listIndexesWithoutOrdinality(catalog, prefix, schema, table)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2119,17 +2172,28 @@ WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, catalog, prefix, ca
 		name, kind      string
 		unique, primary bool
 		attributeNums   []int
+		oid             int64
+		keyCount        int
+		filter          sql.NullString
+		options         []int
 	}
 	rawIndexes := []rawIndex{}
 	for rows.Next() {
 		var item rawIndex
-		var raw any
-		if err := rows.Scan(&item.name, &item.kind, &item.unique, &item.primary, &raw); err != nil {
+		var raw, rawOptions any
+		if err := rows.Scan(&item.name, &item.kind, &item.unique, &item.primary, &raw, &item.oid, &item.keyCount, &item.filter, &rawOptions); err != nil {
 			return nil, err
 		}
 		item.attributeNums, err = parseCatalogAttributeNumbers(raw)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse index %s columns: %w", item.name, err)
+		}
+		item.options, err = parseCatalogAttributeNumbers(rawOptions)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse index %q key options: %w", item.name, err)
+		}
+		if item.keyCount < 1 || item.keyCount > len(item.attributeNums) || len(item.options) < item.keyCount {
+			return nil, fmt.Errorf("index %q has inconsistent metadata: %d keys, %d attributes, %d options", item.name, item.keyCount, len(item.attributeNums), len(item.options))
 		}
 		rawIndexes = append(rawIndexes, item)
 	}
@@ -2145,10 +2209,25 @@ WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, catalog, prefix, ca
 	}
 	result := make([]indexInfo, 0, len(rawIndexes))
 	for _, raw := range rawIndexes {
-		item := indexInfo{Name: raw.name, IsUnique: raw.unique, IsPrimary: raw.primary, IndexType: stringPtr(raw.kind), Columns: []string{}, IncludedColumns: []string{}}
-		for _, number := range raw.attributeNums {
-			if name := attributes[number]; name != "" {
+		item := indexInfo{Name: raw.name, IsUnique: raw.unique, IsPrimary: raw.primary, IndexType: stringPtr(raw.kind), Filter: nullStringPtr(raw.filter), Columns: []string{}, IncludedColumns: []string{}}
+		for ordinal, number := range raw.attributeNums {
+			name := attributes[number]
+			if number == 0 {
+				definitionFunction := kingbaseCatalogFunction(catalog, "sys_get_indexdef", "pg_get_indexdef")
+				query := fmt.Sprintf("SELECT %s(%d, %d, true)", definitionFunction, raw.oid, ordinal+1)
+				if err := s.requireDBQueryRow(query, &name); err != nil {
+					return nil, fmt.Errorf("failed to read index %q key %d: %w", raw.name, ordinal+1, err)
+				}
+			}
+			if name == "" || (number == 0 && strings.TrimSpace(name) == "") {
+				return nil, fmt.Errorf("index %q has no definition for key %d", raw.name, ordinal+1)
+			}
+			if ordinal >= raw.keyCount {
+				item.IncludedColumns = append(item.IncludedColumns, name)
+			} else {
 				item.Columns = append(item.Columns, name)
+				item.KeyIsExpression = append(item.KeyIsExpression, number == 0)
+				item.KeyOptions = append(item.KeyOptions, raw.options[ordinal])
 			}
 		}
 		result = append(result, item)
@@ -2206,14 +2285,17 @@ WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped`
 	return result, rows.Err()
 }
 
-func kingbaseListIndexesQuery(catalog, prefix, schema, table string) string {
-	return fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, a.attname, pos.n
+func kingbaseListIndexesQuery(catalog, prefix, schema, table, keyCount, expression string) string {
+	definitionFunction := kingbaseCatalogFunction(catalog, "sys_get_indexdef", "pg_get_indexdef")
+	return fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary,
+CASE WHEN pos.attnum = 0 THEN %s(ix.indexrelid, CAST(pos.n AS integer), true) ELSE CAST(a.attname AS text) END, pos.n,
+pos.attnum = 0, pos.n > %s, %s(ix.indpred, ix.indrelid), ix.indoption
 FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
 JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
 JOIN %s.%s_am am ON am.oid = i.relam
 JOIN unnest(ix.indkey) WITH ORDINALITY AS pos(attnum,n) ON true
-JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
-WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname, pos.n`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+LEFT JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
+WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname, pos.n`, definitionFunction, keyCount, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
 }
 
 func kingbaseCatalogFunction(catalog, sysFunction, postgresFunction string) string {

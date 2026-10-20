@@ -1394,7 +1394,13 @@ func isNativeDSNSpace(value byte) bool {
 }
 
 func isKingbaseJDBCURL(value string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "jdbc:kingbase8://")
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, prefix := range []string{"jdbc:kingbase://", "jdbc:kingbase8://", "jdbc:kingbase83://", "jdbc:kingbase86://"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func quoteDSNValue(value string) string {

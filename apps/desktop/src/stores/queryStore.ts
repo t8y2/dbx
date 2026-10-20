@@ -7832,7 +7832,10 @@ export const useQueryStore = defineStore("query", () => {
       }
       const targetSchema = resumedExecutionTarget ? resumedExecutionTarget.schema : targetContext?.scope === "connection" ? undefined : (databaseTargetContext?.schema ?? executionTarget?.schema ?? tab.schema);
       const executionDatabase = targetDatabase;
-      const sqlStatementParameterOptions = sqlStatementParameterOptionsForCompatibility(effectiveDbType, effectiveDbType === "opengauss" ? connStore.databaseCompatibilityMode(executionConnectionId, targetDatabase || conn?.database) : undefined);
+      const sqlStatementParameterOptions = sqlStatementParameterOptionsForCompatibility(
+        effectiveDbType,
+        effectiveDbType === "opengauss" ? connStore.databaseCompatibilityMode(executionConnectionId, targetDatabase || conn?.database) : effectiveDbType === "kingbase" ? conn?.database_info?.compatibilityMode : undefined,
+      );
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
       if (!batchResume) {

@@ -47,7 +47,9 @@ var kingbaseReleasePattern = regexp.MustCompile(`(?i)\bV0*([0-9]+)R`)
 
 func detectKingbaseV7(db *sql.DB) bool {
 	var version string
-	if err := db.QueryRow("SELECT version()").Scan(&version); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := db.QueryRowContext(ctx, "SELECT version()").Scan(&version); err != nil {
 		return false
 	}
 	match := kingbaseReleasePattern.FindStringSubmatch(version)
@@ -210,12 +212,13 @@ func detectKingbaseMode(db *sql.DB, configuredMySQL bool) kingbaseMode {
 	}
 	mode := kingbaseMode{compatibilityMode: detectDatabaseMode(db)}
 	mode.postgresCatalog = !catalogExists(db, "sys_catalog.sys_namespace") && catalogExists(db, "pg_catalog.pg_namespace")
+	// Catalog availability and the SQL compatibility mode are independent.
+	if mode.compatibilityMode != "" {
+		mode.mysqlCompat = mode.compatibilityMode == "mysql"
+	} else if !mode.postgresCatalog {
+		mode.mysqlCompat = supportsBacktickIdentifiers(db)
+	}
 	if !mode.postgresCatalog {
-		if mode.compatibilityMode != "" {
-			mode.mysqlCompat = mode.compatibilityMode == "mysql"
-		} else {
-			mode.mysqlCompat = supportsBacktickIdentifiers(db)
-		}
 		mode.sqlServerIdentity = !mode.mysqlCompat && catalogExists(db, "sys.identity_columns")
 	}
 	return mode
@@ -239,23 +242,29 @@ func detectMySQLCompatMode(db *sql.DB) bool {
 }
 
 func detectDatabaseMode(db *sql.DB) string {
-	var databaseMode string
-	switch err := db.QueryRow("SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'").Scan(&databaseMode); {
-	case err == nil:
-		// Treat database_mode as authoritative when the server exposes it. This
-		// avoids misclassifying Oracle-compatible servers that also publish
-		// sql_mode for MySQL syntax toggles such as ANSI_QUOTES.
-		return strings.ToLower(strings.TrimSpace(databaseMode))
-	case errors.Is(err, sql.ErrNoRows):
-		return ""
-	default:
-		return ""
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for _, query := range []string{
+		"SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'",
+		"SELECT setting FROM pg_catalog.pg_settings WHERE LOWER(name) = 'database_mode'",
+		"SHOW database_mode",
+	} {
+		var databaseMode string
+		if err := db.QueryRowContext(ctx, query).Scan(&databaseMode); err == nil {
+			// The reported mode wins over syntax probes, including unknown future modes.
+			if mode := strings.ToLower(strings.TrimSpace(databaseMode)); mode != "" {
+				return mode
+			}
+		}
 	}
+	return ""
 }
 
 func supportsBacktickIdentifiers(db *sql.DB) bool {
 	var value int
-	return db.QueryRow("SELECT 1 AS `dbx_identifier_probe`").Scan(&value) == nil
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return db.QueryRowContext(ctx, "SELECT 1 AS `dbx_identifier_probe`").Scan(&value) == nil
 }
 
 func (s *server) identifierQuote() string {
@@ -291,6 +300,10 @@ func (s *server) connectionInfo() (map[string]any, error) {
 		"database": database, "username": username, "version": version, "schema": schema.String,
 		"compatibilityMode": s.mode.compatibilityMode, "mysql_compat_mode": s.mode.mysqlCompat,
 		"identifierQuote": s.identifierQuote(),
+		"databaseInfo": map[string]string{
+			"productName": "KingbaseES", "productVersion": version, "currentDatabase": database,
+			"compatibilityMode": s.mode.compatibilityMode,
+		},
 	}, nil
 }
 

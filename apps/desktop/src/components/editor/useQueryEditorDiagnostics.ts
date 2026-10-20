@@ -70,6 +70,7 @@ interface QueryEditorDiagnosticsOptions {
   sqlDriverProfile: ComputedRef<string | undefined>;
   sqlStatementParameterOptions: () => SqlParameterOptions;
   sqlBehaviorDialect: () => QueryEditorProps["dialect"];
+  sqlSyntaxDialect?: () => QueryEditorProps["syntaxDialect"];
   queryEditorSelectionLanguage: () => "sql" | "text";
   semanticCompletionEnabled: boolean;
   maxCompletionTables: number;
@@ -441,7 +442,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           sqlReferenceAnalysisDialectFor({
             databaseType: props.databaseType,
             identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
-            fallbackDialect: props.formatDialect ?? props.dialect ?? "generic",
+            fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
           }),
         );
         if (runId !== semanticDiagnosticRunId) return;
@@ -583,7 +584,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           sqlReferenceAnalysisDialectFor({
             databaseType: props.databaseType,
             identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
-            fallbackDialect: props.formatDialect ?? props.dialect ?? "generic",
+            fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
           }),
         );
         if (currentView.state.doc !== doc) return [];

@@ -1,6 +1,6 @@
 import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, IdentifierCase } from "@/types/database";
 
-export type DatabaseInfoField = keyof DatabaseConnectionInfo;
+export type DatabaseInfoField = Exclude<keyof DatabaseConnectionInfo, "compatibilityMode">;
 
 export interface DatabaseInfoRow {
   key: DatabaseInfoField;
@@ -40,6 +40,7 @@ export function configuredDatabaseProductName(config: Pick<ConnectionConfig, "db
 export function normalizeDatabaseConnectionInfo(value: unknown, fallbackProductName?: string, fallbackCurrentDatabase?: string): DatabaseConnectionInfo | undefined {
   const source = isRecord(value) ? value : {};
   const result: DatabaseConnectionInfo = {
+    compatibilityMode: nonBlankString(source.compatibilityMode),
     productName: nonBlankString(source.productName) ?? nonBlankString(fallbackProductName),
     productVersion: nonBlankString(source.productVersion),
     currentDatabase: nonBlankString(source.currentDatabase) ?? nonBlankString(fallbackCurrentDatabase),
@@ -52,7 +53,7 @@ export function normalizeDatabaseConnectionInfo(value: unknown, fallbackProductN
     driverVersion: nonBlankString(source.driverVersion),
     jdbcVersion: nonBlankString(source.jdbcVersion),
   };
-  return DATABASE_INFO_FIELDS.some((key) => result[key] !== undefined) ? result : undefined;
+  return result.compatibilityMode || DATABASE_INFO_FIELDS.some((key) => result[key] !== undefined) ? result : undefined;
 }
 
 export function normalizeConnectionTestResult(value: unknown, config: ConnectionConfig): ConnectionTestResult {

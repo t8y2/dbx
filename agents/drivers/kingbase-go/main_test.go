@@ -1869,7 +1869,9 @@ func TestKingbaseV7VersionPattern(t *testing.T) {
 		v7      bool
 	}{
 		{version: "Kingbase V007R001C002B0014", v7: true},
+		{version: "KingbaseES V008R003C002B0320"},
 		{version: "KingbaseES V008R006C008B0014"},
+		{version: "KingbaseES V009R001C010B0001"},
 		{version: "PostgreSQL 12.1"},
 	} {
 		match := kingbaseReleasePattern.FindStringSubmatch(test.version)
@@ -4534,7 +4536,7 @@ func TestDetectMySQLCompatModeProbesBacktickSyntaxWhenDatabaseModeMissing(t *tes
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.queries) != 2 || !strings.Contains(state.queries[1], "dbx_identifier_probe") {
+	if len(state.queries) != 4 || !strings.Contains(state.queries[3], "dbx_identifier_probe") {
 		t.Fatalf("expected database_mode probe followed by backtick syntax probe, got: %v", state.queries)
 	}
 }

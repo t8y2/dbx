@@ -187,7 +187,7 @@ import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
-import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
 import { supportsTableImport } from "@/lib/database/databaseFeatureSupport";
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
@@ -485,7 +485,7 @@ const activeTabDimension = computed(() => {
   return meta && "dimension" in meta ? (meta as VectorCollectionMeta).dimension : undefined;
 });
 
-const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(activeEffectiveDatabaseType.value));
+const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(kingbaseSqlDatabaseType(props.activeConnection) ?? activeEffectiveDatabaseType.value));
 
 const editorDialect = computed<"mysql" | "postgres" | "sqlserver">(() => codeMirrorSqlDialect(activeEffectiveDatabaseType.value));
 const editorSyntaxDialect = computed<CodeMirrorSqlDialectName>(() => codeMirrorSqlDialectForConnection(props.activeConnection));

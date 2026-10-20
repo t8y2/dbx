@@ -11,7 +11,7 @@ import { driverProfileSqlBuiltinTerms } from "@/lib/database/driverProfileExtens
 // identically to unquoted identifiers.
 const SQL_DIALECT_LANGUAGE_PROPS = [styleTags({ QuotedIdentifier: tags.name })];
 
-export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "clickhouse" | "soql";
+export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "oracle" | "clickhouse" | "soql";
 
 export function supportsQueryEditorSqlLanguage(databaseType?: DatabaseType): boolean {
   return databaseType !== "qdrant";
@@ -351,6 +351,12 @@ function standardSqlKeywordSyntaxTerms(langSql: CodeMirrorSqlLanguageModule): st
 
 function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName, databaseType?: DatabaseType): SQLDialect {
   if (databaseType) {
+    if (databaseType === "kingbase") {
+      if (dialectName === "oracle") return langSql.PLSQL;
+      if (dialectName === "mysql") return langSql.MySQL;
+      if (dialectName === "sqlserver") return langSql.MSSQL;
+      return langSql.PostgreSQL;
+    }
     if (databaseType === "clickhouse") return langSql.StandardSQL;
     if (MYSQL_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.MySQL;
     if (POSTGRES_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.PostgreSQL;
@@ -362,6 +368,7 @@ function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName
     return langSql.StandardSQL;
   }
   if (dialectName === "clickhouse") return langSql.StandardSQL;
+  if (dialectName === "oracle") return langSql.PLSQL;
   return dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
 }
 

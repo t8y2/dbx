@@ -370,6 +370,7 @@ function isAsciiAlphanumeric(ch: string): boolean {
  * whitespace are excluded so editor highlights stay tight).
  */
 export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
+  databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   if (isHttpJsonRestDatabaseType(databaseType)) {
     const requests = splitElasticsearchRestRequestRanges(sql);
     if (requests) return requests;
@@ -719,6 +720,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
  * which lets the editor highlight a tight preview range.
  */
 export function statementRangeAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange | null {
+  databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   const pos = clampCursor(sql, cursorPos);
   if (isCursorOnBlankLine(sql, pos)) return null;
 
@@ -1700,11 +1702,9 @@ function startsLineComment(sql: string, pos: number, databaseType?: DatabaseType
   return (sql[pos] === "-" && sql[pos + 1] === "-") || startsHashLineComment(sql, pos, databaseType, parameterOptions);
 }
 
-function startsHashLineComment(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
-  // `#` is a MySQL-family line-comment marker. Oracle-family engines also allow
-  // it in unquoted identifiers (for example `V$DATAFILE.FILE#`), so treating it
-  // as a comment there truncates otherwise valid statements.
-  if ((databaseType !== undefined && ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType)) || databaseType === "sqlserver" || sql[pos] !== "#") return false;
+export function startsHashLineComment(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  // Oracle/SQLServer allow # in identifiers; PG uses it in operators such as #>>.
+  if ((databaseType !== undefined && (ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType) || POSTGRES_FAMILY_DATABASES.has(databaseType))) || databaseType === "sqlserver" || sql[pos] !== "#") return false;
   return readSqlBracedParameterAt(sql, pos, parameterOptions)?.syntax !== "mybatis";
 }
 
@@ -1891,7 +1891,26 @@ function isOpenGaussOracleCompatibility(databaseType?: DatabaseType, options?: S
   return mode === undefined || mode === "A";
 }
 
+export function statementParsingDatabaseType(databaseType?: DatabaseType, options?: SqlParameterOptions): DatabaseType | undefined {
+  if (databaseType !== "kingbase") return databaseType;
+  switch (options?.compatibilityMode?.trim().toLowerCase()) {
+    case "oracle":
+      return "gaussdb";
+    case "mysql":
+      return "mysql";
+    case "sqlserver":
+      return "sqlserver";
+    case "pg":
+    case "postgres":
+    case "postgresql":
+      return "postgres";
+    default:
+      return "kingbase";
+  }
+}
+
 export function sqlStatementParameterOptionsForCompatibility(databaseType?: DatabaseType, compatibilityMode?: string): SqlParameterOptions | undefined {
+  if (databaseType === "kingbase") return { compatibilityMode: compatibilityMode?.trim() };
   if (databaseType !== "opengauss") return undefined;
   // Keep the browser-side splitter aligned with the backend's conservative
   // behavior while the compatibility probe is still cold or unavailable.
@@ -1899,7 +1918,10 @@ export function sqlStatementParameterOptionsForCompatibility(databaseType?: Data
 }
 
 export function isOracleLikeDatabase(databaseType?: DatabaseType, options?: SqlParameterOptions): boolean {
-  return !!databaseType && (ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType) || isOpenGaussOracleCompatibility(databaseType, options));
+  databaseType = statementParsingDatabaseType(databaseType, options);
+  // An unresolved Kingbase mode keeps the legacy lexer, but must not split a
+  // recognizable PL/SQL block before mode metadata arrives.
+  return !!databaseType && (databaseType === "kingbase" || ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType) || isOpenGaussOracleCompatibility(databaseType, options));
 }
 
 function isPostgresFamilyDatabase(databaseType?: DatabaseType): boolean {
@@ -2787,6 +2809,7 @@ function normalizeSql(sql: string): string {
  * that case only a single candidate is returned to avoid duplicates.
  */
 export function executableStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange[] {
+  databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   if (databaseType === "redis") return redisExecutableCommandRanges(sql);
   if (databaseType === "mongodb") return splitMongoCommandRanges(sql).map(({ from, to, text }) => ({ from, to, sql: text }));
   return splitSqlStatementRanges(sql, databaseType, parameterOptions).flatMap((statement) => splitStatementRangeAtSoftStarts(sql, statement, databaseType, parameterOptions).map((range) => rangeFor(range, sql)));

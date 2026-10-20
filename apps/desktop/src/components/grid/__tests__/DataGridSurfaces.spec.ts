@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick } from "vue";
+import { createApp, defineComponent, h, nextTick, shallowRef } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { dispatch, findAll, findOne, hostText, mountComponent } from "./vueHostHarness";
@@ -2631,6 +2631,34 @@ describe("DataGrid column header tooltips", () => {
     expect(grid.headerTooltipsDisabled()).toEqual([false, false]);
 
     grid.destroy();
+  });
+});
+
+describe("DataGrid busy execution elapsed time", () => {
+  it("rebases the displayed elapsed time when another execution starts while loading", async () => {
+    setActivePinia(createPinia());
+    const now = vi.spyOn(Date, "now").mockReturnValue(5_000);
+    const startedAt = shallowRef(1_000);
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const app = createApp(defineComponent({ setup: () => () => h(DataGrid, { result: { columns: ["id"], rows: [[1]] }, loading: true, busyStartedAt: startedAt.value }) }));
+    try {
+      app.mount(host);
+      await nextTick();
+      await nextTick();
+      expect(host.textContent).toContain("4.0s");
+
+      now.mockReturnValue(9_000);
+      startedAt.value = 8_000;
+      await nextTick();
+      await nextTick();
+      expect(host.textContent).toContain("1.0s");
+      expect(host.textContent).not.toContain("8.0s");
+    } finally {
+      app.unmount();
+      host.remove();
+      now.mockRestore();
+    }
   });
 });
 

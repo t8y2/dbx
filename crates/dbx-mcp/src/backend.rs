@@ -321,6 +321,13 @@ pub trait DbxBackend: Send + Sync {
         false
     }
 
+    /// Absolute path of DBX's configuration database when the backend can
+    /// resolve it. MCP refuses connections (and listings) that target this file:
+    /// it stores `mcp_global_policy`, so letting an agent reach it would let the
+    /// agent rewrite the policy that constrains it (#9108).
+    fn config_db_path(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         let _ = entry;
         Err("Query history is not supported by this backend.".to_string())
@@ -1423,6 +1430,10 @@ impl DbxBackend for LocalBackend {
         Ok(configs)
     }
 
+    fn config_db_path(&self) -> Option<std::path::PathBuf> {
+        Some(self.state.storage.storage_db_path().to_path_buf())
+    }
+
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         self.state.storage.save_history_entry(entry).await
     }
@@ -1946,6 +1957,14 @@ impl DbxBackend for WebBackend {
             .json()
             .await
             .map_err(|error| format!("Invalid connection list response: {error}"))
+    }
+
+    /// Best effort: the DBX Web process owns the real data directory, but it
+    /// normally resolves to the same per-user location this process sees. When it
+    /// does not (portable/`DBX_DATA_DIR` installs), the mutation guard in the Web
+    /// storage path still applies; only resolution-time filtering would miss.
+    fn config_db_path(&self) -> Option<std::path::PathBuf> {
+        crate::paths::storage_db_path().ok()
     }
 
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {

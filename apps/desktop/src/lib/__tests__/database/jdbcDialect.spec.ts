@@ -31,9 +31,38 @@ import {
   setGaussdbTargetServerType,
   supportsGaussdbIdentifierQuoteStyle,
   transferDatabaseTypeForConnection,
+  codeMirrorSqlDialectForConnection,
+  sqlSnippetDatabaseTypeForConnection,
+  kingbaseSqlDatabaseType,
 } from "@/lib/database/jdbcDialect";
 import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
 import { transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
+
+describe("Kingbase compatibility mode routing", () => {
+  it.each([undefined, "", "future_mode"])("does not infer a mode from a version, URL, or unknown mode (%s)", (mode) => {
+    const config = { db_type: "kingbase" as const, connection_string: "jdbc:kingbase8://example.test/demo", database_info: { compatibilityMode: mode, productVersion: "KingbaseES V009R001" } };
+    expect(kingbaseSqlDatabaseType(config)).toBeUndefined();
+    expect(codeMirrorSqlDialectForConnection(config)).toBe("postgres");
+    expect(effectiveDatabaseTypeForConnection(config)).toBe("kingbase");
+  });
+
+  it.each(["postgres", "mysql", "oracle", "sqlserver", "jdbc"] as const)("ignores Kingbase mode metadata on a %s connection", (db_type) => {
+    expect(kingbaseSqlDatabaseType({ db_type, database_info: { compatibilityMode: "oracle" } })).toBeUndefined();
+  });
+
+  it.each([
+    ["pg", "postgres", "postgres"],
+    ["postgresql", "postgres", "postgres"],
+    ["oracle", "oracle", "oracle"],
+    ["mysql", "mysql", "mysql"],
+    ["sqlserver", "sqlserver", "sqlserver"],
+  ] as const)("keeps the %s editor profile separate from the physical database", (mode, type, syntax) => {
+    const connection = { db_type: "kingbase" as const, database_info: { compatibilityMode: mode } };
+    expect(sqlSnippetDatabaseTypeForConnection(connection)).toBe(type);
+    expect(codeMirrorSqlDialectForConnection(connection)).toBe(syntax);
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("kingbase");
+  });
+});
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {

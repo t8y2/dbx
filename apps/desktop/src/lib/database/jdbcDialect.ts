@@ -244,7 +244,27 @@ export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConn
   // ASE uses T-SQL snippets, but mapping it globally to SQL Server would also
   // enable incompatible SQL Server metadata and pagination behavior.
   if (isJdbcAseProfile(connection)) return "sqlserver";
+  const kingbaseType = kingbaseSqlDatabaseType(connection);
+  if (kingbaseType) return kingbaseType;
   return effectiveDatabaseTypeForConnection(connection);
+}
+
+/** SQL syntax only: never use this mapping for transport, catalogs or capabilities. */
+export function kingbaseSqlDatabaseType(connection?: JdbcDialectConnection): "mysql" | "postgres" | "oracle" | "sqlserver" | undefined {
+  if (connection?.db_type !== "kingbase") return undefined;
+  const mode = connection.database_info?.compatibilityMode?.trim().toLowerCase();
+  switch (mode) {
+    case "pg":
+    case "postgres":
+    case "postgresql":
+      return "postgres";
+    case "oracle":
+    case "mysql":
+    case "sqlserver":
+      return mode;
+    default:
+      return undefined;
+  }
 }
 
 export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
@@ -370,14 +390,17 @@ export function connectionTableSqlSchema(connection: JdbcDialectConnection | und
 
 /** Maps a database type to the corresponding CodeMirror SQL dialect name used by QueryEditor and DdlViewDialog. */
 export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" | "postgres" | "sqlserver" {
-  if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss") return "postgres";
+  if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "kingbase") return "postgres";
   if (dbType === "sqlserver") return "sqlserver";
   return "mysql";
 }
 
 export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): CodeMirrorSqlDialectName {
   if (isJdbcAseProfile(connection)) return "sqlserver";
+  const kingbaseType = kingbaseSqlDatabaseType(connection);
+  if (kingbaseType) return kingbaseType;
   const databaseType = effectiveDatabaseTypeForConnection(connection);
+  if (databaseType === "kingbase") return "postgres";
   if (databaseType === "clickhouse") return "clickhouse";
   return codeMirrorSqlDialect(databaseType);
 }

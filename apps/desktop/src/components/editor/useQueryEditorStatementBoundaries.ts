@@ -23,6 +23,7 @@ interface QueryEditorStatementBoundariesOptions {
   cache: { value: ExecutableStatementRangeCache | null };
   runtime: QueryEditorCodeMirrorRuntime;
   driverProfile?: () => string | undefined;
+  syntaxDialect?: () => QueryEditorProps["syntaxDialect"];
 }
 
 export function useQueryEditorStatementBoundaries(options: QueryEditorStatementBoundariesOptions) {
@@ -85,15 +86,17 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
   function ensureStatementCache(state: EditorState): Promise<ExecutableStatementRangeCache | null> {
     if (pendingAnalysis?.doc === state.doc && pendingAnalysis.generation === statementBoundariesGeneration) return pendingAnalysis.result;
     const generation = statementBoundariesGeneration;
-    const result = analysisWorker.analyze({ sql: state.doc.toString(), databaseType: props.databaseType, parameterOptions: sqlStatementParameterOptions(), includeFolds: true, syntaxDialect: props.syntaxDialect ?? props.dialect, driverProfile: options.driverProfile?.() }).then((analysis) => {
-      const currentView = view.value ?? trackedView;
-      if (!analysis || generation !== statementBoundariesGeneration || currentView?.state.doc !== state.doc) return null;
-      const resolved = { ...analysis, doc: state.doc };
-      installStatementBoundaries(state, resolved, analysis.folds);
-      const refreshEffect = codeMirrorRuntime.statementBoundariesRefreshEffect;
-      if (refreshEffect) currentView.dispatch({ effects: refreshEffect.of(null) });
-      return resolved;
-    });
+    const result = analysisWorker
+      .analyze({ sql: state.doc.toString(), databaseType: props.databaseType, parameterOptions: sqlStatementParameterOptions(), includeFolds: true, syntaxDialect: options.syntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, driverProfile: options.driverProfile?.() })
+      .then((analysis) => {
+        const currentView = view.value ?? trackedView;
+        if (!analysis || generation !== statementBoundariesGeneration || currentView?.state.doc !== state.doc) return null;
+        const resolved = { ...analysis, doc: state.doc };
+        installStatementBoundaries(state, resolved, analysis.folds);
+        const refreshEffect = codeMirrorRuntime.statementBoundariesRefreshEffect;
+        if (refreshEffect) currentView.dispatch({ effects: refreshEffect.of(null) });
+        return resolved;
+      });
     pendingAnalysis = { doc: state.doc, generation, result };
     return result;
   }

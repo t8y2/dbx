@@ -44,6 +44,20 @@ describe("sidebar menu layout", () => {
     expect(menu.map((entry) => entry.sidebarActionId)).toEqual(["group.data"]);
     expect(menu[0].children).toContainEqual(search);
   });
+  it("leads database menus with closing the database and falls back to browsing objects", () => {
+    const close = item("contextMenu.closeDatabaseConnection");
+    const browse = item("contextMenu.openObjectBrowser");
+    const query = item("contextMenu.newQuery");
+    const defaults = buildSidebarMenuLayout([close, browse, query], "database", "grouped", [], t);
+    expect(defaults.filter((entry) => !entry.separator).map((entry) => entry.sidebarActionId)).toEqual(["contextMenu.closeDatabaseConnection", "contextMenu.openObjectBrowser", "contextMenu.newQuery"]);
+    expect(leaves(defaults).filter((entry) => entry.sidebarActionId === "contextMenu.closeDatabaseConnection")).toHaveLength(1);
+    // The close entry only exists for opened databases, so browsing objects becomes first once it is gone.
+    const alreadyClosed = buildSidebarMenuLayout([browse, query], "database", "grouped", [], t);
+    expect(alreadyClosed.filter((entry) => !entry.separator)[0].sidebarActionId).toBe("contextMenu.openObjectBrowser");
+    // Explicit user ordering still overrides the new default.
+    const customized = buildSidebarMenuLayout([close, browse], "database", "grouped", [], t, { order: ["contextMenu.openObjectBrowser", "contextMenu.closeDatabaseConnection"] });
+    expect(customized.filter((entry) => !entry.separator).map((entry) => entry.sidebarActionId)).toEqual(["contextMenu.openObjectBrowser", "contextMenu.closeDatabaseConnection"]);
+  });
   it("shows database-specific management actions directly by default and allows opting out", () => {
     const dashboard = item("contextMenu.serverDashboard");
     const processes = item("contextMenu.processList");

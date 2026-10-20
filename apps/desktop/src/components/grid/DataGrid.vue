@@ -13500,7 +13500,7 @@ watch(gridSurfaceBusy, (isLoading) => {
 watch(
   () => props.busyStartedAt,
   () => {
-    if (gridSurfaceBusy.value) startLoadingElapsedTimer();
+    if (gridSurfaceBusy.value) startLoadingElapsedTimer(true);
   },
 );
 

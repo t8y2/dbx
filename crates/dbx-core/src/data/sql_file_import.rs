@@ -59,9 +59,9 @@ pub use failure_log_derive::{
 /// the plain PostgreSQL splitter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SqlCompatibilityMode {
-    /// The database type has no compatibility-mode concept (non-openGauss).
+    /// The database type has no runtime SQL compatibility-mode concept.
     NotApplicable,
-    /// The database is openGauss but the probe failed or the pool was
+    /// The database is openGauss/Kingbase but the probe failed or the pool was
     /// unavailable. The parser must not fall back to PostgreSQL semantics;
     /// it uses the PL/SQL-capable openGauss profile so an A-mode package body
     /// is never split on its inner semicolons.
@@ -74,7 +74,7 @@ impl SqlCompatibilityMode {
     /// The mode string for [`SqlParsingOptions::for_database_type_and_compatibility`],
     /// or `None` when the database has no mode concept or the mode is unknown.
     ///
-    /// `None` is interpreted as "unknown openGauss" by the parser (see that
+    /// `None` is interpreted as an unknown mode by the applicable parser (see that
     /// function), which selects the conservative PL/SQL-capable profile.
     fn as_mode_str(&self) -> Option<&str> {
         match self {
@@ -2326,7 +2326,17 @@ async fn sql_file_import_target(state: &AppState, connection_id: &str, database:
     // still uses the openGauss splitter. A failed probe is recorded as `Unknown`
     // rather than `None` so the splitter keeps PL/SQL package bodies intact
     // instead of silently falling back to PostgreSQL statement semantics.
-    let compatibility_mode = if config.db_type == DatabaseType::OpenGauss {
+    let compatibility_mode = if config.db_type == DatabaseType::Kingbase {
+        match state.get_or_create_pool(connection_id, Some(database)).await {
+            Ok(pool_key) => {
+                match crate::query::connection_sql_compatibility_mode(state, &pool_key, Some(config.db_type)).await {
+                    Some(mode) => SqlCompatibilityMode::Resolved(mode),
+                    None => SqlCompatibilityMode::Unknown,
+                }
+            }
+            Err(_) => SqlCompatibilityMode::Unknown,
+        }
+    } else if config.db_type == DatabaseType::OpenGauss {
         let pool = match state.get_or_create_pool(connection_id, Some(database)).await {
             Ok(pool_key) => match state.pool_handle(&pool_key).await {
                 Some(PoolKind::Postgres(pool)) => Some(pool),

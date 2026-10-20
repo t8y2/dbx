@@ -885,6 +885,7 @@ pub struct PooledAgentClient {
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
     identifier_quote: Option<String>,
+    compatibility_mode: Option<String>,
 }
 
 impl PooledAgentClient {
@@ -892,7 +893,22 @@ impl PooledAgentClient {
         let shared_runtime = client.shared_runtime.clone();
         let agent_session_id = client.agent_session_id.clone();
         let identifier_quote = client.identifier_quote.clone();
-        Self { client: tokio::sync::Mutex::new(client), shared_runtime, agent_session_id, identifier_quote }
+        Self {
+            client: tokio::sync::Mutex::new(client),
+            shared_runtime,
+            agent_session_id,
+            identifier_quote,
+            compatibility_mode: None,
+        }
+    }
+
+    pub fn with_compatibility_mode(mut self, mode: Option<String>) -> Self {
+        self.compatibility_mode = mode.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    pub fn compatibility_mode(&self) -> Option<&str> {
+        self.compatibility_mode.as_deref()
     }
 
     pub fn identifier_quote(&self) -> Option<&str> {
@@ -3834,6 +3850,32 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn kingbase_connection_info_and_pool_preserve_reported_mode() {
+        let info: super::AgentConnectionInfo = serde_json::from_value(serde_json::json!({
+            "identifierQuote": "\"", "compatibilityMode": "oracle",
+            "databaseInfo": {"productName": "KingbaseES", "compatibilityMode": "oracle"}
+        }))
+        .unwrap();
+        assert_eq!(info.database_info.unwrap().compatibility_mode.as_deref(), Some("oracle"));
+        let client = AgentDriverClient {
+            child: None,
+            stdin: None,
+            stdout: None,
+            stderr_tail: Arc::new(Mutex::new(StderrTail::default())),
+            handshake: None,
+            next_id: 0,
+            shared_runtime: None,
+            agent_session_id: None,
+            cached_query: None,
+            identifier_quote: None,
+            dedicated_transaction_query_cancel: false,
+        };
+        let pool = super::PooledAgentClient::new(client).with_compatibility_mode(info.compatibility_mode);
+        assert_eq!(pool.compatibility_mode(), Some("oracle"));
+        assert!(pool.with_compatibility_mode(Some(" ".into())).compatibility_mode().is_none());
+    }
 
     #[cfg(unix)]
     #[test]

@@ -3385,14 +3385,17 @@ impl AppState {
                         }
                     };
                     if db_config.db_type == DatabaseType::Kingbase {
-                        let identifier_quote = client
-                            .connection_info(Some(agent_connect_timeout(&db_config)))
-                            .await
-                            .ok()
-                            .map(|info| info.identifier_quote);
-                        client.set_identifier_quote(identifier_quote);
+                        let info = client.connection_info(Some(agent_connect_timeout(&db_config))).await.ok();
+                        client.set_identifier_quote(info.as_ref().map(|info| info.identifier_quote.clone()));
+                        // database_mode is fixed for the instance. Cache it on the
+                        // live pool, never reuse the saved frontend metadata.
+                        let mode = info.and_then(|info| info.compatibility_mode);
+                        PoolKind::Agent(Arc::new(
+                            db::agent_driver::PooledAgentClient::new(client).with_compatibility_mode(mode),
+                        ))
+                    } else {
+                        PoolKind::agent(client)
                     }
-                    PoolKind::agent(client)
                 } else {
                     // ZooKeeper JVM properties are connection-scoped; shared agent daemons must not inherit them.
                     let mut client = self

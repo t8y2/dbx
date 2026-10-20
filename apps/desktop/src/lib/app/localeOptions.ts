@@ -12,6 +12,7 @@ export const LOCALE_OPTIONS: LocaleOption[] = [
   { value: "en", flag: "🇺🇸", flagIcon: "us", label: "English" },
   { value: "az", flag: "🇦🇿", flagIcon: "az", label: "Azərbaycan" },
   { value: "es", flag: "🇪🇸", flagIcon: "es", label: "Español" },
+  { value: "fr", flag: "🇫🇷", flagIcon: "fr", label: "Français" },
   { value: "id", flag: "🇮🇩", flagIcon: "id", label: "Bahasa Indonesia" },
   { value: "it", flag: "🇮🇹", flagIcon: "it", label: "Italiano" },
   { value: "ja", flag: "🇯🇵", flagIcon: "jp", label: "日本語" },

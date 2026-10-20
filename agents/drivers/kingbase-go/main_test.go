@@ -214,8 +214,8 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 	}
 	if strings.Contains(query, "FROM information_schema.columns c") {
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"id", "integer", "integer", "NO", nil, "primary key", int64(32), int64(0), nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"id", "integer", "integer", "NO", nil, "primary key", int64(32), int64(0), nil, nil, nil, nil}},
 		}, nil
 	}
 	if connection.state.rejectAttidentity && strings.Contains(query, "a.attidentity") {
@@ -230,8 +230,8 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 			identity = nil
 		}
 		return &valueRows{
-			columns: []string{"resolved_schema", "column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity"},
-			rows:    [][]driver.Value{{"public", "id", "integer", false, nil, nil, int64(32), int64(0), nil, identity}},
+			columns: []string{"resolved_schema", "column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated"},
+			rows:    [][]driver.Value{{"public", "id", "integer", false, nil, nil, int64(32), int64(0), nil, identity, nil}},
 		}, nil
 	}
 	return nil, errors.New("unexpected query: " + query)
@@ -1507,8 +1507,8 @@ func TestGetColumnsUsesResolvedSchemaAcrossCatalogMetadata(t *testing.T) {
 						return nil, fmt.Errorf("explicit-schema columns query changed resolution behavior: %s", query)
 					}
 					return &valueRows{
-						columns: []string{"nspname", "attname", "format_type", "nullable", "default", "comment", "precision", "scale", "length", "identity"},
-						rows:    [][]driver.Value{{test.resolvedSchema, "feearea", "character varying", false, nil, nil, nil, nil, nil, nil}},
+						columns: []string{"nspname", "attname", "format_type", "nullable", "default", "comment", "precision", "scale", "length", "identity", "generated"},
+						rows:    [][]driver.Value{{test.resolvedSchema, "feearea", "character varying", false, nil, nil, nil, nil, nil, nil, nil}},
 					}, nil
 				case strings.Contains(query, "FROM information_schema.table_constraints"):
 					if !strings.Contains(query, "tc.table_schema='"+test.resolvedSchema+"'") {
@@ -4028,12 +4028,12 @@ func TestInformationSchemaColumnsPreserveFullTypesInDDL(t *testing.T) {
 			return nil, errors.New("full column type was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
 			rows: [][]driver.Value{
-				{"count", "integer", "integer unsigned", "YES", nil, nil, int64(32), int64(0), nil},
-				{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil},
-				{"created_at", "datetime", "datetime(6)", "YES", nil, nil, nil, nil, nil},
-				{"mask", "bit", "bit(8)", "YES", nil, nil, nil, nil, nil},
+				{"count", "integer", "integer unsigned", "YES", nil, nil, int64(32), int64(0), nil, nil, nil, nil},
+				{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil, nil, nil, nil},
+				{"created_at", "datetime", "datetime(6)", "YES", nil, nil, nil, nil, nil, nil, nil, nil},
+				{"mask", "bit", "bit(8)", "YES", nil, nil, nil, nil, nil, nil, nil, nil},
 			},
 		}, nil
 	}}
@@ -4069,8 +4069,8 @@ func TestInformationSchemaColumnsResolveUserDefinedTypeWithoutColumnType(t *test
 			return nil, errors.New("user-defined type name was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"created_at", "USER-DEFINED", "datetime", "YES", nil, nil, nil, nil, nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"created_at", "USER-DEFINED", "datetime", "YES", nil, nil, nil, nil, nil, nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -4137,8 +4137,8 @@ func TestInformationSchemaColumnsPreserveColumnTypeWithoutUdtName(t *testing.T) 
 			return nil, errors.New("column type fallback was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil, nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -4176,8 +4176,8 @@ func TestInformationSchemaColumnsFallbackWithoutExtendedTypeColumns(t *testing.T
 			return nil, errors.New("base type fallback was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64)}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64), nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -4221,8 +4221,8 @@ func TestInformationSchemaColumnsRetriesOnlyForMissingTypeMetadataColumns(t *tes
 					return nil, errors.New("unexpected fallback query: " + query)
 				}
 				return &valueRows{
-					columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-					rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64)}},
+					columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+					rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64), nil, nil, nil}},
 				}, nil
 			}}
 			server := newServer()
@@ -5016,11 +5016,11 @@ func TestCatalogColumnsPreservesJsonAndJsonbTypes(t *testing.T) {
 			return nil, fmt.Errorf("columns query must distinguish json from jsonb: %s", query)
 		}
 		return &valueRows{
-			columns: []string{"nspname", "attname", "data_type", "nullable", "default", "comment", "precision", "scale", "length", "identity"},
+			columns: []string{"nspname", "attname", "data_type", "nullable", "default", "comment", "precision", "scale", "length", "identity", "generated"},
 			rows: [][]driver.Value{
-				{"public", "data_json", "json", true, nil, nil, nil, nil, nil, nil},
-				{"public", "data_jsonb", "jsonb", true, nil, nil, nil, nil, nil, nil},
-				{"public", "data_json_arr", "json[]", true, nil, nil, nil, nil, nil, nil},
+				{"public", "data_json", "json", true, nil, nil, nil, nil, nil, nil, nil},
+				{"public", "data_jsonb", "jsonb", true, nil, nil, nil, nil, nil, nil, nil},
+				{"public", "data_json_arr", "json[]", true, nil, nil, nil, nil, nil, nil, nil},
 			},
 		}, nil
 	}}

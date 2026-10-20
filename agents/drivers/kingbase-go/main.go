@@ -143,6 +143,7 @@ type server struct {
 	usePgFunctionDefinition         bool
 	useLegacyRoutineDefinition      bool
 	catalogIdentityUnsupported      bool
+	catalogGeneratedUnsupported     bool
 	catalogOIDUnsupported           bool
 	infoColumnTypeUnsupported       bool
 	infoUdtNameUnsupported          bool
@@ -488,6 +489,7 @@ func (s *server) connect(cp connectParams) error {
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
@@ -688,6 +690,7 @@ func (s *server) disconnect() error {
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false

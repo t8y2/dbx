@@ -1889,10 +1889,7 @@ func (s *server) queryCatalogColumns(
 	schema, table string,
 	catalog, prefix, expression string,
 ) ([]columnInfo, error) {
-	identityExpression := "a.attidentity"
-	if s.catalogIdentityUnsupported {
-		identityExpression = "CAST(NULL AS varchar(1)) AS attidentity"
-	}
+	identityExpression, generatedExpression := s.catalogColumnGenerationExpressions()
 	relationPredicate := fmt.Sprintf("n.nspname = %s AND c.relname = %s", quoteLiteral(schema), quoteLiteral(table))
 	if strings.TrimSpace(schema) == "" {
 		visibilityFunction := kingbaseCatalogFunction(catalog, "sys_table_is_visible", "pg_table_is_visible")
@@ -1908,14 +1905,13 @@ func (s *server) queryCatalogColumns(
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN ((a.atttypmod - 4) >> 16) & 65535 END,
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN (a.atttypmod - 4) & 65535 END,
 	CASE WHEN t.typname IN ('varchar','bpchar') AND a.atttypmod > 0 THEN a.atttypmod - 4 END,
-	%s
+	%s, %s
 	FROM %s.%s_attribute a JOIN %s.%s_type t ON t.oid = a.atttypid
 	JOIN %s.%s_class c ON c.oid = a.attrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
 	LEFT JOIN %s.%s_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-WHERE %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, relationPredicate)
+WHERE %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, generatedExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, relationPredicate)
 	rows, err := s.metadataQuery(query)
-	if err != nil && !s.catalogIdentityUnsupported && isUndefinedColumn(err, "attidentity") {
-		s.catalogIdentityUnsupported = true
+	if err != nil && s.cacheMissingColumnGenerationCapability(err) {
 		return s.queryCatalogColumns(schema, table, catalog, prefix, expression)
 	}
 	if err != nil {
@@ -1926,17 +1922,68 @@ WHERE %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression,
 	for rows.Next() {
 		var resolvedSchema, name, dataType string
 		var nullable bool
-		var defaultValue, comment, identity sql.NullString
+		var defaultValue, comment, identity, generated sql.NullString
 		var precision, scale, length sql.NullInt64
-		if err := rows.Scan(&resolvedSchema, &name, &dataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity); err != nil {
+		if err := rows.Scan(&resolvedSchema, &name, &dataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity, &generated); err != nil {
 			return nil, err
 		}
-		result = append(result, columnInfo{Name: name, DataType: dataType, ResolvedSchema: stringPtr(resolvedSchema), IsNullable: nullable, ColumnDefault: nullStringPtr(defaultValue), Extra: kingbaseIdentityClause(identity.String), Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
+		column := columnInfo{Name: name, DataType: dataType, ResolvedSchema: stringPtr(resolvedSchema), IsNullable: nullable, ColumnDefault: nullStringPtr(defaultValue), Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)}
+		if err := applyColumnGenerationMetadata(&column, identity.String, generated.String, defaultValue); err != nil {
+			return nil, err
+		}
+		result = append(result, column)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func (s *server) catalogColumnGenerationExpressions() (identity, generated string) {
+	identity, generated = "a.attidentity", "a.attgenerated"
+	if s.catalogIdentityUnsupported {
+		identity = "CAST(NULL AS varchar(1)) AS attidentity"
+	}
+	if s.catalogGeneratedUnsupported {
+		generated = "CAST(NULL AS varchar(1)) AS attgenerated"
+	}
+	return identity, generated
+}
+
+func (s *server) cacheMissingColumnGenerationCapability(err error) bool {
+	switch {
+	case !s.catalogIdentityUnsupported && isUndefinedColumn(err, "attidentity"):
+		s.catalogIdentityUnsupported = true
+	case !s.catalogGeneratedUnsupported && isUndefinedColumn(err, "attgenerated"):
+		s.catalogGeneratedUnsupported = true
+	default:
+		return false
+	}
+	return true
+}
+
+func applyColumnGenerationMetadata(column *columnInfo, identity, generated string, expression sql.NullString) error {
+	identity = strings.ToLower(strings.TrimSpace(identity))
+	generated = strings.ToLower(strings.TrimSpace(generated))
+	if generated != "" {
+		if generated != "s" || identity != "" {
+			return fmt.Errorf("column %q has unsupported generation metadata (identity=%q, generated=%q)", column.Name, identity, generated)
+		}
+		if !expression.Valid || strings.TrimSpace(expression.String) == "" {
+			return fmt.Errorf("generated column %q has no generation expression", column.Name)
+		}
+		// attrdef stores both defaults and generated expressions. Keep generation
+		// in the established extra clause, never in column_default.
+		column.Extra = stringPtr("GENERATED ALWAYS AS (" + expression.String + ") STORED")
+		column.ColumnDefault = nil
+	} else if identity != "" {
+		column.Extra = kingbaseIdentityClause(identity)
+		if column.Extra == nil {
+			return fmt.Errorf("column %q has unsupported identity metadata %q", column.Name, identity)
+		}
+		column.ColumnDefault = nil
+	}
+	return nil
 }
 
 func isUndefinedFunction(err error, functionName string) bool {
@@ -1965,6 +2012,9 @@ func (s *server) informationSchemaColumns(schema, table string, primary map[stri
 		if err == nil {
 			return result, nil
 		}
+		if s.cacheMissingColumnGenerationCapability(err) {
+			continue
+		}
 		switch {
 		case includeColumnType && isUndefinedColumn(err, "column_type"):
 			includeColumnType = false
@@ -1972,6 +2022,8 @@ func (s *server) informationSchemaColumns(schema, table string, primary map[stri
 		case includeUdtName && isUndefinedColumn(err, "udt_name"):
 			includeUdtName = false
 			s.infoUdtNameUnsupported = true
+		case !s.mode.postgresCatalog && !s.usePgDefaultExpression && isUndefinedFunction(err, "sys_get_expr"):
+			s.usePgDefaultExpression = true
 		default:
 			return nil, err
 		}
@@ -1979,6 +2031,17 @@ func (s *server) informationSchemaColumns(schema, table string, primary map[stri
 }
 
 func (s *server) queryInformationSchemaColumns(schema, table string, primary map[string]bool, includeColumnType, includeUdtName bool) ([]columnInfo, error) {
+	catalog, prefix, expression := "sys_catalog", "sys", "sys_get_expr"
+	if s.mode.postgresCatalog {
+		catalog, prefix, expression = "pg_catalog", "pg", "pg_get_expr"
+	} else if s.usePgDefaultExpression {
+		expression = "pg_get_expr"
+	}
+	identityExpression, generatedExpression := s.catalogColumnGenerationExpressions()
+	generationExpression := "NULL"
+	if !s.catalogGeneratedUnsupported {
+		generationExpression = fmt.Sprintf("CASE WHEN a.attgenerated <> '' THEN %s(ad.adbin, ad.adrelid) END", expression)
+	}
 	var fullDataTypeExpression string
 	switch {
 	case includeColumnType && includeUdtName:
@@ -1998,12 +2061,14 @@ func (s *server) queryInformationSchemaColumns(schema, table string, primary map
 		fullDataTypeExpression = "NULL AS column_type"
 	}
 	query := fmt.Sprintf(`SELECT c.column_name, c.data_type, %s, c.is_nullable, c.column_default,
-	col_description(a.attrelid, a.attnum), c.numeric_precision, c.numeric_scale, c.character_maximum_length
+	col_description(a.attrelid, a.attnum), c.numeric_precision, c.numeric_scale, c.character_maximum_length,
+	%s, %s, %s AS generation_expression
 	FROM information_schema.columns c
-	LEFT JOIN sys_catalog.sys_namespace n ON n.nspname = c.table_schema
-	LEFT JOIN sys_catalog.sys_class rel ON rel.relnamespace = n.oid AND rel.relname = c.table_name
-	LEFT JOIN sys_catalog.sys_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name AND a.attnum > 0 AND NOT a.attisdropped
-	WHERE c.table_schema = %s AND c.table_name = %s ORDER BY c.ordinal_position`, fullDataTypeExpression, quoteLiteral(schema), quoteLiteral(table))
+	LEFT JOIN %s.%s_namespace n ON n.nspname = c.table_schema
+	LEFT JOIN %s.%s_class rel ON rel.relnamespace = n.oid AND rel.relname = c.table_name
+	LEFT JOIN %s.%s_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name AND a.attnum > 0 AND NOT a.attisdropped
+	LEFT JOIN %s.%s_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+	WHERE c.table_schema = %s AND c.table_name = %s ORDER BY c.ordinal_position`, fullDataTypeExpression, identityExpression, generatedExpression, generationExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err
@@ -2012,9 +2077,9 @@ func (s *server) queryInformationSchemaColumns(schema, table string, primary map
 	result := []columnInfo{}
 	for rows.Next() {
 		var name, dataType, nullable string
-		var fullDataType, defaultValue, comment sql.NullString
+		var fullDataType, defaultValue, comment, identity, generated, generationValue sql.NullString
 		var precision, scale, length sql.NullInt64
-		if err := rows.Scan(&name, &dataType, &fullDataType, &nullable, &defaultValue, &comment, &precision, &scale, &length); err != nil {
+		if err := rows.Scan(&name, &dataType, &fullDataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity, &generated, &generationValue); err != nil {
 			return nil, err
 		}
 		if !length.Valid || length.Int64 < 0 {
@@ -2024,7 +2089,11 @@ func (s *server) queryInformationSchemaColumns(schema, table string, primary map
 				length = sql.NullInt64{Int64: int64(*parsed), Valid: true}
 			}
 		}
-		result = append(result, columnInfo{Name: name, DataType: resolvedInformationSchemaDataType(dataType, fullDataType.String), ResolvedSchema: stringPtr(schema), FullDataType: fullDataType.String, IsNullable: strings.EqualFold(nullable, "YES"), ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
+		column := columnInfo{Name: name, DataType: resolvedInformationSchemaDataType(dataType, fullDataType.String), ResolvedSchema: stringPtr(schema), FullDataType: fullDataType.String, IsNullable: strings.EqualFold(nullable, "YES"), ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)}
+		if err := applyColumnGenerationMetadata(&column, identity.String, generated.String, generationValue); err != nil {
+			return nil, err
+		}
+		result = append(result, column)
 	}
 	return result, rows.Err()
 }
@@ -3097,6 +3166,7 @@ WHERE n.nspname=` + quoteLiteral(schema) + ` AND c.relname=` + quoteLiteral(tabl
 					extra = "IDENTITY(" + seed.String + "," + increment.String + ")"
 				}
 				column.Extra = &extra
+				column.ColumnDefault = nil
 			}
 		}
 	}

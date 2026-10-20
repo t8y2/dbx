@@ -20,8 +20,8 @@ use tokio::io::AsyncReadExt;
 
 pub use dbx_sql::dameng_dump::DamengDumpKind as DamengDumpKindReexport;
 use dbx_sql::dameng_dump::{
-    build_command, build_parfile_contents, parse_dump_log, userid_field_error, DamengDumpKind, DamengDumpOutcome,
-    DamengDumpRequest,
+    build_command, build_parfile_contents, failure_message, parse_dump_log, userid_field_error, DamengDumpKind,
+    DamengDumpOutcome, DamengDumpRequest,
 };
 
 use crate::connection::AppState;
@@ -181,14 +181,17 @@ fn prepare_import_source(file_path: &Path) -> Result<(), String> {
 }
 
 /// Run the tool once and return the combined diagnostic text (log file
-/// preferred, console capture as fallback).
+/// preferred, console capture as fallback) plus the process exit status.
+///
+/// The exit status is the only signal left when the tool dies before writing its log —
+/// the case the old code collapsed into "did not report success" (#12837).
 async fn run_tool_and_collect(
     argv: &[String],
     log_path: &Path,
     out_path: &Path,
     err_path: &Path,
     task_id: &str,
-) -> Result<String, String> {
+) -> Result<(String, Option<i32>), String> {
     if argv.is_empty() {
         return Err("Empty dexp/dimp command".to_string());
     }
@@ -224,12 +227,17 @@ async fn run_tool_and_collect(
     if cancelled {
         return Err(EXPORT_CANCELLED_ERROR.to_string());
     }
+    let exit_code = match child.try_wait() {
+        Ok(Some(status)) => status.code(),
+        Ok(None) => None,
+        Err(error) => return Err(format!("Failed to read '{}' exit status: {error}", argv[0])),
+    };
 
     // Prefer the tool's own log (the parse target); fall back to console
     // capture for early failures (missing lib, bad args) that never reach it.
     let log_text = tokio::fs::read_to_string(log_path).await.unwrap_or_default();
     if !log_text.trim().is_empty() {
-        return Ok(log_text);
+        return Ok((log_text, exit_code));
     }
     let mut console = String::new();
     let mut out_file = tokio::fs::File::open(out_path).await.ok();
@@ -247,7 +255,7 @@ async fn run_tool_and_collect(
             console.push_str(&err_text);
         }
     }
-    Ok(console)
+    Ok((console, exit_code))
 }
 
 fn remove_if_exists(path: &Path) {
@@ -308,13 +316,14 @@ pub async fn run_dameng_dump_task(
         return Err(error);
     }
     // A `/` or `@` in the user or password would be read as a USERID field
-    // separator by the tool and surface as a bogus host / connection error;
-    // reject it up front instead of launching.
+    // separator by the tool, and a space would end the token early; both surface as a
+    // bogus host / connection error, so reject them up front instead of launching.
     if let Some(field) = userid_field_error(&config.username, &config.password) {
         let error = tagged(
             DAMENG_USERID_INVALID_TAG,
             &format!(
-                "The connection's {field} contains '/' or '@', which the dexp/dimp USERID argument cannot encode; the task was not started."
+                "The connection's {field} contains '/', '@' or a space, which the dexp/dimp USERID argument \
+                 cannot encode; the task was not started."
             ),
         );
         emit(DamengDumpStatus::Error, false, false, None, Some(error.clone()));
@@ -403,8 +412,8 @@ pub async fn run_dameng_dump_task(
     remove_if_exists(&out_path);
     remove_if_exists(&err_path);
 
-    let text = match run_result {
-        Ok(text) => text,
+    let (text, exit_code) = match run_result {
+        Ok(pair) => pair,
         Err(error) if error == EXPORT_CANCELLED_ERROR => {
             remove_if_exists(&log_path);
             if let Some(temp_path) = &export_temp_path {
@@ -444,13 +453,11 @@ pub async fn run_dameng_dump_task(
         if let Some(temp_path) = &export_temp_path {
             remove_if_exists(temp_path);
         }
-        let error = outcome
-            .error
-            .clone()
-            .or_else(|| {
-                Some(text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("dexp/dimp failed").trim().to_string())
-            })
-            .unwrap_or_else(|| "dexp/dimp failed".to_string());
+        // `parse_dump_log`'s generic fallback hides why the run stopped, so the log/console
+        // tail and the exit status travel with the message. See #12837: on Windows the tool
+        // rejected the quoted, back-slash PARFILE values before writing its log, leaving the
+        // user with a sentence that named no parameter and no path.
+        let error = failure_message(&outcome, exit_code, &text);
         emit(DamengDumpStatus::Error, false, outcome.warnings, outcome.elapsed_seconds.clone(), Some(error.clone()));
         Err(error)
     }
@@ -574,7 +581,9 @@ mod tests {
 
         let mut argv = vec![tool.to_string_lossy().into_owned()];
         argv.extend(tool_args);
-        let text = run_tool_and_collect(&argv, &log_path, &out_path, &err_path, "fake-task").await.unwrap();
+        let (text, exit_code) =
+            run_tool_and_collect(&argv, &log_path, &out_path, &err_path, "fake-task").await.unwrap();
+        assert_eq!(exit_code, Some(0), "a success run reports a clean exit");
         let outcome = parse_dump_log(&text, DamengDumpKind::Export);
         assert!(outcome.success, "should parse the fake success log: {outcome:?}");
         if expect_elapsed {
@@ -610,10 +619,52 @@ mod tests {
 
         let mut argv = vec![tool.to_string_lossy().into_owned()];
         argv.extend(tool_args);
-        let text = run_tool_and_collect(&argv, &log_path, &out_path, &err_path, "fake-fail-task").await.unwrap();
+        let (text, exit_code) =
+            run_tool_and_collect(&argv, &log_path, &out_path, &err_path, "fake-fail-task").await.unwrap();
+        assert_eq!(exit_code, Some(1), "the exit status is reported even without a log");
         let outcome = parse_dump_log(&text, DamengDumpKind::Export);
         assert!(!outcome.success);
         assert!(outcome.error.as_deref().unwrap_or_default().contains("DMException"), "got: {outcome:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The #12837 shape: the tool rejects its parameters and exits non-zero with an
+    /// unrecognised-parameter line on stderr, writing no log at all. The exit status plus
+    /// `failure_message` must carry the cause — a bare "did not report success" would not.
+    #[tokio::test]
+    async fn run_tool_and_collect_carries_exit_code_for_silent_failure() {
+        let dir = std::env::temp_dir().join(format!("dbx-dameng-silent-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("never-written.log");
+        let out_path = dir.join("run.out");
+        let err_path = dir.join("run.err");
+
+        #[cfg(windows)]
+        let (tool, tool_args) = {
+            let tool = dir.join("reject.bat");
+            std::fs::write(&tool, "@echo off\r\necho unrecognized parameter TABLESPACE 1>&2\r\nexit /b 2\r\n").unwrap();
+            (tool, vec![])
+        };
+        #[cfg(not(windows))]
+        let (tool, tool_args) = {
+            use std::os::unix::fs::PermissionsExt;
+            let tool = dir.join("reject.sh");
+            std::fs::write(&tool, "#!/bin/sh\necho 'unrecognized parameter TABLESPACE' >&2\nexit 2\n").unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+            (tool, vec![])
+        };
+
+        let mut argv = vec![tool.to_string_lossy().into_owned()];
+        argv.extend(tool_args);
+        let (text, exit_code) =
+            run_tool_and_collect(&argv, &log_path, &out_path, &err_path, "silent-task").await.unwrap();
+        assert_eq!(exit_code, Some(2));
+
+        let outcome = parse_dump_log(&text, DamengDumpKind::Export);
+        assert!(!outcome.success);
+        let message = failure_message(&outcome, exit_code, &text);
+        assert!(message.contains("exit code 2"), "got: {message}");
+        assert!(message.contains("unrecognized parameter TABLESPACE"), "got: {message}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

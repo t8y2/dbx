@@ -5107,6 +5107,7 @@ export const useQueryStore = defineStore("query", () => {
       connectionId: original.connectionId,
       database: original.database,
       schema: original.schema,
+      schemaQualifiesSql: original.schemaQualifiesSql,
       catalog: original.catalog,
       sql: original.sql,
       originalSql: "",

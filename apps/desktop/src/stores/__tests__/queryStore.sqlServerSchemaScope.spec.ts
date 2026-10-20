@@ -133,6 +133,25 @@ describe("SQL Server 页签 Schema 的显式作用域", () => {
     expect(executedSchema()).toBe("core");
   });
 
+  it.each([true, false])("复制页签保留 Schema 的执行作用域（显式选择：%s）", async (explicit) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const sql = "UPDATE products SET status = 'done' WHERE id = 1";
+    const tabId = store.createTab("sql-1", "app", "Query", "query", "core", sql);
+    if (explicit) store.updateSchema(tabId, "core", { schemaQualifiesSql: true });
+    const expectedSchema = explicit ? "core" : undefined;
+    await store.executeTabSql(tabId, sql);
+    expect(executedSchema()).toBe(expectedSchema);
+
+    store.duplicateTab(tabId);
+    const duplicated = store.tabs.find((tab) => tab.id !== tabId)!;
+    expect(duplicated.schema).toBe("core");
+    expect(duplicated.sql).toBe(sql);
+    await store.executeTabSql(duplicated.id, duplicated.sql);
+
+    expect(executedSchema()).toBe(expectedSchema);
+  });
+
   it("清空或切换数据库会同时清掉显式作用域", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

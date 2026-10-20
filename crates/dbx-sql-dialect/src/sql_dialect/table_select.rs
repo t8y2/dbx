@@ -144,6 +144,16 @@ fn build_large_value_preview_items(options: &TableDataSelectSqlOptions) -> Optio
 
     let protected: std::collections::HashSet<String> =
         options.primary_keys.iter().map(|column| column.to_ascii_lowercase()).collect();
+    // Marker suffixes index the source column's position in the RESULT, which
+    // the client-side extraction verifies (`expected_source_index`). Oracle
+    // tables keyed by the synthetic ROWID prepend one projection, shifting
+    // every column after it; MySQL/PostgreSQL/DB2 project exactly the column
+    // list, so their offsets stay zero.
+    let source_index_offset = usize::from(
+        options.include_row_id
+            && uses_oracle_row_id(options.database_type)
+            && is_oracle_base_table_type(options.table_type.as_deref()),
+    );
     let mut items = Vec::with_capacity(options.columns.len() * 2);
     let mut marker_count = 0;
     for (column_index, (column, data_type)) in options.columns.iter().zip(&options.column_types).enumerate() {
@@ -174,7 +184,7 @@ fn build_large_value_preview_items(options: &TableDataSelectSqlOptions) -> Optio
         let prefix_size = preview_size.saturating_add(1);
 
         let alias_kind = large_value_marker_alias_kind(kind, data_type);
-        let marker_name = format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{column_index}");
+        let marker_name = format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{}", column_index + source_index_offset);
         let marker_alias = quote_table_identifier(database_type, &marker_name);
         let (preview, marker_kind) = match database_type {
             Some(DatabaseType::Mysql) if kind == LargeValuePreviewKind::Binary => {

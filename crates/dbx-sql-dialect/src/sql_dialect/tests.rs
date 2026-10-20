@@ -1205,15 +1205,16 @@ fn builds_oracle_table_data_previews_for_rowid_keyed_tables() {
     });
 
     // 无主键基表：内层投影以合成键 ROWIDTOCHAR 开头、FROM 带别名 t，外层按别名重选
-    // __DBX_ROWID 与 marker 列，取全值时按同一合成键回查。
+    // __DBX_ROWID 与 marker 列，取全值时按同一合成键回查。marker 下标是结果集位置：
+    // __DBX_ROWID 占第 0 位，PAYLOAD 的 marker 因此是 _T_1（客户端剥离按此校验）。
     assert!(
         sql.contains(
-            "SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", DBMS_LOB.SUBSTR(\"PAYLOAD\", 201, 1) AS \"PAYLOAD\", 'T:200:' || DBMS_LOB.GETLENGTH(\"PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_0\", \"CREATED_AT\" FROM \"keyless_logs\" t"
+            "SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", DBMS_LOB.SUBSTR(\"PAYLOAD\", 201, 1) AS \"PAYLOAD\", 'T:200:' || DBMS_LOB.GETLENGTH(\"PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_1\", \"CREATED_AT\" FROM \"keyless_logs\" t"
         ),
         "inner projection: {sql}"
     );
     assert!(
-        sql.starts_with("SELECT \"__DBX_ROWID\", \"PAYLOAD\", \"__DBX_LARGE_VALUE_BYTES_T_0\", \"CREATED_AT\" FROM"),
+        sql.starts_with("SELECT \"__DBX_ROWID\", \"PAYLOAD\", \"__DBX_LARGE_VALUE_BYTES_T_1\", \"CREATED_AT\" FROM"),
         "outer projection: {sql}"
     );
 }

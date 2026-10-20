@@ -210,6 +210,45 @@ async fn deletion_only_removes_recorded_files_within_the_backup_root() {
 }
 
 #[tokio::test]
+async fn deletion_removes_emptied_run_directories_but_keeps_shared_ones_and_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("backups");
+    let run_dir = root.join("dbx-backup__daily__20261020023000__abcd1234");
+    let nested = root.join("2026").join("10").join("20");
+    let shared = root.join("shared");
+    for path in [&run_dir, &nested, &shared] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let user_file = shared.join("notes.txt");
+    std::fs::write(&user_file, "keep").unwrap();
+    let files = [run_dir.join("app.sql"), nested.join("app.sql.gz"), shared.join("app.sql"), root.join("flat.sql")];
+    for file in &files {
+        std::fs::write(file, "SELECT 1;").unwrap();
+    }
+    let service = service(dir.path(), Some(root.clone())).await;
+    let mut run = service.store.enqueue(request(schedule(&root).config)).await.unwrap();
+    service.store.claim().await.unwrap();
+    run.status = "success".into();
+    run.files = files
+        .iter()
+        .map(|file| BackupFile {
+            database: "app".into(),
+            schema: "app".into(),
+            display_name: "app".into(),
+            file_path: file.to_string_lossy().into_owned(),
+            owned: true,
+        })
+        .collect();
+    service.store.finish(run.clone()).await.unwrap();
+    service.delete_runs(vec![run.id]).await.unwrap();
+    assert!(files.iter().all(|file| !file.exists()));
+    assert!(!run_dir.exists());
+    assert!(!root.join("2026").exists());
+    assert!(user_file.exists());
+    assert!(root.is_dir());
+}
+
+#[tokio::test]
 async fn draining_transfers_leadership_without_cancelling_and_cancel_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let service = service(dir.path(), None).await;
@@ -405,7 +444,7 @@ async fn live_mysql_worker_scenario() {
         plan.config.table_filter_mode = "include".into();
         plan.config.table_patterns = vec!["chosen".into()];
         service.command(BackupCommand::Save { schedule: plan }).await?;
-        let mut previous = None;
+        let mut previous: Option<std::path::PathBuf> = None;
         for _ in 0..2 {
             let run = service
                 .store
@@ -443,6 +482,10 @@ async fn live_mysql_worker_scenario() {
                 })
                 .await
                 .map_err(|_| "Retention did not remove the old file")?;
+                let previous_directory = previous.parent().unwrap();
+                assert_ne!(previous_directory, path.parent().unwrap());
+                assert!(!previous_directory.exists(), "Retention left the old run directory behind");
+                assert!(dir.path().is_dir());
             }
             previous = Some(path);
         }

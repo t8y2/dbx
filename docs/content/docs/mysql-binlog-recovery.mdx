@@ -1,0 +1,84 @@
+---
+title: MySQL Binlog Recovery (Experimental)
+description: Inspect local row events, review complete transactions and export guarded inverse SQL without automatic execution.
+---
+
+This Desktop-only workbench is experimental. It does not connect to a database
+or execute recovery SQL. Do not use it against production without independent
+review and a tested backup/recovery procedure.
+
+## Open and Inspect
+
+1. Open **More → MySQL Binlog Recovery** in the Desktop toolbar.
+2. Choose **Import binlog** and select a local MySQL 8.0 binlog file.
+3. Filter by database, table, GTID, local time or physical position. Filters return
+   complete transactions, including their other tables and rows.
+4. Select a transaction to inspect available before/after images. Positions and
+   integers are exact strings; byte values are hex. Missing images and SQL NULL
+   are distinct. Missing signedness displays raw bits, not a confirmed number.
+
+The initial supported input is ROW with FULL images and rich table metadata
+(normally `binlog_row_metadata=FULL`). Missing column names, signedness or reliable
+primary-key information prevents SQL generation. Changing server settings now
+does not add metadata to old files.
+
+## Historical Schema Evidence
+
+Choose a historical-schema JSON file and explicitly confirm its provenance.
+Never substitute a current table definition merely because its column count fits.
+The manifest must bind the binlog SHA256, validity offsets, historical evidence,
+ordered wire column metadata and non-null primary keys. The format and a
+reproducible isolated-server example are documented in
+`examples/mysql-binlog-probe/README.md` and `tests/live_mysql.py` in the repository.
+
+Example envelope (the `tables` array must contain actual verified definitions):
+
+```json
+{
+  "version": 1,
+  "binlog_sha256": "<SHA256 of the complete imported file>",
+  "valid_from": 156,
+  "valid_to": 2173,
+  "provenance": "<verified historical schema source>",
+  "historical": true,
+  "tables": []
+}
+```
+
+## Preview and Export
+
+Select entire transactions and choose **Generate SQL preview**. Any validation
+failure prevents export. A later unselected transaction touching a selected table
+is conservatively rejected; include it or investigate dependencies independently.
+Changing a selection, filter or schema invalidates previously generated SQL.
+
+**Export .sql** writes a new file only: existing files and symlinks are never
+replaced. The workbench has no execute button.
+
+Generated SQL uses a uniquely named INVOKER-security procedure, target structure
+checks, full expected-image guards and per-transaction rollback on conflicts.
+Each inverse transaction commits separately. If a later transaction fails, earlier
+inverse transactions remain committed. Never retry blindly.
+
+Manual execution requires a fresh dedicated autocommit session, routine privileges,
+complete metadata visibility and stop-on-first-error script execution. Helper DDL
+implicitly commits. A failed CALL can leave its helper procedure for manual cleanup.
+Independently verify there are no triggers or incoming/outgoing foreign keys;
+permission-filtered metadata counts alone cannot prove absence.
+
+## Supported Scope and Limits
+
+- Integer, binary/text, exact DECIMAL, ordinary full JSON and modern
+  DATETIME/TIMESTAMP/TIME with microseconds are supported in the tested matrix.
+- DATE, ordinary floating columns, ENUM/SET, geometry, generated columns, zero/
+  invalid temporal values, opaque typed JSON, partial JSON, DDL rollback,
+  compressed transactions, triggers and FKs are not supported.
+- Parser workers have a 60-second deadline, sampled 512 MiB RSS limit, bounded
+  input/output and explicit cancellation. RSS sampling is not an OS hard limit.
+- Files are capped at 512 MiB, individual events at 16 MiB, materialized recovery
+  at 50,000 rows / 10,000 transactions, and table-map IDs at 128. Pages contain
+  at most 100 transactions or changes. Responses are capped at 8 MiB.
+
+Isolated MySQL 8.0.27 tests cover field-by-field restoration and conflict handling.
+They do not establish production acceptance, complete hostile-input safety or a
+Windows/Linux distribution matrix.

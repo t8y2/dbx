@@ -1,3 +1,4 @@
+import { binlogRecoveryJa as binlogRecovery } from "./binlogRecovery";
 import { sidebarMenuJa as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogJa as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
@@ -65,6 +66,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  binlogRecovery,
   oracleSecurity: {
     directSqlNotice: "参照できる直接付与のみを表示します。セッションの有効な権限や完全な再実行スクリプトではありません。継承と付与者は付与元の詳細を参照してください。",
     searchOwner: "owner/schema を検索",

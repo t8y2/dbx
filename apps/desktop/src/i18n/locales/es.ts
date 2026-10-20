@@ -1,3 +1,4 @@
+import { binlogRecoveryEs as binlogRecovery } from "./binlogRecovery";
 import { sidebarMenuEs as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogEs as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
@@ -66,6 +67,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  binlogRecovery,
   oracleSecurity: {
     directSqlNotice: "Solo concesiones directas visibles, no permisos efectivos de sesión ni un script completo para reproducirlas. La herencia y los otorgantes están en los detalles de origen.",
     searchOwner: "Buscar owner/schema",

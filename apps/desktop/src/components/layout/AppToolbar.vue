@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
+import { computed, ref, defineAsyncComponent, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, LogOut, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints, RefreshCw } from "@lucide/vue";
@@ -26,6 +26,9 @@ const GithubIcon = {
     ]);
   },
 };
+
+const BinlogRecoveryDialog = defineAsyncComponent(() => import("@/components/binlog/BinlogRecoveryDialog.vue"));
+const showBinlogRecovery = ref(false);
 
 const props = defineProps<{
   isDark: boolean;
@@ -509,6 +512,16 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       disabled: !props.hasConnections,
     });
   }
+  if (isDesktop)
+    items.push({
+      value: "binlog-recovery",
+      label: t("binlogRecovery.title"),
+      icon: History,
+      action: () => {
+        showBinlogRecovery.value = true;
+      },
+      disabled: false,
+    });
   items.push({
     value: "database-backups",
     label: t("databaseBackup.title"),
@@ -571,6 +584,7 @@ const toolbarStyle = computed(() => {
 
 <template>
   <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :style="toolbarStyle" data-tauri-drag-region @dblclick="onToolbarDblClick">
+    <BinlogRecoveryDialog v-if="isDesktop && showBinlogRecovery" v-model:open="showBinlogRecovery" />
     <a
       v-if="!isDesktop && webLogoPosition === 'left'"
       href="https://dbxio.com"

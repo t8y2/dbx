@@ -1,3 +1,4 @@
+import { binlogRecoveryEn as binlogRecovery } from "./binlogRecovery";
 import { sidebarMenuEn as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogEn as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { redisGroupingEn as redisGrouping } from "./redisGrouping";
@@ -64,6 +65,7 @@ const consul = {
 };
 
 export default {
+  binlogRecovery,
   oracleSecurity: {
     directSqlNotice: "Visible direct grants only, not effective session permissions or a complete replay script. Inheritance and grantors are in the source details.",
     searchOwner: "Search owner/schema",

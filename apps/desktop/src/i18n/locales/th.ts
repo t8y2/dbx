@@ -1,3 +1,4 @@
+import { binlogRecoveryTh as binlogRecovery } from "./binlogRecovery";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/th";
 
@@ -49,6 +50,7 @@ const damengDump = {
 };
 
 export default withEnglishFallback({
+  binlogRecovery,
   oracleForeignKey: {
     resultTitle: "ผลลัพธ์การดำเนินการ Foreign Key",
     executionFailed: "การดำเนินการ Foreign Key ไม่ได้เสร็จสมบูรณ์ กรุณาตรวจสอบผลลัพธ์แต่ละรายการและสถานะฐานข้อมูล",

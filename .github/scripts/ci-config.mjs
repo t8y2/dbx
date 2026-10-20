@@ -1,7 +1,7 @@
 export const rustGroups = {
   foundation: ["dbx-types", "dbx-platform", "dbx-sql-core", "dbx-sql-dialect", "dbx-sql-data", "dbx-sql-schema", "dbx-sql", "dbx-formats", "dbx-ai-provider", "dbx-plugin-runtime"],
   drivers: ["dbx-driver-support", "dbx-driver-agent", "dbx-driver-elasticsearch", "dbx-driver-mongodb", "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver", "dbx-drivers", "dbx-sqlite-worker"],
-  application: ["dbx", "dbx-core", "dbx-web", "dbx-cli", "dbx-mcp", "dbx-tauri-consul", "dbx-tauri-schema"],
+  application: ["dbx", "dbx-binlog", "dbx-core", "dbx-web", "dbx-cli", "dbx-mcp", "dbx-tauri-consul", "dbx-tauri-schema"],
 };
 
 export const goAgents = [

@@ -2,6 +2,7 @@ mod background_backup;
 mod commands;
 mod data_dir;
 pub use background_backup::run_if_requested as run_backup_worker_if_requested;
+pub use commands::binlog_recovery::run_if_requested as run_binlog_worker_if_requested;
 mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
@@ -2231,6 +2232,9 @@ pub fn run() {
             commands::local_backup::local_backup_export,
             commands::local_backup::local_backup_inspect,
             commands::local_backup::local_backup_import,
+            commands::binlog_recovery::binlog_recovery_request,
+            commands::binlog_recovery::binlog_recovery_cancel,
+            commands::binlog_recovery::binlog_recovery_export,
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
             commands::connection::test_ssh_tunnel,

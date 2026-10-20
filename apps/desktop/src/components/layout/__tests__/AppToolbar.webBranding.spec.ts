@@ -41,8 +41,9 @@ vi.mock("@/components/ui/tooltip", () => ({
   TooltipContent: { name: "TooltipContentStub", template: `<span><slot /></span>` },
 }));
 vi.mock("@/components/ui/LightDropdown.vue", () => ({
-  default: { name: "LightDropdownStub", template: `<div />` },
+  default: { name: "LightDropdownStub", props: ["items"], emits: ["update:modelValue"], template: `<div><button v-for="item in items" :key="item.value" :data-menu-item="item.value" @click="$emit('update:modelValue', item.value)">{{ item.label }}</button></div>` },
 }));
+vi.mock("@/components/binlog/BinlogRecoveryDialog.vue", () => ({ __esModule: true, default: { props: ["open"], template: '<div v-if="open" data-binlog-dialog-open>Binlog recovery</div>' } }));
 vi.mock("@/components/layout/WindowControls.vue", () => ({
   default: { name: "WindowControlsStub", template: `<div />` },
 }));
@@ -207,5 +208,20 @@ describe("AppToolbar web branding (#8703, #11053)", () => {
     expect(brandEl).toBeNull();
 
     unmount();
+  });
+  it("opens the lazy binlog dialog from the Desktop menu but exposes no Web entry", async () => {
+    mockIsTauriRuntime = false;
+    let mounted = mount();
+    await nextTick();
+    expect(mounted.host.querySelector('[data-menu-item="binlog-recovery"]')).toBeNull();
+    mounted.unmount();
+    mockIsTauriRuntime = true;
+    mounted = mount();
+    await nextTick();
+    const entry = mounted.host.querySelector<HTMLButtonElement>('[data-menu-item="binlog-recovery"]');
+    expect(entry).not.toBeNull();
+    entry!.click();
+    await vi.waitFor(() => expect(mounted.host.querySelector("[data-binlog-dialog-open]")).not.toBeNull());
+    mounted.unmount();
   });
 });

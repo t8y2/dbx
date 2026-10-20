@@ -2151,6 +2151,7 @@ dependencies = [
  "calamine",
  "chrono",
  "csv",
+ "dbx-binlog",
  "dbx-core",
  "dbx-mcp",
  "dbx-tauri-consul",
@@ -2225,6 +2226,21 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "dbx-binlog"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "getrandom 0.3.4",
+ "mysql_common",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sysinfo",
+ "tempfile",
 ]
 
 [[package]]
@@ -5948,6 +5964,7 @@ source = "git+https://github.com/t8y2/rust_mysql_common.git?rev=47740d85a8277167
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
+ "bitvec",
  "btoi",
  "byteorder",
  "bytes",
@@ -5969,6 +5986,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.19",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

@@ -1,3 +1,4 @@
+import { binlogRecoveryRu as binlogRecovery } from "./binlogRecovery";
 import { sidebarMenuRu as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogRu as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
@@ -7,6 +8,7 @@ import { meilisearchManagementRu } from "./meilisearchManagement";
 
 // Russian locale. Entries omitted here fall back to English at runtime.
 export default withEnglishFallback({
+  binlogRecovery,
   oracleSecurity: {
     directSqlNotice: "Только видимые прямые назначения, а не действующие права сеанса или полный скрипт для повторного выполнения. Наследование и выдавшие права указаны в подробностях источников.",
     searchOwner: "Поиск owner/schema",

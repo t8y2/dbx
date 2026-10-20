@@ -1,3 +1,4 @@
+import { binlogRecoveryKo as binlogRecovery } from "./binlogRecovery";
 import { sidebarMenuKo as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogKo as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { withEnglishFallback } from "./fallback";
@@ -64,6 +65,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  binlogRecovery,
   oracleSecurity: {
     directSqlNotice: "조회 가능한 직접 부여만 표시하며 세션의 유효 권한이나 완전한 재실행 스크립트가 아닙니다. 상속과 부여자는 출처 상세 정보에 표시됩니다.",
     searchOwner: "owner/schema 검색",

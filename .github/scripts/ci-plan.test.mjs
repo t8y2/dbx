@@ -14,6 +14,7 @@ const root = "/fixture";
 const graph = {
   "dbx-types": [],
   "dbx-platform": [],
+  "dbx-binlog": [],
   "dbx-formats": [],
   "dbx-sql-core": ["dbx-types"],
   "dbx-sql-dialect": ["dbx-types"],
@@ -36,7 +37,7 @@ const graph = {
   "dbx-mcp": ["dbx-core"],
   "dbx-cli": ["dbx-core", "dbx-mcp"],
   "dbx-web": ["dbx-core", "dbx-mcp"],
-  dbx: ["dbx-core", "dbx-mcp", "dbx-tauri-consul", "dbx-tauri-schema"],
+  dbx: ["dbx-core", "dbx-mcp", "dbx-tauri-consul", "dbx-tauri-schema", "dbx-binlog"],
   "dbx-tauri-consul": ["dbx-core"],
   "dbx-tauri-schema": ["dbx-core"],
 };
@@ -103,6 +104,15 @@ test("core and consumer changes do not pull unrelated foundation test groups", (
   assert.deepEqual(groups(cli), ["application"]);
   assert.equal(cli.agents, false);
   assert.deepEqual(groups(plan(["crates/dbx-driver-postgres/src/postgres.rs"])), ["drivers", "application"]);
+});
+
+test("binlog changes select their tests and the desktop consumer without unknown-workspace fallback", () => {
+  const result = plan(["crates/dbx-binlog/src/host.rs"]);
+  assert.equal(result.rust_groups_known, true);
+  assert.equal(result.rust_full, false);
+  assert.deepEqual(groups(result), ["application"]);
+  assert.deepEqual(result.affected_packages.toSorted(), ["dbx", "dbx-binlog"]);
+  assert.equal(result.windows_standard, true);
 });
 
 test("Win7 candidate follows the desktop package dependency graph", () => {

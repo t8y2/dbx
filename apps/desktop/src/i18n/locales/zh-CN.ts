@@ -1,3 +1,4 @@
+import { binlogRecoveryZhCN as binlogRecovery } from "./binlogRecovery";
 import { sidebarMenuZhCN as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogZhCN as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
 import { redisGroupingZhCN as redisGrouping } from "./redisGrouping";
@@ -10,6 +11,7 @@ import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpZhCN as damengDump } from "./damengDump";
 
 export default withEnglishFallback({
+  binlogRecovery,
   oracleSecurity: {
     directSqlNotice: "仅显示可见的直接授权，不代表会话有效权限，也不是完整重放脚本。继承及授予者见来源详情。",
     searchOwner: "搜索 owner/schema",

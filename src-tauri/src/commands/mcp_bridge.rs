@@ -565,10 +565,11 @@ mod tests {
         bridge_request_is_local_client, clear_mcp_sql_approvals, effective_database_execution_policy,
         ensure_connection_in_mcp_scope, ensure_mcp_connection_sql_write_allowed, ensure_mcp_execute_and_show_supported,
         ensure_mcp_mongo_pipeline_target_allowed_by_id, ensure_mcp_sql_database_switch_allowed,
-        is_terminal_routed_exec, mongo_filter_is_effectively_unbounded, mongo_pipeline_has_write_stage,
-        parse_content_length, plugin_connection_summaries, plugin_connection_summary, read_bridge_request,
-        resolve_call_plugin_target, resolve_connection, resolve_mongo_database, resolve_mongo_target_values,
-        sql_approvals, take_sql_approval, write_port_file, AppState, SqlApprovalGrant, TimedSqlApproval,
+        ensure_mcp_sql_file_attachment_allowed, is_terminal_routed_exec, mongo_filter_is_effectively_unbounded,
+        mongo_pipeline_has_write_stage, parse_content_length, plugin_connection_summaries, plugin_connection_summary,
+        read_bridge_request, resolve_call_plugin_target, resolve_connection, resolve_mongo_database,
+        resolve_mongo_target_values, sql_approvals, take_sql_approval, write_port_file, AppState, SqlApprovalGrant,
+        TimedSqlApproval,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
     use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
@@ -1034,11 +1035,20 @@ mod tests {
     }
 
     #[test]
-    fn mcp_sql_rejects_persistent_database_switches() {
+    fn mcp_sql_rejects_persistent_database_switches_and_file_attachments() {
         assert!(ensure_mcp_sql_database_switch_allowed(DatabaseType::Mysql, "SELECT 1").is_ok());
         assert_eq!(
             ensure_mcp_sql_database_switch_allowed(DatabaseType::Mysql, "USE production").unwrap_err(),
             "SQL_BLOCKED: MCP does not allow USE or persistent database switching."
+        );
+        assert_eq!(
+            ensure_mcp_sql_file_attachment_allowed(DatabaseType::Sqlite, "ATTACH DATABASE '/tmp/other.db' AS other")
+                .unwrap_err(),
+            "SQL_BLOCKED: MCP does not allow ATTACH or DETACH. Configure attached databases on the connection instead."
+        );
+        assert_eq!(
+            ensure_mcp_sql_file_attachment_allowed(DatabaseType::DuckDb, "DETACH other").unwrap_err(),
+            "SQL_BLOCKED: MCP does not allow ATTACH or DETACH. Configure attached databases on the connection instead."
         );
     }
 
@@ -1834,6 +1844,7 @@ async fn ensure_mcp_sql_allowed_with_approval(
             );
         }
     }
+    ensure_mcp_sql_file_attachment_allowed(config.db_type, sql)?;
     ensure_mcp_sql_database_switch_allowed(config.db_type, sql)?;
     let risk = dbx_core::sql_risk::classify_sql_risk_for_database(sql, config.db_type)
         .map_err(|error| format!("SQL_BLOCKED: {error}"))?;
@@ -2167,6 +2178,21 @@ fn ensure_mcp_sql_database_switch_allowed(
 ) -> Result<(), String> {
     if dbx_core::sql_risk::mcp_sql_has_forbidden_database_switch(sql, database_type) {
         return Err("SQL_BLOCKED: MCP does not allow USE or persistent database switching.".to_string());
+    }
+    Ok(())
+}
+
+/// The desktop bridge must enforce the same local-file boundary as the
+/// standalone MCP server: an ATTACH could otherwise reach DBX's own state DB.
+fn ensure_mcp_sql_file_attachment_allowed(
+    database_type: crate::models::connection::DatabaseType,
+    sql: &str,
+) -> Result<(), String> {
+    if dbx_core::sql_risk::mcp_sql_has_forbidden_file_attach(sql, database_type) {
+        return Err(
+            "SQL_BLOCKED: MCP does not allow ATTACH or DETACH. Configure attached databases on the connection instead."
+                .to_string(),
+        );
     }
     Ok(())
 }

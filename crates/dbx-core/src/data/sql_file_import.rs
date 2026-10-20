@@ -677,6 +677,33 @@ impl SqlFilePinnedSession {
     fn id(&self) -> Option<&str> {
         self.client_session_id.as_deref()
     }
+
+    /// Close the pinned session before work that runs on another connection.
+    ///
+    /// Closing the session pool terminates its connection, which rolls back any
+    /// transaction the file left open and releases its locks. The cleanup guard
+    /// only drops at function exit, which is too late for the catalog-level
+    /// constraint restore: that restore runs on the shared pool and would wait
+    /// on the pinned session's locks until the query timeout.
+    async fn release(&mut self, state: &AppState, request: &SqlFileRequest) {
+        let Some(client_session_id) = self.client_session_id.take() else {
+            return;
+        };
+        let database = request.database.trim();
+        let database = (!database.is_empty()).then_some(database);
+        match state.close_client_session_pool(&request.connection_id, database, &client_session_id).await {
+            Ok(_) => {
+                if let Some(cleanup) = self._cleanup.as_mut() {
+                    cleanup.disarm();
+                }
+            }
+            Err(error) => {
+                // Leave the guard armed so the pool is still removed at function
+                // exit even if the synchronous close failed.
+                log::warn!("[sql_file_import] failed to close pinned session {client_session_id}: {error}");
+            }
+        }
+    }
 }
 
 fn should_pin_sql_file_session(request: &SqlFileRequest, mysql_executor_present: bool) -> bool {
@@ -755,7 +782,7 @@ async fn execute_sql_file_content_inner(
     let mut mysql_executor = MySqlSqlFileExecutor::build(state, request, import_target.as_ref()).await?;
     // Every other family also needs one connection for the whole file: a
     // file-level `BEGIN` / `COMMIT` must not span pooled sessions (#12160).
-    let pinned_session = pin_sql_file_session(state, request, mysql_executor.is_some()).await;
+    let mut pinned_session = pin_sql_file_session(state, request, mysql_executor.is_some()).await;
     let bypass_kind = import_target.as_ref().and_then(relational_constraint_bypass_kind);
     let non_mysql_bypass = request.skip_relational_constraints
         && mysql_executor.is_none()
@@ -781,6 +808,11 @@ async fn execute_sql_file_content_inner(
     )
     .await;
     if non_mysql_bypass {
+        // Release the pinned session first. A file that opened a transaction and
+        // then failed or was cancelled can still hold locks on imported tables;
+        // the catalog-level restore below runs on another connection and would
+        // block on them until the query timeout.
+        pinned_session.release(state, request).await;
         let kind = bypass_kind.expect("non_mysql_bypass implies bypass_kind is set");
         // Use a fresh token, not the (possibly already-cancelled) import token: the
         // restore is catalog-level and must run even after the user cancels, or FK
@@ -928,7 +960,7 @@ async fn execute_sql_file_paths_inner(
     };
     // Non-MySQL families need one connection for the whole batch so a file-level
     // `BEGIN` / `COMMIT` cannot span pooled sessions (#12160).
-    let pinned_session = pin_sql_file_session(state, request, mysql_executor.is_some()).await;
+    let mut pinned_session = pin_sql_file_session(state, request, mysql_executor.is_some()).await;
     let constraints_disabled = request.skip_relational_constraints && mysql_executor.is_some();
     if constraints_disabled {
         let executor = mysql_executor.as_mut().expect("missing MySQL executor while disabling constraints");
@@ -1171,6 +1203,10 @@ async fn execute_sql_file_paths_inner(
         }
     }
     if non_mysql_bypass {
+        // Same ordering as `execute_sql_file_content`: close the pinned session
+        // before the catalog-level restore so an unfinished transaction cannot
+        // hold locks the restore would wait on.
+        pinned_session.release(state, request).await;
         let kind = bypass_kind.expect("non_mysql_bypass implies bypass_kind is set");
         // Fresh token: see the matching comment in `execute_sql_file_content`. `token`
         // here may already be cancelled (user cancel or terminal error), which would

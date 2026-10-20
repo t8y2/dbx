@@ -185,3 +185,58 @@ async fn live_postgres_sql_file_with_explicit_transaction_runs_twice() {
 
     context.state.shutdown(Duration::from_secs(10)).await;
 }
+
+/// `skip_relational_constraints` restores triggers on the shared pool after the
+/// import. A file that leaves a transaction open (here: `BEGIN` + `LOCK TABLE`,
+/// then a failing statement) must not keep the pinned session's lock while that
+/// restore runs, or the restore blocks until the query timeout.
+#[tokio::test]
+#[ignore = "requires a writable PostgreSQL pointed at by DBX_LIVE_POSTGRES_*"]
+async fn live_postgres_sql_file_releases_session_before_constraint_restore() {
+    let context = setup().await;
+    let table = format!("dbx_file_lock_{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+    query(
+        &context.state,
+        &context.database,
+        &format!("CREATE TABLE public.{table} (id int PRIMARY KEY, parent_id int REFERENCES public.{table}(id))"),
+    )
+    .await
+    .expect("create probe table");
+
+    let mut request = request(&context.database, "constraint-restore");
+    request.skip_relational_constraints = true;
+    let file = format!(
+        "BEGIN;\n\
+         LOCK TABLE public.{table} IN ACCESS EXCLUSIVE MODE;\n\
+         SELECT missing_column FROM public.{table};\n"
+    );
+
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        execute_sql_file_content(&context.state, &request, &file, CancellationToken::new(), Instant::now(), |_| {}),
+    )
+    .await
+    .expect("constraint restore must not block on the pinned session");
+    assert!(result.is_err(), "the missing column must fail the import");
+    assert!(started.elapsed() < Duration::from_secs(15), "constraint restore waited on the pinned session's lock");
+
+    let disabled = query(
+        &context.state,
+        &context.database,
+        &format!(
+            "SELECT count(*)::text FROM pg_trigger \
+             WHERE tgrelid = 'public.{table}'::regclass AND tgenabled = 'D'"
+        ),
+    )
+    .await
+    .expect("inspect trigger state");
+    assert_eq!(
+        disabled.rows.first().and_then(|row| row.first()).and_then(|value| value.as_str()),
+        Some("0"),
+        "constraint restore did not re-enable the probe table's triggers"
+    );
+
+    query(&context.state, &context.database, &format!("DROP TABLE public.{table}")).await.expect("cleanup");
+    context.state.shutdown(Duration::from_secs(10)).await;
+}

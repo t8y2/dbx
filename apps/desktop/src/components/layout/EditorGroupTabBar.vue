@@ -1265,7 +1265,7 @@ function closeSpecialPage(surface: SpecialPageSurface) {
 }
 
 function selectTwoRowGroup(group: TwoRowGroupItem) {
-  if (twoRowSelectedKey.value === group.key) return;
+  if (twoRowSelectedKey.value === group.key && !specialPageActive.value) return;
   twoRowFocusedGroupKey.value = group.key;
   const remembered = twoRowGroupActiveTabs.get(group.key);
   const targetId = remembered && group.tabIds.includes(remembered) ? remembered : group.tabIds[0];

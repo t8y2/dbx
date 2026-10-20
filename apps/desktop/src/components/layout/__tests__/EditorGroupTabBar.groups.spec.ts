@@ -878,6 +878,23 @@ describe("EditorGroupTabBar special page navigation", () => {
     return { ...mounted, store, settings, tabId, specialPageTabs, events };
   }
 
+  it("returns from a special page when the current two-row group is clicked", async () => {
+    const activate = vi.fn();
+    const { app, host, settings, tabId } = mountSpecialBar({ "onActivate-tab": activate });
+    settings.editorSettings.tabGroupRows = "two-row";
+    try {
+      await settle();
+      const group = host.querySelector<HTMLButtonElement>(".tab-group-rail-scroll .tab-group-header");
+      expect(group).not.toBeNull();
+      group!.click();
+      await settle();
+      expect(activate).toHaveBeenCalledWith(tabId);
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
   it.each(["classic", "separated"] as const)("keeps grouped tabs and both special pages at every placement in %s layout", async (layout) => {
     const { app, host, settings, store, tabId } = mountSpecialBar();
     settings.editorSettings.appLayout = layout;

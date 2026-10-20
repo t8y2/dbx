@@ -11006,7 +11006,7 @@ LIMIT 100;</pre>
                     </div>
                     <div class="space-y-2 md:col-span-2">
                       <Label for="snippet-sync-passphrase">{{ t("settings.syncSnippetPassphrase") }}</Label>
-                      <PasswordInput id="snippet-sync-passphrase" v-model="snippetPassphrase" :placeholder="snippetHasSavedPassphrase ? '••••••••' : ''" autocomplete="new-password" />
+                      <PasswordInput id="snippet-sync-passphrase" v-model="snippetPassphrase" :placeholder="snippetHasSavedPassphrase ? '••••••••' : ''" :show-toggle="!snippetHasSavedPassphrase || !!snippetPassphrase" autocomplete="new-password" />
                       <div class="flex items-center justify-between gap-3">
                         <label class="flex items-center gap-2 text-xs text-muted-foreground">
                           <input v-model="snippetRememberPassphrase" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />

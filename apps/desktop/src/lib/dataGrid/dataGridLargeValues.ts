@@ -177,12 +177,30 @@ function matchesMysqlUnboundedLargeValueType(base: string): boolean {
   return base === "blob" || base === "mediumblob" || base === "longblob" || base === "text" || base === "mediumtext" || base === "longtext" || base === "json";
 }
 
+/**
+ * Oracle table-data previews truncate LOBs with DBMS_LOB.SUBSTR in the SQL
+ * itself; types without a SUBSTR overload (XMLTYPE, BFILE, LONG, object
+ * columns) keep their existing passthrough behavior.
+ */
+function isOracleTableDataLobColumn(column: Pick<ColumnInfo, "data_type">): boolean {
+  return /^(?:NCLOB|CLOB|BLOB)$/i.test(column.data_type.trim());
+}
+
 export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[]): boolean {
-  return supportsTableDataLargeValuePreview(databaseType) && columns.length > 0 && primaryKeys.length > 0 && !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX));
+  return (
+    supportsTableDataLargeValuePreview(databaseType) &&
+    columns.length > 0 &&
+    primaryKeys.length > 0 &&
+    // Oracle opts in only when a CLOB/NCLOB/BLOB column actually exists: the
+    // preview flag also reaches the Oracle agent as deferLobs, which must stay
+    // off for tables the SQL preview cannot serve.
+    (databaseType !== "oracle" || columns.some(isOracleTableDataLobColumn)) &&
+    !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX))
+  );
 }
 
 export function supportsTableDataLargeValuePreview(databaseType: DatabaseType | undefined): boolean {
-  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "db2";
+  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "db2" || databaseType === "oracle";
 }
 
 /**
@@ -206,7 +224,15 @@ export function tableDataLargeValuePreviewOptions(databaseType: DatabaseType | u
   if (!canUseTableDataLargeValuePreview(databaseType, columns, primaryKeys)) return {};
   const keyColumns = new Set(primaryKeys.map((column) => column.toLocaleLowerCase()));
   const mysqlBudget = databaseType === "mysql" ? mysqlPreviewBudget(columns, keyColumns, pageSize) : null;
-  const previewColumnCount = databaseType === "mysql" ? (mysqlBudget?.previewColumnCount ?? 0) : columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase())).length;
+  // Oracle only ever truncates CLOB/NCLOB/BLOB columns, so budgeting over the
+  // exact LOB column count keeps the per-cell preview from being spread thin
+  // across wide tables.
+  const previewColumnCount =
+    databaseType === "mysql"
+      ? (mysqlBudget?.previewColumnCount ?? 0)
+      : databaseType === "oracle"
+        ? columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase()) && isOracleTableDataLobColumn(column)).length
+        : columns.filter((column) => !keyColumns.has(column.name.toLocaleLowerCase())).length;
   if (previewColumnCount === 0) return {};
   return {
     columnTypes: columns.map((column) => column.data_type),

@@ -105,11 +105,30 @@ fn large_value_preview_kind(
                 None
             }
         }
+        // XMLTYPE, BFILE, LONG and object columns stay untouched: DBMS_LOB.SUBSTR
+        // has no overload for them, and the agent's value rewrite keeps
+        // handling them exactly as before.
+        Some(DatabaseType::Oracle) => {
+            if matches!(base.as_str(), "clob" | "nclob") {
+                Some(LargeValuePreviewKind::Text)
+            } else if base == "blob" {
+                Some(LargeValuePreviewKind::Binary)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
 
-fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Option<String> {
+struct LargeValuePreviewItem {
+    projection: String,
+    /// Output alias of the projection. ROWNUM pagination re-selects it from the
+    /// inline view, so it must equal the expression's AS alias exactly.
+    alias: String,
+}
+
+fn build_large_value_preview_items(options: &TableDataSelectSqlOptions) -> Option<Vec<LargeValuePreviewItem>> {
     let database_type = options.database_type;
     let preview_size = options.large_value_preview_size?.max(1);
     if options.columns.is_empty()
@@ -125,7 +144,7 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
 
     let protected: std::collections::HashSet<String> =
         options.primary_keys.iter().map(|column| column.to_ascii_lowercase()).collect();
-    let mut projections = Vec::with_capacity(options.columns.len() * 2);
+    let mut items = Vec::with_capacity(options.columns.len() * 2);
     let mut marker_count = 0;
     for (column_index, (column, data_type)) in options.columns.iter().zip(&options.column_types).enumerate() {
         let quoted = if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
@@ -137,16 +156,26 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
             .then(|| large_value_preview_kind(database_type, data_type, preview_size))
             .flatten();
         let Some(kind) = kind else {
-            projections.push(quoted);
+            items.push(LargeValuePreviewItem { projection: quoted, alias: column.clone() });
             continue;
         };
 
-        let alias_kind = large_value_marker_alias_kind(kind, data_type);
-        let marker_alias = quote_table_identifier(
-            database_type,
-            &format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{column_index}"),
-        );
+        // Oracle caps SQL-level results at 4000 bytes for VARCHAR2/NVARCHAR2
+        // and 2000 bytes for RAW. DBMS_LOB.SUBSTR amounts are characters, so
+        // 1000 characters of 4-byte UTF-8 and 1999 bytes (RAWTOHEX doubles to
+        // 3998 characters plus the "0x" prefix) are the safe ceilings. The
+        // recorded preview size stays below the fetch amount so oversized
+        // values keep the +1-character truncation signal.
+        let preview_size = match (database_type, kind) {
+            (Some(DatabaseType::Oracle), LargeValuePreviewKind::Binary) => preview_size.min(1998),
+            (Some(DatabaseType::Oracle), _) => preview_size.min(999),
+            _ => preview_size,
+        };
         let prefix_size = preview_size.saturating_add(1);
+
+        let alias_kind = large_value_marker_alias_kind(kind, data_type);
+        let marker_name = format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{column_index}");
+        let marker_alias = quote_table_identifier(database_type, &marker_name);
         let (preview, marker_kind) = match database_type {
             Some(DatabaseType::Mysql) if kind == LargeValuePreviewKind::Binary => {
                 (format!("LEFT({quoted}, {prefix_size}) AS {quoted}"), "B")
@@ -173,20 +202,41 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
                 format!("SUBSTR({quoted}, 1, CASE WHEN LENGTH({quoted}) >= {prefix_size} THEN {prefix_size} ELSE LENGTH({quoted}) END) AS {quoted}"),
                 "T",
             ),
+            Some(DatabaseType::Oracle) if kind == LargeValuePreviewKind::Binary => (
+                // RAWTOHEX yields the 0x-prefixed hex shape the client-side
+                // binary preview truncation expects.
+                format!("'0x' || RAWTOHEX(DBMS_LOB.SUBSTR({quoted}, {prefix_size}, 1)) AS {quoted}"),
+                "B",
+            ),
+            Some(DatabaseType::Oracle) => (format!("DBMS_LOB.SUBSTR({quoted}, {prefix_size}, 1) AS {quoted}"), "T"),
             _ => return None,
         };
         let marker = if database_type == Some(DatabaseType::Mysql) {
             format!("CONCAT('{marker_kind}:{preview_size}:', LENGTH({quoted})) AS {marker_alias}")
         } else if database_type == Some(DatabaseType::Postgres) && kind == LargeValuePreviewKind::Binary {
             format!("'{marker_kind}:{preview_size}:' || octet_length({quoted})::text AS {marker_alias}")
+        } else if database_type == Some(DatabaseType::Oracle) {
+            // GETLENGTH reads LOB metadata only; a NULL LOB yields a NULL
+            // marker, which the client treats as "nothing to load".
+            format!("'{marker_kind}:{preview_size}:' || DBMS_LOB.GETLENGTH({quoted}) AS {marker_alias}")
         } else {
             format!("'{marker_kind}:{preview_size}' AS {marker_alias}")
         };
-        projections.push(preview);
-        projections.push(marker);
+        items.push(LargeValuePreviewItem { projection: preview, alias: column.clone() });
+        items.push(LargeValuePreviewItem { projection: marker, alias: marker_name });
         marker_count += 1;
     }
-    (marker_count > 0).then(|| projections.join(", "))
+    (marker_count > 0).then(|| items)
+}
+
+fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Option<String> {
+    Some(
+        build_large_value_preview_items(options)?
+            .into_iter()
+            .map(|item| item.projection)
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 pub fn build_count_table_sql(database_type: Option<DatabaseType>, schema: Option<&str>, table_name: &str) -> String {
@@ -320,7 +370,19 @@ pub fn build_table_data_select_sql_with_database(
         && is_postgres_base_table_type(options.table_type.as_deref())
         && options.primary_keys.is_empty();
     let offset = options.offset.unwrap_or(0);
-    let select_columns = if include_oracle_row_id {
+    // Oracle previews ride the ROWNUM inline view: the truncated projections
+    // and marker columns live in the inner SELECT, and the outer page SELECT
+    // re-selects them by alias so markers survive pagination.
+    let oracle_preview_items =
+        build_large_value_preview_items(&options).filter(|_| database_type == Some(DatabaseType::Oracle));
+    let select_columns = if let Some(items) = &oracle_preview_items {
+        let mut projections = Vec::with_capacity(items.len() + 1);
+        if include_oracle_row_id {
+            projections.push(format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\""));
+        }
+        projections.extend(items.iter().map(|item| item.projection.clone()));
+        projections.join(", ")
+    } else if include_oracle_row_id {
         format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\", t.*")
     } else if include_postgres_ctid {
         // tableoid separates inherited relations; xmin keeps a recycled CTID from
@@ -348,7 +410,14 @@ pub fn build_table_data_select_sql_with_database(
         )
     };
     let rownum_select_columns = quoted_table_columns_or_star(database_type, &options.columns);
-    let page_select_columns = if include_oracle_row_id {
+    let page_select_columns = if let Some(items) = &oracle_preview_items {
+        let mut columns = Vec::with_capacity(items.len() + 1);
+        if include_oracle_row_id {
+            columns.push(format!("\"{DBX_ROWID_COLUMN}\""));
+        }
+        columns.extend(items.iter().map(|item| quote_table_identifier(database_type, &item.alias)));
+        columns.join(", ")
+    } else if include_oracle_row_id {
         if options.columns.is_empty() {
             "*".to_string()
         } else {
@@ -410,8 +479,11 @@ pub fn build_table_data_select_sql_with_database(
             )
         }
         TablePaginationStrategy::Rownum => {
-            let rownum_inner_select_columns =
-                if include_oracle_row_id { &select_columns } else { &rownum_select_columns };
+            let rownum_inner_select_columns = if include_oracle_row_id || oracle_preview_items.is_some() {
+                &select_columns
+            } else {
+                &rownum_select_columns
+            };
             build_rownum_table_select_sql(
                 &table_alias,
                 &where_clause,

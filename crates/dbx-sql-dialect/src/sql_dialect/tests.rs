@@ -1119,6 +1119,148 @@ fn builds_db2_table_data_large_value_previews_with_bounded_substr() {
 }
 
 #[test]
+fn builds_oracle_table_data_large_value_previews_with_bounded_substr() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("MESPRD".to_string()),
+        table_name: "API_REQUEST_RESPONSE".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "REQ_PAYLOAD".to_string(), "RESP_PAYLOAD".to_string(), "RAW_DATA".to_string()],
+        column_types: vec!["NUMBER".to_string(), "CLOB".to_string(), "NCLOB".to_string(), "BLOB".to_string()],
+        large_value_preview_size: Some(8192),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    // Oracle SQL 结果上限：VARCHAR2 4000 字节（4 字节/字符 → 999+1 字符）、RAW 2000 字节
+    // （RAWTOHEX 翻倍 + "0x" → 1998+1 字节）。外层 ROWNUM 分页按别名重选内层视图的列，
+    // marker 列必须透传到最外层，客户端才能剥离并登记大值单元格。
+    assert!(
+        sql.starts_with(
+            "SELECT \"ID\", \"REQ_PAYLOAD\", \"__DBX_LARGE_VALUE_BYTES_T_1\", \"RESP_PAYLOAD\", \"__DBX_LARGE_VALUE_BYTES_T_2\", \"RAW_DATA\", \"__DBX_LARGE_VALUE_BYTES_B_3\" FROM"
+        ),
+        "outer page projection: {sql}"
+    );
+    assert!(
+        sql.contains("DBMS_LOB.SUBSTR(\"REQ_PAYLOAD\", 1000, 1) AS \"REQ_PAYLOAD\""),
+        "clob preview sql: {sql}"
+    );
+    assert!(
+        sql.contains("'T:999:' || DBMS_LOB.GETLENGTH(\"REQ_PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_1\""),
+        "clob marker sql: {sql}"
+    );
+    assert!(
+        sql.contains("DBMS_LOB.SUBSTR(\"RESP_PAYLOAD\", 1000, 1) AS \"RESP_PAYLOAD\""),
+        "nclob preview sql: {sql}"
+    );
+    assert!(
+        sql.contains("'T:999:' || DBMS_LOB.GETLENGTH(\"RESP_PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_2\""),
+        "nclob marker sql: {sql}"
+    );
+    assert!(
+        sql.contains("'0x' || RAWTOHEX(DBMS_LOB.SUBSTR(\"RAW_DATA\", 1999, 1)) AS \"RAW_DATA\""),
+        "blob preview sql: {sql}"
+    );
+    assert!(
+        sql.contains("'B:1998:' || DBMS_LOB.GETLENGTH(\"RAW_DATA\") AS \"__DBX_LARGE_VALUE_BYTES_B_3\""),
+        "blob marker sql: {sql}"
+    );
+    assert!(sql.contains("ROWNUM <= 100"), "rownum page: {sql}");
+    assert!(!sql.contains("SUBSTR(\"ID\""), "pk should not be previewed: {sql}");
+}
+
+#[test]
+fn builds_oracle_table_data_previews_for_small_budgets() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        table_name: "documents".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "BODY".to_string()],
+        column_types: vec!["NUMBER".to_string(), "CLOB".to_string()],
+        large_value_preview_size: Some(200),
+        limit: Some(50),
+        ..Default::default()
+    });
+
+    assert!(sql.contains("DBMS_LOB.SUBSTR(\"BODY\", 201, 1) AS \"BODY\""), "preview sql: {sql}");
+    assert!(
+        sql.contains("'T:200:' || DBMS_LOB.GETLENGTH(\"BODY\") AS \"__DBX_LARGE_VALUE_BYTES_T_1\""),
+        "marker sql: {sql}"
+    );
+}
+
+#[test]
+fn builds_oracle_table_data_previews_for_rowid_keyed_tables() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        table_name: "keyless_logs".to_string(),
+        table_type: Some("TABLE".to_string()),
+        primary_keys: vec!["__DBX_ROWID".to_string()],
+        include_row_id: true,
+        columns: vec!["PAYLOAD".to_string(), "CREATED_AT".to_string()],
+        column_types: vec!["CLOB".to_string(), "DATE".to_string()],
+        large_value_preview_size: Some(200),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    // 无主键基表：内层投影以合成键 ROWIDTOCHAR 开头、FROM 带别名 t，外层按别名重选
+    // __DBX_ROWID 与 marker 列，取全值时按同一合成键回查。
+    assert!(
+        sql.contains(
+            "SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", DBMS_LOB.SUBSTR(\"PAYLOAD\", 201, 1) AS \"PAYLOAD\", 'T:200:' || DBMS_LOB.GETLENGTH(\"PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_0\", \"CREATED_AT\" FROM \"keyless_logs\" t"
+        ),
+        "inner projection: {sql}"
+    );
+    assert!(
+        sql.starts_with("SELECT \"__DBX_ROWID\", \"PAYLOAD\", \"__DBX_LARGE_VALUE_BYTES_T_0\", \"CREATED_AT\" FROM"),
+        "outer projection: {sql}"
+    );
+}
+
+#[test]
+fn keeps_oracle_table_data_previews_on_later_pages() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        table_name: "documents".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "BODY".to_string()],
+        column_types: vec!["NUMBER".to_string(), "CLOB".to_string()],
+        large_value_preview_size: Some(200),
+        limit: Some(100),
+        offset: Some(200),
+        ..Default::default()
+    });
+
+    // 第二页起是三层嵌套；中间层 dbx_inner.* 必须把 marker 带到最外层投影。
+    assert!(sql.contains("\"__dbx_row_num\""), "row-number page: {sql}");
+    assert!(
+        sql.starts_with("SELECT \"ID\", \"BODY\", \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM"),
+        "outer projection: {sql}"
+    );
+    assert!(sql.contains("DBMS_LOB.SUBSTR(\"BODY\", 201, 1)"), "inner preview survives: {sql}");
+}
+
+#[test]
+fn skips_oracle_previews_for_columns_without_substr_support() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        table_name: "mixed_objects".to_string(),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "DOC".to_string(), "LEGACY".to_string()],
+        column_types: vec!["NUMBER".to_string(), "XMLTYPE".to_string(), "LONG".to_string()],
+        large_value_preview_size: Some(200),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    // XMLTYPE / LONG 没有 DBMS_LOB.SUBSTR 重载，保持原样投影（与旧行为一致）。
+    assert!(!sql.contains("DBMS_LOB"), "no substr for xmltype/long: {sql}");
+    assert!(!sql.contains("__DBX_LARGE_VALUE_BYTES_"), "no markers: {sql}");
+    assert!(sql.contains("\"DOC\""), "xmltype column stays projected: {sql}");
+}
+
+#[test]
 fn preserves_postgres_array_types_in_large_value_previews() {
     let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(DatabaseType::Postgres),

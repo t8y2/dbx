@@ -4342,7 +4342,7 @@ func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSiz
 			}
 			return oraclePagedRetrySQL(sqlText, s.loadOracleColumnMeta, err)
 		}
-		rows, err := s.queryRowsWithOracleValueRewriteIfNeeded(sqlText, opts.TimeoutSecs, opts.DeferLOBs)
+		rows, err := s.queryRowsWithOracleValueRewriteIfNeeded(sqlText, opts.TimeoutSecs, deferLobsForQuery(sqlText, opts.DeferLOBs))
 		if err != nil {
 			if rewritten, ok := retrySQL(err); ok {
 				sqlText = rewritten
@@ -4592,7 +4592,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		maxRows = defaultMaxRows
 	}
 	if isQuerySQL(sqlText) {
-		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs, opts.DeferLOBs)
+		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs, deferLobsForQuery(sqlText, opts.DeferLOBs))
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
@@ -4738,6 +4738,16 @@ func columnTypeNames(rows *sql.Rows) []string {
 		result = append(result, columnType.DatabaseTypeName())
 	}
 	return result
+}
+
+// deferLobsForQuery keeps SQL-level large-value previews in charge. When the
+// client already projected __DBX_LARGE_VALUE_BYTES_ marker columns (Oracle
+// table-data previews truncate LOBs with DBMS_LOB.SUBSTR in the SQL), those
+// expressions must pass through untouched and the nested value rewrite
+// (geometry/XMLType/opaque conversions) keeps running as usual, so the
+// deferred-LOB placeholder pass must not engage on top of them.
+func deferLobsForQuery(sqlText string, requested bool) bool {
+	return requested && !strings.Contains(strings.ToUpper(sqlText), largeValueBytesColumnPrefix)
 }
 
 func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeoutSecs int, deferLOBs bool) (resultRows *sql.Rows, queryErr error) {

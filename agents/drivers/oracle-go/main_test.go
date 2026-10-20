@@ -4816,6 +4816,22 @@ func TestRewriteOracleOpaqueObjectInDeferredProjection(t *testing.T) {
 	}
 }
 
+func TestDeferLobsForQueryDefersToSQLPreviewMarkers(t *testing.T) {
+	plain := `SELECT "ID", "BODY" FROM "MESPRD"."DOCUMENTS"`
+	if !deferLobsForQuery(plain, true) {
+		t.Fatal("defer should engage for plain projections")
+	}
+	if deferLobsForQuery(plain, false) {
+		t.Fatal("defer must honor the request flag")
+	}
+	preview := `SELECT "ID", "BODY", "__DBX_LARGE_VALUE_BYTES_T_1" FROM (SELECT "ID", ` +
+		`DBMS_LOB.SUBSTR("BODY", 201, 1) AS "BODY", 'T:200:' || DBMS_LOB.GETLENGTH("BODY") AS "__DBX_LARGE_VALUE_BYTES_T_1" ` +
+		`FROM "MESPRD"."DOCUMENTS") WHERE ROWNUM <= 100`
+	if deferLobsForQuery(preview, true) {
+		t.Fatal("defer must not engage when SQL-level preview markers are present")
+	}
+}
+
 func TestParseSingleOracleTableRefReadsDatabaseLinkAndAlias(t *testing.T) {
 	cases := []struct {
 		name string

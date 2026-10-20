@@ -291,6 +291,10 @@ func (s *server) connectionInfo() (map[string]any, error) {
 		"database": database, "username": username, "version": version, "schema": schema.String,
 		"compatibilityMode": s.mode.compatibilityMode, "mysql_compat_mode": s.mode.mysqlCompat,
 		"identifierQuote": s.identifierQuote(),
+		"databaseInfo": map[string]string{
+			"productName": "KingbaseES", "productVersion": version, "currentDatabase": database,
+			"compatibilityMode": s.mode.compatibilityMode,
+		},
 	}, nil
 }
 

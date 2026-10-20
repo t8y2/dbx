@@ -168,6 +168,22 @@ describe("content search preview navigation", () => {
     expect(host.querySelector(".cm-editor")).toBeNull();
   });
 
+  // File-content search is not connection-scoped, so offering the picker there would be a
+  // control that silently does nothing.
+  it("shows the connection scope picker only in object mode", async () => {
+    const { props } = await mountSearch();
+    const scopeTitle = i18n.global.t("quickOpen.scope");
+    expect([...host.querySelectorAll<HTMLElement>(`[title="${scopeTitle}"]`)]).toHaveLength(0);
+
+    props.initialContentMode = false;
+    await nextTick();
+    expect([...host.querySelectorAll<HTMLElement>(`[title="${scopeTitle}"]`)]).toHaveLength(1);
+
+    props.initialContentMode = true;
+    await nextTick();
+    expect([...host.querySelectorAll<HTMLElement>(`[title="${scopeTitle}"]`)]).toHaveLength(0);
+  });
+
   it("preserves single-click opening a search result", async () => {
     const { rows } = await mountSearch();
     rows[1]!.click();

@@ -3396,6 +3396,8 @@ export default withEnglishFallback({
     searchExtensions: "Расширения файлов",
     extensionsPlaceholder: "например, sql, txt, md",
     apply: "Применить",
+    scope: "Область поиска",
+    scopeAll: "Все подключения",
   },
   explain: {
     copyRaw: "Копировать {format}",

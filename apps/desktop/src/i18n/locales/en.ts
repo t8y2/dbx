@@ -3684,6 +3684,8 @@ export default {
     searchExtensions: "File extensions",
     extensionsPlaceholder: "e.g. sql, txt, md",
     apply: "Apply",
+    scope: "Search scope",
+    scopeAll: "All connections",
   },
   explain: {
     copyRaw: "Copy {format}",

@@ -3319,6 +3319,8 @@ export default withEnglishFallback({
     searchExtensions: "拡張子",
     extensionsPlaceholder: "例: sql, txt, md",
     apply: "適用",
+    scope: "検索範囲",
+    scopeAll: "すべての接続",
   },
   explain: {
     copyRaw: "{format} をコピー",

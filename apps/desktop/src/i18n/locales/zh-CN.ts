@@ -3616,6 +3616,8 @@ export default withEnglishFallback({
     searchExtensions: "扩展名",
     extensionsPlaceholder: "例如 sql, txt, md",
     apply: "应用",
+    scope: "搜索范围",
+    scopeAll: "全部连接",
   },
   explain: {
     copyRaw: "复制 {format}",

@@ -3240,6 +3240,8 @@ export default withEnglishFallback({
     searchExtensions: "Rozszerzenia plików",
     extensionsPlaceholder: "np. sql, txt, md",
     apply: "Zastosuj",
+    scope: "Zakres wyszukiwania",
+    scopeAll: "Wszystkie połączenia",
   },
   explain: {
     copyRaw: "Kopiuj jako {format}",

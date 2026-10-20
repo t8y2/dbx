@@ -3443,6 +3443,8 @@ export default withEnglishFallback({
     searchExtensions: "Extensiones de archivo",
     extensionsPlaceholder: "p. ej. sql, txt, md",
     apply: "Aplicar",
+    scope: "Ámbito de búsqueda",
+    scopeAll: "Todas las conexiones",
   },
   explain: {
     copyRaw: "Copiar {format}",

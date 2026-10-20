@@ -3298,6 +3298,8 @@ export default withEnglishFallback({
     searchExtensions: "副檔名",
     extensionsPlaceholder: "例如 sql, txt, md",
     apply: "套用",
+    scope: "搜尋範圍",
+    scopeAll: "全部連線",
   },
   explain: {
     copyRaw: "複製 {format}",

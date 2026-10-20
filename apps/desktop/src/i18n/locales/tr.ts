@@ -2820,6 +2820,8 @@ export default withEnglishFallback({
     searchExtensions: "Dosya uzantıları",
     extensionsPlaceholder: "örn. sql, txt, md",
     apply: "Uygula",
+    scope: "Arama kapsamı",
+    scopeAll: "Tüm bağlantılar",
   },
   explain: {
     copyRaw: "{format} kopyala",

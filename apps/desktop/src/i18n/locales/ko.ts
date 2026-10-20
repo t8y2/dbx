@@ -3244,6 +3244,8 @@ export default withEnglishFallback({
     searchExtensions: "확장자",
     extensionsPlaceholder: "예: sql, txt, md",
     apply: "적용",
+    scope: "검색 범위",
+    scopeAll: "모든 연결",
   },
   explain: {
     copyRaw: "{format} 복사",

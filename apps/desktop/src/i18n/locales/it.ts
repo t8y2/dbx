@@ -3295,6 +3295,8 @@ export default withEnglishFallback({
     searchExtensions: "Estensioni file",
     extensionsPlaceholder: "es. sql, txt, md",
     apply: "Applica",
+    scope: "Ambito di ricerca",
+    scopeAll: "Tutte le connessioni",
   },
   explain: {
     copyRaw: "Copia {format}",

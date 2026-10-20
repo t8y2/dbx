@@ -247,6 +247,24 @@ export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConn
   return effectiveDatabaseTypeForConnection(connection);
 }
 
+/** SQL syntax only: never use this mapping for transport, catalogs or capabilities. */
+export function kingbaseSqlDatabaseType(connection?: JdbcDialectConnection): "mysql" | "postgres" | "oracle" | "sqlserver" | undefined {
+  if (connection?.db_type !== "kingbase") return undefined;
+  const mode = connection.database_info?.compatibilityMode?.trim().toLowerCase();
+  switch (mode) {
+    case "pg":
+    case "postgres":
+    case "postgresql":
+      return "postgres";
+    case "oracle":
+    case "mysql":
+    case "sqlserver":
+      return mode;
+    default:
+      return undefined;
+  }
+}
+
 export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection) return undefined;
   if (connection.db_type === "gbase") return "gbase";

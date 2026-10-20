@@ -113,6 +113,26 @@ function structuredSqlError(detail = "duplicate key") {
 }
 
 describe("queryStore multi-statement errors", () => {
+  it.each([
+    ["oracle", "BEGIN\n NULL;\n NULL;\nEND;\n/\nSELECT 3;"],
+    ["mysql", "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;\nSELECT 3;"],
+    ["pg", "CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql; SELECT 3;"],
+    ["sqlserver", "SELECT [a;b] FROM #temp;\nGO\nSELECT 3;"],
+  ])("preserves Kingbase %s batch boundaries from the connection metadata", async (mode, sql) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "kingbase-1", db_type: "kingbase", database: "app", database_info: { compatibilityMode: mode } });
+    mocks.executeMulti.mockResolvedValue([
+      { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 },
+      { columns: ["value"], rows: [[3]], affected_rows: 0, execution_time_ms: 1 },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("kingbase-1", "app", "Query");
+    await store.executeTabSql(tabId, sql);
+    const batch = store.tabs.find((item) => item.id === tabId)!.batchSqlExecution;
+    expect(batch?.items).toHaveLength(2);
+    expect(batch?.items[1].sql).toBe("SELECT 3");
+  });
+
   it.each(["oracle", "oceanbase-oracle"])("preserves the intended offset timing scope for %s", async (dbType) => {
     mocks.getConnectionConfig.mockReturnValue({ id: "timing-offset", name: "Timing", db_type: dbType, database: "APP", query_timeout_secs: 30 });
     mocks.analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });

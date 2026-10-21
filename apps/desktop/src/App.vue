@@ -4590,6 +4590,12 @@ function handleVimDbxAppAction(event: Event) {
     case "closeTab":
       void closeActiveSurface();
       break;
+    case "closeOtherTabs":
+      appTabBarRef.value?.closeOtherActiveTabs();
+      break;
+    case "closeAllTabs":
+      appTabBarRef.value?.closeAllTabs();
+      break;
     case "reopenClosedTab":
       queryStore.reopenClosedTab();
       break;

@@ -41,6 +41,8 @@ export const DBX_VIM_ACTIONS = [
   // app scope (fall through to App.vue's window listener)
   "newQuery",
   "closeTab",
+  "closeOtherTabs",
+  "closeAllTabs",
   "reopenClosedTab",
   "openSettings",
 ] as const satisfies readonly ShortcutActionId[];

@@ -31,7 +31,7 @@ set clipboard=unnamedplus
 | 范围 | 操作 |
 | --- | --- |
 | 编辑器 | `executeSql`、`executeSqlInNewResultTab`、`explainSql`、`formatSql`、`saveSql`、`expandSelectStar`、`toggleLineComment`、`toggleBlockComment`、`selectCurrentStatement`、`previousStatement`、`nextStatement`、`statementStart`、`uppercaseSelection`、`lowercaseSelection`、`sendSelectionToAi`、`sqlIntentionActions` |
-| 应用 | `newQuery`、`closeTab`、`reopenClosedTab`、`openSettings` |
+| 应用 | `newQuery`、`closeTab`、`closeOtherTabs`、`closeAllTabs`、`reopenClosedTab`、`openSettings` |
 
 编辑器操作的行为与对应的快捷键相同。例如 `executeSql` 有选区时执行选中内容，否则执行当前语句。在可视模式下执行（命令行会变成 `:'<,'>dbx executeSql`）时，会先恢复可视选区，只使用选中的 SQL；行可视和块可视选区会扩展为整行。
 

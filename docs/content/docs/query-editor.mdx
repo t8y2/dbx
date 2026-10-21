@@ -31,7 +31,7 @@ Type `:dbx <action>` in the Vim command line to run a DBX action. Action names m
 | Scope | Actions |
 | --- | --- |
 | Editor | `executeSql`, `executeSqlInNewResultTab`, `explainSql`, `formatSql`, `saveSql`, `expandSelectStar`, `toggleLineComment`, `toggleBlockComment`, `selectCurrentStatement`, `previousStatement`, `nextStatement`, `statementStart`, `uppercaseSelection`, `lowercaseSelection`, `sendSelectionToAi`, `sqlIntentionActions` |
-| App | `newQuery`, `closeTab`, `reopenClosedTab`, `openSettings` |
+| App | `newQuery`, `closeTab`, `closeOtherTabs`, `closeAllTabs`, `reopenClosedTab`, `openSettings` |
 
 Editor actions behave like their keyboard shortcuts. For example, `executeSql` runs the selection when there is one, and the current statement otherwise. Running from Visual mode, which enters `:'<,'>dbx executeSql`, restores the visual selection first, so only the selected SQL is used. Linewise and blockwise selections are expanded to whole lines.
 

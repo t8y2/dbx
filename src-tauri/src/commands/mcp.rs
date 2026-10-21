@@ -7,8 +7,22 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+#[cfg(any(windows, test))]
+#[path = "mcp_cleanup.rs"]
+mod cleanup;
 #[path = "mcp_native_installation.rs"]
 mod native_installation;
+
+#[cfg(windows)]
+pub(crate) fn cleanup_mcp_installation_temp_files() {
+    let Some(home) = env::var_os("USERPROFILE").map(PathBuf::from).filter(|home| home.is_absolute()) else {
+        return;
+    };
+    let directory = home.join(".dbx").join("bin");
+    if let Err(error) = cleanup::cleanup_directory(&directory) {
+        log::debug!("Could not clean MCP replacement temporary files in {}: {error}", directory.display());
+    }
+}
 
 const MCP_PACKAGE_NAME: &str = "@dbx-app/mcp-server";
 const MCP_LATEST_URL: &str = "https://registry.npmjs.org/@dbx-app%2fmcp-server/latest";

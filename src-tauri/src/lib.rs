@@ -2010,6 +2010,8 @@ pub fn run() {
             open_plugin_install_deep_links(app.handle(), startup_plugin_install_links);
 
             let app_handle = app.handle().clone();
+            #[cfg(target_os = "windows")]
+            tauri::async_runtime::spawn_blocking(commands::mcp::cleanup_mcp_installation_temp_files);
             tauri::async_runtime::spawn(async move {
                 migration_gate.wait().await;
                 commands::mcp_bridge::start(app_handle, state, data_dir);

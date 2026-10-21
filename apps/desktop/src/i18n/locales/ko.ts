@@ -9250,6 +9250,8 @@ export default withEnglishFallback({
     tabGroupRowsSingle: "한 줄",
     tabGroupRowsTwoRow: "두 줄 (그룹을 별도 줄에 표시)",
     tabGroupRowsDescription: "탭 표시줄이 위쪽 또는 아래쪽에 있고 그룹화가 활성화된 경우에만 적용됩니다. 그룹은 별도의 줄에 표시되고 선택한 그룹의 탭은 다음 줄에 표시됩니다.",
+    linuxFloatingFrame: "창 투명 효과",
+    linuxFloatingFrameDescription: "지원되는 데스크톱에서 투명 테두리를 자동으로 활성화합니다. 창이 깜박이면 끌 수 있으며, 적용하고 DBX를 다시 시작한 후 적용됩니다. 환경 변수 설정이 우선합니다.",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

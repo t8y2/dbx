@@ -9315,6 +9315,8 @@ export default withEnglishFallback({
     tabGroupRowsSingle: "Riga singola",
     tabGroupRowsTwoRow: "Due righe (gruppi su una riga dedicata)",
     tabGroupRowsDescription: "Si applica solo a una barra delle schede superiore o inferiore con raggruppamento attivo: i gruppi occupano una riga dedicata e le schede del gruppo selezionato compaiono nella riga successiva.",
+    linuxFloatingFrame: "Effetto di trasparenza della finestra",
+    linuxFloatingFrameDescription: "Abilita automaticamente i bordi trasparenti sui desktop supportati. Può essere disattivato se la finestra sfarfalla; ha effetto dopo l'applicazione e il riavvio di DBX. Le impostazioni delle variabili d'ambiente hanno la precedenza.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

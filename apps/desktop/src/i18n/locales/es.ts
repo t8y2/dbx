@@ -9566,6 +9566,8 @@ export default withEnglishFallback({
     tabGroupRowsSingle: "Una fila",
     tabGroupRowsTwoRow: "Dos filas (grupos en su propia fila)",
     tabGroupRowsDescription: "Solo se aplica a una barra de pestañas superior o inferior con la agrupación activada: los grupos ocupan su propia fila y las pestañas del grupo seleccionado aparecen en la fila siguiente.",
+    linuxFloatingFrame: "Efecto de transparencia de ventana",
+    linuxFloatingFrameDescription: "Habilita automáticamente bordes transparentes en escritorios compatibles. Si la ventana parpadea, se puede desactivar; surte efecto tras aplicar y reiniciar DBX. La configuración de las variables de entorno tiene prioridad.",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

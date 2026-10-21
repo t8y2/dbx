@@ -8660,6 +8660,8 @@ export default withEnglishFallback({
     shortcutSelectLineEnds: "選取行尾",
     openQueryOnConnectionOpen: "開啟連線時進入查詢頁",
     openQueryOnConnectionOpenDescription: "啟用後，開啟連線或資料庫時進入對應的 default.sql 預設查詢，修改自動儲存。",
+    linuxFloatingFrame: "視窗透明效果",
+    linuxFloatingFrameDescription: "在支援的桌面上自動啟用透明邊框。視窗閃爍時可關閉，套用並重新啟動 DBX 後生效。環境變數設定優先。",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",

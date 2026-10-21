@@ -9352,6 +9352,8 @@ export default withEnglishFallback({
     tabGroupRowsSingle: "1行",
     tabGroupRowsTwoRow: "2行（グループを独立した行に表示）",
     tabGroupRowsDescription: "タブバーが上または下に配置されていて、グループ化が有効な場合にのみ適用されます。グループは専用の行に表示され、選択したグループのタブは次の行に表示されます。",
+    linuxFloatingFrame: "ウィンドウの透明効果",
+    linuxFloatingFrameDescription: "サポートされているデスクトップで透明な枠線を自動的に有効にします。ウィンドウがちらつく場合は無効にでき、適用して DBX を再起動すると反映されます。環境変数の設定が優先されます。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

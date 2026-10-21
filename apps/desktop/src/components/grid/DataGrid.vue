@@ -14723,9 +14723,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbarActions }">{{ t("grid.tableDataPreviewLoadPageShort") }}</span>
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom" class="max-w-sm">
-                  <p>{{ t("grid.tableDataPreviewNotice") }}</p>
-                  <p class="mt-1 opacity-80">{{ t("grid.tableDataPreviewLoadPageHint") }}</p>
+                <TooltipContent side="bottom" class="max-w-none">
+                  <p class="whitespace-nowrap">{{ t("grid.tableDataPreviewLoadPageShortTitle") }}</p>
                 </TooltipContent>
               </Tooltip>
               <slot v-if="hasResultToolbarActionsSlot" name="result-toolbar-actions" :compact="compactDataGridToolbarActions" />

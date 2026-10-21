@@ -177,7 +177,7 @@ describe("MQTT 控制台 payload 搜索 (issue #8183)", () => {
     await settleConsole();
     await setPayloadSearch(container, "error");
 
-    await vi.advanceTimersByTimeAsync(3000);
+    await vi.advanceTimersByTimeAsync(1000);
     await nextTick();
 
     expect(container.textContent).toContain("next-error");

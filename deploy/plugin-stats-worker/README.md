@@ -41,9 +41,9 @@ Analytics Engine writes are effectively free at this scale.
 
 ## Daily aggregation (permanent archive)
 
-AE retains only three months, so a cron trigger (`30 0 * * *` UTC) aggregates the
-trailing window into the `plugin_stats_archive` KV namespace — the permanent
-layer future UI reads:
+AE retains only three months, so cron triggers aggregate the trailing window
+into the `plugin_stats_archive` KV namespace — the permanent layer future UI
+reads:
 
 - `total:{kind}:{pluginId}:{version}` — all-time cumulative events
 - `summary` — one JSON blob `{dl: {pluginId: n}, inst: {...}, updt: {...}}` for
@@ -53,6 +53,27 @@ layer future UI reads:
   classified inst/updt events, distinct downloaders for dl)
 - `meta:last-success` — window marker; only advanced after all writes land, so a
   failed run retries the same window on the next cron
+- `agg:state` / `agg:tuning` / `agg:lock` — resumable-pass cursor, adaptive
+  chunk size, and best-effort mutex (see below)
+
+**Chunked resumable passes** (added 2026-10-20). The original single-shot loop
+needed one KV get+put pair per aggregated key; once a failed window grew the
+retry backlog past the Workers per-invocation subrequest ceiling (1000 paid /
+50 free), every run died mid-loop and the watermark never advanced — the
+aggregation stalled silently for three weeks (2026-09-28 → 2026-10-20) while
+raw AE data kept flowing. Now every invocation processes at most `chunk` keys
+(tuning halves on failure, creeps up on success, 8–400), persists its cursor in
+`agg:state`, and completes the summary write + watermark advance only when the
+pass finishes. Crons: `30 0 * * *` opens the day's window, `0 * * * *`
+resumes any in-flight pass (a normal window finishes in a few ticks ≈ hours;
+the hourly cadence keeps daily KV writes under the free-plan 1000/day alert
+line — freshness is a decorative concern here, raise the frequency only if
+display latency starts to matter). AE row order is normalized with a JS sort because
+the offset cursor must index identically across invocations. Required
+subrequests per invocation: `chunk`-bounded (~2·chunk + 6) — never the whole
+backlog. After deploying schema-affecting changes, or to backfill from scratch,
+pass `x-archive-from: reset` (totals are additive — only safe when the
+archive is known-empty).
 
 Required secret (SQL API access; OAuth login does not carry analytics scope):
 

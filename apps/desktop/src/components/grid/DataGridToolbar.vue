@@ -131,7 +131,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
           {{ autoRefresh?.enabled ? autoRefresh.stopLabel : autoRefresh?.startLabel }}
         </DropdownMenuItem>
         <DropdownMenuItem v-for="seconds in autoRefreshIntervals" :key="seconds" class="gap-2" :disabled="autoRefresh?.disabled" @select="void selectDataGridToolbarAutoRefreshInterval(autoRefresh, seconds)">
-          <Check v-if="autoRefresh?.intervalSeconds === seconds" class="h-3.5 w-3.5" />
+          <Check v-if="autoRefresh?.enabled && autoRefresh.intervalSeconds === seconds" class="h-3.5 w-3.5" />
           <span v-else class="h-3.5 w-3.5" />
           {{ autoRefresh?.intervalLabel(seconds) }}
         </DropdownMenuItem>
@@ -197,7 +197,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(deleteRow)">
       <TooltipTrigger as-child>
-        <Button data-toolbar-action="deleteRow" variant="ghost" size="sm" :class="actionButtonClass('deleteRow')" :disabled="isDataGridToolbarCapabilityDisabled(deleteRow)" @click="void triggerDataGridToolbarAction(deleteRow)">
+        <Button data-toolbar-action="deleteRow" variant="ghost" size="sm" :class="[...actionButtonClass('deleteRow'), 'text-destructive hover:bg-destructive/10 hover:text-destructive']" :disabled="isDataGridToolbarCapabilityDisabled(deleteRow)" @click="void triggerDataGridToolbarAction(deleteRow)">
           <Trash2 class="data-grid-topbar-action-icon h-3 w-3" />
           <span class="data-grid-topbar-action-label" :class="actionLabelClass('deleteRow')">{{ deleteRow?.label }}</span>
         </Button>

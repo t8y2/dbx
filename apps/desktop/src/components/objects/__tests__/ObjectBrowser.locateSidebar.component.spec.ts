@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, reactive, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
@@ -33,16 +33,18 @@ vi.mock("@/stores/connectionStore", () => ({
 }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({
-    editorSettings: {
+  useSettingsStore: () => {
+    const editorSettings = reactive({
+      objectBrowserCompactWidth: 160,
       shortcuts: { refreshData: "F5" },
       objectBrowserViewMode: mocks.viewMode,
       objectBrowserShowCheckbox: false,
       sidebarActivation: "double",
       sidebarMenuLayout: mocks.menuLayout,
       sidebarMenuPinnedActions: { table: mocks.pinnedActions },
-    },
-  }),
+    });
+    return { editorSettings, updateEditorSettings: (patch: Partial<typeof editorSettings>) => Object.assign(editorSettings, patch) };
+  },
 }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => (key === "sidebar.locateActiveTab" ? "Locate in sidebar" : key), locale: ref("en-US") }) }));
 vi.mock("@/i18n", () => ({ default: { install: () => undefined } }));
@@ -60,7 +62,18 @@ vi.mock("vue-virtual-scroller", () => ({
     },
   }),
 }));
-vi.mock("@/components/ui/searchable-select", () => ({ SearchableSelect: { render: () => null } }));
+vi.mock("@/components/ui/searchable-select", () => ({
+  SearchableSelect: defineComponent({
+    props: {
+      modelValue: { type: String, default: "" },
+      options: { type: Array, default: () => [] },
+    },
+    emits: ["update:modelValue"],
+    setup(props, { emit }) {
+      return () => h("button", { "data-schema-select": true, onClick: () => emit("update:modelValue", props.options[1] ?? "") }, props.modelValue);
+    },
+  }),
+}));
 vi.mock("@/components/ui/ToolbarOverflowMenu.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/editor/DangerConfirmDialog.vue", () => ({ default: { render: () => null } }));
@@ -102,6 +115,7 @@ beforeEach(() => {
   ]);
   mocks.ensureConnected.mockResolvedValue(undefined);
   invalidateObjectBrowserRowsCache({});
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -110,6 +124,7 @@ afterEach(() => {
     host.remove();
   }
   invalidateObjectBrowserRowsCache({});
+  localStorage.clear();
   gridStyle.remove();
 });
 
@@ -143,9 +158,67 @@ function menuButton(label: string): HTMLButtonElement {
   return buttons[0]!;
 }
 
-describe.each(["list", "grid"] as const)("ObjectBrowser locate in sidebar (%s)", (viewMode) => {
+it("reflows compact rows immediately when changing width and keeps names and row height", async () => {
+  mocks.viewMode = "compact";
+  const widthSpy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains("object-browser-grid-wrapper") ? 1016 : 0;
+  });
+  try {
+    const host = await mountBrowser();
+    const rows = () => [...host.querySelectorAll<HTMLElement>(".object-browser-grid-row")];
+    const names = () => [...host.querySelectorAll<HTMLElement>("[data-object-compact-card]")].map((card) => card.title);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]!.style.gridTemplateColumns).toBe("repeat(6, minmax(0, 1fr))");
+    const before = names();
+    const select = host.querySelector<HTMLSelectElement>("[data-compact-width-select]")!;
+    expect(select.value).toBe("160");
+    select.value = "240";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+    expect(rows()[0]!.style.gridTemplateColumns).toBe("repeat(4, minmax(0, 1fr))");
+    expect(rows()[0]!.style.height).toBe("28px");
+    expect(names()).toEqual(before);
+    expect(select.value).toBe("240");
+  } finally {
+    widthSpy.mockRestore();
+  }
+});
+
+describe.each(["list", "grid", "compact"] as const)("ObjectBrowser locate in sidebar (%s)", (viewMode) => {
   beforeEach(() => {
     mocks.viewMode = viewMode;
+  });
+
+  it("reloads list column visibility when the selected schema changes", async () => {
+    if (viewMode !== "list") return;
+    localStorage.setItem("dbx-object-browser-columns:v1:locate-connection:browser_database:browser_schema", JSON.stringify({ comment: false }));
+    localStorage.setItem("dbx-object-browser-columns:v1:locate-connection:browser_database:row_schema", JSON.stringify({ comment: true }));
+
+    const host = await mountBrowser({ schema: "browser_schema" });
+    const table = () => host.querySelector<HTMLElement>(".object-browser-table");
+    expect(table()?.textContent).not.toContain("objects.comment");
+
+    host.querySelector<HTMLButtonElement>("[data-schema-select]")?.click();
+    await vi.waitFor(() => expect(table()?.textContent).toContain("objects.comment"));
+  });
+
+  it("keeps the column picker clear of the trailing resize handle", async () => {
+    if (viewMode !== "list") return;
+    localStorage.setItem("dbx-object-browser-columns:v1:locate-connection:browser_database:browser_schema", JSON.stringify({ type: false }));
+
+    const host = await mountBrowser({ schema: "browser_schema" });
+    expect(host.querySelector('[title="objects.configureColumns"]')).not.toBeNull();
+    expect(host.querySelector('[data-object-column-resize="name"]')).not.toBeNull();
+    expect(host.querySelector('[data-object-column-resize="comment"]')).toBeNull();
+  });
+
+  it("keeps the compact card icon and full-name tooltip", async () => {
+    if (viewMode !== "compact") return;
+    const host = await mountBrowser();
+    const card = host.querySelector<HTMLElement>('[data-object-compact-card][title="orders"]');
+    expect(card).not.toBeNull();
+    expect(card?.querySelector("svg")).not.toBeNull();
+    expect(card?.textContent).toContain("orders");
   });
 
   it.each([
@@ -154,7 +227,7 @@ describe.each(["list", "grid"] as const)("ObjectBrowser locate in sidebar (%s)",
     ["order_totals", "MATERIALIZED_VIEW"],
   ])("locates %s with the exact row identity without opening a tab", async (tableName, tableType) => {
     const host = await mountBrowser();
-    expect(host.querySelector(viewMode === "grid" ? ".object-browser-grid-scroller" : ".object-browser-scroller")).not.toBeNull();
+    expect(host.querySelector(viewMode === "list" ? ".object-browser-scroller" : ".object-browser-grid-scroller")).not.toBeNull();
     await openMenu(host, tableName);
     expect(mocks.locateTable).not.toHaveBeenCalled();
     mocks.ensureConnected.mockClear();

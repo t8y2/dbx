@@ -38,9 +38,20 @@ interface Props {
   isFlatMqCluster?: boolean;
   mqSystemKind?: MqSystemKind;
   supportsExchanges?: boolean;
+  supportsCreateTopic?: boolean;
+  supportsDeleteTopic?: boolean;
+  supportsTopicStats?: boolean;
+  supportsBrokerAdmin?: boolean;
+  supportsMessageQuery?: boolean;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  supportsCreateTopic: undefined,
+  supportsDeleteTopic: undefined,
+  supportsTopicStats: undefined,
+  supportsBrokerAdmin: undefined,
+  supportsMessageQuery: undefined,
+});
 const emit = defineEmits<{
   topicSelected: [topic: TopicInfo];
   navigateTab: [payload: { tab: MqTab; topic?: TopicInfo; subscription?: string; preferDlqTopic?: boolean }];
@@ -311,7 +322,7 @@ function changeRabbitMqPageSize(pageSize: number) {
 }
 
 async function loadClusterInfo() {
-  if (!isRocketMqCluster.value) return;
+  if (!isRocketMqCluster.value || props.supportsBrokerAdmin === false) return;
   try {
     clusterInfo.value = await mqGetClusterInfo(props.connectionId);
   } catch (e: unknown) {
@@ -320,6 +331,7 @@ async function loadClusterInfo() {
 }
 
 function openCreateDialog() {
+  if (props.supportsCreateTopic === false) return;
   if (props.readOnly) {
     error.value = t("mqTopics.readOnly");
     return;
@@ -341,6 +353,8 @@ function openCreateDialog() {
 }
 
 function openRocketMqDialog(kind: RocketMqTopicDialogKind, topic: TopicInfo) {
+  if (kind === "status" && props.supportsTopicStats === false) return;
+  if (kind === "route" && props.supportsBrokerAdmin === false) return;
   rocketMqDialogTopic.value = topic;
   activeRocketMqDialog.value = kind;
 }
@@ -384,6 +398,7 @@ function navigateToMessages(topic: TopicInfo) {
 }
 
 function navigateToMessageQuery(topic: TopicInfo, preferDlqTopic = false) {
+  if (props.supportsMessageQuery === false) return;
   emit("navigateTab", {
     tab: "messages",
     topic,
@@ -411,6 +426,7 @@ function openPartitionsDialog(topic: TopicInfo) {
 }
 
 async function handleCreate() {
+  if (props.supportsCreateTopic === false) return;
   if (!(await guardWritable(t("mqTopics.create")))) return;
   if (!formData.value.topicName.trim() || !props.tenant || !props.namespace) {
     dialogError.value = t("mqTopics.topicNameRequired");
@@ -445,6 +461,7 @@ async function handleCreate() {
 }
 
 function handleDelete(topic: TopicInfo) {
+  if (props.supportsDeleteTopic === false) return;
   if (props.readOnly) {
     error.value = t("mqTopics.readOnly");
     return;
@@ -454,6 +471,7 @@ function handleDelete(topic: TopicInfo) {
 }
 
 async function confirmDelete() {
+  if (props.supportsDeleteTopic === false) return;
   if (!(await guardWritable(t("mqTopics.delete")))) return;
   const topic = deleteTarget.value;
   if (!topic || !props.tenant || !props.namespace) return;
@@ -605,7 +623,7 @@ onBeforeUnmount(() => {
           <button @click="loadTopics" :disabled="loading || !tenant || !namespace" class="btn-secondary">
             {{ loading ? t("mqTopics.refreshing") : t("mqTopics.refresh") }}
           </button>
-          <button @click="openCreateDialog" :disabled="loading || readOnly || !tenant || !namespace || showNamespaceColumn" :title="showNamespaceColumn ? t('mqAdmin.selectNamespaceToCreate') : undefined" class="btn-primary">+ {{ t("mqTopics.createTopic") }}</button>
+          <button @click="openCreateDialog" :disabled="loading || readOnly || supportsCreateTopic === false || !tenant || !namespace || showNamespaceColumn" :title="showNamespaceColumn ? t('mqAdmin.selectNamespaceToCreate') : undefined" class="btn-primary">+ {{ t("mqTopics.createTopic") }}</button>
         </div>
       </div>
 
@@ -687,18 +705,18 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="topics-col actions" @click.stop>
                   <template v-if="isRocketMqCluster">
-                    <button type="button" class="btn-sm" @click="openRocketMqDialog('status', row.topic)">{{ t("mqTopics.actionStatus") }}</button>
-                    <button type="button" class="btn-sm" @click="openRocketMqDialog('route', row.topic)">{{ t("mqTopics.actionRoute") }}</button>
+                    <button type="button" class="btn-sm" :disabled="supportsTopicStats === false" @click="openRocketMqDialog('status', row.topic)">{{ t("mqTopics.actionStatus") }}</button>
+                    <button type="button" class="btn-sm" :disabled="supportsBrokerAdmin === false" @click="openRocketMqDialog('route', row.topic)">{{ t("mqTopics.actionRoute") }}</button>
                     <button type="button" class="btn-sm" @click="openRocketMqDialog('consumers', row.topic)">{{ t("mqTopics.actionConsumers") }}</button>
-                    <button v-if="isDlqTopic(row.topic)" type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic, true)">{{ t("mqRocketmq.viewDlqMessages") }}</button>
+                    <button v-if="isDlqTopic(row.topic)" type="button" class="btn-sm" :disabled="supportsMessageQuery === false" @click="navigateToMessageQuery(row.topic, true)">{{ t("mqRocketmq.viewDlqMessages") }}</button>
                     <template v-else>
-                      <button type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic)">{{ t("mqRocketmq.actionMessageQuery") }}</button>
+                      <button type="button" class="btn-sm" :disabled="supportsMessageQuery === false" @click="navigateToMessageQuery(row.topic)">{{ t("mqRocketmq.actionMessageQuery") }}</button>
                       <button type="button" class="btn-sm" :disabled="readOnly" @click="navigateToMessages(row.topic)">{{ t("mqRocketmq.actionSendMessage") }}</button>
                     </template>
                     <button type="button" class="btn-sm" @click="openRocketMqDialog('config', row.topic)">{{ t("mqTopics.actionConfig") }}</button>
                     <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('reset', row.topic)">{{ t("mqTopics.actionReset") }}</button>
                     <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('skip', row.topic)">{{ t("mqTopics.actionSkip") }}</button>
-                    <button type="button" class="btn-sm btn-danger" :disabled="readOnly || isTopicProtected(row.topic)" @click="handleDelete(row.topic)">{{ t("mqTopics.delete") }}</button>
+                    <button type="button" class="btn-sm btn-danger" :disabled="readOnly || supportsDeleteTopic === false || isTopicProtected(row.topic)" @click="handleDelete(row.topic)">{{ t("mqTopics.delete") }}</button>
                   </template>
                   <template v-else>
                     <button v-if="row.topic.partitioned && supportsPartitionedTopics !== false && !isTopicProtected(row.topic)" type="button" @click="openPartitionsDialog(row.topic)" :disabled="readOnly || !row.topic.partitions" class="btn-sm">
@@ -707,7 +725,7 @@ onBeforeUnmount(() => {
                     <button
                       type="button"
                       @click="handleDelete(row.topic)"
-                      :disabled="readOnly || isTopicProtected(row.topic) || (showNamespaceColumn && !row.topic.namespace)"
+                      :disabled="readOnly || supportsDeleteTopic === false || isTopicProtected(row.topic) || (showNamespaceColumn && !row.topic.namespace)"
                       :title="showNamespaceColumn && !row.topic.namespace ? t('mqAdmin.selectNamespaceToWrite') : undefined"
                       class="btn-sm btn-danger"
                     >
@@ -808,7 +826,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="dialog-footer">
             <button @click="showCreateDialog = false" class="btn-secondary">{{ t("mqTopics.cancel") }}</button>
-            <button @click="handleCreate" :disabled="loading || readOnly" class="btn-primary">{{ t("mqTopics.create") }}</button>
+            <button @click="handleCreate" :disabled="loading || readOnly || supportsCreateTopic === false" class="btn-primary">{{ t("mqTopics.create") }}</button>
           </div>
         </div>
       </div>

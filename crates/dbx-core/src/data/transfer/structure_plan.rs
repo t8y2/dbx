@@ -26,7 +26,7 @@ const CREATE_TABLE_DISABLED_NOTE: &str =
     "-- This transfer has structure DDL disabled (createTable = false): no structure statements will run.";
 
 /// Emitted when the transfer also moves non-table schema objects whose DDL this preview
-/// deliberately does not expand (views, routines, triggers, standalone sequences, ...).
+/// does not expand (except for the MySQL overwrite path, which is rendered explicitly).
 const UNEXPANDED_OBJECTS_NOTE: &str = "\
 -- Additional schema objects selected by this request (or the legacy PostgreSQL default) are transferred.
 -- Their generated DDL is not expanded in this preview.";
@@ -49,11 +49,25 @@ pub(super) async fn build_structure_preview(
     source_pool_key: &str,
     target_pool_key: &str,
 ) -> Result<TransferStructurePreview, String> {
+    let schema_object_preview = mysql_schema_object_preview_sql(
+        state,
+        request,
+        source_db_type,
+        target_db_type,
+        source_pool_key,
+        target_pool_key,
+    )
+    .await?;
     if !request.create_table {
+        let mut sections = vec![CREATE_TABLE_DISABLED_NOTE.to_string()];
+        if let Some(sql) = &schema_object_preview {
+            sections.push(sql.clone());
+        }
         return Ok(TransferStructurePreview {
-            sql: CREATE_TABLE_DISABLED_NOTE.to_string(),
+            sql: sections.join("\n\n"),
             tables: Vec::new(),
             operations: Vec::new(),
+            schema_objects_expanded: schema_object_preview.is_some(),
         });
     }
 
@@ -165,9 +179,94 @@ pub(super) async fn build_structure_preview(
         ));
     }
     operations.extend(deferred_fk_operations);
-    sections.extend(unexpanded_schema_object_notes(source_db_type, target_db_type, request));
+    if let Some(sql) = schema_object_preview {
+        sections.push(sql);
+    } else {
+        sections.extend(unexpanded_schema_object_notes(source_db_type, target_db_type, request));
+    }
 
-    Ok(TransferStructurePreview { sql: sections.join("\n\n"), tables: planned_tables, operations })
+    Ok(TransferStructurePreview {
+        sql: sections.join("\n\n"),
+        tables: planned_tables,
+        operations,
+        schema_objects_expanded: request.mode == TransferMode::Overwrite
+            && transfer_object_family(source_db_type) == Some(TransferObjectFamily::Mysql)
+            && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Mysql)
+            && request.object_selection_mode().selections().iter().any(|selection| {
+                selection.object_type != TransferObjectKind::Table
+                    && transfer_object_kinds_for_family(&TransferObjectFamily::Mysql).contains(&selection.object_type)
+                    && !selection.names.is_empty()
+            }),
+    })
+}
+
+/// Expands the MySQL overwrite path in the read-only structure preview. The
+/// executor re-reads the same source DDL and target existence state, but the
+/// preview intentionally never executes any generated DDL.
+async fn mysql_schema_object_preview_sql(
+    state: &Arc<AppState>,
+    request: &TransferRequest,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+) -> Result<Option<String>, String> {
+    if request.mode != TransferMode::Overwrite
+        || transfer_object_family(source_db_type) != Some(TransferObjectFamily::Mysql)
+        || transfer_object_family(target_db_type) != Some(TransferObjectFamily::Mysql)
+    {
+        return Ok(None);
+    }
+    let selections = request.object_selection_mode().selections();
+    let supported_kinds = transfer_object_kinds_for_family(&TransferObjectFamily::Mysql);
+    if !selections.iter().any(|selection| {
+        selection.object_type != TransferObjectKind::Table
+            && supported_kinds.contains(&selection.object_type)
+            && !selection.names.is_empty()
+    }) {
+        return Ok(None);
+    }
+
+    let source_database = &request.source_database;
+    let target_database = if request.target_database.trim().is_empty() {
+        source_database.as_str()
+    } else {
+        request.target_database.as_str()
+    };
+    let mut sections = Vec::new();
+    let order = ordered_transfer_object_kinds(
+        selections
+            .iter()
+            .filter(|selection| {
+                selection.object_type != TransferObjectKind::Table && supported_kinds.contains(&selection.object_type)
+            })
+            .map(|selection| selection.object_type)
+            .collect(),
+    );
+    for kind in order {
+        for name in selected_object_names(selections, &kind) {
+            let exists_sql = target_object_exists_sql(&DatabaseType::Mysql, target_database, &name, &kind)?;
+            let exists = !execute_on_pool(state, target_pool_key, &exists_sql).await?.rows.is_empty();
+            let query = mysql_object_source_query(&kind, source_database, &name)?;
+            let result = execute_on_pool(state, source_pool_key, &query).await?;
+            let raw_ddl = mysql_object_ddl_from_result(&kind, source_database, &result.rows)?;
+            let ddl = rewrite_mysql_schema_qualifier(&strip_mysql_definer(&raw_ddl), source_database, target_database);
+            let validation_name =
+                if exists && matches!(kind, TransferObjectKind::Procedure | TransferObjectKind::Function) {
+                    Some(mysql_transfer_validation_routine_name(&request.transfer_id, target_database, &kind, &name))
+                } else {
+                    None
+                };
+            let statements = if exists {
+                mysql_object_replacement_statements(&kind, target_database, &name, &ddl, validation_name.as_deref())?
+            } else {
+                vec![ddl]
+            };
+            let operation = if exists { "Replace" } else { "Create" };
+            sections.push(format!("-- {operation} MySQL {kind:?} {name}\n{}", statement_block(&statements)));
+        }
+    }
+    Ok((!sections.is_empty()).then(|| sections.join("\n\n")))
 }
 
 struct PlannedTableStructure {
@@ -268,7 +367,7 @@ async fn plan_table_structure(
     pg_compat_transfer: bool,
     index_if_not_exists: bool,
 ) -> Result<PlannedTableStructure, String> {
-    let preserves_target_table_name = target_table == table;
+    let preserves_target_table_name = target_table == table && request.preserves_column_names();
     let columns = source_transfer_columns(state, request, table, source_pool_key).await?;
     let table_comment = source_table_comment(state, request, table, source_db_type).await;
 
@@ -327,15 +426,22 @@ async fn plan_table_structure(
     // metadata below. A statement the create pass filters out must never appear here.
     statements.extend(transfer_ddl_statements(&ddl, target_db_type));
 
+    let target_columns = request.target_columns(&columns);
     let comment_statements = generate_comment_ddl_with_column_quoting(
-        &columns,
+        &target_columns,
         target_table,
         &request.target_schema,
         target_db_type,
         table_comment.as_deref(),
         request.quote_target_column_names,
     );
-    operations.extend(comment_operations(&columns, table, target_table, target_db_type, table_comment.as_deref()));
+    operations.extend(comment_operations(
+        &target_columns,
+        table,
+        target_table,
+        target_db_type,
+        table_comment.as_deref(),
+    ));
     statements.extend(comment_statements);
 
     for sequence in &owned_sequences.owned_sequences {
@@ -552,6 +658,9 @@ mod tests {
     #[test]
     fn structured_ddl_metadata_produces_operation_dtos() {
         let index = db::IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name: "idx_orders_created_at".into(),
             columns: vec!["lower(\"email\")".into()],
             is_unique: false,

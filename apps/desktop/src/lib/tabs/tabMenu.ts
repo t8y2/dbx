@@ -1,4 +1,4 @@
-import { Copy, Crosshair, Pencil, Pin, RotateCcw, X } from "@lucide/vue";
+import { Copy, Crosshair, Pencil, Pin, RotateCcw, Save, X } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
 import type { QueryTab } from "@/types/database";
 
@@ -88,5 +88,15 @@ export function createCloseAllTabMenuItem(options: { label: string; variant?: "d
     action: options.onClose,
     ...(options.variant ? { variant: options.variant } : {}),
     icon: X,
+  };
+}
+
+export function createSaveAllTabsMenuItem(options: { label: string; disabled?: boolean; shortcut?: string; onSaveAll: () => void }): ContextMenuItem {
+  return {
+    label: options.label,
+    action: options.onSaveAll,
+    ...(options.disabled !== undefined ? { disabled: options.disabled } : {}),
+    ...(options.shortcut ? { shortcut: options.shortcut } : {}),
+    icon: Save,
   };
 }

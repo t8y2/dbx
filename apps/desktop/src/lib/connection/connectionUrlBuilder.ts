@@ -124,6 +124,9 @@ const POSTGRES_WIRE_DB_TYPES = new Set<DatabaseType>(["postgres", "redshift", "g
 /** PG-wire families whose JDBC driver accepts the `ssl`/`sslmode` properties. */
 const PG_JDBC_PREFIXES = new Set(["jdbc:postgresql", "jdbc:redshift", "jdbc:gaussdb", "jdbc:opengauss", "jdbc:kingbase8", "jdbc:highgo"]);
 
+/** MySQL-family prefixes that share Connector/J's `?key=value&...` query grammar. */
+const MYSQL_QUERY_JDBC_PREFIXES = new Set(["jdbc:mysql", "jdbc:mariadb", "jdbc:oceanbase"]);
+
 function normalizedDriverProfile(config: ConnectionUrlCopyConfig): string {
   return config.driver_profile?.trim().toLowerCase() ?? "";
 }
@@ -188,9 +191,25 @@ function shouldAppendPort(config: ConnectionUrlCopyConfig): boolean {
  * RFC 3986 component encoding for credentials. `encodeURIComponent` leaves
  * `!'()*` unescaped, so encode those too; only unreserved characters remain
  * literal and every encoded credential can be decoded back byte-for-byte.
+ *
+ * `=` is also kept literal: userinfo and query values split on their first
+ * separator, so an embedded `=` cannot change how the string is read, while
+ * escaping it made copied passwords differ from the stored one for clients
+ * that never percent-decode (#12304).
  */
 function encodeCredential(value: string): string {
-  return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  return encodeURIComponent(value)
+    .replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/%3D/g, "=");
+}
+
+function encodeOceanBaseUrlCredential(value: string): string {
+  return encodeCredential(value).replace(/%(21|24|28|29|2A|2C)/g, decodeURIComponent);
+}
+
+/** Tenant separators stay readable in OceanBase URL previews and copies. */
+export function encodeOceanBaseUrlUsername(value: string): string {
+  return encodeOceanBaseUrlCredential(value).replace(/%40/g, "@");
 }
 
 /**
@@ -210,16 +229,16 @@ function encodeOracleUrlCredential(value: string): string {
   return Array.from(value, (character) => (ORACLE_URL_CREDENTIAL_LITERAL_CHARACTERS.has(character) ? character : encodeURIComponent(character))).join("");
 }
 
-function buildUserInfo(config: ConnectionUrlCopyConfig, includePassword: boolean, encode: (value: string) => string = encodeCredential): string {
+function buildUserInfo(config: ConnectionUrlCopyConfig, includePassword: boolean, encode: (value: string) => string = encodeCredential, encodeUser: (value: string) => string = encode): string {
   const user = effectiveUsername(config);
   const password = config.password ?? "";
   if (includePassword) {
-    if (user && password) return `${encode(user)}:${encode(password)}@`;
-    if (user) return `${encode(user)}@`;
+    if (user && password) return `${encodeUser(user)}:${encode(password)}@`;
+    if (user) return `${encodeUser(user)}@`;
     if (password) return `:${encode(password)}@`;
     return "";
   }
-  return user ? `${encode(user)}@` : "";
+  return user ? `${encodeUser(user)}@` : "";
 }
 
 function standardUrlScheme(config: ConnectionUrlCopyConfig): string | null {
@@ -272,7 +291,8 @@ function buildStandardUrl(config: ConnectionUrlCopyConfig, options: ConnectionUr
   if (!host) return null;
 
   const database = effectiveDatabase(config, options);
-  const userInfo = buildUserInfo(config, options.includePassword, config.db_type === "oracle" ? encodeOracleUrlCredential : encodeCredential);
+  const encode = scheme === "oceanbase" ? encodeOceanBaseUrlCredential : config.db_type === "oracle" ? encodeOracleUrlCredential : encodeCredential;
+  const userInfo = buildUserInfo(config, options.includePassword, encode, scheme === "oceanbase" ? encodeOceanBaseUrlUsername : encode);
   const hostPart = formatHostForUrl(host);
   const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
   const path = database ? `/${encodeURIComponent(database)}` : "";
@@ -291,8 +311,10 @@ function jdbcPrefixFor(config: ConnectionUrlCopyConfig): string | null {
       return profile === GAUSSDB_M_JDBC_DRIVER_PROFILE ? "jdbc:gaussdb" : "jdbc:postgresql";
     case "iris":
       return profile === "cache" ? "jdbc:Cache" : "jdbc:IRIS";
+    case "gbase8s":
+      return "jdbc:gbasedbt-sqli";
     case "gbase":
-      return profile === "gbase8s" ? "jdbc:gbasedbt-sqli" : null;
+      return null;
     case "tdengine":
       return Number(config.port) === 6030 ? "jdbc:TAOS" : "jdbc:TAOS-RS";
     default:
@@ -416,6 +438,7 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
       return `jdbc:inceptor2://${formatHostForUrl(host)}${portPart}/${database || "default"}${props ? `;${props}` : ""}${ssl}`;
     }
     case "informix":
+    case "gbase8s":
     case "gbase": {
       const prefix = config.db_type === "informix" ? "jdbc:informix-sqli" : jdbcPrefixFor(config);
       if (!prefix) return config.db_type === "gbase" ? null : undefined;
@@ -431,14 +454,14 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
 
 function jdbcQuery(config: ConnectionUrlCopyConfig, prefix: string, withCredentials: boolean): string {
   const raw = (config.url_params ?? "").trim().replace(/^[?&]+/, "");
-  // Strict encoding is enabled only for verified query-style drivers.
-  const encode = prefix === "jdbc:mysql" || prefix === "jdbc:postgresql" ? encodeCredential : encodeURIComponent;
+  // OceanBase uses literal property values; other verified query-style drivers use percent encoding.
+  const encode = prefix === "jdbc:oceanbase" ? (value: string) => value : MYSQL_QUERY_JDBC_PREFIXES.has(prefix) || prefix === "jdbc:postgresql" ? encodeCredential : encodeURIComponent;
   const parts = [...jdbcCredentialParams(config, withCredentials, encode)];
   if (raw) parts.push(raw);
   if (config.ssl) {
     if (PG_JDBC_PREFIXES.has(prefix) && !queryHasParam(raw, ["ssl", "sslmode"])) {
       parts.push("ssl=true");
-    } else if ((prefix === "jdbc:mysql" || prefix === "jdbc:mariadb" || prefix === "jdbc:oceanbase") && !queryHasParam(raw, ["usessl", "sslmode", "requiressl"])) {
+    } else if (MYSQL_QUERY_JDBC_PREFIXES.has(prefix) && !queryHasParam(raw, ["usessl", "sslmode", "requiressl"])) {
       parts.push("sslMode=REQUIRED");
     } else if (prefix === "jdbc:clickhouse" && !queryHasParam(raw, ["ssl", "sslmode", "secure"])) {
       parts.push("ssl=true");
@@ -459,6 +482,8 @@ function buildJdbcUrl(config: ConnectionUrlCopyConfig, options: ConnectionUrlCop
 
   const prefix = jdbcPrefixFor(config);
   if (!prefix) return null;
+  // The driver uses literal properties; these characters cannot also round-trip through the URL importer.
+  if (prefix === "jdbc:oceanbase" && options.withCredentials && [effectiveUsername(config), config.password ?? ""].some((value) => /[&;'"#%\s]/.test(value))) return null;
   const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
   const path = database ? `/${encodeURIComponent(database)}` : "";
   const query = jdbcQuery(config, prefix, options.withCredentials);

@@ -4,6 +4,7 @@ import {
   buildTableImportParseOptions,
   defaultTableImportEmptyStringAsNull,
   formatTableImportElapsed,
+  formatTableImportPreviewCell,
   importDataTypeForDatabase,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
@@ -68,6 +69,12 @@ describe("tableImport", () => {
     expect(formatTableImportElapsed(999)).toBe("999 ms");
     expect(formatTableImportElapsed(1_250)).toBe("1.3 s");
     expect(formatTableImportElapsed(61_000)).toBe("1m 1s");
+  });
+
+  it("shows SQL current timestamp markers without exposing internal JSON", () => {
+    expect(formatTableImportPreviewCell({ $dbxSqlImportExpression: "currentTimestamp" })).toBe("CURRENT_TIMESTAMP");
+    expect(formatTableImportPreviewCell({ $dbxSqlImportExpression: "other" })).toBe('{"$dbxSqlImportExpression":"other"}');
+    expect(formatTableImportPreviewCell({ value: 1 })).toBe('{"value":1}');
   });
 
   it("uses the backend elapsed time as the terminal source of truth", () => {

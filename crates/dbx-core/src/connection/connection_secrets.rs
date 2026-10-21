@@ -112,11 +112,64 @@ impl ConnectionSecretStore for FileSecretStore {
     }
 }
 
+/// Match only explicitly identified RocketMQ connections. An explicit system
+/// kind takes precedence over a stale driver profile.
+pub fn is_rocketmq_connection(config: &ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::MessageQueue {
+        return false;
+    }
+    let kind = config
+        .external_config
+        .as_ref()
+        .and_then(|external| external.get("systemKind"))
+        .and_then(serde_json::Value::as_str);
+    kind.or(config.driver_profile.as_deref()).is_some_and(|kind| kind.eq_ignore_ascii_case("rocketmq"))
+}
+
+/// Move legacy RocketMQ ACL copies into Basic auth only when auth is absent.
+/// Explicit auth (including `none` and empty fields) is authoritative. Returns
+/// whether metadata changed, so loaders can rewrite the sanitized legacy row.
+pub fn normalize_rocketmq_credentials(config: &mut ConnectionConfig) -> bool {
+    if !is_rocketmq_connection(config) {
+        return false;
+    }
+    let Some(external) = config.external_config.as_mut().and_then(serde_json::Value::as_object_mut) else {
+        return false;
+    };
+    let Some(extra) = external.get_mut("extra").and_then(serde_json::Value::as_object_mut) else {
+        return false;
+    };
+    let access = extra.remove("accessKey");
+    let access_alias = extra.remove("access_key");
+    let secret = extra.remove("secretKey");
+    let secret_alias = extra.remove("secret_key");
+    let changed = access.is_some() || access_alias.is_some() || secret.is_some() || secret_alias.is_some();
+    if changed && !external.contains_key("auth") {
+        let string_value = |primary: Option<serde_json::Value>, alias: Option<serde_json::Value>| {
+            [primary, alias]
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str().filter(|value| !value.trim().is_empty()).map(str::to_owned))
+                .next()
+                .unwrap_or_default()
+        };
+        external.insert("auth".into(), serde_json::json!({
+            "kind": "basic", "username": string_value(access, access_alias), "password": string_value(secret, secret_alias)
+        }));
+    }
+    changed
+}
+
 pub fn save_connections_to_file(
     path: &Path,
     configs: &[ConnectionConfig],
     store: &dyn ConnectionSecretStore,
 ) -> Result<(), String> {
+    let mut normalized = configs.to_vec();
+    for config in &mut normalized {
+        normalize_rocketmq_credentials(config);
+    }
+    let configs = normalized.as_slice();
     delete_removed_connection_secrets(path, configs, store)?;
     for config in configs {
         persist_secret(store, &config.id, MAIN_PASSWORD_KEY, &config.password)?;
@@ -159,6 +212,7 @@ pub fn load_connections_from_file(
     let mut configs = read_connections(path)?;
     let mut needs_rewrite = false;
     for config in &mut configs {
+        needs_rewrite |= normalize_rocketmq_credentials(config);
         if config.password.is_empty() {
             if let Some(secret) = store.get_secret(&config.id, MAIN_PASSWORD_KEY)? {
                 config.password = secret;
@@ -439,6 +493,9 @@ fn delete_secret_prefix(
 }
 
 fn persist_mq_auth_secrets(store: &dyn ConnectionSecretStore, config: &ConnectionConfig) -> Result<(), String> {
+    if is_rocketmq_connection(config) && !config.save_password {
+        return delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX);
+    }
     if config.db_type != DatabaseType::MessageQueue {
         delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
         return Ok(());
@@ -501,6 +558,14 @@ fn hydrate_mq_auth_secrets(
     config: &mut ConnectionConfig,
     needs_rewrite: &mut bool,
 ) -> Result<(), String> {
+    if is_rocketmq_connection(config) && !config.save_password {
+        *needs_rewrite |= mq_auth_object(config.external_config.as_ref())
+            .and_then(|auth| auth.get("password"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|password| !password.is_empty());
+        scrub_mq_auth_secrets(config);
+        return delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX);
+    }
     if config.db_type != DatabaseType::MessageQueue {
         return Ok(());
     }
@@ -920,6 +985,7 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
         .iter()
         .cloned()
         .map(|mut config| {
+            normalize_rocketmq_credentials(&mut config);
             config.password.clear();
             for layer in &mut config.transport_layers {
                 match layer {
@@ -1060,6 +1126,8 @@ mod tests {
             connect_timeout_secs: crate::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: crate::models::connection::default_query_timeout_secs(),
             idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
+            manual_transaction_timeout_secs: crate::models::connection::default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: crate::models::connection::default_idle_disconnect_secs(),
             keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -1131,6 +1199,7 @@ mod tests {
             enabled: true,
             url: "https://dbx.example.com/dbx_tunnel.php".to_string(),
             token: token.to_string(),
+            protocol: crate::models::connection::HttpTunnelProtocol::DbxTcp,
             connect_timeout_secs: 10,
         })
     }
@@ -1138,6 +1207,93 @@ mod tests {
     fn read_configs(path: &Path) -> Vec<ConnectionConfig> {
         let json = std::fs::read_to_string(path).unwrap();
         serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn rocketmq_legacy_credentials_migrate_on_file_load_and_save() {
+        for (access, secret) in [("accessKey", "secretKey"), ("access_key", "secret_key")] {
+            let path = temp_connections_file(access);
+            let store = MemorySecretStore::default();
+            let mut config = connection("rocket", "", "");
+            config.db_type = DatabaseType::MessageQueue;
+            config.external_config = Some(serde_json::json!({
+                "systemKind": "rocketmq", "extra": {(access): "legacy-ak", (secret): "legacy-sk", "namesrvAddr": "localhost:9876"}
+            }));
+            std::fs::write(&path, serde_json::to_string(&vec![config]).unwrap()).unwrap();
+            let loaded = load_connections_from_file(&path, &store).unwrap();
+            let external = loaded[0].external_config.as_ref().unwrap();
+            assert_eq!(
+                external["auth"],
+                serde_json::json!({"kind":"basic", "username":"legacy-ak", "password":"legacy-sk"})
+            );
+            assert_eq!(external["extra"], serde_json::json!({"namesrvAddr":"localhost:9876"}));
+            assert_eq!(store.get_existing("rocket", MQ_AUTH_PASSWORD_KEY).as_deref(), Some("legacy-sk"));
+            assert!(!std::fs::read_to_string(&path).unwrap().contains("legacy-sk"));
+            save_connections_to_file(&path, &loaded, &store).unwrap();
+            assert_eq!(load_connections_from_file(&path, &store).unwrap(), loaded);
+        }
+    }
+
+    #[test]
+    fn rocketmq_legacy_blank_primary_keys_fall_back_to_nonblank_aliases() {
+        let mut config = connection("rocket-aliases", "", "");
+        config.db_type = DatabaseType::MessageQueue;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "rocketmq",
+            "extra": {"accessKey": "", "access_key": " ak ", "secretKey": " \t", "secret_key": " sk "}
+        }));
+        assert!(super::normalize_rocketmq_credentials(&mut config));
+        let external = config.external_config.as_ref().unwrap();
+        assert_eq!(external["auth"], serde_json::json!({"kind":"basic", "username":" ak ", "password":" sk "}));
+        assert_eq!(external["extra"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn rocketmq_normalization_respects_explicit_auth_and_other_systems() {
+        for auth in [
+            serde_json::json!({"kind":"none"}),
+            serde_json::json!({"kind":"basic", "username":"explicit", "password":""}),
+        ] {
+            let mut config = connection("rocket", "", "");
+            config.db_type = DatabaseType::MessageQueue;
+            config.driver_profile = Some("rocketmq".into());
+            config.external_config = Some(
+                serde_json::json!({"auth":auth, "extra":{"accessKey":"old", "secretKey":"old", "access_key":"old", "secret_key":"old"}}),
+            );
+            assert!(super::normalize_rocketmq_credentials(&mut config));
+            assert_eq!(config.external_config.as_ref().unwrap()["auth"], auth);
+            assert_eq!(config.external_config.as_ref().unwrap()["extra"], serde_json::json!({}));
+            assert!(!super::normalize_rocketmq_credentials(&mut config));
+        }
+        for kind in ["pulsar", "kafka", "rabbitmq"] {
+            let mut config = connection("other", "", "");
+            config.db_type = DatabaseType::MessageQueue;
+            config.external_config = Some(serde_json::json!({"systemKind":kind, "extra":{"secretKey":"keep"}}));
+            config.driver_profile = Some("rocketmq".into());
+            let original = config.clone();
+            assert!(!super::normalize_rocketmq_credentials(&mut config));
+            assert_eq!(config, original);
+        }
+        let mut config = connection("database", "", "");
+        config.external_config = Some(serde_json::json!({"systemKind":"rocketmq", "extra":{"secretKey":"keep"}}));
+        assert!(!super::normalize_rocketmq_credentials(&mut config));
+    }
+
+    #[test]
+    fn rocketmq_file_save_without_password_drops_existing_secret() {
+        let path = temp_connections_file("rocket-no-save");
+        let store = MemorySecretStore::default();
+        store.set_existing("rocket", MQ_AUTH_PASSWORD_KEY, "old");
+        let mut config = connection("rocket", "", "");
+        config.db_type = DatabaseType::MessageQueue;
+        config.save_password = false;
+        config.external_config =
+            Some(serde_json::json!({"systemKind":"rocketmq", "extra":{"accessKey":"ak", "secretKey":"temporary"}}));
+        save_connections_to_file(&path, &[config], &store).unwrap();
+        assert_eq!(store.get_existing("rocket", MQ_AUTH_PASSWORD_KEY), None);
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        assert_eq!(loaded[0].external_config.as_ref().unwrap()["auth"]["password"], "");
+        assert!(!std::fs::read_to_string(path).unwrap().contains("temporary"));
     }
 
     #[test]

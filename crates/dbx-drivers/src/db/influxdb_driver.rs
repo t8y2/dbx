@@ -459,6 +459,111 @@ pub async fn get_columns(client: &InfluxdbClient, database: &str, table: &str) -
     Ok(influx_v1_columns(tag_series, field_series))
 }
 
+/// InfluxQL has no DDL, so "view DDL" for a 1.x measurement is a read-only,
+/// comment-only description of its schema (tag keys and typed field keys).
+/// Every line is an InfluxQL `--` comment so it can never be executed by accident.
+pub async fn table_ddl(client: &InfluxdbClient, database: &str, table: &str) -> Result<String, String> {
+    if client.version == InfluxdbApiVersion::V2 {
+        return Err("Viewing DDL is not supported for InfluxDB 2.x measurements".to_string());
+    }
+    let measurement = quote_influx_identifier(table);
+    let tag_result = influx_query(client, &format!("SHOW TAG KEYS FROM {measurement}"), Some(database))
+        .await
+        .map_err(|e| format!("Failed to read tag keys of measurement {table}: {e}"))?;
+    let field_result = influx_query(client, &format!("SHOW FIELD KEYS FROM {measurement}"), Some(database))
+        .await
+        .map_err(|e| format!("Failed to read field keys of measurement {table}: {e}"))?;
+    // The default retention policy is informational only; do not fail the whole DDL without it.
+    let default_rp =
+        match influx_query(client, &format!("SHOW RETENTION POLICIES ON {}", quote_influx_identifier(database)), None)
+            .await
+        {
+            Ok(result) => default_retention_policy(result.results.iter().flat_map(|r| &r.series)),
+            Err(_) => None,
+        };
+    Ok(render_v1_measurement_description(
+        database,
+        default_rp.as_deref(),
+        table,
+        tag_result.results.iter().flat_map(|r| &r.series),
+        field_result.results.iter().flat_map(|r| &r.series),
+    ))
+}
+
+fn default_retention_policy<'a>(mut series: impl Iterator<Item = &'a InfluxSeries>) -> Option<String> {
+    series.find_map(|series| {
+        let name_idx = series.columns.iter().position(|c| c == "name")?;
+        let default_idx = series.columns.iter().position(|c| c == "default")?;
+        series.values.iter().find_map(|row| {
+            if row.get(default_idx).and_then(serde_json::Value::as_bool) == Some(true) {
+                row.get(name_idx).and_then(serde_json::Value::as_str).map(str::to_string)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn render_v1_measurement_description<'a>(
+    database: &str,
+    default_rp: Option<&str>,
+    measurement: &str,
+    tag_series: impl Iterator<Item = &'a InfluxSeries>,
+    field_series: impl Iterator<Item = &'a InfluxSeries>,
+) -> String {
+    let mut tags: Vec<String> = Vec::new();
+    for name in tag_series
+        .flat_map(|series| &series.values)
+        .filter_map(|row| row.first().and_then(serde_json::Value::as_str))
+        .filter(|name| !name.is_empty())
+    {
+        if !tags.iter().any(|t| t == name) {
+            tags.push(name.to_string());
+        }
+    }
+    // A field key can carry several types across shards; keep each distinct type.
+    let mut fields: Vec<(String, Vec<String>)> = Vec::new();
+    for row in field_series.flat_map(|series| &series.values) {
+        let Some(name) = row.first().and_then(serde_json::Value::as_str).filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        let field_type = row.get(1).and_then(serde_json::Value::as_str).unwrap_or("unknown").to_string();
+        match fields.iter_mut().find(|(n, _)| n == name) {
+            Some((_, types)) => {
+                if !types.contains(&field_type) {
+                    types.push(field_type);
+                }
+            }
+            None => fields.push((name.to_string(), vec![field_type])),
+        }
+    }
+
+    let mut lines = vec![
+        "-- InfluxDB 1.x measurement (read-only description; InfluxQL has no CREATE TABLE)".to_string(),
+        format!("-- database: {}", quote_influx_identifier(database)),
+    ];
+    if let Some(rp) = default_rp {
+        lines.push(format!("-- default retention policy: {}", quote_influx_identifier(rp)));
+    }
+    lines.push(format!("-- measurement: {}", quote_influx_identifier(measurement)));
+    lines.push("--".to_string());
+    if tags.is_empty() {
+        lines.push("-- tag keys: (none)".to_string());
+    } else {
+        lines.push("-- tag keys (indexed, string):".to_string());
+        lines.extend(tags.iter().map(|t| format!("--   {}", quote_influx_identifier(t))));
+    }
+    if fields.is_empty() {
+        lines.push("-- field keys: (none)".to_string());
+    } else {
+        lines.push("-- field keys:".to_string());
+        lines.extend(
+            fields.iter().map(|(name, types)| format!("--   {} {}", quote_influx_identifier(name), types.join(", "))),
+        );
+    }
+    lines.join("\n")
+}
+
 fn influx_v1_column(name: String, data_type: String, is_primary_key: bool, role: &str) -> ColumnInfo {
     ColumnInfo {
         name,
@@ -836,6 +941,85 @@ mod tests {
             version: InfluxdbApiVersion::V1,
             org: None,
         }
+    }
+
+    fn series(columns: &[&str], values: Vec<Vec<serde_json::Value>>) -> InfluxSeries {
+        InfluxSeries {
+            name: "m".to_string(),
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            values,
+            tags: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn describes_measurement_with_tags_and_fields() {
+        let tags = [series(&["tagKey"], vec![vec![json!("host")], vec![json!("region")]])];
+        let fields = [series(
+            &["fieldKey", "fieldType"],
+            vec![vec![json!("usage"), json!("float")], vec![json!("count"), json!("integer")]],
+        )];
+        let ddl = render_v1_measurement_description("telegraf", Some("autogen"), "cpu", tags.iter(), fields.iter());
+        assert_eq!(
+            ddl,
+            "-- InfluxDB 1.x measurement (read-only description; InfluxQL has no CREATE TABLE)\n\
+-- database: \"telegraf\"\n\
+-- default retention policy: \"autogen\"\n\
+-- measurement: \"cpu\"\n\
+--\n\
+-- tag keys (indexed, string):\n\
+--   \"host\"\n\
+--   \"region\"\n\
+-- field keys:\n\
+--   \"usage\" float\n\
+--   \"count\" integer"
+        );
+    }
+
+    #[test]
+    fn describes_field_only_measurement_and_mixed_field_types() {
+        let fields = [series(
+            &["fieldKey", "fieldType"],
+            vec![
+                vec![json!("v"), json!("float")],
+                vec![json!("v"), json!("integer")],
+                vec![json!("v"), json!("float")],
+            ],
+        )];
+        let ddl = render_v1_measurement_description("db", None, "m", std::iter::empty(), fields.iter());
+        assert!(ddl.contains("-- tag keys: (none)"));
+        assert!(ddl.contains("--   \"v\" float, integer"));
+        assert!(!ddl.contains("retention policy"));
+    }
+
+    #[test]
+    fn description_escapes_special_measurement_names_and_stays_comment_only() {
+        let tags = [series(&["tagKey"], vec![vec![json!("主机 \"a\"")]])];
+        let ddl = render_v1_measurement_description(
+            "my db",
+            None,
+            "cpu load\n\"x\"\\y 温度",
+            tags.iter(),
+            std::iter::empty(),
+        );
+        assert!(ddl.contains("-- database: \"my db\""));
+        assert!(ddl.contains("-- measurement: \"cpu load\\n\\\"x\\\"\\\\y 温度\""));
+        assert!(ddl.contains("--   \"主机 \\\"a\\\"\""));
+        assert!(ddl.contains("-- field keys: (none)"));
+        assert!(ddl.lines().all(|line| line.starts_with("--")));
+    }
+
+    #[test]
+    fn finds_default_retention_policy() {
+        let rps = [series(
+            &["name", "duration", "shardGroupDuration", "replicaN", "default"],
+            vec![
+                vec![json!("short"), json!("1h0m0s"), json!("1h0m0s"), json!(1), json!(false)],
+                vec![json!("autogen"), json!("0s"), json!("168h0m0s"), json!(1), json!(true)],
+            ],
+        )];
+        assert_eq!(default_retention_policy(rps.iter()).as_deref(), Some("autogen"));
+        assert_eq!(default_retention_policy(std::iter::empty()), None);
     }
 
     #[test]

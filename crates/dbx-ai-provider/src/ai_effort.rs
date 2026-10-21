@@ -79,6 +79,13 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
         AiProvider::Kimi => kimi_capability(&model, source),
         AiProvider::Qwen => qwen_capability(&model, source),
         AiProvider::Zhipu | AiProvider::Ollama => ollama_capability(&model, source),
+        AiProvider::MiniMax if model == "minimax-m3.1-flash" => {
+            let mut capability = enum_capability(&["low", "medium", "high", "xhigh", "max"], source);
+            if let AiEffortCapability::Enum { default, .. } = &mut capability {
+                *default = AiEffortSelection::Enum("max".to_string());
+            }
+            Some(capability)
+        }
         AiProvider::MiniMax if matches_family(&model, "minimax-m3") => Some(boolean_capability(source)),
         AiProvider::MiniMax => None,
         AiProvider::AnthropicCompatible | AiProvider::OpenaiCompatible | AiProvider::Custom => {
@@ -288,7 +295,7 @@ pub fn apply_runtime_effort(body: &mut Value, config: &AiConfig) {
         AiProvider::Kimi => apply_kimi_effort(object, &config.model, selection),
         AiProvider::Qwen => apply_qwen_effort(object, selection),
         AiProvider::Zhipu | AiProvider::Ollama => apply_openai_effort(object, &config.api_style, selection),
-        AiProvider::MiniMax => apply_minimax_effort(object, selection),
+        AiProvider::MiniMax => apply_minimax_effort(object, &config.model, selection),
         AiProvider::Openai | AiProvider::OpenaiCompatible => apply_openai_effort(object, &config.api_style, selection),
         AiProvider::Custom => {
             if config.api_style == AiApiStyle::AnthropicMessages {
@@ -343,7 +350,13 @@ fn apply_kimi_effort(object: &mut Map<String, Value>, model_id: &str, selection:
     }
 }
 
-fn apply_minimax_effort(object: &mut Map<String, Value>, selection: &AiEffortSelection) {
+fn apply_minimax_effort(object: &mut Map<String, Value>, model_id: &str, selection: &AiEffortSelection) {
+    if normalized_model_id(model_id) == "minimax-m3.1-flash" {
+        if let AiEffortSelection::Enum(value) = selection {
+            object.insert("reasoning_effort".to_string(), Value::String(value.clone()));
+        }
+        return;
+    }
     let thinking_type = match selection {
         AiEffortSelection::Disabled | AiEffortSelection::Boolean(false) => "disabled",
         AiEffortSelection::Boolean(true) => "adaptive",
@@ -482,6 +495,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -510,6 +524,33 @@ mod tests {
                 panic!("expected free-text capability");
             };
             assert_eq!(placeholder, None);
+        }
+    }
+
+    #[test]
+    fn minimax_flash_exposes_only_supported_efforts() {
+        let mut config = config(AiProvider::MiniMax, "MiniMax-M3.1-Flash");
+        let AiEffortCapability::Enum { options, default, .. } =
+            static_effort_capability(&config, &config.model).unwrap()
+        else {
+            panic!("expected Flash effort levels");
+        };
+        assert_eq!(
+            options.iter().map(|option| option.id.as_str()).collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(default, AiEffortSelection::Enum("max".to_string()));
+        for option in options {
+            config.runtime_effort = Some(option.selection);
+            assert!(validate_runtime_effort(&config).is_ok());
+        }
+        for invalid in [
+            AiEffortSelection::Disabled,
+            AiEffortSelection::Boolean(false),
+            AiEffortSelection::Enum("none".to_string()),
+        ] {
+            config.runtime_effort = Some(invalid);
+            assert!(validate_runtime_effort(&config).is_err());
         }
     }
 

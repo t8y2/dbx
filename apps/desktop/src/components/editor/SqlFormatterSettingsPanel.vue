@@ -11,6 +11,7 @@ import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { saveTextFile } from "@/lib/export/saveTextFile";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
+import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import {
   DEFAULT_SQL_FORMATTER_SETTINGS,
   SQL_FORMATTER_CONFIG_FORMATTER,
@@ -54,7 +55,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const { toast } = useToast();
 
-const activeMode = ref<"form" | "json">("form");
+const activeMode = defineModel<"form" | "json">("mode", { default: "form" });
 const fileInputRef = ref<HTMLInputElement>();
 const jsonEditorRef = ref<HTMLDivElement>();
 const jsonDraft = ref(serializeSqlFormatterConfig(props.modelValue));
@@ -66,6 +67,15 @@ const jsonEditorReady = ref(false);
 const jsonEditorLoadError = ref("");
 const paramTypesDraft = ref("");
 const focusedAdvancedOption = ref<"paramTypes" | null>(null);
+const previewSql = ref("SELECT id, name, created_at FROM users WHERE active = 1 AND role = 'admin';\n\nINSERT INTO users (id, name) VALUES (1, 'Ada');\n\nUPDATE users SET name = 'Ada', active = 1 WHERE id = 1;");
+const previewDialect = ref<SqlFormatDialect>("oracle");
+const previewResult = ref("");
+const previewError = ref("");
+const previewDiagnostic = ref(false);
+const previewStale = ref(false);
+const previewLoading = ref(false);
+let previewRequestId = 0;
+let previewTimer: ReturnType<typeof setTimeout> | undefined;
 
 let cmView: EditorViewInstance | null = null;
 let cmModules: CodeMirrorModules | null = null;
@@ -89,6 +99,7 @@ const commaPositionOptions: { value: SqlFormatterCommaPosition; labelKey: string
   { value: "after", labelKey: "settings.sqlFormatterCommaPositionAfter" },
   { value: "before", labelKey: "settings.sqlFormatterCommaPositionBefore" },
 ];
+const dmlCommaPositionOptions = [{ value: "inherit", labelKey: "settings.sqlFormatterRule_inherit" }, ...commaPositionOptions];
 
 const fromClauseLayoutOptions: { value: SqlFormatterFromClauseLayout; labelKey: string }[] = [
   { value: "newLine", labelKey: "settings.sqlFormatterFromNewLine" },
@@ -102,12 +113,11 @@ const indentStyleOptions: { value: SqlFormatterIndentStyle; labelKey: string }[]
 ];
 
 const layoutStyleOptions: { value: SqlFormatterLayoutStyle; labelKey: string }[] = [
-  { value: "dbx", labelKey: "settings.sqlFormatterLayoutStyleDbx" },
   { value: "classic", labelKey: "settings.sqlFormatterLayoutStyleClassic" },
+  { value: "dbx", labelKey: "settings.sqlFormatterLayoutStyleDbx" },
 ];
 
 const tabWidthOptions: SqlFormatterTabWidth[] = [2, 4];
-const expressionWidthOptions: SqlFormatterExpressionWidth[] = [50, 80, 120];
 const linesBetweenQueriesOptions: SqlFormatterLinesBetweenQueries[] = [0, 1, 2];
 const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterOptionSettings, string> = {
   layoutStyle: "settings.sqlFormatterLayoutStyle",
@@ -127,6 +137,23 @@ const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterOptionSettings, stri
   denseOperators: "settings.sqlFormatterDenseOperators",
   newlineBeforeSemicolon: "settings.sqlFormatterNewlineBeforeSemicolon",
   paramTypes: "settings.sqlFormatterParamTypes",
+  customRulesEnabled: "settings.sqlFormatterCustomRules",
+  listLayout: "settings.sqlFormatterListLayout",
+  selectListLayout: "settings.sqlFormatterSelectListLayout",
+  insertListLayout: "settings.sqlFormatterInsertListLayout",
+  updateListLayout: "settings.sqlFormatterUpdateListLayout",
+  listItemAlignment: "settings.sqlFormatterListItemAlignment",
+  alignSelectAliases: "settings.sqlFormatterAlignSelectAliases",
+  alignUpdateAssignments: "settings.sqlFormatterAlignUpdateAssignments",
+  selectCommaPosition: "settings.sqlFormatterSelectCommaPosition",
+  insertCommaPosition: "settings.sqlFormatterInsertCommaPosition",
+  updateCommaPosition: "settings.sqlFormatterUpdateCommaPosition",
+  whereLogicalOperatorNewline: "settings.sqlFormatterWhereLogicalOperatorNewline",
+  onLogicalOperatorNewline: "settings.sqlFormatterOnLogicalOperatorNewline",
+  expressionLogicalOperatorNewline: "settings.sqlFormatterExpressionLogicalOperatorNewline",
+  newlineBeforeJoinOn: "settings.sqlFormatterNewlineBeforeJoinOn",
+  collapseShortStatements: "settings.sqlFormatterCollapseShortStatements",
+  emptyLineMode: "settings.sqlFormatterEmptyLineMode",
 };
 const sqlFormatterConfigErrorKeys: Record<string, string> = {
   "Invalid JSON.": "settings.sqlFormatterConfigErrorInvalidJson",
@@ -231,8 +258,55 @@ function onTabWidth(value: any) {
 
 function onExpressionWidth(value: any) {
   const next = Number(value);
-  if (next === 50 || next === 80 || next === 120) updateOption("expressionWidth", next);
+  if (Number.isInteger(next) && next >= 20 && next <= 500) updateOption("expressionWidth", next as SqlFormatterExpressionWidth);
 }
+
+const ruleEnums = {
+  layout: ["singleLine", "fit", "vertical", "wrap"],
+  layoutOverride: ["inherit", "singleLine", "fit", "vertical", "wrap"],
+  alignment: ["firstItem", "indent"],
+  logical: ["inherit", "before", "after", "none"],
+  empty: ["inherit", "remove", "single", "preserve"],
+} as const;
+const dmlCommaRules: { key: "selectCommaPosition" | "insertCommaPosition" | "updateCommaPosition"; titleKey: string }[] = [
+  { key: "selectCommaPosition", titleKey: "sqlFormatterSelectCommaPosition" },
+  { key: "insertCommaPosition", titleKey: "sqlFormatterInsertCommaPosition" },
+  { key: "updateCommaPosition", titleKey: "sqlFormatterUpdateCommaPosition" },
+];
+const dmlToggleRules: { key: "alignSelectAliases" | "alignUpdateAssignments" | "collapseShortStatements"; titleKey: string }[] = [
+  { key: "alignSelectAliases", titleKey: "sqlFormatterAlignSelectAliases" },
+  { key: "alignUpdateAssignments", titleKey: "sqlFormatterAlignUpdateAssignments" },
+  { key: "collapseShortStatements", titleKey: "sqlFormatterCollapseShortStatements" },
+];
+const conditionRules: { key: "whereLogicalOperatorNewline" | "onLogicalOperatorNewline" | "expressionLogicalOperatorNewline"; titleKey: string }[] = [
+  { key: "whereLogicalOperatorNewline", titleKey: "sqlFormatterWhereLogicalOperatorNewline" },
+  { key: "onLogicalOperatorNewline", titleKey: "sqlFormatterOnLogicalOperatorNewline" },
+  { key: "expressionLogicalOperatorNewline", titleKey: "sqlFormatterExpressionLogicalOperatorNewline" },
+];
+function schedulePreview() {
+  previewStale.value = !!previewResult.value;
+  if (previewTimer) clearTimeout(previewTimer);
+  const requestId = ++previewRequestId;
+  previewTimer = setTimeout(async () => {
+    previewLoading.value = true;
+    previewError.value = "";
+    let diagnostic: "custom-rules-fallback" | undefined;
+    try {
+      const result = await formatSqlText(previewSql.value, previewDialect.value, settings.value, (value) => (diagnostic = value));
+      if (requestId !== previewRequestId) return;
+      previewResult.value = result;
+      previewDiagnostic.value = diagnostic === "custom-rules-fallback";
+      previewStale.value = false;
+    } catch (error) {
+      if (requestId !== previewRequestId) return;
+      previewError.value = error instanceof Error ? error.message : String(error);
+      previewStale.value = !!previewResult.value;
+    } finally {
+      if (requestId === previewRequestId) previewLoading.value = false;
+    }
+  }, 180);
+}
+watch([settings, previewSql, previewDialect], schedulePreview, { deep: true, immediate: true });
 
 function onLinesBetweenQueries(value: any) {
   const next = Number(value);
@@ -498,6 +572,8 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  previewRequestId += 1;
+  if (previewTimer) clearTimeout(previewTimer);
   destroyJsonEditor();
 });
 </script>
@@ -691,17 +767,8 @@ onBeforeUnmount(() => {
 
         <div class="grid gap-4 md:grid-cols-2">
           <div class="space-y-2">
-            <Label>{{ t("settings.sqlFormatterExpressionWidth") }}</Label>
-            <Select :model-value="String(settings.expressionWidth)" @update:model-value="onExpressionWidth">
-              <SelectTrigger class="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="width in expressionWidthOptions" :key="width" :value="String(width)">
-                  {{ width }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <Label for="sql-formatter-expression-width">{{ t("settings.sqlFormatterExpressionWidth") }}</Label>
+            <input id="sql-formatter-expression-width" type="number" min="20" max="500" step="1" :value="settings.expressionWidth" class="h-9 w-full rounded-md border border-input bg-background px-3" @change="onExpressionWidth(($event.target as HTMLInputElement).value)" />
           </div>
 
           <div class="space-y-2">
@@ -739,6 +806,101 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="space-y-3 rounded-md border border-border/70 bg-muted/10 p-3">
+          <div class="flex items-center justify-between gap-3">
+            <Label for="sql-formatter-custom-rules">{{ t("settings.sqlFormatterCustomRules") }}</Label>
+            <Switch id="sql-formatter-custom-rules" :model-value="settings.customRulesEnabled" @update:model-value="(value: boolean) => updateOption('customRulesEnabled', value)" />
+          </div>
+          <p class="text-sm text-muted-foreground">{{ t("settings.sqlFormatterCustomRulesHint") }}</p>
+          <div v-if="settings.customRulesEnabled" class="grid gap-4">
+            <div class="grid gap-3 md:grid-cols-3">
+              <label class="space-y-1 text-sm"
+                >{{ t("settings.sqlFormatterListLayout")
+                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.listLayout" @change="updateOption('listLayout', ($event.target as HTMLSelectElement).value as any)">
+                  <option v-for="value in ruleEnums.layout" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
+                </select></label
+              >
+              <label class="space-y-1 text-sm"
+                >{{ t("settings.sqlFormatterSelectListLayout")
+                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.selectListLayout" @change="updateOption('selectListLayout', ($event.target as HTMLSelectElement).value as any)">
+                  <option v-for="value in ruleEnums.layoutOverride" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
+                </select></label
+              >
+              <label class="space-y-1 text-sm"
+                >{{ t("settings.sqlFormatterInsertListLayout")
+                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.insertListLayout" @change="updateOption('insertListLayout', ($event.target as HTMLSelectElement).value as any)">
+                  <option v-for="value in ruleEnums.layoutOverride" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
+                </select></label
+              >
+              <label class="space-y-1 text-sm"
+                >{{ t("settings.sqlFormatterUpdateListLayout")
+                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.updateListLayout" @change="updateOption('updateListLayout', ($event.target as HTMLSelectElement).value as any)">
+                  <option v-for="value in ruleEnums.layoutOverride" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
+                </select></label
+              >
+              <label class="space-y-1 text-sm"
+                >{{ t("settings.sqlFormatterListItemAlignment")
+                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.listItemAlignment" @change="updateOption('listItemAlignment', ($event.target as HTMLSelectElement).value as any)">
+                  <option v-for="value in ruleEnums.alignment" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
+                </select></label
+              >
+              <label class="space-y-1 text-sm"
+                >{{ t("settings.sqlFormatterEmptyLineMode")
+                }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings.emptyLineMode" @change="updateOption('emptyLineMode', ($event.target as HTMLSelectElement).value as any)">
+                  <option v-for="value in ruleEnums.empty" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
+                </select></label
+              >
+            </div>
+            <details class="space-y-3">
+              <summary class="cursor-pointer text-sm font-medium">{{ t("settings.sqlFormatterDmlRules") }}</summary>
+              <div class="grid gap-3 pt-2 md:grid-cols-3">
+                <label v-for="{ key, titleKey } in dmlCommaRules" :key="key" class="space-y-1 text-sm"
+                  >{{ t(`settings.${titleKey}`)
+                  }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings[key]" @change="updateOption(key, ($event.target as HTMLSelectElement).value as any)">
+                    <option v-for="option in dmlCommaPositionOptions" :key="option.value" :value="option.value">{{ t(option.labelKey) }}</option>
+                  </select></label
+                >
+                <div v-for="{ key, titleKey } in dmlToggleRules" :key="key" class="flex items-center justify-between gap-3 rounded border px-3 py-2">
+                  <Label :for="`sql-formatter-${key}`">{{ t(`settings.${titleKey}`) }}</Label
+                  ><Switch :id="`sql-formatter-${key}`" :model-value="settings[key]" @update:model-value="(value: boolean) => updateOption(key, value as any)" />
+                </div>
+              </div>
+            </details>
+            <details class="space-y-3">
+              <summary class="cursor-pointer text-sm font-medium">{{ t("settings.sqlFormatterConditionRules") }}</summary>
+              <div class="grid gap-3 pt-2 md:grid-cols-2">
+                <label v-for="{ key, titleKey } in conditionRules" :key="key" class="space-y-1 text-sm"
+                  >{{ t(`settings.${titleKey}`)
+                  }}<select class="h-9 w-full rounded-md border bg-background px-2" :value="settings[key]" @change="updateOption(key, ($event.target as HTMLSelectElement).value as any)">
+                    <option v-for="value in ruleEnums.logical" :key="value" :value="value">{{ t(`settings.sqlFormatterRule_${value}`) }}</option>
+                  </select></label
+                >
+                <div class="flex items-center justify-between gap-3 rounded border px-3 py-2">
+                  <Label for="sql-formatter-newline-before-join-on">{{ t("settings.sqlFormatterNewlineBeforeJoinOn") }}</Label
+                  ><Switch id="sql-formatter-newline-before-join-on" :model-value="settings.newlineBeforeJoinOn" @update:model-value="(value: boolean) => updateOption('newlineBeforeJoinOn', value)" />
+                </div>
+              </div>
+            </details>
+          </div>
+          <div class="space-y-3 border-t pt-3">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-medium">{{ t("settings.sqlFormatterPreview") }}</h3>
+              <label class="text-sm"
+                >{{ t("settings.sqlFormatterPreviewDialect") }}
+                <select v-model="previewDialect" class="h-8 rounded border bg-background px-2">
+                  <option value="oracle">Oracle</option>
+                  <option value="postgres">PostgreSQL</option>
+                  <option value="mysql">MySQL</option>
+                  <option value="sqlserver">SQL Server</option>
+                </select></label
+              >
+            </div>
+            <textarea v-model="previewSql" :aria-label="t('settings.sqlFormatterPreviewSource')" class="min-h-28 w-full resize-y rounded-md border bg-background p-3 font-mono text-sm" spellcheck="false" />
+            <p v-if="previewError" role="alert" class="text-sm text-destructive">{{ t("settings.sqlFormatterPreviewFailed", { message: previewError }) }}</p>
+            <p v-if="previewDiagnostic" role="status" class="text-sm text-amber-700">{{ t("settings.sqlFormatterFallbackNotice") }}</p>
+            <p v-if="previewStale" class="text-sm text-amber-700">{{ t("settings.sqlFormatterPreviewStale") }}</p>
+            <p v-if="previewLoading" role="status" class="text-sm text-muted-foreground">{{ t("settings.sqlFormatterPreviewUpdating") }}</p>
+            <pre class="max-h-64 overflow-auto rounded-md border bg-background p-3 font-mono text-sm whitespace-pre-wrap">{{ previewResult }}</pre>
+          </div>
           <div class="text-sm font-medium">{{ t("settings.sqlFormatterAdvancedOptions") }}</div>
           <div class="space-y-2">
             <Label for="sql-formatter-param-types">{{ t("settings.sqlFormatterParamTypes") }}</Label>
@@ -758,7 +920,7 @@ onBeforeUnmount(() => {
         </div>
       </TabsContent>
 
-      <TabsContent value="json" class="m-0 flex min-h-0 flex-col gap-3 pt-2">
+      <TabsContent value="json" data-settings-search-id="formatter-json" class="m-0 flex min-h-0 flex-col gap-3 pt-2">
         <div class="flex flex-wrap items-center gap-2">
           <Button type="button" variant="outline" size="sm" @click="formatJsonDraft">
             <WandSparkles class="mr-2 h-4 w-4" />

@@ -1477,13 +1477,18 @@ fn is_shell_regex_value_prefix(previous_significant: Option<char>) -> bool {
 /// Shell value constructors rewritten to extended JSON before json5 parsing.
 /// `Date` is only recognised after `new`, matching the shell where a bare `Date()`
 /// returns a string rather than a date.
-const SHELL_CONSTRUCTORS: [&str; 11] = [
+const SHELL_CONSTRUCTORS: [&str; 15] = [
     "ObjectId",
     "ISODate",
     "Date",
     "NumberLong",
     "NumberInt",
     "NumberDecimal",
+    // mongosh's BSON type names for the same values.
+    "Int32",
+    "Long",
+    "Double",
+    "Decimal128",
     "UUID",
     "BinData",
     "Timestamp",
@@ -1621,6 +1626,10 @@ fn key_constant_json(name: &str) -> String {
 
 /// Rewrite one `Name(...)` / `new Name(...)` call at `index`, or None when it is not a known constructor.
 fn shell_constructor_call(input: &str, index: usize) -> Result<Option<(String, usize)>, String> {
+    // Only at the start of a name, so `myLong(1)` is not read as `Long(1)`.
+    if input[..index].chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '.')) {
+        return Ok(None);
+    }
     let rest = &input[index..];
     let (name_start, is_new) = match rest.strip_prefix("new") {
         Some(after) if after.starts_with(|ch: char| ch.is_whitespace()) => {
@@ -1670,8 +1679,8 @@ fn shell_constructor_to_extended_json(name: &str, inner: &str) -> Result<String,
             Some(millis) => Ok(format!(r#"{{"$date":{{"$numberLong":"{millis}"}}}}"#)),
             None => Ok(extended_json("$date", &parse_string_arg(inner)?)),
         },
-        "NumberLong" | "NumberInt" => {
-            let key = if name == "NumberLong" { "$numberLong" } else { "$numberInt" };
+        "NumberLong" | "NumberInt" | "Long" | "Int32" => {
+            let key = if matches!(name, "NumberLong" | "Long") { "$numberLong" } else { "$numberInt" };
             let value = match integer {
                 Some(value) => value.to_string(),
                 None => parse_string_arg(inner)?,
@@ -1679,13 +1688,13 @@ fn shell_constructor_to_extended_json(name: &str, inner: &str) -> Result<String,
             value.parse::<i64>().map_err(|_| format!("MongoDB {name}() requires an integer argument."))?;
             Ok(extended_json(key, &value))
         }
-        "NumberDecimal" => {
+        "NumberDecimal" | "Decimal128" | "Double" => {
             let value = match parse_json_value(inner) {
                 Some(Value::Number(number)) => number.to_string(),
                 _ => parse_string_arg(inner)?,
             };
-            value.parse::<f64>().map_err(|_| "MongoDB NumberDecimal() requires a numeric argument.".to_string())?;
-            Ok(extended_json("$numberDecimal", &value))
+            value.parse::<f64>().map_err(|_| format!("MongoDB {name}() requires a numeric argument."))?;
+            Ok(extended_json(if name == "Double" { "$numberDouble" } else { "$numberDecimal" }, &value))
         }
         _ => Err(format!("Unsupported MongoDB value constructor {name}().")),
     }
@@ -2175,6 +2184,43 @@ mod tests {
         };
         let oid = parse_json_value(&filter).unwrap()["_id"]["$oid"].as_str().unwrap().to_string();
         assert!(oid.len() == 24 && oid.chars().all(|ch| ch.is_ascii_hexdigit()), "{oid}");
+    }
+
+    #[test]
+    fn rewrites_mongosh_bson_type_constructors() {
+        let MongoCommand::Insert { documents, .. } = parse(
+            "db.getCollection(\"issue_demo\").insert({\n    name: \"demo\",\n    coins: Int32(\"15000\"),\n    amount: Decimal128(\"100\")\n});",
+        )
+        .unwrap() else {
+            panic!("expected an insert command");
+        };
+        assert_eq!(
+            parse_json_value(&documents).unwrap(),
+            serde_json::json!({ "name": "demo", "coins": { "$numberInt": "15000" }, "amount": { "$numberDecimal": "100" } })
+        );
+
+        let MongoCommand::Find { filter, .. } = parse(
+            r#"db.orders.find({a: Int32(3), b: new Int32(-4), c: Long("9223372036854775807"), d: Long(5), e: Double(1.5), f: Double("2"), g: Decimal128("12.34")})"#,
+        )
+        .unwrap() else {
+            panic!("expected a find command");
+        };
+        assert_eq!(
+            parse_json_value(&filter).unwrap(),
+            serde_json::json!({
+                "a": { "$numberInt": "3" },
+                "b": { "$numberInt": "-4" },
+                "c": { "$numberLong": "9223372036854775807" },
+                "d": { "$numberLong": "5" },
+                "e": { "$numberDouble": "1.5" },
+                "f": { "$numberDouble": "2" },
+                "g": { "$numberDecimal": "12.34" },
+            })
+        );
+
+        assert!(parse(r#"db.orders.find({a: Long("x")})"#).unwrap_err().contains("Long() requires an integer"));
+        assert!(parse(r#"db.orders.find({a: Double("abc")})"#).unwrap_err().contains("Double() requires a numeric"));
+        assert!(parse("db.orders.find({a: myLong(1)})").is_err());
     }
 
     #[test]

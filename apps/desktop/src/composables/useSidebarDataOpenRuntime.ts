@@ -2,10 +2,11 @@ import { nextTick } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import type { TreeNode } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
-import { effectiveDatabaseTypeForConnection, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema } from "@/lib/database/jdbcDialect";
+import { effectiveDatabaseTypeForConnection, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionTableSqlSchema } from "@/lib/database/jdbcDialect";
 import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS, tableMetadataToDataTabMeta } from "@/lib/metadata/tableMetadataCache";
 import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, isDataTabMetadataLifecycleStale, type DataTabOpenMode, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
@@ -30,6 +31,7 @@ export function useSidebarDataOpenRuntime() {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
+  const tunnelProfileStore = useTunnelProfileStore();
 
   async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default", options: NavigationOpenOptions & { reuseMode?: DataTabReuseMode; revealColumn?: string } = {}) {
     if (options.isCurrent?.() === false) return;
@@ -92,6 +94,18 @@ export function useSidebarDataOpenRuntime() {
     const querySchema = config ? connectionObjectTreeQuerySchema(config, node.database, tableSchema) : (tableSchema ?? "");
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const metadataDatabaseType = effectiveDbType || config?.db_type || "";
+    // Navicat's PHP tunnel turns every pooled MySQL session into a separate
+    // HTTP request. Loading columns and indexes before the first data page
+    // therefore creates several competing handshakes and makes the table
+    // appear stuck in "loading" even when SELECT itself is already fast.
+    // Keep the existing eager metadata behavior for every other transport.
+    const isNavicatMysqlTunnel =
+      config?.transport_layers?.some((layer) => {
+        if (layer.type !== "http_tunnel") return false;
+        if (layer.protocol === "navicat_mysql") return true;
+        const profile = tunnelProfileStore.profileById(layer.profile_id);
+        return profile?.type === "http_tunnel" && profile.protocol === "navicat_mysql";
+      }) ?? false;
     const dataTabTarget = {
       connectionId: node.connectionId,
       database: node.database,
@@ -371,7 +385,7 @@ export function useSidebarDataOpenRuntime() {
         logPhase("metadata-started", { tabId });
       }
 
-      const metadataRefresh = shouldRefreshTableMeta && !deferTableMetaRefresh ? refreshTableMetaInBackground(tabId) : undefined;
+      const metadataRefresh = shouldRefreshTableMeta && !deferTableMetaRefresh && !isNavicatMysqlTunnel ? refreshTableMetaInBackground(tabId) : undefined;
       if (!cachedTableMeta && (requiresEagerTableMetadataForDataOpen(effectiveDbType) || defaultSortMode !== "none")) {
         // No query is in flight yet, so deferred drivers can safely load metadata serially.
         if (deferTableMetaRefresh) await refreshTableMetaInBackground(tabId);
@@ -392,10 +406,10 @@ export function useSidebarDataOpenRuntime() {
       const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
-        driverProfile: config?.driver_profile,
+        driverProfile: config?.driver_profile || (config?.db_type === "gbase8s" ? "gbase8s" : undefined),
         serverVersion: connectionStore.getConfig(node.connectionId)?.database_info?.productVersion,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
-        schema: tableSchema,
+        schema: connectionTableSqlSchema(config, tableSchema),
         database: node.database,
         tableName: node.label,
         tableType,
@@ -440,9 +454,9 @@ export function useSidebarDataOpenRuntime() {
         applyTableDefaultSortResult(sortedTab, defaultSort, queryStore.sortTabResultLocally);
       }
       logPhase("execute-tab-sql", { tabId });
-      if (shouldRefreshTableMeta && deferTableMetaRefresh && canApplyTableMetadata(tabId)) {
+      if (shouldRefreshTableMeta && (deferTableMetaRefresh || isNavicatMysqlTunnel) && canApplyTableMetadata(tabId)) {
         void refreshTableMetaInBackground(tabId);
-        logPhase("metadata-started", { tabId });
+        logPhase("metadata-started", { tabId, deferredForTransport: isNavicatMysqlTunnel ? "navicat_mysql" : "driver" });
       }
     } catch (e: any) {
       if (!isActive()) {

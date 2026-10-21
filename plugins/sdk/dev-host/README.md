@@ -69,6 +69,7 @@ Field names come from the plugin manifest, not the runtime. Imported records get
 - Host API 1.0 subset: `ready`, `contributionId` (readable after `ready`), `context`, `locale`, `theme`, `request`, `invoke`, `notify`, `onInit`, `onContext`, `onEvent`, `onBinary`, `sendBinary`, resource reads and `openWorkbench`.
 - Backend transports: default `stdio-jsonl` and explicit `stdio-framed`, protocol version 1. Initialization verifies plugin identity and version. Binary channels require framed transport.
 - Permissions: event, binary and workbench navigation permissions are enforced. Unimplemented methods, such as `host.openFilesystem`, return errors. Native connection actions, query-result contributions and the DBX component kit are not emulated.
+- UI entrypoints and individual asset files: 32 MiB, matching the installed DBX host. Larger files and directories are rejected; path and symlink isolation remains enforced.
 - JSON bridge parameters: 2 MiB. UI binary messages: 8 MiB. Sidecar JSON: 8 MiB. Sidecar binary: 64 MiB. Explicit bridge timeouts are clamped to 1–120000 ms, matching the host baseline.
 - UI resources must be inline or loaded through `readAssetUrl`; relative module URLs are not a replacement for the declared asset bridge. The iframe uses `sandbox="allow-scripts"`, restrictive CSP and pure-data context snapshots. Direct networking is not enabled by the development runtime.
 

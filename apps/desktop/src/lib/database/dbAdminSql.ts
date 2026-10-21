@@ -330,7 +330,7 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
   }
 
   let sourceColumns = options.sourceColumns;
-  if (options.databaseType === "vastbase") {
+  if (options.databaseType === "vastbase" || options.databaseType === "oscar") {
     sourceColumns ??= await api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
   }
   const sql = await buildDuplicateTableStructureSql({
@@ -339,7 +339,7 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     sourceName: options.sourceName,
     targetName: options.targetName,
     tableComment: options.tableComment,
-    columnComments: options.databaseType === "vastbase" ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
+    columnComments: options.databaseType === "vastbase" || options.databaseType === "oscar" ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
     identifierQuote: options.identifierQuote,
   });
   return { sql, sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };

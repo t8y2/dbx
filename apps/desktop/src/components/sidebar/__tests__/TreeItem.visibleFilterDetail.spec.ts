@@ -7,6 +7,8 @@ import TreeItem from "@/components/sidebar/TreeItem.vue";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHost } from "@/lib/sidebar/sidebarTreeRuntime";
 import type { SidebarVisibleFilterSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
+import { buildConnectionUrlCopy } from "@/lib/connection/connectionUrlBuilder";
+import { parseConnectionUrl } from "@/lib/connection/connectionUrl";
 
 const state: {
   config: ConnectionConfig;
@@ -139,6 +141,37 @@ afterEach(() => {
 });
 
 describe("TreeItem visible filter connection detail", () => {
+  it("shows the tenant separator without URL escaping while copied URLs remain round-trippable", async () => {
+    state.config = { ...mysqlConnection(), driver_profile: "oceanbase", username: "admin@tenant", port: 2881, url_params: "password=synthetic-secret" };
+
+    await openConnectionTooltip();
+
+    expect(document.body.textContent).toContain("mysql://admin@tenant@127.0.0.1:2881/filter_alpha?password=***");
+    expect(document.body.textContent).not.toContain("synthetic-secret");
+    const copied = buildConnectionUrlCopy(state.config, "url")!;
+    expect(copied).toContain("admin@tenant@");
+    expect(parseConnectionUrl(copied).username).toBe("admin@tenant");
+  });
+
+  it("keeps other username delimiters escaped and preserves literal percent-looking text", async () => {
+    state.config = { ...mysqlConnection(), username: "user:name@tenant%40cluster", password: "synthetic-secret" };
+
+    await openConnectionTooltip();
+
+    expect(document.body.textContent).toContain("mysql://user%3Aname@tenant%2540cluster@127.0.0.1:3306/filter_alpha");
+    expect(document.body.textContent).not.toContain("synthetic-secret");
+  });
+
+  it("uses the same readable OceanBase username punctuation in previews and copies", async () => {
+    const username = "u!$()*,=@tenant";
+    state.config = { ...mysqlConnection(), driver_profile: "oceanbase", username };
+
+    await openConnectionTooltip();
+
+    expect(document.body.textContent).toContain("mysql://" + username + "@127.0.0.1:3306/filter_alpha");
+    expect(buildConnectionUrlCopy(state.config, "url")).toContain("oceanbase://" + username + "@");
+  });
+
   it("shows an active database filter count in the connection tooltip", async () => {
     const { host, node } = await openConnectionTooltip();
 

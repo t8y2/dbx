@@ -14,6 +14,13 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   openObjectSourceTabPending: vi.fn(),
   toast: vi.fn(),
+  editorSettings: {
+    shortcuts: { refreshData: "F5" },
+    objectBrowserViewMode: "list",
+    objectBrowserShowCheckbox: false,
+    sidebarActivation: "single",
+    objectBrowserAutoOpenDetailPanel: true as boolean | undefined,
+  },
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -36,11 +43,9 @@ vi.mock("@/stores/queryStore", () => ({
 }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: {
-      shortcuts: { refreshData: "F5" },
-      objectBrowserViewMode: "list",
-      objectBrowserShowCheckbox: false,
-      sidebarActivation: "single",
+    editorSettings: mocks.editorSettings,
+    updateEditorSettings: (partial: Partial<typeof mocks.editorSettings>) => {
+      Object.assign(mocks.editorSettings, partial);
     },
   }),
 }));
@@ -102,6 +107,7 @@ beforeEach(() => {
   mocks.buildEditableObjectSource.mockImplementation(async (options: { source: string }) => options.source);
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.openObjectSourceTabPending.mockReturnValue("tab-1");
+  mocks.editorSettings.objectBrowserAutoOpenDetailPanel = true;
   invalidateObjectBrowserRowsCache({});
 });
 
@@ -253,5 +259,69 @@ describe("ObjectBrowser routine double click", () => {
 
     expect(mocks.openObjectSourceTabPending).not.toHaveBeenCalled();
     expect(mocks.getObjectSource).toHaveBeenCalledWith("mysql-routines", "app", "app", "seq_invoice", "SEQUENCE", undefined);
+  });
+
+  it("does not auto-open source side panel on single click when objectBrowserAutoOpenDetailPanel is false", async () => {
+    mocks.editorSettings.objectBrowserAutoOpenDetailPanel = false;
+    const host = await mountBrowser();
+    vi.useFakeTimers();
+
+    click(rowFor(host, "sp_daily_report"), 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY * 2);
+
+    expect(mocks.getObjectSource).not.toHaveBeenCalled();
+  });
+
+  it("still opens routine source tab on double click when objectBrowserAutoOpenDetailPanel is false", async () => {
+    mocks.editorSettings.objectBrowserAutoOpenDetailPanel = false;
+    const host = await mountBrowser();
+    vi.useFakeTimers();
+
+    const row = rowFor(host, "sp_daily_report");
+    click(row, 1);
+    click(row, 2);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(mocks.openObjectSourceTabPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: "mysql-routines",
+        database: "app",
+        request: expect.objectContaining({ name: "sp_daily_report", objectType: "PROCEDURE" }),
+      }),
+    );
+  });
+
+  it("switches side panel when clicking different objects while detail panel is open and auto-open is false", async () => {
+    mocks.editorSettings.objectBrowserAutoOpenDetailPanel = false;
+    const host = await mountBrowser();
+    vi.useFakeTimers();
+
+    const spRow = rowFor(host, "sp_daily_report");
+    click(spRow, 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY * 2);
+    expect(mocks.getObjectSource).not.toHaveBeenCalled();
+
+    // Manually open the side panel
+    const toggleBtn = host.querySelector<HTMLButtonElement>('button[title="objects.openDetailPanel"]');
+    expect(toggleBtn).not.toBeNull();
+    toggleBtn?.click();
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY * 2);
+
+    expect(mocks.getObjectSource).toHaveBeenCalledWith("mysql-routines", "app", "app", "sp_daily_report", "PROCEDURE", "IN day DATE");
+    expect(spRow.style.boxShadow).toBe("inset 3px 0 0 var(--primary)");
+
+    // Switch to another object: sequence
+    const seqRow = rowFor(host, "seq_invoice");
+    click(seqRow, 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY * 2);
+
+    expect(mocks.getObjectSource).toHaveBeenCalledWith("mysql-routines", "app", "app", "seq_invoice", "SEQUENCE", undefined);
+    expect(spRow.style.boxShadow).toBe("");
+    expect(seqRow.style.boxShadow).toBe("inset 3px 0 0 var(--primary)");
+
+    // Clicking the same row again does not close the panel when auto-open is false
+    click(seqRow, 1);
+    await vi.advanceTimersByTimeAsync(SINGLE_CLICK_DELAY * 2);
+    expect(seqRow.style.boxShadow).toBe("inset 3px 0 0 var(--primary)");
   });
 });

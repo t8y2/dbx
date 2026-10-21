@@ -57,7 +57,7 @@ pub(super) fn build(
         if context.automatic_bucket_scaling {
             warnings.push("This StarRocks table uses automatic bucket scaling (bucket_size > 0); changing distribution or bucket count through ALTER is not supported. Create a new table to change distribution.".into());
         }
-        if !version.is_some_and(|v| v >= (3, 2, 0)) {
+        if version.is_none_or(|v| v < (3, 2, 0)) {
             warnings.push("Changing StarRocks distribution requires confirmed version 3.2 or newer.".into());
         }
         if !layout.partitions.is_empty() {

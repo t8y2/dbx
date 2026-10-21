@@ -28,6 +28,9 @@ export type ShortcutActionId =
   | "redo"
   | "selectAll"
   | "selectCurrentStatement"
+  | "previousStatement"
+  | "nextStatement"
+  | "statementStart"
   | "extendSelection"
   | "addNextSelectionOccurrence"
   | "selectAllSelectionOccurrences"
@@ -56,10 +59,14 @@ export type ShortcutActionId =
   | "reopenClosedTab"
   | "closeOtherTabs"
   | "closeAllTabs"
+  | "saveAllTabs"
   | "closeWindow"
   | "focusSearch"
   | "quickOpen"
   | "globalSearch"
+  | "openConnectionPicker"
+  | "openDatabasePicker"
+  | "openSchemaPicker"
   | "toggleAiPanel"
   | "navigateTabHistoryBack"
   | "navigateTabHistoryForward"
@@ -339,6 +346,24 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+Shift+E",
   },
   {
+    id: "previousStatement",
+    labelKey: "settings.shortcutPreviousStatement",
+    scope: "editor",
+    defaultShortcut: "Ctrl+Shift+ArrowUp",
+  },
+  {
+    id: "nextStatement",
+    labelKey: "settings.shortcutNextStatement",
+    scope: "editor",
+    defaultShortcut: "Ctrl+Shift+ArrowDown",
+  },
+  {
+    id: "statementStart",
+    labelKey: "settings.shortcutStatementStart",
+    scope: "editor",
+    defaultShortcut: "Alt+Home",
+  },
+  {
     id: "extendSelection",
     labelKey: "settings.shortcutExtendSelection",
     scope: "editor",
@@ -509,6 +534,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "",
   },
   {
+    id: "saveAllTabs",
+    labelKey: "contextMenu.saveAllTabs",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
     id: "closeWindow",
     labelKey: "settings.shortcutCloseWindow",
     scope: "global",
@@ -533,6 +564,24 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutGlobalSearch",
     scope: "global",
     defaultShortcut: "Mod+Alt+F",
+  },
+  {
+    id: "openConnectionPicker",
+    labelKey: "settings.shortcutOpenConnectionPicker",
+    scope: "global",
+    defaultShortcut: "Mod+Alt+C",
+  },
+  {
+    id: "openDatabasePicker",
+    labelKey: "settings.shortcutOpenDatabasePicker",
+    scope: "global",
+    defaultShortcut: "Mod+Alt+D",
+  },
+  {
+    id: "openSchemaPicker",
+    labelKey: "settings.shortcutOpenSchemaPicker",
+    scope: "global",
+    defaultShortcut: "Mod+Alt+S",
   },
   {
     id: "toggleAiPanel",

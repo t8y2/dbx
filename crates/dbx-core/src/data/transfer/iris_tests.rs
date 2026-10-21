@@ -11,9 +11,19 @@ fn iris_transfer_pages_advance_with_top_and_vid() {
     for offset in [2, 4] {
         assert_eq!(
             pagination_sql_with_order(
-                &columns, "items", "SQLUSER", &DatabaseType::Iris, offset, 2, &["id".into()], None,
+                &columns,
+                "items",
+                "SQLUSER",
+                &DatabaseType::Iris,
+                offset,
+                2,
+                &["id".into()],
+                None,
             ),
-            format!("SELECT * FROM (SELECT TOP {} \"id\", \"name\" FROM \"SQLUSER\".\"items\" ORDER BY \"id\") WHERE %VID > {offset}", offset + 2)
+            format!(
+                "SELECT * FROM (SELECT TOP {} \"id\", \"name\" FROM \"SQLUSER\".\"items\" ORDER BY \"id\") WHERE %VID > {offset}",
+                offset + 2
+            )
         );
     }
     assert_eq!(
@@ -26,8 +36,15 @@ fn iris_transfer_pages_advance_with_top_and_vid() {
 fn iris_transfer_filtered_pages_preserve_predicates_order_and_quoting() {
     assert_eq!(
         pagination_sql_with_filter_order(
-            &["item\"id".into()], "item\"s", "team space", &DatabaseType::Iris,
-            2, 2, Some("WHERE active = 1"), Some("\"item\"\"id\" DESC"), &[],
+            &["item\"id".into()],
+            "item\"s",
+            "team space",
+            &DatabaseType::Iris,
+            2,
+            2,
+            Some("WHERE active = 1"),
+            Some("\"item\"\"id\" DESC"),
+            &[],
         ),
         "SELECT * FROM (SELECT TOP 4 \"item\"\"id\" FROM \"team space\".\"item\"\"s\" WHERE (active = 1) ORDER BY \"item\"\"id\" DESC) WHERE %VID > 2"
     );

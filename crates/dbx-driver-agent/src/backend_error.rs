@@ -303,17 +303,17 @@ impl BackendError {
 
     /// Create a retryable envelope for a manual transaction session that DBX
     /// already rolled back before the requested SQL was executed.
-    pub fn from_manual_transaction_session_expired(timeout_secs: u64) -> Self {
+    ///
+    /// The idle window is a per-connection setting and the session is already
+    /// gone when this is raised, so the message carries no duration.
+    pub fn from_manual_transaction_session_expired() -> Self {
         let entry = catalog_entry(CatalogCode::TransactionSessionExpired);
-        let mut params = BTreeMap::new();
-        params
-            .insert("timeoutSecs".to_string(), BackendMessageParam::Integer(timeout_secs.min(i64::MAX as u64) as i64));
         Self::new(
             entry,
             BackendErrorSource::LegacyBackend,
             BackendErrorOrigin::database(BackendErrorAdapter::Native),
             BackendOperationOutcome::NotStarted,
-            params,
+            BTreeMap::new(),
             None,
             Some(diagnostics_for_local("transaction", AgentErrorStage::Execute)),
         )
@@ -505,7 +505,6 @@ struct CatalogEntry {
 }
 
 const STAGE_PARAM: &[ParamSpec] = &[ParamSpec { name: "stage", kind: ParamKind::String }];
-const TRANSACTION_TIMEOUT_PARAM: &[ParamSpec] = &[ParamSpec { name: "timeoutSecs", kind: ParamKind::Integer }];
 const NO_PARAMS: &[ParamSpec] = &[];
 
 fn catalog_entry(code: CatalogCode) -> &'static CatalogEntry {
@@ -632,7 +631,7 @@ fn catalog_entry(code: CatalogCode) -> &'static CatalogEntry {
             CatalogEntry {
                 code: "DBX-TXN-1001",
                 message_key: "backendErrors.transaction.sessionExpired",
-                params: TRANSACTION_TIMEOUT_PARAM,
+                params: NO_PARAMS,
                 help_url: None,
             },
         ),
@@ -1257,13 +1256,13 @@ mod tests {
 
     #[test]
     fn manual_transaction_session_expiry_is_retryable_before_execution() {
-        let error = BackendError::from_manual_transaction_session_expired(300);
+        let error = BackendError::from_manual_transaction_session_expired();
         let payload = serde_json::to_value(&error).unwrap();
 
         assert_eq!(error.code(), "DBX-TXN-1001");
         assert_eq!(error.operation_outcome(), BackendOperationOutcome::NotStarted);
         assert_eq!(payload["messageKey"], "backendErrors.transaction.sessionExpired");
-        assert_eq!(payload["messageParams"]["timeoutSecs"], 300);
+        assert!(payload["messageParams"].as_object().is_none_or(|params| params.is_empty()));
         assert_eq!(payload["diagnostics"]["category"], "transaction");
     }
 

@@ -407,10 +407,20 @@ function trimSqlTextSpanWhitespace(sql: string | undefined, span: SqlTextSpan): 
   };
 }
 
-function sqlTextSpanToOffsetRange(sql: string, span: SqlTextSpan): { from: number; to: number } | null {
+/**
+ * Converts a 1-based inclusive `SqlTextSpan` into a 0-based half-open offset range `[from, to)`.
+ *
+ * Both `start_column` and `end_column` are 1-based and inclusive.
+ * For a single-line span, `from` is `span.start_column - 1` and `to` is `span.end_column`.
+ * For example, a token from col 8 to 14 (`USER_ID`) maps to `[7, 14)` without overshooting
+ * into a following delimiter such as `,` or `;`.
+ */
+export function sqlTextSpanToOffsetRange(sql: string, span: SqlTextSpan): { from: number; to: number } | null {
   if (!span.start_line || !span.start_column) return null;
   const from = sqlTextPositionToOffset(sql, span.start_line, span.start_column - 1);
-  const to = sqlTextPositionToOffset(sql, Math.max(span.end_line, span.start_line), Math.max(span.end_column, span.start_column));
+  const endLine = Math.max(span.end_line, span.start_line);
+  const endColumn = endLine === span.start_line ? Math.max(span.end_column, span.start_column) : span.end_column;
+  const to = sqlTextPositionToOffset(sql, endLine, endColumn);
   if (from == null || to == null || to <= from) return null;
   return { from, to };
 }

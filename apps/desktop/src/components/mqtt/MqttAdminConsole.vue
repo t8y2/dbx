@@ -35,6 +35,7 @@ interface MqttTabUiState {
   formEnabled?: boolean;
   editingTopic?: string | null;
   publishPanelCollapsed?: boolean;
+  pollingIntervalMs?: number;
 }
 
 interface MqttMessagePreview extends MqttMessage {
@@ -43,6 +44,14 @@ interface MqttMessagePreview extends MqttMessage {
 }
 
 type MqttMessageDirectionFilter = "all" | MqttMessageDirection;
+
+const DEFAULT_MQTT_POLLING_INTERVAL_MS = 1000;
+const MQTT_POLLING_INTERVAL_OPTIONS = [
+  { value: 1000, label: "1s" },
+  { value: 2000, label: "2s" },
+  { value: 3000, label: "3s" },
+  { value: 5000, label: "5s" },
+] as const;
 
 const { initialState: restoredUiState, track: trackUiState } = useTabUiState<MqttTabUiState>({}, "MqttAdminConsole");
 
@@ -53,8 +62,11 @@ const messages = ref<MqttMessage[]>([]);
 const collapsedMessageKeys = ref<Set<string>>(new Set());
 const noLocalSubscribe = ref(false);
 const selectedTopic = ref<string>(restoredUiState.selectedTopic ?? props.initialTopic ?? "");
+const publishInitialTopic = ref(selectedTopic.value);
+const publishTopic = ref(selectedTopic.value);
 const loading = ref(true);
 const error = ref<string | null>(null);
+const pollingIntervalMs = ref<number>(MQTT_POLLING_INTERVAL_OPTIONS.some((opt) => opt.value === restoredUiState.pollingIntervalMs) ? restoredUiState.pollingIntervalMs! : DEFAULT_MQTT_POLLING_INTERVAL_MS);
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null);
 const messageListRef = ref<HTMLElement | null>(null);
 const contextMenuMessage = ref<MqttMessagePreview | null>(null);
@@ -105,7 +117,14 @@ trackUiState(() => ({
   formEnabled: formEnabled.value,
   editingTopic: editingTopic.value,
   publishPanelCollapsed: publishPanelCollapsed.value,
+  pollingIntervalMs: pollingIntervalMs.value,
 }));
+
+function suggestPublishTopic(topic: string, force = false) {
+  if (!force && publishTopic.value.length > 0) return;
+  publishTopic.value = topic;
+  publishInitialTopic.value = topic;
+}
 
 const connected = computed(() => brokerInfo.value?.connected ?? false);
 const mqtt5 = computed(() => brokerInfo.value?.protocolVersion?.includes("5") ?? false);
@@ -202,6 +221,7 @@ async function handleSubscribe(topic: string, qos: MqttQoS = "atmostonce", noLoc
   try {
     await mqttSubscribe(props.connectionId, topic, qos, noLocal);
     selectedTopic.value = topic;
+    suggestPublishTopic(topic);
     await refreshData();
   } catch (e) {
     error.value = String(e);
@@ -227,7 +247,10 @@ async function handleDelete(config: MqttSavedTopic) {
   try {
     if (subscribedTopics.value.some(([topic]) => topic === config.topic)) await mqttUnsubscribe(props.connectionId, config.topic);
     await mqttDeleteTopicConfig(props.connectionId, config.topic);
-    if (selectedTopic.value === config.topic) selectedTopic.value = "";
+    if (selectedTopic.value === config.topic) {
+      selectedTopic.value = "";
+      suggestPublishTopic("");
+    }
     await refreshData();
   } catch (e) {
     error.value = String(e);
@@ -346,6 +369,7 @@ async function saveSubscription() {
     if (topicChanged && previousWasActive && previousTopic) await mqttUnsubscribe(props.connectionId, previousTopic);
     if (topicChanged && previousTopic) await mqttDeleteTopicConfig(props.connectionId, previousTopic);
     selectedTopic.value = topic;
+    suggestPublishTopic(topic);
     showSubscriptionDialog.value = false;
     await refreshData();
   } catch (e) {
@@ -358,6 +382,7 @@ async function saveSubscription() {
 
 function handleTopicClick(topic: string) {
   selectedTopic.value = topic;
+  suggestPublishTopic(topic, true);
   void refreshData();
 }
 
@@ -431,7 +456,11 @@ function startPolling() {
     } catch {
       /* ignore polling errors */
     }
-  }, 3000);
+  }, pollingIntervalMs.value);
+}
+
+function handlePollingIntervalChange() {
+  startPolling();
 }
 
 function stopPolling() {
@@ -489,6 +518,7 @@ watch(
   (topic) => {
     if (topic !== undefined && topic !== selectedTopic.value) {
       selectedTopic.value = topic;
+      suggestPublishTopic(topic, true);
       void refreshData();
     }
   },
@@ -614,6 +644,18 @@ onUnmounted(stopPolling);
               <select v-model="displayEncoding" class="h-6 rounded border bg-transparent px-1.5 text-[11px] text-muted-foreground outline-none">
                 <option v-for="enc in PAYLOAD_ENCODINGS" :key="enc" :value="enc">{{ PAYLOAD_ENCODING_LABELS[enc] }}</option>
               </select>
+              <select
+                v-model.number="pollingIntervalMs"
+                data-testid="mqtt-refresh-interval"
+                class="h-6 rounded border bg-transparent px-1.5 text-[11px] text-muted-foreground outline-none"
+                :aria-label="t('connection.mqttRefreshInterval')"
+                :title="t('connection.mqttRefreshInterval')"
+                @change="handlePollingIntervalChange"
+              >
+                <option v-for="option in MQTT_POLLING_INTERVAL_OPTIONS" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
               <Button size="sm" variant="ghost" class="h-6 gap-1 px-2 text-[11px] font-normal normal-case" :title="messagesPaused ? t('connection.mqttResumeMessages') : t('connection.mqttPauseMessages')" @click="toggleMessagesPaused">
                 <Play v-if="messagesPaused" class="h-3.5 w-3.5" />
                 <Pause v-else class="h-3.5 w-3.5" />
@@ -690,7 +732,7 @@ onUnmounted(stopPolling);
             </div>
           </CustomContextMenu>
         </div>
-        <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="selectedTopic" @published="handleMessagePublished" />
+        <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="publishInitialTopic" @topic-changed="publishTopic = $event" @published="handleMessagePublished" />
       </div>
     </div>
 

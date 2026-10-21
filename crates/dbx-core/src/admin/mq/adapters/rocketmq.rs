@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::ToSocketAddrs;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,6 +28,12 @@ use crate::mq::types::*;
 /// RocketMQ capabilities - no tenants/namespaces; supports topics, consumer groups,
 /// ACLs, and message production.
 const ROCKETMQ_CAPABILITIES: MqCapabilities = MqCapabilities {
+    supports_list_topics: true,
+    supports_create_topic: true,
+    supports_delete_topic: true,
+    supports_topic_stats: true,
+    supports_broker_admin: true,
+    supports_producer_listing: true,
     supports_tenants: false,
     supports_namespaces: false,
     supports_partitioned_topics: true,
@@ -72,6 +78,139 @@ const CONSUMER_GROUP_LIST_PAGE_SIZE: i32 = 500;
 pub struct RocketMqAdmin {
     client: Arc<Mutex<AgentDriverClient>>,
     config: MqAdminConfig,
+    capabilities: RwLock<MqCapabilities>,
+}
+
+fn connection_mode(cfg: &MqAdminConfig) -> &str {
+    extra_str(&cfg.extra, "connectionMode").unwrap_or("remoting")
+}
+
+fn management_enabled(cfg: &MqAdminConfig) -> bool {
+    cfg.extra.get("managementEnabled").and_then(|value| value.as_bool()).unwrap_or(false)
+}
+
+fn validate_connection_config(cfg: &MqAdminConfig) -> Result<(), String> {
+    match connection_mode(cfg) {
+        "remoting" if namesrv_addr(cfg).trim().is_empty() => {
+            Err("RocketMQ namesrvAddr is required for remoting".into())
+        }
+        "remoting" => Ok(()),
+        "proxy" => {
+            let endpoint = extra_str(&cfg.extra, "proxyEndpoint").ok_or("RocketMQ proxyEndpoint is required")?;
+            let (host, port) =
+                parse_namesrv_target(endpoint).map_err(|_| "RocketMQ proxyEndpoint must be host:port")?;
+            if port == 0
+                || host.contains('/')
+                || host.contains('@')
+                || host.contains('?')
+                || host.contains('#')
+                || host.chars().any(char::is_whitespace)
+                || endpoint.contains(';')
+            {
+                return Err("RocketMQ proxyEndpoint must be host:port".into());
+            }
+            // Optional management failure is handled independently by the agent.
+            Ok(())
+        }
+        mode => Err(format!("Unsupported RocketMQ connectionMode '{mode}'")),
+    }
+}
+
+fn validate_handshake(cfg: &MqAdminConfig, handshake: &serde_json::Value) -> Result<(), String> {
+    if connection_mode(cfg) == "proxy"
+        && !handshake
+            .get("capabilities")
+            .and_then(|value| value.as_array())
+            .is_some_and(|caps| caps.iter().any(|value| value.as_str() == Some("rocketmq_proxy_grpc")))
+    {
+        return Err("RocketMQ Proxy requires rocketmq_proxy_grpc; upgrade the RocketMQ agent and retry".into());
+    }
+    Ok(())
+}
+
+fn messaging_only_capabilities(send: bool) -> MqCapabilities {
+    MqCapabilities {
+        supports_list_topics: false,
+        supports_create_topic: false,
+        supports_delete_topic: false,
+        supports_topic_stats: false,
+        supports_broker_admin: false,
+        supports_producer_listing: false,
+        supports_send_message: send,
+        ..MqCapabilities::default()
+    }
+}
+
+fn cluster_info_for_config(cfg: &MqAdminConfig, result: &serde_json::Value) -> Result<MqClusterInfo, String> {
+    let mut info = cluster_info_from_agent_result(result);
+    let is_proxy = connection_mode(cfg) == "proxy";
+    let management_status = result.pointer("/channels/management/status").and_then(|value| value.as_str());
+    let management_ready = management_enabled(cfg) && management_status == Some("ready");
+    if is_proxy && !management_ready {
+        info.capabilities = messaging_only_capabilities(true);
+    }
+    if let Some(reported) = result.get("capabilities") {
+        let reported = reported.as_object().ok_or("RocketMQ agent capabilities must be an object")?;
+        let mut merged = serde_json::to_value(info.capabilities).map_err(|error| error.to_string())?;
+        for (key, value) in reported {
+            merged[key] = value.clone();
+        }
+        info.capabilities =
+            serde_json::from_value(merged).map_err(|error| format!("Invalid RocketMQ agent capabilities: {error}"))?;
+    }
+    if is_proxy && !management_ready {
+        info.capabilities = messaging_only_capabilities(info.capabilities.supports_send_message);
+    }
+    if let Some(channels) = result.get("channels") {
+        info.extra["channels"] = channels.clone();
+    } else if is_proxy {
+        info.extra["channels"] = serde_json::json!({
+            "messaging": { "status": "ready" },
+            "management": { "status": if management_enabled(cfg) { "degraded" } else { "disabled" } }
+        });
+    }
+    Ok(info)
+}
+
+fn ensure_operation_supported(
+    cfg: &MqAdminConfig,
+    caps: MqCapabilities,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    if method == "test_connection" {
+        return Ok(());
+    }
+    let supported = match method {
+        "mq_send_message" => {
+            if connection_mode(cfg) == "proxy" && params.get("partition").is_some_and(|value| !value.is_null()) {
+                return Err("RocketMQ Proxy does not support selecting a partition".into());
+            }
+            caps.supports_send_message
+        }
+        "mq_list_topics" => caps.supports_list_topics,
+        "mq_create_topic" => caps.supports_create_topic,
+        "mq_delete_topic" => caps.supports_delete_topic,
+        "mq_get_topic_stats" => caps.supports_topic_stats,
+        "mq_list_producers" => caps.supports_producer_listing,
+        "mq_peek_messages" => caps.supports_peek_messages,
+        "mq_view_message" | "mq_query_message_by_key" | "mq_query_message_by_topic" => caps.supports_message_query,
+        "mq_query_message_trace" => caps.supports_message_trace,
+        "mq_list_consumer_groups"
+        | "mq_describe_consumer_group"
+        | "mq_get_subscription_group_config"
+        | "mq_alter_subscription_group_config"
+        | "mq_delete_consumer_group"
+        | "mq_get_consumer_lag" => caps.supports_subscriptions,
+        "mq_reset_consumer_group_offsets" => caps.supports_reset_cursor,
+        "mq_list_acls" | "mq_create_acls" | "mq_delete_acls" => caps.supports_permissions,
+        _ => caps.supports_broker_admin,
+    };
+    if supported {
+        Ok(())
+    } else {
+        Err(format!("RocketMQ operation '{method}' is unsupported by the active channels"))
+    }
 }
 
 fn cluster_info_from_agent_result(result: &serde_json::Value) -> MqClusterInfo {
@@ -102,24 +241,27 @@ fn cluster_info_from_agent_result(result: &serde_json::Value) -> MqClusterInfo {
 impl RocketMqAdmin {
     /// Spawn the RocketMQ native agent, perform handshake, and connect.
     ///
-    /// Callers must probe NameServer reachability before invoking this so the
-    /// connect-timeout wall covers only process spawn + handshake + connect.
+    /// Callers probe the configured messaging endpoint before invoking this so
+    /// the connect-timeout wall covers only process spawn + handshake + connect.
     pub async fn new(cfg: MqAdminConfig, launch: AgentLaunchSpec) -> Result<Self, String> {
+        validate_connection_config(&cfg)?;
         let mut client = AgentDriverClient::spawn(launch).await?;
 
         // Handshake / connect use Advanced connect timeout; ops RPC keep query timeout.
-        let _: serde_json::Value =
+        let handshake: serde_json::Value =
             client.call_with_timeout("handshake", serde_json::json!({}), Some(cfg.connect_timeout())).await?;
+        validate_handshake(&cfg, &handshake)?;
 
         // Build the connection params from MqAdminConfig
         let conn_params = build_connection_params(&cfg);
         let connect_params = serde_json::json!({ "connection": conn_params });
-        let _: serde_json::Value =
-            client.call_with_timeout("connect", connect_params, Some(cfg.connect_timeout())).await?;
+        let result: serde_json::Value =
+            client.call_with_timeout("connect", connect_params, Some(cfg.adapter_connect_timeout())).await?;
+        let capabilities = cluster_info_for_config(&cfg, &result)?.capabilities;
 
         log::info!("RocketMQ admin connected via agent (namesrv: {})", namesrv_addr(&cfg));
 
-        Ok(Self { client: Arc::new(Mutex::new(client)), config: cfg })
+        Ok(Self { client: Arc::new(Mutex::new(client)), config: cfg, capabilities: RwLock::new(capabilities) })
     }
 
     /// Send a JSON-RPC call to the RocketMQ agent and deserialize the result.
@@ -128,6 +270,7 @@ impl RocketMqAdmin {
         method: &str,
         params: serde_json::Value,
     ) -> Result<T, String> {
+        ensure_operation_supported(&self.config, self.capabilities(), method, &params)?;
         let mut client = self.client.lock().await;
         client.call_with_timeout(method, params, self.config.rpc_timeout()).await
     }
@@ -156,7 +299,7 @@ impl RocketMqAdmin {
 #[async_trait]
 impl MessageQueueAdmin for RocketMqAdmin {
     fn capabilities(&self) -> MqCapabilities {
-        ROCKETMQ_CAPABILITIES
+        *self.capabilities.read().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn system_kind(&self) -> MqSystemKind {
@@ -169,10 +312,20 @@ impl MessageQueueAdmin for RocketMqAdmin {
 
     async fn test_connection(&self) -> Result<MqClusterInfo, String> {
         let conn_params = build_connection_params(&self.config);
-        let result: serde_json::Value =
-            self.call("test_connection", serde_json::json!({ "connection": conn_params })).await?;
+        let result: serde_json::Value = {
+            let mut client = self.client.lock().await;
+            client
+                .call_with_timeout(
+                    "test_connection",
+                    serde_json::json!({ "connection": conn_params }),
+                    Some(self.config.adapter_connect_timeout()),
+                )
+                .await?
+        };
 
-        Ok(cluster_info_from_agent_result(&result))
+        let info = cluster_info_for_config(&self.config, &result)?;
+        *self.capabilities.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = info.capabilities;
+        Ok(info)
     }
 
     // ---- Tenants (not supported by RocketMQ) ----
@@ -728,7 +881,7 @@ impl MessageQueueAdmin for RocketMqAdmin {
 
         Ok(SendMessageResponse {
             topic: result.get("topic").and_then(|v| v.as_str()).unwrap_or(&req.topic).to_string(),
-            partition: result.get("partition").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            partition: result.get("partition").and_then(|v| v.as_i64()).map(|value| value as i32),
             offset: result.get("offset").and_then(|v| v.as_i64()).unwrap_or(0),
             timestamp: result.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
         })
@@ -870,22 +1023,20 @@ fn rocketmq_topic_admin_params(topic: &TopicRef, partitions: Option<u32>) -> ser
 /// Build the connection params JSON from MqAdminConfig for the native agent.
 fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
     let extra = &cfg.extra;
-    let access_key = extra_str(extra, "accessKey")
-        .or_else(|| extra_str(extra, "access_key"))
-        .or(match &cfg.auth {
-            MqAuth::Basic { username, .. } => Some(username.as_str()),
-            _ => None,
-        })
-        .unwrap_or("");
-    let secret_key = extra_str(extra, "secretKey")
-        .or_else(|| extra_str(extra, "secret_key"))
-        .or(match &cfg.auth {
-            MqAuth::Basic { password, .. } => Some(password.as_str()),
-            _ => None,
-        })
-        .unwrap_or("");
+    let (access_key, secret_key) = match &cfg.auth {
+        MqAuth::Basic { username, password } => (username.as_str(), password.as_str()),
+        _ => ("", ""),
+    };
 
     serde_json::json!({
+        "connection_mode": connection_mode(cfg),
+        "proxy_endpoint": extra_str(extra, "proxyEndpoint").unwrap_or(""),
+        "proxy_tls": extra.get("proxyTls").and_then(|v| v.as_bool()).unwrap_or(true),
+        "management_enabled": management_enabled(cfg),
+        "proxy_dial_endpoint": cfg.connect_override.as_ref().map(|endpoint| {
+            if endpoint.host.contains(':') { format!("[{}]:{}", endpoint.host, endpoint.port) }
+            else { format!("{}:{}", endpoint.host, endpoint.port) }
+        }),
         "namesrv_addr": namesrv_addr(cfg),
         "cluster_name": extra_str(extra, "clusterName")
             .or_else(|| extra_str(extra, "cluster_name"))
@@ -1014,14 +1165,37 @@ fn rocketmq_subscription_from_group(group: &serde_json::Value) -> SubscriptionIn
     }
 }
 
-/// Fail fast on unreachable NameServer before paying for JVM agent startup.
-/// Called outside the connect-timeout wall so the probe does not steal JVM budget.
-pub(crate) async fn probe_namesrv_before_connect(cfg: &MqAdminConfig, budget: Duration) -> Result<(), String> {
-    if let Some(proxy) = &cfg.socks_proxy {
-        probe_namesrv_via_socks5(&namesrv_addr(cfg), proxy, budget).await
+/// Fail fast on an unreachable messaging endpoint before starting the agent.
+/// Optional management is deliberately left to the agent and may degrade independently.
+pub(crate) async fn probe_before_connect(cfg: &MqAdminConfig, budget: Duration) -> Result<(), String> {
+    validate_connection_config(cfg)?;
+    let is_proxy = connection_mode(cfg) == "proxy";
+    let target = if is_proxy {
+        cfg.connect_override
+            .as_ref()
+            .map(|endpoint| {
+                if endpoint.host.contains(':') {
+                    format!("[{}]:{}", endpoint.host, endpoint.port)
+                } else {
+                    format!("{}:{}", endpoint.host, endpoint.port)
+                }
+            })
+            .unwrap_or_else(|| extra_str(&cfg.extra, "proxyEndpoint").unwrap_or("").to_string())
     } else {
-        probe_namesrv_tcp(&namesrv_addr(cfg), budget).await
-    }
+        namesrv_addr(cfg)
+    };
+    let result = if let Some(proxy) = &cfg.socks_proxy {
+        probe_namesrv_via_socks5(&target, proxy, budget).await
+    } else {
+        probe_namesrv_tcp(&target, budget).await
+    };
+    result.map_err(|error| {
+        if is_proxy {
+            error.replace("NameServer", "Proxy").replace("namesrv_addr", "proxyEndpoint")
+        } else {
+            error
+        }
+    })
 }
 
 async fn probe_namesrv_via_socks5(
@@ -1231,6 +1405,233 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rocketmq_proxy_official_agent_integration() {
+        if std::env::var("ROCKETMQ_PROXY_INTEGRATION").as_deref() != Ok("1") {
+            return;
+        }
+        let program = std::env::var("DBX_ROCKETMQ_AGENT_PATH").expect("DBX_ROCKETMQ_AGENT_PATH is required");
+        let endpoint = std::env::var("ROCKETMQ_PROXY_ENDPOINT").unwrap_or_else(|_| "127.0.0.1:18081".into());
+        let topic = std::env::var("ROCKETMQ_PROXY_TOPIC").unwrap_or_else(|_| "DBX_PROXY_TEST".into());
+        for management in [false, true] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let management_endpoint = listener.local_addr().unwrap().to_string();
+            let blackhole = tokio::spawn(async move {
+                let mut streams = Vec::new();
+                while let Ok((stream, _)) = listener.accept().await {
+                    streams.push(stream);
+                }
+            });
+            let mut cfg = rocketmq_config(
+                serde_json::json!({
+                    "connectionMode": "proxy", "proxyEndpoint": endpoint, "proxyTls": false,
+                    "managementEnabled": management,
+                    "namesrvAddr": if management { management_endpoint.as_str() } else { "" }
+                }),
+                MqAuth::None,
+            );
+            cfg.connect_timeout_secs = 10;
+            cfg.query_timeout_secs = 1;
+            let budget = cfg.adapter_connect_timeout();
+            let admin = timeout(budget, RocketMqAdmin::new(cfg, AgentLaunchSpec::new(&program)))
+                .await
+                .expect("Rust outer connection deadline exceeded")
+                .expect("Proxy connect");
+            let info = admin.test_connection().await.expect("Proxy test_connection");
+            assert!(info.capabilities.supports_send_message);
+            assert!(!info.capabilities.supports_list_topics);
+            assert_eq!(
+                serde_json::to_value(admin.capabilities()).unwrap(),
+                serde_json::to_value(info.capabilities).unwrap()
+            );
+            assert_eq!(info.extra["channels"]["messaging"]["status"], "ready");
+            assert_eq!(
+                info.extra["channels"]["management"]["status"],
+                if management { "degraded" } else { "disabled" }
+            );
+            let request: SendMessageRequest = serde_json::from_value(serde_json::json!({
+                "topic": topic, "payloadBase64": "UnVzdCBQcm94eSBpbnRlZ3JhdGlvbg=="
+            }))
+            .unwrap();
+            let result = admin.send_message(request).await.expect("Proxy ordinary send");
+            assert_eq!(result.topic, topic);
+            assert!(
+                serde_json::to_value(result).unwrap().get("partition").is_none(),
+                "Proxy must not invent its selected queue"
+            );
+            blackhole.abort();
+        }
+    }
+
+    #[test]
+    fn proxy_connection_contract_defaults_and_logical_endpoint() {
+        let legacy = rocketmq_config(serde_json::json!({}), MqAuth::None);
+        let params = build_connection_params(&legacy);
+        assert_eq!(params["connection_mode"], "remoting");
+        assert_eq!(params["proxy_tls"], true);
+        assert_eq!(params["management_enabled"], false);
+        let mut proxy = rocketmq_config(
+            serde_json::json!({
+                "connectionMode": "proxy", "proxyEndpoint": "proxy.internal:8081"
+            }),
+            MqAuth::None,
+        );
+        proxy.connect_override = Some(crate::mq::config::MqConnectOverride { host: "127.0.0.1".into(), port: 32100 });
+        let params = build_connection_params(&proxy);
+        assert_eq!(params["proxy_endpoint"], "proxy.internal:8081");
+        assert_eq!(params["proxy_dial_endpoint"], "127.0.0.1:32100");
+    }
+
+    #[test]
+    fn proxy_requires_agent_handshake_capability() {
+        let proxy = rocketmq_config(serde_json::json!({ "connectionMode": "proxy" }), MqAuth::None);
+        assert!(validate_handshake(&proxy, &serde_json::json!({})).unwrap_err().contains("upgrade"));
+        assert!(validate_handshake(&proxy, &serde_json::json!({ "capabilities": ["rocketmq_proxy_grpc"] })).is_ok());
+        let legacy = rocketmq_config(serde_json::json!({}), MqAuth::None);
+        assert!(validate_handshake(&legacy, &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn proxy_channels_disable_management_and_preserve_send() {
+        let cfg = rocketmq_config(serde_json::json!({ "connectionMode": "proxy" }), MqAuth::None);
+        let info = cluster_info_for_config(
+            &cfg,
+            &serde_json::json!({
+                "channels": { "messaging": { "status": "ready" }, "management": { "status": "disabled" } },
+                "capabilities": { "supportsSendMessage": true, "supportsListTopics": false }
+            }),
+        )
+        .unwrap();
+        assert!(info.capabilities.supports_send_message);
+        assert!(!info.capabilities.supports_list_topics);
+        assert!(!info.capabilities.supports_peek_messages);
+        assert!(!info.capabilities.supports_subscriptions);
+        assert_eq!(info.extra["channels"]["management"]["status"], "disabled");
+        assert!(ensure_operation_supported(&cfg, info.capabilities, "mq_list_topics", &serde_json::json!({})).is_err());
+        assert!(ensure_operation_supported(&cfg, info.capabilities, "mq_send_message", &serde_json::json!({})).is_ok());
+        assert!(ensure_operation_supported(
+            &cfg,
+            info.capabilities,
+            "mq_send_message",
+            &serde_json::json!({ "partition": 0 })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn proxy_degraded_management_never_restores_admin_from_reported_flags() {
+        let cfg = rocketmq_config(
+            serde_json::json!({
+                "connectionMode": "proxy", "managementEnabled": true
+            }),
+            MqAuth::None,
+        );
+        let result = serde_json::json!({
+            "channels": { "messaging": { "status": "ready" }, "management": { "status": "degraded", "error": "unreachable" } },
+            "capabilities": { "supportsSendMessage": true, "supportsListTopics": true, "supportsPeekMessages": true }
+        });
+        let info = cluster_info_for_config(&cfg, &result).unwrap();
+        assert!(info.capabilities.supports_send_message);
+        assert!(!info.capabilities.supports_list_topics);
+        assert!(!info.capabilities.supports_broker_admin);
+        assert_eq!(info.extra["channels"], result["channels"]);
+        for method in [
+            "mq_peek_messages",
+            "mq_query_message_by_key",
+            "mq_query_message_trace",
+            "mq_list_consumer_groups",
+            "mq_describe_cluster",
+            "mq_list_producers",
+            "mq_delete_topic",
+        ] {
+            assert!(
+                ensure_operation_supported(&cfg, info.capabilities, method, &serde_json::json!({})).is_err(),
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_ready_management_uses_actual_agent_capabilities() {
+        let cfg = rocketmq_config(
+            serde_json::json!({
+                "connectionMode": "proxy", "managementEnabled": true
+            }),
+            MqAuth::None,
+        );
+        let info = cluster_info_for_config(&cfg, &serde_json::json!({
+            "channels": { "management": { "status": "ready" } },
+            "capabilities": { "supportsListTopics": true, "supportsMessageQuery": false, "supportsProducerListing": false }
+        })).unwrap();
+        assert!(info.capabilities.supports_list_topics);
+        assert!(!info.capabilities.supports_message_query);
+        assert!(!info.capabilities.supports_producer_listing);
+    }
+
+    #[test]
+    fn proxy_validation_accepts_no_nameserver_and_rejects_invalid_modes_or_endpoints() {
+        let cfg = rocketmq_config(
+            serde_json::json!({ "connectionMode": "proxy", "proxyEndpoint": "proxy.internal:8081" }),
+            MqAuth::None,
+        );
+        assert!(validate_connection_config(&cfg).is_ok());
+        for extra in [
+            serde_json::json!({ "connectionMode": "grpc" }),
+            serde_json::json!({ "connectionMode": "proxy" }),
+            serde_json::json!({ "connectionMode": "proxy", "proxyEndpoint": "https://proxy:8081" }),
+            serde_json::json!({ "connectionMode": "proxy", "proxyEndpoint": "proxy:0" }),
+        ] {
+            assert!(validate_connection_config(&rocketmq_config(extra, MqAuth::None)).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_capability_fields_default_true_when_missing() {
+        let mut value = serde_json::to_value(ROCKETMQ_CAPABILITIES).unwrap();
+        for key in [
+            "supportsListTopics",
+            "supportsCreateTopic",
+            "supportsDeleteTopic",
+            "supportsTopicStats",
+            "supportsBrokerAdmin",
+            "supportsProducerListing",
+        ] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        let caps: MqCapabilities = serde_json::from_value(value).unwrap();
+        assert!(caps.supports_list_topics && caps.supports_create_topic && caps.supports_delete_topic);
+        assert!(caps.supports_topic_stats && caps.supports_broker_admin && caps.supports_producer_listing);
+    }
+
+    #[tokio::test]
+    async fn proxy_probe_dials_proxy_without_nameserver() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let cfg = rocketmq_config(
+            serde_json::json!({
+                "connectionMode": "proxy", "proxyEndpoint": listener.local_addr().unwrap().to_string()
+            }),
+            MqAuth::None,
+        );
+        probe_before_connect(&cfg, Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_probe_uses_dial_override_without_rewriting_tls_endpoint() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let cfg = rocketmq_config(
+            serde_json::json!({
+                "connectionMode": "proxy", "proxyEndpoint": "unresolvable.invalid:8081", "proxyTls": true,
+                "namesrvAddr": "unresolvable.invalid:9876", "managementEnabled": true
+            }),
+            MqAuth::None,
+        )
+        .with_connect_override("127.0.0.1", listener.local_addr().unwrap().port());
+        probe_before_connect(&cfg, Duration::from_secs(1)).await.unwrap();
+        let params = build_connection_params(&cfg);
+        assert_eq!(params["proxy_endpoint"], "unresolvable.invalid:8081");
+        assert_eq!(params["proxy_tls"], true);
+    }
+
+    #[tokio::test]
     async fn probe_namesrv_rejects_empty_address_list() {
         let err = probe_namesrv_tcp(" ; ; ", Duration::from_millis(200)).await.expect_err("empty");
         assert!(err.contains("empty"), "{err}");
@@ -1265,7 +1666,7 @@ mod tests {
             password: String::new(),
         });
 
-        probe_namesrv_before_connect(&cfg, Duration::from_secs(2)).await.unwrap();
+        probe_before_connect(&cfg, Duration::from_secs(2)).await.unwrap();
 
         assert_eq!(target_rx.await.unwrap(), ("172.19.191.166".to_string(), 9876));
         proxy_task.await.unwrap();
@@ -1292,6 +1693,20 @@ mod tests {
             params.get("connect_timeout_ms").and_then(|v| v.as_u64()),
             Some(crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS.saturating_mul(1000).max(1_000))
         );
+    }
+
+    #[test]
+    fn connection_params_respect_explicit_auth_including_none_and_empty_basic() {
+        for (auth, expected_ak, expected_sk) in [
+            (MqAuth::None, "", ""),
+            (MqAuth::Basic { username: String::new(), password: String::new() }, "", ""),
+            (MqAuth::Basic { username: "auth-ak".into(), password: "auth-sk".into() }, "auth-ak", "auth-sk"),
+        ] {
+            let cfg = rocketmq_config(serde_json::json!({ "accessKey": "stale-ak", "secretKey": "stale-sk" }), auth);
+            let params = build_connection_params(&cfg);
+            assert_eq!(params["access_key"], expected_ak);
+            assert_eq!(params["secret_key"], expected_sk);
+        }
     }
 
     #[test]

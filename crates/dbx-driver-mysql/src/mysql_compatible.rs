@@ -322,6 +322,9 @@ fn table_key_index(name: &str, line: &str, is_unique: bool, is_primary: bool, in
         return None;
     }
     Some(IndexInfo {
+        key_directions: Vec::new(),
+        visibility: None,
+        key_metadata_complete: false,
         name: name.to_string(),
         columns,
         is_unique,
@@ -345,6 +348,9 @@ fn secondary_index(line: &str) -> Option<IndexInfo> {
         return None;
     }
     Some(IndexInfo {
+        key_directions: Vec::new(),
+        visibility: None,
+        key_metadata_complete: false,
         name,
         columns,
         is_unique: false,

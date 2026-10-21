@@ -154,6 +154,7 @@ async fn live_postgres_export_restores_tables_that_depend_on_functions() {
             database: target_database.clone(),
             schema: Some("public".to_string()),
             file_path: export_path.display().to_string(),
+            encoding: Default::default(),
             continue_on_error: false,
             selected_tables: None,
             part_cooldown_ms: 0,

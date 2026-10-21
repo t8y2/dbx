@@ -44,6 +44,7 @@ const searchInput = ref<InstanceType<typeof Input>>();
 const listContainer = ref<HTMLDivElement>();
 const collapsedGroupIds = ref<Set<string>>(new Set());
 const highlightIndex = ref(-1);
+let focusRestoreElement: HTMLElement | null = null;
 
 const connectionById = computed(() => new Map(props.connections.map((connection) => [connection.id, connection])));
 
@@ -87,6 +88,15 @@ watch(open, async (value) => {
   if (!value) {
     searchText.value = "";
     highlightIndex.value = -1;
+    const restoreTarget = focusRestoreElement;
+    focusRestoreElement = null;
+    if (restoreTarget) {
+      // Reka's modal popover refocuses the trigger synchronously on close, so
+      // the restore must land on the next tick to win for shortcut-opened
+      // dropdowns.
+      await nextTick();
+      if (restoreTarget.isConnected) restoreTarget.focus();
+    }
     return;
   }
   await nextTick();
@@ -130,6 +140,15 @@ function handleKeydown(event: KeyboardEvent) {
     open.value = false;
   }
 }
+
+defineExpose({
+  openDropdown: () => {
+    if (props.disabled) return false;
+    focusRestoreElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    open.value = true;
+    return true;
+  },
+});
 </script>
 
 <template>

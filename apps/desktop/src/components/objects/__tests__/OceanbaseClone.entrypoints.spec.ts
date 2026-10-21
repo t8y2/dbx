@@ -17,6 +17,7 @@ const packageSaveAs = vi.hoisted(() => ({ prepare: vi.fn(), execute: vi.fn() }))
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/backend/api")>()),
   ...backend,
+  closeClientConnectionSession: vi.fn().mockResolvedValue(true),
   listPlugins: vi.fn().mockResolvedValue([]),
   saveSchemaCache: vi.fn().mockResolvedValue(undefined),
   loadSchemaCache: vi.fn().mockResolvedValue(null),

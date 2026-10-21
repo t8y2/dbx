@@ -163,6 +163,12 @@ successful builds would otherwise keep restoring the unfinished snapshot.
 The first successful main run must populate the new namespace before fork PRs can
 reuse it. Target caching is not a per-commit snapshot of workspace artifacts.
 
+The Win7 job looks up AWS-LC and OpenSSL artifacts from main runs.
+Each artifact name includes the fixture hash and the pinned nightly toolchain.
+If an artifact is absent or expires, the job builds that dependency.
+Main uploads each new artifact for 30 days. PRs do not upload copies.
+Run `node .github/scripts/find-win7-prebuilt-artifact.mjs --help` for lookup usage.
+
 Clippy, nextest and native Agent nextest builds emit Cargo HTML timing reports.
 Their `DBX-*-cargo-timings` artifacts are retained for three days, including after
 failures when a report exists, but uploads do not delay cancelled runs. Inspect

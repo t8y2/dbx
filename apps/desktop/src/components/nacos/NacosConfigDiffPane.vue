@@ -151,11 +151,35 @@ onBeforeUnmount(() => {
 </template>
 
 <style>
+.nacos-config-diff-pane {
+  --nacos-diff-delete-background: #fef2f2;
+  --nacos-diff-delete-foreground: #7f1d1d;
+  --nacos-diff-delete-char-background: #fecaca;
+  --nacos-diff-insert-background: #f0fdf4;
+  --nacos-diff-insert-foreground: #14532d;
+  --nacos-diff-insert-char-background: #bbf7d0;
+}
+.dark .nacos-config-diff-pane {
+  --nacos-diff-delete-background: #3f1d20;
+  --nacos-diff-delete-foreground: #fee2e2;
+  --nacos-diff-delete-char-background: #7f1d1d;
+  --nacos-diff-insert-background: #142f22;
+  --nacos-diff-insert-foreground: #dcfce7;
+  --nacos-diff-insert-char-background: #14532d;
+}
 .nacos-config-diff-pane .nacos-diff-line-delete {
-  background: rgb(220 38 38 / 0.2);
+  --nacos-diff-foreground: var(--nacos-diff-delete-foreground);
+  background: var(--nacos-diff-delete-background);
 }
 .nacos-config-diff-pane .nacos-diff-line-insert {
-  background: rgb(22 163 74 / 0.2);
+  --nacos-diff-foreground: var(--nacos-diff-insert-foreground);
+  background: var(--nacos-diff-insert-background);
+}
+/* Keep syntax tokens, including nested comment spans, readable on diff backgrounds.
+   Opaque color pairs also avoid blending with unrelated custom editor colors. */
+.nacos-config-diff-pane .cm-line:is(.nacos-diff-line-delete, .nacos-diff-line-insert),
+.nacos-config-diff-pane .cm-line:is(.nacos-diff-line-delete, .nacos-diff-line-insert) * {
+  color: var(--nacos-diff-foreground);
 }
 .nacos-config-diff-pane .nacos-diff-line-padding {
   background: rgb(113 113 122 / 0.15);
@@ -167,9 +191,9 @@ onBeforeUnmount(() => {
   box-shadow: inset 3px 0 0 rgb(250 204 21 / 0.95);
 }
 .nacos-config-diff-pane .nacos-diff-char-delete {
-  background: rgb(248 113 113 / 0.65);
+  background: var(--nacos-diff-delete-char-background);
 }
 .nacos-config-diff-pane .nacos-diff-char-insert {
-  background: rgb(74 222 128 / 0.6);
+  background: var(--nacos-diff-insert-char-background);
 }
 </style>

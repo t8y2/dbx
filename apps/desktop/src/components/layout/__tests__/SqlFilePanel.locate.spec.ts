@@ -40,7 +40,7 @@ async function mountPanel(path?: string) {
   app.mount(host);
   mounted.push({ app, host });
   await vi.waitFor(() => expect(host.textContent).toContain("other.sql"));
-  const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("sidebar.locateActiveTab")}"]`);
+  const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("sqlFileTree.locateActiveFile")}"]`);
   expect(button).not.toBeNull();
   return { host, button: button!, queryStore };
 }
@@ -94,9 +94,9 @@ describe("SQL file panel locate active file", () => {
     expect(host.querySelector('[data-sql-file-path="/sql/nested/deep/current.sql"]')!.classList.contains("bg-accent")).toBe(false);
   });
 
-  it.each([undefined, "/outside/current.sql"])("disables locating when the active file is unavailable: %s", async (path) => {
+  it.each([undefined, "/outside/current.sql"])("does not locate an unavailable file in the Web runtime: %s", async (path) => {
     const { button } = await mountPanel(path);
-    expect(button.disabled).toBe(true);
+    expect(button.disabled).toBe(path === undefined);
     button.click();
     await nextTick();
     expect(scrollIntoView).not.toHaveBeenCalled();

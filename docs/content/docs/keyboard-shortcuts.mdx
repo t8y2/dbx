@@ -46,6 +46,8 @@ Standard copy and paste still follow platform conventions. Copy Current Row, Del
 
 **Focus WHERE condition** has no default shortcut. Assign your preferred binding in **Settings → Shortcuts → Data grid** to focus the WHERE input in the active table data tab. It keeps the current condition and does not execute a query. It does nothing when the WHERE input is unavailable.
 
+The grid also has two fixed gestures that are not rebindable: pressing `↓` while the cursor is on the last displayed row appends a row at the end of the result (unlike Add Row, which follows the toolbar insert position), and `Esc` inside a cell editor only cancels the current input — with the grid focused, `Esc` removes a new row that was never filled in, otherwise it reverts the selected cell to its original value. See [Data grid](/en/docs/data-grid).
+
 ### Global and Navigation
 
 | Default | Action |

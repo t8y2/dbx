@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCloseAllTabsShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCloseAllTabsShortcut, isSaveAllTabsShortcut } from "@/lib/editor/keyboardShortcuts";
 import {
   closeOtherTabsDefaultShortcut,
   countShortcutConflictPairs,
@@ -206,6 +206,22 @@ describe("shortcutRegistry editor actions", () => {
     expect(findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS).selectCurrentStatement).toContain("disconnectSidebarConnection");
   });
 
+  it("registers conflict-free statement navigation shortcuts", () => {
+    const previous = SHORTCUT_DEFINITIONS.find((item) => item.id === "previousStatement");
+    const next = SHORTCUT_DEFINITIONS.find((item) => item.id === "nextStatement");
+    const start = SHORTCUT_DEFINITIONS.find((item) => item.id === "statementStart");
+
+    expect(previous).toMatchObject({ labelKey: "settings.shortcutPreviousStatement", scope: "editor", defaultShortcut: "Ctrl+Shift+ArrowUp" });
+    expect(next).toMatchObject({ labelKey: "settings.shortcutNextStatement", scope: "editor", defaultShortcut: "Ctrl+Shift+ArrowDown" });
+    expect(start).toMatchObject({ labelKey: "settings.shortcutStatementStart", scope: "editor", defaultShortcut: "Alt+Home" });
+
+    for (const id of ["previousStatement", "nextStatement", "statementStart"] as const) {
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(SHORTCUT_DEFINITIONS.find((item) => item.id === id)?.defaultShortcut);
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS[id])).not.toBe("");
+      expect(findShortcutConflict(id, DEFAULT_SHORTCUT_SETTINGS[id], DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    }
+  });
+
   it("keeps current-view search and editor find contextual on Mod+F", () => {
     const focusSearch = SHORTCUT_DEFINITIONS.find((item) => item.id === "focusSearch");
     const find = SHORTCUT_DEFINITIONS.find((item) => item.id === "find");
@@ -214,6 +230,21 @@ describe("shortcutRegistry editor actions", () => {
     expect(find).toMatchObject({ scope: "editor", defaultShortcut: "Mod+F" });
     expect(findShortcutConflict("focusSearch", DEFAULT_SHORTCUT_SETTINGS.focusSearch, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
     expect(findShortcutConflict("find", DEFAULT_SHORTCUT_SETTINGS.find, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("registers conflict-free global shortcuts for the toolbar connection, database, and schema pickers", () => {
+    const pickerDefaults: Array<[ShortcutActionId, string]> = [
+      ["openConnectionPicker", "Mod+Alt+C"],
+      ["openDatabasePicker", "Mod+Alt+D"],
+      ["openSchemaPicker", "Mod+Alt+S"],
+    ];
+
+    for (const [id, defaultShortcut] of pickerDefaults) {
+      const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === id);
+      expect(definition).toMatchObject({ labelKey: `settings.shortcut${id[0]!.toUpperCase()}${id.slice(1)}`, scope: "global", defaultShortcut });
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(defaultShortcut);
+      expect(findShortcutConflict(id, defaultShortcut, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    }
   });
 
   it("registers a conflict-free global shortcut for Zen mode", () => {
@@ -324,6 +355,23 @@ describe("shortcutRegistry editor actions", () => {
     // 显式分配后生效；默认未绑定时永不触发
     expect(isCloseAllTabsShortcut(event, { closeAllTabs: "Shift+Mod+Alt+W" }, "MacIntel")).toBe(true);
     expect(isCloseAllTabsShortcut(event, {}, "MacIntel")).toBe(false);
+  });
+
+  it("registers saveAllTabs as an unbound global shortcut that users can assign", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "saveAllTabs");
+    expect(definition).toMatchObject({
+      id: "saveAllTabs",
+      labelKey: "contextMenu.saveAllTabs",
+      scope: "global",
+      defaultShortcut: "",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.saveAllTabs).toBe("");
+    expect(normalizeShortcutSettings({}).saveAllTabs).toBe("");
+    expect(normalizeShortcutSettings({ saveAllTabs: "Shift+Mod+Alt+S" }).saveAllTabs).toBe("Shift+Mod+Alt+S");
+    expect(normalizeShortcutSettings({ saveAllTabs: "" }).saveAllTabs).toBe("");
+    const event = { key: "s", shiftKey: true, metaKey: true, altKey: true };
+    expect(isSaveAllTabsShortcut(event, { saveAllTabs: "Shift+Mod+Alt+S" }, "MacIntel")).toBe(true);
+    expect(isSaveAllTabsShortcut(event, {}, "MacIntel")).toBe(false);
   });
 
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {

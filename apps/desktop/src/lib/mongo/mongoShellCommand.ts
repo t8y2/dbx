@@ -118,7 +118,7 @@ const DATABASE_METHOD_SHAPES: Record<string, MongoMethodShape> = {
 
 const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createCollection", "createView", "dropDatabase", "createUser", "getUsers", "getUser", "getRoles", "getRole", "runCommand", "getCollection", "getSiblingDB"];
 
-const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
+const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "Int32", "Long", "Double", "Decimal128", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
 
 const COMMAND_SHAPE = /^db\s*(?:\.\s*(?<collection>[A-Za-z_$][\w$]*)|\[\s*(["'])(?<bracket>.*?)\2\s*\]|\.\s*getCollection\s*\(\s*(["'])(?<named>.*?)\4\s*\))?\s*\.\s*(?<method>[A-Za-z_$][\w$]*)\s*\(/;
 
@@ -210,7 +210,7 @@ function diagnoseMongoCommand(source: string): string | null {
 
 /** First `Name(` outside a string that is not a constructor the parser understands. */
 function findUnsupportedValueConstructor(argument: string): string | null {
-  const known = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey", "deserialize"]);
+  const known = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "Int32", "Long", "Double", "Decimal128", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey", "deserialize"]);
   let quote: string | null = null;
   let escaped = false;
   for (let index = 0; index < argument.length; index += 1) {

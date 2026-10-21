@@ -168,10 +168,10 @@ test("refresh cleanup does not disconnect a connection still used by another pag
   assert.equal(closed.value.connections[0].connected, false);
 });
 async function fixture(t, frontend = false, overrides = {}) {
-  const { pluginManifest = manifest, ...hostOverrides } = overrides;
+  const { pluginManifest = manifest, uiHtml = "<html><head></head><body>Test</body></html>", ...hostOverrides } = overrides;
   const root = await mkdtemp(join(tmpdir(), "dbx-mock-test-"));
   await mkdir(join(root, "ui"));
-  await writeFile(join(root, "ui/index.html"), "<html><head></head><body>Test</body></html>");
+  await writeFile(join(root, "ui/index.html"), uiHtml);
   const actual = frontend ? { ...pluginManifest, entrypoints: { ui: pluginManifest.entrypoints.ui }, contributions: pluginManifest.contributions.filter((c) => c.type === "workbench") } : pluginManifest;
   await writeFile(join(root, "manifest.json"), JSON.stringify(actual));
   const host = await createMockHost({
@@ -439,6 +439,32 @@ test("loopback endpoint rejects cross-origin, forged Host, CSRF and unowned fram
   const boot = await other.json();
   assert.equal((await request("frame-document", { frameId: f.id }, { ...headers, Cookie: other.headers.get("set-cookie").split(";")[0], "X-Mock-Csrf": boot.csrf })).status, 400);
 });
+test("development host opens a self-contained UI larger than 8 MiB (#11286)", async (t) => {
+  const payload = "x".repeat(12 * 1024 * 1024);
+  const uiHtml = `<html><head></head><body><script>/*${payload}*/</script><p>Complete UI</p></body></html>`;
+  const { request } = await fixture(t, true, { uiHtml });
+  const opened = await request("workbenches/open", { contributionId: "example.main" });
+  assert.equal(opened.status, 200);
+  const document = await request("frame-document", { frameId: opened.value.frame.id });
+  assert.equal(document.status, 200);
+  assert.ok(document.value.html.includes(payload), "the UI payload must not be truncated");
+  assert.ok(document.value.html.includes("<p>Complete UI</p>"));
+});
+
+test("asset reader accepts 32 MiB and rejects larger files and directories", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dbx-asset-size-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bytes = Buffer.alloc(32 * 1024 * 1024, 0x61);
+  await writeFile(join(root, "at-limit.bin"), bytes);
+  const asset = await readAsset(root, "at-limit.bin");
+  assert.equal(asset.contentType, "application/octet-stream");
+  assert.ok(Buffer.from(asset.dataBase64, "base64").equals(bytes));
+  await writeFile(join(root, "too-large.bin"), Buffer.alloc(bytes.length + 1));
+  await assert.rejects(readAsset(root, "too-large.bin"), /Asset exceeds 33554432 byte limit/);
+  await mkdir(join(root, "directory"));
+  await assert.rejects(readAsset(root, "directory"), /Asset is not a file/);
+});
+
 test("asset reader rejects traversal and symlinks outside the UI root", async (t) => {
   const { root } = await fixture(t);
   await writeFile(join(root, "secret"), "test-secret");
@@ -499,7 +525,7 @@ test("icon reads reject unsafe paths, missing files, non-images, symlink escapes
   await mkdir(join(root, "assets"));
   await writeFile(join(outside, "private.svg"), "private-icon-content");
   await symlink(join(outside, "private.svg"), join(root, "assets/link.svg"));
-  await writeFile(join(root, "assets/large.svg"), Buffer.alloc(8 * 1024 * 1024 + 1));
+  await writeFile(join(root, "assets/large.svg"), Buffer.alloc(32 * 1024 * 1024 + 1));
   for (const contribution of pluginManifest.contributions) {
     const result = await request("icon", { contributionId: contribution.id });
     assert.equal(result.status, 400, contribution.icon);

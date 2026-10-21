@@ -25,6 +25,12 @@ use crate::mq::types::*;
 /// production are supported through the agent; exchanges and bindings are
 /// managed through the agent.
 const RABBITMQ_CAPABILITIES: MqCapabilities = MqCapabilities {
+    supports_list_topics: true,
+    supports_create_topic: true,
+    supports_delete_topic: true,
+    supports_topic_stats: true,
+    supports_broker_admin: true,
+    supports_producer_listing: true,
     supports_tenants: false,
     supports_namespaces: true,
     supports_partitioned_topics: false,
@@ -721,7 +727,7 @@ impl MessageQueueAdmin for RabbitMqAdmin {
 
         Ok(SendMessageResponse {
             topic: result.get("topic").and_then(|v| v.as_str()).unwrap_or(&req.topic).to_string(),
-            partition: 0,
+            partition: Some(0),
             offset: result.get("offset").and_then(|v| v.as_i64()).unwrap_or(0),
             timestamp: result.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
         })

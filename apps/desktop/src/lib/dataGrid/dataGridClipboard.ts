@@ -54,15 +54,15 @@ export function rememberDataGridClipboardCopy(text: string, rows: readonly (read
   internalClipboardCopy = { text, rows: [...headerRows, ...copiedRows], writeRevision: getClipboardWriteRevision() };
 }
 
-export function parseDataGridClipboard(text: string, limits: DataGridClipboardLimits = {}): Array<Array<string | null>> {
-  return finishDataGridRowPreparation(prepareDataGridClipboard(text, limits));
+export function parseDataGridClipboard(text: string, limits: DataGridClipboardLimits = {}, nullText = ""): Array<Array<string | null>> {
+  return finishDataGridRowPreparation(prepareDataGridClipboard(text, limits, nullText));
 }
 
-export function parseDataGridClipboardInBatches(text: string, options: DataGridRowPreparationOptions = {}, limits: DataGridClipboardLimits = {}): Promise<Array<Array<string | null>> | null> {
-  return runDataGridRowPreparation(prepareDataGridClipboard(text, limits), options, null);
+export function parseDataGridClipboardInBatches(text: string, options: DataGridRowPreparationOptions = {}, limits: DataGridClipboardLimits = {}, nullText = ""): Promise<Array<Array<string | null>> | null> {
+  return runDataGridRowPreparation(prepareDataGridClipboard(text, limits, nullText), options, null);
 }
 
-function* prepareDataGridClipboard(text: string, limits: DataGridClipboardLimits): Generator<DataGridRowPreparationProgress, Array<Array<string | null>>> {
+function* prepareDataGridClipboard(text: string, limits: DataGridClipboardLimits, nullText = ""): Generator<DataGridRowPreparationProgress, Array<Array<string | null>>> {
   const maxRows = limits.maxRows ?? 100_000;
   const maxCells = limits.maxCells ?? 1_000_000;
   let cells = 0;
@@ -83,9 +83,13 @@ function* prepareDataGridClipboard(text: string, limits: DataGridClipboardLimits
   let start = 0;
   let nextYield = DATA_GRID_CLIPBOARD_BATCH_CHARS;
   if (text.length > DATA_GRID_CLIPBOARD_BATCH_CHARS) yield { completed: 0, total: text.length, phase: "parsing" };
+  // Only the configured NULL text becomes NULL again; every other field — an
+  // empty one included — keeps its literal text so a pasted '' stays '' (issue #12727).
+  const nullTextIsConfigured = nullText.length > 0;
   const appendCell = (end: number) => {
     if (rows.length >= maxRows || ++cells > maxCells) throw new DataGridClipboardCapacityError();
-    row.push(text.slice(start, end));
+    const cell = text.slice(start, end);
+    row.push(nullTextIsConfigured && cell === nullText ? null : cell);
   };
   for (let index = 0; index < text.length; index++) {
     if (index >= nextYield) {

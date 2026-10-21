@@ -7,6 +7,7 @@ import TableStructureEditor from "./TableStructureEditor.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { ConnectionConfig } from "@/types/database";
 import type { EditableStructureColumn } from "@/lib/table/tableStructureEditorSql";
+import type { ObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 
@@ -18,15 +19,32 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/backend/api")>()),
   ...backend,
   checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+  getColumns: vi.fn().mockResolvedValue([]),
   listIndexes: vi.fn().mockResolvedValue([]),
   listConstraints: vi.fn().mockResolvedValue([]),
   listForeignKeys: vi.fn().mockResolvedValue([]),
   listTriggers: vi.fn().mockResolvedValue([]),
+  getTableComment: vi.fn().mockResolvedValue(""),
+  getTablePartitioning: vi.fn().mockResolvedValue(null),
   getTableOwner: vi.fn().mockResolvedValue("APP"),
   getTablePartitionStatus: vi.fn().mockResolvedValue(null),
   listPlugins: vi.fn().mockResolvedValue([]),
   loadSchemaCache: vi.fn().mockResolvedValue(null),
   saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+  deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+  loadObjectDdl: vi.fn().mockResolvedValue(""),
+  invalidateObjectDdl: vi.fn().mockResolvedValue(undefined),
+  invalidateObjectMetadataCache: vi.fn().mockResolvedValue(undefined),
+  invalidateTableMetadataCache: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/lib/metadata/objectMetadataCache", () => ({
+  invalidateObjectMetadataCache: vi.fn().mockResolvedValue(undefined),
+  invalidateTableMetadataCache: vi.fn().mockResolvedValue(undefined),
+  loadObjectMetadataFacet: vi.fn().mockImplementation(async (_req, facet) => ({
+    value: facet === "columns" ? [{ name: "C", data_type: "NCLOB", is_nullable: true, column_default: null, comment: "original comment", is_primary_key: false, extra: null }] : facet === "comment" ? "original comment" : [],
+    cacheStatus: "remote",
+  })),
 }));
 
 let app: App | undefined;
@@ -50,10 +68,10 @@ it("filters rejected JDBC recommendations without replacing an existing nonrecom
     dataType: "NCLOB",
     isNullable: true,
     defaultValue: "",
-    comment: "original comment",
+    comment: "original column comment",
     isPrimaryKey: false,
     extra: {},
-    original: { name: "C", data_type: "NCLOB", is_nullable: true, column_default: null, comment: "original comment", is_primary_key: false, extra: null },
+    original: { name: "C", data_type: "NCLOB", is_nullable: true, column_default: null, comment: "original column comment", is_primary_key: false, extra: null },
     originalPosition: 0,
     markedForDrop: false,
   };
@@ -64,9 +82,20 @@ it("filters rejected JDBC recommendations without replacing an existing nonrecom
     database: "APP",
     schema: "APP",
     tableName: "T",
-    draft: { initialized: true, activeTab: "columns" as const, newTableName: "", tableComment: "", originalTableComment: "", columns: [column], indexes: [], foreignKeys: [], triggers: [] },
+    draft: {
+      initialized: true,
+      activeTab: "columns" as const,
+      newTableName: "",
+      tableComment: "original table comment",
+      originalTableComment: "original table comment",
+      columns: [column],
+      indexes: [],
+      foreignKeys: [],
+      triggers: [],
+      loadedMetadataFacets: ["columns", "indexes", "foreign-keys", "constraints", "triggers", "partitions", "comment"] as ObjectMetadataFacet[],
+    },
   };
-  app = createApp({ render: () => h(TooltipProvider, {}, { default: () => h(TableStructureEditor, editorProps) }) });
+  app = createApp({ render: () => h(TooltipProvider, {}, { default: () => h(TableStructureEditor, editorProps as any) }) });
   app.component("LightTooltip", LightTooltip);
   app.use(pinia);
   app.use(i18n);
@@ -82,9 +111,9 @@ it("filters rejected JDBC recommendations without replacing an existing nonrecom
   expect(choices).toContain("NUMBER");
   for (const rejected of ["NCLOB", "Long", "LONG   RAW", "BFILE", "boolean", "VECTOR(3, FLOAT32)"]) expect(choices).not.toContain(rejected);
   picker!.click();
-  const comment = Array.from(root.querySelectorAll("input")).find((input) => input.value === "original comment");
+  const comment = Array.from(root.querySelectorAll<HTMLInputElement>("tbody input")).find((input) => input.value === "original column comment");
   expect(comment).toBeDefined();
   comment!.value = "changed comment";
   comment!.dispatchEvent(new Event("input", { bubbles: true }));
-  await vi.waitFor(() => expect(backend.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ columns: [expect.objectContaining({ dataType: "NCLOB", comment: "changed comment", original: expect.objectContaining({ data_type: "NCLOB" }) })] })));
+  await vi.waitFor(() => expect(backend.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ columns: [expect.objectContaining({ dataType: "NCLOB", comment: "changed comment", original: expect.objectContaining({ data_type: "NCLOB" }) })] })), { timeout: 3000 });
 });

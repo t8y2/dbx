@@ -11,7 +11,8 @@ use dbx_core::connection::{
     connection_configs_pool_equivalent, connection_configs_session_credentials_compatible, AppState, PoolKind,
 };
 use dbx_core::models::connection::{
-    ConnectionConfig, ConnectionLivenessMessage, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType,
+    ConnectionConfig, ConnectionIdleClosedEvent, ConnectionLivenessMessage, ConnectionTestResult,
+    DatabaseConnectionInfo, DatabaseType,
 };
 use dbx_core::nacos::config::{
     take_transient_passwords, NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD,
@@ -46,8 +47,22 @@ struct SessionCredentialWrites {
 }
 
 fn prepare_runtime_config(mut config: ConnectionConfig) -> (ConnectionConfig, NoSaveRuntimeSecrets) {
+    dbx_core::connection::connection_secrets::normalize_rocketmq_credentials(&mut config);
     if config.save_password {
         return (config, NoSaveRuntimeSecrets::default());
+    }
+    if dbx_core::connection::connection_secrets::is_rocketmq_connection(&config) {
+        let primary = config
+            .external_config
+            .as_mut()
+            .and_then(|external| external.get_mut("auth"))
+            .filter(|auth| auth.get("kind").and_then(serde_json::Value::as_str) == Some("basic"))
+            .and_then(|auth| auth.as_object_mut())
+            .and_then(|auth| auth.insert("password".into(), serde_json::json!("")))
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|value| !value.is_empty());
+        config.password.clear();
+        return (config, NoSaveRuntimeSecrets { primary, console: None });
     }
     if config.db_type == DatabaseType::Nacos {
         let passwords = take_transient_passwords(&mut config);
@@ -286,14 +301,50 @@ async fn sync_mongo_legacy_driver_fallback(state: &WebState, config: &Connection
     apply_mongo_legacy_driver_profile(state, config).await
 }
 
+async fn with_temporary_connection_config<T, F, Fut>(
+    app: &Arc<AppState>,
+    config: ConnectionConfig,
+    test: F,
+) -> Result<T, String>
+where
+    F: FnOnce(String, ConnectionConfig) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let temp_id = format!("{TEST_PROBE_ID_PREFIX}{}", uuid::Uuid::new_v4());
+    // Only RocketMQ needs auth.password moved into the owner-scoped probe store.
+    // Other connectors (notably plugin password binding) consume the draft directly.
+    let (mut config, secrets) = if dbx_core::connection::connection_secrets::is_rocketmq_connection(&config) {
+        prepare_runtime_config(config)
+    } else {
+        (config, NoSaveRuntimeSecrets::default())
+    };
+    config.id = temp_id.clone();
+    let owner = dbx_core::session_credentials::current_credential_owner().unwrap_or_default();
+    record_session_credentials(app, &owner, &temp_id, &secrets, false);
+    app.configs.write().await.insert(temp_id.clone(), config.clone());
+    let result = test(temp_id.clone(), config).await;
+    app.configs.write().await.remove(&temp_id);
+    app.session_credentials.clear_connection(&temp_id);
+    result
+}
+
 async fn run_temporary_connection_test(
     app: &Arc<AppState>,
     config: ConnectionConfig,
     include_database_info: bool,
 ) -> Result<ConnectionTestResult, String> {
-    let temp_id = format!("{TEST_PROBE_ID_PREFIX}{}", uuid::Uuid::new_v4());
-    app.configs.write().await.insert(temp_id.clone(), config.clone());
+    with_temporary_connection_config(app, config, |temp_id, config| {
+        run_prepared_temporary_connection_test(app, temp_id, config, include_database_info)
+    })
+    .await
+}
 
+async fn run_prepared_temporary_connection_test(
+    app: &Arc<AppState>,
+    temp_id: String,
+    config: ConnectionConfig,
+    include_database_info: bool,
+) -> Result<ConnectionTestResult, String> {
     if config.db_type == DatabaseType::Plugin {
         let result = async {
             let endpoint = app.plugin_connection_endpoint(&temp_id, &config).await?;
@@ -301,7 +352,6 @@ async fn run_temporary_connection_test(
         }
         .await;
         app.reset_connection_transport_for_config(&temp_id, &config).await;
-        app.configs.write().await.remove(&temp_id);
         return result;
     }
 
@@ -380,7 +430,6 @@ async fn run_temporary_connection_test(
     #[cfg(feature = "mq-admin")]
     app.mq_registry.drop_connection(&temp_id).await;
     app.reset_connection_transport_for_config(&temp_id, &config).await;
-    app.configs.write().await.remove(&temp_id);
 
     result
 }
@@ -444,7 +493,8 @@ pub async fn connect_db(
     // 只有本次请求确实写入/替换了会话凭据（输入了非空密码）时，才需要在连接
     // 失败时回滚它；无密码重连复用的是既有有效凭据，失败不应清掉它，否则瞬时的
     // 数据库/网络抖动就会让"本次会话内记住密码"失效、下次又弹窗。
-    let (runtime_config, runtime_secrets) = prepare_runtime_config(config.clone());
+    let (mut runtime_config, runtime_secrets) = prepare_runtime_config(config.clone());
+    dbx_core::query::plugin_plan::invalidate_gaussdb_dws_product_version(&mut runtime_config);
     let session_credential_writes = record_session_credentials(
         app,
         &owner,
@@ -453,7 +503,14 @@ pub async fn connect_db(
         config.db_type == DatabaseType::Nacos,
     );
 
-    app.remove_connection_pools_detached(&connection_id).await;
+    // Plugin connection/connect refreshes the sidecar's registration in place.
+    // Closing the old pool after this request would send a late
+    // connection/disconnect and remove the refreshed registration.
+    if config.db_type == DatabaseType::Plugin {
+        app.drop_connection_pools_without_close(&connection_id).await;
+    } else {
+        app.remove_connection_pools_detached(&connection_id).await;
+    }
     app.nacos_registry.drop_connection(&connection_id).await;
     app.reset_connection_transport_for_config(&connection_id, &runtime_config).await;
     app.configs.write().await.insert(connection_id.clone(), runtime_config);
@@ -685,6 +742,67 @@ pub async fn connection_liveness_events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Serialise one idle-closed message for the SSE stream, or `None` when serialisation fails.
+fn idle_closed_sse_event(event: &ConnectionIdleClosedEvent) -> Option<Event> {
+    match serde_json::to_string(event) {
+        Ok(payload) => Some(Event::default().data(payload)),
+        // The payload is a struct of plain fields, so this is unreachable in practice.
+        Err(error) => {
+            log::warn!("Connection idle-closed event could not be serialised: {error}");
+            None
+        }
+    }
+}
+
+/// Stream backend idle-closed notifications to the browser (#12112).
+///
+/// The payload is byte-identical to what the desktop shell emits as
+/// `dbx:connection-idle-closed`, so the frontend parses one shape on both transports.
+pub async fn connection_idle_closed_events(
+    State(state): State<Arc<WebState>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let mut events = state.app.subscribe_connection_idle_closed();
+    let stream = stream! {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    if let Some(event) = idle_closed_sse_event(&event) {
+                        yield Ok(event);
+                    }
+                }
+                // 丢弃事件不影响正确性：前端下次触发查询时会经 `ensureConnected` 自动重连，
+                // 侧边栏状态也会在下一次刷新时对齐，因此这里只记日志、不做 resync 补偿。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!("Web connection idle-closed stream skipped {skipped} messages");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// 启动「空闲自动断开」定时清扫（issue #12112）。
+///
+/// web shell 与 desktop shell 一样只负责传输：这里周期调用 core 的
+/// `sweep_idle_connections` 触发清扫，关闭结果由 core 发布到广播通道，再由
+/// [`connection_idle_closed_events`] 以 SSE 下发给浏览器。
+///
+/// 用 `Weak` 持有状态：前端 WebState 被销毁后任务在下一轮自行退出。间隔取 30 秒的理由
+/// 与 desktop 侧的 `install_connection_idle_closed_bridge` 相同（面向分钟级空闲，
+/// 未启用阈值的连接会被 core 直接过滤）。
+pub fn start_connection_idle_sweeper(state: &Arc<WebState>) {
+    let state = Arc::downgrade(state);
+    tokio::spawn(async move {
+        loop {
+            let Some(state) = state.upgrade() else { break };
+            state.app.sweep_idle_connections().await;
+            drop(state);
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
 }
 
 pub async fn prewarm_connection(
@@ -1060,6 +1178,22 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    #[test]
+    fn rocketmq_no_save_runtime_moves_sk_to_session_capture() {
+        let mut config = sqlite_config("rocketmq", "");
+        config.db_type = DatabaseType::MessageQueue;
+        config.save_password = false;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "rocketmq", "adminUrl": "",
+            "auth": { "kind": "basic", "username": "ak", "password": "sk" },
+            "extra": { "secretKey": "stale" }
+        }));
+        let (runtime, secrets) = super::prepare_runtime_config(config);
+        assert_eq!(secrets.primary.as_deref(), Some("sk"));
+        assert_eq!(runtime.external_config.as_ref().unwrap()["auth"]["password"], "");
+        assert!(runtime.external_config.as_ref().unwrap()["extra"].get("secretKey").is_none());
+    }
+
     fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -1092,6 +1226,8 @@ mod tests {
             connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
             idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
+            manual_transaction_timeout_secs: dbx_core::models::connection::default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: dbx_core::models::connection::default_idle_disconnect_secs(),
             keepalive_interval_secs: dbx_core::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -1276,6 +1412,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn temporary_plugin_probe_preserves_no_save_password_for_password_binding() {
+        let (state, _dir) = test_web_state().await;
+        let mut config = plugin_config("plugin-probe-password");
+        config.save_password = false;
+        config.password = "plugin-password".into();
+        super::with_temporary_connection_config(&state.app, config, |_id, runtime| async move {
+            // plugin_host.test_connection receives this config directly and binds
+            // ConnectionConfig.password into the provider's declared password field.
+            assert_eq!(runtime.password, "plugin-password");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn temporary_rocketmq_test_scopes_credentials_to_probe_and_cleans_success_and_failure() {
+        let (state, _dir) = test_web_state().await;
+        for fail in [false, true] {
+            let mut config = sqlite_config("saved-rocketmq", "");
+            config.db_type = DatabaseType::MessageQueue;
+            config.save_password = false;
+            config.external_config = Some(serde_json::json!({
+                "systemKind": "rocketmq", "adminUrl": "",
+                "auth": { "kind": "basic", "username": "ak", "password": "probe-sk" },
+                "extra": { "connectionMode": "proxy", "proxyEndpoint": "proxy:8081" }
+            }));
+            state.app.session_credentials.set("owner-a", "saved-rocketmq", "saved-sk");
+            let probe_id = Arc::new(std::sync::Mutex::new(String::new()));
+            let captured = probe_id.clone();
+            let app = &state.app;
+            let result = dbx_core::session_credentials::with_credential_owner(
+                Some("owner-a".into()),
+                super::with_temporary_connection_config(app, config, |id, runtime| async move {
+                    *captured.lock().unwrap() = id.clone();
+                    assert_ne!(id, "saved-rocketmq");
+                    assert_eq!(runtime.id, id);
+                    assert_eq!(runtime.external_config.as_ref().unwrap()["auth"]["password"], "");
+                    assert_eq!(app.session_credentials.get("owner-a", &id).as_deref(), Some("probe-sk"));
+                    assert!(!app.session_credentials.has("owner-b", &id));
+                    let mqc = app.mq_admin_config_for_connection(&id, &runtime).await.unwrap();
+                    match mqc.auth {
+                        dbx_core::mq::auth::MqAuth::Basic { password, .. } => assert_eq!(password, "probe-sk"),
+                        _ => panic!("expected Basic auth"),
+                    }
+                    if fail {
+                        Err("probe failed".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(result.is_err(), fail);
+            let id = probe_id.lock().unwrap().clone();
+            assert!(!state.app.session_credentials.has("owner-a", &id));
+            assert!(!state.app.configs.read().await.contains_key(&id));
+            assert_eq!(state.app.session_credentials.get("owner-a", "saved-rocketmq").as_deref(), Some("saved-sk"));
+        }
+    }
+
+    #[tokio::test]
     async fn connection_test_info_preserves_legacy_string_and_cleans_up_temporary_state() {
         let (state, dir) = test_web_state().await;
         let db_path = dir.join("test-info.db");
@@ -1329,6 +1528,230 @@ mod tests {
         assert_eq!(error.message, "Plugin connection is missing plugin_id");
         assert!(state.app.with_connection_pools(|pools| !pools.contains_key("plugin-connect")).await);
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_reconnect_ignores_late_disconnect_from_old_pool() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (state, dir) = test_web_state().await;
+        let plugin_dir = dir.join("plugins/sample.reconnect");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.reconnect",
+                "name": "Reconnect test",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                } },
+                "contributions": [{
+                    "type": "connection-provider",
+                    "id": "sample.connection",
+                    "database_type": "sample",
+                    "capabilities": ["connect", "disconnect"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let script = plugin_dir.join("plugin.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":["connections"],"plugin":{"id":"sample.reconnect","version":"1.0.0"}}}\n' "$initialize_id"
+while IFS= read -r request; do
+  request_id=$(printf '%s' "$request" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  method=$(printf '%s' "$request" | sed -E 's/.*"method":"([^"]+)".*/\1/')
+  printf '%s\n' "$method" >> "$(dirname "$0")/events.log"
+  printf '{"jsonrpc":"2.0","id":%s,"result":{"success":true}}\n' "$request_id"
+done
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let mut config = plugin_config("plugin-reconnect");
+        config.host = "127.0.0.1".to_string();
+        config.plugin_id = Some("sample.reconnect".to_string());
+        config.plugin_connection_provider = Some("sample.connection".to_string());
+        config.plugin_connection_type = Some("sample".to_string());
+
+        let request = || ConnectRequest { config: config.clone(), client_attempt: None };
+        let _ = connect_db(State(state.clone()), HeaderMap::new(), Json(request())).await.unwrap();
+        let old_handle = match state.app.pool_handle(&config.id).await.unwrap() {
+            PoolKind::PluginConnection(handle) => handle,
+            _ => panic!("expected a plugin pool"),
+        };
+        let _ = connect_db(State(state.clone()), HeaderMap::new(), Json(request())).await.unwrap();
+        old_handle.disconnect().await.unwrap();
+        let events = std::fs::read_to_string(plugin_dir.join("events.log")).unwrap();
+        assert_eq!(events.lines().collect::<Vec<_>>(), ["connection/connect", "connection/connect"]);
+
+        let _ = disconnect_db(
+            State(state.clone()),
+            Json(DisconnectRequest { connection_id: config.id.clone(), client_attempt: None }),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let events = std::fs::read_to_string(plugin_dir.join("events.log")).unwrap();
+                if events.lines().count() == 3 {
+                    assert_eq!(events.lines().last(), Some("connection/disconnect"));
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("explicit disconnect should reach the sidecar");
+        drop(old_handle);
+        state.app.plugin_host.stop("sample.reconnect").await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_disconnect_waits_for_the_in_flight_request_before_reconnect() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (state, dir) = test_web_state().await;
+        let plugin_dir = dir.join("plugins/sample.reconnect.race");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.reconnect.race",
+                "name": "Reconnect race test",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                } },
+                "contributions": [{
+                    "type": "connection-provider",
+                    "id": "sample.connection",
+                    "database_type": "sample",
+                    "capabilities": ["connect", "disconnect"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // The disconnect handler runs concurrently and completes only after a
+        // delay, removing the registration marker as its side effect: exactly
+        // the late write a reconnect must not be scheduled under.
+        let script = plugin_dir.join("plugin.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":["connections"],"plugin":{"id":"sample.reconnect.race","version":"1.0.0"}}}\n' "$initialize_id"
+while IFS= read -r request; do
+  request_id=$(printf '%s' "$request" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  method=$(printf '%s' "$request" | sed -E 's/.*"method":"([^"]+)".*/\1/')
+  printf '%s\n' "$method" >> "$(dirname "$0")/events.log"
+  if [ "$method" = "connection/disconnect" ]; then
+    (
+      sleep 1
+      rm -f "$(dirname "$0")/registration"
+      touch "$(dirname "$0")/disconnect-done"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"success":true}}\n' "$request_id"
+    ) &
+    continue
+  fi
+  printf '{"jsonrpc":"2.0","id":%s,"result":{"success":true}}\n' "$request_id"
+  if [ "$method" = "connection/connect" ]; then
+    touch "$(dirname "$0")/registration"
+  fi
+done
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let mut config = plugin_config("plugin-reconnect-race");
+        config.host = "127.0.0.1".to_string();
+        config.plugin_id = Some("sample.reconnect.race".to_string());
+        config.plugin_connection_provider = Some("sample.connection".to_string());
+        config.plugin_connection_type = Some("sample".to_string());
+
+        let request = || ConnectRequest { config: config.clone(), client_attempt: None };
+        let _ = connect_db(State(state.clone()), HeaderMap::new(), Json(request())).await.unwrap();
+        let old_handle = match state.app.pool_handle(&config.id).await.unwrap() {
+            PoolKind::PluginConnection(handle) => handle,
+            _ => panic!("expected a plugin pool"),
+        };
+
+        // The pool-close path abandons a disconnect after 3 seconds while the
+        // plugin keeps executing it; a reconnect must wait for that request to
+        // settle instead of re-registering underneath it.
+        let abandoned = tokio::time::timeout(std::time::Duration::from_millis(300), old_handle.disconnect()).await;
+        assert!(abandoned.is_err(), "the disconnect must still be in flight when the caller gives up");
+
+        let _ = connect_db(State(state.clone()), HeaderMap::new(), Json(request())).await.unwrap();
+        // Wait until the stale handler has actually finished before judging:
+        // `disconnect-done` proves the late disconnect already ran.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if plugin_dir.join("disconnect-done").is_file() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the abandoned disconnect should eventually complete in the plugin");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let events = std::fs::read_to_string(plugin_dir.join("events.log")).unwrap_or_default();
+                if events.lines().count() == 3 && plugin_dir.join("registration").is_file() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the reconnect should re-register after the abandoned disconnect settled");
+
+        let events = std::fs::read_to_string(plugin_dir.join("events.log")).unwrap();
+        assert_eq!(
+            events.lines().collect::<Vec<_>>(),
+            ["connection/connect", "connection/disconnect", "connection/connect"],
+            "the reconnect must reach the plugin only after the abandoned disconnect settled"
+        );
+        assert!(
+            plugin_dir.join("registration").is_file(),
+            "the late disconnect must not remove the refreshed registration"
+        );
+
+        // The abandoned handle is spent: a retry must not reach the plugin again.
+        old_handle.disconnect().await.unwrap();
+        let events = std::fs::read_to_string(plugin_dir.join("events.log")).unwrap();
+        assert_eq!(events.lines().count(), 3);
+
+        drop(old_handle);
+        state.app.plugin_host.stop("sample.reconnect.race").await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 

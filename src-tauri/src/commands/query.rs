@@ -46,9 +46,7 @@ fn manual_transaction_command_error(error: String) -> ManualTransactionCommandEr
         return ManualTransactionCommandError::Structured(Box::new(error));
     }
     if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
-        ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
-            dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
-        )))
+        ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired()))
     } else {
         ManualTransactionCommandError::Legacy(error)
     }
@@ -704,6 +702,20 @@ pub fn build_database_structure_search_sql(
     options: dbx_core::database_structure_search_sql::DatabaseStructureSearchSqlOptions,
 ) -> Result<Option<dbx_core::database_structure_search_sql::DatabaseStructureSearchSql>, String> {
     Ok(dbx_core::database_structure_search_sql::build_database_structure_search_sql(options))
+}
+
+#[tauri::command]
+pub fn build_database_search_columns_sql(
+    options: dbx_core::database_search_columns_sql::DatabaseSearchColumnsSqlOptions,
+) -> Result<Option<dbx_core::database_search_columns_sql::DatabaseSearchColumnsSql>, String> {
+    Ok(dbx_core::database_search_columns_sql::build_database_search_columns_sql(options))
+}
+
+#[tauri::command]
+pub fn build_database_search_probe_sql(
+    options: dbx_core::database_search_probe_sql::DatabaseSearchProbeSqlOptions,
+) -> Result<Option<dbx_core::database_search_probe_sql::DatabaseSearchProbeSql>, String> {
+    Ok(dbx_core::database_search_probe_sql::build_database_search_probe_sql(options))
 }
 
 #[tauri::command]

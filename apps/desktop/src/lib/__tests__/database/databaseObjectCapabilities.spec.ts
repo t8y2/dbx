@@ -173,4 +173,17 @@ describe("databaseObjectCapabilities", () => {
     expect(schemaDiffRoutineObjectTypesIntersection("postgres", "opengauss")).toEqual(["PROCEDURE", "FUNCTION"]);
     expect(sidebarObjectKindsForDatabase("sqlserver")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION"]);
   });
+
+  it("gates sidebar object kinds per engine", () => {
+    // GBase 8s only lists tables and views.
+    expect(sidebarObjectKindsForDatabase("gbase8s")).toEqual(["TABLE", "VIEW"]);
+    expect(databaseObjectCapabilities("gbase8s").sourceReadable).toEqual(["VIEW"]);
+    // Native Informix lists procedures/functions from sysprocedures natively.
+    for (const dbType of ["gbase", "informix"] as const) {
+      // "gbase" has no explicit entry: in production it resolves to the "mysql"
+      // effective type, so direct callers hit the unknown-type ROUTINE_OBJECTS fallback.
+      expect(sidebarObjectKindsForDatabase(dbType)).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION"]);
+      expect(databaseObjectCapabilities(dbType).sourceReadable).toEqual(["VIEW", "PROCEDURE", "FUNCTION"]);
+    }
+  });
 });

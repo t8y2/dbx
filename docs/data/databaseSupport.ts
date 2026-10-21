@@ -94,6 +94,8 @@ export const databaseSupport: DatabaseSupportItem[] = [
   { id: "sundb", name: "SunDB", icon: "/icons/database/sundb.svg", tone: "#f97316" },
   { id: "xugu", name: "XuguDB", icon: "/icons/database/xugu.png", tone: "#84cc16" },
   { id: "gbase", name: "GBase", icon: "/icons/database/gbase.png", tone: "#06b6d4" },
+  { id: "gbase8c", name: "GBase 8c", icon: "/icons/database/gbase.png", tone: "#06b6d4" },
+  { id: "gbase8s", name: "GBase 8s", icon: "/icons/database/gbase.png", tone: "#06b6d4" },
   { id: "access", name: "Access", icon: "/icons/database/access.png", tone: "#a53346" },
   { id: "h2", name: "H2", icon: "/icons/database/h2.svg", tone: "#f7a81b" },
   { id: "etcd", name: "Etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },

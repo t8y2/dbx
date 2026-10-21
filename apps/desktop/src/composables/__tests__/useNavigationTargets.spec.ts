@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { clearTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
 import type { QueryTab } from "@/types/database";
@@ -87,6 +88,10 @@ vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: "same-table", tableOpenSortMode: mocks.tableOpenSortMode, tableDatabaseSortDirection: "desc", tableLocalSortDirection: "asc" } }),
 }));
 
+vi.mock("@/stores/tunnelProfileStore", () => ({
+  useTunnelProfileStore: () => ({ profileById: () => undefined }),
+}));
+
 vi.mock("@/lib/table/tableSelectSql", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/table/tableSelectSql")>()),
   buildTableSelectSql: mocks.buildTableSelectSql,
@@ -104,6 +109,7 @@ function column(name: string) {
 
 describe("useNavigationTargets openTableTarget", () => {
   beforeEach(() => {
+    setActivePinia(createPinia());
     clearTableMetadataCache();
     vi.clearAllMocks();
     mocks.tabs.length = 0;

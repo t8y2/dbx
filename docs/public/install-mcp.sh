@@ -169,3 +169,10 @@ mv -f "$work_dir/version" "$marker"
 configure_path
 printf 'Installed dbx-mcp %s at %s\n' "$version" "$binary"
 print_configs
+if [ "$operating_system" = Darwin ]; then
+  printf '\nmacOS: authorize Keychain access once, or MCP clients cannot read the DBX encryption key.\n'
+  printf '  1. Unlock your login keychain.\n'
+  printf '  2. Run: %s --authorize-keychain\n' "$binary"
+  printf '  3. When macOS asks, choose "Always Allow" (not "Allow"), then restart your MCP client.\n'
+  printf 'DBX Desktop can do this for you: Settings > MCP.\n'
+fi

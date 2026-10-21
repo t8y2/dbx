@@ -83,8 +83,16 @@ pub async fn redis_get_value(
     connection_id: String,
     db: u32,
     key_raw: String,
+    preview_limit_bytes: Option<usize>,
 ) -> Result<RedisValue, String> {
-    dbx_core::redis_ops::redis_get_value_in_db_core(&state, &connection_id, db, &key_raw).await
+    dbx_core::redis_ops::redis_get_value_in_db_with_preview_limit_core(
+        &state,
+        &connection_id,
+        db,
+        &key_raw,
+        preview_limit_bytes,
+    )
+    .await
 }
 
 #[tauri::command]

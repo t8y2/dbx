@@ -975,9 +975,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     return current;
                 }
             }
-        } catch (SQLException error) {
-            // A server without SYS_CONTEXT support still resolves an unqualified name to the
-            // connected user, which is what the caller falls back to.
+        } catch (Exception error) {
+            // Current schema resolution is best-effort: any failure (including environments without
+            // SYS_CONTEXT support, query execution errors, or pathological drivers returning a null
+            // Statement) falls back to an empty string, allowing the caller to fall back to the
+            // connected username.
         }
         return "";
     }
@@ -1854,6 +1856,24 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    protected boolean includeColumnCommentsInTableDdl() {
+        return true;
+    }
+
+    @Override
+    public String getTableComment(String rawSchema, String table) {
+        final String schema = normalizeSchema(rawSchema);
+        try {
+            String comment = tableComment(schema, table);
+            if (notBlank(comment)) {
+                return comment;
+            }
+        } catch (Exception ignored) {
+        }
+        return super.getTableComment(schema, table);
+    }
+
+    @Override
     public String getTableDdl(String rawSchema, String table) {
         final String schema = normalizeSchema(rawSchema);
         if (legacyJdbcMetadata) {
@@ -2515,24 +2535,98 @@ public final class DamengAgent extends AbstractJdbcAgent {
             return StandardJdbcMetadata.INSTANCE.listTriggers(schema, table);
         }
         return unchecked(() -> {
-            List<TriggerInfo> result = new ArrayList<>();
-            String sql = """
-                SELECT TRIGGER_NAME, TRIGGERING_EVENT, '' AS TRIGGER_TYPE
-                FROM ALL_TRIGGERS
-                WHERE OWNER = ? AND TABLE_NAME = ?
-                ORDER BY TRIGGER_NAME
-                """.stripIndent().trim();
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-                stmt.setString(1, schema);
-                stmt.setString(2, table);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        result.add(new TriggerInfo(rs.getString(1), rs.getString(2), rs.getString(3)));
+            try {
+                return readTriggerDetails(schema, table);
+            } catch (Exception error) {
+                // 字典视图不可读（权限/旧版本视图缺失）时退回只取名字与事件的实现，
+                // 保证表结构编辑器的触发器列表不会因为新增列整体失败。
+                if (isDamengConnectionError(error)) {
+                    throw error;
+                }
+                return readTriggerNames(schema, table);
+            }
+        });
+    }
+
+    /**
+     * 读取表上触发器的完整字典信息，供表结构编辑器的触发器页签展示与编辑。
+     *
+     * <p>达梦不同版本的 ALL_TRIGGERS 列并不完全一致（部分版本没有 Oracle 的 TRIGGER_TYPE、
+     * WHEN_CLAUSE、TRIGGER_BODY 等列），所以这里用 SELECT * 后再按列名容错读取：
+     * 有列就带回正文/类型/状态，缺列只影响对应字段，不会让整个触发器列表失败。</p>
+     */
+    private List<TriggerInfo> readTriggerDetails(String schema, String table) throws Exception {
+        List<TriggerInfo> result = new ArrayList<>();
+        String sql = """
+            SELECT * FROM ALL_TRIGGERS
+            WHERE OWNER = ? AND TABLE_NAME = ?
+            ORDER BY TRIGGER_NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String name = triggerColumnText(rs, "TRIGGER_NAME").trim();
+                    if (name.isEmpty()) {
+                        continue;
                     }
+                    TriggerInfo trigger = new TriggerInfo(name, triggerColumnText(rs, "TRIGGERING_EVENT"), "");
+                    trigger.setTiming(normalizeTriggerTiming(triggerColumnText(rs, "TRIGGER_TYPE")));
+                    trigger.setStatement(triggerColumnText(rs, "TRIGGER_BODY"));
+                    trigger.setCondition(triggerColumnText(rs, "WHEN_CLAUSE"));
+                    trigger.setEnabled(triggerEnabledState(triggerColumnText(rs, "STATUS")));
+                    result.add(trigger);
                 }
             }
-            return result;
-        });
+        }
+        return result;
+    }
+
+    /** 修复前的降级实现：字典视图缺列时只返回触发器名字与事件。 */
+    private List<TriggerInfo> readTriggerNames(String schema, String table) throws Exception {
+        List<TriggerInfo> result = new ArrayList<>();
+        String sql = """
+            SELECT TRIGGER_NAME, TRIGGERING_EVENT, '' AS TRIGGER_TYPE
+            FROM ALL_TRIGGERS
+            WHERE OWNER = ? AND TABLE_NAME = ?
+            ORDER BY TRIGGER_NAME
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new TriggerInfo(rs.getString(1), rs.getString(2), rs.getString(3)));
+                }
+            }
+        }
+        return result;
+    }
+
+    /** 按列名读取字典文本；当前达梦版本的视图没有该列时返回空串而不是抛错。 */
+    private static String triggerColumnText(ResultSet rs, String column) {
+        try {
+            return coalesce(readTextColumn(rs, rs.findColumn(column)));
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    /** TRIGGER_TYPE 与 Oracle 一致（BEFORE/AFTER + STATEMENT/EACH ROW），只做空白与大小写归一化。 */
+    private static String normalizeTriggerTiming(String value) {
+        return coalesce(value).trim().replaceAll("\\s+", " ").toUpperCase(Locale.ROOT);
+    }
+
+    private static Boolean triggerEnabledState(String status) {
+        String normalized = coalesce(status).trim().toUpperCase(Locale.ROOT);
+        if ("ENABLED".equals(normalized) || "ENABLE".equals(normalized) || "Y".equals(normalized)) {
+            return Boolean.TRUE;
+        }
+        if ("DISABLED".equals(normalized) || "DISABLE".equals(normalized) || "N".equals(normalized)) {
+            return Boolean.FALSE;
+        }
+        return null;
     }
 
     @Override
@@ -2968,16 +3062,30 @@ public final class DamengAgent extends AbstractJdbcAgent {
         return value == null ? "" : value;
     }
 
+    private boolean schemaMatchesConnectedUserOrCurrent(String schema) {
+        if (schema == null || schema.isBlank()) {
+            return true;
+        }
+        if (schemaMatchesConnectedUser(schema)) {
+            return true;
+        }
+        // Short-circuit before the SYS_CONTEXT probe: when we don't know the connected username
+        // there is nothing to compare the probe result against, so skip the extra DB round-trip.
+        if (connectedUsername == null || connectedUsername.isBlank()) {
+            return true;
+        }
+        String currentSchema = currentSchemaOrBlank();
+        if (!currentSchema.isBlank()) {
+            return schema.equalsIgnoreCase(currentSchema);
+        }
+        return false;
+    }
+
     private void fillMissingColumnComments(String schema, String table, List<ColumnInfo> columns) {
         if (columns.stream().noneMatch(column -> !notBlank(column.getComment()))) {
             return;
         }
         Map<String, String> comments = new HashMap<>();
-        queryColumnComments(
-            comments,
-            "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME = ?",
-            table
-        );
         queryColumnComments(
             comments,
             "SELECT /*+ PARALLEL(1) */ COLNAME, COMMENT$ FROM SYS.SYSCOLUMNCOMMENTS WHERE SCHNAME = ? AND TVNAME = ?",
@@ -2990,6 +3098,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
             schema,
             table
         );
+        if (schemaMatchesConnectedUserOrCurrent(schema)) {
+            queryColumnComments(
+                comments,
+                "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME = ?",
+                table
+            );
+        }
         for (ColumnInfo column : columns) {
             if (notBlank(column.getComment())) {
                 continue;
@@ -3056,8 +3171,61 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     }
                 }
             }
+        } catch (Exception ignored) {
+        }
+        if (result.isEmpty()) {
+            queryTableColumnComments(
+                result,
+                "SELECT /*+ PARALLEL(1) */ COLNAME, COMMENT$ FROM SYS.SYSCOLUMNCOMMENTS WHERE SCHNAME = ? AND TVNAME = ?",
+                schema,
+                table
+            );
+        }
+        if (result.isEmpty()) {
+            queryTableColumnComments(
+                result,
+                "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS WHERE UPPER(OWNER) = UPPER(?) AND UPPER(TABLE_NAME) = UPPER(?)",
+                schema,
+                table
+            );
+        }
+        if (result.isEmpty() && schemaMatchesConnectedUserOrCurrent(schema)) {
+            queryTableColumnComments(
+                result,
+                "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME = ?",
+                table
+            );
+        }
+        if (result.isEmpty()) {
+            try {
+                for (ColumnInfo column : getColumns(schema, table)) {
+                    if (notBlank(column.getName()) && notBlank(column.getComment())) {
+                        result.put(column.getName(), column.getComment());
+                    }
+                }
+            } catch (Exception ignored) {
+            }
         }
         return result;
+    }
+
+    private void queryTableColumnComments(Map<String, String> comments, String sql, String... params) {
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            for (int i = 0; i < params.length; i++) {
+                stmt.setString(i + 1, params[i]);
+            }
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String column = rs.getString(1);
+                    String comment = rs.getString(2);
+                    if (notBlank(column) && notBlank(comment)) {
+                        comments.putIfAbsent(column, comment);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Some Dameng versions or users do not expose every comment view.
+        }
     }
 
     private String appendIndependentIndexDdl(String ddl, String schema, String table) throws Exception {

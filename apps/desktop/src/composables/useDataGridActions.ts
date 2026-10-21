@@ -9,6 +9,7 @@ import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions, tableDataPreviewRowBudget } from "@/lib/dataGrid/dataGridLargeValues";
 import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
 import { editablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { markRowIdLocatorSupported, markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { loadVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
 import * as api from "@/lib/backend/api";
@@ -19,7 +20,7 @@ import { invalidateTableMetadataCache, loadTableColumns, loadTableMetadata, TABL
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
 import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
-import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { primaryKeyTieBreakerIndexes, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { continuousQueryResultMaxRows, MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
@@ -115,7 +116,9 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
-    const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType);
+    // 已确认该连接拒绝合成行定位器（如 Hologres 拒绝 tableoid，#12647）时不再注入，
+    // 避免无主键表每次打开都报错。
+    const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType) && !rowIdLocatorUnsupported(tab.connectionId);
     // 列投影只信任真实元数据列：tableMetaForDataTab 的 fallback 列来自查询
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *
@@ -142,6 +145,27 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       injectDefaultTimeSeriesWhere: true,
       ...sqlOptions,
     });
+  }
+
+  // 行定位器被服务端拒绝时的降级执行（#12647）：首次带定位器的加载失败后，
+  // 去掉定位器重试一次；重试成功才记住该连接，之后由 buildTableSql 直接跳过
+  // 定位器。重试也失败则还原标记，让真实的服务端错误可见。
+  async function executeTableDataSqlWithRowIdFallback(tab: QueryTab, sql: string, executeOptions: Parameters<typeof queryStore.executeTabSql>[2], rebuildSql: () => Promise<string>): Promise<void> {
+    await queryStore.executeTabSql(tab.id, sql, executeOptions);
+    if (!shouldRetryWithoutRowIdLocator(sql, tab.connectionId, tabResultFor(tab))) return;
+    markRowIdLocatorUnsupported(tab.connectionId);
+    try {
+      const fallbackSql = await rebuildSql();
+      queryStore.updateSql(tab.id, fallbackSql);
+      await queryStore.executeTabSql(tab.id, fallbackSql, executeOptions);
+      if (!shouldKeepRowIdLocatorDisabled(tabResultFor(tab))) markRowIdLocatorSupported(tab.connectionId);
+    } catch {
+      markRowIdLocatorSupported(tab.connectionId);
+    }
+  }
+
+  function tabResultFor(tab: QueryTab) {
+    return queryStore.tabs.find((entry) => entry.id === tab.id)?.result;
   }
 
   async function refreshDataTabTableMeta(tab: QueryTab, options: { force?: boolean; columnsOnly?: boolean; trace?: { traceId: string; elapsed: () => string } } = {}): Promise<boolean> {
@@ -427,10 +451,23 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
           }
           queryStore.updateSql(tab.id, nextSql);
           console.info("[DBX][reloadData:execute:start]", { traceId, elapsed: elapsed() });
-          await queryStore.executeTabSql(tab.id, nextSql, {
-            pagination: { limit: pageLimit, offset: pageOffset },
-            preserveResultDuringExecution: true,
-          });
+          // 不带定位器的加载保持原执行路径；只有定位器加载才走降级包装（#12647）。
+          if (nextSql.includes("__DBX_ROWID")) {
+            await executeTableDataSqlWithRowIdFallback(
+              tab,
+              nextSql,
+              {
+                pagination: { limit: pageLimit, offset: pageOffset },
+                preserveResultDuringExecution: true,
+              },
+              () => buildTableSql(tab, { whereInput, orderBy: incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset }),
+            );
+          } else {
+            await queryStore.executeTabSql(tab.id, nextSql, {
+              pagination: { limit: pageLimit, offset: pageOffset },
+              preserveResultDuringExecution: true,
+            });
+          }
           console.info("[DBX][reloadData:execute:done]", { traceId, elapsed: elapsed() });
         } catch (e) {
           console.error("[DBX][reloadData:error]", { traceId, elapsed: elapsed(), error: e });
@@ -632,12 +669,31 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const continuesResultSession = offset === expectedNextOffset && limit === tab.resultPageLimit;
     const connection = useConnectionStore().getConfig(tab.connectionId);
     const sessionId = usesAgentCursorForTableData(connection?.db_type, connection?.driver_profile) && tab.result?.has_more && tab.result.session_id && continuesResultSession ? tab.result.session_id : undefined;
-    await queryStore.executeTabSql(tab.id, sql, {
+    const reloadOptions = {
       pagination: { offset, limit, sessionId, clientSessionId: sessionId ? tab.resultClientSessionId : undefined },
       ...appendOptions,
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,
-    });
+    };
+    // 不带定位器的加载保持原执行路径；只有定位器加载才走降级包装（#12647）。
+    if (sql.includes("__DBX_ROWID")) {
+      await executeTableDataSqlWithRowIdFallback(tab, sql, reloadOptions, () =>
+        buildTableSql(tab, {
+          limit,
+          offset,
+          whereInput,
+          orderBy: orderBy ?? tab.orderByInput,
+          previewPageSize: tableDataPreviewRowBudget({
+            limit,
+            offset,
+            expectedTotalRows: tab.resultTotalRowCount,
+            loadedRowCount: tab.result?.rows.length ?? 0,
+          }),
+        }),
+      );
+    } else {
+      await queryStore.executeTabSql(tab.id, sql, reloadOptions);
+    }
   }
 
   async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database", effectiveOrderBy?: string) {
@@ -728,6 +784,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         columnIndex: sortColumns.columnIndex,
         column,
         direction,
+        tieBreakerColumnIndexes: primaryKeyTieBreakerIndexes(tab.querySourceColumns?.length === sortColumns.resultColumns.length ? tab.querySourceColumns : sortColumns.resultColumns, tab.tableMeta?.primaryKeys),
       });
       if (!built.ok || !built.sql) {
         toast(t("grid.sortUnsupported"), 5000);

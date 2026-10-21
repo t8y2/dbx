@@ -36,6 +36,7 @@ export interface QueryEditorProps {
   hideExecutionControls?: boolean;
   enableExplainShortcut?: boolean;
   canExplain?: boolean;
+  isExecuting?: boolean;
   initialViewport?: { scrollTop: number; scrollLeft: number };
   initialSelection?: { anchor: number; head: number };
   revealRequest?: { id: number; line: number; column?: number };

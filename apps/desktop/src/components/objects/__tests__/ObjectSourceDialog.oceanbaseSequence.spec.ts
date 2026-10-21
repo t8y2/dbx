@@ -120,7 +120,7 @@ describe("OceanBase sequence source through the shared Oracle object dialog", ()
     expect(editor()!.state.doc.toString()).toMatch(/CREATE\s+SEQUENCE/i);
     expect(editor()!.state.doc.toString()).toMatch(/START\s+WITH\s+40/i);
     expect(mocks.buildEditableObjectSource).toHaveBeenCalledWith({ databaseType: "oceanbase-oracle", objectType: "SEQUENCE", schema: "APP", name: "SEQ", source: ddl });
-    button("contextMenu.editView")!.click();
+    button("contextMenu.editObject")!.click();
     await vi.waitFor(() => expect(editor()!.state.facet(EditorState.readOnly)).toBe(false));
     expect(editor()!.state.doc.toString()).toBe(alter);
     expect(editor()!.state.doc.toString()).not.toContain("START WITH");
@@ -139,14 +139,14 @@ describe("OceanBase sequence source through the shared Oracle object dialog", ()
     await mount({ databaseType: "oracle", initialEditing });
     expect(editor()!.state.facet(EditorState.readOnly)).toBe(true);
     expect(editor()!.state.doc.toString()).toMatch(/CREATE\s+SEQUENCE/i);
-    expect(button("contextMenu.editView")).toBeUndefined();
+    expect(button("contextMenu.editObject")).toBeUndefined();
     expect(button("objects.saveSource")).toBeUndefined();
     expect(mocks.executeQuery).not.toHaveBeenCalled();
   });
   it("honors a driver-declared read-only OceanBase object", async () => {
     await mount({ editable: false, initialEditing: true });
     expect(editor()!.state.facet(EditorState.readOnly)).toBe(true);
-    expect(button("contextMenu.editView")).toBeUndefined();
+    expect(button("contextMenu.editObject")).toBeUndefined();
     expect(mocks.executeQuery).not.toHaveBeenCalled();
   });
   it("does not execute a sequence save after the selected connection changes during SQL generation", async () => {

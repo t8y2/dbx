@@ -147,6 +147,21 @@ test("frontend tests use two shards on separate runners", () => {
   assert.doesNotMatch(job("frontend-typecheck"), /vitest|oxfmt|oxlint/);
 });
 
+test("frontend type checking retains its configured heap budget", () => {
+  const content = job("frontend-typecheck");
+  assert.match(content, /NODE_OPTIONS: --max-old-space-size=8192/);
+  assert.match(content, /name: Type-check frontend\s+run: pnpm exec vue-tsc --noEmit --project apps\/desktop\/tsconfig\.json/);
+});
+
+test("Windows 7 bundling uses the tested retry script and still audits the installer", () => {
+  const content = job("windows-win7-bundle");
+  assert.ok(content.includes("run: ./.github/scripts/bundle-win7-installer.ps1"));
+  assert.doesNotMatch(content, /bundle-win7-installer\.test\.ps1/);
+  assert.ok(content.includes("assert-win7-installer-content.ps1"));
+  assert.ok(content.indexOf("bundle-win7-installer.ps1") < content.indexOf("assert-win7-installer-content.ps1"));
+  assert.ok(job("github-scripts").includes("run: ./.github/scripts/bundle-win7-installer.test.ps1"));
+});
+
 test("every old Agent stage has an independent owner and Java packaging remains strict", () => {
   assert.ok(job("agent-checks").includes("python3 -m unittest discover"));
   assert.ok(job("agent-checks").includes("python3 scripts/validate_agents.py"));
@@ -361,11 +376,27 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.doesNotMatch(win7, /^\s+(?:CC|CXX):/m);
 });
 
-test("Win7 TLS cache keys ignore the workspace lockfile", () => {
+test("Win7 TLS artifact names ignore the workspace lockfile", () => {
   const win7 = job("windows-win7-bundle");
   assert.ok(win7.includes("hashFiles('.github/fixtures/win7-aws-lc-cache/Cargo.toml', '.github/fixtures/win7-aws-lc-cache/Cargo.lock')"));
   assert.ok(win7.includes("hashFiles('.github/fixtures/win7-openssl-cache/Cargo.toml', '.github/fixtures/win7-openssl-cache/Cargo.lock')"));
-  assert.doesNotMatch(win7, /key: win7-(?:aws-lc|openssl).*hashFiles\('Cargo\.lock'/);
+  assert.doesNotMatch(win7, /WIN7_PREBUILT_ARTIFACT_NAME: win7-(?:aws-lc|openssl).*hashFiles\('Cargo\.lock'/);
+});
+
+test("Win7 TLS artifacts come from main and retain a build fallback", () => {
+  const win7 = job("windows-win7-bundle");
+  assert.ok(win7.includes("actions: read"));
+  assert.doesNotMatch(win7, /uses: actions\/cache(?:\/restore|\/save)?@v4/);
+  for (const [name, id] of [["AWS-LC", "aws-lc-artifact"], ["OpenSSL", "openssl-artifact"]]) {
+    assert.ok(win7.includes(`if: steps.${id}.outputs.run_id != ''`));
+    assert.ok(win7.includes(`if: steps.${id}.outputs.run_id == ''`));
+    assert.ok(win7.includes(`if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.${id}.outputs.run_id == ''`));
+    assert.ok(win7.includes(`name: \${{ steps.${id}.outputs.name }}`));
+    assert.ok(win7.indexOf(`name: Find prebuilt Win7 ${name} artifact`) < win7.indexOf(`name: Download prebuilt Win7 ${name} artifact`));
+    assert.ok(win7.indexOf(`name: Download prebuilt Win7 ${name} artifact`) < win7.indexOf(`name: Build prebuilt Win7 ${name}`));
+    assert.ok(win7.indexOf(`name: Build prebuilt Win7 ${name}`) < win7.indexOf(`name: Upload prebuilt Win7 ${name} on main`));
+    assert.ok(win7.indexOf(`name: Configure prebuilt Win7 ${name}`) < win7.indexOf(`name: Upload prebuilt Win7 ${name} on main`));
+  }
 });
 
 test("path filtering and the planner use the exact test merge first parent", () => {

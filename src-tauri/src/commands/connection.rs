@@ -231,8 +231,112 @@ mod tests {
     use dbx_core::models::connection::{
         AttachedDatabaseConfig, ConnectionConfig, DatabaseType, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
+    use std::sync::Arc;
     use std::time::Duration;
     use tauri::Manager;
+
+    fn rocketmq_config(password: &str) -> ConnectionConfig {
+        let mut config = mongodb_config();
+        config.id = "rocketmq-desktop".into();
+        config.db_type = DatabaseType::MessageQueue;
+        config.driver_profile = None;
+        config.driver_label = None;
+        config.connection_string = None;
+        config.url_params = None;
+        config.password.clear();
+        config.save_password = false;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "rocketmq", "adminUrl": "",
+            "auth": { "kind": "basic", "username": "ak", "password": password },
+            "extra": { "connectionMode": "proxy", "proxyEndpoint": "proxy.invalid:8081", "secretKey": "stale" }
+        }));
+        config
+    }
+
+    #[tokio::test]
+    async fn rocketmq_save_captures_no_save_auth_before_storage_and_rehydrates_desktop_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.path().join("plugins"));
+        let config = rocketmq_config("session-sk");
+        save_connection_configs(&state, std::slice::from_ref(&config), Vec::new()).await.unwrap();
+        let saved = state.storage.load_connections().await.unwrap();
+        assert_eq!(state.session_credentials.get("", &config.id).as_deref(), Some("session-sk"));
+        let external = saved[0].external_config.as_ref().unwrap();
+        assert_eq!(external["auth"]["password"], "");
+        assert!(external["extra"].get("secretKey").is_none());
+        assert_eq!(state.configs.read().await[&config.id].external_config.as_ref().unwrap()["auth"]["password"], "");
+        #[cfg(feature = "mq-admin")]
+        {
+            let runtime = state.mq_admin_config_for_connection(&config.id, &saved[0]).await.unwrap();
+            assert!(
+                matches!(runtime.auth, dbx_core::mq::auth::MqAuth::Basic { password, .. } if password == "session-sk")
+            );
+        }
+        save_connection_configs(&state, &saved, Vec::new()).await.unwrap();
+        assert_eq!(state.session_credentials.get("", &config.id).as_deref(), Some("session-sk"));
+        let mut updated = saved[0].clone();
+        updated.external_config.as_mut().unwrap()["auth"]["username"] = serde_json::json!("other-ak");
+        save_connection_configs(&state, &[updated.clone()], Vec::new()).await.unwrap();
+        assert!(!state.session_credentials.has("", &config.id));
+        // Capture must survive identity-change invalidation during runtime sync.
+        updated.external_config.as_mut().unwrap()["auth"]["username"] = serde_json::json!("new-ak");
+        updated.external_config.as_mut().unwrap()["auth"]["password"] = serde_json::json!("new-sk");
+        save_connection_configs(&state, &[updated], Vec::new()).await.unwrap();
+        assert_eq!(state.session_credentials.get("", &config.id).as_deref(), Some("new-sk"));
+        let state = Arc::new(state);
+        let app = tauri::test::mock_builder()
+            .manage(state.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        super::disconnect_db(app.state::<Arc<AppState>>(), config.id.clone(), None).await.unwrap();
+        assert!(super::session_credential_status(app.state::<Arc<AppState>>(), config.id.clone()).await.unwrap());
+        super::forget_session_credential(app.state::<Arc<AppState>>(), config.id.clone()).await.unwrap();
+        assert!(!state.session_credentials.has("", &config.id));
+    }
+
+    #[tokio::test]
+    async fn rocketmq_save_normalizes_legacy_auth_and_failed_save_keeps_existing_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.path().join("plugins"));
+        let mut config = rocketmq_config("");
+        let external = config.external_config.as_mut().unwrap();
+        external.as_object_mut().unwrap().remove("auth");
+        external["extra"]["access_key"] = serde_json::json!("legacy-ak");
+        external["extra"]["secret_key"] = serde_json::json!("legacy-sk");
+        external["extra"].as_object_mut().unwrap().remove("secretKey");
+        save_connection_configs(&state, &[config.clone()], Vec::new()).await.unwrap();
+        assert_eq!(state.session_credentials.get("", &config.id).as_deref(), Some("legacy-sk"));
+        let saved = state.storage.load_connections().await.unwrap();
+        assert_eq!(saved[0].external_config.as_ref().unwrap()["auth"]["username"], "legacy-ak");
+        let mut invalid = sqlite_config(std::path::Path::new(":memory:"), "");
+        invalid.attached_databases.push(AttachedDatabaseConfig { name: "invalid".into(), path: "invalid.db".into() });
+        assert!(save_connection_configs(&state, &[rocketmq_config("replacement"), invalid], Vec::new()).await.is_err());
+        assert_eq!(state.session_credentials.get("", &config.id).as_deref(), Some("legacy-sk"));
+    }
+
+    #[tokio::test]
+    async fn rocketmq_failed_connect_rolls_back_only_new_session_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, dir.path().join("plugins")));
+        let app = tauri::test::mock_builder()
+            .manage(state.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let mut config = rocketmq_config("bad-sk");
+        config.external_config.as_mut().unwrap()["extra"]["connectionMode"] = serde_json::json!("invalid");
+        assert!(connect_db(app.state::<Arc<AppState>>(), config.clone(), None).await.is_err());
+        assert!(!state.session_credentials.has("", &config.id));
+        state.session_credentials.set("", &config.id, "existing-sk");
+        config.external_config.as_mut().unwrap()["auth"]["password"] = serde_json::json!("");
+        assert!(connect_db(app.state::<Arc<AppState>>(), config.clone(), None).await.is_err());
+        assert_eq!(state.session_credentials.get("", &config.id).as_deref(), Some("existing-sk"));
+        assert!(test_connection_with_info_inner(&state, config.clone()).await.is_err());
+        assert_eq!(state.session_credentials.get("", &config.id).as_deref(), Some("existing-sk"));
+        assert_eq!(state.configs.read().await.len(), 0);
+    }
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
@@ -266,6 +370,8 @@ mod tests {
             connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_core::models::connection::default_query_timeout_secs(),
             idle_timeout_secs: dbx_core::models::connection::default_idle_timeout_secs(),
+            manual_transaction_timeout_secs: dbx_core::models::connection::default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: dbx_core::models::connection::default_idle_disconnect_secs(),
             keepalive_interval_secs: dbx_core::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -1063,15 +1169,24 @@ async fn save_connection_configs(
             )?;
         }
     }
+    // Capture before storage strips no-save auth. Commit to the session only after
+    // persistence and config synchronization succeed (which may clear stale identities).
+    let prepared: Vec<_> = configs.iter().cloned().map(prepare_rocketmq_runtime_config).collect();
+    let configs: Vec<_> = prepared.iter().map(|(config, _)| config.clone()).collect();
     if !removed_ids.is_empty() {
         state.storage.delete_connections(&removed_ids).await?;
     }
-    state.storage.save_connections(configs).await?;
+    state.storage.save_connections(&configs).await?;
     // Saving upserts, so the request only covers this window's connections. Sync
     // against the whole persisted list to keep connections saved by another
     // window/process alive in the runtime cache as well.
     let persisted = state.storage.load_connections().await?;
     let sync = sync_connection_configs(state, &persisted).await;
+    for (config, password) in &prepared {
+        if let Some(password) = password {
+            state.session_credentials.set("", &config.id, password);
+        }
+    }
     remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(state, &sync.mq_adapter_ids_to_drop).await;
@@ -1317,7 +1432,36 @@ async fn test_connection_with_info_inner(
     state: &Arc<AppState>,
     config: ConnectionConfig,
 ) -> Result<ConnectionTestResult, String> {
-    let config = if config.uses_mongodb_oidc() { config.canonicalized() } else { config };
+    let (mut config, password) = prepare_rocketmq_runtime_config(config);
+    if !dbx_core::connection::connection_secrets::is_rocketmq_connection(&config) {
+        return test_connection_with_info_impl(state, config).await;
+    }
+    // Test Connection must never replace credentials or transports of a live connection.
+    let password =
+        password.or_else(|| (!config.save_password).then(|| state.session_credentials.get("", &config.id)).flatten());
+    config.id = format!("{}{}", dbx_core::runtime_config::TEST_PROBE_ID_PREFIX, uuid::Uuid::new_v4());
+    let transport_id = format!("{}:test", config.id);
+    let credential_id = if config.has_effective_transport_layers() { &transport_id } else { &config.id };
+    let token = password.as_deref().and_then(|password| state.session_credentials.set("", credential_id, password));
+    let result = test_connection_with_info_impl(state, config.clone()).await;
+    if let Some(token) = token {
+        state.session_credentials.remove_if_current(&token);
+    }
+    // The implementation has early error returns during adapter construction.
+    state.reset_connection_transport_for_config(&transport_id, &config).await;
+    state.reset_connection_transport_for_config(&config.id, &config).await;
+    result
+}
+
+async fn test_connection_with_info_impl(
+    state: &Arc<AppState>,
+    config: ConnectionConfig,
+) -> Result<ConnectionTestResult, String> {
+    let config = if config.uses_mongodb_oidc() || config.db_type == DatabaseType::SqlServer {
+        config.canonicalized()
+    } else {
+        config
+    };
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
@@ -1739,7 +1883,20 @@ async fn test_connection_with_info_inner(
                         })
                         .unwrap_or_default()
                 };
-                let client = db::turso_driver::TursoClient::new(&url, &auth_token, config.ssl, connect_timeout)?;
+                // Route the test through the same transport-layer proxy resolution the
+                // real connect uses: a test that bypasses the proxy may succeed while
+                // the real connect fails through the proxy.
+                let proxy = clickhouse_http_proxy(runtime_proxy.as_ref())?;
+                let client = db::turso_driver::TursoClient::new_with_options(
+                    &url,
+                    &auth_token,
+                    config.ssl,
+                    connect_timeout,
+                    Some(config.ca_cert_path.as_str()),
+                    Some(config.client_cert_path.as_str()),
+                    Some(config.client_key_path.as_str()),
+                    proxy,
+                )?;
                 db::turso_driver::test_connection(&client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
@@ -1882,9 +2039,37 @@ async fn test_connection_with_info_inner(
     result.map(|message| ConnectionTestResult::success(message).with_database_info(database_info))
 }
 
-/// 连接成功且 `save_password=false` 时，把本次输入的密码记入内存会话凭据仓库，
-/// 供本次运行内 AI / 元数据 / 池重建复用（进程退出即丢，绝不落盘）。
+/// Normalize legacy RocketMQ ACL copies and capture no-save SK before either
+/// persistence or runtime caching. Only canonical auth owns the credential.
+fn prepare_rocketmq_runtime_config(mut config: ConnectionConfig) -> (ConnectionConfig, Option<String>) {
+    use dbx_core::connection::connection_secrets::{is_rocketmq_connection, normalize_rocketmq_credentials};
+    normalize_rocketmq_credentials(&mut config);
+    if config.save_password || !is_rocketmq_connection(&config) {
+        return (config, None);
+    }
+    let password = config
+        .external_config
+        .as_mut()
+        .and_then(|external| external.get_mut("auth"))
+        .filter(|auth| auth.get("kind").and_then(serde_json::Value::as_str) == Some("basic"))
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|auth| auth.insert("password".into(), serde_json::json!("")))
+        .and_then(|password| password.as_str().map(str::to_owned))
+        .filter(|password| !password.is_empty());
+    config.password.clear();
+    (config, password)
+}
+
+/// Other desktop drivers retain their existing success-only capture timing.
+/// RocketMQ is captured before core adapter creation, which reads only the session.
 fn record_session_credential(state: &AppState, config: &ConnectionConfig, connection_id: &str) {
+    if dbx_core::connection::connection_secrets::is_rocketmq_connection(config) {
+        let (_, password) = prepare_rocketmq_runtime_config(config.clone());
+        if let Some(password) = password {
+            state.session_credentials.set("", connection_id, &password);
+        }
+        return;
+    }
     if !config.save_password && !config.password.is_empty() {
         let _ = state.session_credentials.set("", connection_id, &config.password);
     }
@@ -1896,7 +2081,26 @@ pub async fn connect_db(
     config: ConnectionConfig,
     client_attempt: Option<u64>,
 ) -> Result<String, String> {
-    let config = config.canonicalized();
+    let (config, password) = prepare_rocketmq_runtime_config(config);
+    let app = state.inner().clone();
+    let token = password.as_deref().and_then(|password| app.session_credentials.set("", &config.id, password));
+    let result = connect_db_inner(state, config, client_attempt).await;
+    if result.is_err() {
+        if let Some(token) = token {
+            // A stale failed attempt must not remove a newer attempt's credential.
+            app.session_credentials.remove_if_current(&token);
+        }
+    }
+    result
+}
+
+async fn connect_db_inner(
+    state: State<'_, Arc<AppState>>,
+    config: ConnectionConfig,
+    client_attempt: Option<u64>,
+) -> Result<String, String> {
+    let mut config = config.canonicalized();
+    dbx_core::query::plugin_plan::invalidate_gaussdb_dws_product_version(&mut config);
     if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_remote_worker_requested(&config) {
         db::sqlite::validate_persistent_attachments(
             &config.host,
@@ -2238,7 +2442,20 @@ pub async fn connect_db(
                     })
                     .unwrap_or_default()
             };
-            let client = db::turso_driver::TursoClient::new(&url, &auth_token, db_config.ssl, connect_timeout)?;
+            // Same transport-layer proxy resolution as the test path and the real
+            // connect path in dbx-core: bypassing the proxy here would diverge from
+            // both.
+            let proxy = clickhouse_http_proxy(runtime_proxy.as_ref())?;
+            let client = db::turso_driver::TursoClient::new_with_options(
+                &url,
+                &auth_token,
+                db_config.ssl,
+                connect_timeout,
+                Some(db_config.ca_cert_path.as_str()),
+                Some(db_config.client_cert_path.as_str()),
+                Some(db_config.client_key_path.as_str()),
+                proxy,
+            )?;
             db::turso_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::Turso(client)
         }
@@ -2377,7 +2594,7 @@ pub async fn connection_final_proxy_port(
     let db_config = metadata_connection_config(&runtime_config);
     // This pre-connect path caches the configuration for tunnel resolution. Keep
     // no-save passwords out of that shared runtime cache just like connect_db.
-    let mut stored_config = runtime_config.clone();
+    let (mut stored_config, _) = prepare_rocketmq_runtime_config(runtime_config.clone());
     if !stored_config.save_password {
         stored_config.password.clear();
     }
@@ -2515,9 +2732,54 @@ pub fn install_connection_liveness_bridge(app: &tauri::AppHandle, state: Arc<App
     });
 }
 
+/// 「空闲自动断开」定时清扫与事件转发（issue #12112）。
+///
+/// 分两步，与 `install_connection_liveness_bridge` 同一分工（core 负责发布事件，各 shell
+/// 只负责自己的传输）：
+/// 1. 定时任务周期调用 `sweep_idle_connections` 触发清扫；
+/// 2. 订阅转发任务把 core 发布的 `ConnectionIdleClosedEvent` 以 `dbx:connection-idle-closed`
+///    事件发给前端；前端据此把该连接标记为未连接（保留已打开的查询页签与结果，且不写
+///    「用户已关闭」标记，便于自动重连）。
+///
+/// 间隔取 30 秒：该功能面向「分钟级」的长时间空闲，这个检测粒度足够；成本也很低——
+/// 未启用 `idle_disconnect_secs` 的连接在 core 的第一步就被过滤掉，不会有额外开销。
+pub fn install_connection_idle_closed_bridge(app: &tauri::AppHandle, state: Arc<AppState>) {
+    const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    let sweep_state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+        // 间隔型任务不需要「追赶」错过的 tick：若上一轮因为系统休眠等原因被推迟，
+        // 只需在下一轮正常执行，避免休眠唤醒后连续补跑多次清扫。
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            // 首次 tick 会立即就绪，此时通常还没有任何连接池，属于正常空跑。
+            ticker.tick().await;
+            sweep_state.sweep_idle_connections().await;
+        }
+    });
+
+    let app_handle = app.clone();
+    let mut events = state.subscribe_connection_idle_closed();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    let _ = app_handle.emit("dbx:connection-idle-closed", event);
+                }
+                // 丢弃事件不影响正确性：前端下次触发查询时会经 `ensureConnected` 自动重连，
+                // 侧边栏状态也会在下一次刷新时对齐，因此这里只记日志、不做补偿。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!("Desktop idle-closed bridge skipped {skipped} messages");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 /// Warm the driver and connection pool for a connection a tab is opening, so the
-/// first Run does not pay pool creation, tunnel setup, or external-driver (JDBC
-/// agent) startup while the user waits. Never removes an existing pool.
+/// first Run does not pay pool creation, tunnel setup, or external-driver (JDBC)
+/// agent startup while the user waits. Never removes an existing pool.
 #[tauri::command]
 pub async fn prewarm_connection(
     state: State<'_, Arc<AppState>>,

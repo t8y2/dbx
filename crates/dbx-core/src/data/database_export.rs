@@ -25,6 +25,7 @@ use crate::transfer::{
     quote_postgres_string_literal, wrap_dameng_identity_insert_sql_for_table,
 };
 use crate::types::{ObjectSourceKind, SpatialColumn, SqlExportColumnSelection};
+use dbx_sql::value_literals::format_pg_array_text;
 
 static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -264,10 +265,18 @@ fn exports_mysql_trigger_objects(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql)
 }
 
-/// Oracle writes each table's triggers into its table DDL (see `loadTableTriggerDDLs` in
-/// `agents/drivers/oracle-go`), so a trigger that reads `seq.NEXTVAL` reaches the script
-/// whenever structure is exported. The standalone sequences it depends on are written
-/// before the tables of a whole-schema structure export so the script replays (#11673).
+/// Standalone sequences (Oracle, Kingbase, Vastbase) are exported before tables so the DDL
+/// and default expressions replay properly.
+fn exports_standalone_sequence_objects(request: &DatabaseExportRequest, db_type: DatabaseType) -> bool {
+    if !matches!(db_type, DatabaseType::Oracle | DatabaseType::Kingbase | DatabaseType::Vastbase) {
+        return false;
+    }
+    if request.include_objects {
+        return true;
+    }
+    exports_oracle_sequence_objects(request, db_type)
+}
+
 fn exports_oracle_sequence_objects(request: &DatabaseExportRequest, db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Oracle) && request.include_structure && request.selected_tables.is_empty()
 }
@@ -625,7 +634,7 @@ pub fn format_export_sql_literal(value: &Value) -> String {
     format_export_sql_literal_for_database(value, None)
 }
 
-fn format_standard_sql_literal(value: &Value) -> String {
+fn format_standard_sql_literal(value: &Value, database_type: Option<DatabaseType>) -> String {
     if value.is_null() {
         return "NULL".to_string();
     }
@@ -634,6 +643,14 @@ fn format_standard_sql_literal(value: &Value) -> String {
     }
     if let Some(value) = value.as_bool() {
         return if value { "TRUE" } else { "FALSE" }.to_string();
+    }
+    if let Some(arr) = value.as_array() {
+        if database_type == Some(DatabaseType::Postgres) {
+            // The array text carries its own backslash escapes, which a plain
+            // '...' literal keeps verbatim under PostgreSQL's default
+            // `standard_conforming_strings = on`, as it does for other text.
+            return quote_standard_export_sql_string(&format_pg_array_text(arr));
+        }
     }
 
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
@@ -1690,7 +1707,7 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
                 value
             };
             let literal = if insert_dialect == SqlInsertDialect::Standard {
-                format_standard_sql_literal(value)
+                format_standard_sql_literal(value, options.database_type)
             } else if let Some(literal) =
                 crate::data_grid_sql::format_oracle_lob_export_literal(value, options.database_type, column_type)?
             {
@@ -2142,6 +2159,81 @@ fn format_export_table_ddl(ddl: &str, database_type: Option<DatabaseType>, opts:
     };
     let ddl = ddl.trim().trim_end_matches(';').trim_end();
     format!("{ddl};")
+}
+
+pub(crate) fn is_dameng_auto_increment_ddl(ddl: &str) -> bool {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut chars = ddl.chars().peekable();
+    let mut current_word = String::new();
+
+    while let Some(ch) = chars.next() {
+        if in_single_quote {
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                } else {
+                    in_single_quote = false;
+                }
+            }
+            continue;
+        }
+        if in_double_quote {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                } else {
+                    in_double_quote = false;
+                }
+            }
+            continue;
+        }
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+
+        if ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            in_line_comment = true;
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block_comment = true;
+            continue;
+        }
+        if ch == '\'' {
+            in_single_quote = true;
+            continue;
+        }
+        if ch == '"' {
+            in_double_quote = true;
+            continue;
+        }
+
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current_word.push(ch);
+        } else {
+            if current_word.eq_ignore_ascii_case("auto_increment") || current_word.eq_ignore_ascii_case("autoincrement")
+            {
+                return true;
+            }
+            current_word.clear();
+        }
+    }
+    current_word.eq_ignore_ascii_case("auto_increment") || current_word.eq_ignore_ascii_case("autoincrement")
 }
 
 /// PostgreSQL database export: split the statements that may depend on
@@ -3025,6 +3117,7 @@ fn write_database_export_rows<W: Write>(
         insert_dialect,
         SqlInsertMode::default(),
         false,
+        None,
     )
 }
 
@@ -3041,7 +3134,24 @@ fn write_database_export_rows_with_mode<W: Write>(
     insert_dialect: SqlInsertDialect,
     insert_mode: SqlInsertMode,
     preserve_original_language: bool,
+    table_ddl: Option<&str>,
 ) -> Result<(), String> {
+    let normalized_column_extras;
+    let column_extras = if *db_type == DatabaseType::Dameng && table_ddl.is_some_and(is_dameng_auto_increment_ddl) {
+        normalized_column_extras = column_extras
+            .iter()
+            .map(|extra| {
+                if extra.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("identity")) {
+                    Some("auto_increment".to_string())
+                } else {
+                    extra.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        normalized_column_extras.as_slice()
+    } else {
+        column_extras
+    };
     let insert_indices = columns
         .iter()
         .enumerate()
@@ -4029,12 +4139,25 @@ async fn export_database_sql_core_inner(
     } else {
         Vec::new()
     };
-    let all_tables = filter_export_table_infos(all_tables, &request.selected_tables, &request.excluded_tables)
+    let all_tables = filter_export_table_infos(all_tables, &[], &request.excluded_tables)
         .into_iter()
         .filter(|table| !postgres_extension_members.relation_names.contains(&table.name))
         .collect::<Vec<_>>();
-    let mut tables: Vec<_> = all_tables.iter().filter(|t| !t.table_type.contains("VIEW")).collect();
-    let mut views: Vec<_> = all_tables.iter().filter(|t| t.table_type.contains("VIEW")).collect();
+    let mut tables: Vec<_> = all_tables
+        .iter()
+        .filter(|t| !t.table_type.contains("VIEW"))
+        .filter(|t| request.selected_tables.is_empty() || request.selected_tables.contains(&t.name))
+        .collect();
+    let mut views: Vec<_> = all_tables
+        .iter()
+        .filter(|t| t.table_type.contains("VIEW"))
+        .filter(|t| {
+            if !request.include_objects {
+                return false;
+            }
+            request.selected_tables.is_empty() || request.selected_tables.contains(&t.name)
+        })
+        .collect();
     if request.include_objects && db_type == DatabaseType::Mysql && views.len() > 1 {
         match list_mysql_export_view_dependencies(state, &request.connection_id, &request.database, &client_session_id)
             .await
@@ -4112,11 +4235,11 @@ async fn export_database_sql_core_inner(
     let mut functions: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut triggers: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut events: Vec<crate::types::ObjectInfo> = Vec::new();
-    let mut oracle_sequences: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut standalone_sequences: Vec<crate::types::ObjectInfo> = Vec::new();
     let collects_schema_wide_objects = exports_schema_wide_objects(request);
-    let collects_oracle_sequences = exports_oracle_sequence_objects(request, db_type);
+    let collects_standalone_sequences = exports_standalone_sequence_objects(request, db_type);
 
-    if collects_schema_wide_objects || collects_oracle_sequences {
+    if collects_schema_wide_objects || collects_standalone_sequences {
         match crate::schema::list_objects_core(
             state,
             &request.connection_id,
@@ -4137,8 +4260,8 @@ async fn export_database_sql_core_inner(
                         continue;
                     }
                     if ot == "SEQUENCE" {
-                        if collects_oracle_sequences && !is_oracle_identity_sequence(&obj.name) {
-                            oracle_sequences.push(obj.clone());
+                        if collects_standalone_sequences && !is_oracle_identity_sequence(&obj.name) {
+                            standalone_sequences.push(obj.clone());
                         }
                         continue;
                     }
@@ -4161,6 +4284,12 @@ async fn export_database_sql_core_inner(
         }
     }
 
+    if !request.selected_tables.is_empty() {
+        standalone_sequences.retain(|s| request.selected_tables.contains(&s.name));
+        procedures.retain(|p| request.selected_tables.contains(&p.name));
+        functions.retain(|f| request.selected_tables.contains(&f.name));
+    }
+
     // A determinate total must describe the same object categories guarded by
     // the execution branches below, not every object discovered in the schema.
     let total_objects = database_export_total_objects(
@@ -4169,7 +4298,7 @@ async fn export_database_sql_core_inner(
             tables: tables.len(),
             views: views.len(),
             sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count()
-                + oracle_sequences.len(),
+                + standalone_sequences.len(),
             extensions: postgres_extensions.len(),
             enums: postgres_enums.len(),
             procedures: procedures.len(),
@@ -4375,7 +4504,7 @@ async fn export_database_sql_core_inner(
         object_index += 1;
     }
 
-    for sequence in &oracle_sequences {
+    for sequence in &standalone_sequences {
         if is_export_cancelled(&request.export_id).await {
             return Err("Export cancelled".to_string());
         }
@@ -4408,6 +4537,7 @@ async fn export_database_sql_core_inner(
                     &ObjectSourceKind::Sequence,
                     &sequence.name,
                     &obj_source.source,
+                    &request.schema,
                     request.drop_table_if_exists,
                 );
                 if !source.is_empty() {
@@ -4456,6 +4586,8 @@ async fn export_database_sql_core_inner(
             error_count: 0,
             error_summary: None,
         });
+
+        let mut table_ddl_text: Option<String> = None;
 
         // Export structure
         if request.include_structure {
@@ -4510,6 +4642,7 @@ async fn export_database_sql_core_inner(
             }
             match ddl_result {
                 Ok(ddl) => {
+                    table_ddl_text = Some(ddl.clone());
                     let (ddl, indexes, triggers) = split_postgres_export_table_ddl(&ddl, db_type);
                     deferred_postgres_indexes.extend(indexes);
                     deferred_postgres_triggers.extend(triggers);
@@ -4585,6 +4718,29 @@ async fn export_database_sql_core_inner(
             let col_types = columns.iter().map(|c| Some(c.data_type.clone())).collect::<Vec<_>>();
             let col_extras = columns.iter().map(|c| c.extra.clone()).collect::<Vec<_>>();
 
+            if table_ddl_text.is_none()
+                && db_type == DatabaseType::Dameng
+                && col_extras
+                    .iter()
+                    .any(|extra| extra.as_deref().is_some_and(|e| e.to_ascii_lowercase().contains("identity")))
+            {
+                if let Ok(ddl) = await_export_operation(
+                    &request.export_id,
+                    Box::pin(get_export_table_ddl_isolated(
+                        state.clone(),
+                        request.connection_id.clone(),
+                        request.database.clone(),
+                        request.schema.clone(),
+                        table_name.clone(),
+                        client_session_id.clone(),
+                    )),
+                )
+                .await
+                {
+                    table_ddl_text = Some(ddl);
+                }
+            }
+
             if !col_names.is_empty() {
                 if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
                     let sql = database_export_select_sql(&col_names, &col_types, table_name, &request.schema, &db_type);
@@ -4616,6 +4772,7 @@ async fn export_database_sql_core_inner(
                                     request.insert_dialect,
                                     request.insert_mode,
                                     request.preserve_original_language,
+                                    table_ddl_text.as_deref(),
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -4735,6 +4892,7 @@ async fn export_database_sql_core_inner(
                             request.insert_dialect,
                             request.insert_mode,
                             request.preserve_original_language,
+                            table_ddl_text.as_deref(),
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
@@ -4823,6 +4981,7 @@ async fn export_database_sql_core_inner(
                         &ObjectSourceKind::View,
                         view_name,
                         &obj_source.source,
+                        &request.schema,
                         request.drop_table_if_exists,
                     );
                     if !source.is_empty() {
@@ -4882,6 +5041,7 @@ async fn export_database_sql_core_inner(
                         &ObjectSourceKind::Procedure,
                         proc_name,
                         &obj_source.source,
+                        &request.schema,
                         request.drop_table_if_exists,
                     );
                     if !source.is_empty() {
@@ -4941,6 +5101,7 @@ async fn export_database_sql_core_inner(
                         &ObjectSourceKind::Function,
                         func_name,
                         &obj_source.source,
+                        &request.schema,
                         request.drop_table_if_exists,
                     );
                     if !source.is_empty() {
@@ -5006,6 +5167,7 @@ async fn export_database_sql_core_inner(
                         &object_type,
                         object_name,
                         &obj_source.source,
+                        &request.schema,
                         request.drop_table_if_exists,
                     );
                     if !source.is_empty() {
@@ -5089,14 +5251,55 @@ fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseTy
     format!("DROP TABLE IF EXISTS {}{};", crate::transfer::qualified_table(table_name, schema, db_type, None), cascade)
 }
 
+/// 构建写入导出文件的对象 DDL。
+///
+/// MySQL 系的对象定义（`SHOW CREATE VIEW/PROCEDURE/FUNCTION/TRIGGER/EVENT`）会带上
+/// `DEFINER=`user`@`host``：该账号在目标环境常常不存在（例如源库属主是 `root`@`%`，
+/// 目标库只有 `root`@`localhost`），导入时 MySQL 会因 definer 校验失败而拒绝创建对象
+/// （#12322）。因此这里与复制/传输路径保持一致，先剥离 definer 再写出；`SQL SECURITY
+/// DEFINER` 保留，导入后的 definer 即为执行导入的用户，与 Navicat 导出的行为一致。
 fn build_database_export_object_source_sql(
     database_type: DatabaseType,
     object_type: &ObjectSourceKind,
     object_name: &str,
     source: &str,
+    schema: &str,
     drop_if_exists: bool,
 ) -> String {
+    let wrapped_source;
+    let source = if matches!(object_type, ObjectSourceKind::View | ObjectSourceKind::MaterializedView)
+        && !source.trim().to_ascii_uppercase().starts_with("CREATE")
+    {
+        wrapped_source = crate::object_source_sql::build_view_ddl_sql(crate::object_source_sql::BuildViewDdlInput {
+            database_type: Some(database_type),
+            schema: Some(schema.to_string()),
+            name: object_name.to_string(),
+            source: source.to_string(),
+            identifier_quote: None,
+        });
+        &wrapped_source
+    } else {
+        source
+    };
+    // 独立序列在表之前导出，而 agent 序列源内嵌的 `alter sequence ... owned by`
+    // 引用所属表，重放时表还不存在；导出侧直接去掉该语句（DBeaver 同样不导出 OWNED BY）。
+    let stripped_source;
+    let source = if matches!(object_type, ObjectSourceKind::Sequence)
+        && matches!(database_type, DatabaseType::Kingbase | DatabaseType::Vastbase)
+    {
+        stripped_source = strip_agent_sequence_owned_by(source);
+        &stripped_source
+    } else {
+        source
+    };
     let source = build_export_object_source_sql(database_type, object_type.clone(), source);
+    // 非 MySQL 系没有这种 definer 语法；且 strip_mysql_definer 对不含该片段的 DDL 是空操作，
+    // 所以放宽到整个 MySQL 系是安全的，能顺带覆盖 Doris/StarRocks 等同族方言。
+    let source = if crate::data::transfer::is_mysql_family_target(&database_type) {
+        crate::data::transfer::strip_mysql_definer(&source)
+    } else {
+        source
+    };
     if source.is_empty() || !drop_if_exists || database_type != DatabaseType::Mysql {
         return source;
     }
@@ -5111,6 +5314,20 @@ fn build_database_export_object_source_sql(
     };
     let object_name = quote_identifier(object_name, &DatabaseType::Mysql);
     format!("DROP {object_type} IF EXISTS {object_name};\n{source}")
+}
+
+/// agent 序列源以空行分块（create sequence / alter ... owner to / alter ... owned by），
+/// 导出时整块剔除 `owned by` 语句，其余内容原样保留。
+fn strip_agent_sequence_owned_by(source: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    for block in source.split("\n\n") {
+        let lower = block.trim().to_ascii_lowercase();
+        if lower.starts_with("alter sequence ") && lower.contains(" owned by ") {
+            continue;
+        }
+        kept.push(block);
+    }
+    kept.join("\n\n")
 }
 
 #[cfg(test)]
@@ -5132,18 +5349,20 @@ mod tests {
         format_mysql_spatial_export_literal, format_postgres_spatial_export_literal_with_srid,
         format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
         generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
-        generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
-        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
-        record_export_destination_identity, record_export_error, replace_database_export_select_list,
-        sort_export_views_by_dependencies, split_postgres_export_table_ddl, write_database_export_rows,
-        write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
-        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
-        DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum, PostgresExportExtension, PostgresExportSequence,
-        PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE,
-        DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
+        generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl, is_postgres_extension_member_routine,
+        mysql_database_export_preamble, mysql_view_dependencies_from_rows, mysql_view_dependencies_sql,
+        normalize_export_table_ddl, record_export_destination_identity, record_export_error,
+        replace_database_export_select_list, sort_export_views_by_dependencies, split_postgres_export_table_ddl,
+        write_database_export_rows, write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions,
+        BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions, DatabaseExportObjectCounts,
+        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum,
+        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
+        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
+        POSTGRES_EXPORT_SEQUENCES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
+    use crate::data::transfer::strip_mysql_definer;
     use crate::models::connection::DatabaseType;
     use crate::types::SpatialColumn;
     use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
@@ -5527,10 +5746,78 @@ mod tests {
     }
 
     #[test]
+    fn standalone_sequences_are_exported_for_oracle_kingbase_vastbase() {
+        use super::exports_standalone_sequence_objects;
+
+        let cases = [
+            ("kingbase include objects", DatabaseType::Kingbase, export_request(false, false, true, Vec::new()), true),
+            ("kingbase structure only", DatabaseType::Kingbase, export_request(true, false, false, Vec::new()), false),
+            ("vastbase include objects", DatabaseType::Vastbase, export_request(false, false, true, Vec::new()), true),
+            ("oracle include objects", DatabaseType::Oracle, export_request(false, false, true, Vec::new()), true),
+            ("oracle structure only", DatabaseType::Oracle, export_request(true, false, false, Vec::new()), true),
+            ("postgres include objects", DatabaseType::Postgres, export_request(false, false, true, Vec::new()), false),
+            ("mysql include objects", DatabaseType::Mysql, export_request(false, false, true, Vec::new()), false),
+        ];
+        for (name, db_type, request, expected) in cases {
+            assert_eq!(exports_standalone_sequence_objects(&request, db_type), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn kingbase_view_definition_without_create_is_wrapped() {
+        let view_def = "SELECT id, name FROM public.users WHERE active = true";
+        let ddl = build_database_export_object_source_sql(
+            DatabaseType::Kingbase,
+            &ObjectSourceKind::View,
+            "v_active_users",
+            view_def,
+            "public",
+            false,
+        );
+        assert!(ddl.starts_with(
+            "CREATE OR REPLACE VIEW \"public\".\"v_active_users\" AS\nSELECT id, name FROM public.users WHERE active = true;"
+        ));
+    }
+
+    #[test]
+    fn agent_sequence_owned_by_is_stripped_from_kingbase_export() {
+        let source = "-- auto-generated definition\ncreate sequence permissions_id_seq\n    increment by 1\n    minvalue 1\n    maxvalue 9223372036854775807\n    start with 1\n    no cycle;\n\nalter sequence permissions_id_seq owner to app_user;\n\nalter sequence permissions_id_seq owned by permissions.id;";
+        let ddl = build_database_export_object_source_sql(
+            DatabaseType::Kingbase,
+            &ObjectSourceKind::Sequence,
+            "permissions_id_seq",
+            source,
+            "public",
+            false,
+        );
+        // 独立序列在表之前写入导出文件，owned by 引用的表此时还不存在。
+        assert!(!ddl.to_ascii_lowercase().contains("owned by"));
+        assert!(ddl.contains("alter sequence permissions_id_seq owner to app_user;"));
+        assert!(ddl.contains("create sequence permissions_id_seq"));
+    }
+
+    #[test]
+    fn kingbase_view_definition_with_create_is_not_double_wrapped() {
+        let view_def = "CREATE VIEW \"v_users\" AS SELECT id FROM public.users;";
+        let ddl = build_database_export_object_source_sql(
+            DatabaseType::Kingbase,
+            &ObjectSourceKind::View,
+            "v_users",
+            view_def,
+            "public",
+            false,
+        );
+        assert_eq!(ddl, "CREATE VIEW \"v_users\" AS SELECT id FROM public.users;");
+    }
+
+    #[test]
     fn mysql_database_export_drops_triggers_and_events_before_create() {
         let trigger = "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders_ai` AFTER INSERT ON `orders` FOR EACH ROW INSERT INTO audit_log(msg) VALUES ('x')";
         let event =
             "CREATE DEFINER=`root`@`%` EVENT `ev_purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM audit_log WHERE id < 0";
+        // MySQL 系导出会剥离 DEFINER（#12322），所以期望值按剥离后的原文构造。
+        let stripped_trigger = strip_mysql_definer(trigger);
+        let stripped_event = strip_mysql_definer(event);
 
         assert_eq!(
             build_database_export_object_source_sql(
@@ -5538,11 +5825,12 @@ mod tests {
                 &ObjectSourceKind::Trigger,
                 "trg_orders_ai",
                 trigger,
+                "public",
                 true
             ),
             format!(
                 "DROP TRIGGER IF EXISTS `trg_orders_ai`;\n{}",
-                build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Trigger, trigger)
+                build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Trigger, &stripped_trigger)
             )
         );
         assert_eq!(
@@ -5551,11 +5839,12 @@ mod tests {
                 &ObjectSourceKind::Event,
                 "ev_purge",
                 event,
+                "public",
                 true
             ),
             format!(
                 "DROP EVENT IF EXISTS `ev_purge`;\n{}",
-                build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Event, event)
+                build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Event, &stripped_event)
             )
         );
         // Without `dropTableIfExists` the source is written as-is.
@@ -5565,9 +5854,66 @@ mod tests {
                 &ObjectSourceKind::Trigger,
                 "trg_orders_ai",
                 trigger,
+                "public",
                 false
             ),
-            build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Trigger, trigger)
+            build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Trigger, &stripped_trigger)
+        );
+    }
+
+    /// #12322：导出的视图 DDL 不能带 DEFINER —— 目标环境缺少该账号时导入会直接失败；
+    /// `ALGORITHM` / `SQL SECURITY` 等其余选项必须原样保留。
+    #[test]
+    fn mysql_database_export_strips_view_definer() {
+        let view = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `mysql_table` AS select 1";
+
+        assert_eq!(
+            build_database_export_object_source_sql(
+                DatabaseType::Mysql,
+                &ObjectSourceKind::View,
+                "mysql_table",
+                view,
+                "public",
+                true
+            ),
+            "DROP VIEW IF EXISTS `mysql_table`;\nCREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `mysql_table` AS select 1;"
+        );
+    }
+
+    /// 同族方言（Doris/StarRocks 等）同样剥离，避免只覆盖 MySQL 造成漏修。
+    #[test]
+    fn doris_database_export_also_strips_definer() {
+        let view = "CREATE DEFINER=`root`@`%` VIEW `v` AS select 1";
+
+        assert_eq!(
+            build_database_export_object_source_sql(
+                DatabaseType::Doris,
+                &ObjectSourceKind::View,
+                "v",
+                view,
+                "public",
+                true
+            ),
+            "CREATE VIEW `v` AS select 1;"
+        );
+    }
+
+    /// 非 MySQL 系不受影响。这里刻意用带 `DEFINER=`u`@`h`` 的源文本（真实 Postgres DDL
+    /// 不会有这种片段），以便在有人把同族判定写宽时立刻失败。
+    #[test]
+    fn non_mysql_database_export_keeps_object_source_verbatim() {
+        let view = "CREATE DEFINER=`root`@`%` VIEW public.v AS SELECT 1";
+
+        assert_eq!(
+            build_database_export_object_source_sql(
+                DatabaseType::Postgres,
+                &ObjectSourceKind::View,
+                "v",
+                view,
+                "public",
+                true
+            ),
+            "CREATE DEFINER=`root`@`%` VIEW public.v AS SELECT 1;"
         );
     }
 
@@ -5922,6 +6268,7 @@ mod tests {
             &ObjectSourceKind::View,
             "active`rows",
             "CREATE VIEW `active``rows` AS SELECT 1",
+            "public",
             true,
         );
 
@@ -5935,6 +6282,7 @@ mod tests {
             &ObjectSourceKind::Procedure,
             "refresh_cache",
             "CREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END",
+            "public",
             true,
         );
         let function = build_database_export_object_source_sql(
@@ -5942,6 +6290,7 @@ mod tests {
             &ObjectSourceKind::Function,
             "active_count",
             "CREATE FUNCTION `active_count`() RETURNS INT RETURN 1",
+            "public",
             true,
         );
 
@@ -5962,6 +6311,7 @@ mod tests {
             &ObjectSourceKind::View,
             "active_rows",
             "CREATE VIEW `active_rows` AS SELECT 1",
+            "public",
             false,
         );
         let postgres_with_drop = build_database_export_object_source_sql(
@@ -5969,6 +6319,7 @@ mod tests {
             &ObjectSourceKind::View,
             "active_rows",
             "CREATE VIEW active_rows AS SELECT 1",
+            "public",
             true,
         );
 
@@ -7872,6 +8223,30 @@ mod tests {
     }
 
     #[test]
+    fn standard_sql_insert_writes_postgres_arrays_as_array_literals() {
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "postgres",
+            "insertDialect": "standard",
+            "schema": "public",
+            "tableName": "users_role",
+            "columns": ["id", "permissions", "tricky", "empty", "meta"],
+            "columnTypes": ["integer", "text[]", "text[]", "integer[]", "jsonb"],
+            "rows": [
+                [1, ["add_issue", "view_issues"], ["say \"hi\"", "a,b", null, "C:\\tmp", "it's"], [], "{\"k\": [1]}"]
+            ],
+            "batchSize": 10
+        }))
+        .expect("deserialize Standard SQL INSERT payload");
+
+        let sql = build_export_sql_insert(options).expect("build Standard SQL INSERT");
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "public"."users_role" ("id", "permissions", "tricky", "empty", "meta") VALUES (1, '{"add_issue","view_issues"}', '{"say \"hi\"","a,b",NULL,"C:\\tmp","it''s"}', '{}', '{"k": [1]}');"#
+        );
+    }
+
+    #[test]
     fn standard_sql_insert_keeps_requested_batch_mode_for_oracle_sources() {
         let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
             "databaseType": "oracle",
@@ -8056,6 +8431,7 @@ mod tests {
             SqlInsertDialect::Source,
             SqlInsertMode::Single,
             false,
+            None,
         )
         .unwrap();
         drop(file);
@@ -8367,6 +8743,70 @@ mod tests {
                 "SET IDENTITY_INSERT \"SYSDBA\".\"USERS\" ON;\nINSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\nSET IDENTITY_INSERT \"SYSDBA\".\"USERS\" OFF;"
             ]
         );
+    }
+
+    #[test]
+    fn dameng_auto_increment_export_inserts_omit_identity_insert() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Dameng),
+            identifier_quote: None,
+            schema: Some("SYSDBA".to_string()),
+            table_name: Some("USERS".to_string()),
+            qualified_table_name: None,
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            column_types: vec![Some("INT".to_string()), Some("VARCHAR(20)".to_string())],
+            column_extras: vec![Some("auto_increment".to_string()), None],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(1), json!("Ada")]],
+            batch_size: Some(10),
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');"]);
+    }
+
+    #[test]
+    fn dameng_database_row_writer_omits_identity_insert_when_table_ddl_has_auto_increment() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        let ddl = "CREATE TABLE \"SYSDBA\".\"USERS\" (\"ID\" INT AUTO_INCREMENT PRIMARY KEY, \"NAME\" VARCHAR(20));";
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1), json!("Ada")]],
+            &["ID".to_string(), "NAME".to_string()],
+            &[Some("INT".to_string()), Some("VARCHAR(20)".to_string())],
+            // Catalog reports "identity" because DM c.INFO2 & 0x01 = 1 for auto_increment
+            &[Some("identity".to_string()), None],
+            "USERS",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            SqlInsertDialect::Source,
+            SqlInsertMode::Single,
+            false,
+            Some(ddl),
+        )
+        .unwrap();
+        drop(file);
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(!content.contains("IDENTITY_INSERT"));
+        assert_eq!(content, "INSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\n\n");
+    }
+
+    #[test]
+    fn dameng_is_auto_increment_ddl_detection() {
+        assert!(is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT AUTO_INCREMENT, \"NAME\" VARCHAR(20))"));
+        assert!(is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT autoincrement PRIMARY KEY)"));
+        assert!(is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT AUTO_INCREMENT=100)"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT IDENTITY(1, 1), \"NAME\" VARCHAR(20))"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"AUTO_INCREMENT\" INT)"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"VAL\" VARCHAR(50) DEFAULT 'AUTO_INCREMENT')"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\"ID\" INT /* AUTO_INCREMENT */)"));
+        assert!(!is_dameng_auto_increment_ddl("CREATE TABLE \"T\" (\n-- AUTO_INCREMENT\n\"ID\" INT)"));
     }
 
     #[test]

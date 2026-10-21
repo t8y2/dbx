@@ -23,6 +23,26 @@ describe("generateCellValues", () => {
     expect(generateCellValues("datetime-ms", 1, { now: new Date(2026, 6, 16, 9, 8, 7) })).toEqual(["2026-07-16 09:08:07.000"]);
   });
 
+  it("generates Unix timestamps in seconds and milliseconds", () => {
+    const now = new Date(1_645_557_742_123);
+    expect(generateCellValues("timestamp-seconds", 2, { now })).toEqual(["1645557742", "1645557742"]);
+    expect(generateCellValues("timestamp-ms", 2, { now })).toEqual(["1645557742123", "1645557742123"]);
+  });
+
+  it("generates Unix timestamps in seconds and milliseconds without explicit now option", () => {
+    const beforeSeconds = Math.floor(Date.now() / 1000);
+    const [seconds] = generateCellValues("timestamp-seconds", 1);
+    const afterSeconds = Math.floor(Date.now() / 1000);
+    expect(Number(seconds)).toBeGreaterThanOrEqual(beforeSeconds);
+    expect(Number(seconds)).toBeLessThanOrEqual(afterSeconds);
+
+    const beforeMs = Date.now();
+    const [ms] = generateCellValues("timestamp-ms", 1);
+    const afterMs = Date.now();
+    expect(Number(ms)).toBeGreaterThanOrEqual(beforeMs);
+    expect(Number(ms)).toBeLessThanOrEqual(afterMs);
+  });
+
   it("generates one UUID per cell", () => {
     let index = 0;
     expect(generateCellValues("uuid", 3, { uuidFactory: () => `uuid-${++index}` })).toEqual(["uuid-1", "uuid-2", "uuid-3"]);

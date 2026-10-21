@@ -3,7 +3,7 @@ import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_E
 import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZoom";
 import { DATA_GRID_TYPE_COLOR_KEYS, DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
-import { DEFAULT_SQL_FORMATTER_SETTINGS, isCompleteSqlFormatterSettings, type SqlFormatterOptionSettings } from "@/lib/sql/sqlFormatterConfig";
+import { DEFAULT_SQL_FORMATTER_RULE_SETTINGS, DEFAULT_SQL_FORMATTER_SETTINGS, isCompleteSqlFormatterSettings, type SqlFormatterOptionSettings, type SqlFormatterRuleSettings } from "@/lib/sql/sqlFormatterConfig";
 import { SQL_VARIABLE_SYNTAX_KEYS } from "@/lib/sql/sqlVariableSyntax";
 
 /**
@@ -105,6 +105,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "confirmUnsavedSqlClose",
     "appCloseUnsavedTabsMode",
     "savedSqlOpenTargetMode",
+    "aiSqlApplyTargetMode",
     "prefillNewQueryWithSelect",
     "openQueryOnConnectionOpen",
     "generateSqlIncludeDatabaseName",
@@ -123,8 +124,10 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tabPlacement",
     "tabGroupMode",
     "colorizeConnectionTabs",
+    "colorizeConnectionTabsScope",
     "tabSortMode",
     "tabMaxWidth",
+    "tabGroupRows",
     "sidebarActivation",
     "sidebarObjectDisplay",
     "routineSourceOpenMode",
@@ -141,9 +144,11 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataTabReuseMode",
     "openDataTabsNextToActive",
     "clickTableNavigationTarget",
+    "objectBrowserAutoOpenDetailPanel",
     "sidebarObjectInfoMode",
     "sidebarAllowHorizontalScroll",
     "sidebarShowTooltips",
+    "sidebarShowUserAdmin",
     "sidebarIndent",
     "sidebarFontSize",
     "sidebarDensity",
@@ -153,12 +158,14 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   ],
   data: [
     "showColumnCommentsInHeader",
+    "dataGridColumnCommentsInInfoArea",
     "showColumnTypesInHeader",
     "showColumnHeaderTooltips",
     "showResultSourceDatabase",
     "resultTabNamingMode",
     "resultTabPreferComments",
     "dataGridShowTransposeFieldMetadata",
+    "dataGridTransposeMetadataInInfoColumn",
     "colorizeDataGridCellTypes",
     "dataGridTypeColorSchemes",
     "activeDataGridTypeColorSchemeId",
@@ -170,6 +177,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridTextFilterPanelHeight",
     "dataGridToolbarLayout",
     "defaultAutoKeepResults",
+    "pinResultTabOnClick",
     "multiStatementDefaultView",
     "defaultExplainView",
     "dataGridAutoTransposeSingleRow",
@@ -204,6 +212,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "applyColumnFormattersOnExport",
     "csvQuoteMode",
     "csvNullMode",
+    "queryResultExportFileNameSource",
     "exportRowLimitEnabled",
     "exportRowLimit",
     "queryExportKeysetOptimizationEnabled",
@@ -298,6 +307,8 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
   "showColumnCommentsInHeader",
+  "dataGridColumnCommentsInInfoArea",
+  "dataGridTransposeMetadataInInfoColumn",
   "showColumnTypesInHeader",
   "showColumnHeaderTooltips",
   "showResultSourceDatabase",
@@ -315,6 +326,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "sidebarPinDefaultDatabase",
   "sidebarAllowHorizontalScroll",
   "sidebarShowTooltips",
+  "sidebarShowUserAdmin",
   "updateNotificationsEnabled",
   "autoDownloadUpdates",
   "autoUpdateApp",
@@ -328,6 +340,7 @@ const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (val
   // The editor font slider and the Ctrl+wheel zoom both clamp to this range.
   fontSize: (value) => typeof value === "number" && Number.isFinite(value) && value >= EDITOR_MIN_FONT_SIZE && value <= EDITOR_MAX_FONT_SIZE,
   welcomePageMode: (value) => value === "intro" || value === "workspace",
+  aiSqlApplyTargetMode: (value) => value === "current" || value === "first" || value === "new",
   appLayout: (value) => value === "separated" || value === "classic",
   webLogoPosition: (value) => value === "left" || value === "right" || value === "hidden",
   resultTabNamingMode: (value) => value === "source" || value === "ordinal" || value === "comment",
@@ -468,7 +481,7 @@ const SQL_VARIABLE_SYNTAX_KEY_SET = new Set<string>(SQL_VARIABLE_SYNTAX_KEYS);
  * because the version boundary is known; nothing is inferred about which
  * style the user meant. Every future formatter option must be added here.
  */
-const SQL_FORMATTER_KEYS_ADDED_AFTER_TRANSFER_FORMAT = new Set<keyof SqlFormatterOptionSettings>(["commaPosition", "layoutStyle"]);
+const SQL_FORMATTER_KEYS_ADDED_AFTER_TRANSFER_FORMAT = new Set<keyof SqlFormatterOptionSettings>(["commaPosition", "layoutStyle", ...(Object.keys(DEFAULT_SQL_FORMATTER_RULE_SETTINGS) as (keyof SqlFormatterRuleSettings)[])]);
 
 /**
  * Complete-schema check that tolerates the absence of the post-transfer
@@ -510,7 +523,7 @@ const NESTED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: un
   snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
   modelGenerationTemplates: isModelGenerationTemplatesShape,
   sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
-  sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => toggle === false),
+  sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => typeof toggle === "boolean"),
 };
 
 /**

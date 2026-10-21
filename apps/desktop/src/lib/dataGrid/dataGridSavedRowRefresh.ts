@@ -1,4 +1,5 @@
 import type { CellValue } from "@/lib/dataGrid/cellValue";
+import type { QueryResult } from "@/types/database";
 
 export const DATA_GRID_SAVED_ROW_REFRESH_LIMIT = 100;
 
@@ -135,4 +136,33 @@ export function dataGridSavedRowRefreshPatches(plan: DataGridSavedRowRefreshPlan
     });
   }
   return patches;
+}
+
+export interface DataGridSavedRowRefreshQuery {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  sql: string;
+  rowLimit: number;
+  primaryKeys: readonly string[];
+  /** The SQL was built with large-value preview options (truncated cells plus marker columns). */
+  largeValuePreview: boolean;
+}
+
+export interface DataGridSavedRowRefreshRunner {
+  executeQuery: (connectionId: string, database: string, sql: string, schema?: string, executionId?: string, options?: { maxRows?: number; fetchSize?: number; pageSize?: number }) => Promise<QueryResult>;
+  executeMulti: (connectionId: string, database: string, sql: string, schema?: string, executionId?: string, options?: { maxRows?: number; fetchSize?: number; pageSize?: number; resultKeyColumns?: string[]; tableDataPreview?: boolean }) => Promise<QueryResult[]>;
+}
+
+/**
+ * Preview SQL truncates large values and adds marker columns; only a table-data
+ * preview execution turns those markers into `large_value_cells`. A plain query
+ * would hand back the truncated preview as the cell's full value (issue #12504).
+ */
+export async function executeDataGridSavedRowRefreshQuery(runner: DataGridSavedRowRefreshRunner, query: DataGridSavedRowRefreshQuery): Promise<QueryResult | null> {
+  const limits = { maxRows: query.rowLimit, fetchSize: query.rowLimit, pageSize: query.rowLimit };
+  const refreshed = query.largeValuePreview
+    ? (await runner.executeMulti(query.connectionId, query.database, query.sql, query.schema, undefined, { ...limits, resultKeyColumns: [...query.primaryKeys], tableDataPreview: true }))[0]
+    : await runner.executeQuery(query.connectionId, query.database, query.sql, query.schema, undefined, limits);
+  return refreshed && !refreshed.execution_error ? refreshed : null;
 }

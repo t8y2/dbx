@@ -1,12 +1,12 @@
 plugins {
-    id 'com.gradleup.shadow' version '9.0.0-beta12' apply false
+    id 'com.gradleup.shadow' version '9.6.1' apply false
 }
 
 def infrastructureProjects = ['common', 'test-support'] as Set
 def legacyStandaloneProjects = ['mongodb', 'kafka'] as Set
 def pooledJdbcProjects = [
     'access', 'bigquery', 'dameng', 'databend', 'databricks', 'db2', 'exasol',
-    'firebird', 'gbase8a', 'gbase8s', 'goldendb', 'h2', 'h2-legacy', 'highgo',
+    'firebird', 'gbase8a', 'gbase8c', 'gbase8s', 'goldendb', 'h2', 'h2-legacy', 'highgo',
     'ignite', 'ignite3', 'informix', 'iris', 'cache', 'kylin', 'oceanbase-oracle', 'oscar', 'saphana',
     'snowflake', 'spanner', 'spark', 'sqlserver-legacy', 'sundb', 'teradata', 'trino', 'uxdb',
     'vertica', 'yashandb', 'transwarp'
@@ -61,7 +61,7 @@ configure(jdbcAgentProjects) {
 
 configure(agentProjects.findAll { pooledJdbcProjects.contains(it.name) }) {
     dependencies {
-        implementation 'com.zaxxer:HikariCP:7.0.2'
+        implementation 'com.zaxxer:HikariCP:7.1.0'
         runtimeOnly 'org.slf4j:slf4j-nop:2.0.20'
     }
 }

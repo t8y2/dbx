@@ -1,5 +1,6 @@
 import type { AstNode, ClauseNode, LimitClauseNode, ParenthesisNode, SetOperationNode, StatementNode } from "sql-formatter/dist/esm/parser/ast.js";
 import { createTableLayout, isCreateTable } from "./ddl";
+import { hasRuleLineBreak, ruleCommaPosition, ruleListLayout, ruleLogicalNewline, supportsSqlRules } from "./rules";
 import {
   clauseChildContext,
   collapsedContext,
@@ -54,6 +55,10 @@ export type { SqlLayoutContext, SqlLayoutOptions } from "./primitives";
  * stay on one line when they are short enough.
  */
 function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx: SqlLayoutContext): void {
+  if (ctx.options.rules) {
+    printRuleClause(writer, clause, baseColumn, ctx);
+    return;
+  }
   const keyword = keywordText(clause.nameKw, ctx);
   const items = splitByComma(clause.children);
   const itemColumn = baseColumn + keyword.length + 1;
@@ -78,10 +83,35 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
   }
 
   items.forEach((item, index) => {
+    // A line comment written after the previous field's comma is a trailing
+    // annotation for that field, not a separate heading. sql-formatter keeps
+    // its original preceding whitespace; only comments that did not start a
+    // new source line are moved back onto the preceding output line. Comments
+    // that were on their own line keep their own line.
+    const leadingComments = index > 0 && ctx.options.commaPosition !== "before" ? leadingTrailingComments(item) : 0;
+    let itemNodes = item;
+    let leadingText: string | null = null;
+    if (leadingComments > 0) {
+      // `renderInline` intentionally drops comments; a trailing comment is
+      // copied verbatim, and only when it fits the remaining line width.
+      const commentText = item
+        .slice(0, leadingComments)
+        .map((node) => ("text" in node ? node.text : ""))
+        .join(" ");
+      if (commentText && writer.column + 1 + commentText.length <= ctx.options.lineWidth) {
+        leadingText = commentText;
+        itemNodes = item.slice(leadingComments);
+      }
+    }
     if (index === 0) {
       writer.write(keyword);
       if (sourceOnOwnLine) writer.newline(baseColumn + ctx.options.indentWidth);
       else writer.space();
+    } else if (leadingText) {
+      writer.space();
+      writer.write(leadingText);
+      if (itemNodes.length === 0) return;
+      writer.newline(itemColumn);
     } else {
       if (ctx.options.commaPosition === "before") {
         const leadingIndent = sourceOnOwnLine ? baseColumn + ctx.options.indentWidth : Math.max(baseColumn, itemColumn - 2);
@@ -91,20 +121,246 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
         writer.newline(itemColumn);
       }
     }
-    if (alignedAliases) {
+    if (alignedAliases && !leadingText) {
       const aligned = alignedAliases[index];
       if (aligned) {
         writer.write(aligned.expression);
         writer.write(" ".repeat(aligned.aliasColumn - aligned.expression.length));
         writer.write(`${aligned.asKeyword} ${aligned.alias}`);
       } else {
-        printElement(writer, item, baseColumn, childCtx);
+        printElement(writer, itemNodes, baseColumn, childCtx);
       }
     } else {
-      printElement(writer, item, baseColumn, childCtx);
+      printElement(writer, itemNodes, baseColumn, childCtx);
     }
     if (ctx.options.commaPosition !== "before" && index < items.length - 1) writer.write(",");
   });
+}
+
+function writeRuleKeyword(writer: Writer, keyword: string, ctx: SqlLayoutContext): void {
+  const style = ctx.options.rules!.indentStyle;
+  const padding = Math.max(0, (ctx.keywordWidth ?? keyword.length) - keyword.length);
+  if (style === "tabularRight") writer.write(" ".repeat(padding));
+  writer.write(keyword);
+  if (style === "tabularLeft") writer.write(" ".repeat(padding));
+}
+
+function printRuleClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx: SqlLayoutContext): void {
+  writeRuleKeyword(writer, keywordText(clause.nameKw, ctx), ctx);
+  if (clause.children.length === 0) return;
+  if (clause.nameKw.text.toUpperCase() === "FROM" && !ctx.options.fromClauseSourceOnSameLine) writer.newline(baseColumn + ctx.options.indentWidth);
+  else writer.write(" ");
+  const childCtx = clauseChildContext(ctx, clause);
+  printRuleList(writer, splitByComma(clause.children), baseColumn, childCtx);
+}
+
+function alignedAssignmentItems(items: AstNode[][], ctx: SqlLayoutContext, width: number): Array<AlignedProjectionItem | null> | null {
+  const parsed = items.map((item) => {
+    const at = item.findIndex((node) => node.type === "operator" && node.text === "=");
+    if (at <= 0 || at === item.length - 1) return null;
+    const expression = renderInline(ctx, item.slice(0, at), width);
+    const alias = renderInline(ctx, item.slice(at + 1), width);
+    return expression && alias ? { expression, alias, asKeyword: "=", aliasColumn: 0 } : null;
+  });
+  if (parsed.some((item) => !item)) return null;
+  const aliasColumn = Math.max(...parsed.map((item) => item!.expression.length)) + 1;
+  if (parsed.some((item) => aliasColumn + 2 + item!.alias.length > width)) return null;
+  return parsed.map((item) => ({ ...item!, aliasColumn }));
+}
+
+/** One list writer serves clauses, INSERT tuples, IN lists and function arguments. */
+function printRuleList(writer: Writer, items: AstNode[][], baseColumn: number, ctx: SqlLayoutContext): void {
+  const mode = ruleListLayout(ctx);
+  const comma = ruleCommaPosition(ctx);
+  const firstColumn = writer.column;
+  const continuation = ctx.options.rules!.listItemAlignment === "indent" ? baseColumn + ctx.options.indentWidth : firstColumn;
+  const nodes = items.flatMap((item, index) => (index === 0 ? item : [{ type: "comma" } as AstNode, ...item]));
+  // Single-line lists keep their own separators inline, but each item still
+  // visits its nested lists with their actual remaining width.
+  const flat = mode === "singleLine" || (mode === "vertical" && items.length > 1) ? null : renderInline(ctx, nodes, ctx.options.lineWidth - writer.column);
+  if (flat) {
+    writer.write(flat);
+    return;
+  }
+  const available = ctx.options.lineWidth - Math.max(firstColumn, continuation);
+  const aligned =
+    mode !== "singleLine" && items.length > 1 ? (ctx.listKind === "select" && ctx.options.rules!.alignSelectAliases ? alignedProjectionItems(items, ctx, available) : ctx.listKind === "update" && ctx.options.rules!.alignUpdateAssignments ? alignedAssignmentItems(items, ctx, available) : null) : null;
+
+  items.forEach((item, index) => {
+    let itemNodes = item;
+    if (index > 0) {
+      const commentCount = comma === "after" ? leadingTrailingComments(item) : 0;
+      if (commentCount > 0) {
+        writer.space();
+        printRuleElement(writer, item.slice(0, commentCount), baseColumn, ctx);
+        itemNodes = item.slice(commentCount);
+      }
+      const text = renderInline(ctx, itemNodes, Number.MAX_SAFE_INTEGER);
+      const separatorWidth = comma === "before" ? 2 : 1;
+      const trailingCommaWidth = comma === "after" && index < items.length - 1 ? 1 : 0;
+      const sameLine = mode === "singleLine" || (mode === "wrap" && !!text && writer.column + separatorWidth + text.length + trailingCommaWidth <= ctx.options.lineWidth);
+      if (sameLine && commentCount === 0) {
+        if (comma === "before") writer.write(", ");
+        else writer.space();
+      } else {
+        writer.newline(comma === "before" ? Math.max(baseColumn, continuation - 2) : continuation);
+        if (comma === "before") writer.write(", ");
+      }
+    }
+    const alignment = aligned?.[index];
+    if (alignment && itemNodes === item) {
+      writer.write(alignment.expression);
+      writer.write(" ".repeat(alignment.aliasColumn - alignment.expression.length));
+      writer.write(`${alignment.asKeyword} ${alignment.alias}`);
+    } else {
+      printRuleElement(writer, itemNodes, baseColumn, ctx);
+    }
+    if (comma === "after" && index < items.length - 1) writer.write(",");
+  });
+}
+
+function printRuleComments(writer: Writer, nodes: AstNode[] | undefined, column: number, ctx: SqlLayoutContext): void {
+  if (nodes?.length) printRuleElement(writer, nodes, column, ctx);
+}
+
+function printRuleJoins(writer: Writer, nodes: AstNode[], baseColumn: number, ctx: SqlLayoutContext): boolean {
+  const first = nodes.findIndex(isJoinKeyword);
+  if (first < 0) return false;
+  if (first > 0) printRuleElement(writer, nodes.slice(0, first), baseColumn, ctx);
+  let index = first;
+  while (index < nodes.length) {
+    const end = joinElementEnd(nodes, index + 1);
+    const segment = nodes.slice(index + 1, end);
+    const on = segment.findIndex((node) => node.type === "keyword" && node.text.toUpperCase() === "ON");
+    const joinColumn = baseColumn + ctx.options.joinIndentWidth;
+    writer.newline(joinColumn);
+    writer.write(keywordText(nodes[index], ctx));
+    writer.space();
+    printRuleElement(writer, on < 0 ? segment : segment.slice(0, on), joinColumn, { ...ctx, listKind: "general", logicalContext: "expression" });
+    if (on >= 0) {
+      if (ctx.options.rules!.newlineBeforeJoinOn) writer.newline(joinColumn + ctx.options.indentWidth);
+      else writer.space();
+      writer.write(keywordText(segment[on], ctx));
+      writer.space();
+      printRuleElement(writer, segment.slice(on + 1), joinColumn, { ...ctx, listKind: "general", logicalContext: "on" });
+    }
+    index = end;
+  }
+  return true;
+}
+
+function printRuleElement(writer: Writer, nodes: AstNode[], baseColumn: number, ctx: SqlLayoutContext): void {
+  if (nodes.length === 0) return;
+  const whole = renderInline(ctx, nodes, ctx.options.lineWidth - writer.column);
+  if (whole) {
+    writer.write(whole);
+    return;
+  }
+  if (printRuleJoins(writer, nodes, baseColumn, ctx)) return;
+  const operands = ruleLogicalNewline(ctx) === "none" ? null : splitLogicalOperands(nodes);
+  if (operands) {
+    printCondition(writer, operands, baseColumn, ctx);
+    return;
+  }
+  for (let index = 0; index < nodes.length;) {
+    const node = nodes[index];
+    if (node.type === "line_comment" || node.type === "block_comment" || node.type === "disable_comment") {
+      if (/[\r\n]/.test(node.precedingWhitespace)) writer.newline(baseColumn);
+      else writer.space();
+      writer.write(node.text);
+      if (node.type !== "block_comment") writer.markLineComment();
+      index += 1;
+    } else if (node.type === "parenthesis") {
+      if (!isCallParen(nodes, index, ctx)) writer.space();
+      writeParenthesis(writer, nodes, index, isCallParen(nodes, index, ctx) ? { ...ctx, listKind: "general" } : ctx);
+      index += 1;
+    } else if (node.type === "function_call" || node.type === "parameterized_data_type" || node.type === "array_subscript") {
+      writer.space();
+      printRuleComments(writer, node.leadingComments, writer.column, ctx);
+      const name = node.type === "function_call" ? node.nameKw : node.type === "parameterized_data_type" ? node.dataType : node.array;
+      if (node.type === "function_call") {
+        const casing = ctx.options.rules!.functionCase;
+        writer.write(casing === "preserve" ? node.nameKw.raw : casing === "upper" ? node.nameKw.text.toUpperCase() : node.nameKw.text.toLowerCase());
+      } else writer.write(ctx.renderers.block([name]).trim());
+      writeParenthesis(writer, [node.parenthesis], 0, { ...ctx, listKind: "general" });
+      printRuleComments(writer, node.trailingComments, writer.column, ctx);
+      index += 1;
+    } else if (node.type === "property_access") {
+      printRuleComments(writer, node.leadingComments, writer.column, ctx);
+      printRuleElement(writer, [node.object], baseColumn, ctx);
+      writer.write(node.operator);
+      if (node.property.type === "array_subscript") {
+        writer.write(ctx.renderers.block([node.property.array]).trim());
+        writeParenthesis(writer, [node.property.parenthesis], 0, { ...ctx, listKind: "general" });
+      } else writer.write(ctx.renderers.block([node.property]).trim());
+      printRuleComments(writer, node.trailingComments, writer.column, ctx);
+      index += 1;
+    } else if (node.type === "between_predicate") {
+      writer.space();
+      printRuleComments(writer, node.leadingComments, writer.column, ctx);
+      writer.write(keywordText(node.betweenKw, ctx));
+      writer.space();
+      printRuleElement(writer, node.expr1, baseColumn, ctx);
+      writer.space();
+      writer.write(keywordText(node.andKw, ctx));
+      writer.space();
+      printRuleElement(writer, node.expr2, baseColumn, ctx);
+      printRuleComments(writer, node.trailingComments, writer.column, ctx);
+      index += 1;
+    } else if (node.type === "case_expression") {
+      writer.space();
+      printRuleComments(writer, node.leadingComments, writer.column, ctx);
+      const caseCtx: SqlLayoutContext = { ...ctx, listKind: "general", logicalContext: "expression" };
+      const inlineCase = ruleListLayout(ctx) === "singleLine" && !hasRuleLineBreak(ctx, [node]);
+      writer.write(keywordText(node.caseKw, ctx));
+      if (node.expr.length) {
+        writer.space();
+        printRuleElement(writer, node.expr, baseColumn, caseCtx);
+      }
+      for (const branch of node.clauses) {
+        if (inlineCase) writer.space();
+        else writer.newline(baseColumn + ctx.options.indentWidth);
+        printRuleComments(writer, branch.leadingComments, writer.column, ctx);
+        if (branch.type === "case_when") {
+          writer.write(keywordText(branch.whenKw, ctx));
+          writer.space();
+          printRuleElement(writer, branch.condition, baseColumn + ctx.options.indentWidth, caseCtx);
+          writer.space();
+          writer.write(keywordText(branch.thenKw, ctx));
+        } else writer.write(keywordText(branch.elseKw, ctx));
+        writer.space();
+        printRuleElement(writer, branch.result, baseColumn + ctx.options.indentWidth, caseCtx);
+        printRuleComments(writer, branch.trailingComments, writer.column, ctx);
+      }
+      if (inlineCase) writer.space();
+      else writer.newline(baseColumn);
+      writer.write(keywordText(node.endKw, ctx));
+      printRuleComments(writer, node.trailingComments, writer.column, ctx);
+      index += 1;
+    } else {
+      let end = index + 1;
+      while (end < nodes.length && !["parenthesis", "function_call", "parameterized_data_type", "array_subscript", "property_access", "between_predicate", "case_expression", "line_comment", "block_comment", "disable_comment"].includes(nodes[end].type)) end += 1;
+      const run = nodes.slice(index, end);
+      const first = run[0];
+      if (!(first.type === "operator" && ctx.renderers.denseOperator(first.text))) writer.space();
+      const inline = renderInline(ctx, run, Number.MAX_SAFE_INTEGER);
+      if (inline) writer.write(inline);
+      else emitText(writer, ctx.renderers.block(run).trim(), writer.column, endsWithLineComment(run));
+      index = end;
+    }
+  }
+}
+
+/** Count leading comments that were written on the previous source line. */
+function leadingTrailingComments(item: AstNode[]): number {
+  let count = 0;
+  while (count < item.length) {
+    const node = item[count];
+    if (!node || (node.type !== "line_comment" && node.type !== "block_comment")) break;
+    if (/[\r\n]/.test(node.precedingWhitespace ?? "")) break;
+    count += 1;
+  }
+  return count;
 }
 
 interface AlignedProjectionItem {
@@ -137,6 +393,13 @@ function alignedProjectionItems(items: AstNode[][], ctx: SqlLayoutContext, lineW
 function printLimitClause(writer: Writer, clause: LimitClauseNode, ctx: SqlLayoutContext): void {
   const keyword = keywordText(clause.limitKw, ctx);
   const children = limitChildren(clause);
+  if (ctx.options.rules) {
+    const baseColumn = writer.column;
+    writeRuleKeyword(writer, keyword, ctx);
+    writer.space();
+    printRuleList(writer, splitByComma(children), baseColumn, { ...ctx, listKind: "general", logicalContext: "expression" });
+    return;
+  }
   const flat = renderInline(ctx, children, ctx.options.lineWidth - writer.column - keyword.length - 1);
   if (flat) {
     writer.write(`${keyword} ${flat}`);
@@ -185,6 +448,20 @@ function measureParen(writer: Writer, nodes: AstNode[], index: number, ctx: SqlL
  */
 function writeParenthesis(writer: Writer, nodes: AstNode[], index: number, ctx: SqlLayoutContext): void {
   const node = nodes[index] as ParenthesisNode;
+  if (ctx.options.rules) {
+    printRuleComments(writer, node.leadingComments, writer.column, ctx);
+    const inner = measureParen(writer, nodes, index, ctx);
+    if (inner) writer.write(`${node.openParen}${inner}${node.closeParen}`);
+    else {
+      writer.write(node.openParen);
+      const column = writer.column;
+      if (node.children.some(isBodyNode)) printBlock(writer, node.children, column, ctx);
+      else printRuleList(writer, splitByComma(node.children), column - node.openParen.length, ctx);
+      writer.write(node.closeParen);
+    }
+    printRuleComments(writer, node.trailingComments, writer.column, ctx);
+    return;
+  }
   const inner = measureParen(writer, nodes, index, ctx);
   if (inner) {
     writer.write(`${node.openParen}${inner}${node.closeParen}`);
@@ -198,15 +475,14 @@ function writeParenthesis(writer: Writer, nodes: AstNode[], index: number, ctx: 
 /**
  * Emits one set operation (`UNION ALL`, `INTERSECT`, ...).
  *
- * The parser only promotes a *bare* `SELECT` after the operator to a sibling
- * clause of its own; every other branch — a parenthesized subquery, a `VALUES`
- * list — stays in this node's `children`. Printing the keyword alone would
- * therefore delete every branch after the first one (#10472), so the operand is
- * written on the next line at the operator's column, which is where the
- * sibling-clause form (`SELECT ... UNION ALL SELECT ...`) puts it as well.
+ * Bare `SELECT` and `VALUES` operands become sibling clauses. Operands retained
+ * in this node's `children`, such as a parenthesized subquery or a `TABLE`
+ * reference, must also be printed to avoid dropping a branch (#10472). They go
+ * on the next line at the operator's column, just like the sibling-clause form.
  */
 function printSetOperation(writer: Writer, node: SetOperationNode, baseColumn: number, ctx: SqlLayoutContext): void {
-  writer.write(keywordText(node.nameKw, ctx));
+  if (ctx.options.rules) writeRuleKeyword(writer, keywordText(node.nameKw, ctx), ctx);
+  else writer.write(keywordText(node.nameKw, ctx));
   if (node.children.length === 0) return;
   writer.newline(baseColumn);
   printSetOperationOperand(writer, node.children, ctx);
@@ -218,9 +494,7 @@ function printSetOperationOperand(writer: Writer, nodes: AstNode[], ctx: SqlLayo
     writeParenthesis(writer, nodes, 0, ctx);
     return;
   }
-  // Anything the grammar did not turn into a clause of its own (a `VALUES`
-  // list, a dialect-specific operand): let sql-formatter lay it out, re-based
-  // on this column.
+  // Keep other dialect-specific operands, such as TABLE references, at this column.
   emitText(writer, ctx.renderers.block(nodes).trim(), writer.column, endsWithLineComment(nodes));
 }
 
@@ -242,7 +516,7 @@ function printCondition(writer: Writer, operands: AstNode[][], baseColumn: numbe
     }
 
     const operator = keywordText(head, ctx);
-    if (ctx.options.logicalOperatorNewline === "before") {
+    if (ruleLogicalNewline(ctx) === "before") {
       writer.newline(column);
       writer.write(operator);
       writer.space();
@@ -260,6 +534,10 @@ function printCondition(writer: Writer, operands: AstNode[][], baseColumn: numbe
  * current line.
  */
 function printElement(writer: Writer, nodes: AstNode[], baseColumn: number, ctx: SqlLayoutContext): void {
+  if (ctx.options.rules) {
+    printRuleElement(writer, nodes, baseColumn, ctx);
+    return;
+  }
   const whole = renderInline(ctx, nodes, ctx.options.lineWidth - writer.column);
   if (whole) {
     writer.write(whole);
@@ -323,6 +601,7 @@ function printElement(writer: Writer, nodes: AstNode[], baseColumn: number, ctx:
  * the very expansion the caller asked for.
  */
 function printBlock(writer: Writer, nodes: AstNode[], baseColumn: number, ctx: SqlLayoutContext): void {
+  if (ctx.options.rules) ctx = ruleBlockContext(nodes, ctx);
   if (!nodes.some(isBodyNode)) {
     // A plain expression group (not a subquery) that did not fit: let
     // sql-formatter break it, then re-base the block on this column.
@@ -336,6 +615,11 @@ function printBlock(writer: Writer, nodes: AstNode[], baseColumn: number, ctx: S
     writeBodyNode(writer, node, baseColumn, ctx);
     first = false;
   }
+}
+
+function ruleBlockContext(nodes: AstNode[], ctx: SqlLayoutContext): SqlLayoutContext {
+  const lengths = nodes.flatMap((node) => (node.type === "clause" || node.type === "set_operation" ? [keywordText(node.nameKw, ctx).length] : node.type === "limit_clause" ? [keywordText(node.limitKw, ctx).length] : []));
+  return { ...ctx, keywordWidth: Math.max(0, ...lengths) };
 }
 
 /** Emits one clause / set operation / limit clause of a statement body. */
@@ -352,11 +636,25 @@ function writeBodyNode(writer: Writer, node: AstNode, baseColumn: number, ctx: S
 
 /** Emits a whole statement, one clause per line unless the statement collapses. */
 function printStatement(statement: StatementNode, ctx: SqlLayoutContext): string | null {
+  if (ctx.options.rules) {
+    if (!supportsSqlRules(statement.children)) return null;
+    ctx = ruleBlockContext(statement.children, ctx);
+    if (statement.children.every((node) => ["line_comment", "block_comment", "disable_comment"].includes(node.type))) {
+      const writer = new Writer(ctx.options);
+      printRuleElement(writer, statement.children, 0, ctx);
+      if (statement.hasSemicolon) writer.write(";");
+      return writer.toString();
+    }
+  }
   const hasMultiItemProjection = statement.children.some((node) => node.type === "clause" && isProjectionClauseName(node.nameKw.text) && splitByComma(node.children).length > 1);
-  const collapsed = hasMultiItemProjection ? null : renderInline(collapsedContext(ctx), statement.children, ctx.options.lineWidth);
-  if (collapsed) return statement.hasSemicolon ? `${collapsed};` : collapsed;
+  const mayCollapse = ctx.options.rules ? ctx.options.rules.collapseShortStatements : !hasMultiItemProjection;
+  const collapsed = mayCollapse ? renderInline(collapsedContext(ctx), statement.children, ctx.options.lineWidth) : null;
+  if (collapsed) {
+    if (!statement.hasSemicolon) return collapsed;
+    return ctx.options.newlineBeforeSemicolon ? `${collapsed}\n;` : `${collapsed};`;
+  }
 
-  if (isCreateTable(statement)) return createTableLayout(statement, ctx);
+  if (!ctx.options.rules && isCreateTable(statement)) return createTableLayout(statement, ctx);
 
   // A statement without clauses is a bare expression — a fragment the user
   // selected in the editor — and has no clause layout to apply. Declining hands
@@ -371,7 +669,10 @@ function printStatement(statement: StatementNode, ctx: SqlLayoutContext): string
     writeBodyNode(writer, node, 0, ctx);
     first = false;
   }
-  if (statement.hasSemicolon) writer.write(";");
+  if (statement.hasSemicolon) {
+    if (ctx.options.newlineBeforeSemicolon) writer.newline(0);
+    writer.write(";");
+  }
   return writer.toString();
 }
 

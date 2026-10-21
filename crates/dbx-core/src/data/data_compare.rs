@@ -1532,6 +1532,10 @@ fn build_limited_sampling_select_sql(
             let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
             format!("SELECT TOP ({row_limit}) {select_columns} FROM {table}{order}")
         }
+        TablePaginationStrategy::InformixFirst => {
+            let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
+            format!("SELECT FIRST {row_limit} {select_columns} FROM {table}{order}")
+        }
         _ => {
             let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
             format!("SELECT {select_columns} FROM {table}{order} LIMIT {row_limit}")
@@ -1633,7 +1637,7 @@ fn build_sampling_select_sql(
             DatabaseType::Questdb => {
                 format!("SELECT {select_columns} FROM {table} ORDER BY RAND() LIMIT {sample_size}")
             }
-            DatabaseType::Informix => {
+            DatabaseType::Informix | DatabaseType::Gbase8s => {
                 format!("SELECT FIRST {sample_size} {select_columns} FROM {table} ORDER BY RAND()")
             }
             _ => {
@@ -1730,7 +1734,7 @@ fn build_sampling_select_sql(
                 DatabaseType::Questdb => {
                     format!("SELECT {select_columns} FROM {table} ORDER BY RAND() LIMIT {random_count}")
                 }
-                DatabaseType::Informix => {
+                DatabaseType::Informix | DatabaseType::Gbase8s => {
                     format!("SELECT FIRST {random_count} {select_columns} FROM {table} ORDER BY RAND()")
                 }
                 _ => {
@@ -3176,6 +3180,26 @@ mod tests {
             "SELECT TOP (3) [id], [tenant_id], [name] FROM [dbo].[EVENTS] ORDER BY [id] DESC, [tenant_id] DESC"
         ));
         assert!(!sql.contains(" LIMIT "));
+    }
+
+    #[test]
+    fn builds_gbase8s_hybrid_sampling_sql_with_first() {
+        for database_type in [DatabaseType::Informix, DatabaseType::Gbase8s] {
+            let sql = build_sampling_select_sql(
+                database_type,
+                "gbasedbt",
+                "events",
+                &["id".to_string(), "name".to_string()],
+                &["id".to_string()],
+                &SamplingStrategy::Hybrid,
+                10,
+            );
+
+            assert!(sql.contains("SELECT FIRST 5 id, name FROM"));
+            assert!(sql.contains("SELECT FIRST 2 id, name FROM"));
+            assert!(sql.contains("SELECT FIRST 3 id, name FROM"));
+            assert!(!sql.contains(" LIMIT "));
+        }
     }
 
     #[test]

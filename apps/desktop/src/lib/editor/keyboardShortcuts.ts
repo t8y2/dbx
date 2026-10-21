@@ -180,6 +180,10 @@ export function isExecuteSqlInNewResultTabShortcut(event: ShortcutLikeEvent, sho
   return matchesShortcut(event, actionShortcut("executeSqlInNewResultTab", shortcuts));
 }
 
+export function isExplainSqlShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("explainSql", shortcuts));
+}
+
 export function isCloseTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("closeTab", shortcuts));
 }
@@ -194,6 +198,10 @@ export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: P
 
 export function isCloseAllTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("closeAllTabs", shortcuts), platform);
+}
+
+export function isSaveAllTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("saveAllTabs", shortcuts), platform);
 }
 
 export function isCloseWindowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
@@ -286,6 +294,34 @@ export function isObjectSourceSaveShortcutTarget(target: { closest(selector: str
   return !!target?.closest("[data-object-source-editor], [data-object-source-preview]");
 }
 
+/**
+ * Which surface the "save" shortcut should act on.
+ *
+ * The settings page, plugin center and driver store replace the content area but
+ * keep the previously active query tab activated, so `activeTab.mode === "query"`
+ * stays true while one of those surfaces is on screen. Without this decision the
+ * save shortcut popped the "SQL saved" dialog on top of the settings page instead
+ * of applying the edited draft (#13020).
+ */
+export type SaveShortcutSurface = "settings" | "query" | "none";
+
+export interface SaveShortcutSurfaceInput {
+  settingsPageOpen?: boolean;
+  pluginCenterOpen?: boolean;
+  driverStoreOpen?: boolean;
+  activeTabMode?: string | null;
+  saveSqlDialogOpen?: boolean;
+}
+
+export function saveShortcutSurface(input: SaveShortcutSurfaceInput): SaveShortcutSurface {
+  if (input.settingsPageOpen) return "settings";
+  // Browsing surfaces have nothing to save, and must not fall through to the
+  // query branch just because a query tab is still the active tab.
+  if (input.pluginCenterOpen || input.driverStoreOpen) return "none";
+  if (input.activeTabMode !== "query" || input.saveSqlDialogOpen) return "none";
+  return "query";
+}
+
 export function isCopyCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("copyCurrentRow", shortcuts));
 }
@@ -372,6 +408,18 @@ export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partia
 
 export function isGlobalSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("globalSearch", shortcuts));
+}
+
+export function isOpenConnectionPickerShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("openConnectionPicker", shortcuts));
+}
+
+export function isOpenDatabasePickerShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("openDatabasePicker", shortcuts));
+}
+
+export function isOpenSchemaPickerShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("openSchemaPicker", shortcuts));
 }
 
 export function isNavigateTabHistoryBackShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {

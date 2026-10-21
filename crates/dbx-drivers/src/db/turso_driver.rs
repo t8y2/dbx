@@ -3,7 +3,10 @@ use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
-use super::{binary_value_to_json, http_client_builder, with_connection_timeout};
+use super::{
+    apply_http_proxy, apply_tls_certificates_for_driver, binary_value_to_json, http_client_builder,
+    with_connection_timeout,
+};
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectSource, ObjectSourceKind, QueryResult, TableInfo,
@@ -19,10 +22,26 @@ pub struct TursoClient {
 
 impl TursoClient {
     pub fn new(url: &str, auth_token: &str, tls_enabled: bool, timeout: Duration) -> Result<Self, String> {
+        Self::new_with_options(url, auth_token, tls_enabled, timeout, None, None, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_options(
+        url: &str,
+        auth_token: &str,
+        tls_enabled: bool,
+        timeout: Duration,
+        ca_cert_path: Option<&str>,
+        client_cert_path: Option<&str>,
+        client_key_path: Option<&str>,
+        proxy: Option<reqwest::Proxy>,
+    ) -> Result<Self, String> {
         let mut builder = http_client_builder(timeout);
         if turso_accept_invalid_certs(tls_enabled) {
             builder = builder.danger_accept_invalid_certs(true);
         }
+        builder = apply_http_proxy(builder, url, proxy, None, None)?;
+        builder = apply_tls_certificates_for_driver(builder, ca_cert_path, client_cert_path, client_key_path, "Turso")?;
         let http = builder.build().map_err(|e| format!("Failed to configure Turso HTTP client: {e}"))?;
         Ok(Self { http, base_url: url.trim_end_matches('/').to_string(), auth_token: auth_token.to_string() })
     }
@@ -214,6 +233,9 @@ pub async fn list_indexes(client: &TursoClient, _schema: &str, table: &str) -> R
             .filter_map(|row| value_by_column(&column_result.columns, row, "name"))
             .collect();
         indexes.push(IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name,
             columns,
             is_unique,
@@ -841,5 +863,22 @@ mod tests {
         let qr = query_result_from_turso_result(result, 5, Some(100));
         assert_eq!(qr.rows.len(), 2);
         assert!(!qr.truncated);
+    }
+
+    #[test]
+    fn validates_turso_ca_cert_path_error() {
+        let err = TursoClient::new_with_options(
+            "https://test.turso.io",
+            "token",
+            false,
+            Duration::from_secs(1),
+            Some("/nonexistent/turso-ca.pem"),
+            None,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("Failed to read Turso CA certificate at /nonexistent/turso-ca.pem"));
     }
 }

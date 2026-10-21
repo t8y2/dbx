@@ -15,6 +15,8 @@ describe("SQL completion insertion", () => {
     expect(appendSqlCompletionSpace("tt", { enabled: true, itemType: "variable" })).toBe("tt");
     expect(appendSqlCompletionSpace("orders", { enabled: true, itemType: "table", nextCharacter: ")" })).toBe("orders");
     expect(appendSqlCompletionSpace("orders", { enabled: true, itemType: "table", nextCharacter: "," })).toBe("orders");
+    expect(appendSqlCompletionSpace("SELECT", { enabled: true, itemType: "keyword", nextCharacter: " " })).toBe("SELECT");
+    expect(appendSqlCompletionSpace("SELECT", { enabled: true, itemType: "keyword", nextCharacter: "\t" })).toBe("SELECT");
   });
 
   it("keeps the space when a statement terminator follows the cursor", () => {
@@ -22,6 +24,13 @@ describe("SQL completion insertion", () => {
     // otherwise the user cannot keep typing the operand without fixing the text.
     expect(appendSqlCompletionSpace("BETWEEN", { enabled: true, itemType: "keyword", nextCharacter: ";" })).toBe("BETWEEN ");
     expect(appendSqlCompletionSpace("SALARY", { enabled: true, itemType: "column", nextCharacter: ";" })).toBe("SALARY ");
+  });
+
+  it("appends a space at end of doc, before a newline, and in multi-statement documents", () => {
+    expect(appendSqlCompletionSpace("SELECT", { enabled: true, itemType: "keyword", nextCharacter: "" })).toBe("SELECT ");
+    expect(appendSqlCompletionSpace("SELECT", { enabled: true, itemType: "keyword", nextCharacter: "\n" })).toBe("SELECT ");
+    expect(appendSqlCompletionSpace("SELECT", { enabled: true, itemType: "keyword", nextCharacter: "\r" })).toBe("SELECT ");
+    expect(appendSqlCompletionSpace("orders", { enabled: true, itemType: "table", nextCharacter: "\n" })).toBe("orders ");
   });
 
   it("honors the setting and leaves snippet-like completions unchanged", () => {

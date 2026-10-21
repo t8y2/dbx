@@ -2,8 +2,9 @@ use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::execute_sql_statement;
 use dbx_core::transfer::{
-    ensure_transfer_pool, transfer_schema_objects, transfer_table, TransferContent, TransferMode, TransferObjectKind,
-    TransferObjectSelection, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
+    ensure_transfer_pool, transfer_schema_objects, transfer_table, TransferColumnNameCase, TransferContent,
+    TransferMode, TransferObjectKind, TransferObjectSelection, TransferOwnershipPolicy, TransferRequest,
+    TransferTableNameCase,
 };
 use std::sync::Arc;
 
@@ -113,6 +114,7 @@ async fn live_oracle_transfer_creates_table_with_index_comment_and_trigger() {
         ]),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        target_column_name_case: TransferColumnNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,
@@ -166,4 +168,121 @@ async fn live_oracle_transfer_creates_table_with_index_comment_and_trigger() {
     insert.expect("the transferred trigger fills ID from the transferred sequence");
     assert_eq!(cells(&ids.unwrap()), vec!["100".to_string(), "105".to_string()]);
     assert_eq!(cells(&source_triggers.unwrap()), vec!["1".to_string()]);
+}
+
+/// Like the test above, but the two users must have different default tablespaces and
+/// the target user must have no quota on the source user's default tablespace.
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_ORACLE_SOURCE_USER and DBX_LIVE_ORACLE_TARGET_USER with separate default tablespaces"]
+async fn live_oracle_transfer_places_tables_in_target_default_tablespace() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string()[..8].to_uppercase();
+    let dir = std::env::temp_dir().join(format!("dbx-live-oracle-transfer-ts-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    let service = std::env::var("DBX_LIVE_ORACLE_SERVICE").unwrap();
+    let source_schema =
+        std::env::var("DBX_LIVE_ORACLE_SOURCE_USER").expect("DBX_LIVE_ORACLE_SOURCE_USER").to_uppercase();
+    let target_schema =
+        std::env::var("DBX_LIVE_ORACLE_TARGET_USER").expect("DBX_LIVE_ORACLE_TARGET_USER").to_uppercase();
+    let source_id = format!("live-oracle-transfer-ts-src-{suffix}");
+    let target_id = format!("live-oracle-transfer-ts-dst-{suffix}");
+    state.configs.write().await.insert(source_id.clone(), live_oracle_config(&source_id, &source_schema));
+    state.configs.write().await.insert(target_id.clone(), live_oracle_config(&target_id, &target_schema));
+
+    let filled = format!("DBX_TRANSFER_TS_FILLED_{suffix}");
+    let empty = format!("DBX_TRANSFER_TS_EMPTY_{suffix}");
+    let run = |connection_id: String, schema: String, sql: String| {
+        let state = state.clone();
+        let service = service.clone();
+        async move { execute_sql_statement(&state, &connection_id, &service, &sql, Some(&schema), None).await }
+    };
+    let source = |sql: String| run(source_id.clone(), source_schema.clone(), sql);
+    let target = |sql: String| run(target_id.clone(), target_schema.clone(), sql);
+    let drop_all = [format!("DROP TABLE {filled} PURGE"), format!("DROP TABLE {empty} PURGE")];
+    for sql in &drop_all {
+        let _ = source(sql.clone()).await;
+        let _ = target(sql.clone()).await;
+    }
+
+    let default_tablespace = "SELECT DEFAULT_TABLESPACE FROM USER_USERS".to_string();
+    let source_tablespace = cells(&source(default_tablespace.clone()).await.unwrap());
+    let target_tablespace = cells(&target(default_tablespace).await.unwrap());
+    assert_ne!(source_tablespace, target_tablespace, "the users must have different default tablespaces");
+
+    for sql in [
+        format!("CREATE TABLE {filled} (ID NUMBER PRIMARY KEY, NOTE VARCHAR2(50), BODY CLOB)"),
+        format!("CREATE INDEX {filled}_NOTE_IX ON {filled} (NOTE)"),
+        format!("INSERT INTO {filled} VALUES (1, 'first', 'body')"),
+        format!("CREATE TABLE {empty} (ID NUMBER PRIMARY KEY, BODY CLOB)"),
+    ] {
+        source(sql).await.expect("source setup");
+    }
+
+    let request = TransferRequest {
+        table_filters: Default::default(),
+        transfer_id: format!("live-oracle-transfer-ts-{suffix}"),
+        source_connection_id: source_id.clone(),
+        source_database: service.clone(),
+        source_schema: source_schema.clone(),
+        source_catalog: None,
+        target_connection_id: target_id.clone(),
+        target_database: service.clone(),
+        target_schema: target_schema.clone(),
+        target_catalog: None,
+        tables: vec![filled.clone(), empty.clone()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::StructureAndData,
+        objects: None,
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        target_column_name_case: TransferColumnNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 100,
+    };
+    let source_pool = ensure_transfer_pool(&state, &source_id, &service, None).await.unwrap();
+    let target_pool = ensure_transfer_pool(&state, &target_id, &service, None).await.unwrap();
+    let mut results = Vec::new();
+    for (index, table) in [&filled, &empty].into_iter().enumerate() {
+        results.push(
+            transfer_table(
+                &state,
+                &request,
+                table,
+                index,
+                &DatabaseType::Oracle,
+                &DatabaseType::Oracle,
+                &source_pool,
+                &target_pool,
+                &Default::default(),
+                &mut Vec::new(),
+                None,
+                |_| {},
+            )
+            .await,
+        );
+    }
+    let in_tables = format!("('{filled}', '{empty}')");
+    let segment_tablespaces = target(format!(
+        "SELECT DISTINCT TABLESPACE_NAME FROM (\
+         SELECT TABLESPACE_NAME FROM USER_TABLES WHERE TABLE_NAME IN {in_tables} \
+         UNION ALL SELECT TABLESPACE_NAME FROM USER_INDEXES WHERE TABLE_NAME IN {in_tables} \
+         UNION ALL SELECT TABLESPACE_NAME FROM USER_LOBS WHERE TABLE_NAME IN {in_tables})"
+    ))
+    .await;
+    // The empty table has no segment yet, so only a write proves the target can use it.
+    let insert = target(format!("INSERT INTO {empty} VALUES (1, 'body')")).await;
+
+    for sql in &drop_all {
+        let _ = source(sql.clone()).await;
+        let _ = target(sql.clone()).await;
+    }
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(results, vec![Ok(1), Ok(0)]);
+    assert_eq!(cells(&segment_tablespaces.unwrap()), target_tablespace);
+    insert.expect("the empty table accepts rows in the target tablespace");
 }

@@ -1927,6 +1927,65 @@ func TestRenderXuguTableDDLPreservesProgrammableTableMetadata(t *testing.T) {
 	}
 }
 
+func TestRenderXuguTableDDLDefersPrimaryKeyForCopyNumberLobTable(t *testing.T) {
+	ddl := renderXuguTableDDL(
+		"APP", "LOB_TABLE",
+		[]columnInfo{
+			{Name: "ID", DataType: "INTEGER", IsNullable: false},
+			{Name: "BLOB_C", DataType: "BLOB", IsNullable: true},
+			{Name: "CLOB_C", DataType: "CLOB", IsNullable: true},
+			{Name: "JSON_C", DataType: "JSON", IsNullable: true},
+			{Name: "XML_C", DataType: "XML", IsNullable: true},
+		},
+		xuguTableMetadata{CopyNum: 3},
+		nil,
+		[]xuguConstraintInfo{{Name: "PK_LOB_TABLE", Type: "P", Definition: `"ID"`, Enabled: true}},
+		nil, nil,
+	)
+
+	if strings.Contains(strings.Split(ddl, "ALTER TABLE")[0], `CONSTRAINT "PK_LOB_TABLE" PRIMARY KEY`) {
+		t.Fatalf("primary key must not be inline for a LOB table with explicit COPY NUMBER:\n%s", ddl)
+	}
+	if !strings.Contains(ddl, "COPY NUMBER 3;\n\nALTER TABLE \"APP\".\"LOB_TABLE\" ADD CONSTRAINT \"PK_LOB_TABLE\" PRIMARY KEY (\"ID\")") {
+		t.Fatalf("the original named primary key must follow CREATE TABLE:\n%s", ddl)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(ddl), ";") {
+		t.Fatalf("standalone table DDL must end with a statement terminator:\n%s", ddl)
+	}
+}
+
+func TestRenderXuguTableDDLLeavesOtherPrimaryKeysInline(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		metadata xuguTableMetadata
+		columns  []columnInfo
+	}{
+		{
+			name:     "copy number without a large-object column",
+			metadata: xuguTableMetadata{CopyNum: 3},
+			columns:  []columnInfo{{Name: "ID", DataType: "INTEGER"}},
+		},
+		{
+			name:     "large-object column without explicit copy number",
+			metadata: xuguTableMetadata{},
+			columns:  []columnInfo{{Name: "ID", DataType: "INTEGER"}, {Name: "BODY", DataType: "CLOB"}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ddl := renderXuguTableDDL(
+				"APP", "T", test.columns, test.metadata, nil,
+				[]xuguConstraintInfo{{Name: "PK_T", Type: "P", Definition: `"ID"`, Enabled: true}}, nil, nil,
+			)
+			if !strings.Contains(ddl, `CONSTRAINT "PK_T" PRIMARY KEY ("ID")`) {
+				t.Fatalf("primary key must remain inline outside the verified Xugu case:\n%s", ddl)
+			}
+			if strings.Contains(ddl, `ALTER TABLE "APP"."T" ADD CONSTRAINT "PK_T" PRIMARY KEY`) {
+				t.Fatalf("primary key must not be deferred outside the verified Xugu case:\n%s", ddl)
+			}
+		})
+	}
+}
+
 func TestRenderXuguTableDDLSkipsImplicitIdentityUniqueConstraint(t *testing.T) {
 	ddl := renderXuguTableDDL(
 		"AppSchema", "tbIdentityAndDefaults",

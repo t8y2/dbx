@@ -329,4 +329,46 @@ describe("renderCodeSnapshotHtml", () => {
     await expect(savePngDataUrlToFile("data:image/png;base64,AA==", "snapshot.png")).rejects.toThrow("disk full");
     expect(writeFile).toHaveBeenCalledOnce();
   });
+
+  it("encompasses the last row bottom edge and relaxes clone height for grid snapshots", async () => {
+    toPng.mockResolvedValue("data:image/png;base64,test");
+    const container = document.createElement("div");
+    container.className = "dbx-grid-snapshot";
+    container.innerHTML = "<table><tbody><tr><td>row1</td></tr><tr><td>row2</td></tr></tbody></table>";
+    document.body.appendChild(container);
+
+    // Mock layout measurements
+    Object.defineProperty(container, "offsetWidth", { value: 400 });
+    Object.defineProperty(container, "offsetHeight", { value: 300 });
+    Object.defineProperty(container, "scrollWidth", { value: 400 });
+    Object.defineProperty(container, "scrollHeight", { value: 298 });
+    container.getBoundingClientRect = () => ({ top: 10, bottom: 310, left: 0, right: 400, width: 400, height: 300 }) as DOMRect;
+
+    const lastRow = container.querySelector("tr:last-child") as HTMLTableRowElement;
+    lastRow.getBoundingClientRect = () => ({ top: 280, bottom: 318, left: 0, right: 400, width: 400, height: 38 }) as DOMRect;
+
+    try {
+      await snapshotElementToPng(container);
+
+      // Height should encompass lastRow.bottom (318) - container.top (10) = 308
+      expect(toPng).toHaveBeenLastCalledWith(
+        container,
+        expect.objectContaining({
+          width: 400,
+          height: 308,
+        }),
+      );
+
+      const options = toPng.mock.calls.at(-1)?.[1];
+      expect(typeof options?.onclone).toBe("function");
+
+      const clone = container.cloneNode(true) as HTMLElement;
+      clone.style.height = "308px";
+      options.onclone(clone);
+      expect(clone.style.height).toBe("auto");
+      expect(clone.style.minHeight).toBe("308px");
+    } finally {
+      container.remove();
+    }
+  });
 });

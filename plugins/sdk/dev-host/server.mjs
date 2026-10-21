@@ -314,9 +314,38 @@ export async function createMockHost(options) {
         requirePermission(manifest, "host.workbench");
         return { mockHostOpenFrame: await serialize(() => openFrame(session, p.context?.connectionId || frame.connectionId, p.contributionId, p.context)) };
       }
+      case "host.setTitle": {
+        requirePermission(manifest, "host.workbench");
+        const title = p.title === null || p.title === undefined ? null : typeof p.title === "string" ? p.title.trim() || null : null;
+        frame.title = title;
+        return { ok: true, title };
+      }
+      case "host.getTitle": {
+        requirePermission(manifest, "host.workbench");
+        return frame.title ?? "";
+      }
       case "host.reopenConnection": {
         if (typeof p.connectionId !== "string" || !p.connectionId) throw new Error("connectionId is invalid");
         return { ok: true, mockReopenConnection: p.connectionId };
+      }
+      case "host.getConnections":
+      case "host.listConnections": {
+        const hasConnectionsRead = manifest.permissions?.includes("host.connections:read") || manifest.permissions?.includes("host.connections::read");
+        if (!hasConnectionsRead) {
+          requirePermission(manifest, "host.workbench");
+        }
+        return [
+          {
+            id: frame.connectionId || "mock-conn-1",
+            name: "Mock Connection",
+            dbType: "sqlite",
+            dialect: "sqlite",
+            databaseType: "sqlite",
+            connected: true,
+            isConnected: true,
+            readOnly: false,
+          },
+        ];
       }
       case "host.storageGet":
       case "host.storageSet":

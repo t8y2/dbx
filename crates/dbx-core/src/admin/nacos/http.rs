@@ -396,9 +396,23 @@ impl NacosOpenApiAdmin {
         method: reqwest::Method,
         path: &str,
         mut query: Vec<(String, String)>,
-        form: Option<Vec<(String, String)>>,
+        mut form: Option<Vec<(String, String)>>,
         body: Option<Value>,
     ) -> Result<reqwest::Response, String> {
+        // Nacos 2 configuration APIs store the default namespace as an empty
+        // tenant. Keep the explicit `public` scope in DBX (ordinary users may
+        // not be able to list namespaces), and translate only at the HTTP
+        // boundary. Naming APIs, Nacos 3 and r-nacos retain their own IDs.
+        if !self.is_rnacos_compatible()
+            && matches!(self.cfg.version_mode, Some(NacosVersionMode::V2))
+            && (path.starts_with("/v1/cs/") || path.starts_with("/v2/cs/"))
+        {
+            for (key, value) in query.iter_mut().chain(form.iter_mut().flatten()) {
+                if key == "tenant" && value == "public" {
+                    value.clear();
+                }
+            }
+        }
         let token = self.access_token().await?;
         // Token transport follows the endpoint generation, not only the
         // detected server version: Nacos 3 can deliberately fall back to a
@@ -4889,6 +4903,19 @@ mod tests {
             assert!(target.contains("accessToken=ordinary-token"));
             write_json_response(&mut socket, r#"{"code":403,"message":"authorization failed","data":"access denied"}"#)
                 .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            assert_eq!(url.path(), "/nacos/v1/cs/configs");
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(params.get("tenant").map(|value| value.as_ref()), Some(""));
+            assert_eq!(params.get("accessToken").map(|value| value.as_ref()), Some("ordinary-token"));
+            write_json_response(
+                &mut socket,
+                r#"{"totalCount":118,"pageItems":[{"dataId":"app.yaml","group":"DEFAULT_GROUP","tenant":""}]}"#,
+            )
+            .await;
         });
 
         let mut config = test_admin_config(format!("http://{address}"));
@@ -4899,12 +4926,84 @@ mod tests {
             NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
         config.managed_namespaces = vec!["team-a".to_string(), "public".to_string()];
 
-        let namespaces = NacosOpenApiAdmin::new(config).unwrap().list_namespaces().await.unwrap();
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        let namespaces = admin.list_namespaces().await.unwrap();
         assert_eq!(
             namespaces.into_iter().map(|namespace| namespace.namespace).collect::<Vec<_>>(),
             vec!["team-a".to_string(), "public".to_string()]
         );
+        let configs = admin
+            .list_configs(NacosConfigQuery {
+                namespace: Some("public".to_string()),
+                group: None,
+                group_contains: false,
+                data_id: None,
+                app_name: None,
+                search: None,
+                page_no: Some(1),
+                page_size: Some(20),
+            })
+            .await
+            .unwrap();
+        assert_eq!(configs.total_count, 118);
+        assert_eq!(configs.items.len(), 1);
+        assert_eq!(configs.items[0].namespace, "public");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_requests_translate_only_official_v2_public_tenants() {
+        for (implementation, version, path, tenant, expected) in [
+            (NacosImplementation::Nacos, NacosVersionMode::V2, "/v1/cs/configs", "public", ""),
+            (NacosImplementation::Nacos, NacosVersionMode::V2, "/v2/cs/history", "public", ""),
+            (NacosImplementation::Nacos, NacosVersionMode::V2, "/v1/cs/configs", "team-a", "team-a"),
+            (NacosImplementation::Nacos, NacosVersionMode::V2, "/v1/cs/configs", "", ""),
+            (NacosImplementation::Nacos, NacosVersionMode::V3, "/v3/admin/cs/config", "public", "public"),
+            (NacosImplementation::Nacos, NacosVersionMode::V2, "/v1/ns/instance", "public", "public"),
+            (NacosImplementation::RNacos, NacosVersionMode::V2, "/v1/cs/configs", "public", "public"),
+        ] {
+            for method in [reqwest::Method::GET, reqwest::Method::POST, reqwest::Method::DELETE] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let request = read_http_request(&mut socket).await;
+                    let target = request.split_whitespace().nth(1).unwrap();
+                    let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+                    let params = url.query_pairs().collect::<HashMap<_, _>>();
+                    assert_eq!(url.path(), format!("/nacos{path}"));
+                    assert_eq!(params.get("tenant").map(|value| value.as_ref()), Some(expected));
+                    assert_eq!(params.get("namespaceId").map(|value| value.as_ref()), Some(tenant));
+                    if request.starts_with("POST ") {
+                        assert_eq!(request_form_value(&request, "tenant"), Some(expected));
+                        assert_eq!(request_form_value(&request, "dataId"), Some("app.yaml"));
+                    }
+                    write_json_response(&mut socket, "{}").await;
+                });
+                let mut config = test_admin_config(format!("http://{address}"));
+                config.context_path = "/nacos".to_string();
+                config.implementation = Some(implementation.clone());
+                config.version_mode = Some(version.clone());
+                let form = (method == reqwest::Method::POST).then(|| {
+                    vec![("tenant".to_string(), tenant.to_string()), ("dataId".to_string(), "app.yaml".to_string())]
+                });
+                NacosOpenApiAdmin::new(config)
+                    .unwrap()
+                    .request(
+                        method,
+                        path,
+                        vec![
+                            ("tenant".to_string(), tenant.to_string()),
+                            ("namespaceId".to_string(), tenant.to_string()),
+                        ],
+                        form,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                server.await.unwrap();
+            }
+        }
     }
 
     #[test]

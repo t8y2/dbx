@@ -2,8 +2,11 @@ use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
-use super::{http_client_builder, json_value_for_js, with_connection_timeout};
-use crate::models::connection::ConnectionConfig;
+use super::{
+    apply_http_proxy, apply_tls_certificates_for_driver, http_client_builder, json_value_for_js,
+    parse_proxy_url_params, with_connection_timeout,
+};
+use crate::models::connection::{ConnectionConfig, ProxyType, TransportLayerConfig};
 use crate::types::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectSource, ObjectSourceKind, QueryResult, TableInfo,
     TriggerInfo,
@@ -27,17 +30,64 @@ pub struct CloudflareD1Client {
 
 impl CloudflareD1Client {
     pub fn new(account_id: &str, database_id: &str, api_token: &str, timeout: Duration) -> Result<Self, String> {
+        Self::new_with_options(account_id, database_id, api_token, timeout, None, None, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_options(
+        account_id: &str,
+        database_id: &str,
+        api_token: &str,
+        timeout: Duration,
+        ca_cert_path: Option<&str>,
+        client_cert_path: Option<&str>,
+        client_key_path: Option<&str>,
+        proxy: Option<reqwest::Proxy>,
+    ) -> Result<Self, String> {
         let account_id = required_identifier(account_id, "Cloudflare Account ID")?;
         let database_id = required_identifier(database_id, "Cloudflare D1 Database ID")?;
         let endpoint = format!("{CLOUDFLARE_API_BASE_URL}/accounts/{account_id}/d1/database/{database_id}/raw");
-        Self::with_endpoint(endpoint, api_token, timeout)
+        Self::with_endpoint_and_options(
+            endpoint,
+            api_token,
+            timeout,
+            ca_cert_path,
+            client_cert_path,
+            client_key_path,
+            proxy,
+            None,
+            None,
+        )
     }
 
-    fn with_endpoint(endpoint: String, api_token: &str, timeout: Duration) -> Result<Self, String> {
+    pub fn with_endpoint(endpoint: String, api_token: &str, timeout: Duration) -> Result<Self, String> {
+        Self::with_endpoint_and_options(endpoint, api_token, timeout, None, None, None, None, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_endpoint_and_options(
+        endpoint: String,
+        api_token: &str,
+        timeout: Duration,
+        ca_cert_path: Option<&str>,
+        client_cert_path: Option<&str>,
+        client_key_path: Option<&str>,
+        proxy: Option<reqwest::Proxy>,
+        explicit_proxy_url: Option<&str>,
+        no_proxy: Option<&str>,
+    ) -> Result<Self, String> {
         let api_token = required_field(api_token, "Cloudflare API Token")?;
-        let http = http_client_builder(timeout)
-            .build()
-            .map_err(|error| format!("Failed to configure Cloudflare D1 HTTP client: {error}"))?;
+        let mut builder = http_client_builder(timeout);
+        builder = apply_http_proxy(builder, &endpoint, proxy, explicit_proxy_url, no_proxy)?;
+        builder = apply_tls_certificates_for_driver(
+            builder,
+            ca_cert_path,
+            client_cert_path,
+            client_key_path,
+            "Cloudflare D1",
+        )?;
+        let http =
+            builder.build().map_err(|error| format!("Failed to configure Cloudflare D1 HTTP client: {error}"))?;
         Ok(Self { http, endpoint, api_token: api_token.to_string() })
     }
 
@@ -48,6 +98,32 @@ impl CloudflareD1Client {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .json(&serde_json::json!({ "sql": sql }))
     }
+}
+
+pub fn proxy_from_transport_layers(layers: &[TransportLayerConfig]) -> Result<Option<reqwest::Proxy>, String> {
+    for layer in layers.iter().rev() {
+        if let TransportLayerConfig::Proxy(proxy) = layer {
+            if !proxy.enabled {
+                continue;
+            }
+            let scheme = match proxy.proxy_type {
+                ProxyType::Http => "http",
+                ProxyType::Socks5 => "socks5h",
+            };
+            let host = if proxy.host.contains(':') && !proxy.host.starts_with('[') {
+                format!("[{}]", proxy.host)
+            } else {
+                proxy.host.clone()
+            };
+            let mut reqwest_proxy = reqwest::Proxy::all(format!("{scheme}://{host}:{}", proxy.port))
+                .map_err(|e| format!("Invalid proxy address: {e}"))?;
+            if !proxy.username.is_empty() || !proxy.password.is_empty() {
+                reqwest_proxy = reqwest_proxy.basic_auth(&proxy.username, &proxy.password);
+            }
+            return Ok(Some(reqwest_proxy));
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,14 +172,50 @@ pub async fn test_connection(client: &CloudflareD1Client, timeout: Duration) -> 
 }
 
 pub async fn connect(config: &ConnectionConfig, timeout: Duration) -> Result<CloudflareD1Client, String> {
-    let client = CloudflareD1Client::new(
-        &config.host,
-        config.database.as_deref().unwrap_or_default(),
-        &config.password,
-        timeout,
-    )?;
+    connect_with_proxy(config, None, timeout).await
+}
+
+pub async fn connect_with_proxy(
+    config: &ConnectionConfig,
+    proxy: Option<reqwest::Proxy>,
+    timeout: Duration,
+) -> Result<CloudflareD1Client, String> {
+    let client = client_from_config(config, proxy, timeout)?;
     test_connection(&client, timeout).await?;
     Ok(client)
+}
+
+pub fn client_from_config(
+    config: &ConnectionConfig,
+    proxy: Option<reqwest::Proxy>,
+    timeout: Duration,
+) -> Result<CloudflareD1Client, String> {
+    let proxy = match proxy {
+        Some(p) => Some(p),
+        None => proxy_from_transport_layers(&config.transport_layers)?,
+    };
+    let (explicit_proxy_url, explicit_no_proxy) = parse_proxy_url_params(config.url_params.as_deref());
+    let ca_cert_path = if config.ca_cert_path.trim().is_empty() { None } else { Some(config.ca_cert_path.as_str()) };
+    let client_cert_path =
+        if config.client_cert_path.trim().is_empty() { None } else { Some(config.client_cert_path.as_str()) };
+    let client_key_path =
+        if config.client_key_path.trim().is_empty() { None } else { Some(config.client_key_path.as_str()) };
+
+    let account_id = required_identifier(&config.host, "Cloudflare Account ID")?;
+    let database_id = required_identifier(config.database.as_deref().unwrap_or_default(), "Cloudflare D1 Database ID")?;
+    let endpoint = format!("{CLOUDFLARE_API_BASE_URL}/accounts/{account_id}/d1/database/{database_id}/raw");
+
+    CloudflareD1Client::with_endpoint_and_options(
+        endpoint,
+        &config.password,
+        timeout,
+        ca_cert_path,
+        client_cert_path,
+        client_key_path,
+        proxy,
+        explicit_proxy_url.as_deref(),
+        explicit_no_proxy.as_deref(),
+    )
 }
 
 pub async fn list_databases(_client: &CloudflareD1Client) -> Result<Vec<DatabaseInfo>, String> {
@@ -188,6 +300,9 @@ pub async fn list_indexes(client: &CloudflareD1Client, _schema: &str, table: &st
         let columns =
             column_result.rows.iter().filter_map(|row| value_by_column(&column_result.columns, row, "name")).collect();
         indexes.push(IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name,
             columns,
             is_unique,
@@ -645,5 +760,99 @@ mod tests {
             }
         }
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn validates_ca_cert_path_error() {
+        let err = CloudflareD1Client::new_with_options(
+            "account",
+            "database",
+            "token",
+            Duration::from_secs(1),
+            Some("/nonexistent/ca.pem"),
+            None,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("Failed to read Cloudflare D1 CA certificate at /nonexistent/ca.pem"));
+    }
+
+    #[test]
+    fn proxy_from_transport_layers_extracts_http_and_socks5_proxies() {
+        use crate::models::connection::ProxyTunnelConfig;
+
+        let layer = TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "p1".to_string(),
+            profile_id: String::new(),
+            test_target: None,
+            name: "test-proxy".to_string(),
+            enabled: true,
+            proxy_type: ProxyType::Http,
+            host: "proxy.example.com".to_string(),
+            port: 8080,
+            username: "user".to_string(),
+            password: "pwd".to_string(),
+        });
+        let proxy = proxy_from_transport_layers(&[layer]).unwrap();
+        assert!(proxy.is_some());
+
+        let disabled_layer = TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "p2".to_string(),
+            profile_id: String::new(),
+            test_target: None,
+            name: "disabled-proxy".to_string(),
+            enabled: false,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.example.com".to_string(),
+            port: 1080,
+            username: "".to_string(),
+            password: "".to_string(),
+        });
+        let proxy = proxy_from_transport_layers(&[disabled_layer]).unwrap();
+        assert!(proxy.is_none());
+    }
+
+    #[tokio::test]
+    async fn routes_requests_through_configured_http_proxy() {
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+
+        let proxy_handle = tokio::spawn(async move {
+            let (mut socket, _) = proxy_listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(
+                request.contains("POST http://test.d1.internal/raw")
+                    || request.contains("CONNECT test.d1.internal")
+                    || request.contains("POST /raw")
+            );
+
+            let body = r#"{"success":true,"errors":[],"result":[{"success":true,"results":{"columns":["proxied"],"rows":[[1]]},"meta":{"changes":0}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let proxy = reqwest::Proxy::all(format!("http://{proxy_addr}")).unwrap();
+        let client = CloudflareD1Client::with_endpoint_and_options(
+            "http://test.d1.internal/raw".to_string(),
+            "test-token",
+            Duration::from_secs(5),
+            None,
+            None,
+            None,
+            Some(proxy),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let result = execute_query_with_max_rows(&client, "SELECT 1", None).await.unwrap();
+        assert_eq!(result.columns, ["proxied"]);
+        proxy_handle.await.unwrap();
     }
 }

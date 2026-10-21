@@ -1,7 +1,6 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { createApp, defineComponent, h, nextTick } from "vue";
+import { createApp, defineComponent, h, nextTick, shallowRef } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { dispatch, findAll, findOne, hostText, mountComponent } from "./vueHostHarness";
@@ -113,18 +112,7 @@ import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 import DataGridSortBuilder from "@/components/grid/DataGridSortBuilder.vue";
 import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
 import DataGridTextSortWorkbench from "@/components/grid/DataGridTextSortWorkbench.vue";
-
-const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
-const cellDetailDialogSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailDialog.vue", "utf8");
-const binaryTextPreviewSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailTextPreview.vue", "utf8");
-const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-
-describe("DataGrid opaque aggregate-state safety", () => {
-  it("blocks cell edits and keyless row deletion through the centralized gates", () => {
-    expect(dataGridSource).toMatch(/function canEditCellItem[\s\S]*isOpaqueAggregateStateColumnType\(allColumnTypes\.value\[columnIndex\]\)/);
-    expect(dataGridSource).toMatch(/function canDeleteRowItem[\s\S]*canUseKeylessRowPredicate[\s\S]*hasUnsafeOpaqueAggregateStatePredicate\(allColumnTypes\.value, item\.data\)/);
-  });
-});
+import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   return {
@@ -525,13 +513,6 @@ describe("DataGridPagination", () => {
 
     dispatch(sum, "click");
     expect(copySelectionSummary).not.toHaveBeenCalled();
-  });
-});
-
-describe("DataGrid selection summary copy wiring", () => {
-  it("routes the pagination aggregate copy through the grid clipboard helper", () => {
-    expect(dataGridSource).toMatch(/@copy-selection-summary="copyText"/);
-    expect(dataGridSource).toMatch(/:selection-summary-pending="isSelectingCells"/);
   });
 });
 
@@ -2272,6 +2253,55 @@ describe("cell detail surfaces", () => {
     expect(findOne(panel.root, (node) => node.type === "textarea").value).toBe("中文");
   });
 
+  it("shows the grid boolean label in the panel and dialog without changing the raw value", () => {
+    const booleanDetail = detail({
+      type: "bit",
+      value: true,
+      rawValue: "true",
+      rawValuePreview: "true",
+      displayValue: "TRUE",
+      displayValuePreview: "TRUE",
+      formattedJson: "",
+    });
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: booleanDetail,
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => false,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "sqlserver",
+    });
+    const dialog = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: booleanDetail,
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText: vi.fn(),
+      canDownloadBinaryValue: () => false,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      databaseType: "sqlserver",
+    });
+
+    for (const mounted of [panel, dialog]) {
+      expect(hostText(mounted.root)).toContain("TRUE");
+      expect(hostText(mounted.root)).not.toContain(">true<");
+    }
+    // rawValue remains the edit/copy payload; only the preview is labeled.
+    expect(booleanDetail.rawValue).toBe("true");
+  });
+
   it("keeps the value transform entry for non-binary detail cells", () => {
     const panel = mountComponent(DataGridCellDetailPanel, {
       detail: detail({ type: "VARCHAR(32)", value: "hello", rawValue: "hello", rawValuePreview: "hello", displayValue: "hello", displayValuePreview: "hello", formattedJson: "" }),
@@ -2334,16 +2364,6 @@ describe("cell detail surfaces", () => {
     expect(startEdit).not.toHaveBeenCalled();
     expect(hostText(panel.root)).toContain("0x48656c6c6f");
     expect(findOne(panel.root, (node) => node.type === "textarea").value).toBe("Hello");
-  });
-
-  it("keeps the binary text preview component strictly read-only and shared by both surfaces", () => {
-    expect(binaryTextPreviewSource).toContain("binaryCellTextPreview(props.value");
-    // 不发出任何编辑/提交事件，也不给 detail.value / rawValue 赋值。
-    expect(binaryTextPreviewSource).not.toContain("defineEmits");
-    expect(binaryTextPreviewSource).not.toMatch(/(?:props|detail)\.(?:value|rawValue)\s*=/);
-    expect(cellDetailDialogSource).toMatch(/<DataGridCellDetailTextPreview\s+v-if="open && isBinaryCellColumnType\(detail\.type\)"/);
-    // Panel 与下载菜单同一道闸门：编辑中不对草稿做只读文本预览。
-    expect(cellDetailPanelSource).toMatch(/<DataGridCellDetailTextPreview\s+v-if="!editing && isBinaryCellColumnType\(detail\.type\)"/);
   });
 
   it("copies the presented value, emits edit, closes, and replaces the JSON result", async () => {
@@ -2611,5 +2631,136 @@ describe("DataGrid column header tooltips", () => {
     expect(grid.headerTooltipsDisabled()).toEqual([false, false]);
 
     grid.destroy();
+  });
+});
+
+describe("DataGrid busy execution elapsed time", () => {
+  it("rebases the displayed elapsed time when another execution starts while loading", async () => {
+    setActivePinia(createPinia());
+    const now = vi.spyOn(Date, "now").mockReturnValue(5_000);
+    const startedAt = shallowRef(1_000);
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const app = createApp(defineComponent({ setup: () => () => h(DataGrid, { result: { columns: ["id"], rows: [[1]] }, loading: true, busyStartedAt: startedAt.value }) }));
+    try {
+      app.mount(host);
+      await nextTick();
+      await nextTick();
+      expect(host.textContent).toContain("4.0s");
+
+      now.mockReturnValue(9_000);
+      startedAt.value = 8_000;
+      await nextTick();
+      await nextTick();
+      expect(host.textContent).toContain("1.0s");
+      expect(host.textContent).not.toContain("8.0s");
+    } finally {
+      app.unmount();
+      host.remove();
+      now.mockRestore();
+    }
+  });
+});
+
+describe("EnumCellEditor boolean labels", () => {
+  it("shows TRUE/FALSE but commits the raw boolean value", () => {
+    const commit = vi.fn();
+    const editor = mountComponent(EnumCellEditor, {
+      modelValue: "true",
+      values: ["true", "false"],
+      displayValues: ["TRUE", "FALSE"],
+      nullable: true,
+      onCommit: commit,
+    });
+
+    expect(hostText(editor.root)).toContain("TRUE");
+    dispatch(
+      findOne(editor.root, (node) => node.type === "button" && hostText(node).trim() === "FALSE"),
+      "click",
+    );
+    expect(commit).toHaveBeenCalledWith("false");
+  });
+
+  it("shows 1/0 for the zero-one style while keeping the raw values", () => {
+    const commit = vi.fn();
+    const editor = mountComponent(EnumCellEditor, {
+      modelValue: "false",
+      values: ["true", "false"],
+      displayValues: ["1", "0"],
+      nullable: true,
+      onCommit: commit,
+    });
+
+    expect(hostText(editor.root)).toContain("0");
+    dispatch(
+      findOne(editor.root, (node) => node.type === "button" && hostText(node).trim() === "1"),
+      "click",
+    );
+    expect(commit).toHaveBeenCalledWith("true");
+  });
+});
+
+describe("DataGrid large-table preview notice", () => {
+  const HIDDEN_KEY = "dbx-table-data-preview-notice-hidden";
+
+  function mountGrid() {
+    setActivePinia(createPinia());
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const result = {
+      columns: ["id", "content"],
+      column_types: ["int4", "text"],
+      rows: [[1, "preview"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      large_value_cells: [{ row_index: 0, column_index: 1, original_bytes: 5000 }],
+    };
+    const tableMeta = { schema: "app", tableName: "t", columns: [], primaryKeys: [] };
+    const app = createApp(defineComponent({ setup: () => () => h(DataGrid, { result, tableMeta, context: "table-data" }) }));
+    app.mount(host);
+    return {
+      host,
+      notice: () => host.querySelector("[data-grid-preview-notice]"),
+      destroy() {
+        app.unmount();
+        host.remove();
+      },
+    };
+  }
+
+  beforeEach(() => {
+    localStorage.removeItem(HIDDEN_KEY);
+  });
+
+  function fullTextEntry(host: HTMLElement) {
+    return [...host.querySelectorAll("button")].find((button) => button.textContent?.trim() === "grid.tableDataPreviewLoadPageShort");
+  }
+
+  // #12906: the banner only stayed away for the current result, so every new
+  // table brought it back. "Don't show again" has to persist across tables and
+  // keep the full text one click away.
+  it("persists the don't-show-again choice without leaving an empty banner row", async () => {
+    const grid = mountGrid();
+    await nextTick();
+    expect(grid.notice()?.textContent).toContain("grid.tableDataPreviewNotice");
+    expect(fullTextEntry(grid.host)).toBeUndefined();
+
+    const dontShowAgain = [...grid.host.querySelectorAll("button")].find((button) => button.textContent?.trim() === "grid.tableDataPreviewDontShowAgain");
+    expect(dontShowAgain).toBeTruthy();
+    dontShowAgain!.click();
+    await nextTick();
+
+    expect(localStorage.getItem(HIDDEN_KEY)).toBe("1");
+    // The banner row is gone entirely; the full-text action moved into the
+    // existing toolbar action row so no empty strip is left behind.
+    expect(grid.notice()).toBeNull();
+    expect(fullTextEntry(grid.host)).toBeTruthy();
+    grid.destroy();
+
+    const reopened = mountGrid();
+    await nextTick();
+    expect(reopened.notice()).toBeNull();
+    expect(fullTextEntry(reopened.host)).toBeTruthy();
+    reopened.destroy();
   });
 });

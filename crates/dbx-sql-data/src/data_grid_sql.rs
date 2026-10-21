@@ -30,7 +30,7 @@ use data_grid_salesforce_sql::{
 
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{
-    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id,
+    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id, uses_postgres_ctid,
     uses_single_row_insert_statements, uses_synthetic_row_id, uses_xugu_row_id, TablePaginationStrategy,
 };
 use crate::value_literals::{format_ch_array_sql_literal, format_pg_array_sql_literal};
@@ -45,16 +45,36 @@ const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
 const KEYLESS_GUARD_COUNT_ALIAS: &str = "dbx_keyless_row_matches";
 const KEYLESS_AMBIGUOUS_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, so the row is identified by matching every column value, and more than one row in the table matches that condition. Add a primary key or unique index, or make the rows distinguishable, before editing.";
 const KEYLESS_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key and none of the result columns map to a table column, so there is no condition that can target a single row. Add a primary key, or edit the table directly, before saving.";
+const POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row because its hidden row identifier is missing or invalid. Refresh the table data before saving.";
+const POSTGRES_CTID_STALE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row: it no longer matches the physical row that was loaded. Another session may have changed or deleted it. Refresh the table data and try again.";
 /// Dameng rejects every comparison against its binary LOB types with
 /// `Data type mismatch` (SQLSTATE 22000, code -6105), and spatial columns are
 /// BLOB-backed and behave the same, so a keyless row predicate — which matches
 /// every result column value — cannot carry one of them.
 const DAMENG_KEYLESS_BINARY_LOB_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, and Dameng cannot compare binary LOB values, so Dbx cannot build a condition that targets it. Add a primary key or unique index, or exclude the binary LOB column from the query, before editing.";
 
+/// Row budget for one statement. It binds only the predicate shapes that cannot
+/// merge into an `IN` run (a compound key stays one OR-ed part per row) and the
+/// deleted-rows rollback INSERT value tuples; merged `IN` runs are bounded by
+/// `MYSQL_DATA_GRID_BATCH_MAX_VALUES` and by the text budget instead, so the
+/// three budgets each cover a different shape.
 const MYSQL_DATA_GRID_BATCH_MAX_ROWS: usize = 500;
 const MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES: usize = 256 * 1024;
+/// Per-statement ceiling on the literal values a batched MySQL UPDATE/DELETE may
+/// carry. MySQL charges the range optimizer ≈230 bytes per `IN` literal (every
+/// `IN` value counts as a predicate combined with `OR`), so 10k values ≈ 2.3 MiB
+/// of the 8 MiB default `range_optimizer_max_mem_size` — about 3.6× headroom.
+/// The 256 KiB text budget alone is not enough: short integer keys are ≈7 bytes
+/// of text each, so it would let a statement reach ≈8.6 MiB and silently abandon
+/// the range scan (warning 3170, or a hard error under `sql_safe_updates`).
+/// Keeping 500 values per flush would instead re-join the runs into the same
+/// oversized statement, which is why the cap counts values rather than rows.
+const MYSQL_DATA_GRID_BATCH_MAX_VALUES: usize = 10_000;
 const ORACLE_SQL_LITERAL_MAX_BYTES: usize = 4000;
 const ORACLE_LOB_LITERAL_CHUNK_BYTES: usize = 3900;
+/// SQL Server types an `N'..' + NCHAR(n) + N'..'` chain of non-`max` operands as
+/// `nvarchar(4000)`; a longer concatenation result is truncated without an error.
+const SQLSERVER_NVARCHAR_LITERAL_MAX_CHARS: usize = 4000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -367,12 +387,21 @@ pub struct HiveTablePropertiesSqlOptions {
 /// `message` unless the returned count is at most `max_matched_rows`, and also
 /// refused when the count cannot be obtained at all — an unverified keyless
 /// write is exactly the ambiguous write this guard exists to prevent.
+///
+/// A predicate built from a physical row locator (PostgreSQL `tableoid`/`ctid`)
+/// also sets `min_matched_rows`: that locator only stays valid while the row is
+/// unchanged, so a count of zero means the row moved and must be reported with
+/// `min_message` instead of silently updating nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataGridSaveGuard {
     pub sql: String,
     pub max_matched_rows: u32,
+    #[serde(default)]
+    pub min_matched_rows: u32,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,6 +605,15 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     format_reference: impl Fn(String) -> String,
     format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>) -> String,
 ) -> Option<String> {
+    build_data_grid_copy_insert_statements_with_formatters(options, format_reference, format_literal)
+        .map(|statements| statements.join("\n"))
+}
+
+pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
+    options: DataGridCopyInsertStatementOptions,
+    format_reference: impl Fn(String) -> String,
+    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>) -> String,
+) -> Option<Vec<String>> {
     let save_columns = effective_copy_columns(options.source_columns.as_deref(), &options.columns);
     let column_info = options.table_meta.as_ref().and_then(|meta| meta.columns.as_deref()).unwrap_or(&[]);
     let primary_keys = options.table_meta.as_ref().map(|meta| meta.primary_keys.as_slice()).unwrap_or_default();
@@ -744,23 +782,39 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     // SQL Server and Dameng reject explicit values for identity columns unless the
     // statement runs between `SET IDENTITY_INSERT <table> ON` and `OFF` (SQL Server
     // error 544), so a copied INSERT that carries the identity column must ship the
-    // wrapper. Each statement is wrapped on its own so row-by-row copies stay
-    // individually executable, matching the SQL export path.
-    let needs_identity_insert_wrapper =
-        matches!(options.database_type, Some(DatabaseType::SqlServer | DatabaseType::Dameng))
-            && insert_columns.iter().any(|(_, _, info)| info.as_ref().is_some_and(is_auto_generated_column));
+    // wrapper. Dameng AUTO_INCREMENT columns are not IDENTITY columns (DM error -2717)
+    // and must not be wrapped. Each statement is wrapped on its own so row-by-row
+    // copies stay individually executable, matching the SQL export path.
+    let needs_identity_insert_wrapper = match options.database_type {
+        Some(DatabaseType::SqlServer) => insert_columns.iter().any(|(_, _, info)| {
+            info.as_ref().is_some_and(|col| {
+                col.extra.as_deref().is_some_and(|extra| extra.to_ascii_lowercase().contains("identity"))
+                    || is_auto_generated_column(col)
+            })
+        }),
+        Some(DatabaseType::Dameng) => insert_columns.iter().any(|(_, _, info)| {
+            info.as_ref().is_some_and(|col| {
+                col.extra.as_deref().is_some_and(|extra| {
+                    let normalized = extra.to_ascii_lowercase();
+                    normalized.contains("identity")
+                        && !normalized.contains("auto_increment")
+                        && !normalized.contains("autoincrement")
+                })
+            })
+        }),
+        _ => false,
+    };
     if needs_identity_insert_wrapper {
         return Some(
             statements
-                .iter()
+                .into_iter()
                 .map(|statement| {
                     format!("SET IDENTITY_INSERT {table} ON;\n{statement}\nSET IDENTITY_INSERT {table} OFF;")
                 })
-                .collect::<Vec<_>>()
-                .join("\n"),
+                .collect(),
         );
     }
-    Some(statements.join("\n"))
+    Some(statements)
 }
 
 pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterConditionOptions) -> Option<String> {
@@ -1347,6 +1401,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
     if let Some(error) = validate_existing_row_primary_keys(options) {
         return Some(error);
     }
+    if let Some(error) = validate_postgres_ctid_row_identifier(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_oracle_keyless_lob_predicate(options) {
         return Some(error);
     }
@@ -1489,6 +1546,31 @@ fn validate_existing_row_primary_keys(options: &DataGridSaveStatementOptions) ->
         }
     }
 
+    None
+}
+
+fn validate_postgres_ctid_row_identifier(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if !uses_postgres_ctid(options.database_type)
+        || !options.table_meta.primary_keys.is_empty()
+        || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty())
+    {
+        return None;
+    }
+
+    let save_columns = effective_columns(options);
+    // Without the hidden locator in the projection there is nothing to check;
+    // the save falls back to its previous keyless behaviour.
+    let row_id_index = find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN)?;
+    for row_index in
+        options.dirty_rows.iter().map(|(row_index, _)| *row_index).chain(options.deleted_rows.iter().copied())
+    {
+        let Some(row) = options.rows.get(row_index) else {
+            continue;
+        };
+        if row.get(row_id_index).and_then(parse_postgres_ctid_row_id).is_none() {
+            return Some(POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR.to_string());
+        }
+    }
     None
 }
 
@@ -1662,6 +1744,13 @@ fn validate_inserted_primary_keys(options: &DataGridSaveStatementOptions) -> Opt
     None
 }
 
+/// One predicate this save sends, plus whether it addresses a physical row
+/// locator that must still match a row rather than merely "at most one".
+struct GuardedPredicate {
+    sql: String,
+    requires_match: bool,
+}
+
 /// Builds the statements the save executes, and alongside them the server-side
 /// guards for every keyless predicate those statements actually send. The guard
 /// is derived from the same `where_clause` value the UPDATE/DELETE carries, so
@@ -1699,13 +1788,18 @@ fn build_data_grid_save_statements(
         options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
 
     let guards_keyless_predicates = primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type);
-    let mut guarded_predicates: Vec<String> = Vec::new();
-    let guard_predicate = |predicate: &str, guarded: &mut Vec<String>| {
+    // With the hidden locator present every generated predicate addresses one
+    // physical row, so its guard must match exactly one row rather than "at most one".
+    let postgres_ctid_locator = guards_keyless_predicates
+        && uses_postgres_ctid(options.database_type)
+        && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
+    let mut guarded_predicates: Vec<GuardedPredicate> = Vec::new();
+    let guard_predicate = |predicate: &str, guarded: &mut Vec<GuardedPredicate>| {
         if !guards_keyless_predicates || predicate.trim().is_empty() {
             return;
         }
-        if !guarded.iter().any(|existing| existing == predicate) {
-            guarded.push(predicate.to_string());
+        if !guarded.iter().any(|existing| existing.sql == predicate) {
+            guarded.push(GuardedPredicate { sql: predicate.to_string(), requires_match: postgres_ctid_locator });
         }
     };
 
@@ -1744,7 +1838,7 @@ fn build_data_grid_save_statements(
         if sets.is_empty() {
             continue;
         }
-        let mut where_clause = build_primary_key_where(
+        let mut predicate = build_primary_key_predicate(
             options.database_type,
             &options.table_meta.primary_keys,
             &save_columns,
@@ -1757,27 +1851,36 @@ fn build_data_grid_save_statements(
             &save_columns,
             row,
             changes.iter().map(|(index, _)| *index),
-            &mut where_clause,
+            &mut predicate.sql,
         );
-        guard_predicate(&where_clause, &mut guarded_predicates);
+        if guarded_lob {
+            // An appended `AND ...` guard makes the clause more than the plain
+            // equality it started as; never merge a guarded predicate.
+            predicate.plain = None;
+        }
+        guard_predicate(&predicate.sql, &mut guarded_predicates);
         if batch_mysql_writes {
             if update_sets.as_deref().is_some_and(|current| current != sets) {
                 let current_sets = update_sets.take().unwrap_or_default();
-                push_mysql_predicate_batches(
+                push_mysql_key_predicate_batches(
                     &mut statements,
                     &format!("UPDATE {table} SET {current_sets} WHERE "),
                     std::mem::take(&mut update_predicates),
                 );
             }
             update_sets = Some(sets);
-            update_predicates.push(where_clause);
+            update_predicates.push(predicate);
         } else {
-            let statement = data_grid_update_sql(options.database_type, &table, &sets, &where_clause);
+            let statement = data_grid_update_sql(options.database_type, &table, &sets, &predicate.sql);
             statements.push(data_grid_save_statement(options.database_type, statement, guarded_lob, bound_statements));
         }
     }
     if let Some(sets) = update_sets {
-        push_mysql_predicate_batches(&mut statements, &format!("UPDATE {table} SET {sets} WHERE "), update_predicates);
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            &format!("UPDATE {table} SET {sets} WHERE "),
+            update_predicates,
+        );
     }
 
     let mut delete_predicates = Vec::new();
@@ -1785,7 +1888,7 @@ fn build_data_grid_save_statements(
         let Some(row) = options.rows.get(*row_index) else {
             continue;
         };
-        let mut where_clause = build_primary_key_where(
+        let mut predicate = build_primary_key_predicate(
             options.database_type,
             &options.table_meta.primary_keys,
             &save_columns,
@@ -1794,17 +1897,20 @@ fn build_data_grid_save_statements(
             options.identifier_quote.as_deref(),
         );
         let guarded_lob =
-            append_oceanbase_lob_save_guards(options, &save_columns, row, 0..save_columns.len(), &mut where_clause);
-        guard_predicate(&where_clause, &mut guarded_predicates);
+            append_oceanbase_lob_save_guards(options, &save_columns, row, 0..save_columns.len(), &mut predicate.sql);
+        if guarded_lob {
+            predicate.plain = None;
+        }
+        guard_predicate(&predicate.sql, &mut guarded_predicates);
         if batch_mysql_writes {
-            delete_predicates.push(where_clause);
+            delete_predicates.push(predicate);
         } else {
-            let statement = data_grid_delete_sql(options.database_type, &table, &where_clause);
+            let statement = data_grid_delete_sql(options.database_type, &table, &predicate.sql);
             statements.push(data_grid_save_statement(options.database_type, statement, guarded_lob, bound_statements));
         }
     }
     if !delete_predicates.is_empty() {
-        push_mysql_delete_batches(&mut statements, &format!("DELETE FROM {table} WHERE "), delete_predicates);
+        push_mysql_key_predicate_batches(&mut statements, &format!("DELETE FROM {table} WHERE "), delete_predicates);
     }
 
     for row in &options.new_rows {
@@ -1897,9 +2003,11 @@ fn build_data_grid_save_statements(
     }
 
     keyless_guards.extend(guarded_predicates.into_iter().map(|predicate| DataGridSaveGuard {
-        sql: format!("SELECT COUNT(*) AS {KEYLESS_GUARD_COUNT_ALIAS} FROM {table} WHERE ({predicate})"),
+        sql: format!("SELECT COUNT(*) AS {KEYLESS_GUARD_COUNT_ALIAS} FROM {table} WHERE ({})", predicate.sql),
         max_matched_rows: 1,
+        min_matched_rows: u32::from(predicate.requires_match),
         message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+        min_message: predicate.requires_match.then(|| POSTGRES_CTID_STALE_ROW_ERROR.to_string()),
     }));
 
     statements
@@ -1931,6 +2039,9 @@ fn build_data_grid_rollback_statements(
     );
     let table = data_grid_save_table_name(options, schema);
     let mut statements = Vec::new();
+    let postgres_ctid_identity = uses_postgres_ctid(options.database_type)
+        && options.table_meta.primary_keys.is_empty()
+        && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
 
     for row in &options.new_rows {
         // Server-generated keys are unknown; never invent an undo predicate from
@@ -2067,24 +2178,41 @@ fn build_data_grid_rollback_statements(
         if sets.is_empty() {
             continue;
         }
-        let mut predicates = vec![build_primary_key_where(
-            options.database_type,
-            &options.table_meta.primary_keys,
-            &save_columns,
-            &after_row,
-            column_info,
-            options.identifier_quote.as_deref(),
-        )];
-        predicates.extend(writable_changes.iter().map(|((_, value), column)| {
-            build_save_column_predicate(
+        let rollback_identity = if postgres_ctid_identity {
+            let row_predicate = build_save_row_where(
                 options.database_type,
-                column,
-                value,
-                column_info_for(column_info, column),
-                true,
+                &save_columns,
+                &after_row,
+                column_info,
+                options.identifier_quote.as_deref(),
+            );
+            if row_predicate.is_empty() {
+                continue;
+            }
+            format!("({row_predicate}) AND (SELECT COUNT(*) FROM {table} WHERE ({row_predicate})) = 1")
+        } else {
+            build_primary_key_where(
+                options.database_type,
+                &options.table_meta.primary_keys,
+                &save_columns,
+                &after_row,
+                column_info,
                 options.identifier_quote.as_deref(),
             )
-        }));
+        };
+        let mut predicates = vec![rollback_identity];
+        if !postgres_ctid_identity {
+            predicates.extend(writable_changes.iter().map(|((_, value), column)| {
+                build_save_column_predicate(
+                    options.database_type,
+                    column,
+                    value,
+                    column_info_for(column_info, column),
+                    true,
+                    options.identifier_quote.as_deref(),
+                )
+            }));
+        }
         statements.push(data_grid_statement(
             options.database_type,
             format!(
@@ -2102,98 +2230,107 @@ fn supports_mysql_data_grid_batch(options: &DataGridSaveStatementOptions) -> boo
     options.database_type == Some(DatabaseType::Mysql) && !options.table_meta.primary_keys.is_empty()
 }
 
-fn push_mysql_predicate_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<String>) {
-    push_mysql_joined_batches(statements, prefix, predicates, " OR ", true);
+/// One row key predicate of a batched MySQL UPDATE/DELETE.
+struct MysqlKeyPredicate {
+    /// Exactly the text the statement carries when this predicate cannot be
+    /// merged — the same OR-form clause an unbatched statement would use.
+    sql: String,
+    /// Present only when `sql` is provably one plain non-NULL equality on a
+    /// single column, so it may be merged into an `IN` list.
+    plain: Option<MysqlPlainEquality>,
 }
 
-/// Render a batch of delete predicates for MySQL. Rows deleted through the grid
-/// usually differ only in a single primary-key equality predicate, so equal-key
-/// runs collapse into `id IN (...)` instead of a chain of ORs (#8857). Anything
-/// that is not a plain `column = literal` equality (compound keys, NULL checks,
-/// BINARY comparisons, ...) falls back to the OR form, which stays correct for
-/// every predicate shape.
-fn push_mysql_delete_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<String>) {
+/// A provably plain `` `column` = literal `` key equality. Both pieces are
+/// already rendered — the dialect-quoted identifier and the formatted literal —
+/// and are accepted only after the clause they came from was checked to be
+/// exactly `"{column} = {literal}"` (`plain_equality_from_clause`).
+#[derive(Clone)]
+struct MysqlPlainEquality {
+    column: String,
+    literal: String,
+}
+
+/// A rendered part of a batched MySQL statement, with the weight the
+/// per-statement value budget has to account for it.
+struct MysqlBatchPart {
+    sql: String,
+    /// Literal values this part contributes to the statement's value budget. An
+    /// `IN` run contributes one per literal, a standalone predicate one; an
+    /// INSERT value tuple contributes nothing because that budget exists only to
+    /// bound range-optimizer memory on key predicates.
+    values: usize,
+}
+
+/// Render the batched `WHERE` parts of a MySQL save. Runs of rows that differ
+/// only in a single primary-key value collapse into `` `id` IN (...) `` instead
+/// of a chain of ORs (#8857), which is the form a DBA is willing to run.
+/// Anything that is not provably one plain non-NULL `column = literal` equality
+/// — compound keys, `IS NULL`, BINARY/JSON comparisons, BLOB-guarded keys —
+/// falls back to its own text, which stays correct for every predicate shape.
+///
+/// The merge is streaming: a non-mergeable predicate flushes the open run in
+/// place, so the order the caller built the predicates in is preserved rather
+/// than regrouped (`SET A → SET B → SET A` stays three statements).
+///
+/// Whether a predicate is "plain" is decided by the code that rendered it
+/// (`build_primary_key_predicate`), and only after that rendering was checked to
+/// reproduce the clause character for character. That check is why a future
+/// change in `build_column_predicate` cannot silently widen a batch: a new
+/// wrapper or comparison stops matching and the predicate keeps its OR form.
+fn push_mysql_key_predicate_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<MysqlKeyPredicate>) {
     const IN_JOINER: &str = ", ";
 
     struct InRun {
-        column: Option<String>,
+        column: String,
         values: Vec<String>,
         bytes: usize,
     }
 
-    fn flush_in(run: &mut InRun, batches: &mut Vec<String>) {
-        if let Some(column) = run.column.take() {
-            if run.values.len() == 1 {
-                batches.push(format!("{column} = {}", run.values[0]));
-            } else {
-                batches.push(format!("{column} IN ({})", run.values.join(IN_JOINER)));
-            }
-            run.values.clear();
-            run.bytes = 0;
+    fn flush_run(run: &mut InRun, parts: &mut Vec<MysqlBatchPart>) {
+        if run.values.len() == 1 {
+            parts.push(MysqlBatchPart { sql: format!("{} = {}", run.column, run.values[0]), values: 1 });
+        } else {
+            parts.push(MysqlBatchPart {
+                sql: format!("{} IN ({})", run.column, run.values.join(IN_JOINER)),
+                values: run.values.len(),
+            });
         }
+        run.values.clear();
+        run.bytes = 0;
     }
 
-    let mut in_run = InRun { column: None, values: Vec::new(), bytes: 0 };
-    let mut in_batches: Vec<String> = Vec::new();
-    let mut pending_batches: Vec<String> = Vec::new();
-
-    for predicate in &predicates {
-        match parse_mysql_equality_predicate(predicate) {
-            Some((column, literal)) => {
-                let literal_bytes = literal.len() + IN_JOINER.len();
-                let column_switch = in_run.column.as_deref().is_some_and(|existing| existing != column);
-                let over_budget = in_run.bytes + literal_bytes > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES;
-                let over_rows = in_run.values.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS;
-                if column_switch || over_budget || over_rows {
-                    flush_in(&mut in_run, &mut in_batches);
-                }
-                if in_run.column.is_none() {
-                    in_run.column = Some(column);
-                }
-                in_run.bytes += literal_bytes;
-                in_run.values.push(literal);
+    let mut parts: Vec<MysqlBatchPart> = Vec::new();
+    let mut run: Option<InRun> = None;
+    for predicate in predicates {
+        let Some(plain) = predicate.plain else {
+            if let Some(open) = run.as_mut() {
+                flush_run(open, &mut parts);
             }
-            None => {
-                flush_in(&mut in_run, &mut in_batches);
-                pending_batches.push(predicate.clone());
+            run = None;
+            parts.push(MysqlBatchPart { sql: predicate.sql, values: 1 });
+            continue;
+        };
+        let literal_bytes = plain.literal.len() + IN_JOINER.len();
+        let starts_new_run = run.as_ref().is_some_and(|open| {
+            open.column != plain.column
+                || open.bytes + literal_bytes > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES
+                || open.values.len() >= MYSQL_DATA_GRID_BATCH_MAX_VALUES
+        });
+        if starts_new_run {
+            if let Some(open) = run.as_mut() {
+                flush_run(open, &mut parts);
             }
+            run = None;
         }
+        let open = run.get_or_insert_with(|| InRun { column: plain.column, values: Vec::new(), bytes: 0 });
+        open.bytes += literal_bytes;
+        open.values.push(plain.literal);
     }
-    flush_in(&mut in_run, &mut in_batches);
+    if let Some(open) = run.as_mut() {
+        flush_run(open, &mut parts);
+    }
 
-    let mut batches = pending_batches;
-    batches.extend(in_batches);
-    if batches.len() == 1 {
-        statements.push(format!("{prefix}{};", batches.remove(0)));
-    } else if !batches.is_empty() {
-        push_mysql_predicate_batches(statements, prefix, batches);
-    }
-}
-
-/// Recognize predicates shaped exactly like `` `column` = literal `` (with or
-/// without backticks) so they can merge into an IN list. Anything else —
-/// compound-key AND chains, IS NULL, BINARY comparisons — returns None.
-fn parse_mysql_equality_predicate(predicate: &str) -> Option<(String, String)> {
-    let mut trimmed = predicate;
-    while let Some(inner) = trimmed.strip_prefix('(').and_then(|inner| inner.strip_suffix(')')) {
-        trimmed = inner;
-    }
-    let separator = trimmed.find(" = ")?;
-    let column = trimmed.get(..separator)?.trim().to_string();
-    if !column.starts_with('`') || !column.ends_with('`') || column.len() < 3 {
-        return None;
-    }
-    let literal = trimmed.get(separator + 3..)?.trim().to_string();
-    if literal.is_empty() || literal.eq_ignore_ascii_case("null") {
-        return None;
-    }
-    // Compound-key predicates contain further AND/OR/IS clauses after the first
-    // equality; merging those into an IN list would change the row targeting.
-    let upper = literal.to_ascii_uppercase();
-    if upper.contains(" AND ") || upper.contains(" OR ") || upper.starts_with("IS ") {
-        return None;
-    }
-    Some((column, literal))
+    push_mysql_joined_batches(statements, prefix, parts, " OR ", true, Some(MYSQL_DATA_GRID_BATCH_MAX_VALUES));
 }
 
 fn push_mysql_values_insert_batches(
@@ -2205,24 +2342,34 @@ fn push_mysql_values_insert_batches(
     push_mysql_joined_batches(
         statements,
         &format!("INSERT INTO {table} ({columns}) VALUES "),
-        value_tuples,
+        value_tuples.into_iter().map(|tuple| MysqlBatchPart { sql: tuple, values: 0 }).collect(),
         ", ",
         false,
+        // Row values are not key predicates; the value budget does not apply.
+        None,
     );
 }
 
+/// Joins the parts of a MySQL statement, splitting whenever the open batch
+/// reaches the row budget, the SQL byte budget, or — when `max_values` is set —
+/// the per-statement value budget (see `MYSQL_DATA_GRID_BATCH_MAX_VALUES`).
 fn push_mysql_joined_batches(
     statements: &mut Vec<String>,
     prefix: &str,
-    parts: Vec<String>,
+    parts: Vec<MysqlBatchPart>,
     separator: &str,
     wrap_multiple_parts: bool,
+    max_values: Option<usize>,
 ) {
-    let mut batch = Vec::new();
+    let mut batch: Vec<MysqlBatchPart> = Vec::new();
+    let mut batch_values = 0usize;
     for part in parts {
         let next_len = joined_batch_sql_len(prefix, &batch, &part, separator, wrap_multiple_parts);
+        let over_values = max_values.is_some_and(|max| batch_values + part.values > max);
         if !batch.is_empty()
-            && (batch.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS || next_len > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES)
+            && (batch.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS
+                || next_len > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES
+                || over_values)
         {
             push_mysql_joined_batch_statement(
                 statements,
@@ -2231,7 +2378,9 @@ fn push_mysql_joined_batches(
                 separator,
                 wrap_multiple_parts,
             );
+            batch_values = 0;
         }
+        batch_values += part.values;
         batch.push(part);
     }
     if !batch.is_empty() {
@@ -2241,35 +2390,36 @@ fn push_mysql_joined_batches(
 
 fn joined_batch_sql_len(
     prefix: &str,
-    current: &[String],
-    next: &str,
+    current: &[MysqlBatchPart],
+    next: &MysqlBatchPart,
     separator: &str,
     wrap_multiple_parts: bool,
 ) -> usize {
     let part_bytes = |part: &str| part.len() + usize::from(wrap_multiple_parts) * 2;
     if current.is_empty() {
-        return prefix.len() + next.len() + 1;
+        return prefix.len() + next.sql.len() + 1;
     }
     let current_bytes = if current.len() == 1 && wrap_multiple_parts {
-        current[0].len()
+        current[0].sql.len()
     } else {
-        current.iter().map(|part| part_bytes(part)).sum::<usize>() + separator.len() * current.len().saturating_sub(1)
+        current.iter().map(|part| part_bytes(&part.sql)).sum::<usize>()
+            + separator.len() * current.len().saturating_sub(1)
     };
     let existing_adjustment = if current.len() == 1 && wrap_multiple_parts { 2 } else { 0 };
-    prefix.len() + current_bytes + existing_adjustment + separator.len() + part_bytes(next) + 1
+    prefix.len() + current_bytes + existing_adjustment + separator.len() + part_bytes(&next.sql) + 1
 }
 
 fn push_mysql_joined_batch_statement(
     statements: &mut Vec<String>,
     prefix: &str,
-    parts: Vec<String>,
+    parts: Vec<MysqlBatchPart>,
     separator: &str,
     wrap_multiple_parts: bool,
 ) {
     let body = if parts.len() == 1 || !wrap_multiple_parts {
-        parts.join(separator)
+        parts.into_iter().map(|part| part.sql).collect::<Vec<_>>().join(separator)
     } else {
-        parts.into_iter().map(|part| format!("({part})")).collect::<Vec<_>>().join(separator)
+        parts.into_iter().map(|part| format!("({})", part.sql)).collect::<Vec<_>>().join(separator)
     };
     statements.push(format!("{prefix}{body};"));
 }
@@ -2887,10 +3037,19 @@ fn format_sqlserver_unicode_literal(text: &str) -> String {
         parts.push(format!("N'{}'", segment.replace('\'', "''")));
     }
     if parts.is_empty() {
-        "N''".to_string()
-    } else {
-        parts.join(" + ")
+        return "N''".to_string();
     }
+    // SQL Server types a `+` chain of ordinary literals and `NCHAR(n)` as
+    // `nvarchar(4000)`, and silently truncates a longer result instead of
+    // failing, so a long value needs an `nvarchar(max)` operand to survive
+    // (issue #12202). A single literal needs no anchor: SQL Server already types
+    // a literal longer than 4000 characters as `nvarchar(max)`. Each emitted
+    // character of the chain is one UTF-16 code unit of `text`, so the value's
+    // own length is the length of the concatenation.
+    if parts.len() > 1 && text.encode_utf16().count() > SQLSERVER_NVARCHAR_LITERAL_MAX_CHARS {
+        parts.insert(0, "CAST(N'' AS NVARCHAR(MAX))".to_string());
+    }
+    parts.join(" + ")
 }
 
 fn is_sqlite_literal_database(database_type: Option<DatabaseType>) -> bool {
@@ -2923,6 +3082,7 @@ fn keeps_literal_backslashes(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::Kwdb
         )
     )
@@ -3436,26 +3596,96 @@ fn build_primary_key_where(
     column_info: &[DataGridColumnInfo],
     identifier_quote: Option<&str>,
 ) -> String {
+    build_primary_key_predicate(database_type, primary_keys, columns, row, column_info, identifier_quote).sql
+}
+
+/// Builds a row's key `WHERE` clause and, for a single-column key, the structured
+/// equality the MySQL batching may merge into an `IN` list. Both come out of the
+/// same rendering call, so the merge decision can never be made against a clause
+/// that differs from the one the statement carries.
+fn build_primary_key_predicate(
+    database_type: Option<DatabaseType>,
+    primary_keys: &[String],
+    columns: &[Option<String>],
+    row: &[Value],
+    column_info: &[DataGridColumnInfo],
+    identifier_quote: Option<&str>,
+) -> MysqlKeyPredicate {
     if primary_keys.is_empty() && uses_keyless_row_predicate(database_type) {
-        return build_row_where(database_type, columns, row, column_info, identifier_quote);
+        if uses_postgres_ctid(database_type) {
+            if let Some(row_id_index) = find_column_index(database_type, columns, DBX_ROWID_COLUMN) {
+                // `validate_postgres_ctid_row_identifier` already refused every
+                // touched row whose locator does not parse, so this fallback only
+                // keeps a malformed caller from generating an unguarded write.
+                return MysqlKeyPredicate {
+                    sql: build_postgres_ctid_predicate(row.get(row_id_index).unwrap_or(&Value::Null))
+                        .unwrap_or_else(|| "FALSE".to_string()),
+                    // A physical row locator is a single equality set, not a
+                    // mergeable plain column equality, and PostgreSQL never
+                    // batches grid writes anyway.
+                    plain: None,
+                };
+            }
+        }
+        // A keyless row predicate matches every column value: never one plain
+        // equality, and never batched (`supports_mysql_data_grid_batch`).
+        return MysqlKeyPredicate {
+            sql: build_row_where(database_type, columns, row, column_info, identifier_quote),
+            plain: None,
+        };
     }
-    primary_keys
-        .iter()
-        .map(|primary_key| {
-            let value = row
-                .get(find_column_index(database_type, columns, primary_key).unwrap_or(usize::MAX))
-                .unwrap_or(&Value::Null);
-            build_column_predicate(
-                database_type,
-                primary_key,
-                value,
-                column_info_for(column_info, primary_key),
-                false,
-                identifier_quote,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" AND ")
+
+    let single_key = primary_keys.len() == 1;
+    let mut plain = None;
+    let mut parts = Vec::with_capacity(primary_keys.len());
+    for primary_key in primary_keys {
+        let value = row
+            .get(find_column_index(database_type, columns, primary_key).unwrap_or(usize::MAX))
+            .unwrap_or(&Value::Null);
+        let (part, part_plain) = build_column_predicate_with_plain(
+            database_type,
+            primary_key,
+            value,
+            column_info_for(column_info, primary_key),
+            false,
+            identifier_quote,
+        );
+        parts.push(part);
+        if single_key {
+            plain = part_plain;
+        }
+    }
+    let sql = parts.join(" AND ");
+    let plain = plain.and_then(|plain| plain_equality_from_clause(&sql, plain));
+    MysqlKeyPredicate { sql, plain }
+}
+
+/// Accepts the structured equality only when re-rendering it as
+/// `{column} = {literal}` reproduces the clause about to be sent, modulo the
+/// outer parentheses a batched part may add. `build_column_predicate` stays the
+/// single source of truth for that text: if a future branch there renders another
+/// form (a new wrapper, a different comparison), this check fails and the
+/// predicate keeps the OR form instead of silently merging into an `IN` list that
+/// targets rows the clause alone would not.
+fn plain_equality_from_clause(clause: &str, plain: MysqlPlainEquality) -> Option<MysqlPlainEquality> {
+    // Keep the retired text parser's explicit rejection of a bare `NULL` literal.
+    // A NULL key value already leaves through the `IS NULL` branch, so this only
+    // guards a formatter change that would emit the keyword for a real value:
+    // `col = NULL` and `col IN (NULL)` both match nothing, but an `IN (NULL, ...)`
+    // list would still read as a bug in the SQL a DBA has to approve.
+    if plain.literal.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let expected = format!("{} = {}", plain.column, plain.literal);
+    (strip_outer_parentheses(clause) == expected).then_some(plain)
+}
+
+fn strip_outer_parentheses(text: &str) -> &str {
+    let mut trimmed = text.trim();
+    while let Some(inner) = trimmed.strip_prefix('(').and_then(|inner| inner.strip_suffix(')')) {
+        trimmed = inner;
+    }
+    trimmed
 }
 
 fn build_row_where(
@@ -3522,25 +3752,54 @@ pub fn build_column_predicate(
     use_binary_text_comparison: bool,
     identifier_quote: Option<&str>,
 ) -> String {
+    build_column_predicate_with_plain(
+        database_type,
+        column,
+        value,
+        column_info,
+        use_binary_text_comparison,
+        identifier_quote,
+    )
+    .0
+}
+
+/// Renders one key predicate and, alongside it, the structured
+/// `` (identifier, literal) `` pair when the rendering is the plain
+/// `column = literal` equality. The pair is a *claim* about the text returned
+/// here, not an independent derivation: callers must confirm it still reproduces
+/// that text (`plain_equality_from_clause`) before merging anything.
+fn build_column_predicate_with_plain(
+    database_type: Option<DatabaseType>,
+    column: &str,
+    value: &Value,
+    column_info: Option<&DataGridColumnInfo>,
+    use_binary_text_comparison: bool,
+    identifier_quote: Option<&str>,
+) -> (String, Option<MysqlPlainEquality>) {
     let ident = predicate_ident(database_type, column, identifier_quote);
     if value.is_null() {
-        format!("{ident} IS NULL")
-    } else if let Some(predicate) = oceanbase_lob_predicate(database_type, &ident, value, column_info) {
-        predicate
-    } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
-        format!(
-            "BINARY {ident} = {}",
-            format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote)
-        )
-    } else {
-        let literal = format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote);
-        if use_binary_text_comparison {
-            if let Some(predicate) = postgres_keyless_json_predicate(database_type, &ident, &literal, column_info) {
-                return predicate;
-            }
-        }
-        format!("{ident} = {}", mysql_json_predicate_literal(literal, database_type, column_info))
+        return (format!("{ident} IS NULL"), None);
     }
+    if let Some(predicate) = oceanbase_lob_predicate(database_type, &ident, value, column_info) {
+        return (predicate, None);
+    }
+    if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
+        return (
+            format!(
+                "BINARY {ident} = {}",
+                format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote)
+            ),
+            None,
+        );
+    }
+    let literal = format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote);
+    if use_binary_text_comparison {
+        if let Some(predicate) = postgres_keyless_json_predicate(database_type, &ident, &literal, column_info) {
+            return (predicate, None);
+        }
+    }
+    let sql = format!("{ident} = {}", mysql_json_predicate_literal(literal.clone(), database_type, column_info));
+    (sql, Some(MysqlPlainEquality { column: ident, literal }))
 }
 
 fn build_save_column_predicate(
@@ -3735,7 +3994,7 @@ fn mysql_json_predicate_literal(
     }
 }
 
-fn data_grid_statement(database_type: Option<DatabaseType>, sql: String) -> String {
+pub(crate) fn data_grid_statement(database_type: Option<DatabaseType>, sql: String) -> String {
     if database_type == Some(DatabaseType::OceanbaseOracle) {
         if let Some(statement) = oceanbase_blob_statement(&sql, false) {
             return statement;
@@ -3920,7 +4179,7 @@ fn data_grid_update_sql(database_type: Option<DatabaseType>, table: &str, sets: 
     }
 }
 
-fn data_grid_delete_sql(database_type: Option<DatabaseType>, table: &str, where_clause: &str) -> String {
+pub(crate) fn data_grid_delete_sql(database_type: Option<DatabaseType>, table: &str, where_clause: &str) -> String {
     if database_type == Some(DatabaseType::ClickHouse) {
         format!("ALTER TABLE {table} DELETE WHERE {where_clause}")
     } else {
@@ -3998,6 +4257,37 @@ fn oracle_character_lob_constructor(data_type: &str) -> Option<&'static str> {
 
 fn is_synthetic_row_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
     uses_synthetic_row_id(database_type) && name.is_some_and(|name| name.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
+}
+
+fn parse_postgres_ctid_row_id(value: &Value) -> Option<(u32, String, u32)> {
+    let value = value.as_str()?;
+    let (table_oid, rest) = value.split_once(':')?;
+    if table_oid.is_empty() || !table_oid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let table_oid = table_oid.parse::<u32>().ok()?;
+    let (ctid, xmin) = rest.split_once(':')?;
+    let ctid = ctid.strip_prefix('(')?.strip_suffix(')')?;
+    let (block, offset) = ctid.split_once(',')?;
+    if block.is_empty()
+        || offset.is_empty()
+        || !block.bytes().all(|byte| byte.is_ascii_digit())
+        || !offset.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let block = block.parse::<u32>().ok()?;
+    let offset = offset.parse::<u16>().ok()?;
+    if xmin.is_empty() || !xmin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let xmin = xmin.parse::<u32>().ok()?;
+    Some((table_oid, format!("({block},{offset})"), xmin))
+}
+
+fn build_postgres_ctid_predicate(value: &Value) -> Option<String> {
+    let (table_oid, ctid, xmin) = parse_postgres_ctid_row_id(value)?;
+    Some(format!("tableoid = '{table_oid}'::oid AND ctid = '{ctid}'::tid AND xmin = '{xmin}'::xid"))
 }
 
 pub fn is_neo4j_element_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
@@ -4254,6 +4544,9 @@ fn clickhouse_no_mutable_columns_error() -> String {
 
 fn predicate_ident(database_type: Option<DatabaseType>, name: &str, identifier_quote: Option<&str>) -> String {
     if is_synthetic_row_id(database_type, Some(name)) {
+        if uses_postgres_ctid(database_type) {
+            return "(tableoid::text || ':' || ctid::text || ':' || xmin::text)".to_string();
+        }
         if uses_xugu_row_id(database_type) {
             return "ROWID".to_string();
         }
@@ -4388,6 +4681,7 @@ fn is_postgres_like_pattern_database(database_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
@@ -4519,6 +4813,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
+                | DatabaseType::Gbase8c
                 | DatabaseType::Vastbase
                 | DatabaseType::Goldendb
                 | DatabaseType::Yashandb
@@ -4533,6 +4828,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Questdb
                 | DatabaseType::OceanbaseOracle
                 | DatabaseType::Gbase
+                | DatabaseType::Gbase8s
                 | DatabaseType::Access
                 | DatabaseType::H2
                 | DatabaseType::Snowflake
@@ -6360,6 +6656,24 @@ mod tests {
     }
 
     #[test]
+    fn dameng_copy_insert_omits_identity_wrapper_for_auto_increment_columns() {
+        let mut options = sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")]],
+            DataGridCopyInsertMode::Merged,
+        );
+        options.database_type = Some(DatabaseType::Dameng);
+        options.table_meta.as_mut().unwrap().columns = Some(vec![
+            column("table_id", "bigint", false, Some("auto_increment")),
+            column("table_name", "varchar", true, None),
+        ]);
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO \"dbo\".\"gen_table\" (\"table_id\", \"table_name\") VALUES (1, 't_destype');")
+        );
+    }
+
+    #[test]
     fn mysql_copy_statements_preserve_blob_hex_literals() {
         let table_meta = DataGridTableMeta {
             catalog: None,
@@ -6862,6 +7176,25 @@ mod tests {
         assert_eq!(equals(Some(DatabaseType::Neo4j), "score", json!(7)), Some("n.`score` = 7".to_string()));
         assert_eq!(equals(None, DBX_ROWID_COLUMN, json!("row-id")), Some("\"__DBX_ROWID\" = 'row-id'".to_string()));
         assert_eq!(equals(Some(DatabaseType::VictoriaMetrics), DBX_ROWID_COLUMN, json!("row-id")), None);
+    }
+
+    #[test]
+    fn builds_postgres_ctid_context_filter_conditions() {
+        let condition = build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            column_name: DBX_ROWID_COLUMN.to_string(),
+            mode: DataGridContextFilterMode::Equals,
+            value: json!("16384:(0,1):742"),
+            values: Vec::new(),
+            end_value: None,
+            column_info: None,
+        });
+
+        assert_eq!(
+            condition.as_deref(),
+            Some("(tableoid::text || ':' || ctid::text || ':' || xmin::text) = '16384:(0,1):742'")
+        );
     }
 
     #[test]
@@ -9740,6 +10073,32 @@ mod tests {
         }
     }
 
+    fn postgres_ctid_options() -> DataGridSaveStatementOptions {
+        DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "duplicate_rows".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "integer", false, None), column("value", "text", true, None)]),
+            },
+            columns: vec![DBX_ROWID_COLUMN.to_string(), "id".to_string(), "value".to_string()],
+            source_columns: None,
+            rows: vec![
+                vec![json!("16384:(0,1):742"), json!(1), json!("same")],
+                vec![json!("16384:(0,2):743"), json!(1), json!("same")],
+            ],
+            dirty_rows: vec![(0, vec![(2, json!("updated"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        }
+    }
+
     /// The predicate a guard counts must be byte-identical to the one its
     /// statement carries, otherwise the safety decision is made against a
     /// different set of columns or values than the mutation actually uses.
@@ -9791,10 +10150,71 @@ mod tests {
                 sql: r#"SELECT COUNT(*) AS dbx_keyless_row_matches FROM "daily_stats" WHERE ("stat_date" = '2026-09-07' AND "period" IS NULL)"#
                     .to_string(),
                 max_matched_rows: 1,
+                min_matched_rows: 0,
                 message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+                min_message: None,
             }]
         );
         assert_guards_cover_statement_predicates(&result);
+    }
+
+    #[test]
+    fn uses_postgres_tableoid_and_ctid_to_edit_one_duplicate_row() {
+        let update = prepare_data_grid_save(postgres_ctid_options());
+
+        assert_eq!(update.validation_error, None);
+        assert_eq!(
+            update.statements,
+            vec![
+                r#"UPDATE "public"."duplicate_rows" SET "value" = 'updated' WHERE tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid;"#
+            ]
+        );
+        assert_eq!(update.keyless_guards.len(), 1);
+        assert_eq!(
+            update.keyless_guards[0].sql,
+            r#"SELECT COUNT(*) AS dbx_keyless_row_matches FROM "public"."duplicate_rows" WHERE (tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid)"#
+        );
+        // A physical locator must still address one row: zero matches means the
+        // row moved, which the frontend reports instead of "deleted successfully".
+        assert_eq!(update.keyless_guards[0].min_matched_rows, 1);
+        assert_eq!(update.keyless_guards[0].min_message.as_deref(), Some(POSTGRES_CTID_STALE_ROW_ERROR));
+        assert_guards_cover_statement_predicates(&update);
+
+        // CTID changes after UPDATE, so history rollback uses the new full-row
+        // values and only proceeds if that predicate still identifies one row.
+        assert_eq!(
+            update.rollback_statements,
+            vec![
+                r#"UPDATE "public"."duplicate_rows" SET "value" = 'same' WHERE ("id" = 1 AND "value" = 'updated') AND (SELECT COUNT(*) FROM "public"."duplicate_rows" WHERE ("id" = 1 AND "value" = 'updated')) = 1;"#
+            ]
+        );
+
+        let mut delete_options = postgres_ctid_options();
+        delete_options.dirty_rows.clear();
+        delete_options.deleted_rows = vec![0];
+        let delete = prepare_data_grid_save(delete_options);
+        assert_eq!(
+            delete.statements,
+            vec![
+                r#"DELETE FROM "public"."duplicate_rows" WHERE tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid;"#
+            ]
+        );
+        assert_eq!(delete.keyless_guards.len(), 1);
+        assert_eq!(delete.keyless_guards[0].min_matched_rows, 1);
+        assert_eq!(delete.keyless_guards[0].min_message.as_deref(), Some(POSTGRES_CTID_STALE_ROW_ERROR));
+        assert_guards_cover_statement_predicates(&delete);
+    }
+
+    #[test]
+    fn rejects_invalid_postgres_ctid_before_building_mutations() {
+        let mut options = postgres_ctid_options();
+        options.rows[0][0] = json!("not-a-ctid");
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error.as_deref(), Some(POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR));
+        assert!(result.statements.is_empty());
+        assert!(result.keyless_guards.is_empty());
     }
 
     #[test]
@@ -9912,6 +10332,15 @@ mod tests {
         );
     }
 
+    /// A predicate the save already proved plain: the same `(column, literal)`
+    /// pair `build_primary_key_predicate` produces, for direct batcher tests.
+    fn mysql_plain_predicate(sql: &str, column: &str, literal: &str) -> MysqlKeyPredicate {
+        MysqlKeyPredicate {
+            sql: sql.to_string(),
+            plain: Some(MysqlPlainEquality { column: column.to_string(), literal: literal.to_string() }),
+        }
+    }
+
     #[test]
     fn batches_mysql_updates_with_identical_values() {
         let mut options = mysql_people_save_options(3);
@@ -9921,11 +10350,335 @@ mod tests {
         let result = prepare_data_grid_save(options);
 
         assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `app`.`people` SET `status` = NULL WHERE `id` IN (1, 2, 3);"]);
+        assert_eq!(result.rollback_statements.len(), 3);
+    }
+
+    #[test]
+    fn keeps_single_dirty_mysql_row_as_plain_equality() {
+        let mut options = mysql_people_save_options(1);
+        options.dirty_rows = vec![(0, vec![(1, Value::Null)])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `app`.`people` SET `status` = NULL WHERE `id` = 1;"]);
+    }
+
+    #[test]
+    fn preserves_mysql_update_order_when_mergeable_and_unmergeable_predicates_mix() {
+        // Renders past the save path: a NULL key row is rejected by
+        // `validate_existing_row_primary_keys`, but the batcher itself must still
+        // flush an open run in place instead of regrouping, so the order the save
+        // built (IN-able, unmergeable, IN-able) survives.
+        let mut statements = Vec::new();
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            "UPDATE `app`.`people` SET `id` = 10 WHERE ",
+            vec![
+                mysql_plain_predicate("`id` = 1", "`id`", "1"),
+                MysqlKeyPredicate { sql: "`id` IS NULL".to_string(), plain: None },
+                mysql_plain_predicate("`id` = 3", "`id`", "3"),
+            ],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["UPDATE `app`.`people` SET `id` = 10 WHERE (`id` = 1) OR (`id` IS NULL) OR (`id` = 3);"]
+        );
+    }
+
+    #[test]
+    fn keeps_null_mysql_key_predicates_out_of_the_in_run() {
+        // A NULL key cannot be merged (`col IN (NULL)` never matches, unlike
+        // `col = NULL`), so it stays its own part and never joins a neighbour run.
+        let mut statements = Vec::new();
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            "UPDATE `app`.`people` SET `id` = 1 WHERE ",
+            vec![
+                mysql_plain_predicate("`id` = 1", "`id`", "1"),
+                mysql_plain_predicate("`id` = 2", "`id`", "2"),
+                MysqlKeyPredicate { sql: "`id` IS NULL".to_string(), plain: None },
+                mysql_plain_predicate("`id` = 3", "`id`", "3"),
+                mysql_plain_predicate("`id` = 4", "`id`", "4"),
+            ],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["UPDATE `app`.`people` SET `id` = 1 WHERE (`id` IN (1, 2)) OR (`id` IS NULL) OR (`id` IN (3, 4));"]
+        );
+    }
+
+    #[test]
+    fn merges_mysql_string_keys_containing_sql_keywords() {
+        // The retired text parser rejected any literal containing " AND " / " OR "
+        // / starting with "IS "; the structured check proves these are plain
+        // equalities, so both paths merge them now.
+        let mut options = mysql_people_save_options(0);
+        options.table_meta.columns = Some(vec![column("id", "varchar(32)", false, None)]);
+        options.columns = vec!["id".to_string()];
+        options.table_meta.primary_keys = vec!["id".to_string()];
+        options.rows = vec![vec![json!("a AND b")], vec![json!("c OR d")], vec![json!("IS x")]];
+        options.dirty_rows =
+            vec![(0, vec![(0, json!("new"))]), (1, vec![(0, json!("new"))]), (2, vec![(0, json!("new"))])];
+        options.deleted_rows = vec![];
+
+        let updates = prepare_data_grid_save(options.clone());
+
+        assert_eq!(updates.validation_error, None);
+        assert_eq!(
+            updates.statements,
+            vec!["UPDATE `app`.`people` SET `id` = 'new' WHERE `id` IN ('a AND b', 'c OR d', 'IS x');"]
+        );
+
+        let deletes = prepare_data_grid_save(DataGridSaveStatementOptions {
+            dirty_rows: vec![],
+            deleted_rows: vec![0, 1, 2],
+            ..options
+        });
+        assert_eq!(deletes.validation_error, None);
+        assert_eq!(deletes.statements, vec!["DELETE FROM `app`.`people` WHERE `id` IN ('a AND b', 'c OR d', 'IS x');"]);
+    }
+
+    #[test]
+    fn merges_mysql_string_keys_with_quotes_and_backslashes() {
+        let mut options = mysql_people_save_options(0);
+        options.table_meta.columns = Some(vec![column("id", "varchar(32)", false, None)]);
+        options.columns = vec!["id".to_string()];
+        options.table_meta.primary_keys = vec!["id".to_string()];
+        options.rows = vec![vec![json!("O'Reilly")], vec![json!("back\\slash")]];
+        options.dirty_rows = vec![(0, vec![(0, json!("new"))]), (1, vec![(0, json!("new"))])];
+
+        let result = prepare_data_grid_save(options);
+
+        // The literals keep the formatter's escaping; only the predicate shape changed.
+        assert_eq!(result.validation_error, None);
         assert_eq!(
             result.statements,
-            vec!["UPDATE `app`.`people` SET `status` = NULL WHERE (`id` = 1) OR (`id` = 2) OR (`id` = 3);"]
+            vec!["UPDATE `app`.`people` SET `id` = 'new' WHERE `id` IN ('O''Reilly', 'back\\\\slash');"]
         );
-        assert_eq!(result.rollback_statements.len(), 3);
+    }
+
+    #[test]
+    fn keeps_null_mysql_key_predicates_out_of_the_in_run_after_a_rejected_save() {
+        // A NULL key value never reaches the batcher: the save refuses the write
+        // outright, which is also why `col IN (NULL)` cannot silently over-match.
+        let mut options = mysql_people_save_options(0);
+        options.table_meta.columns = Some(vec![column("id", "bigint", true, None)]);
+        options.columns = vec!["id".to_string()];
+        options.table_meta.primary_keys = vec!["id".to_string()];
+        options.rows = vec![vec![json!(1)], vec![Value::Null], vec![json!(3)]];
+        options.dirty_rows = vec![(0, vec![(0, json!(10))]), (1, vec![(0, json!(11))]), (2, vec![(0, json!(12))])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert!(result.statements.is_empty());
+        assert!(
+            result.validation_error.unwrap_or_default().contains("has no value in the query result"),
+            "a NULL key must be refused instead of merging into an IN list"
+        );
+    }
+
+    #[test]
+    fn keeps_guarded_mysql_predicates_out_of_the_in_run() {
+        // A clause that carries an extra `AND` guard is not a plain equality even
+        // when its first half looks like one; merging it would widen the batch.
+        let mut statements = Vec::new();
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            "DELETE FROM `app`.`people` WHERE ",
+            vec![
+                mysql_plain_predicate("`id` = 1", "`id`", "1"),
+                MysqlKeyPredicate { sql: "`id` = 2 AND `payload` = 'x'".to_string(), plain: None },
+                mysql_plain_predicate("`id` = 3", "`id`", "3"),
+            ],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["DELETE FROM `app`.`people` WHERE (`id` = 1) OR (`id` = 2 AND `payload` = 'x') OR (`id` = 3);"]
+        );
+    }
+
+    #[test]
+    fn keeps_compound_key_mysql_updates_in_or_form() {
+        let mut options = mysql_people_save_options(2);
+        options.table_meta.primary_keys = vec!["id".to_string(), "status".to_string()];
+        options.dirty_rows = vec![(0, vec![(1, json!("x"))]), (1, vec![(1, json!("x"))])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `app`.`people` SET `status` = 'x' WHERE (`id` = 1 AND `status` = 'active') OR (`id` = 2 AND `status` = 'active');"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_plain_report_when_the_rendered_clause_differs_from_the_pair() {
+        let mysql = Some(DatabaseType::Mysql);
+        // Sanity: the ordinary MySQL key is plain.
+        let predicate = build_primary_key_predicate(
+            mysql,
+            &["id".to_string()],
+            &[Some("id".to_string())],
+            &[json!(1)],
+            &[column("id", "int", false, None)],
+            None,
+        );
+        assert_eq!(predicate.sql, "`id` = 1");
+        assert!(predicate.plain.is_some());
+
+        // MySQL JSON columns already wrap the literal (`CAST(... AS JSON)`). Any
+        // future branch that renders another form must stop being mergeable,
+        // because the pair no longer reproduces the clause.
+        let json_predicate = build_primary_key_predicate(
+            mysql,
+            &["payload".to_string()],
+            &[Some("payload".to_string())],
+            &[json!(r#"{"a":1}"#)],
+            &[column("payload", "json", false, None)],
+            None,
+        );
+        assert!(json_predicate.sql.contains("CAST("), "{}", json_predicate.sql);
+        assert!(json_predicate.plain.is_none(), "a wrapped literal must stay in the OR form");
+    }
+
+    #[test]
+    fn plain_equality_check_ignores_outer_parentheses_only() {
+        let plain = |column: &str, literal: &str| MysqlPlainEquality {
+            column: column.to_string(),
+            literal: literal.to_string(),
+        };
+
+        assert!(plain_equality_from_clause("`id` = 1", plain("`id`", "1")).is_some());
+        assert!(plain_equality_from_clause("(`id` = 1)", plain("`id`", "1")).is_some());
+        // An appended guard, a compound key or a different comparison must not pass.
+        assert!(plain_equality_from_clause("`id` = 1 AND `status` = 'x'", plain("`id`", "1")).is_none());
+        assert!(plain_equality_from_clause("BINARY `id` = 1", plain("`id`", "1")).is_none());
+        assert!(plain_equality_from_clause("`id` IS NULL", plain("`id`", "1")).is_none());
+        assert!(plain_equality_from_clause("`id` = CAST('1' AS JSON)", plain("`id`", "1")).is_none());
+        // A bare NULL keyword is never merged, matching the retired parser.
+        assert!(plain_equality_from_clause("`id` = NULL", plain("`id`", "NULL")).is_none());
+        assert!(plain_equality_from_clause("`id` = null", plain("`id`", "null")).is_none());
+    }
+
+    #[test]
+    fn splits_mysql_batches_above_the_value_budget() {
+        let row_count = MYSQL_DATA_GRID_BATCH_MAX_VALUES + 1;
+        let mut options = mysql_people_save_options(row_count);
+        options.dirty_rows = (0..row_count).map(|index| (index, vec![(1, json!("archived"))])).collect();
+
+        let updates = prepare_data_grid_save(options.clone());
+
+        assert_eq!(updates.validation_error, None);
+        assert_eq!(updates.statements.len(), 2);
+        // The first statement holds exactly the value budget, so the last value
+        // it carries is the budget itself and the leftover opens the next one.
+        assert!(updates.statements[0].contains("`id` IN ("));
+        assert!(updates.statements[0].ends_with(&format!("{});", MYSQL_DATA_GRID_BATCH_MAX_VALUES)));
+        assert!(!updates.statements[0].contains(&format!(", {row_count})")));
+        assert!(updates.statements[1].ends_with(&format!("WHERE `id` = {row_count};")));
+
+        // The same budget applies to DELETE, which already emits IN lists today.
+        let deletes = prepare_data_grid_save(DataGridSaveStatementOptions {
+            dirty_rows: vec![],
+            deleted_rows: (0..row_count).collect(),
+            ..options
+        });
+
+        assert_eq!(deletes.validation_error, None);
+        assert_eq!(deletes.statements.len(), 2);
+        assert!(deletes.statements[0].ends_with(&format!("{});", MYSQL_DATA_GRID_BATCH_MAX_VALUES)));
+        assert!(deletes.statements[1].ends_with(&format!("WHERE `id` = {row_count};")));
+    }
+
+    #[test]
+    fn mysql_data_grid_update_respects_target_sql_size() {
+        // Keys long enough that two of them fit the text budget but not three, so
+        // the merged run still has to split even though all rows share one SET.
+        let key_length = 101_000;
+        let mut options = mysql_people_save_options(3);
+        options.rows[0][0] = json!("a".repeat(key_length));
+        options.rows[1][0] = json!("b".repeat(key_length));
+        options.rows[2][0] = json!("c".repeat(key_length));
+        options.dirty_rows = vec![
+            (0, vec![(1, json!("archived"))]),
+            (1, vec![(1, json!("archived"))]),
+            (2, vec![(1, json!("archived"))]),
+        ];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements.len(), 2);
+        assert!(result.statements[0].contains("`id` IN ("), "{}", &result.statements[0][..80]);
+        assert!(result.statements.iter().all(|statement| statement.contains("'archived'")));
+        assert!(result.statements.iter().all(|statement| statement.len() <= MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES));
+    }
+
+    #[test]
+    fn splits_mysql_in_runs_when_the_plain_column_changes() {
+        // The save path never mixes key columns inside one SET group, so this is
+        // only reachable from a direct caller — but merging across columns would
+        // rewrite `id = 1 OR code = 'a'` into a list that matches the wrong rows,
+        // so the column change must break the run.
+        let mut statements = Vec::new();
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            "UPDATE `app`.`people` SET `status` = 'x' WHERE ",
+            vec![
+                mysql_plain_predicate("`id` = 1", "`id`", "1"),
+                mysql_plain_predicate("`code` = 'a'", "`code`", "'a'"),
+                mysql_plain_predicate("`id` = 2", "`id`", "2"),
+            ],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["UPDATE `app`.`people` SET `status` = 'x' WHERE (`id` = 1) OR (`code` = 'a') OR (`id` = 2);"]
+        );
+    }
+
+    #[test]
+    fn keeps_non_mysql_batched_updates_in_or_form() {
+        for (database_type, quote) in [(DatabaseType::Postgres, '"'), (DatabaseType::StarRocks, '`')] {
+            let mut options = mysql_people_save_options(2);
+            options.database_type = Some(database_type);
+            options.table_meta.primary_keys = vec!["id".to_string()];
+            options.dirty_rows = vec![(0, vec![(1, Value::Null)]), (1, vec![(1, Value::Null)])];
+
+            let result = prepare_data_grid_save_for_driver_profile(options, None);
+
+            assert_eq!(result.validation_error, None);
+            assert_eq!(
+                result.statements,
+                vec![
+                    format!("UPDATE {quote}app{quote}.{quote}people{quote} SET {quote}status{quote} = NULL WHERE {quote}id{quote} = 1;"),
+                    format!("UPDATE {quote}app{quote}.{quote}people{quote} SET {quote}status{quote} = NULL WHERE {quote}id{quote} = 2;"),
+                ],
+                "{database_type:?} must keep one statement per row"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_mysql_batching_for_starrocks_driver_profiles() {
+        // The batch gate stays `DatabaseType::Mysql`; a MySQL connection whose
+        // driver profile is "starrocks" must keep the same batching (and the same
+        // IN form the DELETE path already emits there).
+        let mut options = mysql_people_save_options(2);
+        options.dirty_rows = vec![(0, vec![(1, Value::Null)]), (1, vec![(1, Value::Null)])];
+
+        let result = prepare_data_grid_save_for_driver_profile(options, Some("starrocks"));
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `app`.`people` SET `status` = NULL WHERE `id` IN (1, 2);"]);
     }
 
     #[test]
@@ -10361,6 +11114,26 @@ mod tests {
             format_grid_sql_literal(&json!("line1\\\r\nline2"), Some(DatabaseType::SqlServer), None),
             r"N'line1\' + NCHAR(13) + NCHAR(10) + N'line2'"
         );
+    }
+
+    #[test]
+    fn sqlserver_long_multiline_literals_anchor_nvarchar_max() {
+        // A `+` chain of non-`max` operands is typed nvarchar(4000) by SQL Server, which
+        // silently truncates a longer result, so a long value must be anchored on
+        // nvarchar(max) or the copied statement loses everything past 4000 characters
+        // (issue #12202).
+        let long_value = format!("{}\n{}", "a".repeat(3000), "b".repeat(3000));
+        let literal = format_grid_sql_literal(&json!(long_value), Some(DatabaseType::SqlServer), None);
+        assert!(literal.starts_with("CAST(N'' AS NVARCHAR(MAX)) + N'"), "{literal}");
+        assert!(literal.contains(" + NCHAR(10) + N'"), "{literal}");
+
+        // A value that fits in nvarchar(4000) keeps the plain chain.
+        let short_value = format_grid_sql_literal(&json!("line1\nline2"), Some(DatabaseType::SqlServer), None);
+        assert_eq!(short_value, r"N'line1' + NCHAR(10) + N'line2'");
+
+        // A single long literal is already nvarchar(max) by SQL Server's own rules.
+        let single_line = format_grid_sql_literal(&json!("a".repeat(5000)), Some(DatabaseType::SqlServer), None);
+        assert_eq!(single_line, format!("N'{}'", "a".repeat(5000)));
     }
 
     #[test]

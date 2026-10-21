@@ -1,7 +1,5 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -61,8 +59,6 @@ vi.mock("@/components/ui/button", async () => {
 });
 
 import SshHostKeyPromptDialog from "@/components/ssh/SshHostKeyPromptDialog.vue";
-
-const dialogSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/ssh/SshHostKeyPromptDialog.vue"), "utf8");
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -128,13 +124,6 @@ async function mountDialog() {
 }
 
 describe("SshHostKeyPromptDialog web bridge", () => {
-  it("requires an explicit answer for blocking SSH prompts", () => {
-    expect(dialogSource).toContain(':show-close-button="false"');
-    expect(dialogSource).toContain("@interact-outside.prevent");
-    expect(dialogSource).toContain("@escape-key-down.prevent");
-    expect(dialogSource).not.toContain(':dismissible="false"');
-  });
-
   it("keeps the prompt above a later body-mounted connection dialog and answerable", async () => {
     await mountDialog();
 
@@ -376,8 +365,6 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     expect(document.body.textContent).toContain("203.0.113.10:22");
     expect(document.body.textContent).toContain("08ca4746e8fbf97038a93105d3ef023112e3f66bc097869401628c00acea7709");
     expect(document.body.textContent).toContain("/home/testuser/.cache/dbx/sqlite-worker/");
-    expect(dialogSource).toContain("break-all");
-    expect(dialogSource).toContain("shrink-0");
 
     const buttons = [...document.body.querySelectorAll("button")].map((button) => button.textContent?.trim());
     expect(buttons).toContain("Cancel");

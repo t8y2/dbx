@@ -2,15 +2,10 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { PluginHostBridge } from "../../apps/desktop/src/lib/plugins/pluginHostBridge.ts";
-import {
-  MAX_PLUGIN_PLAN_BYTES,
-  MAX_PLUGIN_PLAN_SQL_CHARS,
-  MAX_PLUGIN_PLAN_TIMEOUT_MS,
-  PLUGIN_PLAN_PERMISSION,
-  PLUGIN_PLAN_WARNING,
-} from "../../apps/desktop/src/types/pluginPlan.ts";
+import { MAX_PLUGIN_PLAN_BYTES, MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, PLUGIN_PLAN_WARNING } from "../../apps/desktop/src/types/pluginPlan.ts";
 import type { PluginPlanCapabilities, PluginPlanRequest } from "../../apps/desktop/src/types/pluginPlan.ts";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "../../apps/desktop/src/types/database.ts";
+import { GAUSSDB_DWS_PRODUCT_PROFILE, GAUSSDB_DWS_PRODUCT_PROFILE_KEY } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 
 /**
  * The plan Host API (#9675) spans three languages: the Rust core that owns
@@ -95,12 +90,16 @@ test("plan limits and mode match the Rust core", () => {
   // raised in Rust without the matching TS change must fail this test.
   assert.equal(rustConst(planCoreSource, "MAX_PLUGIN_PLAN_TIMEOUT_MS").replaceAll("_", ""), String(MAX_PLUGIN_PLAN_TIMEOUT_MS));
   assert.equal(rustConst(planCoreSource, "MAX_PLUGIN_PLAN_SQL_CHARS").replaceAll("_", ""), String(MAX_PLUGIN_PLAN_SQL_CHARS));
-  assert.equal(
-    rustConst(planCoreSource, "MAX_PLUGIN_PLAN_BYTES").replaceAll("_", "").replaceAll(" ", ""),
-    `4*1024*1024`,
-  );
+  assert.equal(rustConst(planCoreSource, "MAX_PLUGIN_PLAN_BYTES").replaceAll("_", "").replaceAll(" ", ""), `4*1024*1024`);
   assert.equal(MAX_PLUGIN_PLAN_BYTES, 4 * 1024 * 1024);
   assert.equal(rustConst(planCoreSource, "PLUGIN_PLAN_MODE_ESTIMATED"), '"estimated"');
+});
+
+test("the explicit Huawei DWS profile marker matches the Rust Host gate without a version pin", () => {
+  assert.equal(rustConst(planCoreSource, "GAUSSDB_DWS_PROFILE_KEY"), JSON.stringify(GAUSSDB_DWS_PRODUCT_PROFILE_KEY));
+  assert.equal(rustConst(planCoreSource, "GAUSSDB_DWS_PROFILE_VALUE"), JSON.stringify(GAUSSDB_DWS_PRODUCT_PROFILE));
+  assert.match(planCoreSource, /if is_explicit_gaussdb_dws_profile\(config\)/);
+  assert.equal(planCoreSource.includes("SUPPORTED_GAUSSDB_DWS_VERSION"), false);
 });
 
 test("plan warning codes match the Rust core", () => {
@@ -193,7 +192,11 @@ test("mode is required and only estimated is served", async () => {
     },
   });
 
-  for (const [id, mode] of [["actual", "actual"], ["analyze", "analyze"], ["missing", undefined]] as const) {
+  for (const [id, mode] of [
+    ["actual", "actual"],
+    ["analyze", "analyze"],
+    ["missing", undefined],
+  ] as const) {
     send(bridge, target, "host.explainPlan", { connectionId: "c1", sql: "SELECT 1", mode }, id);
   }
   await until(() => messages.length === 3, "the three rejections");

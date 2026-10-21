@@ -235,8 +235,20 @@ test("binaryCellClipboardText decodes textual MySQL varbinary and preserves arbi
   assert.equal(binaryCellClipboardText(null, "VARBINARY(128)", "mysql"), null);
 
   // Case 7: 非目标类型 / 非 MySQL 一律不改写，回归保护。
-  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "mysql"), null); // MySQL BLOB 不跟随
-  assert.equal(binaryCellClipboardText("0x616263", "LONGBLOB", "mysql"), null);
+  // MySQL BLOB 跟随（#12413）：网格对文本型 BLOB 显示文本预览，复制必须与显示一致；
+  // BLOB 与显示/编辑路径一样只解严格 UTF-8，不做 GBK 回退。
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "mysql"), "abc");
+  assert.equal(binaryCellClipboardText("0x616263", "LONGBLOB", "mysql"), "abc");
+  assert.equal(binaryCellClipboardText("0xd6d0cec4", "LONGBLOB", "mysql"), null); // BLOB 不回退 GBK（与显示一致）
+  // Oracle 家族 BLOB 与内联显示预览共用同一闸门：文本型 BLOB 显示为文本，复制也必须
+  // 还原成同一份文本；只解严格 UTF-8（不回退 GBK），不可解码的 bytes 仍为 hex，
+  // 没有文本预览的库（如 sqlite）与 Oracle RAW 不受影响。
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "oracle"), "abc");
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "oceanbase-oracle"), "abc");
+  assert.equal(binaryCellClipboardText("0xd6d0cec4", "BLOB", "oracle"), null);
+  assert.equal(binaryCellClipboardText("0x00fffe", "BLOB", "oracle"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "sqlite"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "RAW", "oracle"), null);
   assert.equal(binaryCellClipboardText("0x616263", "BINARY(8)", "mysql"), null); // MySQL BINARY 不跟随
   assert.equal(binaryCellClipboardText("0x616263", "VARBINARY(128)", "sqlserver"), null); // SQL Server varbinary 不改
   assert.equal(binaryCellClipboardText("0x616263", "bytea", "postgres"), null); // Postgres bytea 不改

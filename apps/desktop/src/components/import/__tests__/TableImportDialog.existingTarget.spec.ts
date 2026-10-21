@@ -38,6 +38,7 @@ vi.mock("@/stores/connectionStore", () => ({
       if (id === "connection-1") return { id, name: "SQLite", db_type: "sqlite" };
       if (id === "postgres-1") return { id, name: "PostgreSQL", db_type: "postgres" };
       if (id === "sqlserver-1") return { id, name: "SQL Server", db_type: "sqlserver" };
+      if (id === "doris-1") return { id, name: "Doris", db_type: "doris" };
       return undefined;
     },
     ensureConnected: mocks.ensureConnected,
@@ -259,7 +260,17 @@ beforeEach(() => {
     { name: "name", data_type: "TEXT", nullable: true, is_primary_key: false },
   ]);
   mocks.listDataTypes.mockClear();
-  mocks.previewTableImportFile.mockClear();
+  mocks.previewTableImportFile.mockReset().mockResolvedValue({
+    fileName: "rows.xlsx",
+    filePath: "/tmp/rows.xlsx",
+    fileType: "excel",
+    sizeBytes: 24,
+    columns: ["id", "name"],
+    rows: [[1, "Alice"]],
+    totalRows: 1,
+    sourceFingerprint: "rows-xlsx",
+    sheets: ["Data"],
+  });
   mocks.importTableFile.mockReset().mockImplementation(async (request, onProgress) => {
     onProgress({ importId: request.importId, status: "done", rowsImported: 1, totalRows: 1, elapsedMs: 1 });
     return { importId: request.importId, rowsImported: 1, totalRows: 1, elapsedMs: 1 };
@@ -469,6 +480,110 @@ describe("TableImportDialog existing targets", () => {
     expect(document.body.textContent).toContain("requires primary-key metadata");
   });
 
+  it("recognizes Doris unique-key columns as primary keys for update-existing", async () => {
+    mocks.getColumns.mockResolvedValueOnce([
+      { name: "id", data_type: "BIGINT", nullable: false, is_primary_key: false, is_unique: true },
+      { name: "name", data_type: "VARCHAR", nullable: true, is_primary_key: false, is_unique: false },
+    ]);
+    i18n.global.locale.value = "en";
+    await mountDialog({ connectionId: "doris-1", database: "analytics" });
+    await selectWorkbook();
+    buttonContaining("Existing table")?.click();
+    await flushAsyncUpdates();
+    await selectExistingTarget("existing_target");
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+
+    const policySelect = document.body.querySelector<HTMLSelectElement>('[data-testid="table-import-conflict-policy"]');
+    expect(policySelect).toBeTruthy();
+    const updateOption = policySelect?.querySelector<HTMLOptionElement>('option[value="updateExisting"]');
+    await vi.waitFor(() => expect(updateOption?.disabled, document.body.textContent || "").toBe(false));
+    if (policySelect) {
+      policySelect.value = "updateExisting";
+      policySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await flushAsyncUpdates();
+
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Start Import")?.click();
+    await flushAsyncUpdates();
+
+    expect(mocks.importTableFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: "doris-1",
+        conflictPolicy: "updateExisting",
+        skipDuplicateRows: false,
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it("allows selecting update-existing on options step when target has keys even if preview columns are initially unmapped, and guards mapping step", async () => {
+    mocks.previewTableImportFile.mockResolvedValue({
+      fileName: "unmapped.xlsx",
+      filePath: "/tmp/unmapped.xlsx",
+      fileType: "excel",
+      sizeBytes: 24,
+      columns: ["other_code", "name"],
+      rows: [[1, "Alice"]],
+      totalRows: 1,
+      sourceFingerprint: "unmapped-xlsx",
+      sheets: ["Data"],
+    });
+    i18n.global.locale.value = "en";
+    await mountDialog({ connectionId: "doris-1", database: "analytics" });
+    await selectWorkbook();
+    buttonContaining("Existing table")?.click();
+    await flushAsyncUpdates();
+    await selectExistingTarget("existing_target");
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+
+    const policySelect = document.body.querySelector<HTMLSelectElement>('[data-testid="table-import-conflict-policy"]');
+    expect(policySelect).toBeTruthy();
+    const updateOption = policySelect?.querySelector<HTMLOptionElement>('option[value="updateExisting"]');
+    // On options step, the option is enabled because target table has unique/primary key
+    expect(updateOption?.disabled).toBe(false);
+    if (policySelect) {
+      policySelect.value = "updateExisting";
+      policySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await flushAsyncUpdates();
+
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+
+    // Now in mapping step: column mapping hasn't mapped the primary key yet,
+    // so error is displayed and proceeding is guarded
+    expect(document.body.textContent).toContain("Map every primary-key column to update conflicts. Missing: id");
+    expect(buttonContaining("Next")?.disabled).toBe(true);
+
+    // Map other_code -> id
+    const mappings = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select"));
+    if (mappings[0]) {
+      mappings[0].value = "id";
+      mappings[0].dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await flushAsyncUpdates();
+
+    // Now mapping is valid, so Next becomes enabled
+    expect(buttonContaining("Next")?.disabled).toBe(false);
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Start Import")?.click();
+    await flushAsyncUpdates();
+
+    expect(mocks.importTableFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: "doris-1",
+        conflictPolicy: "updateExisting",
+        skipDuplicateRows: false,
+      }),
+      expect.any(Function),
+    );
+  });
+
   it("allows selecting target schema on schema-aware databases and reloads tables", async () => {
     i18n.global.locale.value = "en";
     await mountDialog({ connectionId: "sqlserver-1", database: "mydb" });
@@ -622,5 +737,77 @@ describe("TableImportDialog existing targets", () => {
     await flushAsyncUpdates();
     const nameSelects = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
     expect(nameSelects.map((s) => s.value)).toEqual(["__skip__", "__skip__"]);
+  });
+
+  it("renders strikethrough on skipped column header and preview cells in mapping step", async () => {
+    i18n.global.locale.value = "en";
+    mocks.previewTableImportFile.mockResolvedValueOnce({
+      fileName: "preview_strikethrough.csv",
+      filePath: "/tmp/preview_strikethrough.csv",
+      fileType: "csv",
+      sizeBytes: 30,
+      columns: ["id", "name"],
+      rows: [
+        ["101", "Alice"],
+        ["102", "Bob"],
+      ],
+      totalRows: 2,
+      sourceFingerprint: "preview_strikethrough",
+    });
+
+    await mountDialog({ prefillTable: "existing_target" });
+    await selectWorkbook("preview_strikethrough.csv");
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+
+    const getHeaderSpans = () => [...document.body.querySelectorAll<HTMLElement>("thead th span")];
+    const getRowCells = (rowIdx: number) => [...document.body.querySelectorAll<HTMLElement>(`tbody tr:nth-child(${rowIdx}) td span`)];
+
+    // Initially both columns match "id" and "name"
+    expect(getHeaderSpans()).toHaveLength(2);
+    expect(getHeaderSpans()[0].classList.contains("line-through")).toBe(false);
+    expect(getHeaderSpans()[1].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[0].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[1].classList.contains("line-through")).toBe(false);
+
+    // Skip the second column ("name")
+    const selects = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
+    expect(selects).toHaveLength(2);
+    selects[1].value = "__skip__";
+    selects[1].dispatchEvent(new Event("change"));
+    await flushAsyncUpdates();
+
+    // Column 0 is still active, Column 1 has strikethrough
+    expect(getHeaderSpans()[0].classList.contains("line-through")).toBe(false);
+    expect(getHeaderSpans()[1].classList.contains("line-through")).toBe(true);
+    expect(getRowCells(1)[0].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[1].classList.contains("line-through")).toBe(true);
+    expect(getRowCells(2)[0].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(2)[1].classList.contains("line-through")).toBe(true);
+
+    // Click "Skip all"
+    const skipAllBtn = document.body.querySelector<HTMLButtonElement>('button[data-action="skip-all"]');
+    expect(skipAllBtn).toBeTruthy();
+    skipAllBtn?.click();
+    await flushAsyncUpdates();
+
+    // Both columns now have strikethrough
+    expect(getHeaderSpans()[0].classList.contains("line-through")).toBe(true);
+    expect(getHeaderSpans()[1].classList.contains("line-through")).toBe(true);
+    expect(getRowCells(1)[0].classList.contains("line-through")).toBe(true);
+    expect(getRowCells(1)[1].classList.contains("line-through")).toBe(true);
+
+    // Re-map by position
+    const mapByPositionBtn = document.body.querySelector<HTMLButtonElement>('button[data-action="map-by-position"]');
+    mapByPositionBtn?.click();
+    await flushAsyncUpdates();
+
+    // Neither column has strikethrough
+    expect(getHeaderSpans()[0].classList.contains("line-through")).toBe(false);
+    expect(getHeaderSpans()[1].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[0].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[1].classList.contains("line-through")).toBe(false);
   });
 });

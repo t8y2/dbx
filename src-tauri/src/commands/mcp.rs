@@ -7,8 +7,22 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+#[cfg(any(windows, test))]
+#[path = "mcp_cleanup.rs"]
+mod cleanup;
 #[path = "mcp_native_installation.rs"]
 mod native_installation;
+
+#[cfg(windows)]
+pub(crate) fn cleanup_mcp_installation_temp_files() {
+    let Some(home) = env::var_os("USERPROFILE").map(PathBuf::from).filter(|home| home.is_absolute()) else {
+        return;
+    };
+    let directory = home.join(".dbx").join("bin");
+    if let Err(error) = cleanup::cleanup_directory(&directory) {
+        log::debug!("Could not clean MCP replacement temporary files in {}: {error}", directory.display());
+    }
+}
 
 const MCP_PACKAGE_NAME: &str = "@dbx-app/mcp-server";
 const MCP_LATEST_URL: &str = "https://registry.npmjs.org/@dbx-app%2fmcp-server/latest";
@@ -361,6 +375,31 @@ pub async fn check_mcp_server_status(app: AppHandle) -> Result<McpServerStatus, 
             .to_string(),
         error,
     })
+}
+
+/// Whether a background `dbx-mcp` launch can read the DBX encryption key.
+/// Kept apart from `check_mcp_server_status` so the frequent update-badge
+/// polling does not spawn a probe process.
+#[tauri::command]
+pub async fn check_mcp_keychain_access() -> Result<native_installation::KeychainAccess, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        native_installation::resolve()
+            .map_or(native_installation::KeychainAccess::NotApplicable, |native| native.keychain_access())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn authorize_mcp_keychain() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let native = native_installation::resolve().ok_or_else(|| {
+            "The native DBX MCP is not installed; install it before authorizing Keychain access.".to_string()
+        })?;
+        native.authorize_keychain()
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

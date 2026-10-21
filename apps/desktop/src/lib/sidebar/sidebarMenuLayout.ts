@@ -22,7 +22,9 @@ export function sidebarMenuScope(type: SidebarMenuTargetType): SidebarMenuScope 
 
 const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
   connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.openDatabaseBrowser", "contextMenu.editConnection", "contextMenu.refreshChildren"],
-  database: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
+  // Closing a database hides itself once the database is already closed, so it leads the database menu
+  // and "browse objects" stays first for databases that cannot be closed.
+  database: ["contextMenu.closeDatabaseConnection", "contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
   schema: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
   table: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editStructure", "contextMenu.newQuery", "contextMenu.refreshChildren"],
   view: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editView", "contextMenu.newQuery", "contextMenu.refreshChildren"],
@@ -72,7 +74,20 @@ export function reorderSidebarMenuEntries(savedOrder: readonly string[], visible
 const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
   data: ["contextMenu.importData", "contextMenu.exportData", "contextMenu.exportDatabase", "contextMenu.exportAllDatabases", "transfer.dataTransfer", "dataCompare.title", "contextMenu.backupSqliteDatabase", "contextMenu.restoreSqliteDatabase", "databaseBackup.title", "databaseSearch.open"],
   sql: ["contextMenu.generateSql", "contextMenu.sqlHistory", "contextMenu.addToAi", "modelGeneration.title", "sqlFile.title"],
-  structure: ["contextMenu.viewDdl", "contextMenu.viewSource", "contextMenu.viewDependencies", "contextMenu.exportStructure", "contextMenu.duplicateStructure", "contextMenu.renameObject", "contextMenu.compileObject", "diagram.open", "docs.title", "diff.title", "dataDictionary.title"],
+  structure: [
+    "contextMenu.editObject",
+    "contextMenu.viewDdl",
+    "contextMenu.viewSource",
+    "contextMenu.viewDependencies",
+    "contextMenu.exportStructure",
+    "contextMenu.duplicateStructure",
+    "contextMenu.renameObject",
+    "contextMenu.compileObject",
+    "diagram.open",
+    "docs.title",
+    "diff.title",
+    "dataDictionary.title",
+  ],
   copy: ["contextMenu.copyName", "contextMenu.copyConnectionInfo", "contextMenu.copyStructureAs", "contextMenu.copyFinalProxyPort", "contextMenu.copyTable", "contextMenu.pasteTable"],
   organize: [
     "contextMenu.setDefaultDatabase",
@@ -89,7 +104,6 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "connectionGroup.moveToNewGroup",
     "contextMenu.duplicateConnection",
     "connection.disconnectAndForgetPassword",
-    "contextMenu.closeDatabaseConnection",
     "contextMenu.revealDatabaseFile",
     "contextMenu.changeOpenMode",
     "tableVGroup.moveToGroup",
@@ -175,6 +189,9 @@ export function buildSidebarMenuLayout(items: readonly ContextMenuItem[], scope:
     }
     const actionGroup = sidebarMenuActionGroup(item);
     const group: MenuGroup = scope === "connection" && ["data", "sql", "structure"].includes(actionGroup) ? "manage" : (scope === "table" || scope === "view") && actionGroup === "manage" ? "structure" : actionGroup;
+    // Unchecking an action in the customize dialog has to hide it, not just drop
+    // it back into its group (#12791). Built-in actions cannot be unchecked.
+    if (group !== "danger" && !builtInIds.has(item.sidebarActionId) && hiddenIds.has(item.sidebarActionId)) continue;
     if (group !== "danger" && (builtInIds.has(item.sidebarActionId) || pinned.has(item.sidebarActionId) || (recommendedIds.has(item.sidebarActionId) && !hiddenIds.has(item.sidebarActionId)))) {
       primary.push(item);
       continue;

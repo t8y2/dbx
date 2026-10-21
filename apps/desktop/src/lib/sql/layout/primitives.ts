@@ -1,5 +1,7 @@
 import type { AstNode, CaseExpressionNode, ClauseNode, KeywordNode, LimitClauseNode, ParenthesisNode, SetOperationNode } from "sql-formatter/dist/esm/parser/ast.js";
 import type { SqlLayoutRenderers } from "./internals";
+import type { SqlFormatterSettings } from "../sqlFormatterConfig";
+import { clauseRuleContext, hasRuleLineBreak, ruleLogicalNewline } from "./rules";
 
 /**
  * The building blocks both layout strategies share: a column-tracking output
@@ -11,6 +13,8 @@ import type { SqlLayoutRenderers } from "./internals";
  */
 
 export interface SqlLayoutOptions {
+  /** Explicit, opt-in rule mode; absent for every existing layout call. */
+  rules?: SqlFormatterSettings;
   /** Hard wrap column; a group wider than this is broken across lines. */
   lineWidth: number;
   /** Maximum number of clause items kept on the keyword's line. */
@@ -48,6 +52,8 @@ export interface SqlLayoutOptions {
    * "FROM clause" setting.
    */
   fromClauseSourceOnSameLine: boolean;
+  /** Whether the terminating semicolon is placed on its own line. */
+  newlineBeforeSemicolon: boolean;
 }
 
 export interface SqlLayoutContext {
@@ -67,6 +73,10 @@ export interface SqlLayoutContext {
    * measurements override it — see {@link collapsedContext}.
    */
   joinLogicalOperators?: boolean;
+  listKind?: "general" | "select" | "insert" | "update";
+  logicalContext?: "where" | "on" | "expression";
+  /** Same-level keyword width, never shared with a nested query block. */
+  keywordWidth?: number;
 }
 
 /**
@@ -91,7 +101,7 @@ export class Writer {
    */
   private lineCommentOpen = false;
 
-  constructor(private readonly options: Pick<SqlLayoutOptions, "useTabs" | "indentWidth">) {}
+  constructor(private readonly options: Pick<SqlLayoutOptions, "useTabs" | "indentWidth" | "rules">) {}
 
   /** Column the cursor currently sits at, on the last line. */
   get column(): number {
@@ -103,7 +113,8 @@ export class Writer {
     if (text.length === 0) return;
     this.closeLineComment();
     this.lines[this.lines.length - 1] += text;
-    this.columns[this.columns.length - 1] += text.length;
+    if (this.options.rules && /[\r\n]/.test(text)) this.columns[this.columns.length - 1] = text.length - Math.max(text.lastIndexOf("\n"), text.lastIndexOf("\r")) - 1;
+    else this.columns[this.columns.length - 1] += text.length;
   }
 
   /** Appends a single separating space, unless one is already there. */
@@ -113,6 +124,7 @@ export class Writer {
       return;
     }
     const line = this.lines[this.lines.length - 1];
+    if (this.options.rules && /[([]$/.test(line)) return;
     if (line.length > 0 && !line.endsWith(" ")) {
       this.lines[this.lines.length - 1] = `${line} `;
       this.columns[this.columns.length - 1] += 1;
@@ -140,10 +152,9 @@ export class Writer {
   }
 
   toString(): string {
-    return this.lines
-      .map((line) => line.trimEnd())
-      .join("\n")
-      .trim();
+    const text = this.lines.map((line) => line.trimEnd()).join("\n");
+    // Leading spaces can be the first keyword's tabular alignment, not input padding.
+    return this.options.rules ? text.replace(/^\n+|\n+$/g, "") : text.trim();
   }
 
   /**
@@ -226,6 +237,7 @@ export function isBodyNode(node: AstNode): boolean {
  * even when the user asked for `logicalOperatorNewline: "before"`.
  */
 export function collapsedContext(ctx: SqlLayoutContext): SqlLayoutContext {
+  if (ctx.options.rules) return ctx;
   return ctx.joinLogicalOperators ? ctx : { ...ctx, joinLogicalOperators: true };
 }
 
@@ -402,11 +414,34 @@ const DEFINITION_LIST_KEYWORD = new RegExp(`^(?:INSERT\\b[\\s\\S]*\\bINTO|${CREA
  * `ON DUPLICATE KEY UPDATE b = f(c)`, which the parser also puts here — a call.
  */
 export function clauseChildContext(ctx: SqlLayoutContext, clause: ClauseNode): SqlLayoutContext {
+  ctx = clauseRuleContext(ctx, clause);
   if (clause.children.length < 2 || !DEFINITION_LIST_KEYWORD.test(clause.nameKw.text.trim())) return ctx;
 
   const at = clause.children.findIndex(isParenthesis);
   if (at <= 0) return ctx;
   return { ...ctx, nonCallParens: new Set([...(ctx.nonCallParens ?? []), clause.children[at]]) };
+}
+
+// The parser groups everything up to a semicolon into one StatementNode,
+// including scripts whose statements are separated only by newlines. Do not
+// collapse several statement heads onto one line. Only inspect sibling clauses:
+// SELECTs in CTEs, subqueries, strings and comments must not count here.
+function hasMultipleStatementHeads(nodes: AstNode[]): boolean {
+  let seenHead = false;
+  let updateNeedsSet = false;
+  for (const node of nodes) {
+    if (node.type !== "clause") continue;
+    const keyword = node.nameKw.text.toUpperCase();
+    if (keyword === "SET" && updateNeedsSet) {
+      updateNeedsSet = false;
+      continue;
+    }
+    if (!/^(?:SELECT|INSERT|REPLACE|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|SHOW|DESCRIBE|DESC|EXPLAIN|USE|SET|CALL|EXEC|EXECUTE|GRANT|REVOKE|COMMIT|ROLLBACK)\b/.test(keyword)) continue;
+    if (seenHead) return true;
+    seenHead = true;
+    updateNeedsSet = keyword === "UPDATE";
+  }
+  return false;
 }
 
 /**
@@ -427,7 +462,8 @@ export function clauseChildContext(ctx: SqlLayoutContext, clause: ClauseNode): S
  * while it fits; the printer splits the operators onto their own lines otherwise.
  */
 export function renderInline(ctx: SqlLayoutContext, nodes: AstNode[], width: number): string | null {
-  if (nodes.length === 0 || width <= 0) return null;
+  if (nodes.length === 0 || width <= 0 || hasMultipleStatementHeads(nodes)) return null;
+  if (ctx.options.rules && hasRuleLineBreak(ctx, nodes)) return null;
 
   const parenAt = nodes.findIndex(isParenthesis);
   if (parenAt >= 0) {
@@ -458,7 +494,7 @@ export function renderInline(ctx: SqlLayoutContext, nodes: AstNode[], width: num
   );
   if (direct) return direct;
 
-  const joinsOperators = ctx.joinLogicalOperators ?? ctx.options.logicalOperatorNewline === "none";
+  const joinsOperators = ctx.options.rules ? ruleLogicalNewline(ctx) === "none" : (ctx.joinLogicalOperators ?? ctx.options.logicalOperatorNewline === "none");
   const joined = joinsOperators && nodes.some(isLogicalOperator) ? renderLogicalJoin(ctx, nodes, width) : null;
   if (joined) return joined;
 
@@ -499,8 +535,10 @@ function renderParenGroup(ctx: SqlLayoutContext, nodes: AstNode[], at: number, w
   const head = at === 0 ? "" : renderInline(groupCtx, nodes.slice(0, at), width);
   if (head === null) return null;
 
-  const separator = at === 0 || isCallParen(nodes, at, ctx) ? "" : " ";
-  const inner = renderInline(groupCtx, node.children, width - head.length - separator.length - node.openParen.length - node.closeParen.length);
+  const call = isCallParen(nodes, at, ctx);
+  const separator = at === 0 || call ? "" : " ";
+  const innerCtx = ctx.options.rules && call ? { ...groupCtx, listKind: "general" as const } : groupCtx;
+  const inner = renderInline(innerCtx, node.children, width - head.length - separator.length - node.openParen.length - node.closeParen.length);
   if (!inner) return null;
   const group = `${head}${separator}${node.openParen}${inner}${node.closeParen}`;
 

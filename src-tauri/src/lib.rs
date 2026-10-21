@@ -16,6 +16,8 @@ mod startup_recovery;
 #[path = "startup_recovery_noop.rs"]
 mod startup_recovery;
 #[cfg(any(target_os = "windows", test))]
+mod webview2_legacy_css;
+#[cfg(any(target_os = "windows", test))]
 mod webview2_recovery;
 mod window_state_guard;
 
@@ -176,21 +178,45 @@ pub(crate) fn linux_compositing_available() -> bool {
     gtk::gdk::Screen::default().is_some_and(|screen| screen.is_composited())
 }
 
+/// Desktops where the transparent floating frame is known to render correctly. Others (notably
+/// KDE, which shows flickering or missing content with some driver/WebKitGTK combinations) keep
+/// the opaque window unless the user forces the frame on.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn should_enable_linux_floating_frame(compositing: bool, opt_in: Option<&std::ffi::OsStr>) -> bool {
-    compositing && opt_in == Some(std::ffi::OsStr::new("1"))
+fn linux_desktop_supports_floating_frame(current_desktop: Option<&std::ffi::OsStr>) -> bool {
+    current_desktop
+        .map(|value| value.to_string_lossy().split(':').any(|name| name.eq_ignore_ascii_case("GNOME")))
+        .unwrap_or(false)
+}
+
+/// `DBX_LINUX_FLOATING_FRAME=1|0` is an optional override; without it the desktop decides.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn should_enable_linux_floating_frame(
+    compositing: bool,
+    override_value: Option<&std::ffi::OsStr>,
+    current_desktop: Option<&std::ffi::OsStr>,
+) -> bool {
+    if !compositing {
+        return false;
+    }
+    match override_value.and_then(|value| value.to_str()) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => linux_desktop_supports_floating_frame(current_desktop),
+    }
 }
 
 /// The Linux config declares the main window with `create: false` so its transparency can
-/// be explicitly opted into at runtime when a compositor is available.
+/// depend at runtime on the desktop and on whether a compositor is available.
 #[cfg(target_os = "linux")]
 fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
     let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main").cloned() else {
         return Ok(());
     };
     let compositing = linux_compositing_available();
-    let opt_in = std::env::var_os("DBX_LINUX_FLOATING_FRAME");
-    let floating_frame = should_enable_linux_floating_frame(compositing, opt_in.as_deref());
+    let override_value = std::env::var_os("DBX_LINUX_FLOATING_FRAME");
+    let current_desktop = std::env::var_os("XDG_CURRENT_DESKTOP");
+    let floating_frame =
+        should_enable_linux_floating_frame(compositing, override_value.as_deref(), current_desktop.as_deref());
     log::info!("[WINDOW] Linux main window compositing={compositing}; floating_frame={floating_frame}");
     let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.transparent(floating_frame);
     if floating_frame {
@@ -715,7 +741,12 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
     let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
 }
 
-fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
+fn register_deep_link_state<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    // macOS can deliver Opened before setup, so its queue must already exist.
+    builder.manage(commands::deep_link::DeepLinkOpenState::default())
+}
+
+fn open_connection_deep_links<R: tauri::Runtime>(app: &tauri::AppHandle<R>, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
@@ -767,6 +798,7 @@ enum LocaleFamily {
     Indonesian,
     Italian,
     Portuguese,
+    Polish,
     Russian,
     Turkish,
 }
@@ -804,6 +836,8 @@ fn locale_family(locale: &str) -> LocaleFamily {
         LocaleFamily::Italian
     } else if is_language("pt") {
         LocaleFamily::Portuguese
+    } else if is_language("pl") {
+        LocaleFamily::Polish
     } else if is_language("ru") {
         LocaleFamily::Russian
     } else {
@@ -825,6 +859,7 @@ fn tray_menu_labels_for_locale(locale: &str) -> (&'static str, &'static str) {
         LocaleFamily::Turkish => ("DBX'i Göster", "DBX'ten Çık"),
         LocaleFamily::Portuguese => ("Mostrar DBX", "Sair do DBX"),
         LocaleFamily::Russian => ("Показать DBX", "Выйти из DBX"),
+        LocaleFamily::Polish => ("Pokaż DBX", "Zakończ DBX"),
         LocaleFamily::English => ("Show DBX", "Quit DBX"),
     }
 }
@@ -845,6 +880,7 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
         LocaleFamily::Turkish => "Destek bilgilerini kopyala",
         LocaleFamily::Portuguese => "Copiar informações",
         LocaleFamily::Russian => "Копировать сведения о поддержке",
+        LocaleFamily::Polish => "Kopiuj informacje o pomocy technicznej",
         LocaleFamily::English => "Copy Support Info",
     }
 }
@@ -864,6 +900,7 @@ fn app_menu_close_tab_label(locale: &str) -> &'static str {
         LocaleFamily::Turkish => "Sekmeyi kapat",
         LocaleFamily::Portuguese => "Fechar aba",
         LocaleFamily::Russian => "Закрыть вкладку",
+        LocaleFamily::Polish => "Zamknij kartę",
         LocaleFamily::English => "Close Tab",
     }
 }
@@ -882,6 +919,7 @@ fn app_menu_quit_label(locale: &str, app_name: &str) -> String {
         LocaleFamily::Turkish => format!("{app_name} Uygulamasından Çık"),
         LocaleFamily::Portuguese => format!("Sair do {app_name}"),
         LocaleFamily::Russian => format!("Выйти из {app_name}"),
+        LocaleFamily::Polish => format!("Zakończ {app_name}"),
         LocaleFamily::English => format!("Quit {app_name}"),
     }
 }
@@ -1138,6 +1176,53 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
+    #[cfg(desktop)]
+    fn deep_links_received_before_setup_survive_until_frontend_ready() {
+        use crate::commands::deep_link::{pending_open_connection_links, DeepLinkOpenState};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tauri::test::{mock_builder, mock_context, noop_assets};
+        use tauri::{Listener, Manager};
+
+        let setup_ran = Arc::new(AtomicBool::new(false));
+        let setup_observed = setup_ran.clone();
+        // Use the production registration path, not a test-only manage call.
+        let mut app = super::register_deep_link_state(mock_builder())
+            .setup(move |_| {
+                setup_observed.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        assert!(!setup_ran.load(Ordering::SeqCst));
+        assert!(app.try_state::<DeepLinkOpenState>().is_some());
+
+        let emitted = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let observed = emitted.clone();
+        app.listen("dbx-open-connection-links", move |event| {
+            observed.lock().unwrap().push(serde_json::from_str(event.payload()).unwrap());
+        });
+        let first = "dbx://connection/new?type=mysql&one_time=true".to_string();
+        let second = "dbx://connection/new?type=postgres&one_time=false".to_string();
+        super::open_connection_deep_links(app.handle(), vec![first.clone()]);
+        super::open_connection_deep_links(app.handle(), vec![first.clone(), second.clone()]);
+        assert!(emitted.lock().unwrap().is_empty());
+
+        // Tauri runs setup here even though MockRuntime's iteration is a no-op.
+        // A single iteration avoids the busy-loop the deprecation warns about.
+        #[allow(deprecated)]
+        app.run_iteration(|_, _| {});
+        assert!(setup_ran.load(Ordering::SeqCst));
+        assert!(emitted.lock().unwrap().is_empty());
+        assert_eq!(pending_open_connection_links(app.state()), vec![first, second]);
+        assert!(pending_open_connection_links(app.state()).is_empty());
+
+        let warm = "dbx://connection/new?type=mysql&host=localhost".to_string();
+        super::open_connection_deep_links(app.handle(), vec![warm.clone()]);
+        assert_eq!(*emitted.lock().unwrap(), vec![vec![warm]]);
+        assert!(pending_open_connection_links(app.state()).is_empty());
+    }
+
+    #[test]
     fn forced_exit_shutdown_waits_for_a_dedicated_cleanup_thread() {
         let caller = std::thread::current().id();
         let cleanup_thread = Arc::new(Mutex::new(None));
@@ -1153,22 +1238,30 @@ mod tests {
     }
 
     #[test]
-    fn linux_floating_frame_is_disabled_by_default() {
-        assert!(!should_enable_linux_floating_frame(true, None));
-        assert!(!should_enable_linux_floating_frame(false, None));
+    fn linux_floating_frame_is_enabled_by_default_on_gnome_only() {
+        for desktop in ["GNOME", "ubuntu:GNOME", "gnome", "GNOME-Classic:GNOME"] {
+            assert!(should_enable_linux_floating_frame(true, None, Some(OsStr::new(desktop))), "{desktop}");
+        }
+        for desktop in ["KDE", "XFCE", "X-Cinnamon", "sway", "", "GNOMEISH"] {
+            assert!(!should_enable_linux_floating_frame(true, None, Some(OsStr::new(desktop))), "{desktop}");
+        }
+        assert!(!should_enable_linux_floating_frame(true, None, None));
     }
 
     #[test]
-    fn linux_floating_frame_requires_explicit_opt_in() {
-        assert!(should_enable_linux_floating_frame(true, Some(OsStr::new("1"))));
-        for value in ["", "0", "false", "true", "auto", "yes", "01"] {
-            assert!(!should_enable_linux_floating_frame(true, Some(OsStr::new(value))));
+    fn linux_floating_frame_override_wins_over_desktop() {
+        assert!(should_enable_linux_floating_frame(true, Some(OsStr::new("1")), Some(OsStr::new("KDE"))));
+        assert!(!should_enable_linux_floating_frame(true, Some(OsStr::new("0")), Some(OsStr::new("GNOME"))));
+        for value in ["", "true", "auto", "01"] {
+            assert!(should_enable_linux_floating_frame(true, Some(OsStr::new(value)), Some(OsStr::new("GNOME"))));
+            assert!(!should_enable_linux_floating_frame(true, Some(OsStr::new(value)), Some(OsStr::new("KDE"))));
         }
     }
 
     #[test]
-    fn linux_floating_frame_requires_compositing_even_when_opted_in() {
-        assert!(!should_enable_linux_floating_frame(false, Some(OsStr::new("1"))));
+    fn linux_floating_frame_requires_compositing() {
+        assert!(!should_enable_linux_floating_frame(false, Some(OsStr::new("1")), Some(OsStr::new("GNOME"))));
+        assert!(!should_enable_linux_floating_frame(false, None, Some(OsStr::new("GNOME"))));
     }
 
     #[test]
@@ -1191,6 +1284,8 @@ mod tests {
         assert_eq!(tray_menu_labels_for_locale("pt-BR"), ("Mostrar DBX", "Sair do DBX"));
         assert_eq!(tray_menu_labels_for_locale("tr-TR"), ("DBX'i Göster", "DBX'ten Çık"));
         assert_eq!(tray_menu_labels_for_locale("ru-RU"), ("Показать DBX", "Выйти из DBX"));
+        assert_eq!(tray_menu_labels_for_locale("pl-PL"), ("Pokaż DBX", "Zakończ DBX"));
+        assert_eq!(tray_menu_labels_for_locale("pl_PL"), ("Pokaż DBX", "Zakończ DBX"));
         assert_eq!(tray_menu_labels_for_locale("en-US"), ("Show DBX", "Quit DBX"));
         // Unknown and empty locales fall back to English; "ita" must not match "it".
         assert_eq!(tray_menu_labels_for_locale("ita"), ("Show DBX", "Quit DBX"));
@@ -1628,7 +1723,7 @@ pub fn run() {
 
     let startup_begin = Instant::now();
 
-    let builder = tauri::Builder::default()
+    let builder = register_deep_link_state(tauri::Builder::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1870,6 +1965,7 @@ pub fn run() {
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
             commands::connection::install_connection_liveness_bridge(app.handle(), state.clone());
+            commands::connection::install_connection_idle_closed_bridge(app.handle(), state.clone());
             let app_identifier = app.config().identifier.clone();
             let backups = tauri::async_runtime::block_on(async {
                 background_backup::BackgroundBackup::new(state.clone(), data_dir.clone(), app_identifier)
@@ -1895,7 +1991,6 @@ pub fn run() {
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
-            app.manage(commands::deep_link::DeepLinkOpenState::default());
             app.manage(commands::update::PendingUpdateState::default());
             app.manage(commands::ssh_prompt::SshPromptState::new());
             commands::ssh_prompt::install_ssh_prompt_bridge(app.handle());
@@ -1915,6 +2010,8 @@ pub fn run() {
             open_plugin_install_deep_links(app.handle(), startup_plugin_install_links);
 
             let app_handle = app.handle().clone();
+            #[cfg(target_os = "windows")]
+            tauri::async_runtime::spawn_blocking(commands::mcp::cleanup_mcp_installation_temp_files);
             tauri::async_runtime::spawn(async move {
                 migration_gate.wait().await;
                 commands::mcp_bridge::start(app_handle, state, data_dir);
@@ -2044,6 +2141,7 @@ pub fn run() {
             commands::ai_multi_config::save_ai_config_item,
             commands::ai_multi_config::delete_ai_config,
             commands::cc_switch::load_cc_switch_ai_configs,
+            commands::cc_switch::load_magpie_ai_configs,
             commands::prompt_template::load_prompt_templates,
             commands::prompt_template::save_prompt_template,
             commands::prompt_template::delete_prompt_template,
@@ -2123,6 +2221,9 @@ pub fn run() {
             commands::cloud_sync::snippet_token_status,
             commands::cloud_sync::save_snippet_saved_token,
             commands::cloud_sync::forget_snippet_saved_token,
+            commands::cloud_sync::snippet_passphrase_status,
+            commands::cloud_sync::save_snippet_saved_passphrase,
+            commands::cloud_sync::forget_snippet_saved_passphrase,
             commands::cloud_sync::snippet_sync_settings,
             commands::cloud_sync::save_snippet_sync_id,
             commands::cloud_sync::retry_snippet_legacy_cleanup,
@@ -2268,6 +2369,8 @@ pub fn run() {
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
             commands::query::build_database_search_sql,
+            commands::query::build_database_search_columns_sql,
+            commands::query::build_database_search_probe_sql,
             commands::query::build_database_structure_search_sql,
             commands::query::supports_database_structure_search,
             commands::query::build_search_result_where,
@@ -2774,6 +2877,8 @@ pub fn run() {
             commands::task_history::load_task_run,
             commands::task_history::load_task_run_items,
             commands::mcp::check_mcp_server_status,
+            commands::mcp::check_mcp_keychain_access,
+            commands::mcp::authorize_mcp_keychain,
             commands::mcp::install_mcp_server,
             commands::mcp::install_native_mcp_server,
             commands::mcp::uninstall_mcp_server,

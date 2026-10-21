@@ -87,7 +87,9 @@ pub struct MqAdminConfig {
 impl MqAdminConfig {
     /// Decode the MQ admin config from a connection's `external_config` slot.
     pub fn from_connection(cfg: &ConnectionConfig) -> Result<Self, String> {
-        let raw = cfg
+        let mut normalized = cfg.clone();
+        crate::connection::connection_secrets::normalize_rocketmq_credentials(&mut normalized);
+        let raw = normalized
             .external_config
             .as_ref()
             .ok_or("This connection has no message queue admin configuration (external_config is empty)")?;
@@ -129,6 +131,19 @@ impl MqAdminConfig {
     /// Budget for establishing the MQ adapter (agent spawn + handshake/connect).
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_secs(self.connect_timeout_secs.max(1))
+    }
+
+    /// Rust process/RPC wall around the agent's independently bounded network setup.
+    /// Proxy keeps a fixed allowance for spawn, handshake and JSON-RPC overhead.
+    pub fn adapter_connect_timeout(&self) -> Duration {
+        let overhead = if self.system_kind == MqSystemKind::RocketMq
+            && self.extra.get("connectionMode").and_then(serde_json::Value::as_str) == Some("proxy")
+        {
+            5
+        } else {
+            0
+        };
+        self.connect_timeout().saturating_add(Duration::from_secs(overhead))
     }
 
     /// Milliseconds for agent `connect_timeout_ms` (Advanced connect timeout).
@@ -209,6 +224,8 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -314,6 +331,24 @@ mod tests {
         assert_eq!(mqc.query_timeout_secs, 30);
         assert_eq!(mqc.connect_timeout_secs, 5);
         assert_eq!(mqc.request_timeout_ms(), 30_000);
+    }
+
+    #[test]
+    fn proxy_adapter_timeout_allows_bounded_process_overhead() {
+        for (kind, extra, expected) in [
+            ("rocketmq", serde_json::json!({ "connectionMode": "proxy" }), 10),
+            ("rocketmq", serde_json::json!({ "connectionMode": "remoting" }), 5),
+            ("rocketmq", serde_json::json!({}), 5),
+            ("kafka", serde_json::json!({ "connectionMode": "proxy" }), 5),
+        ] {
+            let cfg = connection_with_external(serde_json::json!({
+                "systemKind": kind, "adminUrl": "", "extra": extra
+            }));
+            let mqc = MqAdminConfig::from_connection(&cfg).unwrap();
+            assert_eq!(mqc.adapter_connect_timeout(), Duration::from_secs(expected));
+            assert_eq!(mqc.connect_timeout(), Duration::from_secs(5));
+            assert_eq!(mqc.connect_timeout_ms(), 5_000);
+        }
     }
 
     #[test]

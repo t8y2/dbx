@@ -30,8 +30,8 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import * as api from "@/lib/backend/api";
-import type { TransferContent, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/api";
-import { crossFamilyTransferableKinds, isSameTransferFamily, isTransferPairSupported, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
+import type { TransferColumnNameCase, TransferContent, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/api";
+import { crossFamilyTransferableKinds, isSameTransferFamily, isTransferPairSupported, transferObjectFamily, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
 import ObjectSelectionTree from "@/components/transfer/ObjectSelectionTree.vue";
 import TransferTaskTree from "@/components/transfer/TransferTaskTree.vue";
 import DataTransferProgressDialog from "@/components/transfer/DataTransferProgressDialog.vue";
@@ -199,12 +199,16 @@ const pendingTargetSchemaPrefill = ref("");
 // Options
 const selectedStrategy = ref<TransferStrategy>("append");
 const targetTableStrategy = computed<TransferStrategy>({
-  get: () => (transferContent.value === "structureOnly" && selectedStrategy.value !== "rebuild" ? "append" : selectedStrategy.value),
+  // Structure-only transfers have no table-data operation, but overwrite is
+  // still meaningful for selected schema objects (for example MySQL routines).
+  // Keep upsert unavailable in this mode while preserving an explicit overwrite.
+  get: () => (transferContent.value === "structureOnly" && (selectedStrategy.value === "upsert" || (selectedStrategy.value === "overwrite" && !structureOverwriteSupported())) ? "append" : selectedStrategy.value),
   set: (value) => {
     selectedStrategy.value = value;
   },
 });
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
+const targetColumnNameCase = ref<TransferColumnNameCase>("preserve");
 const quoteTargetColumnNames = ref(true);
 const batchSize = ref(1000);
 const operationTimeoutMode = ref<"inherit" | "custom">("inherit");
@@ -285,10 +289,19 @@ function requestedTableFilters(): Record<string, string> | undefined {
 const sourceTransferType = computed(() => transferDatabaseTypeForConnection(store.getConfig(sourceConnectionId.value)));
 const targetTransferType = computed(() => transferDatabaseTypeForConnection(store.getConfig(targetConnectionId.value)));
 const isXuguTransferPair = computed(() => sourceTransferType.value === "xugu" && targetTransferType.value === "xugu");
+
+function structureOverwriteSupported(): boolean {
+  if (transferContent.value !== "structureOnly") return true;
+  const hasNonTableObject = Object.entries(selectedObjects.value).some(([kind, names]) => kind !== "TABLE" && (names?.size ?? 0) > 0);
+  return transferObjectFamily(sourceTransferType.value) === "mysql" && transferObjectFamily(targetTransferType.value) === "mysql" && hasNonTableObject;
+}
 // The table-name-case selector is hidden for Xugu pairs; reset any earlier choice so the
 // blocking xuguPreserveTableNames hint cannot strand the user without a visible control.
 watch(isXuguTransferPair, (isXuguPair) => {
-  if (isXuguPair) targetTableNameCase.value = "preserve";
+  if (isXuguPair) {
+    targetTableNameCase.value = "preserve";
+    targetColumnNameCase.value = "preserve";
+  }
 });
 const targetStrategyType = computed(() => (targetTransferType.value === "xugu" ? "xugu" : connectionType(targetConnectionId.value)));
 const xuguTransferHint = computed(() => {
@@ -814,6 +827,7 @@ function resetState(cancelTaskLoad = true) {
   transferContent.value = "structureAndData";
   selectedStrategy.value = "append";
   targetTableNameCase.value = "preserve";
+  targetColumnNameCase.value = "preserve";
   quoteTargetColumnNames.value = true;
   batchSize.value = 1000;
   operationTimeoutMode.value = "inherit";
@@ -936,6 +950,7 @@ async function requestStartTransfer() {
     ...buildTransferObjectSelectionField(selectedObjects.value, treeDisabledGroups.value),
     ...transferStrategyOptions(targetTableStrategy.value),
     targetTableNameCase: targetTableNameCase.value,
+    targetColumnNameCase: targetColumnNameCase.value,
     quoteTargetColumnNames: quoteTargetColumnNames.value,
     ownershipPolicy: "preserve",
     batchSize: batchSize.value,
@@ -1020,6 +1035,7 @@ function currentConfig(): TransferTaskConfig {
     content: transferContent.value,
     ...transferStrategyOptions(targetTableStrategy.value),
     targetTableNameCase: targetTableNameCase.value,
+    targetColumnNameCase: targetColumnNameCase.value,
     quoteTargetColumnNames: quoteTargetColumnNames.value,
     batchSize: batchSize.value,
     operationTimeoutSecs: operationTimeoutMode.value === "custom" && operationTimeoutValid.value ? operationTimeoutSecs.value : undefined,
@@ -1074,6 +1090,7 @@ async function loadTaskIntoForm(task: TransferTask) {
   transferContent.value = config.content;
   selectedStrategy.value = resolveTransferStrategy(config);
   targetTableNameCase.value = config.targetTableNameCase;
+  targetColumnNameCase.value = config.targetColumnNameCase ?? "preserve";
   quoteTargetColumnNames.value = config.quoteTargetColumnNames;
   batchSize.value = config.batchSize;
   operationTimeoutMode.value = config.operationTimeoutSecs === undefined ? "inherit" : "custom";
@@ -1195,7 +1212,10 @@ function onSelectedTaskIdUpdate(id: string | null) {
 // ---- confirmation for the immutable, previewed transfer request ----
 
 function transferStrategyLabel(request: api.TransferRequest): string {
-  if (request.content === "structureOnly") return t(request.dropTargetBeforeCreate ? "transfer.modeRebuildStructure" : "transfer.modeKeepExisting");
+  if (request.content === "structureOnly") {
+    if (request.dropTargetBeforeCreate) return t("transfer.modeRebuildStructure");
+    return t(request.mode === "overwrite" ? "transfer.modeReplaceExisting" : "transfer.modeKeepExisting");
+  }
   const strategy = resolveTransferStrategy(request);
   const keys = { append: "modeAppend", overwrite: "modeOverwrite", upsert: "modeUpsert", rebuild: "modeRebuild" };
   return t(`transfer.${keys[strategy]}`);
@@ -1265,7 +1285,7 @@ const confirmationDetails = computed(() => {
     lines.push(t("transfer.structurePlanSqlPreview"));
 
     const unexpandedObjects = request.objects.filter((selection) => selection.objectType !== "TABLE" && selection.names.length > 0);
-    if (unexpandedObjects.length > 0) {
+    if (unexpandedObjects.length > 0 && !preview.structure.schemaObjectsExpanded) {
       lines.push(t("transfer.structurePreviewUnexpandedObjects", { objects: unexpandedObjects.map((selection) => selection.names.join(", ")).join("; ") }));
     }
     lines.push(t("transfer.structurePreviewRevalidation"));
@@ -1599,7 +1619,7 @@ async function saveConfigTask() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="append">{{ t(transferContent === "structureOnly" ? "transfer.modeKeepExisting" : "transfer.modeAppend") }}</SelectItem>
-                    <SelectItem v-if="transferContent !== 'structureOnly'" value="overwrite">{{ t("transfer.modeOverwrite") }}</SelectItem>
+                    <SelectItem v-if="transferContent !== 'structureOnly' || structureOverwriteSupported()" value="overwrite">{{ t(transferContent === "structureOnly" ? "transfer.modeReplaceExisting" : "transfer.modeOverwrite") }}</SelectItem>
                     <SelectItem v-if="transferContent !== 'structureOnly'" value="upsert" :disabled="!upsertSupported">{{ t("transfer.modeUpsert") }}</SelectItem>
                     <SelectItem value="rebuild" :disabled="!!rebuildDisabledReason">{{ t(transferContent === "structureOnly" ? "transfer.modeRebuildStructure" : "transfer.modeRebuild") }}</SelectItem>
                   </SelectContent>
@@ -1610,6 +1630,19 @@ async function saveConfigTask() {
               <div v-if="!isXuguTransferPair" class="flex items-center gap-3">
                 <Label class="text-xs shrink-0">{{ t("transfer.targetTableNameCase") }}</Label>
                 <Select v-model="targetTableNameCase">
+                  <SelectTrigger class="h-7 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="preserve">{{ t("transfer.tableNameCasePreserve") }}</SelectItem>
+                    <SelectItem value="lower">{{ t("transfer.tableNameCaseLower") }}</SelectItem>
+                    <SelectItem value="upper">{{ t("transfer.tableNameCaseUpper") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div v-if="!isXuguTransferPair" class="flex items-center gap-3">
+                <Label class="text-xs shrink-0">{{ t("transfer.targetColumnNameCase") }}</Label>
+                <Select v-model="targetColumnNameCase">
                   <SelectTrigger class="h-7 text-xs">
                     <SelectValue />
                   </SelectTrigger>

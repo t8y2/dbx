@@ -37,7 +37,8 @@ export interface HoverTableLookupTarget {
 }
 
 /**
- * Resolve the metadata scope for table hover / Ctrl+click navigation.
+ * Resolve the metadata scope for object hover / Ctrl+click navigation
+ * (tables, procedures, and functions).
  *
  * Qualified names (`schema.table`, `db.schema.table`, MySQL-style `db.table`)
  * always use the SQL qualifier. Unqualified names follow `mode`:
@@ -99,6 +100,23 @@ export function pickHoverTableMatch<T extends { name: string; schema?: string }>
     if (preferred) return preferred;
   }
   return nameMatches[0] ?? null;
+}
+
+/**
+ * Prefer the selected schema when the same routine name exists in multiple schemas.
+ * Standalone routines win over package members for unqualified names (same as {@link matchSqlObject}).
+ */
+export function pickHoverObjectMatch<T extends { name: string; schema?: string; parentName?: string }>(objectName: string, objects: readonly T[], preferredSchema?: string): T | null {
+  const nameLower = objectName.toLowerCase();
+  const nameMatches = objects.filter((object) => object.name.toLowerCase() === nameLower);
+  if (nameMatches.length === 0) return null;
+  const standalone = nameMatches.filter((object) => !object.parentName);
+  const pool = standalone.length > 0 ? standalone : nameMatches;
+  if (preferredSchema) {
+    const preferred = pool.find((object) => object.schema?.toLowerCase() === preferredSchema.toLowerCase());
+    if (preferred) return preferred;
+  }
+  return pool[0] ?? null;
 }
 
 export interface MatchHoverTableCandidatesOptions {

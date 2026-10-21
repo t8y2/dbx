@@ -17,7 +17,7 @@ import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { materializeSnapshotResultRows, waitForLargeValueSnapshot } from "@/lib/dataGrid/largeValueSnapshot";
 import { snapshotExportSelection, assertSnapshotXlsxCellLengths } from "@/lib/dataGrid/snapshotExport";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
-import { clipboardLineEndings, copyToClipboard } from "@/lib/common/clipboard";
+import { clipboardLineEndings, copyRichTextToClipboard, copyToClipboard } from "@/lib/common/clipboard";
 import { clearDataGridClipboardCopy, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { buildDataGridCopyInsertStatement, type DataGridColumnInfo, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { formatSqlInsert, formatTsv } from "@/lib/export/exportFormats";
@@ -116,6 +116,7 @@ export interface UseDataGridExportOptions {
   mongoUpdateTarget?: ComputedRef<MongoCopyUpdateTarget | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   displayValue?: (value: CellValue, columnIndex: number) => string;
+  editValue?: (value: CellValue, columnIndex: number) => string;
   hasColumnFormatter?: (columnIndex: number) => boolean;
   applyColumnFormattersOnExport?: ComputedRef<boolean>;
   cellClipboardText?: (value: CellValue, columnIndex: number) => string | undefined;
@@ -279,12 +280,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   const visibleColumnIndexes = visibleColumnIndexesOption ?? computed(() => columns.value.map((_, index) => index));
   const hasColumnSelection = hasColumnSelectionOption ?? computed(() => false);
 
-  async function copyText(text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }) {
+  async function copyText(text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }, richHtml?: string) {
     const copiedRows = gridCopy?.rows.map((row) => [...row]);
     const copiedHeader = gridCopy?.header ? [...gridCopy.header] : undefined;
     clearDataGridClipboardCopy();
     try {
-      await copyToClipboard(text);
+      if (richHtml !== undefined) await copyRichTextToClipboard(richHtml, text);
+      else await copyToClipboard(text);
       // Remember the text as it now sits on the clipboard, so a paste back into
       // the grid still matches and keeps its null-cell metadata.
       if (copiedRows) rememberDataGridClipboardCopy(clipboardLineEndings(text), copiedRows, copiedHeader);
@@ -964,10 +966,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     visibleColumnIndexes,
     columnTypes,
     allColumnTypes: allColumnTypesOption,
+    columnComments: columnCommentsOption,
+    allColumnComments: allColumnCommentsOption,
     extractorOptions: extractorOptionsOption,
     databaseType,
     identifierQuote,
     tableMeta,
+    database: options.database,
     includeDatabaseName: options.includeDatabaseName,
     hasCellSelection,
     selectedCells,
@@ -986,6 +991,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     partialLoadInfo: partialLoadCopyInfo,
     canBuildMongoUpdate: canBuildMongoExtractorUpdate,
     displayValue: options.displayValue,
+    editValue: options.editValue,
     hasColumnFormatter: options.hasColumnFormatter,
     applyColumnFormattersOnExport: options.applyColumnFormattersOnExport,
     externalCellValue: (value, columnIndex) => {

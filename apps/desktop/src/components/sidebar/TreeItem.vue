@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, inject, shallowRef, watch, onBeforeUnmount } from "vue";
+import { ref, computed, inject, nextTick, shallowRef, watch, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Database,
@@ -55,6 +55,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import { encodeOceanBaseUrlUsername } from "@/lib/connection/connectionUrlBuilder";
 import type { ColumnInfo, ConnectionConfig, CustomTypeTreeMemberMeta, DatabaseType, TreeNode, TriggerInfo } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, isSidebarCommentSupportedType, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import {
@@ -96,7 +97,7 @@ import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectName
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
-import { showSidebarRowProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
+import { isSidebarProductionContainer, showSidebarRowProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
@@ -229,12 +230,22 @@ const stopPasteHandlerRegistration = watch(
 
 const activeNode = shallowRef<TreeNode>(props.node);
 
-const isDisabledTrigger = computed(() => activeNode.value.type === "trigger" && (activeNode.value.meta as TriggerInfo | undefined)?.enabled === false);
+const isDisabledTrigger = computed(() => {
+  const current = activeNode.value;
+  if (current.type !== "trigger") return false;
+  const meta = (props.node.meta as TriggerInfo | undefined) ?? (current.meta as TriggerInfo | undefined);
+  return meta?.enabled === false;
+});
 
 const showProductionBadge = computed(() => {
   const node = activeNode.value;
   return showSidebarRowProductionBadge(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined, props.isStickyContext);
 });
+
+// Object rows use an icon-only marker pinned to the row's trailing edge, so
+// every production table lines up in one column instead of pushing the name
+// aside at a different x per name length. Container rows keep the text badge.
+const showProductionRowMarker = computed(() => showProductionBadge.value && !isSidebarProductionContainer(activeNode.value));
 
 function currentDatabaseType(): DatabaseType | undefined {
   return activeNode.value.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(activeNode.value.connectionId)) : undefined;
@@ -555,7 +566,8 @@ function connectionTooltipUrl(config: ConnectionConfig): string {
   const scheme = connectionDisplayUrlScheme(config);
   const port = Number(config.port) > 0 ? `:${config.port}` : "";
   const user = cleanTooltipValue(config.username);
-  const userInfo = user ? `${encodeURIComponent(user)}@` : "";
+  const encodedUser = config.db_type === "mysql" && config.driver_profile?.trim().toLowerCase() === "oceanbase" ? encodeOceanBaseUrlUsername(user) : encodeURIComponent(user).replace(/%40/g, "@");
+  const userInfo = user ? `${encodedUser}@` : "";
   const database = tooltipDatabaseValue(config);
   const encodedDatabase = config.db_type === "spanner" ? encodeSpannerResourcePath(database) : encodeURIComponent(database);
   const path = database ? `/${encodedDatabase}` : "";
@@ -1033,7 +1045,7 @@ const rowStyle = computed(() => {
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
   return {
     paddingLeft: paddingLeft.value,
-    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : trailingComment.value ? "12px" : undefined,
+    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : showProductionRowMarker.value ? "8px" : trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
     "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.2 : 0.16),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
@@ -1107,6 +1119,16 @@ const renameInputRef = ref<HTMLInputElement>();
 /** Snapshot of the row being renamed: reprojecting the tree mid-rename recycles activeNode. */
 const renameTargetNode = shallowRef<TreeNode | null>(null);
 
+function restoreRowFocus() {
+  void nextTick(() => {
+    // Only reclaim focus when it is genuinely lost (fell back to <body>).
+    // A blur triggered by the user focusing something else (editor, search
+    // box, Tab navigation) must keep that target focused.
+    if (document.activeElement && document.activeElement !== document.body) return;
+    rowRef.value?.focus({ preventScroll: true });
+  });
+}
+
 function startRenameGroup() {
   renameTargetNode.value = activeNode.value;
   renameInput.value = activeNode.value.label;
@@ -1165,12 +1187,17 @@ function finishRenameGroup() {
   const trimmed = renameInput.value.trim();
   // An empty name cancels the rename and keeps the group as-is — never delete
   // here. Deleting a group is done explicitly via the context menu (issue #681).
-  if (!trimmed || trimmed === target.label) return;
+  if (!trimmed || trimmed === target.label) {
+    restoreRowFocus();
+    return;
+  }
   if (target.type === "table-vgroup" && target.vgroupId) {
     connectionStore.renameTableVGroup(target, target.vgroupId, trimmed);
+    restoreRowFocus();
     return;
   }
   connectionStore.renameConnectionGroup(target.id, trimmed);
+  restoreRowFocus();
 }
 
 async function finishRenameSavedSql() {
@@ -1178,13 +1205,17 @@ async function finishRenameSavedSql() {
   isRenamingSavedSql.value = false;
   const fileId = activeNode.value.savedSqlId;
   const trimmed = renameInput.value.trim();
-  if (!fileId || !trimmed || ensureSqlExtension(trimmed) === activeNode.value.label) return;
+  if (!fileId || !trimmed || ensureSqlExtension(trimmed) === activeNode.value.label) {
+    restoreRowFocus();
+    return;
+  }
   try {
     const savedSqlStore = useSavedSqlStore();
     await savedSqlStore.renameFile(fileId, ensureSqlExtension(trimmed));
   } catch (e: any) {
     toast(t("savedSql.renameFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
   }
+  restoreRowFocus();
 }
 
 async function finishRenameConnection() {
@@ -1192,12 +1223,16 @@ async function finishRenameConnection() {
   isRenamingConnection.value = false;
   const connectionId = activeNode.value.connectionId;
   const trimmed = renameInput.value.trim();
-  if (!connectionId || !trimmed || trimmed === activeNode.value.label) return;
+  if (!connectionId || !trimmed || trimmed === activeNode.value.label) {
+    restoreRowFocus();
+    return;
+  }
   try {
     await connectionStore.renameConnection(connectionId, trimmed);
   } catch (e: any) {
     toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
   }
+  restoreRowFocus();
 }
 
 function finishRename() {
@@ -1210,6 +1245,7 @@ function cancelRename() {
   isRenamingGroup.value = false;
   isRenamingSavedSql.value = false;
   isRenamingConnection.value = false;
+  restoreRowFocus();
 }
 
 const PINNED_TREE_NODE_DRAG_TYPE = "__pinned-tree-node__";
@@ -1759,7 +1795,7 @@ function onKeydown(event: KeyboardEvent) {
               <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
             </button>
             <Pin v-else-if="isPinned" class="h-3 w-3 shrink-0 fill-current text-primary" aria-hidden="true" />
-            <ProductionContextBadge v-if="showProductionBadge" compact />
+            <ProductionContextBadge v-if="showProductionBadge && !showProductionRowMarker" compact />
             <span
               v-if="
                 (node.type === 'group-tables' ||
@@ -1813,6 +1849,9 @@ function onKeydown(event: KeyboardEvent) {
         <ReadOnlySessionControl v-if="isConnectionReadonly && activeNode.connectionId" :connection-id="activeNode.connectionId" show-label />
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
+        <span v-if="showProductionRowMarker" class="flex w-4 shrink-0 items-center justify-center" :class="{ 'ml-auto': !formattedObjectStorage() }">
+          <ProductionContextBadge marker />
+        </span>
         <button
           v-if="isConnecting"
           type="button"

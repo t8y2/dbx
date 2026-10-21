@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   getConnectionConfig: vi.fn(),
   saveOpenTabsState: vi.fn(),
   loadTableMetadata: vi.fn(),
+  prepareQueryPaginationExecutionPlan: vi.fn(),
   metadataGeneration: 0,
 }));
 
@@ -20,6 +21,7 @@ vi.mock("@/lib/backend/api", () => ({
   closeClientConnectionSession: mocks.closeClientConnectionSession,
   closeQuerySession: mocks.closeQuerySession,
   executeMulti: mocks.executeMulti,
+  prepareQueryPaginationExecutionPlan: mocks.prepareQueryPaginationExecutionPlan,
   saveOpenTabsState: mocks.saveOpenTabsState,
 }));
 
@@ -64,6 +66,7 @@ describe("queryStore table data refresh", () => {
     clearDataGridSortBuilderMemoryCache();
     setActivePinia(createPinia());
     mocks.metadataGeneration = 0;
+    mocks.prepareQueryPaginationExecutionPlan.mockResolvedValue({ useAgentResultSession: false });
     mocks.getConnectionConfig.mockReturnValue({
       id: "pg-1",
       name: "Postgres",
@@ -80,6 +83,49 @@ describe("queryStore table data refresh", () => {
         execution_time_ms: 1,
       },
     ]);
+  });
+
+  it.each([
+    { offset: 0, returnedRows: 55, hasMore: false },
+    { offset: 0, returnedRows: 56, hasMore: true },
+    { offset: 55, returnedRows: 55, hasMore: false },
+  ])("probes MySQL data pages without publishing the extra row: %j", async ({ offset, returnedRows, hasMore }) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("mysql-1", "app", "apis", "data");
+    const baseSql = "SELECT id FROM apis WHERE id > 0 ORDER BY id";
+    const sql = `${baseSql} LIMIT 55${offset ? ` OFFSET ${offset}` : ""};`;
+    const probeSql = `${baseSql} LIMIT 56 OFFSET ${offset};`;
+    mocks.prepareQueryPaginationExecutionPlan.mockResolvedValue({ pageProbeSql: probeSql, useAgentResultSession: false });
+    mocks.executeMulti.mockResolvedValue([
+      {
+        columns: ["id"],
+        rows: Array.from({ length: returnedRows }, (_, index) => [offset + index + 1]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        has_more: false,
+      },
+    ]);
+
+    await store.executeTabSql(id, sql, { pagination: { limit: 55, offset } });
+
+    expect(mocks.prepareQueryPaginationExecutionPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: baseSql,
+        queryBaseSql: sql,
+        pagination: { limit: 55, offset },
+        useAgentCursor: false,
+      }),
+    );
+    expect(mocks.executeMulti.mock.calls[0]?.[2]).toBe(probeSql);
+    const tab = store.tabs.find((candidate) => candidate.id === id)!;
+    expect(tab.result?.rows).toHaveLength(55);
+    expect(tab.result?.rows[0]).toEqual([offset + 1]);
+    expect(tab.result?.page_has_more).toBe(hasMore);
+    expect(tab.resultPageLimit).toBe(55);
+    expect(tab.resultPageOffset).toBe(offset);
+    expect(tab.resultTotalRowCount).toBe(hasMore ? undefined : offset + 55);
   });
 
   it("loads a duplicated data tab with its filter, database sort and page without sharing results", async () => {

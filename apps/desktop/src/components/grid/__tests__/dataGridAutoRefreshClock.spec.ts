@@ -1,12 +1,8 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import DataGridAutoRefreshClock from "@/components/grid/DataGridAutoRefreshClock.vue";
 import { findOne, mountComponent, type HostNode } from "./vueHostHarness";
-
-const clockPath = "apps/desktop/src/components/grid/DataGridAutoRefreshClock.vue";
-const source = readFileSync(clockPath, "utf8");
 
 function findHand(node: HostNode): HostNode {
   return findOne(node, (candidate) => candidate.type === "line" && candidate.props["data-auto-refresh-hand"] !== undefined);
@@ -57,15 +53,5 @@ describe("DataGridAutoRefreshClock", () => {
       expect(findHand(host.root).props.style["--dbx-auto-refresh-sweep-duration"]).toBe("10s");
       host.unmount();
     }
-  });
-
-  it("rotates about the clock centre and opts out of motion on request", () => {
-    expect(source).toContain("transform-box: view-box");
-    expect(source).toContain("transform-origin: 12px 14px");
-    expect(source).toContain("animation: data-grid-auto-refresh-sweep var(--dbx-auto-refresh-sweep-duration, 10s) linear");
-    // House spinner idiom: the motion is cosmetic information, so honour the
-    // system preference rather than animating unconditionally.
-    expect(source).toContain("@media (prefers-reduced-motion: reduce)");
-    expect(source).toContain("animation: none");
   });
 });

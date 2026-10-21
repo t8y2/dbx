@@ -162,6 +162,26 @@ test("defines mode-specific Phoenix Maven runtimes", () => {
   assert.equal(jdbcProductRuntimeSelectionId(PHOENIX_JDBC_PRODUCT_PROFILE, "direct"), "phoenix:direct");
 });
 
+test("accepts legacy distribution Phoenix Direct client jar names", () => {
+  assert.equal(isPhoenixRuntimePath("D:\\apps\\DBX\\plugins\\jdbc\\drivers\\phoenix-5.0.0-HBase-2.0-client.jar", "direct"), true);
+  assert.equal(isPhoenixRuntimePath("/opt/phoenix-4.14.3-HBase-1.3-client.jar", "direct"), true);
+  assert.equal(isPhoenixRuntimePath("/opt/PHOENIX-5.1.3-hbase-2.4-CLIENT.JAR", "direct"), true);
+  assert.equal(isPhoenixRuntimePath("/opt/phoenix-5.0.0-HBase-2.0-thin-client.jar", "direct"), false);
+  assert.equal(isPhoenixRuntimePath("/opt/phoenix-5.0.0-HBase-2.0-server.jar", "direct"), false);
+  assert.equal(isPhoenixRuntimePath("/opt/phoenix-5.0.0-HBase-2.0-client.jar", "query-server"), false);
+});
+
+test("keeps a manually selected legacy Phoenix Direct client runtime", async () => {
+  const config = phoenixConfig();
+  config.jdbc_driver_paths = ["D:\\apps\\DBX\\plugins\\jdbc\\drivers\\phoenix-5.0.0-HBase-2.0-client.jar", "D:\\hbase\\conf"];
+  const runtime = runtimeApi();
+
+  const result = await ensureJdbcProductRuntimeDrivers(PHOENIX_JDBC_PRODUCT_PROFILE, config, runtime.api);
+
+  assert.deepEqual(result?.paths, config.jdbc_driver_paths);
+  assert.equal(result?.runtimeSelectionId, undefined);
+});
+
 test("builds one complete selector runtime for each installed Phoenix mode", () => {
   const direct = mavenBundle(PHOENIX_DIRECT_MAVEN_COORDINATE);
   const logging = mavenBundle(PHOENIX_DIRECT_LOGGING_MAVEN_COORDINATE);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addConfiguredAiModel, aiModelOptions, generateId, prepareImportedAiConfigs } from "@/lib/ai/aiConfigList";
+import { addConfiguredAiModel, aiModelOptions, generateId, prepareImportedAiConfigs, removeConfiguredAiModel } from "@/lib/ai/aiConfigList";
 
 describe("generateId", () => {
   afterEach(() => {
@@ -51,6 +51,13 @@ describe("AI model options", () => {
   it("persists a manual model only once", () => {
     expect(addConfiguredAiModel([{ name: "ark-code-latest" }], "  doubao-seed-2.0-code  ")).toEqual([{ name: "ark-code-latest" }, { name: "doubao-seed-2.0-code" }]);
     expect(addConfiguredAiModel([{ name: "ark-code-latest" }], "ark-code-latest")).toEqual([{ name: "ark-code-latest" }]);
+  });
+
+  it("removes a configured manual model", () => {
+    expect(removeConfiguredAiModel([{ name: "ark-code-latest" }, { name: "doubao-seed-2.0-code" }], "doubao-seed-2.0-code")).toEqual([{ name: "ark-code-latest" }]);
+    expect(removeConfiguredAiModel([{ name: "ark-code-latest" }], "non-existent")).toEqual([{ name: "ark-code-latest" }]);
+    expect(removeConfiguredAiModel(undefined, "model")).toEqual([]);
+    expect(removeConfiguredAiModel([{ name: "ark-code-latest" }], "   ")).toEqual([{ name: "ark-code-latest" }]);
   });
 
   it("merges saved metadata with discovered capabilities", () => {

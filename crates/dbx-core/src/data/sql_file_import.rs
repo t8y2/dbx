@@ -8,7 +8,7 @@ use mysql_async::prelude::Queryable;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-use crate::connection::{AppState, PoolKind};
+use crate::connection::{AppState, ClientSessionPoolCleanupGuard, PoolKind};
 use crate::db;
 use crate::models::connection::DatabaseType;
 
@@ -27,7 +27,7 @@ use crate::query::{
 use crate::sql::{
     optimize_sql_file_import_statements, optimize_sql_file_import_statements_with_max_insert_batch_statements,
     prepare_sql_file_statement, split_sql_batches, starts_with_sqlserver_module_ddl, statement_summary,
-    SqlFileImportStatement, SqlFileImportStatementKind, SqlFilePhase, SqlFileProgress, SqlFileRequest,
+    SqlFileEncoding, SqlFileImportStatement, SqlFileImportStatementKind, SqlFilePhase, SqlFileProgress, SqlFileRequest,
     SqlFileStatementAction, SqlFileStatus, SqlParsingOptions, SqlStatementSplitter, SqlStatementWithControl,
 };
 use crate::types::QueryResult;
@@ -59,9 +59,9 @@ pub use failure_log_derive::{
 /// the plain PostgreSQL splitter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SqlCompatibilityMode {
-    /// The database type has no compatibility-mode concept (non-openGauss).
+    /// The database type has no runtime SQL compatibility-mode concept.
     NotApplicable,
-    /// The database is openGauss but the probe failed or the pool was
+    /// The database is openGauss/Kingbase but the probe failed or the pool was
     /// unavailable. The parser must not fall back to PostgreSQL semantics;
     /// it uses the PL/SQL-capable openGauss profile so an A-mode package body
     /// is never split on its inner semicolons.
@@ -74,7 +74,7 @@ impl SqlCompatibilityMode {
     /// The mode string for [`SqlParsingOptions::for_database_type_and_compatibility`],
     /// or `None` when the database has no mode concept or the mode is unknown.
     ///
-    /// `None` is interpreted as "unknown openGauss" by the parser (see that
+    /// `None` is interpreted as an unknown mode by the applicable parser (see that
     /// function), which selects the conservative PL/SQL-capable profile.
     fn as_mode_str(&self) -> Option<&str> {
         match self {
@@ -661,6 +661,72 @@ async fn with_sql_file_transaction<T>(
     result
 }
 
+/// A session pinned for one SQL file execution.
+///
+/// Non-MySQL files execute each statement through the shared pool, so a file
+/// that contains its own `BEGIN` / `COMMIT` can span physical connections and
+/// leave an unfinished transaction `idle in transaction` in the pool (#12160).
+/// MySQL already pins a connection in [`MySqlSqlFileExecutor`], and manual
+/// transactions own their session, so both keep using their existing paths.
+struct SqlFilePinnedSession {
+    client_session_id: Option<String>,
+    _cleanup: Option<ClientSessionPoolCleanupGuard>,
+}
+
+impl SqlFilePinnedSession {
+    fn id(&self) -> Option<&str> {
+        self.client_session_id.as_deref()
+    }
+
+    /// Close the pinned session before work that runs on another connection.
+    ///
+    /// Closing the session pool terminates its connection, which rolls back any
+    /// transaction the file left open and releases its locks. The cleanup guard
+    /// only drops at function exit, which is too late for the catalog-level
+    /// constraint restore: that restore runs on the shared pool and would wait
+    /// on the pinned session's locks until the query timeout.
+    async fn release(&mut self, state: &AppState, request: &SqlFileRequest) {
+        let Some(client_session_id) = self.client_session_id.take() else {
+            return;
+        };
+        let database = request.database.trim();
+        let database = (!database.is_empty()).then_some(database);
+        match state.close_client_session_pool(&request.connection_id, database, &client_session_id).await {
+            Ok(_) => {
+                if let Some(cleanup) = self._cleanup.as_mut() {
+                    cleanup.disarm();
+                }
+            }
+            Err(error) => {
+                // Leave the guard armed so the pool is still removed at function
+                // exit even if the synchronous close failed.
+                log::warn!("[sql_file_import] failed to close pinned session {client_session_id}: {error}");
+            }
+        }
+    }
+}
+
+fn should_pin_sql_file_session(request: &SqlFileRequest, mysql_executor_present: bool) -> bool {
+    request.txn_session_id.is_none() && !mysql_executor_present
+}
+
+async fn pin_sql_file_session(
+    state: &AppState,
+    request: &SqlFileRequest,
+    mysql_executor_present: bool,
+) -> SqlFilePinnedSession {
+    if !should_pin_sql_file_session(request, mysql_executor_present) {
+        return SqlFilePinnedSession { client_session_id: None, _cleanup: None };
+    }
+    let client_session_id = format!("sql-file-{}", request.execution_id);
+    let database = request.database.trim();
+    let database = (!database.is_empty()).then_some(database);
+    // The guard removes the session-scoped pool when the file finishes, errors
+    // or is cancelled, which also rolls back a transaction the file left open.
+    let cleanup = state.workload_session_pool_cleanup_guard(&request.connection_id, database, &client_session_id).await;
+    SqlFilePinnedSession { client_session_id: Some(client_session_id), _cleanup: cleanup }
+}
+
 pub async fn execute_sql_file_content(
     state: &AppState,
     request: &SqlFileRequest,
@@ -714,6 +780,9 @@ async fn execute_sql_file_content_inner(
     // MySQL-family imports need one pinned connection so `USE` and session
     // state survive across the whole file.
     let mut mysql_executor = MySqlSqlFileExecutor::build(state, request, import_target.as_ref()).await?;
+    // Every other family also needs one connection for the whole file: a
+    // file-level `BEGIN` / `COMMIT` must not span pooled sessions (#12160).
+    let mut pinned_session = pin_sql_file_session(state, request, mysql_executor.is_some()).await;
     let bypass_kind = import_target.as_ref().and_then(relational_constraint_bypass_kind);
     let non_mysql_bypass = request.skip_relational_constraints
         && mysql_executor.is_none()
@@ -733,11 +802,17 @@ async fn execute_sql_file_content_inner(
         started_at,
         &planned_statements,
         mysql_executor.as_mut(),
+        pinned_session.id(),
         &mut progress,
         &mut emit,
     )
     .await;
     if non_mysql_bypass {
+        // Release the pinned session first. A file that opened a transaction and
+        // then failed or was cancelled can still hold locks on imported tables;
+        // the catalog-level restore below runs on another connection and would
+        // block on them until the query timeout.
+        pinned_session.release(state, request).await;
         let kind = bypass_kind.expect("non_mysql_bypass implies bypass_kind is set");
         // Use a fresh token, not the (possibly already-cancelled) import token: the
         // restore is catalog-level and must run even after the user cancels, or FK
@@ -860,7 +935,7 @@ async fn execute_sql_file_paths_inner(
         let Some(selected) = &request.selected_tables else {
             return Ok(None);
         };
-        let (tables, views) = scan_sql_file_tables(file_paths[0], &token).await?;
+        let (tables, views) = scan_sql_file_tables(file_paths[0], &token, request.encoding).await?;
         validate_selected_tables(selected, &tables)?;
         Ok::<_, String>(Some(TableRestoreFilter::with_views(views)))
     }
@@ -883,6 +958,9 @@ async fn execute_sql_file_paths_inner(
             return Err(error);
         }
     };
+    // Non-MySQL families need one connection for the whole batch so a file-level
+    // `BEGIN` / `COMMIT` cannot span pooled sessions (#12160).
+    let mut pinned_session = pin_sql_file_session(state, request, mysql_executor.is_some()).await;
     let constraints_disabled = request.skip_relational_constraints && mysql_executor.is_some();
     if constraints_disabled {
         let executor = mysql_executor.as_mut().expect("missing MySQL executor while disabling constraints");
@@ -945,10 +1023,11 @@ async fn execute_sql_file_paths_inner(
             let normalize_mysql_binary_literals = import_target.as_ref().is_some_and(|target| {
                 crate::sql::is_mysql_compatible_import_target(&target.db_type, target.driver_profile.as_deref())
             });
-            let mut decoder = match SqlFileStreamDecoder::open_for_target_with_progress(
+            let mut decoder = match SqlFileStreamDecoder::open_for_import(
                 file_path,
+                request.encoding.to_encoding(),
                 normalize_mysql_binary_literals,
-                read_progress.bytes_read.clone(),
+                Some(read_progress.bytes_read.clone()),
             )
             .await
             {
@@ -1036,6 +1115,7 @@ async fn execute_sql_file_paths_inner(
                     max_insert_batch_statements,
                     import_target.as_ref(),
                     mysql_executor.as_mut(),
+                    pinned_session.id(),
                     &mut progress,
                     &mut emit,
                 )
@@ -1072,6 +1152,7 @@ async fn execute_sql_file_paths_inner(
                 max_insert_batch_statements,
                 import_target.as_ref(),
                 mysql_executor.as_mut(),
+                pinned_session.id(),
                 &mut progress,
                 &mut emit,
             )
@@ -1122,6 +1203,10 @@ async fn execute_sql_file_paths_inner(
         }
     }
     if non_mysql_bypass {
+        // Same ordering as `execute_sql_file_content`: close the pinned session
+        // before the catalog-level restore so an unfinished transaction cannot
+        // hold locks the restore would wait on.
+        pinned_session.release(state, request).await;
         let kind = bypass_kind.expect("non_mysql_bypass implies bypass_kind is set");
         // Fresh token: see the matching comment in `execute_sql_file_content`. `token`
         // here may already be cancelled (user cancel or terminal error), which would
@@ -1139,14 +1224,22 @@ async fn execute_sql_file_paths_inner(
 }
 
 pub async fn inspect_sql_file_tables(file_path: &Path) -> Result<Vec<SqlFileTable>, String> {
-    scan_sql_file_tables(file_path, &CancellationToken::new()).await.map(|(tables, _)| tables)
+    inspect_sql_file_tables_with_encoding(file_path, SqlFileEncoding::Auto).await
+}
+
+pub async fn inspect_sql_file_tables_with_encoding(
+    file_path: &Path,
+    encoding: SqlFileEncoding,
+) -> Result<Vec<SqlFileTable>, String> {
+    scan_sql_file_tables(file_path, &CancellationToken::new(), encoding).await.map(|(tables, _)| tables)
 }
 
 async fn scan_sql_file_tables(
     file_path: &Path,
     token: &CancellationToken,
+    encoding: SqlFileEncoding,
 ) -> Result<(Vec<SqlFileTable>, std::collections::BTreeSet<SqlFileTable>), String> {
-    let mut decoder = SqlFileStreamDecoder::open_for_target(file_path, true).await?;
+    let mut decoder = SqlFileStreamDecoder::open_for_import(file_path, encoding.to_encoding(), true, None).await?;
     let mut splitter =
         StreamingSqlFileSplitter::new(Some(DatabaseType::Mysql), SqlParsingOptions::mysql_compatible(), false);
     let mut scan = TableRestoreFilter::default();
@@ -1213,9 +1306,36 @@ fn filter_restore_statements(
 }
 
 pub async fn read_sql_file_preview(file_path: &Path, max_chars: usize) -> Result<String, String> {
-    let mut decoder =
-        SqlFileStreamDecoder::open_with_detection_limit(file_path, Some(SQL_FILE_PREVIEW_ENCODING_SAMPLE_BYTES))
-            .await?;
+    read_sql_file_preview_with_encoding(file_path, max_chars, SqlFileEncoding::Auto).await
+}
+
+pub async fn read_sql_file_preview_with_encoding(
+    file_path: &Path,
+    max_chars: usize,
+    encoding: SqlFileEncoding,
+) -> Result<String, String> {
+    let mut decoder = if encoding == SqlFileEncoding::Auto {
+        SqlFileStreamDecoder::open_with_detection_limit(file_path, Some(SQL_FILE_PREVIEW_ENCODING_SAMPLE_BYTES)).await?
+    } else {
+        SqlFileStreamDecoder::open_for_import(file_path, encoding.to_encoding(), false, None).await?
+    };
+    // Preview may run before a database is selected. Do not apply MySQL syntax
+    // rewriting to valid text (for example PostgreSQL dollar-quoted strings).
+    // Like automatic detection, recover raw mysqldump binary bytes only when
+    // ordinary UTF-8 decoding fails. Reopen so the preview cannot mix original
+    // text with normalized chunks. Honor BOM overrides and never change encoding.
+    let recover_mysql_binary = encoding != SqlFileEncoding::Auto && decoder.encoding() == encoding_rs::UTF_8;
+    match collect_sql_file_preview(&mut decoder, max_chars).await {
+        Err(error) if recover_mysql_binary && error == "Unsupported or invalid SQL file encoding" => {
+            let mut decoder =
+                SqlFileStreamDecoder::open_for_import(file_path, encoding.to_encoding(), true, None).await?;
+            collect_sql_file_preview(&mut decoder, max_chars).await
+        }
+        result => result,
+    }
+}
+
+async fn collect_sql_file_preview(decoder: &mut SqlFileStreamDecoder, max_chars: usize) -> Result<String, String> {
     let mut preview = String::new();
     while preview.chars().count() < max_chars {
         let Some(chunk) = decoder.next_chunk().await? else {
@@ -1330,10 +1450,12 @@ impl SqlFileStreamDecoder {
         Self::open_with_options(file_path, detection_limit, false, None).await
     }
 
+    #[cfg(test)]
     async fn open_for_target(file_path: &Path, normalize_mysql_binary_literals: bool) -> Result<Self, String> {
         Self::open_with_options(file_path, None, normalize_mysql_binary_literals, None).await
     }
 
+    #[cfg(test)]
     async fn open_for_target_with_progress(
         file_path: &Path,
         normalize_mysql_binary_literals: bool,
@@ -1974,6 +2096,7 @@ async fn execute_sql_file_statement_batch(
     max_insert_batch_statements: Option<usize>,
     import_target: Option<&SqlFileImportTarget>,
     mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    session_id: Option<&str>,
     progress: &mut SqlFileExecutionProgress,
     emit: &mut impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
@@ -1995,6 +2118,7 @@ async fn execute_sql_file_statement_batch(
         started_at,
         &planned_statements,
         mysql_executor,
+        session_id,
         progress,
         emit,
     )
@@ -2202,7 +2326,17 @@ async fn sql_file_import_target(state: &AppState, connection_id: &str, database:
     // still uses the openGauss splitter. A failed probe is recorded as `Unknown`
     // rather than `None` so the splitter keeps PL/SQL package bodies intact
     // instead of silently falling back to PostgreSQL statement semantics.
-    let compatibility_mode = if config.db_type == DatabaseType::OpenGauss {
+    let compatibility_mode = if config.db_type == DatabaseType::Kingbase {
+        match state.get_or_create_pool(connection_id, Some(database)).await {
+            Ok(pool_key) => {
+                match crate::query::connection_sql_compatibility_mode(state, &pool_key, Some(config.db_type)).await {
+                    Some(mode) => SqlCompatibilityMode::Resolved(mode),
+                    None => SqlCompatibilityMode::Unknown,
+                }
+            }
+            Err(_) => SqlCompatibilityMode::Unknown,
+        }
+    } else if config.db_type == DatabaseType::OpenGauss {
         let pool = match state.get_or_create_pool(connection_id, Some(database)).await {
             Ok(pool_key) => match state.pool_handle(&pool_key).await {
                 Some(PoolKind::Postgres(pool)) => Some(pool),
@@ -2451,6 +2585,7 @@ async fn execute_planned_statements_with_progress(
     started_at: Instant,
     planned_statements: &[ControlledSqlFileImportStatement],
     mut mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    session_id: Option<&str>,
     progress: &mut SqlFileExecutionProgress,
     emit: &mut impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
@@ -2471,6 +2606,7 @@ async fn execute_planned_statements_with_progress(
             &mut progress.failure_count,
             &mut progress.affected_rows,
             mysql_executor.as_deref_mut(),
+            session_id,
             emit,
         )
         .await?
@@ -2494,6 +2630,7 @@ async fn execute_statement_with_progress(
     failure_count: &mut usize,
     affected_rows: &mut u64,
     mut mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    session_id: Option<&str>,
     emit: &mut impl FnMut(SqlFileProgress),
 ) -> Result<bool, String> {
     let statement = &controlled_statement.statement;
@@ -2557,8 +2694,16 @@ async fn execute_statement_with_progress(
 
     let result = {
         let mysql_executor = mysql_executor.as_deref_mut();
-        execute_sql_file_statement_with_executor(state, request, &statement.sql, token, statement_index, mysql_executor)
-            .await
+        execute_sql_file_statement_with_executor(
+            state,
+            request,
+            &statement.sql,
+            token,
+            statement_index,
+            mysql_executor,
+            session_id,
+        )
+        .await
     };
 
     match result {
@@ -2592,6 +2737,7 @@ async fn execute_statement_with_progress(
                     failure_count,
                     affected_rows,
                     mysql_executor,
+                    session_id,
                     emit,
                 )
                 .await;
@@ -2633,6 +2779,7 @@ async fn execute_merged_statement_fallback_with_progress(
     failure_count: &mut usize,
     affected_rows: &mut u64,
     mut mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    session_id: Option<&str>,
     emit: &mut impl FnMut(SqlFileProgress),
 ) -> Result<bool, String> {
     for (offset, source_sql) in statement.source_sqls.iter().enumerate() {
@@ -2672,6 +2819,7 @@ async fn execute_merged_statement_fallback_with_progress(
             token,
             statement_index,
             mysql_executor.as_deref_mut(),
+            session_id,
         )
         .await
         {
@@ -2726,11 +2874,12 @@ async fn execute_sql_file_statement_with_executor(
     token: &CancellationToken,
     statement_index: usize,
     mysql_executor: Option<&mut MySqlSqlFileExecutor>,
+    pinned_session_id: Option<&str>,
 ) -> Result<QueryResult, String> {
     if let Some(mysql_executor) = mysql_executor {
         mysql_executor.execute_statement(state, request, sql, token, statement_index).await
     } else {
-        execute_sql_file_statement(state, request, sql, token, statement_index).await
+        execute_sql_file_statement(state, request, sql, token, statement_index, pinned_session_id).await
     }
 }
 
@@ -2740,6 +2889,7 @@ async fn execute_sql_file_statement(
     sql: &str,
     token: &CancellationToken,
     statement_index: usize,
+    pinned_session_id: Option<&str>,
 ) -> Result<QueryResult, String> {
     if let Some(session_id) = request.txn_session_id.as_deref() {
         let schema = sql_file_transaction_schema(state, request).await?;
@@ -2778,7 +2928,12 @@ async fn execute_sql_file_statement(
         sql,
         request.schema.as_deref(),
         Some(child_token),
-        QueryExecutionOptions { execution_id: Some(execution_id), timeout_secs, ..Default::default() },
+        QueryExecutionOptions {
+            execution_id: Some(execution_id),
+            timeout_secs,
+            client_session_id: pinned_session_id.map(str::to_string),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -2882,6 +3037,31 @@ mod tests {
         assert_eq!(manual[1].statement.sql, statements[1].sql);
     }
 
+    #[test]
+    fn auto_commit_file_execution_pins_one_session_unless_mysql_or_manual() {
+        let mut request = SqlFileRequest {
+            execution_id: "pin-session".to_string(),
+            connection_id: "connection".to_string(),
+            database: String::new(),
+            schema: None,
+            file_path: String::new(),
+            continue_on_error: false,
+            txn_session_id: None,
+            selected_tables: None,
+            part_cooldown_ms: 0,
+            skip_relational_constraints: false,
+            failure_log_enabled: true,
+            encoding: Default::default(),
+        };
+        // Non-MySQL auto-commit files must keep BEGIN/COMMIT on one connection.
+        assert!(should_pin_sql_file_session(&request, false));
+        // MySQL already pins its own connection in MySqlSqlFileExecutor.
+        assert!(!should_pin_sql_file_session(&request, true));
+        // Manual transactions already own a session.
+        request.txn_session_id = Some("manual-transaction".to_string());
+        assert!(!should_pin_sql_file_session(&request, false));
+    }
+
     #[tokio::test]
     async fn manual_file_missing_session_never_falls_back_to_ordinary_execution() {
         let directory = tempfile::tempdir().unwrap();
@@ -2899,6 +3079,7 @@ mod tests {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            encoding: Default::default(),
         };
         let mut events = Vec::new();
         let error = execute_sql_file_content(
@@ -3254,6 +3435,7 @@ mod tests {
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
                 failure_log_enabled: true,
+                encoding: Default::default(),
             };
             let token = CancellationToken::new();
             let mut events = Vec::new();
@@ -3578,6 +3760,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encoding_preview_preserves_postgres_dollar_quotes_like_execution() {
+        let sql = "SELECT $$ _binary ' $$;\nSELECT $tag$ _binary 'abc' $tag$;\n";
+        let mut bom_bytes = vec![0xEF, 0xBB, 0xBF];
+        bom_bytes.extend_from_slice(sql.as_bytes());
+        for (bytes, encoding) in [
+            (sql.as_bytes().to_vec(), SqlFileEncoding::Auto),
+            (sql.as_bytes().to_vec(), SqlFileEncoding::Utf8),
+            (bom_bytes, SqlFileEncoding::Gbk),
+        ] {
+            let path = temporary_sql_file(&bytes).await;
+            let preview = read_sql_file_preview_with_encoding(&path, 20_000, encoding).await.unwrap();
+            // PostgreSQL execution passes false for MySQL normalization.
+            let mut execution =
+                SqlFileStreamDecoder::open_for_import(&path, encoding.to_encoding(), false, None).await.unwrap();
+            assert_eq!(preview, sql);
+            assert_eq!(preview, collect_sql_file_preview(&mut execution, 20_000).await.unwrap());
+            tokio::fs::remove_file(path).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn encoding_preview_recovers_mysql_binary_without_mixing_chunks() {
+        // The failure is in a later chunk; recovery must discard the first pass.
+        let prefix = format!("SELECT _binary 'abc';\n-- {}\n", "x".repeat(SQL_FILE_READ_CHUNK_BYTES));
+        let mut bytes = prefix.as_bytes().to_vec();
+        bytes.extend_from_slice(b"INSERT INTO t VALUES (_binary '\xAC\\\xED\\0\x05', '");
+        bytes.extend_from_slice("中文');\n".as_bytes());
+        for path in [temporary_sql_file(&bytes).await, temporary_gzip_sql_file(&bytes).await] {
+            for encoding in [SqlFileEncoding::Auto, SqlFileEncoding::Utf8] {
+                let preview = read_sql_file_preview_with_encoding(&path, 1_000_000, encoding).await.unwrap();
+                let mut execution =
+                    SqlFileStreamDecoder::open_for_import(&path, encoding.to_encoding(), true, None).await.unwrap();
+                assert_eq!(preview, collect_sql_file_preview(&mut execution, 1_000_000).await.unwrap());
+                assert!(preview.starts_with("SELECT X'616263';"));
+                assert!(preview.ends_with("INSERT INTO t VALUES (X'ACED0005', '中文');\n"));
+                assert_eq!(preview.matches("SELECT").count(), 1);
+            }
+            tokio::fs::remove_file(path).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn encoding_preview_does_not_hide_invalid_utf8_outside_binary_literals() {
+        let path = temporary_sql_file(b"SELECT '\xFF';").await;
+        assert_eq!(
+            read_sql_file_preview_with_encoding(&path, 20_000, SqlFileEncoding::Utf8).await.unwrap_err(),
+            "Unsupported or invalid SQL file encoding",
+        );
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn streaming_decoder_detects_gbk_after_ascii_prefix() {
         let (encoded, _, _) = encoding_rs::GBK.encode("-- Navicat dump\nINSERT INTO t VALUES ('中文');");
         let path = temporary_sql_file(encoded.as_ref()).await;
@@ -3842,9 +4076,15 @@ mod tests {
         state.configs.write().await.insert(config.id.clone(), config);
 
         let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        // SQL file execution pins a session-scoped pool, so the injected pool
+        // must exist under that key too; the base key keeps any non-pinned path
+        // (metadata probes) working.
+        let session_pool_key =
+            state.session_pool_key_for_test("gauss-stream", None, "sql-file-gauss-stop-on-error").await;
         state
             .update_connection_pools(|connections| {
                 connections.insert("gauss-stream".to_string(), crate::connection::PoolKind::Sqlite(pool.clone()));
+                connections.insert(session_pool_key, crate::connection::PoolKind::Sqlite(pool.clone()));
             })
             .await;
 
@@ -3864,6 +4104,7 @@ mod tests {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            encoding: Default::default(),
         };
         let mut progress = Vec::new();
 

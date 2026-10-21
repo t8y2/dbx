@@ -34,6 +34,9 @@ pub(super) async fn prepare_table_ddl(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
 ) -> Result<PreparedTableDdl, String> {
     let rebuild = request.drop_target_before_create;
+    // Every column reference below (CREATE TABLE, keys) uses the target-side names.
+    let target_columns = request.target_columns(columns);
+    let columns = target_columns.as_slice();
 
     let foreign_keys = if let Some(foreign_keys) = known_foreign_keys.get(table) {
         foreign_keys.clone()
@@ -84,7 +87,7 @@ pub(super) async fn prepare_table_ddl(
         target_db_type,
         source_driver_profile.as_deref(),
         target_driver_profile.as_deref(),
-        target_table == table,
+        target_table == table && request.preserves_column_names(),
     ) && (request.quote_target_column_names
         || !matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss));
 
@@ -123,7 +126,9 @@ pub(super) async fn prepare_table_ddl(
             match db::doris::get_catalog_table_ddl(&pool, catalog, &request.source_database, table).await {
                 Ok(ddl) => (ddl, true),
                 Err(err) => {
-                    log::warn!("[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL");
+                    log::warn!(
+                        "[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL"
+                    );
                     (
                         generate_create_table_ddl_with_column_quoting(
                             columns,
@@ -141,13 +146,12 @@ pub(super) async fn prepare_table_ddl(
                 }
             }
         } else {
-            match crate::schema::get_table_ddl_core(
+            match crate::schema::get_table_transfer_ddl_core(
                 state,
                 &request.source_connection_id,
                 &request.source_database,
                 &request.source_schema,
                 table,
-                None,
             )
             .await
             {
@@ -211,7 +215,17 @@ pub(super) async fn prepare_table_ddl(
             target_table,
         ) {
             reused_source_ddl = source_ddl_was_read;
-            rewritten
+            // openGauss's `pg_get_tabledef()` DDL carries storage options the PG-compatible
+            // targets reject (`WITH (orientation=row, compression=no)` → #9037). The profiles
+            // are passed in because a plain PostgreSQL connection profiled as openGauss reads
+            // that same DDL.
+            normalize_reused_opengauss_table_ddl(
+                &rewritten,
+                source_db_type,
+                source_driver_profile.as_deref(),
+                target_db_type,
+                target_driver_profile.as_deref(),
+            )
         } else {
             // The reused DDL's CREATE TABLE head could not be renamed safely; fall back
             // to the generated DDL rather than creating the table under the wrong name.
@@ -452,9 +466,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(prepared.deferred_fk_alters, vec![
-            "ALTER TABLE `resolved_child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
-        ]);
+        assert_eq!(
+            prepared.deferred_fk_alters,
+            vec![
+                "ALTER TABLE `resolved_child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
+            ]
+        );
         assert!(prepared.ddl.contains("`resolved_child`"), "{}", prepared.ddl);
     }
 

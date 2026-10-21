@@ -307,7 +307,8 @@ fn stream_formula_guard(reader: impl Read) -> Result<bool, String> {
             Some(b'.') if !dot && digits > 0 => {
                 dot = true;
                 digits = 0;
-                significant = 0;
+                // Precision is shared across both sides of the decimal point.
+                // Only leading zeros before the first nonzero digit are ignored.
             }
             None => return Ok(digits == 0),
             _ => return Ok(true),
@@ -330,6 +331,14 @@ mod tests {
             "-1.25",
             "-00000000000000000000000000001",
             "-1.00000000000000001",
+            "-123456789012345.6",
+            "-12345678.12345678",
+            "-12345678.01234567",
+            "-12345678.1234567",
+            "-00012345678.1234567",
+            "-0.000000000000000123456789012345",
+            "-0.0000000000000001234567890123456",
+            "-0.00000000000000000000",
             "-2+cmd",
             "-",
             "'-1",
@@ -360,6 +369,10 @@ mod tests {
         for value in [
             format!("{}=cmd", " ".repeat(16385)),
             format!("-{}1", "0".repeat(16385)),
+            format!("-{}12345678.1234567", "0".repeat(8182)),
+            format!("-{}12345678.01234567", "0".repeat(8182)),
+            format!("-0.{}123456789012345", "0".repeat(16385)),
+            format!("-0.{}1234567890123456", "0".repeat(16385)),
             format!("{}中🙂", " ".repeat(16385)),
         ] {
             let mut reader = CountingReader { data: value.as_bytes(), reads: 0 };

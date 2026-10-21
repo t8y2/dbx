@@ -631,13 +631,14 @@ describe("extractSqlParameters", () => {
   });
 
   it("describes each placeholder syntax for the parameter dialog", () => {
-    const sql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e";
-    expect(extractSqlParameterDescriptors(sql)).toEqual([
+    const sql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e, &substitution_name as f";
+    expect(extractSqlParameterDescriptors(sql, { databaseType: "oracle" })).toEqual([
       { key: "?1", name: "?1", syntax: "positional", token: "?" },
       { key: "named", name: "named", syntax: "named", token: ":named" },
       { key: "shell_name", name: "shell_name", syntax: "shell", token: "${shell_name}" },
       { key: "mybatis_name", name: "mybatis_name", syntax: "mybatis", token: "#{mybatis_name}" },
       { key: "sql_server_name", name: "sql_server_name", syntax: "sqlserver", token: "@sql_server_name" },
+      { key: "substitution_name", name: "substitution_name", syntax: "substitution", token: "&substitution_name" },
     ]);
   });
 
@@ -1569,6 +1570,137 @@ describe("enabledSyntaxes option", () => {
     expect(extractSqlParameters(sql, { enabledSyntaxes: ["shell"] })).toEqual(["shell_name"]);
     expect(extractSqlParameters(sql, { enabledSyntaxes: ["mybatis"] })).toEqual(["mybatis_name"]);
     expect(substituteSqlParameters(sql, { shell_name: { kind: "string", value: "a" }, mybatis_name: { kind: "string", value: "b" } }, { enabledSyntaxes: ["named"] })).toBe(sql);
+  });
+});
+
+describe("Oracle substitution variables", () => {
+  const oracleOptions = { databaseType: "oracle" as const };
+
+  it("extracts single and double ampersand substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id AND mgr_dept = &&dept_id";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["dept_id"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([{ key: "dept_id", name: "dept_id", syntax: "substitution", token: "&dept_id" }]);
+  });
+
+  it("extracts positional numeric substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &1 AND job_id = &&2";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["1", "2"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([
+      { key: "1", name: "1", syntax: "substitution", token: "&1" },
+      { key: "2", name: "2", syntax: "substitution", token: "&&2" },
+    ]);
+  });
+
+  it("handles optional dot terminator on substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM &table_name. WHERE id = 1";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["table_name"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([{ key: "table_name", name: "table_name", syntax: "substitution", token: "&table_name." }]);
+    expect(substituteSqlParameters(sql, { table_name: { kind: "raw", value: "employees" } }, oracleOptions)).toBe("SELECT * FROM employees WHERE id = 1");
+  });
+
+  it("handles double dot for schema and table concatenation in Oracle", () => {
+    const sql = "SELECT * FROM &schema..table_name";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["schema"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([{ key: "schema", name: "schema", syntax: "substitution", token: "&schema." }]);
+    expect(substituteSqlParameters(sql, { schema: { kind: "raw", value: "hr" } }, oracleOptions)).toBe("SELECT * FROM hr.table_name");
+  });
+
+  it("extracts and replaces quoted substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE ename = '&ename' AND job = '&job.' AND dept = '&&dept'";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["ename", "job", "dept"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([
+      { key: "ename", name: "ename", syntax: "substitution", token: "'&ename'" },
+      { key: "job", name: "job", syntax: "substitution", token: "'&job.'" },
+      { key: "dept", name: "dept", syntax: "substitution", token: "'&&dept'" },
+    ]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          ename: { kind: "string", value: "O'Brien" },
+          job: { kind: "string", value: "CLERK" },
+          dept: { kind: "string", value: "SALES" },
+        },
+        oracleOptions,
+      ),
+    ).toBe("SELECT * FROM emp WHERE ename = 'O''Brien' AND job = 'CLERK' AND dept = 'SALES'");
+  });
+
+  it("does not falsely treat ordinary ampersands as substitution variables in Oracle", () => {
+    const sql = "SELECT 'Tom & Jerry' as a, 'AT&T' as b, flags & 1 as c, array1 && array2 as d, id &lt; 10 as e FROM dual";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual([]);
+  });
+
+  it("ignores substitution variables in line and block comments in Oracle", () => {
+    const sql = `
+      -- &comment_var
+      /* &block_var */
+      SELECT * FROM emp WHERE id = &real_var
+    `;
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["real_var"]);
+  });
+
+  it("substitutes various parameter kinds for substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept AND ename = &name AND active = &active";
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          dept: { kind: "number", value: "10" },
+          name: { kind: "string", value: "KING" },
+          active: { kind: "boolean", value: "true" },
+        },
+        oracleOptions,
+      ),
+    ).toBe("SELECT * FROM emp WHERE deptno = 10 AND ename = 'KING' AND active = TRUE");
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "dameng", "yashandb", "oscar"] as const)("defaults substitution variables to enabled for %s", (databaseType) => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id AND code = '&code'";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["dept_id", "code"]);
+  });
+
+  it("enables substitution variables by default for openGauss in A mode but disables in PG mode", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id";
+    expect(extractSqlParameters(sql, { databaseType: "opengauss", compatibilityMode: "A" })).toEqual(["dept_id"]);
+    expect(extractSqlParameters(sql, { databaseType: "opengauss", compatibilityMode: "PG" })).toEqual([]);
+  });
+
+  it("enables substitution variables by default for Kingbase in oracle mode but disables in pg mode", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id";
+    expect(extractSqlParameters(sql, { databaseType: "kingbase", compatibilityMode: "oracle" })).toEqual(["dept_id"]);
+    expect(extractSqlParameters(sql, { databaseType: "kingbase", compatibilityMode: "pg" })).toEqual([]);
+  });
+
+  it("disables substitution variables by default when databaseType is undefined or non-Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id";
+    expect(extractSqlParameters(sql)).toEqual([]);
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+  });
+
+  it("does not treat PostgreSQL bitwise & or array overlap && as substitution variables", () => {
+    expect(extractSqlParameters("SELECT flags &mask FROM t", { databaseType: "postgres" })).toEqual([]);
+    expect(extractSqlParameters("SELECT flags & 1 FROM t", { databaseType: "postgres" })).toEqual([]);
+    expect(extractSqlParameters("SELECT a &&b FROM t", { databaseType: "postgres" })).toEqual([]);
+    expect(extractSqlParameters("SELECT array1 && array2 FROM t", { databaseType: "postgres" })).toEqual([]);
+  });
+
+  it("does not treat SQL Server bitwise & as substitution variables", () => {
+    expect(extractSqlParameters("SELECT flags &mask FROM t", { databaseType: "sqlserver" })).toEqual([]);
+    expect(extractSqlParameters("SELECT flags & 1 FROM t", { databaseType: "sqlserver" })).toEqual([]);
+  });
+
+  it("respects enabledSyntaxes toggle for substitution syntax across database types", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept AND id = :id";
+    // Oracle with substitution explicitly excluded
+    expect(extractSqlParameters(sql, { databaseType: "oracle", enabledSyntaxes: ["named"] })).toEqual(["id"]);
+    // PostgreSQL with substitution explicitly included
+    expect(extractSqlParameters(sql, { databaseType: "postgres", enabledSyntaxes: ["substitution"] })).toEqual(["dept"]);
+    expect(extractSqlParameters("SELECT flags &mask FROM t", { databaseType: "postgres", enabledSyntaxes: ["substitution"] })).toEqual(["mask"]);
+    expect(extractSqlParameters("SELECT a &&b FROM t", { databaseType: "postgres", enabledSyntaxes: ["substitution"] })).toEqual(["b"]);
+    // Substitution execution
+    expect(substituteSqlParameters("SELECT * FROM emp WHERE deptno = &dept", { dept: { kind: "number", value: "10" } }, { databaseType: "oracle", enabledSyntaxes: ["named"] })).toBe("SELECT * FROM emp WHERE deptno = &dept");
+    expect(substituteSqlParameters("SELECT * FROM emp WHERE deptno = &dept", { dept: { kind: "number", value: "10" } }, { databaseType: "postgres", enabledSyntaxes: ["substitution"] })).toBe("SELECT * FROM emp WHERE deptno = 10");
   });
 });
 

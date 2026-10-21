@@ -17,7 +17,7 @@ describe("sidebar database storage", () => {
     }
     expect(supportsSidebarTableStorage(config("jdbc"))).toBe(false);
     expect(supportsSidebarTableStorage({ ...config("postgres"), driver_profile: "cockroachdb" })).toBe(false);
-    expect(supportsSidebarTableStorage({ ...config("gbase"), driver_profile: "gbase8s" })).toBe(false);
+    expect(supportsSidebarTableStorage({ ...config("gbase8s"), driver_profile: "gbase8s" })).toBe(false);
   });
 
   it("requests and applies only visible database nodes", () => {

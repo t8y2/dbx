@@ -68,6 +68,7 @@ type modeDetectionDriverState struct {
 	queries             []string
 	databaseMode        *string
 	backtickIdentifiers bool
+	nullCurrentSchema   bool
 	databaseErr         error
 }
 
@@ -213,8 +214,8 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 	}
 	if strings.Contains(query, "FROM information_schema.columns c") {
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"id", "integer", "integer", "NO", nil, "primary key", int64(32), int64(0), nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"id", "integer", "integer", "NO", nil, "primary key", int64(32), int64(0), nil, nil, nil, nil}},
 		}, nil
 	}
 	if connection.state.rejectAttidentity && strings.Contains(query, "a.attidentity") {
@@ -229,8 +230,8 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 			identity = nil
 		}
 		return &valueRows{
-			columns: []string{"resolved_schema", "column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity"},
-			rows:    [][]driver.Value{{"public", "id", "integer", false, nil, nil, int64(32), int64(0), nil, identity}},
+			columns: []string{"resolved_schema", "column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated"},
+			rows:    [][]driver.Value{{"public", "id", "integer", false, nil, nil, int64(32), int64(0), nil, identity, nil}},
 		}, nil
 	}
 	return nil, errors.New("unexpected query: " + query)
@@ -253,9 +254,13 @@ func (connection *modeDetectionConn) QueryContext(_ context.Context, query strin
 
 	switch {
 	case strings.Contains(query, "SELECT current_database()"):
+		var schema driver.Value = "public"
+		if connection.state.nullCurrentSchema {
+			schema = nil
+		}
 		return &valueRows{
 			columns: []string{"current_database", "current_user", "version", "current_schema"},
-			rows:    [][]driver.Value{{"test", "system", "KingbaseES", "public"}},
+			rows:    [][]driver.Value{{"test", "system", "KingbaseES", schema}},
 		}, nil
 	case strings.Contains(query, "LOWER(name) = 'database_mode'"):
 		if connection.state.databaseErr != nil {
@@ -1351,7 +1356,7 @@ func TestConnectAndTestConnectionSharePreferFallback(t *testing.T) {
 }
 
 func TestKingbaseListIndexesQuerySupportsSQLServerMode(t *testing.T) {
-	query := kingbaseListIndexesQuery("sys_catalog", "sys", "public", "orders")
+	query := kingbaseListIndexesQuery("sys_catalog", "sys", "public", "orders", "ix.indnkeyatts", "sys_get_expr")
 	if !strings.Contains(query, "unnest(ix.indkey) WITH ORDINALITY") {
 		t.Fatalf("index query should preserve index column order without array subscripts: %s", query)
 	}
@@ -1431,10 +1436,10 @@ func TestListIndexesFallsBackWhenWithOrdinalityIsUnsupported(t *testing.T) {
 			return nil, &gokb.Error{Code: gokb.ErrorCode("42601"), Message: `syntax error at or near "WITH ORDINALITY"`}
 		case strings.Contains(query, "SELECT i.relname, am.amname") && strings.Contains(query, "ix.indkey"):
 			return &valueRows{
-				columns: []string{"relname", "amname", "indisunique", "indisprimary", "indkey"},
+				columns: []string{"relname", "amname", "indisunique", "indisprimary", "indkey", "indexrelid", "key_count", "filter", "indoption"},
 				rows: [][]driver.Value{
-					{"orders_customer_idx", "btree", false, false, "2 3"},
-					{"orders_pkey", "btree", true, true, []byte("1")},
+					{"orders_customer_idx", "btree", false, false, "2 3", int64(123), int64(2), nil, "0 0"},
+					{"orders_pkey", "btree", true, true, []byte("1"), int64(124), int64(1), nil, "0"},
 				},
 			}, nil
 		case strings.Contains(query, "SELECT a.attnum, a.attname"):
@@ -1502,8 +1507,8 @@ func TestGetColumnsUsesResolvedSchemaAcrossCatalogMetadata(t *testing.T) {
 						return nil, fmt.Errorf("explicit-schema columns query changed resolution behavior: %s", query)
 					}
 					return &valueRows{
-						columns: []string{"nspname", "attname", "format_type", "nullable", "default", "comment", "precision", "scale", "length", "identity"},
-						rows:    [][]driver.Value{{test.resolvedSchema, "feearea", "character varying", false, nil, nil, nil, nil, nil, nil}},
+						columns: []string{"nspname", "attname", "format_type", "nullable", "default", "comment", "precision", "scale", "length", "identity", "generated"},
+						rows:    [][]driver.Value{{test.resolvedSchema, "feearea", "character varying", false, nil, nil, nil, nil, nil, nil, nil}},
 					}, nil
 				case strings.Contains(query, "FROM information_schema.table_constraints"):
 					if !strings.Contains(query, "tc.table_schema='"+test.resolvedSchema+"'") {
@@ -1864,7 +1869,9 @@ func TestKingbaseV7VersionPattern(t *testing.T) {
 		v7      bool
 	}{
 		{version: "Kingbase V007R001C002B0014", v7: true},
+		{version: "KingbaseES V008R003C002B0320"},
 		{version: "KingbaseES V008R006C008B0014"},
+		{version: "KingbaseES V009R001C010B0001"},
 		{version: "PostgreSQL 12.1"},
 	} {
 		match := kingbaseReleasePattern.FindStringSubmatch(test.version)
@@ -3970,6 +3977,9 @@ func TestColumnDDLDefinitionPreservesCompatibilityExtras(t *testing.T) {
 	if extra := kingbaseIdentityClause(""); extra != nil {
 		t.Fatalf("non-identity column must not expose an extra clause: %#v", extra)
 	}
+	if extra := kingbaseIdentityClause("i"); extra != nil {
+		t.Fatalf("unrecognised identity code must not expose an extra clause: %#v", extra)
+	}
 }
 
 func TestRenderTableDDLUsesBacktickIdentifiersInMySQLCompatMode(t *testing.T) {
@@ -4023,12 +4033,12 @@ func TestInformationSchemaColumnsPreserveFullTypesInDDL(t *testing.T) {
 			return nil, errors.New("full column type was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
 			rows: [][]driver.Value{
-				{"count", "integer", "integer unsigned", "YES", nil, nil, int64(32), int64(0), nil},
-				{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil},
-				{"created_at", "datetime", "datetime(6)", "YES", nil, nil, nil, nil, nil},
-				{"mask", "bit", "bit(8)", "YES", nil, nil, nil, nil, nil},
+				{"count", "integer", "integer unsigned", "YES", nil, nil, int64(32), int64(0), nil, nil, nil, nil},
+				{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil, nil, nil, nil},
+				{"created_at", "datetime", "datetime(6)", "YES", nil, nil, nil, nil, nil, nil, nil, nil},
+				{"mask", "bit", "bit(8)", "YES", nil, nil, nil, nil, nil, nil, nil, nil},
 			},
 		}, nil
 	}}
@@ -4064,8 +4074,8 @@ func TestInformationSchemaColumnsResolveUserDefinedTypeWithoutColumnType(t *test
 			return nil, errors.New("user-defined type name was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"created_at", "USER-DEFINED", "datetime", "YES", nil, nil, nil, nil, nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"created_at", "USER-DEFINED", "datetime", "YES", nil, nil, nil, nil, nil, nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -4132,8 +4142,8 @@ func TestInformationSchemaColumnsPreserveColumnTypeWithoutUdtName(t *testing.T) 
 			return nil, errors.New("column type fallback was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil, nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -4171,8 +4181,8 @@ func TestInformationSchemaColumnsFallbackWithoutExtendedTypeColumns(t *testing.T
 			return nil, errors.New("base type fallback was not requested")
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64)}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+			rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64), nil, nil, nil}},
 		}, nil
 	}}
 	server := newServer()
@@ -4216,8 +4226,8 @@ func TestInformationSchemaColumnsRetriesOnlyForMissingTypeMetadataColumns(t *tes
 					return nil, errors.New("unexpected fallback query: " + query)
 				}
 				return &valueRows{
-					columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-					rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64)}},
+					columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity", "attgenerated", "generation_expression"},
+					rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64), nil, nil, nil}},
 				}, nil
 			}}
 			server := newServer()
@@ -4500,6 +4510,25 @@ func TestConnectionInfoReportsCompatibilityIdentifierQuote(t *testing.T) {
 	}
 }
 
+func TestConnectionInfoAllowsNullCurrentSchema(t *testing.T) {
+	db := openModeDetectionDB(t, &modeDetectionDriverState{nullCurrentSchema: true})
+	server := newServer()
+	server.db = db
+	server.mode.compatibilityMode = "mysql"
+	server.mode.mysqlCompat = true
+
+	info, err := server.connectionInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["schema"] != "" {
+		t.Fatalf("unexpected schema: %#v", info["schema"])
+	}
+	if info["identifierQuote"] != "`" {
+		t.Fatalf("unexpected identifier quote: %#v", info["identifierQuote"])
+	}
+}
+
 func TestDetectMySQLCompatModeProbesBacktickSyntaxWhenDatabaseModeMissing(t *testing.T) {
 	state := &modeDetectionDriverState{backtickIdentifiers: true}
 	db := openModeDetectionDB(t, state)
@@ -4510,7 +4539,7 @@ func TestDetectMySQLCompatModeProbesBacktickSyntaxWhenDatabaseModeMissing(t *tes
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.queries) != 2 || !strings.Contains(state.queries[1], "dbx_identifier_probe") {
+	if len(state.queries) != 4 || !strings.Contains(state.queries[3], "dbx_identifier_probe") {
 		t.Fatalf("expected database_mode probe followed by backtick syntax probe, got: %v", state.queries)
 	}
 }
@@ -4936,7 +4965,7 @@ func containsString(values []string, target string) bool {
 }
 
 // Regression test for https://github.com/t8y2/dbx/issues/7681: a timezone-less
-// "timestamp"/"date"/"time" column must not be labeled as an absolute UTC
+// "timestamp"/"date" column must not be labeled as an absolute UTC
 // instant (RFC3339Nano with a "Z"/offset suffix), or clients that convert it
 // to a display timezone will double-apply the shift.
 func TestNormalizeValueKingbaseTimezoneLessDateTime(t *testing.T) {
@@ -4944,7 +4973,7 @@ func TestNormalizeValueKingbaseTimezoneLessDateTime(t *testing.T) {
 	// the process-local zone, which is not a real UTC instant.
 	wallClock := time.Date(2026, time.January, 30, 10, 0, 3, 0, time.UTC)
 
-	for _, columnType := range []string{"TIMESTAMP", "timestamp", "DATE", "TIME"} {
+	for _, columnType := range []string{"TIMESTAMP", "timestamp", "DATE"} {
 		got := normalizeValue(wallClock, columnType)
 		want := "2026-01-30T10:00:03"
 		gotStr, ok := got.(string)
@@ -4967,6 +4996,24 @@ func TestNormalizeValueKingbaseTimezoneLessDateTime(t *testing.T) {
 	}
 }
 
+// Regression test for https://github.com/t8y2/dbx/issues/12188: gokb decodes a
+// "time" column into a time.Time on Go's zero date, so the date part must not
+// reach the client. Showing it rendered every time of day as 0000-01-01T17:19:34.
+func TestNormalizeValueKingbaseTimeColumnKeepsTimeOfDay(t *testing.T) {
+	timeOfDay := time.Date(0, time.January, 1, 17, 19, 34, 0, time.UTC)
+
+	for _, columnType := range []string{"TIME", "time", "time without time zone"} {
+		got := normalizeValue(timeOfDay, columnType)
+		gotStr, ok := got.(string)
+		if !ok {
+			t.Fatalf("columnType=%s: expected a string, got %#v", columnType, got)
+		}
+		if gotStr != "17:19:34" {
+			t.Fatalf("columnType=%s: got %q, want %q", columnType, gotStr, "17:19:34")
+		}
+	}
+}
+
 func TestCatalogColumnsPreservesJsonAndJsonbTypes(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		if !strings.Contains(query, "WHEN t.typname = 'json' THEN 'json'") ||
@@ -4974,11 +5021,11 @@ func TestCatalogColumnsPreservesJsonAndJsonbTypes(t *testing.T) {
 			return nil, fmt.Errorf("columns query must distinguish json from jsonb: %s", query)
 		}
 		return &valueRows{
-			columns: []string{"nspname", "attname", "data_type", "nullable", "default", "comment", "precision", "scale", "length", "identity"},
+			columns: []string{"nspname", "attname", "data_type", "nullable", "default", "comment", "precision", "scale", "length", "identity", "generated"},
 			rows: [][]driver.Value{
-				{"public", "data_json", "json", true, nil, nil, nil, nil, nil, nil},
-				{"public", "data_jsonb", "jsonb", true, nil, nil, nil, nil, nil, nil},
-				{"public", "data_json_arr", "json[]", true, nil, nil, nil, nil, nil, nil},
+				{"public", "data_json", "json", true, nil, nil, nil, nil, nil, nil, nil},
+				{"public", "data_jsonb", "jsonb", true, nil, nil, nil, nil, nil, nil, nil},
+				{"public", "data_json_arr", "json[]", true, nil, nil, nil, nil, nil, nil, nil},
 			},
 		}, nil
 	}}

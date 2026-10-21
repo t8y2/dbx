@@ -16,6 +16,12 @@ describe("data grid filter candidate value serialization", () => {
     expect(parseFilterValues(raw)).toEqual(["north,east", "line 1\nline 2", "O'Brien", "null"]);
   });
 
+  it("keeps exact decimal filter literals as text for lossless SQL generation", () => {
+    const value = "9007199254740993.123456789012";
+    expect(parseFilterValue(value, { data_type: "NUMBER(38,12)" }, "oceanbase-oracle")).toBe(value);
+    expect(parseFilterValues(`'${value}', '${value}1'`, { data_type: "NUMBER(38,12)" }, "oceanbase-oracle")).toEqual([value, `${value}1`]);
+  });
+
   it("maps a selected NULL candidate to a null-aware single-value operator", () => {
     expect(dataGridNullSuggestionFilterMode("equals")).toBe("is-null");
     expect(dataGridNullSuggestionFilterMode("like")).toBe("is-null");

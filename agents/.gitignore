@@ -1,5 +1,6 @@
 **/libs/*.jar
 !drivers/cache/libs/CacheDB.jar
+!drivers/gbase8c/libs/gbase8c-jdbc-3.0.0B02.jar
 !drivers/oscar/libs/oscarJDBC8.jar
 !drivers/sundb/libs/sundb8-1.0.2.jar
 !drivers/transwarp/libs/inceptor-sdk-transwarp-6.1.0-SNAPSHOT.jar

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridValueTransform from "@/components/grid/DataGridValueTransform.vue";
-import { computed, toRef } from "vue";
+import { computed, ref, toRef } from "vue";
 import { Code2, Copy, Download, Eye, FileDiff, FileUp, Pencil, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import { TabsContent } from "@/components/ui/tabs";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import { useDataGridCellDetail } from "@/composables/useDataGridCellDetail";
 import { BINARY_CELL_DOWNLOAD_MODES, isBinaryCellColumnType, binaryCellUtf8Text, isBlobCellColumnType, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
-import { isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
+import { cellDetailPreviewText, isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { isHexGeometry } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
@@ -54,6 +54,7 @@ const emit = defineEmits<{
   copyValue: [];
   commit: [];
   cancel: [];
+  close: [];
   save: [];
   setNull: [];
   copyColumnName: [];
@@ -64,6 +65,7 @@ const { geometryPreviewOpen, geometryCanvas, detailsEditorContainer, sideJsonPre
   detail: toRef(props, "detail"),
   editValue: detailEditValue,
   onCancel: () => emit("cancel"),
+  onClose: () => emit("close"),
   // 详情编辑器里按 Ctrl/Cmd+S 与 temporal 编辑器的 ctrl+s 路径保持一致：
   // 先 emit commit（把草稿落成待保存变更），再 emit save（触发网格保存）。
   onSave: () => {
@@ -76,7 +78,10 @@ void detailsEditorContainer;
 void sideJsonPreviewContainer;
 
 const binaryTextPreview = computed(() => (isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
-const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? props.detail.rawValuePreview : props.detail.displayValuePreview));
+const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? cellDetailPreviewText(props.detail, props.databaseType) : props.detail.displayValuePreview));
+const transformOpen = ref(false);
+// 底部面板横向空间充足：有图片预览时与值文本左右并排，侧栏窄面板保持上下堆叠。
+const valueBesideImage = computed(() => props.panelIsBottom && !props.editing && !!props.detail.imagePreviewUrl);
 
 function startJsonEditFromBlankArea(event: MouseEvent) {
   const target = event.target as { closest?: (selector: string) => Element | null } | null;
@@ -96,26 +101,26 @@ defineExpose({ openSearch });
 <template>
   <TabsContent value="details" class="m-0 min-h-0 min-w-0 flex-1 flex flex-col">
     <div data-native-clipboard class="min-w-0 flex-1 min-h-0 overflow-auto px-3 pt-3 text-xs" :class="[valueFillsHeight ? 'flex flex-col gap-3' : 'space-y-3', editing && !panelIsBottom ? 'pb-1' : 'pb-3']">
-      <div v-if="panelIsBottom && !metadataCollapsed" class="grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2">
+      <div v-if="panelIsBottom && !metadataCollapsed" class="grid grid-cols-[minmax(0,1.6fr)_repeat(4,minmax(0,0.55fr))_minmax(0,1fr)] gap-3 rounded border bg-muted/20 p-2">
         <div class="min-w-0 space-y-1">
           <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
           <div class="truncate font-medium" :title="detail.column">{{ detail.column }}</div>
         </div>
-        <div class="space-y-1">
+        <div class="min-w-0 space-y-1">
           <div class="text-muted-foreground">{{ t("grid.rowNumber") }}</div>
-          <div>{{ detail.rowNumber }}</div>
+          <div class="min-w-0 break-all">{{ detail.rowNumber }}</div>
         </div>
         <div class="min-w-0 space-y-1">
           <div class="text-muted-foreground">{{ t("grid.columnType") }}</div>
           <div class="truncate" :class="detail.type ? typeColorClass(detail.type) : 'text-muted-foreground'" :title="detail.type || '-'">{{ detail.type || "-" }}</div>
         </div>
-        <div class="space-y-1">
+        <div class="min-w-0 space-y-1">
           <div class="text-muted-foreground">{{ t("grid.nullValue") }}</div>
-          <div>{{ (detail.isNull ?? detail.value === null) ? "true" : "false" }}</div>
+          <div class="min-w-0 break-all">{{ (detail.isNull ?? detail.value === null) ? "true" : "false" }}</div>
         </div>
-        <div class="space-y-1">
+        <div class="min-w-0 space-y-1">
           <div class="text-muted-foreground">{{ t("grid.valueLength") }}</div>
-          <div>{{ detail.length }}</div>
+          <div class="min-w-0 break-all">{{ detail.length }}</div>
         </div>
         <div class="min-w-0 space-y-1">
           <div class="text-muted-foreground">{{ t("grid.columnComment") }}</div>
@@ -151,18 +156,28 @@ defineExpose({ openSearch });
         </div>
       </template>
 
-      <div class="space-y-1" :class="[{ 'min-h-0 flex flex-col': valueFillsHeight }, valueFillsHeight && !(detail.imagePreviewUrl && !editing) ? 'flex-1' : '', detail.imagePreviewUrl && !editing ? 'shrink-0' : '']">
-        <div class="flex min-h-5 min-w-0 flex-wrap items-center justify-between gap-2">
+      <div
+        :class="[
+          { 'min-h-0 flex flex-col': valueFillsHeight && !valueBesideImage },
+          valueBesideImage ? 'grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-start gap-2' : 'space-y-1',
+          valueFillsHeight && !(detail.imagePreviewUrl && !editing) ? 'flex-1' : '',
+          detail.imagePreviewUrl && !editing ? 'shrink-0' : '',
+        ]"
+      >
+        <div class="flex min-h-5 min-w-0 flex-wrap items-center justify-between gap-2" :class="valueBesideImage ? 'col-span-2' : ''">
           <div class="shrink-0 text-muted-foreground">{{ t("grid.cellValue") }}</div>
           <div class="min-w-0 flex flex-1 flex-wrap items-center justify-end gap-1">
             <!-- 与下载菜单同一道闸门：两者都读已提交的 `0x<hex>`，编辑中不对草稿做只读文本预览。 -->
             <DataGridCellDetailTextPreview v-if="!editing && isBinaryCellColumnType(detail.type)" :identity="`${detail.rowId}:${detail.colIndex}`" :value="detail.value" :column-type="detail.type" :database-type="databaseType" :incomplete="detail.isSourceTruncated" />
             <DataGridValueTransform
               v-else-if="!isBinaryCellColumnType(detail.type)"
+              v-model:open="transformOpen"
               :source="(detail.isNull ?? detail.value === null) && (!editing || !detailEditValue || detailEditValue === detail.rawValue) ? null : editing ? detailEditValue : detail.rawValue"
               :identity="`${detail.rowId}:${detail.colIndex}:${editing}`"
               :incomplete="detail.isSourceTruncated"
               :unsafe-number="typeof detail.value === 'number' && Number.isInteger(detail.value) && !Number.isSafeInteger(detail.value) && (!editing || detailEditValue === detail.rawValue)"
+              :column="detail.column"
+              :row-number="detail.rowNumber"
             />
             <Button v-if="editing && showCompareJson" variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-xs" :disabled="!canCompareJson" :title="t('grid.compareJson')" @mousedown.prevent @click="emit('compareJson')"><FileDiff class="h-3 w-3" />{{ t("grid.compareJson") }}</Button>
             <!-- issue #9832：编辑中「压缩 JSON」作用于草稿，格式化入口不能再被 !editing 挡掉，否则压缩后就无法展开。 -->
@@ -186,14 +201,13 @@ defineExpose({ openSearch });
             ></Popover>
           </div>
         </div>
-        <div v-if="detail.imagePreviewUrl && !editing" class="shrink-0 space-y-1.5">
-          <div class="text-muted-foreground">{{ t("grid.imagePreview") }}</div>
-          <a :href="detail.imagePreviewUrl" role="button" class="flex overflow-hidden rounded border bg-muted/20" :class="panelIsBottom ? 'max-h-28' : 'max-h-40'" @click.prevent="openImagePreview(detail.imagePreviewUrl, detail.column)"
-            ><img :src="detail.imagePreviewUrl" :alt="detail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-full w-full object-contain"
+        <div v-if="detail.imagePreviewUrl && !editing" :style="transformOpen ? { display: 'none' } : null" :class="valueBesideImage ? 'col-start-2 row-start-2' : ''" class="shrink-0">
+          <a :href="detail.imagePreviewUrl" role="button" class="flex overflow-hidden rounded border bg-muted/20" :class="valueBesideImage ? 'max-h-[44vh]' : panelIsBottom ? 'max-h-28' : 'max-h-40'" @click.prevent="openImagePreview(detail.imagePreviewUrl, detail.column)"
+            ><img :src="detail.imagePreviewUrl" :alt="detail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="w-full object-contain" :class="valueBesideImage ? 'max-h-[44vh]' : panelIsBottom ? 'max-h-28' : 'max-h-40'"
           /></a>
         </div>
         <template v-if="editing"
-          ><div class="dbx-data-grid-value-font min-h-0 min-w-0 flex-1" :style="editorStyle">
+          ><div class="dbx-data-grid-value-font min-h-0 min-w-0 flex-1" :style="transformOpen ? { display: 'none' } : editorStyle">
             <TemporalCellEditor v-if="temporalEditorConfig" v-model="detailEditValue" :kind="temporalEditorConfig.kind" :fraction-precision="temporalEditorConfig.fractionPrecision" variant="inline" :commit-on-close="false" @cancel="emit('cancel')" @commit="emit('commit')" @save="emit('save')" />
             <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="min-h-0 h-full w-full rounded border overflow-hidden" />
           </div>
@@ -204,20 +218,27 @@ defineExpose({ openSearch });
         >
         <div
           v-else-if="detail.formattedJson"
+          :style="transformOpen ? { display: 'none' } : null"
           ref="sideJsonPreviewContainer"
           data-cell-detail-editor-root
           data-cell-detail-json-preview
           class="overflow-hidden rounded border bg-muted/20 p-2"
-          :class="[{ 'cursor-text': detail.isEditable }, valueFillsHeight ? 'min-h-0 flex-1' : 'h-72 max-h-[42vh]']"
+          :class="[{ 'cursor-text': detail.isEditable }, valueBesideImage ? 'col-start-1 row-start-2' : '', valueFillsHeight ? 'min-h-0 flex-1' : 'h-72 max-h-[42vh]']"
           @dblclick.capture="startJsonEditFromBlankArea"
         />
         <pre
           v-else
+          :style="transformOpen ? { display: 'none' } : null"
           class="dbx-data-grid-value-font overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
-          :class="[{ 'cursor-text': detail.isEditable }, panelIsBottom && detail.imagePreviewUrl ? 'min-h-24 max-h-32 shrink-0' : '', valueFillsHeight && !detail.imagePreviewUrl ? 'min-h-0 flex-1' : '']"
+          :class="[
+            { 'cursor-text': detail.isEditable },
+            valueBesideImage ? 'col-start-1 row-start-2' : '',
+            panelIsBottom && detail.imagePreviewUrl ? (valueBesideImage ? 'min-h-24 max-h-[44vh]' : 'min-h-24 max-h-32 shrink-0') : '',
+            valueFillsHeight && !detail.imagePreviewUrl ? 'min-h-0 flex-1' : '',
+          ]"
           @dblclick="emit('startEdit')"
           >{{ presentedValuePreview }}</pre>
-        <div v-if="detail.isValuePreviewTruncated && !sideJsonView" class="text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}</div>
+        <div v-if="detail.isValuePreviewTruncated && !sideJsonView" :style="transformOpen ? { display: 'none' } : null" :class="valueBesideImage ? 'col-start-1' : ''" class="text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}</div>
       </div>
     </div>
     <div class="flex min-w-0 flex-wrap gap-1 overflow-hidden border-t bg-background p-1.5" :class="panelIsBottom ? 'shrink-0 items-center' : 'shrink-0 flex-col'">

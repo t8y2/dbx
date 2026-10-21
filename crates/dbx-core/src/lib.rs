@@ -44,6 +44,8 @@ pub use data::database_export;
 pub use dbx_drivers::database_capabilities;
 pub use dbx_sql::data_grid_extractors;
 pub use dbx_sql::data_grid_sql;
+pub use dbx_sql::database_search_columns_sql;
+pub use dbx_sql::database_search_probe_sql;
 pub use dbx_sql::database_search_sql;
 pub use dbx_sql::database_structure_search_sql;
 pub use dbx_types::database_manifest;

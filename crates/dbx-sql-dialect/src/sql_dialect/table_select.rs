@@ -1,7 +1,8 @@
 use crate::models::connection::DatabaseType;
 
 use super::capabilities::{
-    firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, uses_xugu_row_id, TablePaginationStrategy,
+    firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, uses_postgres_ctid, uses_xugu_row_id,
+    TablePaginationStrategy,
 };
 use super::identifiers::{
     normalize_where_input, parse_sqlserver_linked_schema_ref, qualified_table_name, qualified_table_name_with_catalog,
@@ -200,8 +201,11 @@ pub fn table_data_schema<'a>(
     driver_profile: Option<&str>,
     schema: Option<&'a str>,
 ) -> Option<&'a str> {
-    if database_type == Some(DatabaseType::Informix)
-        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s"))
+    // The frontend reports GBase 8s through the Informix dialect (see `connectionSqlDialect`), so
+    // the owner-free rule applies to both the dialect-mapped and the native `gbase8s` type.
+    if database_type == Some(DatabaseType::Gbase8s)
+        || (database_type == Some(DatabaseType::Informix)
+            && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")))
     {
         None
     } else {
@@ -311,9 +315,19 @@ pub fn build_table_data_select_sql_with_database(
         && is_oracle_base_table_type(options.table_type.as_deref());
     let include_xugu_row_id =
         options.include_row_id && uses_xugu_row_id(database_type) && !is_view_table_type(options.table_type.as_deref());
+    let include_postgres_ctid = options.include_row_id
+        && uses_postgres_ctid(database_type)
+        && is_postgres_base_table_type(options.table_type.as_deref())
+        && options.primary_keys.is_empty();
     let offset = options.offset.unwrap_or(0);
     let select_columns = if include_oracle_row_id {
         format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\", t.*")
+    } else if include_postgres_ctid {
+        // tableoid separates inherited relations; xmin keeps a recycled CTID from
+        // identifying a new tuple. The body stays `*` — the projection this engine
+        // already used for table data. Bounded large-value previews stay off here
+        // because they are keyed off a declared primary key, which this table lacks.
+        format!("tableoid::text || ':' || ctid::text || ':' || xmin::text AS \"{DBX_ROWID_COLUMN}\", *")
     } else if let Some(preview_columns) = build_large_value_preview_columns(&options) {
         preview_columns
     } else if include_xugu_row_id {
@@ -494,15 +508,19 @@ pub fn database_qualified_table_name(
     database: Option<&str>,
     table_name: &str,
 ) -> Option<String> {
-    let database = database.map(str::trim).filter(|database| !database.is_empty())?;
+    let database = database.map(str::trim).filter(|database| !database.is_empty());
+    let schema = schema.map(str::trim).filter(|schema| !schema.is_empty());
     match database_type {
-        Some(DatabaseType::ClickHouse) => Some(format!(
-            "{}.{}",
-            quote_table_identifier(database_type, database),
-            quote_table_identifier(database_type, table_name)
-        )),
+        Some(DatabaseType::ClickHouse) => {
+            let namespace = database.or(schema)?;
+            Some(format!(
+                "{}.{}",
+                quote_table_identifier(database_type, namespace),
+                quote_table_identifier(database_type, table_name)
+            ))
+        }
         Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks) => {
-            let namespace = schema.map(str::trim).filter(|schema| !schema.is_empty()).unwrap_or(database);
+            let namespace = schema.or(database)?;
             Some(qualified_table_name_with_catalog(
                 database_type,
                 catalog,
@@ -512,9 +530,10 @@ pub fn database_qualified_table_name(
             ))
         }
         Some(DatabaseType::SqlServer) => {
+            let database = database?;
             // A linked-server schema already carries `server|catalog|schema`, so
             // prefixing it with the local database would produce a bogus name.
-            let schema = schema.map(str::trim).filter(|schema| !schema.is_empty())?;
+            let schema = schema?;
             if parse_sqlserver_linked_schema_ref(schema).is_some() {
                 return None;
             }
@@ -542,6 +561,9 @@ pub fn table_data_qualified_table_name(
             .filter(|schema| !schema.is_empty())
             .map(|schema| format!("{}.{table}", quote_iris_identifier(schema, identifier_quote)))
             .unwrap_or(table);
+    }
+    if database_type == Some(DatabaseType::Gbase8s) {
+        return quote_table_data_identifier(database_type, table_name, identifier_quote);
     }
     if !uses_connection_identifier_quote(database_type, identifier_quote) {
         return qualified_table_name(database_type, schema, table_name);
@@ -588,7 +610,7 @@ pub fn uses_connection_identifier_quote(database_type: Option<DatabaseType>, ide
         // Kyuubi normally uses Hive-family backticks, but a Trino-backed
         // session reports the ANSI double quote through connection info.
         || (database_type == Some(DatabaseType::Kyuubi) && identifier_quote.is_some())
-        || (database_type == Some(DatabaseType::Informix) && identifier_quote.is_some())
+        || (matches!(database_type, Some(DatabaseType::Informix | DatabaseType::Gbase8s)) && identifier_quote.is_some())
         || (matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres))
             && identifier_quote.is_some())
 }
@@ -599,6 +621,17 @@ fn is_view_table_type(table_type: Option<&str>) -> bool {
 
 fn is_oracle_base_table_type(table_type: Option<&str>) -> bool {
     table_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("TABLE"))
+}
+
+fn is_postgres_base_table_type(table_type: Option<&str>) -> bool {
+    // The PostgreSQL driver reports `relkind = 'r'` as the information-schema
+    // spelling `BASE TABLE`, while other metadata paths (and the hand-written
+    // tests) use `TABLE`. Accept both so the locator is actually injected for a
+    // real sidebar preview.
+    table_type.is_some_and(|value| {
+        let value = value.trim();
+        value.eq_ignore_ascii_case("TABLE") || value.eq_ignore_ascii_case("BASE TABLE")
+    })
 }
 
 pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
@@ -1314,9 +1347,17 @@ mod tests {
             Some("`db_9`.`t`")
         );
         assert_eq!(
+            database_qualified_table_name(Some(DatabaseType::Mysql), None, Some("db_9"), None, "t").as_deref(),
+            Some("`db_9`.`t`")
+        );
+        assert_eq!(
             database_qualified_table_name(Some(DatabaseType::ClickHouse), None, Some("default"), Some("dbx"), "t")
                 .as_deref(),
             Some("`dbx`.`t`")
+        );
+        assert_eq!(
+            database_qualified_table_name(Some(DatabaseType::ClickHouse), None, Some("default"), None, "t").as_deref(),
+            Some("`default`.`t`")
         );
         assert_eq!(
             database_qualified_table_name(Some(DatabaseType::SqlServer), None, Some("dbo"), Some("dbx"), "t")

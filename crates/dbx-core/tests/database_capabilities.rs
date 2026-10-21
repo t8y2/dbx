@@ -113,11 +113,13 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Exasol, None), Some("exasol"));
     assert_eq!(agent_key(&DatabaseType::OceanbaseOracle, None), Some("oceanbase-oracle"));
     assert_eq!(agent_key(&DatabaseType::Gbase, None), Some("gbase8a"));
+    assert_eq!(agent_key(&DatabaseType::Gbase8s, None), Some("gbase8s"));
     assert_eq!(agent_key(&DatabaseType::Access, None), Some("access"));
     assert_eq!(agent_key(&DatabaseType::Oracle, None), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Databend, None), Some("databend"));
     assert_eq!(agent_key(&DatabaseType::InfluxDb, None), Some("influxdb"));
     assert_eq!(agent_key(&DatabaseType::Uxdb, None), Some("uxdb"));
+    assert_eq!(agent_key(&DatabaseType::Gbase8c, None), Some("gbase8c"));
     assert_eq!(agent_key(&DatabaseType::ZooKeeper, None), Some("zookeeper"));
     assert_eq!(agent_key(&DatabaseType::Spanner, None), Some("spanner"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle"));
@@ -159,6 +161,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Exasol));
     assert!(is_agent_type(&DatabaseType::OceanbaseOracle));
     assert!(is_agent_type(&DatabaseType::Gbase));
+    assert!(is_agent_type(&DatabaseType::Gbase8c));
     assert!(is_agent_type(&DatabaseType::Access));
     assert!(is_agent_type(&DatabaseType::Databend));
     assert!(is_agent_type(&DatabaseType::InfluxDb));
@@ -364,6 +367,26 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(!uxdb.capabilities.data_transfer);
     assert!(!uxdb.capabilities.user_admin);
 
+    let gbase8c = find_driver(DatabaseType::Gbase8c);
+    assert_eq!(gbase8c.label, "南大通用 GBase 8c");
+    assert_eq!(gbase8c.runtime_mode, "agent");
+    assert_eq!(gbase8c.agent_key.as_deref(), Some("gbase8c"));
+    assert_eq!(gbase8c.support_level, "operate");
+    assert!(gbase8c.capabilities.query_execution);
+    assert!(gbase8c.capabilities.metadata_browse);
+    assert!(gbase8c.capabilities.table_data_edit);
+    assert!(gbase8c.capabilities.driver_management);
+    // Generated DDL has to follow DBCOMPATIBILITY (A/B/C/PG), which is fixed at database
+    // creation and cannot be changed by SQL, so the same DDL can be right on one GBase 8c
+    // instance and wrong on another. Structure editing, table import and data transfer stay
+    // off until the DDL generator can honour the connected database's mode.
+    assert!(!gbase8c.capabilities.table_structure_edit);
+    assert!(!gbase8c.capabilities.table_import);
+    assert!(!gbase8c.capabilities.data_transfer);
+    // ConfiguredJdbcAgent (the base this agent uses) throws for object source.
+    assert!(!gbase8c.capabilities.object_source);
+    assert!(!gbase8c.capabilities.user_admin);
+
     let salesforce = find_driver(DatabaseType::Salesforce);
     assert_eq!(salesforce.label, "Salesforce");
     assert_eq!(salesforce.support_level, "operate");
@@ -519,4 +542,21 @@ fn db2_declares_table_import_support() {
     let db2 = manifest.drivers.iter().find(|driver| driver.db_type == DatabaseType::Db2).expect("DB2 manifest entry");
 
     assert!(db2.capabilities.table_import);
+}
+
+#[test]
+fn opengauss_declares_table_import_support() {
+    let manifest = driver_manifest();
+    let opengauss = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::OpenGauss)
+        .expect("openGauss manifest entry");
+
+    assert!(opengauss.capabilities.table_import);
+    // The import wizard relies on these neighbouring capabilities; keep the
+    // openGauss block coherent so the entry surfaces stay reachable.
+    assert!(opengauss.capabilities.table_data_edit);
+    assert!(opengauss.capabilities.sql_file_execution);
+    assert!(opengauss.capabilities.data_transfer);
 }

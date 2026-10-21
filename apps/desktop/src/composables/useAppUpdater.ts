@@ -131,6 +131,7 @@ export async function resolveUpdaterProxy(): Promise<string | undefined> {
 export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const { t } = useI18n();
   const settingsStore = useSettingsStore();
+  const updaterDisabled = import.meta.env.VITE_DBX_DISABLE_UPDATER === "1";
   type Phase = "idle" | "checking" | "downloading" | "ready" | "preparing" | "installing" | "restart";
   const phase = ref<Phase>("idle");
   const downloaded = ref<api.DownloadedUpdate | null>(null);
@@ -148,11 +149,16 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const updateReady = computed(() => phase.value === "restart");
   const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
   const autoUpdateEnabled = computed(() => settingsStore.editorSettings.autoUpdateApp !== false);
+  // Hiding the toolbar update entry opts the app out of background update
+  // nagging (#11041): silent startup/hourly/retry checks stop, while the
+  // explicit "Check for updates" action in settings keeps working.
+  const updateEntryVisible = computed(() => settingsStore.editorSettings.toolbarItems?.checkUpdates !== false);
   const hasUpdateAvailable = computed(() => (updateDownloaded.value || updateReady.value || updateInfo.value?.update_available === true) && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion));
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
   let generation = 0;
   let activeDownload: Promise<void> | undefined;
   let automaticDownload = false;
+  let silentCheck = false;
   let cancellation: Promise<void> | undefined;
   let cancelOperation: Promise<void> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -223,13 +229,15 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     return t("updates.installFailed", { error: message });
   }
   async function checkUpdates(checkOptions: { silent?: boolean } = {}) {
-    if (disposed || isIgnoringUpdate.value) return;
+    if (updaterDisabled || disposed || isIgnoringUpdate.value) return;
+    if (checkOptions.silent && !updateEntryVisible.value) return;
     if (!checkOptions.silent) showUpdateDialog.value = true;
     // A downloaded-but-uninstalled update keeps the app in the ready phase; checks
     // continue so a newer release can replace the cached package.
     if (phase.value !== "idle" && phase.value !== "ready") return;
     clearRetry();
     const token = ++generation;
+    silentCheck = checkOptions.silent === true;
     phase.value = "checking";
     clearError();
     try {
@@ -281,7 +289,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     }
   }
   async function downloadUpdateInBackground(automatic = false) {
-    if (disposed || isIgnoringUpdate.value || phase.value !== "idle" || downloaded.value || !canDownloadAndInstallUpdate(updateInfo.value, isTauriRuntime())) return;
+    if (updaterDisabled || disposed || isIgnoringUpdate.value || phase.value !== "idle" || downloaded.value || !canDownloadAndInstallUpdate(updateInfo.value, isTauriRuntime())) return;
     if (automatic && !autoUpdateEnabled.value) return;
     automaticDownload = automatic;
     const version = updateInfo.value!.latest_version;
@@ -434,14 +442,17 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     }
   }
   async function installDownloadedUpdate() {
+    if (updaterDisabled) return;
     await performInstall(false);
   }
   async function restartApp() {
+    if (updaterDisabled) return;
     if (updateReady.value) await performInstall(true);
   }
   async function initialize() {
     if (initialized || disposed) return;
     initialized = true;
+    if (updaterDisabled) return;
     if (isTauriRuntime()) {
       phase.value = "checking";
       try {
@@ -484,11 +495,28 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       })
       .catch(fail);
   });
+  // Hiding the toolbar entry mid-session must also stop background activity,
+  // and re-showing it resumes the silent checks.
+  const stopUpdateEntryWatch = watch(updateEntryVisible, (visible) => {
+    if (disposed) return;
+    if (!visible) {
+      clearRetry();
+      if (automaticDownload || (checkingUpdates.value && silentCheck)) void cancelDownload().catch(fail);
+      return;
+    }
+    if (!initialized) return;
+    void (cancelOperation ?? Promise.resolve())
+      .then(() => {
+        if (updateEntryVisible.value && !disposed) void checkUpdates({ silent: true });
+      })
+      .catch(fail);
+  });
   function dispose() {
     disposed = true;
     clearRetry();
     clearInterval(hourlyTimer);
     stopSettingsWatch();
+    stopUpdateEntryWatch();
     updatePreparationRelease?.();
     updatePreparationRelease = undefined;
     void cancelDownload().catch(() => {});

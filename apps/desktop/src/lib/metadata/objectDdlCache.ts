@@ -81,12 +81,16 @@ function invalidationPrefix(match: MetadataCacheInvalidation): string {
   return `${parts.join(":")}:`;
 }
 
+function sanitizeDdl(ddl: string): string {
+  return ddl.includes("\0") ? ddl.replaceAll("\0", "") : ddl;
+}
+
 function decodeCachedDdl(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const envelope = payload as Partial<ObjectDdlCacheEnvelope>;
   const cachedAt = typeof envelope.cachedAt === "string" ? Date.parse(envelope.cachedAt) : Number.NaN;
   if (envelope.version !== 1 || !Number.isFinite(cachedAt) || Date.now() - cachedAt > MAX_PERSISTED_DDL_AGE_MS || typeof envelope.ddl !== "string") return null;
-  return envelope.ddl;
+  return sanitizeDdl(envelope.ddl);
 }
 
 async function waitForPendingInvalidations(cacheKey: string): Promise<void> {
@@ -151,7 +155,8 @@ async function loadRemoteDdl(request: ObjectDdlRequest, cacheKey: string, force:
   signal.addEventListener("abort", cancel, { once: true });
   recordMetadataCacheRemoteMiss(cacheKey);
   entry.promise = waitForMetadata(
-    api.getTableDisplayDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog).then((ddl) => {
+    api.getTableDisplayDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog).then((rawDdl) => {
+      const ddl = sanitizeDdl(rawDdl);
       const current = !entry.invalidated;
       if (current && ddl.length <= MAX_PERSISTED_DDL_CHARS) {
         const envelope: ObjectDdlCacheEnvelope = { version: 1, cachedAt: new Date().toISOString(), ddl };

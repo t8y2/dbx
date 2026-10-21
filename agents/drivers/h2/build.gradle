@@ -8,7 +8,7 @@ dependencies {
     h2V1 'com.h2database:h2:1.4.200'
     h2V2 'com.h2database:h2:2.1.214'
     h2V3 'com.h2database:h2:2.4.240'
-    testImplementation 'com.google.code.gson:gson:2.12.1'
+    testImplementation 'com.google.code.gson:gson:2.14.0'
 }
 
 tasks.named('processResources') {

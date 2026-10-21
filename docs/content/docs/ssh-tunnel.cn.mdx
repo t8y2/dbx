@@ -102,6 +102,8 @@ DBX 支持：
 
 当数据库在内网中，外部只能访问一台内网 Web 服务器，并且不能使用 SSH/VPN 时，可以使用 HTTP 隧道。这类场景和 Navicat、SQL-Front 的 HTTP 隧道类似。
 
+<Callout type="warning">PHP 脚本需要 PHP-FPM 的 `fastcgi_finish_request()`，或允许通过 `popen()` 启动 PHP CLI。若 CGI/FastCGI 共享主机不具备这两种能力，就无法运行此 TCP 隧道；脚本会返回 HTTP 503 和具体原因。目前没有提供 SQL 级 MySQL HTTP 适配器。</Callout>
+
 ### 部署脚本
 
 把 `deploy/dbx_tunnel.php` 上传到一台能访问目标数据库的 PHP Web 服务器。
@@ -114,7 +116,7 @@ DBX 支持：
 | `DBX_TUNNEL_ALLOWED_HOSTS`       | 否   | 允许连接的目标主机列表，逗号分隔，强烈建议配置。 |
 | `DBX_TUNNEL_DIR`                 | 否   | 会话队列目录，默认使用临时目录。             |
 | `DBX_TUNNEL_MAX_SESSION_SECONDS` | 否   | 会话最长生命周期，默认 `3600` 秒。           |
-| `DBX_TUNNEL_PHP`                 | 否   | 当 PHP-FPM 没有 `fastcgi_finish_request` 时，用于启动 worker 的 PHP CLI 路径。 |
+| `DBX_TUNNEL_PHP`                 | 否   | PHP-FPM 没有 `fastcgi_finish_request()` 且 `popen()` 可用时，用于启动 worker 的 PHP CLI 路径。 |
 
 在 DBX 里添加 **HTTP 隧道** 层，并填写：
 

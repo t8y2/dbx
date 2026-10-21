@@ -355,6 +355,10 @@ describe("supportsTableImport", () => {
   it("keeps Xugu table import available", () => {
     expect(supportsTableImport("xugu")).toBe(true);
   });
+
+  it("enables openGauss table import", () => {
+    expect(supportsTableImport("opengauss")).toBe(true);
+  });
 });
 
 describe("supportsFieldLineage", () => {

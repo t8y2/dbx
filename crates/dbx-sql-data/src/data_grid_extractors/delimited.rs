@@ -1,6 +1,6 @@
 use super::{
-    value_text, write_bytes, DataGridDsvOptions, DataGridExtractError, DataGridExtractErrorCode, DataGridQuotePolicy,
-    ExtractContext,
+    value_text, write_bytes, DataGridArrayFormat, DataGridDsvOptions, DataGridExtractError, DataGridExtractErrorCode,
+    DataGridHeaderCase, DataGridHeaderFormat, DataGridHeaderPosition, DataGridQuotePolicy, ExtractContext,
 };
 use std::borrow::Cow;
 use std::io::Write;
@@ -13,7 +13,7 @@ const MAX_NULL_TEXT_CHARACTERS: usize = 64;
 /// string value that happens to equal it.
 enum DsvCell<'a> {
     Null,
-    Text(Cow<'a, str>),
+    Text(Cow<'a, str>, bool, bool),
 }
 
 pub(super) fn write_dsv(
@@ -23,11 +23,16 @@ pub(super) fn write_dsv(
     quote_char_triggers_quoting: bool,
 ) -> Result<(), DataGridExtractError> {
     validate_dsv_options(options, true)?;
+    let header_position = match options.header_position {
+        DataGridHeaderPosition::Top | DataGridHeaderPosition::Bottom => Some(options.header_position),
+        DataGridHeaderPosition::Legacy if options.include_column_header => Some(DataGridHeaderPosition::Top),
+        DataGridHeaderPosition::Legacy | DataGridHeaderPosition::None => None,
+    };
     let mut first_row = true;
-    if options.include_column_header {
+    if header_position == Some(DataGridHeaderPosition::Top) {
         write_dsv_row(
             output,
-            context.selected_columns.iter().map(|column| Cow::Borrowed(column.display_name.as_str())),
+            context.selected_columns.iter().map(|column| Cow::Owned(header_label(column, options))),
             options,
             options.include_row_header.then(|| "#".to_string()),
             quote_char_triggers_quoting,
@@ -40,12 +45,28 @@ pub(super) fn write_dsv(
         }
         write_dsv_data_row(
             output,
-            context.selected_source_indexes.iter().map(|source_index| {
+            context.selected_source_indexes.iter().zip(&context.selected_columns).map(|(source_index, column)| {
                 let value = &row[*source_index];
                 if value.is_null() {
                     DsvCell::Null
                 } else {
-                    DsvCell::Text(value_text(value))
+                    let is_numeric_string =
+                        value.as_str().is_some_and(|text| !text.is_empty() && text.parse::<f64>().is_ok());
+                    let numeric_type = is_numeric_type(column.data_type.as_deref());
+                    let mut text = format_array_value(
+                        value_text(value).into_owned(),
+                        value,
+                        column.data_type.as_deref(),
+                        options.array_format,
+                    );
+                    text = replace_line_feeds(text, &options.line_feed_escape_string);
+                    if options.escape_formulas
+                        && starts_formula(&text)
+                        && !(numeric_type && text.parse::<f64>().is_ok())
+                    {
+                        text.insert(0, '\'');
+                    }
+                    DsvCell::Text(Cow::Owned(text), numeric_type, is_numeric_string)
                 }
             }),
             options,
@@ -54,7 +75,123 @@ pub(super) fn write_dsv(
         )?;
         first_row = false;
     }
+    if header_position == Some(DataGridHeaderPosition::Bottom) {
+        if !first_row {
+            write_bytes(output, options.row_separator.as_bytes())?;
+        }
+        write_dsv_row(
+            output,
+            context.selected_columns.iter().map(|column| Cow::Owned(header_label(column, options))),
+            options,
+            options.include_row_header.then(|| "#".to_string()),
+            quote_char_triggers_quoting,
+        )?;
+    }
     Ok(())
+}
+
+fn header_label(column: &super::DataGridExtractColumn, options: &DataGridDsvOptions) -> String {
+    let label = match options.header_format {
+        DataGridHeaderFormat::Name => column.display_name.clone(),
+        DataGridHeaderFormat::Description => {
+            column.description.as_deref().filter(|text| !text.is_empty()).unwrap_or(&column.display_name).to_owned()
+        }
+        DataGridHeaderFormat::Both => column
+            .description
+            .as_deref()
+            .filter(|text| !text.is_empty())
+            .map(|description| format!("{} ({description})", column.display_name))
+            .unwrap_or_else(|| column.display_name.clone()),
+    };
+    let mut label = match options.header_case {
+        DataGridHeaderCase::Preserve => label,
+        DataGridHeaderCase::Upper => label.to_uppercase(),
+        DataGridHeaderCase::Lower => label.to_lowercase(),
+    };
+    label = replace_line_feeds(label, &options.line_feed_escape_string);
+    if options.escape_formulas && starts_formula(&label) {
+        label.insert(0, '\'');
+    }
+    label
+}
+
+fn is_numeric_type(data_type: Option<&str>) -> bool {
+    let ty = data_type.unwrap_or_default().trim().to_ascii_lowercase();
+    let tokens: Vec<_> =
+        ty.split(|character: char| !character.is_ascii_alphanumeric()).filter(|token| !token.is_empty()).collect();
+    let Some(first) = tokens.first().copied() else { return false };
+    let exact = [
+        "int",
+        "integer",
+        "smallint",
+        "bigint",
+        "tinyint",
+        "mediumint",
+        "decimal",
+        "numeric",
+        "number",
+        "float",
+        "double",
+        "real",
+        "serial",
+        "bigserial",
+        "smallserial",
+        "money",
+        "smallmoney",
+        "dec",
+        "fixed",
+    ];
+    exact.contains(&first)
+        || tokens.contains(&"unsigned")
+        || ["int", "uint", "float", "double", "decimal", "numeric", "number", "serial"].iter().any(|prefix| {
+            first
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit()))
+        })
+}
+
+fn starts_formula(value: &str) -> bool {
+    value
+        .chars()
+        .next()
+        .is_some_and(|first| matches!(first, '=' | '+' | '-' | '@' | '＝' | '＋' | '－' | '＠' | '\t' | '\r' | '\n'))
+}
+
+fn replace_line_feeds(mut value: String, replacement: &str) -> String {
+    if replacement.is_empty() {
+        return value;
+    }
+    value = value.replace("\r\n", replacement).replace('\n', replacement);
+    value
+}
+
+fn format_array_value(
+    mut text: String,
+    value: &serde_json::Value,
+    data_type: Option<&str>,
+    format: DataGridArrayFormat,
+) -> String {
+    if format == DataGridArrayFormat::Preserve {
+        return text;
+    }
+    let is_array = value.is_array() || data_type.unwrap_or_default().to_ascii_lowercase().contains("array");
+    if !is_array {
+        return text;
+    }
+    let (open, close) = match format {
+        DataGridArrayFormat::Braces => ('{', '}'),
+        DataGridArrayFormat::Brackets => ('[', ']'),
+        DataGridArrayFormat::Parentheses => ('(', ')'),
+        DataGridArrayFormat::Preserve => return text,
+    };
+    let first = text.chars().next();
+    let last = text.chars().last();
+    if matches!((first, last), (Some('['), Some(']')) | (Some('{'), Some('}')) | (Some('('), Some(')'))) {
+        text.replace_range(..1, &open.to_string());
+        let last_index = text.len() - 1;
+        text.replace_range(last_index.., &close.to_string());
+    }
+    text
 }
 
 /// Writes a row of header strings (column names / row-number header). Headers
@@ -152,6 +289,9 @@ fn write_dsv_field(
     let should_quote = match options.quote_policy {
         DataGridQuotePolicy::Always => true,
         DataGridQuotePolicy::Never => false,
+        DataGridQuotePolicy::Strings | DataGridQuotePolicy::AllButNumbers | DataGridQuotePolicy::AllIncludingNulls => {
+            true
+        }
         DataGridQuotePolicy::Minimal => dsv_needs_quote(value, options, quote_char_triggers_quoting),
     };
     if !should_quote {
@@ -172,13 +312,26 @@ fn write_dsv_data_field(
     quote_char_triggers_quoting: bool,
 ) -> Result<(), DataGridExtractError> {
     match cell {
-        DsvCell::Null => write_bytes(output, options.null_text.as_bytes()),
-        DsvCell::Text(value) => {
+        DsvCell::Null => match options.quote_policy {
+            DataGridQuotePolicy::AllIncludingNulls => write_quoted_dsv_field(output, &options.null_text, options),
+            _ => write_bytes(output, options.null_text.as_bytes()),
+        },
+        DsvCell::Text(value, numeric_type, numeric_string) => {
             let should_quote = match options.quote_policy {
                 DataGridQuotePolicy::Always => true,
                 DataGridQuotePolicy::Never => false,
+                DataGridQuotePolicy::Strings => {
+                    !numeric_type
+                        || (options.quote_numeric_strings && *numeric_string)
+                        || dsv_needs_quote(value, options, quote_char_triggers_quoting)
+                }
+                DataGridQuotePolicy::AllButNumbers => {
+                    !numeric_type || dsv_needs_quote(value, options, quote_char_triggers_quoting)
+                }
+                DataGridQuotePolicy::AllIncludingNulls => true,
                 DataGridQuotePolicy::Minimal => {
                     dsv_needs_quote(value, options, quote_char_triggers_quoting)
+                        || (options.quote_numeric_strings && *numeric_string)
                         || value.as_ref() == options.null_text.as_str()
                 }
             };
@@ -193,21 +346,24 @@ fn write_dsv_data_field(
 pub(super) fn write_one_row(context: &ExtractContext<'_>, output: &mut dyn Write) -> Result<(), DataGridExtractError> {
     let options = DataGridDsvOptions { column_separator: ",".to_string(), ..context.request.options.dsv.clone() };
     validate_dsv_options(&options, false)?;
-    let values = context
-        .request
-        .rows
-        .iter()
-        .flat_map(|row| context.selected_source_indexes.iter().map(move |source_index| &row[*source_index]));
     let mut first = true;
-    for value in values {
-        if !first {
-            write_bytes(output, options.column_separator.as_bytes())?;
+    for row in &context.request.rows {
+        for (source_index, column) in context.selected_source_indexes.iter().zip(&context.selected_columns) {
+            if !first {
+                write_bytes(output, options.column_separator.as_bytes())?;
+            }
+            let value = &row[*source_index];
+            let cell = if value.is_null() {
+                DsvCell::Null
+            } else {
+                let numeric_string = value.as_str().is_some_and(|text| !text.is_empty() && text.parse::<f64>().is_ok());
+                DsvCell::Text(value_text(value), is_numeric_type(column.data_type.as_deref()), numeric_string)
+            };
+            // A one-row extraction is an RFC4180 CSV record, so embedded quotes must
+            // be escaped.
+            write_dsv_data_field(output, &cell, &options, true)?;
+            first = false;
         }
-        let cell = if value.is_null() { DsvCell::Null } else { DsvCell::Text(value_text(value)) };
-        // A one-row extraction is an RFC4180 CSV record, so embedded quotes must
-        // be escaped.
-        write_dsv_data_field(output, &cell, &options, true)?;
-        first = false;
     }
     Ok(())
 }
@@ -222,10 +378,11 @@ fn validate_dsv_options(options: &DataGridDsvOptions, uses_row_separator: bool) 
     if options.column_separator.chars().count() > MAX_SEPARATOR_CHARACTERS
         || options.row_separator.chars().count() > MAX_SEPARATOR_CHARACTERS
         || options.null_text.chars().count() > MAX_NULL_TEXT_CHARACTERS
+        || options.line_feed_escape_string.chars().count() > 32
     {
         return Err(DataGridExtractError::new(
             DataGridExtractErrorCode::InvalidDsvConfiguration,
-            "DSV separators may contain at most 8 characters and NULL text at most 64 characters.",
+            "DSV separators may contain at most 8 characters, NULL text at most 64 characters, and line-feed replacement at most 32 characters.",
         ));
     }
     if uses_row_separator

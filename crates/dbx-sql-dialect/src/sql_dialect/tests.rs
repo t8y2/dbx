@@ -270,7 +270,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::UserQuery),
-        TablePaginationStrategy::Unbounded
+        TablePaginationStrategy::Rownum
     );
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Jdbc)), TablePaginationStrategy::AgentMaxRows);
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
@@ -711,6 +711,32 @@ fn builds_table_data_where_and_schema_queries() {
         }),
         "SELECT FIRST 100 * FROM gbasedbt.connection_smoke"
     );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Gbase8s),
+            schema: Some("gbasedbt".to_string()),
+            table_name: "v_orders".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT FIRST 100 * FROM v_orders"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Gbase8s),
+            identifier_quote: Some(String::new()),
+            schema: Some("gbasedbt".to_string()),
+            table_name: "v_orders".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT FIRST 100 * FROM v_orders"
+    );
+    assert_eq!(
+        build_count_table_sql(Some(DatabaseType::Gbase8s), Some("gbasedbt"), "v_orders"),
+        "SELECT COUNT(*) AS row_count FROM v_orders"
+    );
+    assert_eq!(qualified_table_name(Some(DatabaseType::Gbase8s), Some("gbasedbt"), "v_orders"), "v_orders");
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Gaussdb),
@@ -1290,6 +1316,75 @@ fn explicit_table_data_order_is_preserved() {
             ..Default::default()
         }),
         "SELECT * FROM \"public\".\"country_gdp\" ORDER BY \"iso3\" ASC LIMIT 100;"
+    );
+}
+
+#[test]
+fn selects_hidden_postgres_tuple_identity_only_for_known_unkeyed_base_tables() {
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "duplicate_rows".to_string(),
+        table_type: Some("TABLE".to_string()),
+        columns: vec!["id".to_string(), "value".to_string()],
+        limit: Some(20),
+        include_row_id: true,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        build_table_data_select_sql(base.clone()),
+        "SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS \"__DBX_ROWID\", * FROM \"public\".\"duplicate_rows\" LIMIT 20;"
+    );
+
+    // The sidebar's `listTables` path spells relkind 'r' as `BASE TABLE`; the
+    // locator must be injected for that spelling too.
+    let base_table_spelling = build_table_data_select_sql(TableDataSelectSqlOptions {
+        table_type: Some("BASE TABLE".to_string()),
+        ..base.clone()
+    });
+    assert!(base_table_spelling.contains("ctid"), "BASE TABLE must receive the locator: {base_table_spelling}");
+
+    for table_type in ["PARTITIONED TABLE", "FOREIGN TABLE", "VIEW"] {
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            table_type: Some(table_type.to_string()),
+            ..base.clone()
+        });
+        assert!(!sql.contains("ctid"), "{table_type} must not receive a synthetic tuple key: {sql}");
+    }
+
+    let unknown_type = build_table_data_select_sql(TableDataSelectSqlOptions { table_type: None, ..base.clone() });
+    assert!(!unknown_type.contains("ctid"));
+
+    let keyed = build_table_data_select_sql(TableDataSelectSqlOptions { primary_keys: vec!["id".to_string()], ..base });
+    assert!(!keyed.contains("ctid"));
+}
+
+#[test]
+fn hologres_plugin_connections_receive_the_tableoid_locator_for_keyless_tables() {
+    // t8y2/dbx#12647: Hologres connects through the plain PostgreSQL plugin
+    // type, so the frontend gate enables the keyless-table locator and the
+    // click-to-open SELECT projects `tableoid`. Hologres' query translation
+    // layer rejects `tableoid` ("Variable tableoid ... can't be found in query
+    // translation"), so every keyless table fails to open. Hologres also
+    // reports a plain PG-11-style `server_version`, so the gate cannot be
+    // driven off the version string alone. This pins the exact statement the
+    // client emits today; the fix must stop projecting `tableoid` for engines
+    // without system-column support without regressing vanilla PostgreSQL.
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "hologres_keyless_events".to_string(),
+        table_type: Some("TABLE".to_string()),
+        primary_keys: Vec::new(),
+        limit: Some(200),
+        include_row_id: true,
+        ..Default::default()
+    });
+
+    assert_eq!(
+        sql,
+        "SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS \"__DBX_ROWID\", * FROM \"public\".\"hologres_keyless_events\" LIMIT 200;"
     );
 }
 

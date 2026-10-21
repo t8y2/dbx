@@ -123,6 +123,7 @@ class SundbAgentMetadataTest {
     void buildsSunDbJdbcUrlFromProfileTemplate() {
         Assertions.assertEquals("csii.sundb.jdbc.SundbDriver", SundbAgent.SUNDB_PROFILE.getDriverClass());
         Assertions.assertEquals(22581, SundbAgent.SUNDB_PROFILE.getDefaultPort());
+        Assertions.assertTrue(SundbAgent.SUNDB_PROFILE.getCaseInsensitiveTableMetadata());
 
         ConnectParams params = new ConnectParams();
         params.setHost("10.0.0.1");

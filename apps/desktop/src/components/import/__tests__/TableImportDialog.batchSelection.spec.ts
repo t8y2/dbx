@@ -292,6 +292,29 @@ afterEach(() => {
 });
 
 describe("TableImportDialog batch selection", () => {
+  it.each([false, true])("blocks import when every sheet is empty (single sheet: %s)", async (singleSheet) => {
+    mocks.previewTableImportFile.mockResolvedValue({ ...workbookPreview("First"), sheets: singleSheet ? ["First"] : sheets, columns: ["id"], rows: [], totalRows: 0 });
+    await mountDialog();
+    expect(button("Next").disabled).toBe(true);
+    expect(mocks.importTableFile).not.toHaveBeenCalled();
+  });
+
+  it.each(["First", "Second"])("keeps data sheets importable when %s is empty", async (emptySheet) => {
+    mocks.previewTableImportFile.mockImplementation((_source, options) => {
+      const name = options.parseOptions.sheetName || "First";
+      const preview = workbookPreview(name);
+      if (name === emptySheet) Object.assign(preview, { columns: [], rows: [], totalRows: 0, totalRowsExact: true });
+      return Promise.resolve(preview);
+    });
+    await mountDialog();
+
+    expect(taskCheckbox(`rows_${emptySheet}`).checked).toBe(false);
+    expect(taskCheckbox(`rows_${emptySheet}`).disabled).toBe(true);
+    await startImport();
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(2);
+    expect(mocks.importTableFile.mock.calls.every(([request]) => request.preparedSource!.totalRows > 0)).toBe(true);
+  });
+
   it("reloads a single CSV preview and passes the selected decimal separator to import", async () => {
     mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
     await mountDialog([new File(['amount,note\n"12,50",plain'], "rows.csv")]);

@@ -27,6 +27,8 @@ export interface EditorToolbarActions {
   blockDangerousRedisCommands: Ref<boolean>;
   /** Highlights the database selector of the tab that needs a database choice. */
   databaseRequiredSignalFor(tabId: string): number;
+  /** Highlights and opens the connection selector of the tab that needs a connection choice. */
+  connectionRequiredSignalFor(tabId: string): number;
   /** Captures the acting editor's execution snapshot before a toolbar click. */
   captureExecutionSnapshot(tabId: string): void;
   toolbarExecute(source: "pointer" | "keyboard", tabId: string): void;
@@ -38,6 +40,7 @@ export interface EditorToolbarActions {
   /** Flips the keyword-case preference and re-cases the acting tab's editor to match. */
   toggleSqlKeywordCase(tabId: string): void;
   saveSql(tabId: string): void;
+  saveAllTabs(tabIds?: string[]): void;
   openSqlFile(): void;
   importResultArchive(): void;
   pasteSqlInCondition(): void;
@@ -79,6 +82,7 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
     explainMode: mode,
     blockDangerousRedisCommands: flag,
     databaseRequiredSignalFor: () => 0,
+    connectionRequiredSignalFor: () => 0,
     captureExecutionSnapshot: noop,
     toolbarExecute: noop,
     toolbarExecuteInNewResultTab: noop,
@@ -88,6 +92,7 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
     compressSql: noop,
     toggleSqlKeywordCase: noop,
     saveSql: noop,
+    saveAllTabs: noop,
     openSqlFile: noop,
     importResultArchive: noop,
     pasteSqlInCondition: noop,

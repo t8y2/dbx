@@ -147,23 +147,19 @@ pub(super) fn capabilities_for(
             comment: true,
             ..base
         },
-        // GBase 8s is Informix-compatible, unlike the rest of the `Gbase`
-        // family (GBase 8a and friends) which speak MySQL wire protocol and
-        // SQL dialect. `driver_profile` is the only signal that distinguishes
-        // them (see the same check in `table_export.rs` / `table_select.rs`).
-        Some(DatabaseType::Gbase) if driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")) => {
-            TableStructureCapabilities {
-                dialect: StructureDialect::Informix,
-                add_column: true,
-                drop_column: true,
-                rename_column: true,
-                alter_existing_column: true,
-                create_index: true,
-                drop_index: true,
-                rebuild_index: true,
-                ..base
-            }
-        }
+        // GBase 8s is Informix-compatible, unlike GBase 8a (`Gbase`), which speaks
+        // the MySQL wire protocol and SQL dialect.
+        Some(DatabaseType::Gbase8s) => TableStructureCapabilities {
+            dialect: StructureDialect::Informix,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            create_index: true,
+            drop_index: true,
+            rebuild_index: true,
+            ..base
+        },
         Some(DatabaseType::Gbase) => TableStructureCapabilities {
             dialect: StructureDialect::Mysql,
             add_column: true,
@@ -282,6 +278,7 @@ pub(super) fn capabilities_for(
             // from the index metadata (issue #10758).
             add_primary_key: true,
             alter_primary_key: true,
+            foreign_key: true,
             ..base
         },
         Some(DatabaseType::SapHana) => TableStructureCapabilities {

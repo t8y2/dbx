@@ -518,6 +518,7 @@ fn schema_first_qualifier_type(db_type: &DatabaseType) -> bool {
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
             | DatabaseType::Vastbase
+            | DatabaseType::Gbase8c
             | DatabaseType::Yashandb
             | DatabaseType::Oracle
             | DatabaseType::OceanbaseOracle
@@ -533,6 +534,7 @@ fn schema_first_qualifier_type(db_type: &DatabaseType) -> bool {
             | DatabaseType::Xugu
             | DatabaseType::Oscar
             | DatabaseType::Gbase
+            | DatabaseType::Gbase8s
             | DatabaseType::SapHana
             | DatabaseType::SqlServer
             | DatabaseType::Snowflake
@@ -612,6 +614,7 @@ impl SqlScanLexerRules {
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
+                | DatabaseType::Gbase8c
                 | DatabaseType::Kwdb
         );
         let oracle_family = matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle);
@@ -910,6 +913,8 @@ mod tests {
             connect_timeout_secs: 10,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: 30,
             ssl: false,
             ca_cert_path: String::new(),

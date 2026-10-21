@@ -92,17 +92,16 @@ fn at_sign_begins_excel_formula(rest: &str) -> bool {
 fn is_excel_exact_decimal_literal(value: &str) -> bool {
     let bytes = value.as_bytes();
     let digits = if matches!(bytes.first(), Some(b'+') | Some(b'-')) { &bytes[1..] } else { bytes };
-    match digits.iter().position(|&byte| byte == b'.') {
-        Some(dot) => is_exact_digit_run(&digits[..dot]) && is_exact_digit_run(&digits[dot + 1..]),
-        None => is_exact_digit_run(digits),
-    }
-}
-
-/// 整段是否为非空纯 ASCII 数字，且有效数字（去前导零）不超过 Excel 精度上限。
-fn is_exact_digit_run(bytes: &[u8]) -> bool {
-    !bytes.is_empty()
-        && bytes.iter().all(u8::is_ascii_digit)
-        && bytes.iter().skip_while(|&&byte| byte == b'0').count() <= EXCEL_SIGNIFICANT_DIGIT_LIMIT
+    let valid_digits = |part: &[u8]| !part.is_empty() && part.iter().all(u8::is_ascii_digit);
+    let valid = match digits.iter().position(|&byte| byte == b'.') {
+        Some(dot) => valid_digits(&digits[..dot]) && valid_digits(&digits[dot + 1..]),
+        None => valid_digits(digits),
+    };
+    // Count the whole decimal together: fractional zeros are significant once
+    // the first nonzero digit has appeared in either part.
+    valid
+        && digits.iter().filter(|&&byte| byte != b'.').skip_while(|&&byte| byte == b'0').count()
+            <= EXCEL_SIGNIFICANT_DIGIT_LIMIT
 }
 
 /// 在单元格值开头写入公式中和前缀，每单元格调用一次：
@@ -839,6 +838,26 @@ mod tests {
                 "\"'-cmd\""
             )
         );
+    }
+
+    #[test]
+    fn negative_decimal_precision_counts_digits_across_the_decimal_point() {
+        for (value, guarded) in [
+            ("-123456789012345.6", true),
+            ("-12345678.12345678", true),
+            ("-12345678.01234567", true),
+            ("-12345678.1234567", false),
+            ("-00012345678.1234567", false),
+            ("-0.000000000000000123456789012345", false),
+            ("-0.0000000000000001234567890123456", true),
+            ("-0.00000000000000000000", false),
+        ] {
+            let expected = format!("{}{value}", if guarded { "'" } else { "" });
+            let rows = [vec![json!(value)]];
+            assert_eq!(format_csv(&["v".to_string()], &rows), format!("\"v\"\n\"{expected}\""), "CSV: {value}");
+            assert_eq!(format_tsv(&["v".to_string()], &rows), format!("v\n{expected}"), "TSV: {value}");
+            assert_eq!(super::strip_formula_guard(&expected), value);
+        }
     }
 
     #[test]

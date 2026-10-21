@@ -379,7 +379,7 @@ fn validate_sort_columns(
     let version = super::create_dialect::parse_version(context.server_version.as_deref());
     let primary = context.model.as_deref() == Some("primary");
     if !matches!(context.model.as_deref(), Some("primary" | "duplicate" | "aggregate" | "unique"))
-        || !version.is_some_and(|version| version >= if primary { (3, 0, 0) } else { (3, 3, 0) })
+        || version.is_none_or(|version| version < if primary { (3, 0, 0) } else { (3, 3, 0) })
     {
         warnings.push("Changing StarRocks sort keys requires confirmed table metadata and version 3.0+ for PRIMARY or 3.3+ for other models.".into());
     }

@@ -99,7 +99,7 @@ pub enum AiProvider {
     ClaudeCodeCli,
     #[serde(rename = "pi-agent-cli")]
     PiAgentCli,
-    #[serde(rename = "opencode-cli")]
+    #[serde(rename = "opencode-cli", alias = "opencode2-cli")]
     OpenCodeCli,
     #[serde(rename = "cursor-cli")]
     CursorCli,
@@ -340,6 +340,13 @@ pub struct AiChatSelectionState {
     /// Whether opening the AI panel should restore the most recently updated conversation.
     #[serde(default)]
     pub restore_last_conversation: bool,
+    /// Whether to include query result data previews in AI context (#12757).
+    /// Defaults to false to avoid sending sensitive row data to AI.
+    #[serde(default)]
+    pub include_query_result: bool,
+    /// Inverted alias for include_query_result (#12757).
+    #[serde(default)]
+    pub exclude_query_result: bool,
     /// Prompt template ids auto-applied when the AI panel opens, keyed by
     /// connection db_type. BTreeMap keeps serialized key order stable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -359,6 +366,8 @@ impl Default for AiChatSelectionState {
             default_mode: None,
             default_auto_routing: false,
             restore_last_conversation: false,
+            include_query_result: false,
+            exclude_query_result: false,
             default_templates_by_db_type: BTreeMap::new(),
             last_used_templates_by_db_type: BTreeMap::new(),
         }
@@ -458,6 +467,8 @@ pub struct AiConfig {
     pub opencode_cli_path: Option<String>,
     #[serde(default)]
     pub opencode_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub opencode_cli_version: Option<String>,
     #[serde(default)]
     pub cursor_cli_path: Option<String>,
     #[serde(default)]
@@ -1525,7 +1536,10 @@ fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &
     }
 
     if matches!(config.provider, AiProvider::MiniMax) {
-        body["thinking"] = json!({ "type": "disabled" });
+        // Flash is adaptive-only, even when a saved legacy toggle is off.
+        if !config.model.trim().eq_ignore_ascii_case("MiniMax-M3.1-Flash") {
+            body["thinking"] = json!({ "type": "disabled" });
+        }
     } else if matches!(config.provider, AiProvider::Ollama) {
         // Ollama's OpenAI-compatible API uses reasoning_effort instead of
         // forwarding provider-specific chat template arguments.
@@ -1942,6 +1956,7 @@ fn ai_endpoint_is_loopback(config: &AiConfig) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
+    let host = host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
     host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().map(|addr| addr.is_loopback()).unwrap_or(false)
 }
 
@@ -1950,7 +1965,10 @@ pub fn build_ai_http_client(config: &AiConfig, timeout_secs: u64) -> Result<reqw
     if config.skip_tls_verify {
         builder = builder.danger_accept_invalid_certs(true);
     }
-    if config.proxy_enabled && !config.proxy_url.trim().is_empty() && !ai_endpoint_is_loopback(config) {
+    if ai_endpoint_is_loopback(config) {
+        // Skipping an explicit proxy alone still allows environment and system proxies.
+        builder = builder.no_proxy();
+    } else if config.proxy_enabled && !config.proxy_url.trim().is_empty() {
         let proxy_url = normalize_ai_proxy_url(&config.proxy_url);
         let proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| format!("Invalid AI proxy URL: {e}"))?;
         builder = builder.proxy(proxy);
@@ -5387,6 +5405,8 @@ mod tests {
         // Same for the opt-in auto-routing flag: a blob written before it existed
         // must load as false (concrete action stays the default).
         assert!(!legacy.default_auto_routing);
+        assert!(!legacy.include_query_result);
+        assert!(!legacy.exclude_query_result);
 
         let agent: AiChatSelectionState = serde_json::from_str(r#"{"version":1,"defaultMode":"agent"}"#).unwrap();
         assert_eq!(agent.default_mode, Some(AiAssistantMode::Agent));
@@ -5398,6 +5418,8 @@ mod tests {
         let serialized = serde_json::to_value(agent).unwrap();
         assert_eq!(serialized["defaultMode"], serde_json::json!("agent"));
         assert_eq!(serialized["defaultAutoRouting"], serde_json::json!(false));
+        assert_eq!(serialized["includeQueryResult"], serde_json::json!(false));
+        assert_eq!(serialized["excludeQueryResult"], serde_json::json!(false));
     }
 
     struct CapturedJsonRequest {
@@ -5432,13 +5454,17 @@ mod tests {
                     let (name, value) = line.split_once(':')?;
                     name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
                 })
-                .unwrap();
+                .unwrap_or(0);
             while request.len() < header_end + content_length {
                 let read = socket.read(&mut chunk).await.unwrap();
                 assert!(read > 0, "request ended before body was complete");
                 request.extend_from_slice(&chunk[..read]);
             }
-            let body = serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+            let body = if content_length == 0 {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap()
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: {response_content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
                 response_body.len()
@@ -5634,6 +5660,7 @@ mod tests {
                 pi_agent_cli_env: Default::default(),
                 opencode_cli_path: None,
                 opencode_cli_env: Default::default(),
+                opencode_cli_version: None,
                 cursor_cli_path: None,
                 cursor_cli_env: Default::default(),
                 grok_cli_path: None,
@@ -6271,6 +6298,7 @@ mod tests {
         assert!(config.pi_agent_cli_env.is_empty());
         assert!(config.opencode_cli_path.is_none());
         assert!(config.opencode_cli_env.is_empty());
+        assert!(config.opencode_cli_version.is_none());
         assert!(config.cursor_cli_path.is_none());
         assert!(config.cursor_cli_env.is_empty());
         assert!(config.codebuddy_cli_path.is_none());
@@ -6307,6 +6335,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6350,6 +6379,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6381,6 +6411,29 @@ mod tests {
     }
 
     #[test]
+    fn ai_http_client_identifies_loopback_endpoints() {
+        for (endpoint, expected) in [
+            ("http://localhost:3456/v1", true),
+            ("http://LOCALHOST:3456/v1", true),
+            ("http://127.0.0.1:3456/v1", true),
+            ("http://127.12.34.56:3456/v1", true),
+            ("http://[::1]:3456/v1", true),
+            ("http://192.168.1.2:3456/v1", false),
+            ("http://10.0.0.1:3456/v1", false),
+            ("http://[fd00::1]:3456/v1", false),
+            ("https://api.example.com/v1", false),
+            ("http://localhost.example.com/v1", false),
+            ("invalid endpoint", false),
+        ] {
+            let config: AiConfig = serde_json::from_value(serde_json::json!({
+                "provider": "openai-compatible", "endpoint": endpoint
+            }))
+            .unwrap();
+            assert_eq!(super::ai_endpoint_is_loopback(&config), expected, "{endpoint}");
+        }
+    }
+
+    #[test]
     fn ai_http_client_bypasses_proxy_for_loopback_endpoint() {
         let config = AiConfig {
             provider: AiProvider::OpenaiCompatible,
@@ -6408,6 +6461,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6449,6 +6503,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6494,6 +6549,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6536,6 +6592,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6597,6 +6654,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6634,6 +6692,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6674,6 +6733,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6781,6 +6841,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6869,6 +6930,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6984,6 +7046,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7034,6 +7097,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7206,6 +7270,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7252,6 +7317,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7346,6 +7412,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7695,6 +7762,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7928,6 +7996,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7981,6 +8050,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -8037,6 +8107,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -8087,6 +8158,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -8138,6 +8210,63 @@ mod tests {
         assert_eq!(captured.body["max_completion_tokens"], 64);
         assert_eq!(captured.body["thinking"]["type"], "disabled");
         assert!(captured.body.get("max_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn minimax_catalog_prefers_flash_without_changing_saved_models() {
+        let (endpoint, server) = spawn_json_capture_server(
+            "application/json",
+            r#"{"data":[
+            {"id":"MiniMax-M2.7"},{"id":"MiniMax-M3"},{"id":"MiniMax-M3.1-Flash"}
+        ]}"#,
+        )
+        .await;
+        let mut config = minimax_test_config(endpoint.trim_end_matches("/messages"));
+        config.model = "MiniMax-M2.7".to_string();
+        let models = list_models_core(&config).await.unwrap();
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["MiniMax-M3.1-Flash", "MiniMax-M3"]
+        );
+        assert_eq!(config.model, "MiniMax-M2.7");
+        assert!(server.await.unwrap().headers.starts_with("GET /v1/models "));
+    }
+
+    #[tokio::test]
+    async fn minimax_flash_completion_preserves_model_and_serializes_supported_effort() {
+        for model in ["MiniMax-M3.1-Flash", "MiniMax-M3", "MiniMax-M2.7", "private-model"] {
+            for effort in [None, Some(AiEffortSelection::ProviderDefault)] {
+                let (endpoint, server) =
+                    spawn_json_capture_server("application/json", r#"{"choices":[{"message":{"content":"ok"}}]}"#)
+                        .await;
+                let mut request = minimax_test_request(endpoint.trim_end_matches("/messages"));
+                request.config.model = model.to_string();
+                request.config.enable_thinking = false;
+                request.config.runtime_effort = effort.clone();
+                assert_eq!(complete(&request).await.unwrap(), "ok");
+                let captured = server.await.unwrap();
+                assert_eq!(captured.body["model"], model);
+                assert_eq!(captured.body["reasoning_split"], true);
+                assert!(captured.body.get("reasoning_effort").is_none());
+                if model == "MiniMax-M3.1-Flash" || effort.is_some() {
+                    assert!(captured.body.get("thinking").is_none());
+                } else {
+                    assert_eq!(captured.body["thinking"]["type"], "disabled");
+                }
+                assert!(captured.body.get("service_tier").is_none());
+            }
+        }
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            let (endpoint, server) =
+                spawn_json_capture_server("application/json", r#"{"choices":[{"message":{"content":"ok"}}]}"#).await;
+            let mut request = minimax_test_request(endpoint.trim_end_matches("/messages"));
+            request.config.model = "MiniMax-M3.1-Flash".to_string();
+            request.config.runtime_effort = Some(AiEffortSelection::Enum(effort.to_string()));
+            assert_eq!(complete(&request).await.unwrap(), "ok");
+            let captured = server.await.unwrap();
+            assert_eq!(captured.body["reasoning_effort"], effort);
+            assert!(captured.body.get("thinking").is_none());
+        }
     }
 
     #[test]
@@ -8416,12 +8545,45 @@ mod tests {
         );
         let (capture_endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
         let endpoint = capture_endpoint.trim_end_matches("/v1/messages").to_string();
-        let request = minimax_test_request(endpoint);
+        let mut request = minimax_test_request(endpoint);
+        request.config.model = "MiniMax-M3.1-Flash".to_string();
+        request.config.enable_thinking = false;
+        request.config.runtime_effort = Some(AiEffortSelection::Enum("high".to_string()));
+        request.messages[0]
+            .images
+            .push(AiInlineImage { media_type: "image/png".to_string(), data: "aGVsbG8=".to_string() });
+        let details = serde_json::json!([{"type": "reasoning.text", "text": "Inspect tables"}]);
+        request.messages.push(AiMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            images: vec![],
+            tool_call_id: None,
+            tool_calls: vec![ToolCallRef {
+                id: "previous_call".to_string(),
+                name: "list_tables".to_string(),
+                arguments: serde_json::json!({"schema": "public"}),
+                provider_payload: Some(serde_json::json!({MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: details})),
+            }],
+        });
+        request.messages.push(AiMessage {
+            role: "tool".to_string(),
+            content: "users".to_string(),
+            images: vec![],
+            tool_call_id: Some("previous_call".to_string()),
+            tool_calls: vec![],
+        });
+        let tools = [crate::agent_events::ToolDefinition {
+            name: "list_tables".into(),
+            description: "List tables".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"schema": {"type": "string"}}}),
+            read_only: true,
+            parallel_ok: true,
+        }];
         let chunks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let observed = chunks.clone();
 
         let (calls, _) =
-            stream_with_tools(&request.config, &request, "minimax-tool-test", &[], &Notify::new(), move |chunk| {
+            stream_with_tools(&request.config, &request, "minimax-tool-test", &tools, &Notify::new(), move |chunk| {
                 observed.lock().unwrap().push(chunk)
             })
             .await
@@ -8451,6 +8613,15 @@ mod tests {
         assert!(captured.headers.starts_with("POST /v1/chat/completions "));
         assert_eq!(captured.body["reasoning_split"], true);
         assert_eq!(captured.body["max_completion_tokens"], 64);
+        assert_eq!(captured.body["model"], "MiniMax-M3.1-Flash");
+        assert_eq!(captured.body["reasoning_effort"], "high");
+        assert!(captured.body.get("thinking").is_none());
+        assert_eq!(captured.body["tools"][0]["function"]["name"], "list_tables");
+        assert_eq!(captured.body["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,aGVsbG8=");
+        assert_eq!(captured.body["messages"][2]["reasoning_details"], details);
+        assert_eq!(captured.body["messages"][2]["tool_calls"][0]["function"]["arguments"], r#"{"schema":"public"}"#);
+        assert_eq!(captured.body["messages"][3]["tool_call_id"], "previous_call");
+        assert_eq!(captured.body["messages"][3]["content"], "users");
     }
 
     #[test]
@@ -8481,6 +8652,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -8558,6 +8730,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -8631,6 +8804,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,

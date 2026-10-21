@@ -19,6 +19,14 @@ use super::{
 };
 use dbx_platform::ssh_prompt;
 
+/// A request failed this way without the host observing the end of the
+/// handler, so the plugin may still be executing it. Lifecycle callers treat
+/// the outcome as unconfirmed instead of assuming the request died with the
+/// abandoned caller.
+pub(super) fn request_may_still_execute(error: &str) -> bool {
+    error.contains("timed out after") || error.contains("was waiting for user input")
+}
+
 pub const PLUGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Host API method a plugin backend calls to ask the user for input
 /// (`user_input.rs` semantics). Plugin-initiated requests use string ids, which

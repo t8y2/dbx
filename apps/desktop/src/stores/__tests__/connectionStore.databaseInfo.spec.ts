@@ -26,6 +26,20 @@ function mysqlConnection(): ConnectionConfig {
   };
 }
 
+function gaussdbDwsConnection(): ConnectionConfig {
+  return {
+    ...mysqlConnection(),
+    id: "gaussdb-dws-info",
+    name: "Huawei DWS",
+    db_type: "gaussdb",
+    driver_profile: "gaussdb",
+    driver_label: "GaussDB",
+    port: 8000,
+    external_config: { gaussdbProductProfile: "huawei-dws" },
+    database_info: { productName: "GaussDB", productVersion: "PostgreSQL 9.2.4 (GaussDB 9.1.1)" },
+  };
+}
+
 describe("connectionStore database info", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -71,6 +85,73 @@ describe("connectionStore database info", () => {
       jdbcVersion: undefined,
     });
     expect(store.getConfig(config.id)?.database_info?.productVersion).toBe("8.0.34");
+    expect(store.connectedIds.has(config.id)).toBe(true);
+  }, 30_000);
+
+  it.each(["connect", "ensureConnected"] as const)(
+    "refreshes DWS product metadata before %s exposes the connection",
+    async (method) => {
+      const config = gaussdbDwsConnection();
+      let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;
+      const databaseInfo = new Promise<{ productName: string; productVersion: string }>((resolve) => {
+        resolveDatabaseInfo = resolve;
+      });
+      const connectionDatabaseInfo = vi.fn(() => databaseInfo);
+      const connectDb = vi.fn().mockResolvedValue(config.id);
+
+      vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+      vi.doMock("@/lib/backend/api", () => ({
+        connectDb,
+        connectionDatabaseInfo,
+        saveConnectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
+        saveConnections: vi.fn().mockResolvedValue(undefined),
+        saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+        connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      }));
+
+      const { useConnectionStore } = await import("@/stores/connectionStore");
+      const { gaussdbConnectionMode } = await import("@/lib/database/jdbcDialect");
+      const store = useConnectionStore();
+      expect(gaussdbConnectionMode(config)).toBe("dws");
+      await store.addConnection(config);
+      expect(gaussdbConnectionMode(store.getConfig(config.id))).toBe("dws");
+      const connecting = method === "connect" ? store.connect(config) : store.ensureConnected(config.id);
+      await vi.waitFor(() => expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: config.id }), expect.any(Number)));
+      await vi.waitFor(() => expect(connectionDatabaseInfo).toHaveBeenCalledWith(config.id));
+
+      // The connection is not exposed as ready until DBX refreshes its product metadata.
+      expect(store.connectedIds.has(config.id)).toBe(false);
+      resolveDatabaseInfo({ productName: "GaussDB", productVersion: "GaussDB 9.2.0" });
+      await connecting;
+
+      expect(store.connectedIds.has(config.id)).toBe(true);
+      expect(store.getConfig(config.id)?.database_info?.productVersion).toBe("GaussDB 9.2.0");
+    },
+    30_000,
+  );
+
+  it("keeps a DWS connection usable when optional product metadata refresh fails", async () => {
+    const config = gaussdbDwsConnection();
+    const connectionDatabaseInfo = vi.fn().mockRejectedValue(new Error("metadata unavailable"));
+    const saveConnectionDatabaseInfo = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo,
+      saveConnectionDatabaseInfo,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await store.addConnection(config);
+    await expect(store.connect(config)).resolves.toBe(config.id);
+
+    expect(connectionDatabaseInfo).toHaveBeenCalledWith(config.id);
+    expect(saveConnectionDatabaseInfo).not.toHaveBeenCalled();
     expect(store.connectedIds.has(config.id)).toBe(true);
   });
 
@@ -210,6 +291,116 @@ describe("connectionStore database info", () => {
     await vi.waitFor(() => {
       const refreshedDatabaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
       expect(refreshedDatabaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["async_task"]);
+    });
+    expect(listTables).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes physical table metadata after delayed Mycat detection", async () => {
+    const config = mysqlConnection();
+    let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;
+    const databaseInfo = new Promise<{ productName: string; productVersion: string }>((resolve) => {
+      resolveDatabaseInfo = resolve;
+    });
+    let useLogicalTables = false;
+    const listTables = vi.fn().mockImplementation(async () => [
+      {
+        name: useLogicalTables ? "order_info" : "order_info_0",
+        table_type: "BASE TABLE",
+        comment: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn(() => databaseInfo),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([{ name: "app" }]),
+      listObjects: vi.fn().mockResolvedValue([]),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnectionDatabaseInfo: vi.fn().mockImplementation(async () => {
+        useLogicalTables = true;
+      }),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    await store.addConnection(config);
+    await store.connect(config);
+    await store.loadDatabases(config.id, { force: true });
+    const databaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
+    expect(databaseNode).toBeDefined();
+    await store.loadTreeNodeChildren(databaseNode!, { force: true });
+    expect(databaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info_0"]);
+
+    resolveDatabaseInfo({ productName: "MySQL", productVersion: "5.6.29-mycat-1.6-RELEASE-20161028204710" });
+
+    await vi.waitFor(() => {
+      const refreshedDatabaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
+      expect(refreshedDatabaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info"]);
+    });
+    expect(listTables).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes physical table metadata after delayed Mycat detection via serverComment", async () => {
+    const config = mysqlConnection();
+    let resolveDatabaseInfo!: (value: { productName: string; productVersion?: string; serverComment?: string }) => void;
+    const databaseInfo = new Promise<{ productName: string; productVersion?: string; serverComment?: string }>((resolve) => {
+      resolveDatabaseInfo = resolve;
+    });
+    let useLogicalTables = false;
+    const listTables = vi.fn().mockImplementation(async () => [
+      {
+        name: useLogicalTables ? "order_info" : "order_info_0",
+        table_type: "BASE TABLE",
+        comment: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn(() => databaseInfo),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([{ name: "app" }]),
+      listObjects: vi.fn().mockResolvedValue([]),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnectionDatabaseInfo: vi.fn().mockImplementation(async () => {
+        useLogicalTables = true;
+      }),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    await store.addConnection(config);
+    await store.connect(config);
+    await store.loadDatabases(config.id, { force: true });
+    const databaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
+    expect(databaseNode).toBeDefined();
+    await store.loadTreeNodeChildren(databaseNode!, { force: true });
+    expect(databaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info_0"]);
+
+    resolveDatabaseInfo({ productName: "MySQL", serverComment: "Mycat Server 1.6" });
+
+    await vi.waitFor(() => {
+      const refreshedDatabaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
+      expect(refreshedDatabaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info"]);
     });
     expect(listTables).toHaveBeenCalledTimes(2);
   });

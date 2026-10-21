@@ -72,9 +72,13 @@ const contentEmits = createContentSurfaceEventForwarders(emit);
 const surfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
 
 const activeSurfaceRef = ref<QueryEditorSurfaceHandle | null>(null);
+const toolbarRef = ref<InstanceType<typeof EditorToolbar> | null>(null);
 
 defineExpose({
   focusSearch: (target: Element | null = null) => activeSurfaceRef.value?.focusSearch(target) ?? false,
+  openConnectionPicker: () => toolbarRef.value?.openConnectionPicker() ?? false,
+  openDatabasePicker: () => toolbarRef.value?.openDatabasePicker() ?? false,
+  openSchemaPicker: () => toolbarRef.value?.openSchemaPicker() ?? false,
   focusWhere: () => activeSurfaceRef.value?.focusWhere() ?? false,
   openGoToColumn: () => activeSurfaceRef.value?.openGoToColumn() ?? false,
   openTableStructureEditor: (initialTab?: TableInfoTab) => activeSurfaceRef.value?.openTableStructureEditor?.(initialTab) ?? false,
@@ -195,6 +199,7 @@ const groupExecutableSql = computed(() => {
         @close-plugin-center="toolbar.closePluginCenter()"
         @activate-driver-store="toolbar.activateDriverStore()"
         @close-driver-store="toolbar.closeDriverStore()"
+        @save-all-tabs="toolbar.saveAllTabs()"
       />
     </Teleport>
     <!-- The toolbar stays at the top of the pane's content column in every
@@ -204,6 +209,7 @@ const groupExecutableSql = computed(() => {
     <div v-show="!contentSuppressed" class="flex min-h-0 min-w-0 flex-1 flex-col">
       <EditorToolbar
         v-if="activeTab && showGroupToolbar"
+        ref="toolbarRef"
         :active-tab="activeTab"
         :active-connection="activeConnection"
         :executable-sql="groupExecutableSql"
@@ -211,6 +217,7 @@ const groupExecutableSql = computed(() => {
         :block-dangerous-redis-commands="toolbar.blockDangerousRedisCommands.value"
         :sql-keyword-case="settingsStore.editorSettings.sqlFormatter.keywordCase"
         :database-required-signal="toolbar.databaseRequiredSignalFor(activeTab.id)"
+        :connection-required-signal="toolbar.connectionRequiredSignalFor(activeTab.id)"
         :auto-commit="activeTab.autoCommit ?? true"
         :txn-session-id="activeTab.txnSessionId"
         :txn-auto-rolled-back="activeTab.txnAutoRolledBack"

@@ -12,7 +12,7 @@ import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composabl
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { BINARY_CELL_DOWNLOAD_MODES, isBinaryCellColumnType, binaryCellUtf8Text, isBlobCellColumnType, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
-import { isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
+import { cellDetailPreviewText, isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { isHexGeometry, renderWktOnCanvas } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { DatabaseType } from "@/types/database";
@@ -40,6 +40,7 @@ const emit = defineEmits<{
 
 const open = defineModel<boolean>("open", { default: false });
 const geometryPreviewOpen = ref(false);
+const valueTransformOpen = ref(false);
 const geometryCanvas = ref<HTMLCanvasElement | null>(null);
 const jsonPreviewContainer = ref<HTMLElement>();
 let jsonPreviewEditor: UseCellDetailEditorReturn | null = null;
@@ -48,7 +49,7 @@ const jsonFormatted = computed(() => settingsStore.editorSettings.cellDetailJson
 const jsonView = computed(() => jsonFormatted.value && !!props.detail?.formattedJson);
 const wordWrapEnabled = computed(() => settingsStore.editorSettings.wordWrap);
 const binaryTextPreview = computed(() => (props.detail && isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
-const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? props.detail?.rawValuePreview : props.detail?.displayValuePreview) ?? "");
+const presentedValuePreview = computed(() => (binaryTextPreview.value === null && props.detail ? cellDetailPreviewText(props.detail, props.databaseType) : props.detail?.displayValuePreview) ?? "");
 
 function toggleWordWrap() {
   settingsStore.updateEditorSettings({ wordWrap: !wordWrapEnabled.value });
@@ -73,7 +74,10 @@ function copyColumnName() {
 }
 
 watch(open, (isOpen) => {
-  if (!isOpen) geometryPreviewOpen.value = false;
+  if (!isOpen) {
+    geometryPreviewOpen.value = false;
+    valueTransformOpen.value = false;
+  }
 });
 
 watch(
@@ -98,6 +102,7 @@ watch(jsonPreviewContainer, async (element) => {
     jsonPreviewEditor = useCellDetailEditor({
       language: "json",
       readOnly: true,
+      onEscape: () => (open.value = false),
       editorTheme: () => settingsStore.editorSettings.theme,
       appAppearance: () => (isDark.value ? "dark" : "light"),
       appPalette: () => themePalette.value,
@@ -155,20 +160,23 @@ watch(
           <div class="whitespace-pre-wrap break-words">{{ detail.comment || t("grid.noComment") }}</div>
         </div>
 
-        <div class="space-y-2">
-          <div class="flex items-center justify-between gap-2">
+        <div :class="detail.imagePreviewUrl ? 'grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-start gap-2' : 'space-y-2'">
+          <div class="flex items-center justify-between gap-2" :class="detail.imagePreviewUrl ? 'col-span-2' : ''">
             <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
-            <div class="flex items-center gap-1">
+            <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1">
               <!-- Binary cells keep `0x<hex>` as the canonical value; the transform kinds below
                    (timestamp/JSON/radix…) have text semantics and would misread hex. Offer the
                    explicit, read-only bytes decode instead. -->
               <DataGridCellDetailTextPreview v-if="open && isBinaryCellColumnType(detail.type)" :identity="`${detail.rowId}:${detail.colIndex}`" :value="detail.value" :column-type="detail.type" :database-type="databaseType" :incomplete="detail.isSourceTruncated" />
               <DataGridValueTransform
                 v-else-if="open"
+                v-model:open="valueTransformOpen"
                 :source="(detail.isNull ?? detail.value === null) ? null : detail.rawValue"
                 :identity="`${detail.rowId}:${detail.colIndex}`"
                 :incomplete="detail.isSourceTruncated"
                 :unsafe-number="typeof detail.value === 'number' && Number.isInteger(detail.value) && !Number.isSafeInteger(detail.value)"
+                :column="detail.column"
+                :row-number="detail.rowNumber"
               />
               <Button v-if="detail.formattedJson" :variant="jsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('grid.formattedJson')" @click="toggleJsonFormatted">
                 <Code2 class="h-3 w-3" />
@@ -220,12 +228,32 @@ watch(
               </Popover>
             </div>
           </div>
-          <a v-if="detail.imagePreviewUrl" :href="detail.imagePreviewUrl" role="button" class="block max-h-72 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(detail.imagePreviewUrl, detail.column)">
+          <a
+            v-if="detail.imagePreviewUrl"
+            :style="valueTransformOpen ? { display: 'none' } : null"
+            :href="detail.imagePreviewUrl"
+            role="button"
+            class="block max-h-72 overflow-hidden rounded border bg-muted/20"
+            :class="detail.imagePreviewUrl ? 'col-start-2 row-start-2' : ''"
+            @click.prevent="openImagePreview(detail.imagePreviewUrl, detail.column)"
+          >
             <img :src="detail.imagePreviewUrl" :alt="detail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-72 w-full object-contain" />
           </a>
-          <div v-if="jsonView && detail.formattedJson" ref="jsonPreviewContainer" data-cell-detail-editor-root class="h-[44vh] min-h-60 overflow-hidden rounded border bg-muted/20 p-3" />
-          <pre v-else class="dbx-data-grid-value-font max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': detail.value === null }">{{ presentedValuePreview }}</pre>
-          <div v-if="detail.isValuePreviewTruncated && !jsonView" class="text-[11px] text-muted-foreground">
+          <div
+            v-if="jsonView && detail.formattedJson"
+            :style="valueTransformOpen ? { display: 'none' } : null"
+            :class="detail.imagePreviewUrl ? 'col-start-1 row-start-2' : ''"
+            ref="jsonPreviewContainer"
+            data-cell-detail-editor-root
+            class="h-[44vh] min-h-60 overflow-hidden rounded border bg-muted/20 p-3"
+          />
+          <pre
+            v-else
+            :style="valueTransformOpen ? { display: 'none' } : null"
+            class="dbx-data-grid-value-font max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 text-xs whitespace-pre-wrap break-words"
+            :class="[detail.value === null ? 'italic text-muted-foreground' : '', detail.imagePreviewUrl ? 'col-start-1 row-start-2' : '']"
+            >{{ presentedValuePreview }}</pre>
+          <div v-if="detail.isValuePreviewTruncated && !jsonView" :style="valueTransformOpen ? { display: 'none' } : null" :class="detail.imagePreviewUrl ? 'col-start-1' : ''" class="text-[11px] text-muted-foreground">
             {{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}
           </div>
         </div>

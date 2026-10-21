@@ -14,8 +14,10 @@ import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
 import { batchResultInsertRequest } from "@/lib/query/queryResultBatchInsert";
 import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
+import { hexToRgba } from "@/lib/common/color";
 import { useI18n } from "vue-i18n";
 import { provideTabUiState } from "@/lib/tabs/tabUiState";
+import { shouldPinResultRunOnClick } from "@/lib/tabs/resultRunPin";
 import {
   Check,
   CheckSquare2,
@@ -28,6 +30,7 @@ import {
   Search,
   TableProperties,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Inbox,
   RefreshCcw,
@@ -48,6 +51,7 @@ import {
   ShieldAlert,
   AlignLeft,
   AlignRight,
+  Binary,
   PanelsTopLeft,
   Palette,
   CircleAlert,
@@ -77,7 +81,10 @@ import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarAct
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
+import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
+import { objectDependencyTarget, isObjectDependencySection, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import DataGridFreezeFirstColumnControl from "@/components/grid/DataGridFreezeFirstColumnControl.vue";
+import DataGridStatusSqlControl from "@/components/grid/DataGridStatusSqlControl.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
 import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
@@ -183,7 +190,7 @@ import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
-import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
 import { supportsTableImport } from "@/lib/database/databaseFeatureSupport";
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
@@ -207,7 +214,7 @@ import { loadQueryResultTransferSourceDdl } from "@/components/transfer/queryRes
 import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
 import { sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
-import type { QueryMessage, QueryResult, QueryTab, RedisResultViewMode, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
+import type { QueryMessage, QueryResult, QueryTab, RedisResultViewMode, TableInfoTab, TabOutputView, TreeNode, VectorCollectionMeta } from "@/types/database";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -310,6 +317,8 @@ function groupedQueryReadonlyColumnIndexes(tab: QueryTab): number[] | undefined 
 const settingsStore = useSettingsStore();
 const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
 const setBooleanDisplayMode = (mode: "checkbox" | "dropdown") => settingsStore.updateEditorSettings({ dataGridBooleanDisplayMode: mode });
+const booleanValueStyle = computed(() => settingsStore.editorSettings.dataGridBooleanValueStyle);
+const setBooleanValueStyle = (style: "true-false" | "zero-one") => settingsStore.updateEditorSettings({ dataGridBooleanValueStyle: style });
 const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.colorizeDataGridCellTypes);
 const setColorizeDataGridCellTypes = (value: boolean) => settingsStore.updateEditorSettings({ colorizeDataGridCellTypes: value });
 const { toast } = useToast();
@@ -359,7 +368,14 @@ const dataGridViewOptionsOpen = ref(false);
 // real overflow; tiers then drop button labels and move secondary actions
 // into the overflow menu instead of crushing the chips away.
 const dataToolbarRef = ref<HTMLElement | null>(null);
-const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [() => props.activeTab.id, () => !!props.activeTab.result]);
+const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [
+  () => props.activeTab.id,
+  () => !!props.activeTab.result,
+  // The grid exposes these only after the table result mounts; the toolbar's
+  // action set grows at that point, so the row must be re-measured.
+  () => !!dataGridRef.value?.canOpenTableStructureEditor,
+  () => !!dataGridRef.value?.goToColumnToolbarCapability?.visible,
+]);
 const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
@@ -403,6 +419,20 @@ const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.d
 const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
 const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
+const activeObjectDependencyTarget = computed(() => {
+  const tab = props.activeTab;
+  const details = tab.objectDetails;
+  if (!details || details.connectionId !== tab.connectionId || details.database !== tab.database || details.schema !== (tab.schema || tab.database) || (details.catalog || "") !== (tab.catalog || "")) return undefined;
+  return objectDependencyTarget(details, effectiveDatabaseTypeForConnection(connectionStore.getConfig(details.connectionId)));
+});
+const activeObjectSection = computed<ObjectDetailsSection>(() => (activeObjectDependencyTarget.value ? props.activeTab.objectDetails?.section || "source" : "source"));
+const sourceSectionActive = computed(() => !isObjectDependencySection(props.activeTab));
+function setObjectSection(section: ObjectDetailsSection) {
+  if (props.activeTab.objectDetails) props.activeTab.objectDetails.section = section;
+}
+function viewObjectDependencySql(context: ObjectDependencyTarget, sql: string) {
+  queryStore.createTab(context.connectionId, context.database, t("objectDependencies.viewSql"), "query", context.schema, sql, context.catalog, { forceNew: true });
+}
 // 表数据工具箱的「导入数据」与侧边栏、对象浏览器共用同一条能力判断：未适配导入的引擎（如 HANA）不出现入口。
 const canOpenTableImport = computed(() => supportsTableImport(activeEffectiveDatabaseType.value));
 const activeVectorConnection = computed(() => connectionStore.getConfig(props.activeTab.connectionId) ?? props.activeConnection);
@@ -466,9 +496,8 @@ function increaseTableFontSize() {
   setTableFontSize(tableFontSize.value + 1);
 }
 
-/** Export file base name for the query result grid: the result's label (nearby
- *  comment or `schema.table`) names exports, matching the result tab (#9894). */
-const activeQueryResultExportBaseName = computed(() => queryResultExportBaseName(props.activeTab.result?.sourceLabel, props.activeTab.title));
+/** Export file base name for the query result grid: prefers result label or tab title based on settings (#9894, #12092). */
+const activeQueryResultExportBaseName = computed(() => queryResultExportBaseName(props.activeTab.result?.sourceLabel, props.activeTab.title, settingsStore.editorSettings.queryResultExportFileNameSource));
 
 const activeTabDimension = computed(() => {
   const tab = props.activeTab;
@@ -480,7 +509,7 @@ const activeTabDimension = computed(() => {
   return meta && "dimension" in meta ? (meta as VectorCollectionMeta).dimension : undefined;
 });
 
-const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(activeEffectiveDatabaseType.value));
+const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(kingbaseSqlDatabaseType(props.activeConnection) ?? activeEffectiveDatabaseType.value));
 
 const editorDialect = computed<"mysql" | "postgres" | "sqlserver">(() => codeMirrorSqlDialect(activeEffectiveDatabaseType.value));
 const editorSyntaxDialect = computed<CodeMirrorSqlDialectName>(() => codeMirrorSqlDialectForConnection(props.activeConnection));
@@ -526,6 +555,21 @@ const activeQueryError = computed(() => {
   return String(result.rows[0]?.[0] ?? "");
 });
 const hasQueryOutput = computed(() => tabHasQueryOutput(props.activeTab));
+function resultRunConnectionId(runId?: string) {
+  const run = props.activeTab.resultRuns?.find((item) => item.id === runId);
+  return run?.multiDbExecution?.kind === "multi-db" ? run.multiDbExecution.target.connectionId : (run?.connectionId ?? props.activeTab.connectionId);
+}
+
+function resultRunColor(runId?: string) {
+  return connectionStore.getConfig(resultRunConnectionId(runId))?.color || "";
+}
+
+function resultRunColorStyle(runId: string, active: boolean): CSSProperties | undefined {
+  const color = resultRunColor(runId);
+  return color ? { borderColor: hexToRgba(color, active ? 0.72 : 0.35), backgroundColor: hexToRgba(color, active ? 0.14 : 0.05) } : undefined;
+}
+
+const activeResultColor = computed(() => (hasQueryOutput.value ? resultRunColor(props.activeTab.activeResultRunId) : ""));
 // 结果集页签/列表的名称是否带库名，由编辑器设置控制（默认带库名）
 const includeResultSourceDatabase = computed(() => settingsStore.editorSettings.showResultSourceDatabase);
 const resultTabNamingMode = computed(() => settingsStore.editorSettings.resultTabNamingMode);
@@ -867,6 +911,14 @@ function setRedisResultViewMode(mode: RedisResultViewMode) {
   queryStore.updateTabUiState(props.activeTab.id, { redisResultViewMode: mode });
 }
 
+function selectOutputView(tabId: string, view: TabOutputView) {
+  queryStore.updateTabUiState(tabId, {
+    activeOutputView: view,
+    autoSwitchedToMessagesDuringExecution: false,
+  });
+  emit("update:activeOutputView", tabId, view);
+}
+
 function observeStandaloneResultToolbar() {
   standaloneResultToolbarResizeObserver?.disconnect();
   standaloneResultToolbarResizeObserver = undefined;
@@ -1102,18 +1154,33 @@ watch(
   () => props.activeTab.liveQueryMessages?.length ?? 0,
   (count, previousCount) => {
     if (count > 0 && !previousCount && props.activeTab.isExecuting && !props.editorOnly && !hasTabularResult.value && (props.activeOutputView === "result" || props.activeOutputView === "summary")) {
+      queryStore.updateTabUiState(props.activeTab.id, {
+        activeOutputView: "messages",
+        autoSwitchedToMessagesDuringExecution: true,
+      });
       emit("update:activeOutputView", props.activeTab.id, "messages");
     }
   },
 );
 
 watch(
-  () => [props.activeTab.id, props.activeTab.result, props.activeTab.results, props.activeTab.isExecuting, props.activeOutputView] as const,
+  () => [props.activeTab.id, props.activeTab.result, props.activeTab.results, props.activeTab.isExecuting, props.activeTab.batchSqlExecution, props.activeOutputView] as const,
   () => {
     // The output view belongs to the shared result surface. An editor-only
     // surface (a background group's editor) must never redirect the global
     // view when its own tab finishes executing.
     if (props.editorOnly) return;
+    // A batch run reports its progress statement by statement, and only the
+    // summary view shows that, so a run of several statements opens there
+    // instead of on the first statement's grid. The switch is recorded against
+    // the run it happened in: a user who picks another view mid-run keeps it,
+    // and the next run switches again.
+    const batchExecution = props.activeTab.batchSqlExecution;
+    if (batchExecution && batchExecution.finishedAt === undefined && batchExecution.total > 1 && props.activeOutputView === "result" && props.activeTab.uiState?.batchSummaryExecutionId !== batchExecution.executionId) {
+      queryStore.updateTabUiState(props.activeTab.id, { activeOutputView: "summary", batchSummaryExecutionId: batchExecution.executionId });
+      emit("update:activeOutputView", props.activeTab.id, "summary");
+      return;
+    }
     if (props.activeTab.isExecuting) return;
     if (props.activeOutputView === "graph" && !canShowGraphOutput.value) {
       emit("update:activeOutputView", props.activeTab.id, "result");
@@ -1122,6 +1189,7 @@ watch(
     if (hasExecutionSummary.value && (!hasTabularResult.value || props.activeTab.result?.server_message === true) && props.activeOutputView === "result") {
       const result = props.activeTab.result;
       emit("update:activeOutputView", props.activeTab.id, result ? defaultViewForResult(result) : "summary");
+      return;
     }
   },
   { immediate: true },
@@ -1670,7 +1738,7 @@ function dispatchBeforeResultTabSwitch() {
 async function selectResultRunFromTab(runId: string) {
   if (!(await selectResultRun(runId))) return;
   const run = resultRuns.value.find((item) => item.id === runId);
-  if (run && !run.pinned) toggleResultRunPinned(runId);
+  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick)) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {
@@ -1764,22 +1832,27 @@ function handleModRTarget(target: Element): boolean {
 }
 
 function requestQueryEditorExecute() {
+  if (!sourceSectionActive.value) return false;
   return queryEditorRef.value?.requestExecute();
 }
 
 function captureQueryEditorExecutionSnapshot() {
+  if (!sourceSectionActive.value) return;
   return queryEditorRef.value?.captureExecutionSnapshot();
 }
 
 function requestQueryEditorExecuteInNewResultTab() {
+  if (!sourceSectionActive.value) return false;
   return queryEditorRef.value?.requestExecuteInNewResultTab();
 }
 
 function requestQueryEditorPreviewChanges(stackSql?: string) {
+  if (!sourceSectionActive.value) return Promise.resolve(false);
   return queryEditorRef.value?.requestPreviewChanges?.(stackSql);
 }
 
 function shouldBlockQueryEditorExecutionShortcut(event: KeyboardEvent) {
+  if (!sourceSectionActive.value) return true;
   return queryEditorRef.value?.shouldBlockExecutionShortcut?.(event) ?? false;
 }
 
@@ -1976,94 +2049,97 @@ defineExpose({
               </Button>
             </div>
             <ProductionWatermark v-if="activeProductionContext.active" />
-            <!-- issue #9035：源码 tab 先出现再加载。pending 期间不挂载编辑器
+            <ObjectDependenciesPanel :target="activeObjectDependencyTarget" :section="activeObjectSection" @update:section="setObjectSection" @view-sql="viewObjectDependencySql" @open-object="(context, target) => emit('openDependencyObject', context, target)">
+              <!-- issue #9035：源码 tab 先出现再加载。pending 期间不挂载编辑器
                  （还没有内容可编辑，也省下一次 Monaco 初始化），失败则就地重试。
                  issue #9387：DDL 新标签同样先出 tab 再加载，失败就地显示错误。 -->
-            <QueryLoadingState v-if="activeTab.sourceLoad && !activeTab.sourceLoad.error" class="relative z-0 flex-1" :elapsed-seconds="sourceLoadElapsedSeconds" />
-            <div v-else-if="activeTab.sourceLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-object-source-load-error>
-              <p class="max-w-[80%] text-center break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
-              <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryObjectSourceTab(activeTab.id)">
-                <RotateCcw class="h-4 w-4" />
-                {{ t("common.retry") }}
-              </Button>
-            </div>
-            <QueryLoadingState v-else-if="activeTab.ddlLoad && !activeTab.ddlLoad.error" class="relative z-0 flex-1" :elapsed-seconds="ddlLoadElapsedSeconds" />
-            <div v-else-if="activeTab.ddlLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-ddl-load-error>
-              <p class="max-w-[80%] text-center break-words text-destructive">{{ t("contextMenu.ddlRefreshFailed", { message: activeTab.ddlLoad.error }) }}</p>
-              <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryDdlViewerTab(activeTab.id)">
-                <RotateCcw class="h-4 w-4" />
-                {{ t("common.retry") }}
-              </Button>
-            </div>
-            <QueryEditor
-              v-else
-              ref="queryEditorRef"
-              class="relative z-0 flex-1"
-              :auto-focus="autoFocus !== false"
-              :model-value="activeTab.sql"
-              :tab-id="activeTab.id"
-              :connection-id="activeTab.connectionId"
-              :catalog="activeTab.catalog"
-              :database="activeTab.database"
-              :schema="activeTab.schema"
-              :client-session-id="activeTab.id"
-              :completion-context-version="activeTab.completionContextVersion"
-              :database-type="activeEffectiveDatabaseType"
-              :dialect="editorDialect"
-              :syntax-dialect="editorSyntaxDialect"
-              :format-dialect="activeSqlFormatDialect"
-              :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
-              :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
-              :keyword-case-request-id="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.id : undefined"
-              :keyword-case-request-mode="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.mode : undefined"
-              :execution-error="activeQueryError"
-              :execution-error-sql="activeTab.lastExecutedSql"
-              :execution-error-result="activeQueryError ? activeTab.result : undefined"
-              :result-columns="activeTab.result?.columns"
-              :result-source-statement="activeTab.result?.sourceStatement"
-              :result-source-from="activeTab.result?.sourceFrom"
-              :result-source-to="activeTab.result?.sourceTo"
-              :statement-execution-markers="activeStatementExecutionMarkers"
-              :initial-viewport="activeTab.editorViewport"
-              :initial-selection="activeTab.editorSelection"
-              :reveal-request="activeTab.editorRevealRequest"
-              :force-word-wrap="activeTab.forceWordWrap"
-              :read-only="!!activeTab.ddlViewer"
-              :hide-execution-controls="!!activeTab.ddlViewer"
-              enable-explain-shortcut
-              :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
-              @update:model-value="emit('editorUpdate', activeTab.id, $event)"
-              @selection-change="emit('editorSelectionChange', activeTab.id, $event)"
-              @send-selection-to-ai="emit('sendSelectionToAi', activeTab.id, $event)"
-              @cursor-change="emit('editorCursorChange', activeTab.id, $event)"
-              @preview-changes-available="emit('previewChangesAvailable', activeTab.id, $event)"
-              @viewport-change="(viewport, tabId) => emit('editorViewportChange', tabId ?? activeTab.id, viewport)"
-              @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
-              @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
-              @editor-reveal-consumed="clearEditorRevealRequest(activeTab)"
-              @format-error="emit('formatError', activeTab.id)"
-              @execute="emit('execute', activeTab.id, $event)"
-              @execute-in-new-result-tab="emit('executeInNewResultTab', activeTab.id, $event)"
-              @explain="emit('explain', activeTab.id)"
-              @export-query="handleExportQuery"
-              @save="emit('saveSql', props.activeTab.id)"
-              @click-table="onHandleClickTable"
-              @view-table-data="onHandleViewTableData"
-              @edit-table-structure="onHandleEditTableStructure"
-              @view-table-ddl="onHandleViewTableDdl"
-              @open-object-source="onHandleOpenObjectSource"
-              @click-column="onHandleClickColumn"
-              @close-column-panel="onHandleCloseColumnPanel"
-            />
-            <ColumnInfoPanel
-              v-if="showColumnInfo"
-              :columns="columnInfoColumns"
-              :loading="columnInfoLoading"
-              :error="columnInfoError"
-              :database-type="activeEffectiveDatabaseType"
-              :is-gaussdb-m="activeEffectiveDatabaseType === 'gaussdb' && activeResultConnection?.driver_profile?.toLowerCase() === 'gaussdb-m'"
-              @close="closeColumnInfo"
-            />
+              <QueryLoadingState v-if="activeTab.sourceLoad && !activeTab.sourceLoad.error" class="relative z-0 flex-1" :elapsed-seconds="sourceLoadElapsedSeconds" />
+              <div v-else-if="activeTab.sourceLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-object-source-load-error>
+                <p class="max-w-[80%] text-center break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
+                <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryObjectSourceTab(activeTab.id)">
+                  <RotateCcw class="h-4 w-4" />
+                  {{ t("common.retry") }}
+                </Button>
+              </div>
+              <QueryLoadingState v-else-if="activeTab.ddlLoad && !activeTab.ddlLoad.error" class="relative z-0 flex-1" :elapsed-seconds="ddlLoadElapsedSeconds" />
+              <div v-else-if="activeTab.ddlLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-ddl-load-error>
+                <p class="max-w-[80%] text-center break-words text-destructive">{{ t("contextMenu.ddlRefreshFailed", { message: activeTab.ddlLoad.error }) }}</p>
+                <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryDdlViewerTab(activeTab.id)">
+                  <RotateCcw class="h-4 w-4" />
+                  {{ t("common.retry") }}
+                </Button>
+              </div>
+              <QueryEditor
+                v-else
+                ref="queryEditorRef"
+                class="relative z-0 flex-1"
+                :auto-focus="sourceSectionActive && autoFocus !== false"
+                :model-value="activeTab.sql"
+                :tab-id="activeTab.id"
+                :connection-id="activeTab.connectionId"
+                :catalog="activeTab.catalog"
+                :database="activeTab.database"
+                :schema="activeTab.schema"
+                :client-session-id="activeTab.id"
+                :completion-context-version="activeTab.completionContextVersion"
+                :database-type="activeEffectiveDatabaseType"
+                :dialect="editorDialect"
+                :syntax-dialect="editorSyntaxDialect"
+                :format-dialect="activeSqlFormatDialect"
+                :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
+                :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
+                :keyword-case-request-id="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.id : undefined"
+                :keyword-case-request-mode="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.mode : undefined"
+                :execution-error="activeQueryError"
+                :execution-error-sql="activeTab.lastExecutedSql"
+                :execution-error-result="activeQueryError ? activeTab.result : undefined"
+                :result-columns="activeTab.result?.columns"
+                :result-source-statement="activeTab.result?.sourceStatement"
+                :result-source-from="activeTab.result?.sourceFrom"
+                :result-source-to="activeTab.result?.sourceTo"
+                :statement-execution-markers="activeStatementExecutionMarkers"
+                :initial-viewport="activeTab.editorViewport"
+                :initial-selection="activeTab.editorSelection"
+                :reveal-request="activeTab.editorRevealRequest"
+                :force-word-wrap="activeTab.forceWordWrap"
+                :read-only="!!activeTab.ddlViewer"
+                :hide-execution-controls="!!activeTab.ddlViewer"
+                enable-explain-shortcut
+                :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
+                :is-executing="activeTab.isExecuting"
+                @update:model-value="emit('editorUpdate', activeTab.id, $event)"
+                @selection-change="emit('editorSelectionChange', activeTab.id, $event)"
+                @send-selection-to-ai="emit('sendSelectionToAi', activeTab.id, $event)"
+                @cursor-change="emit('editorCursorChange', activeTab.id, $event)"
+                @preview-changes-available="emit('previewChangesAvailable', activeTab.id, $event)"
+                @viewport-change="(viewport, tabId) => emit('editorViewportChange', tabId ?? activeTab.id, viewport)"
+                @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
+                @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
+                @editor-reveal-consumed="clearEditorRevealRequest(activeTab)"
+                @format-error="emit('formatError', activeTab.id)"
+                @execute="sourceSectionActive && emit('execute', activeTab.id, $event)"
+                @execute-in-new-result-tab="sourceSectionActive && emit('executeInNewResultTab', activeTab.id, $event)"
+                @explain="sourceSectionActive && emit('explain', activeTab.id)"
+                @export-query="handleExportQuery"
+                @save="sourceSectionActive && emit('saveSql', props.activeTab.id)"
+                @click-table="onHandleClickTable"
+                @view-table-data="onHandleViewTableData"
+                @edit-table-structure="onHandleEditTableStructure"
+                @view-table-ddl="onHandleViewTableDdl"
+                @open-object-source="onHandleOpenObjectSource"
+                @click-column="onHandleClickColumn"
+                @close-column-panel="onHandleCloseColumnPanel"
+              />
+              <ColumnInfoPanel
+                v-if="showColumnInfo"
+                :columns="columnInfoColumns"
+                :loading="columnInfoLoading"
+                :error="columnInfoError"
+                :database-type="activeEffectiveDatabaseType"
+                :is-gaussdb-m="activeEffectiveDatabaseType === 'gaussdb' && activeResultConnection?.driver_profile?.toLowerCase() === 'gaussdb-m'"
+                @close="closeColumnInfo"
+              />
+            </ObjectDependenciesPanel>
             <Button v-if="!editorOnly && hasQueryOutput && !resultsPaneOpen" variant="secondary" size="sm" class="absolute bottom-3 right-3 z-20 h-7 gap-1.5 rounded-full border bg-background/95 px-3 text-xs shadow-lg hover:bg-accent" @click="resultsPaneOpen = true">
               <ChevronUp class="h-3.5 w-3.5" />
               {{ t("editor.showResultsPane") }}
@@ -2071,7 +2147,7 @@ defineExpose({
           </div>
         </Pane>
         <Pane v-if="(resultsPaneOpen || resultOnly) && !editorOnly" class="min-h-0" :size="resultOnly ? 100 : resultsPaneSize" :min-size="resultOnly ? 100 : 20">
-          <div class="h-full flex flex-col">
+          <div data-query-result-surface class="h-full flex flex-col border border-transparent" :style="activeResultColor ? { borderColor: activeResultColor } : undefined">
             <!--
               The shared result surface (resultOnly) is always mounted regardless of
               whether the active tab has run a query yet, and this toolbar is the only
@@ -2109,6 +2185,7 @@ defineExpose({
                           role="presentation"
                           class="group/result-run inline-flex h-7 shrink-0 select-none items-center overflow-hidden rounded-md border transition-colors"
                           :class="run.active ? 'border-border bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:border-border/70 hover:bg-background/70 hover:text-foreground'"
+                          :style="resultRunColorStyle(run.id, run.active)"
                           @contextmenu="onContextMenu"
                           @mousedown.middle.stop.prevent="removeResultRun(run.id)"
                         >
@@ -2124,6 +2201,7 @@ defineExpose({
                             @keydown="onResultRunTabKeydown($event, runIndex)"
                             @mousedown.middle.stop.prevent="removeResultRun(run.id)"
                           >
+                            <span v-if="resultRunColor(run.id)" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: resultRunColor(run.id) }" aria-hidden="true" />
                             <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
                             {{ run.title || run.sourceLabel || resultRunFallbackLabel(run.sequence) }}
                           </button>
@@ -2145,6 +2223,7 @@ defineExpose({
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
+                        <span v-if="activeResultColor" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: activeResultColor }" aria-hidden="true" />
                         <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || activeResultRunItem.sourceLabel || resultRunFallbackLabel(activeResultRunItem.sequence) : t("tabs.resultRuns") }}</span>
                         <ChevronDown class="h-3.5 w-3.5 shrink-0" />
                       </Button>
@@ -2152,6 +2231,7 @@ defineExpose({
                     <DropdownMenuContent align="start" class="w-48">
                       <CustomContextMenu v-for="run in resultRuns" :key="run.id" :items="() => resultRunContextMenuItems(run)" v-slot="{ onContextMenu }">
                         <DropdownMenuItem class="flex items-center gap-2 pr-1" @select="selectResultRunFromTab(run.id)" @contextmenu="onContextMenu" @mousedown.middle.stop.prevent="removeResultRun(run.id)">
+                          <span v-if="resultRunColor(run.id)" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: resultRunColor(run.id) }" aria-hidden="true" />
                           <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
                           <span v-else class="h-3.5 w-3.5 shrink-0" />
                           <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
@@ -2180,6 +2260,7 @@ defineExpose({
                   :can-export-xlsx="activeOutputView === 'result' && redisResultViewMode === 'grid' && !!activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse"
                   :active-index="activeTab.activeResultIndex ?? 0"
                   :active="activeOutputView === 'result'"
+                  :connection-color="activeResultColor"
                   :display-mode="resultRunDisplayMode"
                   :has-sibling-run-tabs="resultRuns.length > 0"
                   @select="selectResultItem"
@@ -2463,6 +2544,32 @@ defineExpose({
                     </div>
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                       <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <Binary class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.booleanValueStyle") }}</span>
+                      </div>
+                      <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                          :disabled="booleanDisplayMode === 'checkbox'"
+                          :class="booleanValueStyle === 'true-false' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanValueStyle('true-false')"
+                        >
+                          {{ t("grid.booleanValueTrueFalse") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                          :disabled="booleanDisplayMode === 'checkbox'"
+                          :class="booleanValueStyle === 'zero-one' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanValueStyle('zero-one')"
+                        >
+                          {{ t("grid.booleanValueZeroOne") }}
+                        </button>
+                      </div>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
                         <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                         <span>{{ t("grid.colorizeDataTypes") }}</span>
                       </div>
@@ -2478,6 +2585,7 @@ defineExpose({
                     </div>
                     <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
                     <DataGridFreezeFirstColumnControl />
+                    <DataGridStatusSqlControl />
                     <DataGridCopyFormatControl
                       :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                       :current-value="dataGridRef?.defaultCopyPreference ?? ''"
@@ -2508,7 +2616,7 @@ defineExpose({
                 :result-mode="redisResultViewMode"
                 :message-count="resultMessageCount"
                 :compact="standaloneResultToolbarCompact"
-                @select-view="emit('update:activeOutputView', activeTab.id, $event)"
+                @select-view="selectOutputView(activeTab.id, $event)"
                 @select-result-mode="setRedisResultViewMode"
               />
               <QueryResultToolbarActions
@@ -2520,8 +2628,8 @@ defineExpose({
                 :archive-exporting="resultArchiveExporting"
                 :compact="standaloneResultToolbarCompact"
                 :has-result="!!activeTab.result"
-                @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
-                @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
+                @select-explain="selectOutputView(activeTab.id, 'explain')"
+                @select-profile="selectOutputView(activeTab.id, 'profile')"
                 @export-archive="exportResultArchive"
                 @open-result-view="openPluginResultView"
               />
@@ -2680,7 +2788,7 @@ defineExpose({
               <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
               <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
               <DataGrid
-                v-else-if="activeTab.result && hasTabularResult"
+                v-else-if="activeTab.result && hasTabularResult && (!activeTab.isExecuting || !isQueryExecutionErrorResult(activeTab.result))"
                 ref="dataGridRef"
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
@@ -2699,6 +2807,7 @@ defineExpose({
                 :export-sql="activeResultExportSql"
                 :page-sql="activeTab.resultPageSql"
                 :loading="activeResultIsLoading"
+                :busy-started-at="activeTab.isExecuting ? activeTab.queryExecutionStartedAt : undefined"
                 :editable="!hasNeo4jNodes && (!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler)"
                 :source-columns="hasNeo4jNodes ? undefined : activeTab.querySourceColumns"
                 :joined-write-targets="hasNeo4jNodes ? undefined : activeTab.queryWriteTargets"
@@ -2706,6 +2815,7 @@ defineExpose({
                 :has-unique-query-insert-target="!!activeTab.tableMeta && activeTab.queryAnalysis?.multiSource !== true && (activeTab.queryAnalysis?.sources?.length ?? 1) === 1 && (activeTab.queryWriteTargets?.length ?? 1) <= 1"
                 :readonly-column-indexes="hasNeo4jNodes ? undefined : groupedQueryReadonlyColumnIndexes(activeTab)"
                 :result-column-comments="hasNeo4jNodes ? undefined : activeTab.resultColumnComments"
+                :result-column-type-labels="hasNeo4jNodes ? undefined : activeTab.resultColumnTypeLabels"
                 :query-display-source-columns="hasNeo4jNodes ? undefined : activeTab.queryDisplaySourceColumns"
                 :custom-save-handler="mongoQueryResultSaveHandler"
                 :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
@@ -2777,7 +2887,7 @@ defineExpose({
                     :result-mode="redisResultViewMode"
                     :message-count="resultMessageCount"
                     :compact="compact"
-                    @select-view="emit('update:activeOutputView', activeTab.id, $event)"
+                    @select-view="selectOutputView(activeTab.id, $event)"
                     @select-result-mode="setRedisResultViewMode"
                   />
                   <template v-if="activeElasticsearchRawBody">
@@ -2799,7 +2909,7 @@ defineExpose({
                       class="inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
                       :class="activeOutputView === 'profile' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
                       :aria-pressed="activeOutputView === 'profile'"
-                      @click="emit('update:activeOutputView', activeTab.id, activeOutputView === 'profile' ? 'result' : 'profile')"
+                      @click="selectOutputView(activeTab.id, activeOutputView === 'profile' ? 'result' : 'profile')"
                     >
                       <Gauge class="h-3.5 w-3.5" />
                       {{ t("profile.title") }}
@@ -2815,8 +2925,8 @@ defineExpose({
                     :archive-exporting="resultArchiveExporting"
                     :compact="compact"
                     :has-result="!!activeTab.result"
-                    @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
-                    @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
+                    @select-explain="selectOutputView(activeTab.id, 'explain')"
+                    @select-profile="selectOutputView(activeTab.id, 'profile')"
                     @export-archive="exportResultArchive"
                     @open-result-view="openPluginResultView"
                   />
@@ -2835,7 +2945,7 @@ defineExpose({
                 </template>
               </DataGrid>
               <QueryLoadingState
-                v-else-if="!activeTab.result && activeTab.isExecuting"
+                v-else-if="(!activeTab.result || isQueryExecutionErrorResult(activeTab.result)) && activeTab.isExecuting"
                 class="flex-1 min-h-0"
                 :label-key="queryExecutionLabelKey(activeTab)"
                 :elapsed-seconds="queryRunningElapsedSeconds"
@@ -2864,37 +2974,44 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'data'">
       <div class="flex-1 min-h-0 flex flex-col">
         <div ref="dataToolbarRef" class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
-          <!-- No fixed max-w cap on these chips: they must flex (truncate)
-               so long names only clip when the header row itself runs out
-               (#7880). The min-w floor keeps scrollWidth reporting real
-               overflow so the measured tiers condense the row before the
-               chips collapse. -->
-          <button
-            v-if="activeConnection?.name?.trim()"
-            type="button"
-            data-data-header-connection
-            class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
-            :title="activeConnection.name"
-            :disabled="!activeTab.connectionId"
-            @click="queryStore.openDatabaseBrowser(activeTab.connectionId)"
-          >
-            {{ activeConnection.name }}
-          </button>
-          <span class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 font-medium" :title="activeDataTabTableMeta?.tableName || activeTab.title">
-            {{ activeDataTabTableMeta?.tableName || activeTab.title }}
-          </span>
-          <button
-            type="button"
-            data-data-header-database
-            class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
-            :title="[activeDataTabTableMeta?.schema, databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t)].filter(Boolean).join('@')"
-            :disabled="!activeTab.connectionId || !activeTab.database"
-            @click="queryStore.openObjectBrowser(activeTab.connectionId, activeTab.database, activeDataTabTableMeta?.schema, activeDataTabTableMeta?.catalog)"
-          >
-            <template v-if="activeDataTabTableMeta?.schema">{{ activeDataTabTableMeta.schema }}@</template>{{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t) }}
-          </button>
-          <span v-if="showDataColumnsChip && activeDataTabTableMeta" class="inline-flex shrink-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums"> {{ activeDataTabTableMeta.columns.length }} {{ t("tree.columns") }} </span>
-          <span class="ml-auto" />
+          <!-- Context breadcrumb. The connection and database segments are
+               capped so a long connection name can never eat half the row;
+               the table name gets the remaining room and is the only filled
+               segment, which keeps the hierarchy obvious at a glance. -->
+          <div class="flex min-w-[18rem] flex-1 items-center gap-1 overflow-hidden">
+            <button
+              v-if="activeConnection?.name?.trim()"
+              type="button"
+              data-data-header-connection
+              class="inline-flex max-w-[13rem] shrink items-center gap-1 rounded text-muted-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+              :class="dataToolbarCompact ? 'w-5 justify-center px-0.5' : 'min-w-[3.5rem] px-1 py-0.5'"
+              :title="activeConnection.name"
+              :aria-label="activeConnection.name"
+              :disabled="!activeTab.connectionId"
+              @click="queryStore.openDatabaseBrowser(activeTab.connectionId)"
+            >
+              <Database class="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+              <span v-if="!dataToolbarCompact" class="truncate">{{ activeConnection.name }}</span>
+            </button>
+            <span v-if="activeConnection?.name?.trim()" class="shrink-0 text-muted-foreground/40" aria-hidden="true">/</span>
+            <button
+              type="button"
+              data-data-header-database
+              class="inline-flex min-w-[2.5rem] max-w-[12rem] shrink items-center rounded px-1 py-0.5 text-muted-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+              :title="[activeDataTabTableMeta?.schema, databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t)].filter(Boolean).join('@')"
+              :disabled="!activeTab.connectionId || !activeTab.database"
+              @click="queryStore.openObjectBrowser(activeTab.connectionId, activeTab.database, activeDataTabTableMeta?.schema, activeDataTabTableMeta?.catalog)"
+            >
+              <span class="truncate"
+                ><template v-if="activeDataTabTableMeta?.schema">{{ activeDataTabTableMeta.schema }}@</template>{{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t) }}</span
+              >
+            </button>
+            <ChevronRight class="h-3 w-3 shrink-0 text-muted-foreground/40" aria-hidden="true" />
+            <span class="inline-flex min-w-[6rem] items-center rounded-md bg-muted/60 px-2 py-0.5 font-medium text-foreground" :title="activeDataTabTableMeta?.tableName || activeTab.title">
+              <span class="truncate">{{ activeDataTabTableMeta?.tableName || activeTab.title }}</span>
+            </span>
+            <span v-if="showDataColumnsChip && activeDataTabTableMeta" class="shrink-0 whitespace-nowrap text-muted-foreground tabular-nums">{{ activeDataTabTableMeta.columns.length }} {{ t("tree.columns") }}</span>
+          </div>
           <LightTooltip v-if="dataGridRef?.canOpenTableStructureEditor" :text="t('contextMenu.editStructure')" side="bottom" nowrap>
             <Button data-edit-table-structure variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :aria-label="t('contextMenu.editStructure')" @click="dataGridRef?.openTableStructureEditor('columns')">
               <PencilRuler class="h-3.5 w-3.5" />
@@ -3166,6 +3283,32 @@ defineExpose({
               </div>
               <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                 <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <Binary class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.booleanValueStyle") }}</span>
+                </div>
+                <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                    :disabled="booleanDisplayMode === 'checkbox'"
+                    :class="booleanValueStyle === 'true-false' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanValueStyle('true-false')"
+                  >
+                    {{ t("grid.booleanValueTrueFalse") }}
+                  </button>
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                    :disabled="booleanDisplayMode === 'checkbox'"
+                    :class="booleanValueStyle === 'zero-one' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanValueStyle('zero-one')"
+                  >
+                    {{ t("grid.booleanValueZeroOne") }}
+                  </button>
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
                   <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span>{{ t("grid.colorizeDataTypes") }}</span>
                 </div>
@@ -3181,6 +3324,7 @@ defineExpose({
               </div>
               <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
               <DataGridFreezeFirstColumnControl />
+              <DataGridStatusSqlControl />
               <DataGridCopyFormatControl
                 :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                 :current-value="dataGridRef?.defaultCopyPreference ?? ''"
@@ -3192,7 +3336,7 @@ defineExpose({
           </Popover>
         </div>
         <DataGrid
-          v-if="activeTab.result"
+          v-if="activeTab.result && (!activeTab.isExecuting || !isQueryExecutionErrorResult(activeTab.result))"
           ref="dataGridRef"
           class="flex-1 min-h-0"
           :key="activeTab.id"
@@ -3207,6 +3351,7 @@ defineExpose({
           :sql="activeTab.sql"
           :page-sql="activeTab.resultPageSql || activeTab.sql"
           :loading="activeTab.isExecuting"
+          :busy-started-at="activeTab.isExecuting ? activeTab.queryExecutionStartedAt : undefined"
           :editable="!activeTab.tableMetaPending && (isTableDataEditable(activeEffectiveDatabaseType, activeTableMeta?.primaryKeys ?? [], activeTableMeta?.tableType) || !!influxDbV1DeleteSaveHandler)"
           :custom-save-handler="influxDbV1DeleteSaveHandler"
           context="table-data"

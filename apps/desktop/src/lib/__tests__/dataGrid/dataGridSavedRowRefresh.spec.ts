@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { buildDataGridSavedRowRefreshPlan, dataGridSavedRowRefreshPatches } from "@/lib/dataGrid/dataGridSavedRowRefresh";
+import { describe, expect, it, vi } from "vitest";
+import { buildDataGridSavedRowRefreshPlan, dataGridSavedRowRefreshPatches, executeDataGridSavedRowRefreshQuery } from "@/lib/dataGrid/dataGridSavedRowRefresh";
+import type { QueryResult } from "@/types/database";
 
 function dirtyRows(...entries: Array<[number, Array<[number, string | number | boolean | null]>]>): Map<number, Map<number, string | number | boolean | null>> {
   return new Map(entries.map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
@@ -115,5 +116,39 @@ describe("dataGridSavedRowRefresh", () => {
         ],
       ),
     ).toBeNull();
+  });
+});
+
+describe("executeDataGridSavedRowRefreshQuery", () => {
+  const query = { connectionId: "c1", database: "cloudbook", schema: undefined, sql: "SELECT ...", rowLimit: 2, primaryKeys: ["id"] };
+
+  function result(overrides: Partial<QueryResult> = {}): QueryResult {
+    return { columns: ["id", "def_json"], rows: [[16, "{"]], affected_rows: 0, execution_time_ms: 1, ...overrides };
+  }
+
+  it("runs large-value preview SQL as a table-data preview so markers become large_value_cells", async () => {
+    const preview = result({ large_value_cells: [{ row_index: 0, column_index: 1, original_bytes: 21814 }] });
+    const runner = { executeQuery: vi.fn(), executeMulti: vi.fn().mockResolvedValue([preview]) };
+
+    await expect(executeDataGridSavedRowRefreshQuery(runner, { ...query, largeValuePreview: true })).resolves.toBe(preview);
+    expect(runner.executeQuery).not.toHaveBeenCalled();
+    expect(runner.executeMulti).toHaveBeenCalledWith("c1", "cloudbook", "SELECT ...", undefined, undefined, { maxRows: 2, fetchSize: 2, pageSize: 2, resultKeyColumns: ["id"], tableDataPreview: true });
+  });
+
+  it("keeps the plain query path when no preview columns were requested", async () => {
+    const plain = result();
+    const runner = { executeQuery: vi.fn().mockResolvedValue(plain), executeMulti: vi.fn() };
+
+    await expect(executeDataGridSavedRowRefreshQuery(runner, { ...query, largeValuePreview: false })).resolves.toBe(plain);
+    expect(runner.executeMulti).not.toHaveBeenCalled();
+    expect(runner.executeQuery).toHaveBeenCalledWith("c1", "cloudbook", "SELECT ...", undefined, undefined, { maxRows: 2, fetchSize: 2, pageSize: 2 });
+  });
+
+  it("returns null for a failed or empty preview execution so the grid reloads instead", async () => {
+    const failing = { executeQuery: vi.fn(), executeMulti: vi.fn().mockResolvedValue([result({ execution_error: true })]) };
+    const empty = { executeQuery: vi.fn(), executeMulti: vi.fn().mockResolvedValue([]) };
+
+    await expect(executeDataGridSavedRowRefreshQuery(failing, { ...query, largeValuePreview: true })).resolves.toBeNull();
+    await expect(executeDataGridSavedRowRefreshQuery(empty, { ...query, largeValuePreview: true })).resolves.toBeNull();
   });
 });

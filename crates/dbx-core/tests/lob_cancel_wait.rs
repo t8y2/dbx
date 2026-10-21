@@ -105,6 +105,7 @@ async fn public_lob_request_cancels_while_waiting_for_transaction_connection() {
                 connection: connection.clone(),
                 pool_key: "lob".into(),
                 last_activity: Instant::now(),
+                idle_timeout: std::time::Duration::from_secs(dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS),
                 busy: false,
                 snapshot_rotation_safe: false,
                 connection_id: "lob".into(),

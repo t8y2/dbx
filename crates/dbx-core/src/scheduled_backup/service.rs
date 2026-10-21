@@ -152,6 +152,7 @@ impl BackupService {
         let others = self.store.snapshot().await?.runs;
         let mut retained = Vec::new();
         let mut errors = Vec::new();
+        let mut emptied = Vec::new();
         for file in &run.files {
             if others.iter().any(|r| r.id != run.id && r.files.iter().any(|f| f.file_path == file.file_path)) {
                 continue;
@@ -167,18 +168,22 @@ impl BackupService {
                 continue;
             }
             match self.checked_file(run, path).await {
-                Ok(path) => {
-                    if let Err(e) = tokio::fs::remove_file(path).await {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            retained.push(file.clone());
-                            errors.push(e.to_string());
-                        }
+                Ok(path) => match tokio::fs::remove_file(&path).await {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        retained.push(file.clone());
+                        errors.push(e.to_string());
                     }
-                }
+                    _ => emptied.extend(path.parent().map(Path::to_path_buf)),
+                },
                 Err(error) => {
                     retained.push(file.clone());
                     errors.push(error);
                 }
+            }
+        }
+        if let Ok(root) = self.validate_destination(&run.destination_directory) {
+            for directory in emptied {
+                remove_empty_directories(&directory, &root).await;
             }
         }
         run.files = retained;
@@ -208,5 +213,19 @@ impl BackupService {
         } else {
             Err(errors.join("; "))
         }
+    }
+}
+
+/// Removes the per-run directories left behind once their backup files are gone.
+/// `remove_dir` refuses non-empty directories, so folders still holding other runs'
+/// backups or the user's own files are kept, and the destination root is never removed.
+async fn remove_empty_directories(mut directory: &Path, root: &Path) {
+    while directory != root && directory.starts_with(root) {
+        let is_directory = tokio::fs::symlink_metadata(directory).await.is_ok_and(|m| m.is_dir());
+        if !is_directory || tokio::fs::remove_dir(directory).await.is_err() {
+            break;
+        }
+        let Some(parent) = directory.parent() else { break };
+        directory = parent;
     }
 }

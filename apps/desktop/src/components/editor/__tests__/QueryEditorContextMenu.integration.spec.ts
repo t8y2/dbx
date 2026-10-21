@@ -149,7 +149,8 @@ describe("QueryEditor extracted context menu", () => {
     expect([...document.querySelectorAll("[data-dbx-context-menu] button")].some((entry) => entry.textContent === "editor.contextMenu.uppercaseSelection")).toBe(false);
     button("sidebarMenu.groups.sqlEditor").click();
     await nextTick();
-    expect(button("editor.contextMenu.uppercaseSelection").disabled).toBe(false);
+    // Opting out hides the action for good; it must not reappear in its group (#12791).
+    expect([...document.querySelectorAll("[data-dbx-context-menu] button")].some((entry) => entry.textContent === "editor.contextMenu.uppercaseSelection")).toBe(false);
   });
 
   it("promotes saved editor actions without changing the preferences of table menus", async () => {

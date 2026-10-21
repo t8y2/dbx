@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type ComponentPublicInstance, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { Search, X, ListOrdered, ArrowDownAZ, ArrowUpZA, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -32,7 +33,7 @@ import { needsSidebarObjectGroupDiscovery } from "@/lib/sidebar/sidebarSearchDis
 import { isSidebarSearchPrunedDatabaseNode, resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import { createSidebarSearchExpansionState } from "@/lib/sidebar/sidebarSearchExpansionState";
 import { createSidebarSearchLoadingTracker } from "@/lib/sidebar/sidebarSearchLoadingTracker";
-import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isPasteSidebarSelectionShortcut, isRefreshDataShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
@@ -41,6 +42,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionDisconnectTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { formatSidebarTableCopyText } from "@/lib/sidebar/sidebarTableNameCopy";
 import { pruneTreeSelectionToVisibleNodeIds } from "@/lib/sidebar/sidebarTreeSelection";
+import { sidebarUserAdminVisibility } from "@/lib/sidebar/sidebarUserAdminVisibility";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { isInternalDorisCatalog, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionObjectTreeNodeSchema, connectionShouldDiscoverJdbcSchemas, connectionUsesConnectionRootSchemaMode, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -102,6 +104,8 @@ import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@
 import { createSidebarLayoutMonitor, type SidebarExpandedConnectionInfo } from "@/lib/sidebar/sidebarLayoutMonitor";
 import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
 import { compileSearchRegex } from "@/lib/common/searchPattern";
+import type { ObjectDependencyTarget, ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
+import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 
 const { t, locale } = useI18n();
 const store = useConnectionStore();
@@ -135,6 +139,7 @@ const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, s
 const emit = defineEmits<{
   "open-settings": [initialTab: string];
   "add-to-ai": [nodes: TreeNode | TreeNode[]];
+  "open-dependency-object": [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
 }>();
 
 const sidebarContextMenuTarget = ref<SidebarActionTarget | null>(null);
@@ -152,7 +157,7 @@ const sidebarDdlTarget = ref<TreeNode | null>(null);
 const sidebarDdlOpen = ref(false);
 const sidebarElasticsearchIndexMetadataTarget = ref<{ node: TreeNode; kind: ElasticsearchIndexMetadataKind } | null>(null);
 const sidebarElasticsearchIndexMetadataOpen = ref(false);
-const sidebarObjectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean } | null>(null);
+const sidebarObjectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean; initialSection?: ObjectDetailsSection } | null>(null);
 const sidebarObjectSourceOpen = ref(false);
 const sidebarProcedureTarget = ref<TreeNode | null>(null);
 const sidebarProcedureOpen = ref(false);
@@ -711,7 +716,8 @@ function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
   });
 }
 
-const displayedTreeNodes = computed(() => sortConnectionListForDisplay(store.treeNodes, settingsStore.editorSettings.sidebarConnectionSortMode));
+const userAdminVisibility = computed(() => sidebarUserAdminVisibility(store.treeNodes, settingsStore.editorSettings.sidebarShowUserAdmin !== false));
+const displayedTreeNodes = computed(() => sortConnectionListForDisplay(userAdminVisibility.value.nodes, settingsStore.editorSettings.sidebarConnectionSortMode));
 const localTableSearchResults = ref<Record<string, TableInfo[] | null>>({});
 const localTableSearchRequestRevisions = new Map<string, number>();
 type InvalidatedTableSearchScope = SidebarRegexScopeIdentity & { parentNodeId: string };
@@ -1080,6 +1086,26 @@ watch(useVirtualTree, (virtual, wasVirtual) => {
 });
 const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
 const hasTreeMultiSelection = computed(() => store.connectionMultiSelectActive || store.selectedTreeNodeIds.length > 1);
+
+watch(
+  () => [userAdminVisibility.value.hiddenNodeIds, store.selectedTreeNodeId, store.treeSelectionAnchorId, [...store.selectedTreeNodeIds]] as const,
+  ([hiddenNodeIds]) => {
+    if (!hiddenNodeIds.size) return;
+    const next = pruneTreeSelectionToVisibleNodeIds(
+      { has: (id) => !hiddenNodeIds.has(id) },
+      {
+        nodeIds: store.selectedTreeNodeIds,
+        activeNodeId: store.selectedTreeNodeId,
+        anchorNodeId: store.treeSelectionAnchorId,
+      },
+    );
+    if (next.nodeIds.length !== store.selectedTreeNodeIds.length) store.selectedTreeNodeIds = [...next.nodeIds];
+    if (next.activeNodeId !== store.selectedTreeNodeId) store.selectedTreeNodeId = next.activeNodeId;
+    if (next.anchorNodeId !== store.treeSelectionAnchorId) store.treeSelectionAnchorId = next.anchorNodeId;
+    if (!next.nodeIds.length) store.connectionMultiSelectActive = false;
+  },
+  { flush: "post", immediate: true },
+);
 
 watch(
   () => (hasTreeMultiSelection.value ? flatTreeIndex.value.nodeById : null),
@@ -1650,6 +1676,22 @@ async function focusSidebarTreeNode(nodeId: string) {
   row.focus({ preventScroll: true });
 }
 
+function sidebarDialogOpen(): boolean {
+  return sidebarDdlOpen.value || sidebarElasticsearchIndexMetadataOpen.value || sidebarObjectSourceOpen.value || sidebarProcedureOpen.value || sidebarVisibleDatabasesOpen.value || sidebarVisibleSchemasOpen.value || sidebarVisibleNacosNamespacesOpen.value || sidebarTableNameFilterOpen.value;
+}
+
+function restoreSidebarTreeFocusAfterDialog(nodeId: string | null | undefined) {
+  if (!nodeId) return;
+  void nextTick(() => {
+    if (!sidebarDialogOpen()) void focusSidebarTreeNode(nodeId);
+  });
+}
+
+async function focusSelectedNode() {
+  const nodeId = store.selectedTreeNodeId;
+  if (nodeId) await focusSidebarTreeNode(nodeId);
+}
+
 function clearSidebarSelection() {
   // Clicking the blank area of the tree clears the current selection. Row
   // clicks call event.stopPropagation(), so this only fires for blank clicks
@@ -2211,6 +2253,25 @@ function openSidebarTableStructureForSelection(): boolean {
   return sidebarTreeRuntimeHostRef.value?.openStructureEditorForSelection?.(node) ?? false;
 }
 
+function requestSelectedSidebarRefresh(): boolean {
+  const selectedNodeId = store.selectedTreeNodeId;
+  const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : null;
+  if (node && sidebarTreeRuntimeHostRef.value?.refreshNode?.(node)) {
+    return true;
+  }
+  void refreshAllSidebarTree();
+  return true;
+}
+
+async function refreshAllSidebarTree() {
+  try {
+    await store.reloadFromDisk();
+    await store.refreshAllTree();
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
 function openSidebarElasticsearchIndexMetadata(node: TreeNode, kind: ElasticsearchIndexMetadataKind) {
   if (!node.connectionId) return;
   beginSidebarAction();
@@ -2218,7 +2279,7 @@ function openSidebarElasticsearchIndexMetadata(node: TreeNode, kind: Elasticsear
   sidebarElasticsearchIndexMetadataOpen.value = true;
 }
 
-function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
+function openSidebarObjectSource(node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection) {
   if (!node.connectionId || !hasTreeNodeDatabaseContext(node) || !objectSourceTargetForTreeNode(node)) return;
   // TYPE/TYPE_BODY only have a source implementation on Xugu; PostgreSQL-family
   // connections list user-defined types without a CREATE TYPE getter this cycle.
@@ -2227,7 +2288,7 @@ function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
   beginSidebarAction();
   // issue #9035：弹窗立即挂载。此前先 await ensureConnected 再开弹窗，这段时间
   // 界面上没有任何反馈；现在连接与取源都在弹窗自身的加载态之内完成。
-  sidebarObjectSourceTarget.value = { node: target, initialEditing };
+  sidebarObjectSourceTarget.value = { node: target, initialEditing, initialSection };
   sidebarObjectSourceOpen.value = true;
 }
 
@@ -2372,27 +2433,51 @@ watch(sidebarElasticsearchIndexMetadataOpen, (open) => {
 });
 
 watch(sidebarObjectSourceOpen, (open) => {
-  if (!open) sidebarObjectSourceTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarObjectSourceTarget.value?.node.id;
+    sidebarObjectSourceTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarProcedureOpen, (open) => {
-  if (!open) sidebarProcedureTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarProcedureTarget.value?.id;
+    sidebarProcedureTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarVisibleDatabasesOpen, (open) => {
-  if (!open) sidebarVisibleDatabasesTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarVisibleDatabasesTarget.value?.id;
+    sidebarVisibleDatabasesTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarVisibleSchemasOpen, (open) => {
-  if (!open) sidebarVisibleSchemasTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarVisibleSchemasTarget.value?.id;
+    sidebarVisibleSchemasTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarVisibleNacosNamespacesOpen, (open) => {
-  if (!open) sidebarVisibleNacosNamespacesTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarVisibleNacosNamespacesTarget.value?.id;
+    sidebarVisibleNacosNamespacesTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 watch(sidebarTableNameFilterOpen, (open) => {
-  if (!open) sidebarTableNameFilterTarget.value = null;
+  if (!open) {
+    const nodeId = sidebarTableNameFilterTarget.value?.id;
+    sidebarTableNameFilterTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
 });
 
 function collapseAllTreeNodes() {
@@ -2537,6 +2622,13 @@ function onWindowKeydown(event: KeyboardEvent) {
       }
       return;
     }
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isRefreshDataShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      if (requestSelectedSidebarRefresh()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
   }
 
   if (!pointerInsideTree.value || isEditableSidebarTypeSearchTarget(event.target) || isEditableSidebarTypeSearchTarget(document.activeElement)) return;
@@ -2563,7 +2655,9 @@ function sidebarShortcutTargetIsActive(target: EventTarget | null): boolean {
 }
 
 function sidebarShortcutTargetAllowsAppShortcut(target: EventTarget | null): boolean {
+  if (sidebarDialogOpen()) return false;
   if (!(target instanceof HTMLElement)) return true;
+  if (target.closest('[role="dialog"], [role="alertdialog"]')) return false;
   return !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable || !!target.closest("[contenteditable='true'], [role='textbox']"));
 }
 
@@ -2705,7 +2799,16 @@ onUnmounted(() => {
   if (sidebarTreeContentMeasureFrame) window.cancelAnimationFrame(sidebarTreeContentMeasureFrame);
 });
 
-defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSidebar, disconnectAllActiveConnections, openTableStructureForSelection: openSidebarTableStructureForSelection });
+defineExpose({
+  focusSearch,
+  createNewGroup,
+  collapseAllTreeNodes,
+  locateTabInSidebar,
+  disconnectAllActiveConnections,
+  focusSelectedNode,
+  openTableStructureForSelection: openSidebarTableStructureForSelection,
+  refreshSidebar: requestSelectedSidebarRefresh,
+});
 </script>
 
 <template>
@@ -2957,6 +3060,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       v-model:open="sidebarObjectSourceOpen"
       :connection-id="sidebarObjectSourceTarget.node.connectionId!"
       :database="sidebarObjectSourceTarget.node.database!"
+      :catalog="sidebarObjectSourceTarget.node.catalog"
       :schema="sidebarObjectSourceResolvedTarget?.schema"
       :name="sidebarObjectSourceResolvedTarget!.name"
       :relation-name="sidebarObjectSourceTarget.node.tableName"
@@ -2966,6 +3070,8 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       :dialect="sidebarObjectSourceDialect"
       :format-dialect="sidebarObjectSourceFormatDialect"
       :initial-editing="sidebarObjectSourceTarget.initialEditing"
+      :initial-section="sidebarObjectSourceTarget.initialSection"
+      @open-object="(context: ObjectDependencyTarget, target: SqlObjectNavigationTarget) => emit('open-dependency-object', context, target)"
       @saved="refreshSidebarActionTarget"
     />
 

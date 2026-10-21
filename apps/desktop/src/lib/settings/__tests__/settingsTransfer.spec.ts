@@ -14,6 +14,17 @@ function fileWith(editor: Record<string, unknown>, overrides: Record<string, unk
 }
 
 describe("settingsTransfer", () => {
+  it("round-trips column comment placement as a data preference and rejects non-booleans", () => {
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, dataGridColumnCommentsInInfoArea: true, dataGridTransposeMetadataInInfoColumn: true });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.dataGridColumnCommentsInInfoArea).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.dataGridTransposeMetadataInInfoColumn).toBe(true);
+    expect(transferCategoryForKey("dataGridTransposeMetadataInInfoColumn")).toBe("data");
+    expect(transferCategoryForKey("dataGridColumnCommentsInInfoArea")).toBe("data");
+    expect(parseSettingsTransferFile(fileWith({ dataGridColumnCommentsInInfoArea: "true" })).ok).toBe(false);
+    expect(parseSettingsTransferFile(fileWith({ dataGridTransposeMetadataInInfoColumn: "true" })).ok).toBe(false);
+  });
   it("round-trips an opt-out of comment-first result names and rejects non-booleans", () => {
     const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, resultTabPreferComments: false });
     const result = parseSettingsTransferFile(text);
@@ -541,6 +552,48 @@ describe("settingsTransfer", () => {
     expect(result.value.editorSettings.sqlFormatter?.commaPosition).toBe("after");
   });
 
+  it("imports a pre-custom-rules application backup without dropping existing settings", () => {
+    const current = DEFAULT_EDITOR_SETTINGS.sqlFormatter;
+    const oldKeys = [
+      "layoutStyle",
+      "keywordCase",
+      "dataTypeCase",
+      "functionCase",
+      "identifierCase",
+      "indentStyle",
+      "useTabs",
+      "tabWidth",
+      "logicalOperatorNewline",
+      "commaPosition",
+      "fromClauseLayout",
+      "expressionWidth",
+      "linesBetweenQueries",
+      "preserveEmptyLines",
+      "denseOperators",
+      "newlineBeforeSemicolon",
+      "paramTypes",
+    ];
+    const legacy = Object.fromEntries(Object.entries(current).filter(([key]) => oldKeys.includes(key)));
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: legacy }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.sqlFormatter).toMatchObject({ ...legacy, customRulesEnabled: false, selectListLayout: "vertical" });
+  });
+
+  it("preserves custom rules and a 76-column width in application backups", () => {
+    const sqlFormatter = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, customRulesEnabled: true, selectListLayout: "wrap", updateListLayout: "vertical", expressionWidth: 76 };
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.sqlFormatter).toEqual(sqlFormatter);
+  });
+
+  it("accepts and transfers sql variable syntax overrides with boolean flags", () => {
+    const overrides = { postgres: { substitution: true }, oracle: { substitution: false } };
+    const result = parseSettingsTransferFile(fileWith({ sqlVariableSyntaxOverrides: overrides }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.sqlVariableSyntaxOverrides).toEqual(overrides);
+  });
+
   it("rejects malformed sql variable syntax overrides", () => {
     const result = parseSettingsTransferFile(fileWith({ sqlVariableSyntaxOverrides: { mysql: { positional: "yes" } } }));
     expect(result.ok).toBe(false);
@@ -563,6 +616,11 @@ describe("settingsTransfer", () => {
   it("maps csvNullMode into the data category", () => {
     expect(transferCategoryForKey("csvNullMode")).toBe("data");
     expect(collectTransferCategories(["csvNullMode", "csvQuoteMode"])).toEqual(["data"]);
+  });
+
+  it("maps queryResultExportFileNameSource into the data category (#12092)", () => {
+    expect(transferCategoryForKey("queryResultExportFileNameSource")).toBe("data");
+    expect(collectTransferCategories(["queryResultExportFileNameSource", "pageSize"])).toEqual(["data"]);
   });
 
   it("round-trips zebra row background in data category", () => {
@@ -600,5 +658,14 @@ describe("settingsTransfer", () => {
     const result = parseSettingsTransferFile(text);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.editorSettings.caretBrowsingEnabled).toBe(true);
+  });
+
+  it("round-trips aiSqlApplyTargetMode and rejects invalid values (#12438)", () => {
+    expect(transferCategoryForKey("aiSqlApplyTargetMode")).toBe("editor");
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, aiSqlApplyTargetMode: "new" });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.aiSqlApplyTargetMode).toBe("new");
+    expect(parseSettingsTransferFile(fileWith({ aiSqlApplyTargetMode: "invalid" })).ok).toBe(false);
   });
 });

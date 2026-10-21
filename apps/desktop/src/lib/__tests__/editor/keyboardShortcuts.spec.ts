@@ -21,10 +21,14 @@ import {
   isGoToNextPageShortcut,
   isGoToPreviousPageShortcut,
   isToggleZenModeShortcut,
+  isOpenConnectionPickerShortcut,
+  isOpenDatabasePickerShortcut,
+  isOpenSchemaPickerShortcut,
   isSidebarFocusedTarget,
   isToggleAiPanelShortcut,
   matchesModifierOnlyShortcut,
   matchesShortcut,
+  saveShortcutSurface,
   tabSwitcherDirectionFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
 import { formatShortcutDisplay, isMacShortcutPlatform } from "@/lib/editor/shortcutDisplay";
@@ -226,6 +230,20 @@ describe("keyboard shortcut matching", () => {
     expect(isToggleZenModeShortcut(platformModEvent, { toggleZenMode: "" })).toBe(false);
   });
 
+  it("matches the toolbar picker shortcuts by default and with custom bindings", () => {
+    const modEvent = (key: string) => (isMacShortcutPlatform() ? { key, metaKey: true, altKey: true } : { key, ctrlKey: true, altKey: true });
+
+    expect(isOpenConnectionPickerShortcut(modEvent("c"))).toBe(true);
+    expect(isOpenDatabasePickerShortcut(modEvent("d"))).toBe(true);
+    expect(isOpenSchemaPickerShortcut(modEvent("s"))).toBe(true);
+    expect(isOpenConnectionPickerShortcut(modEvent("d"))).toBe(false);
+    expect(isOpenConnectionPickerShortcut({ ...modEvent("c"), altKey: false })).toBe(false);
+    expect(isOpenDatabasePickerShortcut({ key: "b", ctrlKey: true, altKey: true }, { openDatabasePicker: "Mod+Alt+B" })).toBe(true);
+    expect(isOpenDatabasePickerShortcut(modEvent("d"), { openDatabasePicker: "Mod+Alt+B" })).toBe(false);
+    expect(isOpenSchemaPickerShortcut(modEvent("s"), { openSchemaPicker: "" })).toBe(false);
+    expect(isOpenSchemaPickerShortcut({ ...modEvent("s"), isComposing: true })).toBe(false);
+  });
+
   it("matches the platform-specific AI panel shortcut", () => {
     expect(isToggleAiPanelShortcut({ key: "i", ctrlKey: true, metaKey: true }, undefined, "MacIntel")).toBe(true);
     expect(isToggleAiPanelShortcut({ key: "i", ctrlKey: true, altKey: true }, undefined, "Win32")).toBe(true);
@@ -380,5 +398,37 @@ describe("shouldBlockCaretBrowsing", () => {
   it("does not block when F7 is bound to a custom shortcut action", () => {
     expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: false, shortcuts: { executeSql: "F7" } })).toBe(false);
     expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: false, shortcuts: { executeSql: "Ctrl+Enter" } })).toBe(true);
+  });
+});
+
+describe("saveShortcutSurface", () => {
+  it("applies the settings draft while the settings page owns the window", () => {
+    expect(saveShortcutSurface({ settingsPageOpen: true, activeTabMode: "query" })).toBe("settings");
+  });
+
+  it("keeps sending Ctrl+S to the save-SQL dialog for an active query tab", () => {
+    expect(saveShortcutSurface({ activeTabMode: "query" })).toBe("query");
+  });
+
+  it("stays out of the query branch while the save-SQL dialog is already open", () => {
+    expect(saveShortcutSurface({ activeTabMode: "query", saveSqlDialogOpen: true })).toBe("none");
+  });
+
+  it("does nothing for a non-query tab", () => {
+    expect(saveShortcutSurface({ activeTabMode: "table" })).toBe("none");
+    expect(saveShortcutSurface({ activeTabMode: null })).toBe("none");
+    expect(saveShortcutSurface({})).toBe("none");
+  });
+
+  // The plugin center and driver store also replace the content area while the
+  // previously active query tab stays active, so the active tab alone used to
+  // send Ctrl+S down the save-SQL branch (#13020).
+  it("does nothing while the plugin center or driver store is open", () => {
+    expect(saveShortcutSurface({ pluginCenterOpen: true, activeTabMode: "query" })).toBe("none");
+    expect(saveShortcutSurface({ driverStoreOpen: true, activeTabMode: "query" })).toBe("none");
+  });
+
+  it("prefers the settings page over the other browsing surfaces", () => {
+    expect(saveShortcutSurface({ settingsPageOpen: true, pluginCenterOpen: true, driverStoreOpen: true, activeTabMode: "query" })).toBe("settings");
   });
 });

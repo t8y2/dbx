@@ -84,7 +84,7 @@ function toggleWordWrap() {
       <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openColumnDetailsDialog')" @click="emit('openColumnDetails')">
         <TableProperties class="w-3 h-3" />
       </Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')">
+      <Button variant="ghost" size="icon" class="h-5 w-5" :title="`${t('common.close')} (Esc)`" :aria-label="`${t('common.close')} (Esc)`" @click="emit('close')">
         <X class="w-3 h-3" />
       </Button>
     </div>

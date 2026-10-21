@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { generateTimeInRange } from "@/lib/dataGrid/generatorTimeRange";
 import { generateRegexValue } from "@/lib/dataGrid/regexGenerate";
 
 export interface GeneratorNode {
@@ -1434,8 +1435,8 @@ function buildDefaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, ge
   }
 
   if (generatorKey === "time") {
-    params.startTime = "00";
-    params.endTime = "23";
+    params.startTime = "00:00";
+    params.endTime = "23:59";
     return params;
   }
 
@@ -1649,13 +1650,7 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     if (params?.allDay) {
       const [rangeStart, rangeEnd] = ensureRange(start, end);
       const d = new Date(rangeStart.getTime() + Math.random() * (rangeEnd.getTime() - rangeStart.getTime()));
-      const sh = parseInt(params.startTime ?? "00") || 0;
-      const sm = parseInt(params.endTime ?? "23") || 23;
-      const h = Math.floor(Math.random() * (sm - sh + 1)) + sh;
-      const m = Math.floor(Math.random() * 60);
-      const s = Math.floor(Math.random() * 60);
-      const pad = (n: number) => String(n).padStart(2, "0");
-      return `${formatLocalDate(d)} ${pad(h)}:${pad(m)}:${pad(s)}`;
+      return `${formatLocalDate(d)} ${generateTimeInRange(params.startTime, params.endTime)}`;
     }
     return randTimestamp(start, end);
   }
@@ -1665,17 +1660,7 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     return randDate(start, end);
   }
   if (key === "time") {
-    let sh = 0,
-      sm = 23;
-    if (!params?.allDay) {
-      sh = parseInt(params?.startTime ?? "00") || 0;
-      sm = parseInt(params?.endTime ?? "23") || 23;
-    }
-    const h = Math.floor(Math.random() * (sm - sh + 1)) + sh;
-    const m = Math.floor(Math.random() * 60);
-    const s = Math.floor(Math.random() * 60);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `${pad(h)}:${pad(m)}:${pad(s)}`;
+    return params?.allDay ? generateTimeInRange() : generateTimeInRange(params?.startTime, params?.endTime);
   }
   if (key === "enum") {
     const vals = (params?.values ?? "")

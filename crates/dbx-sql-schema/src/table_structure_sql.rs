@@ -8,9 +8,12 @@ mod create_dialect;
 mod create_options;
 mod create_table;
 mod dialect;
+mod existing_primary_key;
 mod foreign_keys;
 mod indexes;
 mod mysql_engine;
+mod oracle_constraints;
+mod oracle_foreign_keys;
 mod owner;
 mod partitions;
 mod starrocks_layout;
@@ -59,10 +62,18 @@ pub fn build_table_structure_change_sql_with_context(
     mut options: TableStructureSqlOptions,
     starrocks: Option<StarRocksAlterOptions>,
 ) -> TableStructureSqlResult {
+    if options.oracle_constraint_changes.is_some() {
+        return oracle_constraints::build_changes(options);
+    }
+    if options.oracle_foreign_key_changes.is_some() {
+        return oracle_foreign_keys::build_changes(options);
+    }
+    if options.primary_key_change.is_some() {
+        return existing_primary_key::build_existing_primary_key_change(options);
+    }
     if alter_dialect::is_starrocks(&options) {
         return alter_dialect::build(&options, starrocks);
     }
-
     let mysql_engine_errors = validate_mysql_engine(&options);
     if !mysql_engine_errors.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings: mysql_engine_errors };

@@ -269,7 +269,7 @@ export function normalizeDatabaseBackupTime(value: unknown): string {
 }
 
 export function normalizeDatabaseBackupRetention(value: unknown): number {
-  return boundedInteger(value, 10, 1, 100);
+  return boundedInteger(value, 10, 0, 1000);
 }
 
 export function normalizeDatabaseBackupSchedule(value: unknown, now = new Date()): DatabaseBackupSchedule | null {
@@ -436,10 +436,12 @@ export function writeDatabaseBackupRuns(runs: readonly DatabaseBackupRun[]) {
 }
 
 export function databaseBackupRunsToPrune(runs: readonly DatabaseBackupRun[], scheduleId: string, retentionCount: number): DatabaseBackupRun[] {
+  const normalizedRetention = normalizeDatabaseBackupRetention(retentionCount);
+  if (normalizedRetention === 0) return [];
   return runs
     .filter((run) => run.scheduleId === scheduleId && run.status === "success")
     .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
-    .slice(normalizeDatabaseBackupRetention(retentionCount));
+    .slice(normalizedRetention);
 }
 
 export function sanitizeDatabaseBackupFileSegment(value: string): string {

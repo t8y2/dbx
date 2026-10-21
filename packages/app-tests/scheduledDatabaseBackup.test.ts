@@ -96,14 +96,14 @@ test("normalization deduplicates databases and bounds schedule values", () => {
     ...schedule(),
     databases: ["app", "app", " analytics "],
     intervalHours: 999,
-    retentionCount: 0,
+    retentionCount: -1,
     timeOfDay: "invalid",
   });
 
   assert.ok(normalized);
   assert.deepEqual(normalized.databases, ["app", "analytics"]);
   assert.equal(normalized.intervalHours, 168);
-  assert.equal(normalized.retentionCount, 1);
+  assert.equal(normalized.retentionCount, 0);
   assert.equal(normalized.timeOfDay, "02:00");
 });
 
@@ -157,6 +157,7 @@ test("retention pruning keeps the newest successful runs", () => {
     databaseBackupRunsToPrune(runs, "schedule-1", 2).map((item) => item.id),
     ["old"],
   );
+  assert.deepEqual(databaseBackupRunsToPrune(runs, "schedule-1", 0), []);
 });
 
 test("backup history normalization preserves an independent display name and progress", () => {

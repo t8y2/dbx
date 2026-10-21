@@ -57,6 +57,7 @@ pub fn build_database_structure_search_sql(
         | DatabaseType::Kingbase
         | DatabaseType::Highgo
         | DatabaseType::Uxdb
+        | DatabaseType::Gbase8c
         | DatabaseType::Vastbase
         | DatabaseType::OpenGauss
         | DatabaseType::Gaussdb
@@ -81,9 +82,9 @@ pub fn build_database_structure_search_sql(
             tdengine_structure_search_sql(&options.database, &tdengine_like_pattern_literal(&term), limit)
         }
         DatabaseType::Snowflake => snowflake_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit),
-        // gbase8s is Informix-compatible (see the table_structure_sql dialects)
-        // and has no information_schema; only MySQL-dialect Gbase 8a takes this path.
-        DatabaseType::Gbase if !driver_profile_is_gbase8s(options.driver_profile.as_deref()) => {
+        // GBase 8s is its own `Gbase8s` type (Informix-compatible, no information_schema)
+        // and falls through to the data search; only MySQL-dialect Gbase 8a takes this path.
+        DatabaseType::Gbase => {
             gbase_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
         }
         DatabaseType::Jdbc if driver_profile_is_mysql(options.driver_profile.as_deref()) => {
@@ -114,10 +115,6 @@ fn driver_profile_is_mysql(profile: Option<&str>) -> bool {
 fn driver_profile_is_postgres(profile: Option<&str>) -> bool {
     let profile = profile.map(str::trim).unwrap_or("").to_ascii_lowercase();
     profile.contains("postgres") || profile.contains("kingbase") || profile.contains("opengauss")
-}
-
-fn driver_profile_is_gbase8s(profile: Option<&str>) -> bool {
-    profile.map(str::trim).is_some_and(|profile| profile.to_ascii_lowercase().contains("gbase8s"))
 }
 
 fn driver_profile_is_oracle(profile: Option<&str>) -> bool {
@@ -288,7 +285,7 @@ fn oracle_family_structure_search_sql(
          LEFT JOIN ALL_COL_COMMENTS m ON c.OWNER = m.OWNER AND c.TABLE_NAME = m.TABLE_NAME AND c.COLUMN_NAME = m.COLUMN_NAME \
          WHERE c.OWNER = {owner} \
          AND ({name_expr} LIKE LOWER({pattern}) ESCAPE '~' OR LOWER(COALESCE(m.COMMENTS, '')) LIKE LOWER({pattern}) ESCAPE '~') \
-         ORDER BY object_schema, object_name, column_name) WHERE ROWNUM <= {limit} \
+         ORDER BY 1, 2, 3) WHERE ROWNUM <= {limit} \
          UNION ALL \
          SELECT * FROM ( \
          SELECT t.OWNER AS object_schema, t.TABLE_NAME AS object_name, CAST(NULL AS VARCHAR2(128)) AS column_name \
@@ -296,8 +293,8 @@ fn oracle_family_structure_search_sql(
          FROM ALL_TAB_COMMENTS t \
          WHERE t.OWNER = {owner} \
          AND LOWER(COALESCE(t.COMMENTS, '')) LIKE LOWER({pattern}) ESCAPE '~' \
-         ORDER BY object_schema, object_name) WHERE ROWNUM <= {table_limit} \
-         ORDER BY object_schema, object_name, column_name) WHERE ROWNUM <= {total_limit}",
+         ORDER BY 1, 2) WHERE ROWNUM <= {table_limit} \
+         ORDER BY 1, 2, 3) WHERE ROWNUM <= {total_limit}",
         owner = owner_literal,
         name_expr = name_expr,
         pattern = pattern_literal,
@@ -595,15 +592,15 @@ mod tests {
 
         assert_eq!(
             build_database_structure_search_sql(DatabaseStructureSearchSqlOptions {
-                database_type: Some(DatabaseType::Gbase),
-                driver_profile: Some("gbase8s".to_string()),
+                database_type: Some(DatabaseType::Gbase8s),
+                driver_profile: None,
                 database: "app".to_string(),
                 schema: None,
                 term: "email".to_string(),
                 limit: Some(10),
             }),
             None,
-            "gbase8s is Informix-compatible and must fall back to data search"
+            "GBase 8s is Informix-compatible and must fall back to data search"
         );
     }
 

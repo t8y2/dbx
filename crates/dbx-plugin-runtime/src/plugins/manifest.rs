@@ -37,6 +37,8 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
     "host.ai",
     "host.clipboard:read",
     "host.data:read",
+    "host.connections:read",
+    "host.connections::read",
 ];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat

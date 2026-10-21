@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+﻿// @vitest-environment happy-dom
 
 import { createApp, nextTick, reactive, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -172,6 +172,8 @@ vi.mock("@/components/ui/select", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));
@@ -267,7 +269,7 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     app.mount(root);
     const content = () => root.querySelector(".cm-content")?.textContent ?? "";
     const toggle = () => root.querySelector<HTMLButtonElement>('[role="switch"]')!;
-    await vi.waitFor(() => expect(content()).toContain("PARTITION BY HASH"));
+    await vi.waitFor(() => expect(content()).toMatch(/PARTITION BY\s+HASH/), { timeout: 5000 });
     expect(content()).not.toContain("PCTFREE");
     expect(toggle().getAttribute("aria-checked")).toBe("true");
     toggle().click();

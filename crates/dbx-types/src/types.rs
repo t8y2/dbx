@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+/// Agent drivers can serialize an empty native slice as JSON `null` instead of
+/// `[]` (for example a Vastbase `UPDATE ... FROM` that returns no result
+/// columns). A present `null` must deserialize as an empty vector: one driver's
+/// serialization detail must not fail the whole agent call with
+/// "invalid type: null, expected a sequence".
+fn deserialize_vec_or_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// A data-grid statement whose BLOB values travel outside the executable SQL.
 /// The preview must match the caller's reviewed SQL before any statement runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,26 +596,28 @@ pub struct LargeValueCell {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryResult {
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub columns: Vec<String>,
     /// Database type name for each column, parallel to `columns`. May be empty
     /// when a driver cannot supply types (e.g. schemaless stores or fallback
     /// query paths); consumers must tolerate a shorter/empty vector.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub column_types: Vec<String>,
     /// Sortable for each column. Parallel to `columns`. Optional and may
     /// be shorter/empty when a driver cannot supply sortable information.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub column_sortables: Vec<bool>,
     /// Spatial reference metadata for geometry/geography cells. Kept outside
     /// `rows` so displayed, copied, exported, and edited values remain WKT.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default", skip_serializing_if = "Vec::is_empty")]
     pub spatial_columns: Vec<SpatialColumn>,
     /// Per-cell SRID metadata, parallel to `rows`: `spatial_values[row][column]`
     /// is the SRID of that cell's geometry value (`None` for non-spatial cells
     /// or unknown SRID). Unlike `spatial_columns` (a column-level hint), every
     /// geometry value keeps its own SRID so mixed-SRID results stay correct.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default", skip_serializing_if = "Vec::is_empty")]
     pub spatial_values: Vec<Vec<Option<u32>>>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub rows: Vec<Vec<serde_json::Value>>,
     pub affected_rows: u64,
     pub execution_time_ms: u128,
@@ -627,7 +642,7 @@ pub struct QueryResult {
     /// Messages emitted by the database server while executing the statement
     /// (notices, warnings, info messages). Empty for drivers that do not
     /// capture server messages.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default", skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<QueryMessage>,
 }
 
@@ -666,7 +681,7 @@ impl Serialize for QueryResult {
         if !self.spatial_values.is_empty() {
             state.serialize_field("spatial_values", &self.spatial_values)?;
         }
-        state.serialize_field("rows", &JsSafeRows(&self.rows))?;
+        state.serialize_field("rows", &JsSafeRows(&self.rows, &self.column_types))?;
         state.serialize_field("affected_rows", &self.affected_rows)?;
         state.serialize_field("execution_time_ms", &self.execution_time_ms)?;
         if let Some(server_execute_time_us) = &self.server_execute_time_us {
@@ -688,9 +703,9 @@ impl Serialize for QueryResult {
     }
 }
 
-/// Serializes result rows with [`JsSafeCell`] wrapping so unsafe integers
-/// become strings without cloning the row data.
-struct JsSafeRows<'a>(&'a [Vec<serde_json::Value>]);
+/// Serializes result rows with [`JsSafeCell`] wrapping so values which cannot
+/// round-trip through JavaScript without losing precision become strings.
+struct JsSafeRows<'a>(&'a [Vec<serde_json::Value>], &'a [String]);
 
 impl Serialize for JsSafeRows<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -701,13 +716,13 @@ impl Serialize for JsSafeRows<'_> {
 
         let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
         for row in self.0 {
-            seq.serialize_element(&JsSafeCells(row))?;
+            seq.serialize_element(&JsSafeCells(row, self.1))?;
         }
         seq.end()
     }
 }
 
-struct JsSafeCells<'a>(&'a [serde_json::Value]);
+struct JsSafeCells<'a>(&'a [serde_json::Value], &'a [String]);
 
 impl Serialize for JsSafeCells<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -717,17 +732,17 @@ impl Serialize for JsSafeCells<'_> {
         use serde::ser::SerializeSeq;
 
         let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-        for cell in self.0 {
-            seq.serialize_element(&JsSafeCell(cell))?;
+        for (index, cell) in self.0.iter().enumerate() {
+            seq.serialize_element(&JsSafeCell(cell, self.1.get(index).map(String::as_str)))?;
         }
         seq.end()
     }
 }
 
-/// Serializes one cell, replacing unsafe integer numbers with their decimal
-/// string form and recursing into arrays/objects the same way
-/// `db::json_value_for_js` does.
-struct JsSafeCell<'a>(&'a serde_json::Value);
+/// Serializes one cell, replacing unsafe integers and non-round-trippable exact
+/// decimal values with strings. Nested JSON values retain their existing
+/// normalization behavior.
+struct JsSafeCell<'a>(&'a serde_json::Value, Option<&'a str>);
 
 impl Serialize for JsSafeCell<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -738,6 +753,10 @@ impl Serialize for JsSafeCell<'_> {
 
         match self.0 {
             serde_json::Value::Number(number) => {
+                let value = number.as_str();
+                if self.1.is_some_and(is_exact_decimal_type) && !decimal_round_trips_through_f64(value) {
+                    return serializer.serialize_str(value);
+                }
                 if let Some(value) = number.as_i64() {
                     if !(-crate::json::JS_MAX_SAFE_INTEGER..=crate::json::JS_MAX_SAFE_INTEGER).contains(&value) {
                         return serializer.serialize_str(&value.to_string());
@@ -758,20 +777,96 @@ impl Serialize for JsSafeCell<'_> {
                 use serde::ser::SerializeSeq;
                 let mut seq = serializer.serialize_seq(Some(values.len()))?;
                 for value in values {
-                    seq.serialize_element(&JsSafeCell(value))?;
+                    seq.serialize_element(&JsSafeCell(value, None))?;
                 }
                 seq.end()
             }
             serde_json::Value::Object(entries) => {
                 let mut map = serializer.serialize_map(Some(entries.len()))?;
                 for (key, value) in entries {
-                    map.serialize_entry(key, &JsSafeCell(value))?;
+                    map.serialize_entry(key, &JsSafeCell(value, None))?;
                 }
                 map.end()
             }
             _ => self.0.serialize(serializer),
         }
     }
+}
+
+fn is_exact_decimal_type(data_type: &str) -> bool {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    let normalized = normalized.strip_suffix(" unsigned").unwrap_or(&normalized).trim_end();
+    let base_end = normalized
+        .find(|character: char| character == '(' || character == '[' || character.is_whitespace())
+        .unwrap_or(normalized.len());
+    let base = &normalized[..base_end];
+    if !matches!(
+        base,
+        "decimal"
+            | "numeric"
+            | "number"
+            | "dec"
+            | "fixed"
+            | "money"
+            | "smallmoney"
+            | "bigdecimal"
+            | "bignumeric"
+            | "big_numeric"
+    ) {
+        return false;
+    }
+    let suffix = normalized[base_end..].trim();
+    if suffix.is_empty() {
+        return true;
+    }
+    suffix.starts_with('(')
+        && suffix.ends_with(')')
+        && suffix[1..suffix.len() - 1]
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == ',' || character.is_whitespace())
+}
+
+fn decimal_round_trips_through_f64(value: &str) -> bool {
+    let Ok(number) = value.parse::<f64>() else { return false };
+    if !number.is_finite() || (number == 0.0 && canonical_decimal(value).is_some_and(|decimal| decimal.digits != "0")) {
+        return false;
+    }
+    canonical_decimal(value)
+        .is_some_and(|original| canonical_decimal(&number.to_string()).is_some_and(|round_trip| original == round_trip))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CanonicalDecimal {
+    negative: bool,
+    digits: String,
+    exponent: i64,
+}
+
+fn canonical_decimal(value: &str) -> Option<CanonicalDecimal> {
+    let (mantissa, exponent) = value
+        .split_once(['e', 'E'])
+        .map(|(mantissa, exponent)| Some((mantissa, exponent.parse::<i64>().ok()?)))
+        .unwrap_or_else(|| Some((value, 0)))?;
+    let (negative, unsigned) = match mantissa.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, mantissa.strip_prefix('+').unwrap_or(mantissa)),
+    };
+    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if integer.is_empty() && fraction.is_empty()
+        || !integer.bytes().chain(fraction.bytes()).all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut digits = format!("{integer}{fraction}");
+    let first_significant = digits.bytes().position(|digit| digit != b'0');
+    let Some(first_significant) = first_significant else {
+        return Some(CanonicalDecimal { negative: false, digits: "0".to_string(), exponent: 0 });
+    };
+    digits.drain(..first_significant);
+    let trailing_zero_count = digits.bytes().rev().take_while(|digit| *digit == b'0').count();
+    digits.truncate(digits.len() - trailing_zero_count);
+    let exponent = exponent.checked_sub(fraction.len() as i64)?.checked_add(trailing_zero_count as i64)?;
+    Some(CanonicalDecimal { negative, digits, exponent })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -789,6 +884,16 @@ pub struct IndexInfo {
     /// introspection source doesn't track this (provenance unknown for that dialect/path).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_is_expression: Vec<bool>,
+    /// Parallel to `columns`: Oracle-family key order (`ASC` or `DESC`). Empty when
+    /// the source does not expose direction metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_directions: Vec<String>,
+    /// Oracle-family index visibility (`VISIBLE` or `INVISIBLE`), when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    /// True only when the source returned aligned expression, direction and visibility metadata.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub key_metadata_complete: bool,
     /// Parallel to `columns`: operator class name for each key column, if non-default.
     /// For example, a GIN trigram index on a varchar column will have `"gin_trgm_ops"`.
     /// `None` means the default operator class is used (can be omitted in DDL).
@@ -873,6 +978,44 @@ pub struct ConstraintInfo {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_metadata: Option<OracleConstraintMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintMetadata {
+    pub metadata_complete: bool,
+    pub owner: String,
+    pub constraint_type: Option<String>,
+    pub status: Option<String>,
+    pub validated: Option<String>,
+    pub deferrable: Option<String>,
+    pub deferred: Option<String>,
+    pub rely: Option<String>,
+    pub index_owner: Option<String>,
+    pub index_name: Option<String>,
+    pub index_sharing: Option<String>,
+    pub index: Option<OracleConstraintIndexMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintIndexMetadata {
+    pub metadata_complete: bool,
+    pub owner: String,
+    pub table_owner: String,
+    pub table_name: String,
+    pub index_type: String,
+    pub uniqueness: String,
+    pub status: String,
+    pub partitioned: bool,
+    pub visibility: String,
+    pub secondary: Option<String>,
+    pub columns: Vec<String>,
+    pub directions: Vec<String>,
+    pub key_is_expression: Vec<bool>,
+    pub included_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1507,6 +1650,158 @@ mod tests {
     }
 
     #[test]
+    fn query_result_preserves_precision_sensitive_exact_numeric_cells_for_js() {
+        for value in [
+            "9007199254740993.123456789012",
+            "-9007199254740993.123456789012",
+            "0.1234567890123456789012345",
+            "1.234567890123456789e30",
+            "12345678901234567",
+            "1e400",
+            "1e-400",
+        ] {
+            let mut result = bigint_result_sample();
+            result.columns = vec!["AMOUNT".to_string()];
+            result.column_types = vec!["NUMBER(38,12)".to_string()];
+            result.rows = vec![vec![serde_json::from_str(value).unwrap()]];
+            let rows_before = result.rows.clone();
+
+            let number_token = result.rows[0][0].as_number().unwrap().as_str();
+            let wire = serde_json::to_string(&result).unwrap();
+            let serialized: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            assert_eq!(serialized["rows"][0][0], number_token, "{value}");
+            assert_eq!(result.rows, rows_before, "serialization must not mutate in-memory rows");
+
+            let decoded: super::QueryResult = serde_json::from_str(&wire).unwrap();
+            assert_eq!(serde_json::to_value(&decoded).unwrap()["rows"][0][0], serialized["rows"][0][0]);
+        }
+    }
+
+    #[test]
+    fn query_result_precision_wire_matches_shared_javascript_fixture() {
+        let mut result = bigint_result_sample();
+        result.columns = vec!["AMOUNT".to_string()];
+        result.column_types = vec!["NUMBER(38,12)".to_string()];
+        result.column_sortables.clear();
+        result.rows = vec![vec![serde_json::from_str("9007199254740993.123456789012").unwrap()]];
+
+        let serialized = serde_json::to_string(&result).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../apps/desktop/src/lib/__tests__/dataGrid/fixtures/exactDecimalQueryResult.json"
+        ))
+        .unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&serialized).unwrap(), expected);
+    }
+
+    #[test]
+    fn query_result_keeps_exact_decimals_as_numbers_when_binary64_decimal_roundtrip_is_safe() {
+        for value in [
+            "0.1",
+            "123.45",
+            "1.25e-7",
+            "1234567890123456.5",
+            "1234567890123456",
+            "123.4500",
+            "1.2345e2",
+            "1234567890123456.0",
+            "0e-400",
+        ] {
+            let mut result = bigint_result_sample();
+            result.columns = vec!["AMOUNT".to_string()];
+            result.column_types = vec!["DECIMAL(38,12)".to_string()];
+            result.rows = vec![vec![serde_json::from_str(value).unwrap()]];
+
+            let serialized = serde_json::to_value(&result).unwrap();
+            assert!(serialized["rows"][0][0].is_number(), "{value}: {serialized}");
+        }
+
+        let mut result = bigint_result_sample();
+        result.column_types = vec!["DECIMAL".to_string()];
+        result.rows = vec![vec![serde_json::from_str("10000000000000000").unwrap()]];
+        assert_eq!(serde_json::to_value(result).unwrap()["rows"][0][0], "10000000000000000");
+    }
+
+    #[test]
+    fn query_result_exact_decimal_guard_is_type_scoped_and_tolerates_missing_metadata() {
+        let original = "9007199254740993.123456789012";
+        for column_type in [
+            "decimal",
+            "numeric(38,12)",
+            "number (38, 12)",
+            "dec",
+            "fixed",
+            "money",
+            "smallmoney",
+            "bigdecimal",
+            "bignumeric",
+            "big_numeric",
+            "decimal(38,12) unsigned",
+        ] {
+            let mut result = bigint_result_sample();
+            result.column_types = vec![column_type.to_string()];
+            result.rows = vec![vec![serde_json::from_str(original).unwrap()]];
+            assert_eq!(serde_json::to_value(&result).unwrap()["rows"][0][0], original, "{column_type}");
+        }
+
+        for column_type in [
+            "FLOAT",
+            "DOUBLE PRECISION",
+            "REAL",
+            "BINARY_FLOAT",
+            "BINARY_DOUBLE",
+            "NUMBER[]",
+            "JSON",
+            "my_numeric_domain",
+        ] {
+            let mut result = bigint_result_sample();
+            result.column_types = vec![column_type.to_string()];
+            result.rows = vec![vec![serde_json::from_str(original).unwrap()]];
+
+            let serialized = serde_json::to_value(&result).unwrap();
+            assert!(serialized["rows"][0][0].is_number(), "{column_type}");
+        }
+
+        for column_types in [Vec::new(), vec!["NUMBER".to_string()]] {
+            let mut result = bigint_result_sample();
+            result.columns = vec!["AMOUNT".into(), "NOTE".into()];
+            result.column_types = column_types;
+            result.rows = vec![
+                vec![serde_json::from_str(original).unwrap(), serde_json::json!("text")],
+                vec![serde_json::Value::Null, serde_json::json!("unchanged")],
+            ];
+
+            let serialized = serde_json::to_value(&result).unwrap();
+            let exact_cell_expected = if result.column_types.is_empty() {
+                serde_json::from_str::<serde_json::Value>(original).unwrap()
+            } else {
+                serde_json::json!(original)
+            };
+            assert_eq!(serialized["rows"][0][0], exact_cell_expected);
+            assert_eq!(serialized["rows"][0][1], "text");
+            assert_eq!(serialized["rows"][1][0], serde_json::Value::Null);
+        }
+
+        let mut result = bigint_result_sample();
+        result.column_types = vec!["NUMBER".to_string()];
+        result.rows = vec![vec![serde_json::json!(original)]];
+        assert_eq!(serde_json::to_value(result).unwrap()["rows"][0][0], original);
+    }
+
+    #[test]
+    fn query_result_uses_column_type_only_for_top_level_cells() {
+        let mut result = bigint_result_sample();
+        result.column_types = vec!["NUMBER".to_string()];
+        result.rows = vec![vec![serde_json::from_str(
+            r#"{"decimal":9007199254740993.123456789012,"id":2026081810175800100000000000}"#,
+        )
+        .unwrap()]];
+
+        let serialized = serde_json::to_value(&result).unwrap();
+        assert!(serialized["rows"][0][0]["decimal"].is_number());
+        assert_eq!(serialized["rows"][0][0]["id"], "2026081810175800100000000000");
+    }
+
+    #[test]
     fn query_result_serialization_matches_js_normalization_for_nested_numbers() {
         let cell: serde_json::Value = serde_json::from_str(
             r#"{"ids":[2026081810175800100000000000,2026081810175800100000000001],"nested":{"id":-2026081810175800100000000000},"safe":42,"decimal":123.45,"exponent":1.25e-7,"null":null,"text":"2026081810175800100000000000"}"#,
@@ -1623,5 +1918,51 @@ mod tests {
         let deserialized: super::QueryResult =
             serde_json::from_value(serde_json::to_value(bigint_result_sample()).unwrap()).unwrap();
         assert_eq!(deserialized.rows[0][0], serde_json::json!("1391198305898897409"));
+    }
+
+    /// Agent drivers may serialize empty native slices as JSON `null` (seen on
+    /// Vastbase `UPDATE ... FROM`, #11668). A present null must mean "empty",
+    /// not a contract violation.
+    #[test]
+    fn query_result_treats_null_vectors_from_agents_as_empty() {
+        let deserialized: super::QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": null,
+            "column_types": null,
+            "column_sortables": null,
+            "spatial_columns": null,
+            "spatial_values": null,
+            "rows": null,
+            "affected_rows": 3,
+            "execution_time_ms": 7,
+            "messages": null
+        }))
+        .expect("null vectors should deserialize as empty");
+
+        assert!(deserialized.columns.is_empty());
+        assert!(deserialized.column_types.is_empty());
+        assert!(deserialized.column_sortables.is_empty());
+        assert!(deserialized.spatial_columns.is_empty());
+        assert!(deserialized.spatial_values.is_empty());
+        assert!(deserialized.rows.is_empty());
+        assert!(deserialized.messages.is_empty());
+        assert_eq!(deserialized.affected_rows, 3);
+        assert_eq!(deserialized.execution_time_ms, 7);
+    }
+
+    #[test]
+    fn query_result_still_deserializes_real_columns_and_rows() {
+        let deserialized: super::QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": ["id", "name"],
+            "column_types": ["int4", "text"],
+            "column_sortables": [true, true],
+            "rows": [[1, "a"]],
+            "affected_rows": 1,
+            "execution_time_ms": 2
+        }))
+        .unwrap();
+
+        assert_eq!(deserialized.columns, ["id", "name"]);
+        assert_eq!(deserialized.rows.len(), 1);
+        assert_eq!(deserialized.rows[0][1], serde_json::json!("a"));
     }
 }

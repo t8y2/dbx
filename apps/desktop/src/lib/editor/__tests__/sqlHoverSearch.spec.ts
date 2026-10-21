@@ -416,4 +416,159 @@ describe("createHoverSearch", () => {
     expect(count.textContent).toBe("1 / 2");
     expect(activeMarks(target)).toEqual([firstMatch]);
   });
+
+  it("does not run search while IME composition is active, but runs after compositionend", () => {
+    const { target, input } = setup("id + amount");
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+
+    input.value = "amount";
+    input.dispatchEvent(new Event("input"));
+    // While composing, no marks should be injected into target
+    expect(target.querySelector("mark")).toBeNull();
+
+    input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    // After composition ends, search is executed
+    expect(target.querySelector("mark")).not.toBeNull();
+    expect(target.querySelector("mark")?.textContent).toBe("amount");
+  });
+
+  it("debounces rapid input events when debounceMs is specified and flushes on Enter", () => {
+    vi.useFakeTimers();
+    try {
+      const target = document.createElement("div");
+      target.textContent = DDL;
+      const controller = createHoverSearch({
+        target,
+        originalHtml: target.innerHTML,
+        placeholder: "Search columns…",
+        noResultLabel: "No matching columns",
+        debounceMs: 120,
+      });
+      const input = controller.element.querySelector<HTMLInputElement>('[data-sql-hover-search-input="true"]')!;
+      const count = controller.element.querySelector<HTMLElement>('[data-sql-hover-search-count="true"]')!;
+
+      input.value = "customer";
+      input.dispatchEvent(new Event("input"));
+      // Immediately after input, before timer fires, no marks yet
+      expect(target.querySelector("mark")).toBeNull();
+
+      // Pressing Enter immediately flushes the pending search and activates match
+      pressKey(input, "Enter");
+      expect(target.querySelector("mark")).not.toBeNull();
+      expect(count.textContent).toBe("1 / 1");
+
+      // Now type another query
+      input.value = "amount";
+      input.dispatchEvent(new Event("input"));
+      expect(target.querySelector("mark")?.textContent).toBe("customer");
+
+      // Advance debounce timer
+      vi.advanceTimersByTime(120);
+      expect(target.querySelector("mark")?.textContent).toBe("amount");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels pending debounce timer on destroy", () => {
+    vi.useFakeTimers();
+    try {
+      const target = document.createElement("div");
+      target.textContent = DDL;
+      const controller = createHoverSearch({
+        target,
+        originalHtml: target.innerHTML,
+        placeholder: "Search columns…",
+        noResultLabel: "No matching columns",
+        debounceMs: 120,
+      });
+      const input = controller.element.querySelector<HTMLInputElement>('[data-sql-hover-search-input="true"]')!;
+
+      input.value = "amount";
+      input.dispatchEvent(new Event("input"));
+      controller.destroy();
+
+      vi.advanceTimersByTime(200);
+      expect(target.querySelector("mark")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("avoids mutating target innerHTML when non-matching queries are entered on pristine content", () => {
+    const target = document.createElement("div");
+    target.textContent = DDL;
+    const initialFirstChild = target.firstChild;
+    const controller = createHoverSearch({
+      target,
+      originalHtml: target.innerHTML,
+      placeholder: "Search columns…",
+      noResultLabel: "No matching columns",
+    });
+    const input = controller.element.querySelector<HTMLInputElement>('[data-sql-hover-search-input="true"]')!;
+
+    input.value = "zzz_missing";
+    input.dispatchEvent(new Event("input"));
+    // Since target was pristine and no matches were found, target children were untouched
+    expect(target.firstChild).toBe(initialFirstChild);
+    expect(controller.status.hidden).toBe(false);
+
+    input.value = "zzz_missing_2";
+    input.dispatchEvent(new Event("input"));
+    expect(target.firstChild).toBe(initialFirstChild);
+  });
+
+  describe("pinTooltip", () => {
+    function mountPinnedSearch() {
+      const host = document.createElement("div");
+      const target = document.createElement("div");
+      target.textContent = DDL;
+      const controller = createHoverSearch({ target, originalHtml: target.innerHTML, placeholder: "Search columns…", noResultLabel: "No matching columns" });
+      host.append(controller.element, target);
+      document.body.appendChild(host);
+      controller.pinTooltip(host);
+      const leave = vi.fn();
+      host.addEventListener("mouseleave", leave);
+      const input = controller.element.querySelector<HTMLInputElement>('[data-sql-hover-search-input="true"]')!;
+      return { controller, host, input, leave };
+    }
+
+    it("keeps the tooltip from seeing mouseleave while the search input is focused", () => {
+      const { host, input, leave } = mountPinnedSearch();
+      input.focus();
+      input.dispatchEvent(new CompositionEvent("compositionstart"));
+
+      host.dispatchEvent(new MouseEvent("mouseleave"));
+
+      expect(leave).not.toHaveBeenCalled();
+    });
+
+    it("lets mouseleave through when the search input is not focused", () => {
+      const { host, leave } = mountPinnedSearch();
+
+      host.dispatchEvent(new MouseEvent("mouseleave"));
+
+      expect(leave).toHaveBeenCalledTimes(1);
+    });
+
+    it("replays the missed mouseleave when the search input loses focus off the tooltip", () => {
+      const { host, input, leave } = mountPinnedSearch();
+      input.focus();
+      host.dispatchEvent(new MouseEvent("mouseleave"));
+
+      input.blur();
+
+      expect(leave).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops pinning after destroy", () => {
+      const { controller, host, input, leave } = mountPinnedSearch();
+      input.focus();
+      controller.destroy();
+
+      host.dispatchEvent(new MouseEvent("mouseleave"));
+
+      expect(leave).toHaveBeenCalledTimes(1);
+    });
+  });
 });

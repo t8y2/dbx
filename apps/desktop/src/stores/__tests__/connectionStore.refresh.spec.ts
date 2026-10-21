@@ -67,7 +67,7 @@ function column(name: string) {
   };
 }
 
-function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; listTables?: ReturnType<typeof vi.fn>; listObjects?: ReturnType<typeof vi.fn> }) {
+function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; listTables?: ReturnType<typeof vi.fn>; listObjects?: ReturnType<typeof vi.fn>; listTriggers?: ReturnType<typeof vi.fn> }) {
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
@@ -76,6 +76,7 @@ function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; list
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     listObjects: options?.listObjects ?? vi.fn().mockResolvedValue([]),
     listTables: options?.listTables ?? vi.fn().mockResolvedValue([]),
+    listTriggers: options?.listTriggers ?? vi.fn().mockResolvedValue([]),
     loadSchemaCache: vi.fn().mockResolvedValue(null),
     saveConnections: vi.fn().mockResolvedValue(undefined),
     saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -166,6 +167,98 @@ describe("connectionStore tree refresh state", () => {
     await expect(store.listCompletionColumns("pg-1", "app", "users", "public")).resolves.toEqual([expect.objectContaining({ name: "id" }), expect.objectContaining({ name: "new_column" })]);
     expect(getColumns).toHaveBeenCalledTimes(2);
     expect(store.completionCacheRevision("pg-1", "app")).toBeGreaterThan(0);
+  });
+
+  it("refreshes a table-level trigger group using listTriggers without wiping triggers", async () => {
+    const listTriggers = vi.fn().mockResolvedValue([{ name: "trg_orders_audit", timing: "AFTER", event: "UPDATE", enabled: false }]);
+    const listObjects = vi.fn().mockResolvedValue([]);
+    installApiMocks({ listTriggers, listObjects });
+
+    const triggerGroup: TreeNode = {
+      id: "pg-1:app:public:orders:__triggers",
+      label: "tree.triggers",
+      type: "group-triggers",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      isExpanded: true,
+      children: [],
+    };
+    const table: TreeNode = {
+      id: "pg-1:app:public:orders",
+      label: "orders",
+      type: "table",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      isExpanded: true,
+      children: [triggerGroup],
+    };
+    const root = schemaNode([table]);
+    const store = await createStore(root);
+
+    await store.refreshTreeNode(triggerGroup);
+
+    expect(listTriggers).toHaveBeenCalledWith("pg-1", "app", "public", "orders", undefined);
+    expect(listObjects).not.toHaveBeenCalled();
+    expect(triggerGroup.objectCount).toBe(1);
+    expect(triggerGroup.children).toHaveLength(1);
+    expect(triggerGroup.children![0]).toMatchObject({
+      id: "pg-1:app:public:orders:__triggers:trg_orders_audit",
+      type: "trigger",
+      tableName: "orders",
+      meta: { name: "trg_orders_audit", enabled: false },
+    });
+  });
+
+  it("refreshes the parent table trigger group when refreshing a child trigger node", async () => {
+    const listTriggers = vi.fn().mockResolvedValue([{ name: "trg_orders_audit", timing: "AFTER", event: "UPDATE", enabled: true }]);
+    installApiMocks({ listTriggers });
+
+    const triggerChild: TreeNode = {
+      id: "pg-1:app:public:orders:__triggers:trg_orders_audit",
+      label: "trg_orders_audit (AFTER UPDATE)",
+      type: "trigger",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      meta: { name: "trg_orders_audit", enabled: false },
+    };
+    const triggerGroup: TreeNode = {
+      id: "pg-1:app:public:orders:__triggers",
+      label: "tree.triggers",
+      type: "group-triggers",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      isExpanded: true,
+      children: [triggerChild],
+    };
+    const table: TreeNode = {
+      id: "pg-1:app:public:orders",
+      label: "orders",
+      type: "table",
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      tableName: "orders",
+      isExpanded: true,
+      children: [triggerGroup],
+    };
+    const root = schemaNode([table]);
+    const store = await createStore(root);
+
+    await store.refreshTreeNode(triggerChild);
+
+    expect(listTriggers).toHaveBeenCalledWith("pg-1", "app", "public", "orders", undefined);
+    expect(triggerGroup.children![0].meta).toMatchObject({
+      name: "trg_orders_audit",
+      enabled: true,
+    });
   });
 });
 

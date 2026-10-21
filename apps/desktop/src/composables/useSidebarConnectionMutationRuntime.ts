@@ -19,6 +19,8 @@ import { releaseConnectionFromMultiSelection } from "@/lib/sidebar/sidebarConnec
 import { connectionDeleteTargetSnapshot, connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
+import { connectSidebarConnections } from "@/lib/sidebar/sidebarConnectionConnect";
+import { connectionBearingGroupIdsUnder } from "@/lib/sidebar/sidebarLayout";
 
 interface SidebarConnectionMutationRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -230,6 +232,28 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     toast(t("connection.saveFailed", { message }), 5000);
   }
 
+  async function connectConnectionIds(connectionIds: readonly string[]) {
+    if (!connectionIds.length) return;
+    const result = await connectSidebarConnections(connectionIds, async (connectionId) => {
+      const node = connectionStore.findConnectionNode(connectionId);
+      if (node && connectionStore.loadTreeNodeChildren) {
+        await connectionStore.loadTreeNodeChildren(node);
+      } else {
+        await connectionStore.ensureConnected(connectionId);
+      }
+    });
+    if (!result.failed) {
+      toast(connectionIds.length > 1 ? t("connection.connectedSelected", { count: connectionIds.length }) : t("connection.connected"), 2000);
+      return;
+    }
+    if (result.succeeded > 0) {
+      toast(t("connection.connectSelectedPartial", { succeeded: result.succeeded, failed: result.failed }), 5000);
+      return;
+    }
+    const message = result.firstError instanceof Error ? result.firstError.message : String(result.firstError);
+    toast(t("connection.connectFailed", { message }), 5000);
+  }
+
   async function restoreSqliteDatabase() {
     const connectionId = activeNode.value.connectionId;
     const config = connectionId ? connectionStore.getConfig(connectionId) : undefined;
@@ -289,6 +313,32 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   async function disconnectConnectionGroup() {
     await disconnectConnectionIds(connectionGroupDisconnectTargets());
+  }
+
+  function connectionGroupConnectTargets(): string[] {
+    const node = activeNode.value;
+    if (node.type !== "connection-group") return [];
+    return connectionStore.connectionIdsInGroups([node.id]).filter((connectionId) => !connectionStore.connectedIds.has(connectionId) && !connectionStore.connectingIds?.has(connectionId));
+  }
+
+  function connectionGroupConnectMenuLabel(): string {
+    return t("connectionGroup.openConnections", { count: connectionGroupConnectTargets().length });
+  }
+
+  function canConnectConnectionGroup(): boolean {
+    return connectionGroupConnectTargets().length > 0;
+  }
+
+  async function connectConnectionGroup() {
+    const node = activeNode.value;
+    if (node.type !== "connection-group") return;
+    const targets = connectionGroupConnectTargets();
+    if (!targets.length) return;
+    if (connectionStore.expandConnectionGroups) {
+      const groupIds = connectionStore.sidebarLayout ? connectionBearingGroupIdsUnder(connectionStore.sidebarLayout, node.id) : [node.id];
+      connectionStore.expandConnectionGroups(groupIds.length ? groupIds : [node.id]);
+    }
+    await connectConnectionIds(targets);
   }
 
   /** "断开并忘记本次密码"是否可用：save_password=false 且当前已连接（本次运行期必已输入密码）。 */
@@ -476,6 +526,10 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     connectionGroupDisconnectMenuLabel,
     canDisconnectConnectionGroup,
     disconnectConnectionGroup,
+    connectionGroupConnectTargets,
+    connectionGroupConnectMenuLabel,
+    canConnectConnectionGroup,
+    connectConnectionGroup,
     canForgetSessionCredential,
     disconnectAndForgetConnectionPassword,
     cancelConnectionAttempt,

@@ -115,6 +115,32 @@ describe("executableStatementRangeCacheForDoc", () => {
     const cache = executableStatementRangeCacheForDoc(null, doc, "sqlserver");
 
     expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe(sql);
+    expect(executableStatementRangeAtCursor(cache, doc.line(2).from + 2)?.sql).toBe(sql);
+  });
+
+  it("keeps Kingbase SQLServer temporary tables executable at the cursor and gutter", () => {
+    const sql = "/*+ hint */\nSELECT\n#temporary_table.id\nFROM #temporary_table";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "kingbase", { compatibilityMode: "sqlserver" });
+    expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe(sql);
+    expect(executableStatementRangeAtCursor(cache, doc.line(3).from + 2)?.sql).toBe(sql);
+  });
+
+  it("resolves the SQL gutter after a Kingbase MySQL proxy directive", () => {
+    const sql = "/*proxy*/\nSELECT 1;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "kingbase", { compatibilityMode: "mysql" });
+    expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe(sql.slice(0, -1));
+  });
+
+  it("preserves PG JSON path operators in statements and cursor ranges", () => {
+    const statement = `SELECT '{"a":{"b":7}}'::jsonb\n#>> '{a,b}' AS value`;
+    const doc = Text.of(`${statement};\nSELECT 2;`.split("\n"));
+    for (const type of ["kingbase", "postgres"] as const) {
+      const cache = executableStatementRangeCacheForDoc(null, doc, type, { compatibilityMode: "pg" });
+      expect(cache.ranges.map((range) => range.sql)).toEqual([statement, "SELECT 2"]);
+      expect(executableStatementRangeAtCursor(cache, doc.line(2).from + 2)?.sql).toBe(statement);
+    }
   });
 
   it("does not attach ordinary leading block comments to gutter execution", () => {

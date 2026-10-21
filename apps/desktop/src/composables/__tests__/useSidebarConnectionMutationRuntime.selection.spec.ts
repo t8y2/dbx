@@ -69,6 +69,10 @@ function connectionStore(selectedTreeNodeIds: string[]) {
     connectingIds: new Set<string>(),
     disconnect: vi.fn().mockResolvedValue(undefined),
     disconnectAndForgetConnectionPassword: vi.fn().mockResolvedValue(undefined),
+    ensureConnected: vi.fn().mockResolvedValue(undefined),
+    loadTreeNodeChildren: vi.fn().mockResolvedValue(undefined),
+    findConnectionNode: vi.fn((_id: string): TreeNode | null => null),
+    expandConnectionGroups: vi.fn(),
     isTreeNodeChildrenLoaded: vi.fn(() => false),
     getConfig: vi.fn(() => undefined),
     isDefaultDatabase: vi.fn(() => false),
@@ -276,6 +280,87 @@ describe("sidebar connection group deletion selection", () => {
     expect(showDeleteGroupConfirm.value).toBe(true);
     expect(connectionGroupDeleteTargetSnapshot.value.map((target) => target.id)).toEqual(["group-1"]);
     expect(mocks.toast).toHaveBeenCalledWith('connection.saveFailed:{"message":"persist failed"}', 5000);
+  });
+});
+
+describe("sidebar connection group connect", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sidebarFormTarget.value = null;
+  });
+
+  it("recursively connects unconnected connections under a group and expands groups", async () => {
+    const group = connectionGroupNode("group-parent");
+    group.isExpanded = false;
+    const store = connectionStore([group.id]);
+    store.connectionIdsInGroups.mockReturnValue(["conn-1", "conn-2", "conn-3"]);
+    store.connectedIds = new Set(["conn-1"]);
+    store.connectingIds = new Set(["conn-3"]);
+    const { canConnectConnectionGroup, connectionGroupConnectMenuLabel, connectConnectionGroup } = runtime(group, store);
+
+    expect(canConnectConnectionGroup()).toBe(true);
+    expect(connectionGroupConnectMenuLabel()).toBe('connectionGroup.openConnections:{"count":1}');
+    await connectConnectionGroup();
+
+    expect(store.connectionIdsInGroups).toHaveBeenCalledWith(["group-parent"]);
+    expect(store.expandConnectionGroups).toHaveBeenCalledWith(["group-parent"]);
+    expect(store.ensureConnected).toHaveBeenCalledWith("conn-2");
+    expect(mocks.toast).toHaveBeenCalledWith("connection.connected", 2000);
+  });
+
+  it("disables and safely no-ops when the group has no unconnected connections", async () => {
+    const group = connectionGroupNode("group-parent");
+    const store = connectionStore([group.id]);
+    store.connectionIdsInGroups.mockReturnValue(["conn-1", "conn-2"]);
+    store.connectedIds = new Set(["conn-1", "conn-2"]);
+    const { canConnectConnectionGroup, connectionGroupConnectMenuLabel, connectConnectionGroup } = runtime(group, store);
+
+    expect(canConnectConnectionGroup()).toBe(false);
+    expect(connectionGroupConnectMenuLabel()).toBe('connectionGroup.openConnections:{"count":0}');
+    await connectConnectionGroup();
+
+    expect(store.ensureConnected).not.toHaveBeenCalled();
+    expect(store.expandConnectionGroups).not.toHaveBeenCalled();
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("loads tree node children when connection tree node exists", async () => {
+    const group = connectionGroupNode("group-parent");
+    const targetNode = connectionNode("conn-1");
+    const store = connectionStore([group.id]);
+    store.connectionIdsInGroups.mockReturnValue(["conn-1"]);
+    store.findConnectionNode.mockImplementation((id: string) => (id === "conn-1" ? targetNode : null));
+    const { connectConnectionGroup } = runtime(group, store);
+
+    await connectConnectionGroup();
+
+    expect(store.loadTreeNodeChildren).toHaveBeenCalledWith(targetNode);
+    expect(store.ensureConnected).not.toHaveBeenCalled();
+  });
+
+  it("continues group connects after one connection fails and reports partial success", async () => {
+    const group = connectionGroupNode("group-parent");
+    const store = connectionStore([group.id]);
+    store.connectionIdsInGroups.mockReturnValue(["conn-1", "conn-2"]);
+    store.ensureConnected.mockRejectedValueOnce(new Error("connect failed")).mockResolvedValueOnce(undefined);
+    const { connectConnectionGroup } = runtime(group, store);
+
+    await connectConnectionGroup();
+
+    expect(store.ensureConnected.mock.calls).toEqual([["conn-1"], ["conn-2"]]);
+    expect(mocks.toast).toHaveBeenCalledWith('connection.connectSelectedPartial:{"succeeded":1,"failed":1}', 5000);
+  });
+
+  it("reports connection error when all connections fail", async () => {
+    const group = connectionGroupNode("group-parent");
+    const store = connectionStore([group.id]);
+    store.connectionIdsInGroups.mockReturnValue(["conn-1"]);
+    store.ensureConnected.mockRejectedValueOnce(new Error("network error"));
+    const { connectConnectionGroup } = runtime(group, store);
+
+    await connectConnectionGroup();
+
+    expect(mocks.toast).toHaveBeenCalledWith('connection.connectFailed:{"message":"network error"}', 5000);
   });
 });
 

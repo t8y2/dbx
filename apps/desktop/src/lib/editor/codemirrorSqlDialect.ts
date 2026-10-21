@@ -1,8 +1,17 @@
+import { styleTags, tags } from "@lezer/highlight";
 import type { SQLDialect } from "@codemirror/lang-sql";
 import type { DatabaseType } from "@/types/database";
 import { driverProfileSqlBuiltinTerms } from "@/lib/database/driverProfileExtensions";
 
-export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "clickhouse" | "soql";
+// In SQL, quoted identifiers (e.g. `col`, "col", [col]) represent column, table,
+// and schema names — not string literals (#12122). CodeMirror's SQL grammar tags
+// QuotedIdentifier as special(string) by default, which themes highlight as a
+// string literal. We retag QuotedIdentifier as tags.name so all themes (both DBX
+// custom/IDE themes and standard third-party themes) highlight quoted identifiers
+// identically to unquoted identifiers.
+const SQL_DIALECT_LANGUAGE_PROPS = [styleTags({ QuotedIdentifier: tags.name })];
+
+export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "oracle" | "clickhouse" | "soql";
 
 export function supportsQueryEditorSqlLanguage(databaseType?: DatabaseType): boolean {
   return databaseType !== "qdrant";
@@ -342,6 +351,12 @@ function standardSqlKeywordSyntaxTerms(langSql: CodeMirrorSqlLanguageModule): st
 
 function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName, databaseType?: DatabaseType): SQLDialect {
   if (databaseType) {
+    if (databaseType === "kingbase") {
+      if (dialectName === "oracle") return langSql.PLSQL;
+      if (dialectName === "mysql") return langSql.MySQL;
+      if (dialectName === "sqlserver") return langSql.MSSQL;
+      return langSql.PostgreSQL;
+    }
     if (databaseType === "clickhouse") return langSql.StandardSQL;
     if (MYSQL_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.MySQL;
     if (POSTGRES_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.PostgreSQL;
@@ -353,6 +368,7 @@ function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName
     return langSql.StandardSQL;
   }
   if (dialectName === "clickhouse") return langSql.StandardSQL;
+  if (dialectName === "oracle") return langSql.PLSQL;
   return dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
 }
 
@@ -368,6 +384,8 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
       caseInsensitiveIdentifiers: true,
       identifierQuotes: "",
       doubleDollarQuotedStrings: false,
+    }).configureLanguage({
+      props: SQL_DIALECT_LANGUAGE_PROPS,
     });
   }
   const baseDialect = codeMirrorBaseDialect(langSql, dialectName, databaseType);
@@ -409,5 +427,7 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
       : {}),
     ...(isPlsql ? { doubleQuotedStrings: false } : {}),
     doubleDollarQuotedStrings: false,
+  }).configureLanguage({
+    props: SQL_DIALECT_LANGUAGE_PROPS,
   });
 }

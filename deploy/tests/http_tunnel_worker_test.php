@@ -4,6 +4,9 @@ declare(strict_types=1);
 define('DBX_TUNNEL_FUNCTIONS_ONLY', true);
 require dirname(__DIR__) . DIRECTORY_SEPARATOR . 'dbx_tunnel.php';
 
+assert_same('fastcgi', select_worker_start_method(true, false), 'PHP-FPM can keep the request worker alive');
+assert_same('popen', select_worker_start_method(false, true), 'PHP CLI can be spawned when PHP-FPM is unavailable');
+assert_same(null, select_worker_start_method(false, false), 'CGI/FastCGI without process spawning cannot run the tunnel worker');
 assert_same(10000, worker_poll_timeout_us(0), 'active polling starts at 10ms');
 assert_same(10000, worker_poll_timeout_us(99), 'active polling lasts for 100 idle polls');
 assert_same(50000, worker_poll_timeout_us(100), 'brief inactivity backs off to 50ms');

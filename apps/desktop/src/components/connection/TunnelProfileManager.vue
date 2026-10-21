@@ -134,6 +134,26 @@ function updateProxyType(value: unknown) {
   profile.proxy_type = value === "http" ? "http" : "socks5";
 }
 
+function updateHttpTunnelProtocol(value: unknown) {
+  const profile = selectedHttp.value;
+  if (!profile) return;
+  profile.protocol = String(value) === "navicat_mysql" ? "navicat_mysql" : "dbx_tcp";
+  if (profile.protocol === "navicat_mysql") profile.token = "";
+  if (profile.protocol === "navicat_mysql" && profile.url.trim()) {
+    try {
+      const url = new URL(profile.url.trim());
+      if (url.pathname.endsWith("/")) {
+        url.pathname += "ntunnel_mysql.php";
+        profile.url = url.toString();
+      } else {
+        profile.url = url.toString();
+      }
+    } catch {
+      // Keep invalid input unchanged so save/connect validation can report it.
+    }
+  }
+}
+
 async function browseSshKeyPath(target?: { key_path?: string } | null) {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -244,20 +264,22 @@ async function testSelected() {
           <Label class="text-xs">{{ t("connection.sshUser") }}</Label>
           <Input v-model="selectedSsh.user" class="col-span-3" placeholder="root" />
         </div>
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshAuthMethod") }}</Label>
-          <Select :model-value="selectedSsh.auth_method || 'password'" @update:model-value="updateSshAuthMethod">
-            <SelectTrigger class="col-span-3 h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
-              <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
-              <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
-              <SelectItem value="agent">{{ t("connection.sshUseAgent") }}</SelectItem>
-              <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
-            </SelectContent>
-          </Select>
+          <div class="col-span-3 min-w-0">
+            <Select :model-value="selectedSsh.auth_method || 'password'" @update:model-value="updateSshAuthMethod">
+              <SelectTrigger class="h-9 w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
+                <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
+                <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
+                <SelectItem value="agent">{{ t("connection.sshUseAgent") }}</SelectItem>
+                <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div v-if="!selectedSsh.auth_method || selectedSsh.auth_method === 'password' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshPassword") }}</Label>
@@ -303,17 +325,19 @@ async function testSelected() {
       </template>
 
       <template v-else-if="selectedProxy">
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.proxyType") }}</Label>
-          <Select :model-value="selectedProxy.proxy_type || 'socks5'" @update:model-value="updateProxyType">
-            <SelectTrigger class="col-span-3 h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="socks5">SOCKS5</SelectItem>
-              <SelectItem value="http">HTTP CONNECT</SelectItem>
-            </SelectContent>
-          </Select>
+          <div class="col-span-3 min-w-0">
+            <Select :model-value="selectedProxy.proxy_type || 'socks5'" @update:model-value="updateProxyType">
+              <SelectTrigger class="h-9 w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="socks5">SOCKS5</SelectItem>
+                <SelectItem value="http">HTTP CONNECT</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.proxyHost") }}</Label>
@@ -335,17 +359,41 @@ async function testSelected() {
       </template>
 
       <template v-else-if="selectedHttp">
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
+          <Label class="text-xs">{{ t("connection.httpTunnelProtocol") }}</Label>
+          <div class="col-span-3 min-w-0">
+            <Select :model-value="selectedHttp!.protocol" @update:model-value="updateHttpTunnelProtocol">
+              <SelectTrigger class="w-full min-w-0"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="dbx_tcp">{{ t("connection.httpTunnelProtocolDbx") }}</SelectItem>
+                <SelectItem value="navicat_mysql">{{ t("connection.httpTunnelProtocolNavicat") }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelUrl") }}</Label>
-          <Input v-model="selectedHttp!.url" class="col-span-3" placeholder="https://dbx.example.com/dbx_tunnel.php" />
+          <div class="col-span-3 min-w-0">
+            <Input v-model="selectedHttp!.url" class="w-full min-w-0" :placeholder="selectedHttp!.protocol === 'navicat_mysql' ? 'https://example.com/ntunnel_mysql.php' : 'https://dbx.example.com/dbx_tunnel.php'" />
+          </div>
         </div>
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div v-if="selectedHttp!.protocol === 'navicat_mysql'" class="col-span-4 min-w-0 text-xs text-muted-foreground">
+          {{ t("connection.httpTunnelNavicatHint") }}
+        </div>
+        <div v-if="selectedHttp!.protocol === 'navicat_mysql'" class="col-span-4 min-w-0 text-xs">
+          <a class="text-primary underline underline-offset-2" href="https://help.navicat.com/hc/en-us/articles/218283457-Where-can-I-get-the-HTTP-tunnel-script-file" target="_blank" rel="noopener noreferrer">{{ t("connection.httpTunnelNavicatScriptHelp") }}</a>
+        </div>
+        <div v-if="selectedHttp!.protocol !== 'navicat_mysql'" class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelToken") }}</Label>
-          <PasswordInput v-model="selectedHttp!.token" class="col-span-3" :placeholder="t('connection.httpTunnelTokenPlaceholder')" />
+          <div class="col-span-3 min-w-0">
+            <PasswordInput v-model="selectedHttp!.token" class="w-full min-w-0" :placeholder="t('connection.httpTunnelTokenPlaceholder')" />
+          </div>
         </div>
-        <div class="grid grid-cols-4 items-center gap-4">
+        <div class="grid min-w-0 grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.httpTunnelConnectTimeout") }}</Label>
-          <Input v-model.number="selectedHttp!.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" />
+          <div class="col-span-3 min-w-0">
+            <Input v-model.number="selectedHttp!.connect_timeout_secs" type="number" min="1" max="300" step="1" class="w-full min-w-0" />
+          </div>
         </div>
       </template>
     </template>

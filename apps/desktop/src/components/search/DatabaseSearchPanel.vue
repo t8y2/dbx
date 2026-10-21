@@ -12,7 +12,10 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
 import { buildDatabaseSearchSql, buildSearchResultWhere, findMatchedSearchColumns } from "@/lib/database/databaseSearch";
 import { databaseSearchBatchRange, databaseSearchNextBatchSize } from "@/lib/database/databaseSearchBatch";
-import type { DatabaseSearchResultItem, DatabaseSearchScope, DatabaseSearchTableTask, DatabaseSearchTabState, DatabaseType, TableInfo } from "@/types/database";
+import { fetchDatabaseSearchColumns, findSearchColumns, type DatabaseSearchColumnLite, type SearchColumnsByTable } from "@/lib/database/databaseSearchColumns";
+import { nextProbeChunkEnd, probeTables } from "@/lib/database/databaseSearchProbe";
+import { supportsBulkDatabaseSearch } from "@/lib/database/databaseSearchCapabilities";
+import type { ColumnInfo, DatabaseSearchResultItem, DatabaseSearchScope, DatabaseSearchTableTask, DatabaseSearchTabState, DatabaseType, TableInfo } from "@/types/database";
 import { buildDatabaseStructureSearchSql, effectiveDatabaseSearchScope, runDatabaseStructureSearch, structureHitPreview, supportsDatabaseStructureSearchFromManifest } from "@/lib/database/databaseStructureSearch";
 import { usesDocumentStructureSearch, usesSqlCatalogStructureSearch } from "@/lib/database/databaseStructureSearchCapabilities";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
@@ -60,6 +63,8 @@ const generalError = ref(props.initialState?.generalError ?? "");
 const currentExecutionId = ref("");
 const tableTasks = ref<DatabaseSearchTableTask[]>(props.initialState?.tableTasks ? [...props.initialState.tableTasks] : []);
 const nextTableIndex = ref(props.initialState?.nextTableIndex ?? 0);
+// 批量取列结果(键小写)。不进持久化 tab state:组件存活期间复用,重建后为空走逐表回退。
+const columnsByTable = ref<SearchColumnsByTable>(new Map());
 const activeKeyword = ref(props.initialState?.activeKeyword ?? "");
 const activePerTableLimit = ref(props.initialState?.activePerTableLimit ?? 20);
 let runId = 0;
@@ -132,6 +137,7 @@ function resetSearchState() {
   currentExecutionId.value = "";
   tableTasks.value = [];
   nextTableIndex.value = 0;
+  columnsByTable.value = new Map();
   activeKeyword.value = "";
   activePerTableLimit.value = 20;
   emitState();
@@ -226,7 +232,16 @@ async function startSearch() {
     progressTotal.value = tableTasks.value.length;
     loadingTables.value = false;
     emitState();
-    await scanTableRange(currentRun, false);
+    await loadBulkColumns(currentRun);
+    if (currentRun !== runId || cancelled.value) return;
+    // 首轮默认扫完全部表：仍按 DATABASE_SEARCH_TABLE_BATCH_SIZE 分批推进，
+    // 批间让出事件循环，保证进度实时刷新且“停止”按钮可响应。
+    while (currentRun === runId && !cancelled.value && nextTableIndex.value < tableTasks.value.length) {
+      await scanTableRange(currentRun, false);
+      if (nextTableIndex.value < tableTasks.value.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
   } catch (error: any) {
     if (currentRun === runId && !cancelled.value) {
       generalError.value = error?.message || String(error);
@@ -333,25 +348,125 @@ async function runStructureSearch(currentRun: number) {
   }
 }
 
+/** 批量取列:按任务表涉及的 schema 各发一条目录查询,失败静默(空 Map → 逐表回退)。 */
+async function loadBulkColumns(currentRun: number) {
+  const databaseType = connection.value?.db_type;
+  if (!databaseType || !supportsBulkDatabaseSearch(databaseType)) return;
+  const schemas = [...new Set(tableTasks.value.map((task) => task.schema))];
+  const merged: SearchColumnsByTable = new Map();
+  for (const schema of schemas) {
+    if (currentRun !== runId || cancelled.value) return;
+    const executionId = makeExecutionId();
+    currentExecutionId.value = executionId;
+    const partial = await fetchDatabaseSearchColumns({
+      databaseType,
+      database: props.database,
+      schema,
+      executeQuery: (sql, runExecutionId) => api.executeQuery(props.connectionId, props.database, sql, undefined, runExecutionId),
+      executionId,
+    });
+    if (currentExecutionId.value === executionId) currentExecutionId.value = "";
+    if (currentRun !== runId || cancelled.value) return;
+    partial.forEach((columns, key) => merged.set(key, columns));
+  }
+  columnsByTable.value = merged;
+}
+
 async function scanTableRange(currentRun: number, scanAllRemaining: boolean) {
   const range = databaseSearchBatchRange(nextTableIndex.value, tableTasks.value.length, scanAllRemaining);
+  const databaseType = connection.value!.db_type;
+  const probeReady = supportsBulkDatabaseSearch(databaseType) && columnsByTable.value.size > 0;
+  // 每张任务的预取列(可能为 undefined——该表无目录信息,批内走逐表回退)
+  const taskColumns = tableTasks.value.map((task) => findSearchColumns(columnsByTable.value, task.schema, props.database, task.table.name));
+
   while (nextTableIndex.value < range.end) {
     if (currentRun !== runId || cancelled.value) break;
-    const task = tableTasks.value[nextTableIndex.value];
-    if (!task) break;
-    await searchTable(task, connection.value!.db_type, currentRun);
+    const chunkStart = nextTableIndex.value;
+    const chunkEnd = probeReady ? nextProbeChunkEnd(chunkStart, range.end, taskColumns, activeKeyword.value) : Math.min(chunkStart + 1, range.end);
+    const chunk = tableTasks.value.slice(chunkStart, chunkEnd);
+    if (!chunk.length) break;
+
+    let hitChunkIndexes: Set<number> | undefined;
+    if (probeReady) {
+      hitChunkIndexes = await probeChunk(chunk, taskColumns.slice(chunkStart, chunkEnd), databaseType, currentRun);
+    }
     if (currentRun !== runId || cancelled.value) break;
-    nextTableIndex.value += 1;
-    progressDone.value = nextTableIndex.value;
-    emitState();
+
+    for (let offset = 0; offset < chunk.length; offset++) {
+      if (currentRun !== runId || cancelled.value) break;
+      const taskIndex = chunkStart + offset;
+      const task = chunk[offset];
+      const prefetched = taskColumns[taskIndex];
+      // 探测路径下:未命中的表跳过取数;无目录信息的表恒走逐表
+      if (hitChunkIndexes && prefetched && !hitChunkIndexes.has(taskIndex)) {
+        // skip: 探测未命中
+      } else {
+        await searchTable(task, databaseType, currentRun, prefetched);
+      }
+      nextTableIndex.value = taskIndex + 1;
+      progressDone.value = nextTableIndex.value;
+      emitState();
+    }
   }
 }
 
-async function searchTable(task: DatabaseSearchTableTask, databaseType: DatabaseType, currentRun: number) {
+/** 对一个探测批执行多表探测,返回命中表的全局下标集合;语句失败整批回退(全部视为待取数)。 */
+async function probeChunk(chunk: DatabaseSearchTableTask[], chunkColumns: Array<DatabaseSearchColumnLite[] | undefined>, databaseType: DatabaseType, currentRun: number): Promise<Set<number>> {
+  const chunkStart = nextTableIndex.value;
+  const probeable: number[] = [];
+  chunkColumns.forEach((columns, offset) => {
+    if (columns?.length) probeable.push(offset);
+  });
+
+  if (!probeable.length) return new Set();
+
+  const executionId = makeExecutionId();
+  currentExecutionId.value = executionId;
+  let hitProbeIndexes: Set<number>;
+  try {
+    hitProbeIndexes = await probeTables({
+      databaseType,
+      driverProfile: connection.value?.driver_profile,
+      term: activeKeyword.value,
+      limit: activePerTableLimit.value,
+      tables: probeable.map((offset) => ({
+        schema: chunk[offset].schema,
+        tableName: chunk[offset].table.name,
+        columns: chunkColumns[offset]!,
+      })),
+      executeQuery: (sql, runExecutionId) => api.executeQuery(props.connectionId, props.database, sql, undefined, runExecutionId),
+      executionId,
+    });
+  } catch {
+    // 探测批失败(单表权限/中途 DDL 等):整批回退逐表,错误重新隔离到单表
+    hitProbeIndexes = new Set(probeable.map((_, index) => index));
+  }
+  if (currentExecutionId.value === executionId) currentExecutionId.value = "";
+  if (currentRun !== runId || cancelled.value) return new Set();
+
+  const hitTaskIndexes = new Set<number>();
+  hitProbeIndexes.forEach((probeIndex) => {
+    const offset = probeable[probeIndex];
+    if (offset !== undefined) hitTaskIndexes.add(chunkStart + offset);
+  });
+  return hitTaskIndexes;
+}
+
+async function searchTable(task: DatabaseSearchTableTask, databaseType: DatabaseType, currentRun: number, prefetchedColumns?: DatabaseSearchColumnLite[]) {
   const tableLabel = task.schema ? `${task.schema}.${task.table.name}` : task.table.name;
   try {
     const schema = task.schema || props.database;
-    const columns = await api.getColumns(props.connectionId, props.database, schema, task.table.name);
+    // 批量取列命中时跳过逐表 getColumns;数据搜索单表查询只消费这三个字段
+    const columns: ColumnInfo[] = prefetchedColumns?.length
+      ? prefetchedColumns.map((column) => ({
+          name: column.name,
+          data_type: column.data_type,
+          is_primary_key: column.is_primary_key,
+          is_nullable: false,
+          column_default: null,
+          extra: null,
+        }))
+      : await api.getColumns(props.connectionId, props.database, schema, task.table.name);
     const query = await buildDatabaseSearchSql({
       databaseType,
       driverProfile: connection.value?.driver_profile,

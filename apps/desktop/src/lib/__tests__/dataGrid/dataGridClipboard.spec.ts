@@ -144,6 +144,22 @@ describe("parseDataGridClipboard", () => {
     expect(parseDataGridClipboard("null")).toEqual([["null"]]);
   });
 
+  it("turns the configured null text back into NULL while leaving other fields alone", () => {
+    expect(parseDataGridClipboard("NULL\tkeep", {}, "NULL")).toEqual([[null, "keep"]]);
+    expect(parseDataGridClipboard("null\tkeep", {}, "NULL")).toEqual([["null", "keep"]]);
+    expect(parseDataGridClipboard("\tkeep", {}, "NULL")).toEqual([["", "keep"]]);
+  });
+
+  it("keeps an empty clipboard field empty when no null text is configured", () => {
+    expect(parseDataGridClipboard("\tkeep", {}, "")).toEqual([["", "keep"]]);
+  });
+
+  it("applies the configured null text through the batched parser", async () => {
+    const text = Array.from({ length: 50 }, (_, index) => `${index % 2 === 0 ? "NULL" : `keep-${index}`}`).join("\n");
+
+    expect(await parseDataGridClipboardInBatches(text, {}, {}, "NULL")).toEqual(text.split("\n").map((cell, index) => [index % 2 === 0 ? null : cell]));
+  });
+
   it("does not reuse null metadata after a literal NULL is copied", () => {
     rememberDataGridClipboardCopy("NULL", [[null]]);
     rememberDataGridClipboardCopy("NULL", [["NULL"]]);

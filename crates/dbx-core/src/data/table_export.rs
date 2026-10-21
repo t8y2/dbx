@@ -373,16 +373,10 @@ struct TableExportSqlContext<'a> {
     schema: Option<&'a str>,
 }
 
-fn table_export_sql_context<'a>(
-    database_type: DatabaseType,
-    driver_profile: Option<&str>,
-    schema: Option<&'a str>,
-) -> TableExportSqlContext<'a> {
+fn table_export_sql_context<'a>(database_type: DatabaseType, schema: Option<&'a str>) -> TableExportSqlContext<'a> {
     // GBase8s selects from the active database and rejects the owner-qualified
-    // names produced for MySQL-family GBase connections.
-    if database_type == DatabaseType::Gbase
-        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s"))
-    {
+    // names produced for other connection types.
+    if database_type == DatabaseType::Gbase8s {
         TableExportSqlContext { database_type: DatabaseType::Informix, schema: None }
     } else {
         TableExportSqlContext { database_type, schema }
@@ -1612,15 +1606,15 @@ async fn export_table_data_core_inner(
     cancelled: Arc<AtomicBool>,
     cancel_token: CancellationToken,
 ) -> Result<(), String> {
-    // 1. Get database type and the profile that can refine its SQL dialect.
-    let (db_type, driver_profile) = {
+    // 1. Get database type
+    let db_type = {
         let configs = state.configs.read().await;
         let config = configs
             .get(&request.connection_id)
             .ok_or_else(|| format!("Connection config not found: {}", request.connection_id))?;
-        (config.db_type, config.driver_profile.clone())
+        config.db_type
     };
-    let sql_context = table_export_sql_context(db_type, driver_profile.as_deref(), request.schema.as_deref());
+    let sql_context = table_export_sql_context(db_type, request.schema.as_deref());
 
     // 2. Get pool
     let client_session_id = table_export_client_session_id(&request.export_id);
@@ -1677,6 +1671,37 @@ async fn export_table_data_core_inner(
         let primary_keys: Vec<String> = columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
         (col_names, column_types, column_extras, primary_keys)
     };
+    let mut column_extras = column_extras;
+    if request.format.eq_ignore_ascii_case("sql")
+        && db_type == DatabaseType::Dameng
+        && column_extras
+            .iter()
+            .any(|extra| extra.as_deref().is_some_and(|e| e.to_ascii_lowercase().contains("identity")))
+    {
+        if let Ok(ddl) = crate::schema::get_table_ddl_core(
+            state,
+            &request.connection_id,
+            &request.database,
+            request.schema.as_deref().unwrap_or(""),
+            &request.table_name,
+            None,
+        )
+        .await
+        {
+            if crate::data::database_export::is_dameng_auto_increment_ddl(&ddl) {
+                column_extras = column_extras
+                    .into_iter()
+                    .map(|extra| {
+                        if extra.as_deref().is_some_and(|e| e.eq_ignore_ascii_case("identity")) {
+                            Some("auto_increment".to_string())
+                        } else {
+                            extra
+                        }
+                    })
+                    .collect();
+            }
+        }
+    }
 
     let sql_projection = if request.format.eq_ignore_ascii_case("sql") {
         Some(SqlExportProjection::resolve(&col_names, request.selected_columns.as_deref())?)
@@ -3059,7 +3084,7 @@ mod tests {
             split_max_mb: None,
             omit_database_qualifier: None,
         };
-        let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
+        let context = table_export_sql_context(DatabaseType::Iotdb, request.schema.as_deref());
         let columns = vec!["Time".to_string(), "root.test.device2.temperature".to_string()];
         let query_columns = table_export_query_columns(&request, &context, &columns).unwrap();
         assert_eq!(query_columns.as_ref(), &["temperature".to_string()]);
@@ -3127,7 +3152,7 @@ mod tests {
             split_max_mb: None,
             omit_database_qualifier: None,
         };
-        let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
+        let context = table_export_sql_context(DatabaseType::Iotdb, request.schema.as_deref());
         let columns = vec!["tImE".to_string(), "temperature".to_string()];
         let query_columns = table_export_query_columns(&request, &context, &columns).unwrap();
 
@@ -3171,7 +3196,7 @@ mod tests {
             split_max_mb: None,
             omit_database_qualifier: None,
         };
-        let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
+        let context = table_export_sql_context(DatabaseType::Iotdb, request.schema.as_deref());
         let error = table_export_query_columns(&request, &context, &["TIME".to_string()]).unwrap_err();
         assert_eq!(error, "IoTDB table export requires at least one non-Time column");
     }
@@ -3210,7 +3235,7 @@ mod tests {
             split_max_mb: None,
             omit_database_qualifier: None,
         };
-        let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
+        let context = table_export_sql_context(DatabaseType::Iotdb, request.schema.as_deref());
         let columns = vec![
             "Time".to_string(),
             "root.test.device2.temperature".to_string(),
@@ -3271,7 +3296,7 @@ mod tests {
                 "SELECT \"Time\", \"value\" FROM \"samples\" LIMIT 25 OFFSET 10",
             ),
         ] {
-            let context = table_export_sql_context(database_type, None, None);
+            let context = table_export_sql_context(database_type, None);
             let query_columns = table_export_query_columns(&request, &context, &columns).unwrap();
             assert!(matches!(query_columns, Cow::Borrowed(_)));
             assert_eq!(table_cursor_sql(&request, &context, query_columns.as_ref(), &[], &[]), cursor_sql);
@@ -3316,7 +3341,7 @@ mod tests {
             split_max_mb: None,
             omit_database_qualifier: None,
         };
-        let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
+        let context = table_export_sql_context(DatabaseType::Oracle, request.schema.as_deref());
 
         let sql = table_cursor_sql(
             &request,
@@ -3371,7 +3396,7 @@ mod tests {
         };
         let columns = vec!["id".to_string(), "payload".to_string()];
         let primary_keys = vec!["id".to_string()];
-        let context = table_export_sql_context(DatabaseType::Gbase, Some("gbase8s"), request.schema.as_deref());
+        let context = table_export_sql_context(DatabaseType::Gbase8s, request.schema.as_deref());
 
         assert_eq!(context.database_type, DatabaseType::Informix);
         assert_eq!(context.schema, None);
@@ -3399,7 +3424,7 @@ mod tests {
             "SELECT COUNT(*) FROM orders"
         );
 
-        let regular_gbase = table_export_sql_context(DatabaseType::Gbase, Some("gbase8a"), request.schema.as_deref());
+        let regular_gbase = table_export_sql_context(DatabaseType::Gbase, request.schema.as_deref());
         assert_eq!(regular_gbase.database_type, DatabaseType::Gbase);
         assert_eq!(regular_gbase.schema, Some("gbasedbt"));
         assert_eq!(
@@ -3407,7 +3432,7 @@ mod tests {
             "SELECT \"id\", \"payload\" FROM \"gbasedbt\".\"orders\" ORDER BY \"id\" LIMIT 50 OFFSET 100"
         );
 
-        let informix = table_export_sql_context(DatabaseType::Informix, None, request.schema.as_deref());
+        let informix = table_export_sql_context(DatabaseType::Informix, request.schema.as_deref());
         assert_eq!(informix.database_type, DatabaseType::Informix);
         assert_eq!(informix.schema, Some("gbasedbt"));
         assert_eq!(
@@ -3452,7 +3477,7 @@ mod tests {
         };
         let columns = vec!["id".to_string(), "DisplayName".to_string()];
         let primary_keys = vec!["id".to_string()];
-        let context = table_export_sql_context(DatabaseType::Gaussdb, None, request.schema.as_deref());
+        let context = table_export_sql_context(DatabaseType::Gaussdb, request.schema.as_deref());
 
         assert_eq!(
             table_cursor_sql(&request, &context, &columns, &[], &primary_keys),
@@ -3516,7 +3541,7 @@ mod tests {
         let columns = vec!["id".to_string(), "geom".to_string(), "name".to_string()];
         let column_types = vec![Some("int".to_string()), Some("geometry".to_string()), Some("varchar".to_string())];
         let primary_keys = vec!["id".to_string()];
-        let context = table_export_sql_context(DatabaseType::Mysql, None, None);
+        let context = table_export_sql_context(DatabaseType::Mysql, None);
 
         let cursor_sql = table_cursor_sql(&request, &context, &columns, &column_types, &primary_keys);
         assert!(cursor_sql.contains("ST_SRID(`geom`), ':', HEX(ST_AsWKB(`geom`))"));
@@ -3578,7 +3603,7 @@ mod tests {
             split_max_mb: None,
             omit_database_qualifier: None,
         };
-        let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
+        let context = table_export_sql_context(DatabaseType::Oracle, request.schema.as_deref());
         let sql = table_cursor_sql(&request, &context, &columns, &[], &primary_keys);
         assert_eq!(sql, "SELECT \"ID\", \"NAME\" FROM \"APP\".\"USERS\"");
 

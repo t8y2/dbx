@@ -97,6 +97,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
+      # Sharded test runs across 900+ files exceed 4 GiB; public Linux runners provide 16 GiB RAM.
+      NODE_OPTIONS: --max-old-space-size=8192
     strategy:
       fail-fast: false
       matrix:
@@ -175,6 +177,10 @@ jobs:
       - name: PowerShell MCP installer tests
         shell: pwsh
         run: ./.github/scripts/install-mcp-powershell.test.ps1
+
+      - name: Windows installer bundling tests
+        shell: pwsh
+        run: ./.github/scripts/bundle-win7-installer.test.ps1
 
   packages:
     needs: changes
@@ -318,6 +324,21 @@ jobs:
       - name: Setup Rust for standard Windows
         uses: dtolnay/rust-toolchain@1.97.1
 
+      - name: MCP replacement temporary file cleanup tests
+        shell: pwsh
+        run: |
+          @'
+          #[path = "src-tauri/src/commands/mcp_cleanup.rs"]
+          mod cleanup;
+          '@ | rustc --edition 2021 --test -o "$env:RUNNER_TEMP/mcp-cleanup-tests.exe" -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/mcp-cleanup-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: PowerShell MCP installer tests
+        shell: pwsh
+        run: ./.github/scripts/install-mcp-powershell.test.ps1
+
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
@@ -359,6 +380,9 @@ jobs:
     if: needs.changes.outputs.windows_win7_bundle == 'true'
     runs-on: windows-2022
     timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_LTO: "off"
@@ -371,7 +395,7 @@ jobs:
       SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
       SCCACHE_IDLE_TIMEOUT: "0"
       # Single source for the job's nightly pin: the toolchain step and the
-      # prebuilt AWS-LC cache key must move together.
+      # prebuilt AWS-LC artifact name must move together.
       WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-07-22
     steps:
       - uses: actions/checkout@v7
@@ -421,16 +445,26 @@ jobs:
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
           } >> "$GITHUB_ENV"
 
-      - name: Restore prebuilt Win7 AWS-LC
-        id: aws-lc-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/win7-aws-lc-install
-          # The fixture manifest and lockfile define the prebuilt AWS-LC artifact.
-          key: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-aws-lc-cache/Cargo.toml', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
+      - name: Find prebuilt Win7 AWS-LC artifact
+        id: aws-lc-artifact
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WIN7_PREBUILT_ARTIFACT_NAME: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-aws-lc-cache/Cargo.toml', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
+        run: node .github/scripts/find-win7-prebuilt-artifact.mjs
 
-      - name: Build Win7 AWS-LC cache
-        if: steps.aws-lc-cache.outputs.cache-hit != 'true'
+      - name: Download prebuilt Win7 AWS-LC artifact
+        if: steps.aws-lc-artifact.outputs.run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.aws-lc-artifact.outputs.name }}
+          path: ${{ runner.temp }}/win7-aws-lc-install
+          run-id: ${{ steps.aws-lc-artifact.outputs.run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Build prebuilt Win7 AWS-LC
+        if: steps.aws-lc-artifact.outputs.run_id == ''
         shell: pwsh
         run: |
           $timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -492,7 +526,7 @@ jobs:
           }
           $bindingLines | Set-Content -LiteralPath $bindingOutput -Encoding utf8NoBOM
           $timer.Stop()
-          "AWS-LC cache build: $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds" >> $env:GITHUB_STEP_SUMMARY
+          "AWS-LC prebuilt build: $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds" >> $env:GITHUB_STEP_SUMMARY
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/win7-aws-lc-build
 
@@ -508,24 +542,44 @@ jobs:
           )
           foreach ($relativePath in $requiredFiles) {
             if (!(Test-Path (Join-Path $installRoot $relativePath))) {
-              Write-Error "The AWS-LC cache does not contain $relativePath."
+              Write-Error "The AWS-LC artifact does not contain $relativePath."
               exit 1
             }
           }
           "AWS_LC_SYS_SYSTEM_DIR=$installRoot" >> $env:GITHUB_ENV
           "AWS_LC_SYS_USE_SYSTEM=1" >> $env:GITHUB_ENV
           "AWS_LC_SYS_STATIC=1" >> $env:GITHUB_ENV
-          "AWS-LC cache hit: ${{ steps.aws-lc-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          "AWS-LC artifact hit: ${{ steps.aws-lc-artifact.outputs.run_id != '' }}" >> $env:GITHUB_STEP_SUMMARY
 
-      - name: Restore prebuilt Win7 OpenSSL
-        id: openssl-cache
-        uses: actions/cache@v4
+      - name: Upload prebuilt Win7 AWS-LC on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.aws-lc-artifact.outputs.run_id == ''
+        uses: actions/upload-artifact@v6
         with:
-          path: ${{ runner.temp }}/win7-openssl-install
-          key: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-openssl-cache/Cargo.toml', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
+          name: ${{ steps.aws-lc-artifact.outputs.name }}
+          path: ${{ runner.temp }}/win7-aws-lc-install/
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Build Win7 OpenSSL cache
-        if: steps.openssl-cache.outputs.cache-hit != 'true'
+      - name: Find prebuilt Win7 OpenSSL artifact
+        id: openssl-artifact
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WIN7_PREBUILT_ARTIFACT_NAME: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-openssl-cache/Cargo.toml', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
+        run: node .github/scripts/find-win7-prebuilt-artifact.mjs
+
+      - name: Download prebuilt Win7 OpenSSL artifact
+        if: steps.openssl-artifact.outputs.run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.openssl-artifact.outputs.name }}
+          path: ${{ runner.temp }}/win7-openssl-install
+          run-id: ${{ steps.openssl-artifact.outputs.run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Build prebuilt Win7 OpenSSL
+        if: steps.openssl-artifact.outputs.run_id == ''
         shell: pwsh
         run: |
           $timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -548,7 +602,7 @@ jobs:
           New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
           Copy-Item -Path (Join-Path $install.FullName "*") -Destination $installRoot -Recurse -Force
           $timer.Stop()
-          "OpenSSL cache build: $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds" >> $env:GITHUB_STEP_SUMMARY
+          "OpenSSL prebuilt build: $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds" >> $env:GITHUB_STEP_SUMMARY
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/win7-openssl-build
 
@@ -557,21 +611,30 @@ jobs:
         run: |
           $installRoot = Join-Path $env:RUNNER_TEMP "win7-openssl-install"
           if (!(Test-Path (Join-Path $installRoot "include/openssl/ssl.h"))) {
-            Write-Error "The OpenSSL cache does not contain ssl.h."
+            Write-Error "The OpenSSL artifact does not contain ssl.h."
             exit 1
           }
           if (!(Get-ChildItem (Join-Path $installRoot "lib") -Filter "*ssl*.lib")) {
-            Write-Error "The OpenSSL cache does not contain an SSL library."
+            Write-Error "The OpenSSL artifact does not contain an SSL library."
             exit 1
           }
           if (!(Get-ChildItem (Join-Path $installRoot "lib") -Filter "*crypto*.lib")) {
-            Write-Error "The OpenSSL cache does not contain a crypto library."
+            Write-Error "The OpenSSL artifact does not contain a crypto library."
             exit 1
           }
           "OPENSSL_DIR=$installRoot" >> $env:GITHUB_ENV
           "OPENSSL_NO_VENDOR=1" >> $env:GITHUB_ENV
           "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
-          "OpenSSL cache hit: ${{ steps.openssl-cache.outputs.cache-hit }}" >> $env:GITHUB_STEP_SUMMARY
+          "OpenSSL artifact hit: ${{ steps.openssl-artifact.outputs.run_id != '' }}" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload prebuilt Win7 OpenSSL on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.openssl-artifact.outputs.run_id == ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.openssl-artifact.outputs.name }}
+          path: ${{ runner.temp }}/win7-openssl-install/
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh
@@ -616,19 +679,7 @@ jobs:
 
       - name: Bundle Windows 7 fixed-runtime test installer with zlib
         shell: pwsh
-        run: |
-          $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc `
-            --config src-tauri/tauri.webview2-win7-fixed.conf.json `
-            --config .github/fixtures/win7-nsis-zlib-config.json
-          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-          if (!$installer) {
-            Write-Error "Missing Windows 7 fixed-runtime installer in ${bundleDir}"
-            exit 1
-          }
-          Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+        run: ./.github/scripts/bundle-win7-installer.ps1
 
       - name: Audit Windows 7 installer contents
         shell: pwsh

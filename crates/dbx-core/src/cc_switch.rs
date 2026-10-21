@@ -6,6 +6,7 @@ use crate::ai::AiConfigItem;
 pub const CC_SWITCH_PLUGIN_ID: &str = "cc-switch";
 pub const CC_SWITCH_PLUGIN_CAPABILITY: &str = "ai-config-import";
 pub const CC_SWITCH_IMPORT_METHOD: &str = "import_ai_configs";
+pub const MAGPIE_IMPORT_METHOD: &str = "import_magpie_ai_configs";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

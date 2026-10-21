@@ -125,6 +125,36 @@ describe("parseInsertStatementPaste", () => {
     expect(parsed?.rows).toEqual([["1", "2"]]);
   });
 
+  it("handles dot-separated quoted table references with and without column lists", () => {
+    const backtickQualified = parseInsertStatementPaste("INSERT INTO `db`.`t` (a) VALUES (1)");
+    expect(backtickQualified?.columnNames).toEqual(["a"]);
+    expect(backtickQualified?.rows).toEqual([["1"]]);
+
+    const doubleQuoteQualified = parseInsertStatementPaste('INSERT INTO "s"."t" (a, b) VALUES (1, 2)');
+    expect(doubleQuoteQualified?.columnNames).toEqual(["a", "b"]);
+    expect(doubleQuoteQualified?.rows).toEqual([["1", "2"]]);
+
+    const bracketQualified = parseInsertStatementPaste("INSERT INTO [db].[dbo].[t] (a) VALUES (1)");
+    expect(bracketQualified?.columnNames).toEqual(["a"]);
+    expect(bracketQualified?.rows).toEqual([["1"]]);
+
+    const noColumnsBacktick = parseInsertStatementPaste("INSERT INTO `db`.`t` VALUES (1, 'hello')");
+    expect(noColumnsBacktick?.columnNames).toBeNull();
+    expect(noColumnsBacktick?.rows).toEqual([["1", "hello"]]);
+
+    const noColumnsDoubleQuote = parseInsertStatementPaste('INSERT INTO "s"."t" VALUES (1, \'hello\')');
+    expect(noColumnsDoubleQuote?.columnNames).toBeNull();
+    expect(noColumnsDoubleQuote?.rows).toEqual([["1", "hello"]]);
+
+    const spacedDots = parseInsertStatementPaste("INSERT INTO `db` . `t` (a) VALUES (1)");
+    expect(spacedDots?.columnNames).toEqual(["a"]);
+    expect(spacedDots?.rows).toEqual([["1"]]);
+
+    const multiStatementQualified = parseInsertStatementPaste("INSERT INTO `db`.`t` (a) VALUES (1); INSERT INTO `db`.`t` (a) VALUES (2);");
+    expect(multiStatementQualified?.columnNames).toEqual(["a"]);
+    expect(multiStatementQualified?.rows).toEqual([["1"], ["2"]]);
+  });
+
   it("returns null for INSERT ... SELECT", () => {
     expect(parseInsertStatementPaste("INSERT INTO t (a) SELECT a FROM other")).toBeNull();
   });

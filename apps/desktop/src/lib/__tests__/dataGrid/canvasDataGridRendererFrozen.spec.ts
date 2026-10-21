@@ -146,6 +146,39 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     expect(resolveCanvasBackingStoreMetrics({ width: 801, height: 399, pixelRatio: 5 })).toEqual({ pixelWidth: 3204, pixelHeight: 1596, scaleX: 4, scaleY: 4, measured: false });
   });
 
+  it("resolves crisp 1:1 backing store metrics under fractional webview zoom when devicePixelSize is not supported", () => {
+    // WebKitGTK on Linux and WKWebView on macOS do not support devicePixelContentBoxSize,
+    // so devicePixelSize is null/undefined. The backing store must match the webview's
+    // devicePixelRatio (which already incorporates uiScale / zoom level) 1:1.
+    const metrics125 = resolveCanvasBackingStoreMetrics({
+      width: 1000,
+      height: 600,
+      pixelRatio: 1.25,
+      devicePixelSize: null,
+    });
+    expect(metrics125).toEqual({
+      pixelWidth: 1250,
+      pixelHeight: 750,
+      scaleX: 1.25,
+      scaleY: 1.25,
+      measured: false,
+    });
+
+    const metrics150 = resolveCanvasBackingStoreMetrics({
+      width: 1000,
+      height: 600,
+      pixelRatio: 1.5,
+      devicePixelSize: null,
+    });
+    expect(metrics150).toEqual({
+      pixelWidth: 1500,
+      pixelHeight: 900,
+      scaleX: 1.5,
+      scaleY: 1.5,
+      measured: false,
+    });
+  });
+
   it("reports a completed draw only after obtaining a Canvas context", () => {
     const canvas = createMockCanvas();
     const options = createBaseOptions({ canvas, rowCount: 0, rowAt: () => undefined });
@@ -273,6 +306,43 @@ describe("drawCanvasDataGrid with frozen columns", () => {
       nullHighlightKeys: nullKeys,
     });
     expect(() => drawCanvasDataGrid(options)).not.toThrow();
+  });
+
+  it("keeps the row-number gutter unhighlighted when select-all owns the selection", () => {
+    const fills: { fillStyle: string; x: number; width: number }[] = [];
+    let fillStyle = "";
+    const context = new Proxy(
+      {},
+      {
+        get: (_target, key) => {
+          if (key === "fillRect") return (x: number, _y: number, width: number) => fills.push({ fillStyle, x, width });
+          if (key === "measureText") return () => ({ width: 0 });
+          return () => {};
+        },
+        set: (_target, key, value) => {
+          if (key === "fillStyle") fillStyle = String(value);
+          return true;
+        },
+      },
+    ) as unknown as CanvasRenderingContext2D;
+
+    const rowNumberFills = (selectingAll: boolean) => {
+      fills.length = 0;
+      const canvas = createMockCanvas();
+      vi.spyOn(canvas, "getContext").mockReturnValue(context);
+      drawCanvasDataGrid(
+        createBaseOptions({
+          canvas,
+          selectingAll,
+          selectionFrames: [{ startRow: 0, endRow: 2, startCol: 0, endCol: 2 }],
+        }),
+      );
+      return fills.filter((fill) => fill.x === 0 && fill.width === 40).map((fill) => fill.fillStyle);
+    };
+
+    // theme.cellSelected is the row-number "covered by selection" tint; select-all must not use it.
+    expect(rowNumberFills(false)).toContain("rgb(179, 208, 254)");
+    expect(rowNumberFills(true)).not.toContain("rgb(179, 208, 254)");
   });
 
   it("draws with custom crosshair row and column colors", () => {

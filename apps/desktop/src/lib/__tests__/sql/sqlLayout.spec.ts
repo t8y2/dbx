@@ -3,7 +3,7 @@ import { formatSqlText } from "@/lib/sql/sqlFormatter";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 
 /**
- * Golden tests for the layout engine behind DBX's default formatting style.
+ * Golden tests for DBX's default layout.
  * The expectations for the queries in issues #827, #4850 and #5170 pin the
  * real-world shapes those reports asked for; the rest pin the rules those
  * examples exercise — the collapse of short statements, the wrap of long ones,
@@ -19,6 +19,30 @@ async function format(sql: string, overrides: Partial<SqlFormatterSettings> = {}
 const lines = (...rows: string[]) => rows.join("\n");
 
 describe("sql layout", () => {
+  it.each([
+    ["SELECT 1\nSELECT 2", "SELECT 1\nSELECT 2"],
+    ["SELECT a FROM t\nSELECT b FROM u", "SELECT a\nFROM t\nSELECT b\nFROM u"],
+    ["SELECT 1\nUPDATE t SET a = 2", "SELECT 1\nUPDATE t\nSET a = 2"],
+    ["UPDATE t SET a = 1\nUPDATE t SET a = 2", "UPDATE t\nSET a = 1\nUPDATE t\nSET a = 2"],
+    ["SET @a = 1\nSELECT @a", "SET @a = 1\nSELECT @a"],
+    ["DELETE FROM t\nINSERT INTO t VALUES (1)", "DELETE FROM t\nINSERT INTO t\nVALUES (1)"],
+    ["SELECT 1\nSHOW TABLES", "SELECT 1\nSHOW TABLES"],
+  ])("keeps unseparated statements on different lines (#12523): %s", async (sql, expected) => {
+    const formatted = await format(sql);
+    expect(formatted).toBe(expected);
+    expect(await format(formatted)).toBe(formatted);
+    expect(formatted).not.toContain(";");
+  });
+
+  it.each([
+    ["SELECT (SELECT 1) AS value", "SELECT (SELECT 1) AS value"],
+    ["WITH t AS (SELECT 1 AS a) SELECT a FROM t", "WITH t AS (SELECT 1 AS a) SELECT a FROM t"],
+    ["SELECT 'SELECT UPDATE' AS value", "SELECT 'SELECT UPDATE' AS value"],
+    ["UPDATE t SET a = 1 WHERE id = 2", "UPDATE t SET a = 1 WHERE id = 2"],
+  ])("keeps a single short statement compact: %s", async (sql, expected) => {
+    expect(await format(sql)).toBe(expected);
+  });
+
   it("formats a query with a derived table (#827)", async () => {
     const sql = lines(
       "SELECT loc_id, loc_name, loc_type, delivery_emp_num, update_time",
@@ -212,6 +236,39 @@ describe("sql layout", () => {
     expect(await format("SELECT a, bb AS x, c AS yyy FROM t;")).toBe(lines("SELECT a,", "       bb AS x,", "       c  AS yyy", "FROM t;"));
   });
 
+  it("keeps DBX JOIN and condition layout while aligning aliases and FROM", async () => {
+    const sql = lines(
+      "SELECT js.start_time AS jobslipstarttime, js.end_time AS jobslipendtime, js.job_area_ids AS jobareaids, jsm.job_slip_id, jsm.flag, upi.worker_basic_info_id AS workerid",
+      "FROM loc_job_slip js LEFT JOIN loc_job_slip_audit jsa ON js.id = jsa.job_slip_id LEFT JOIN loc_job_slip_manager jsm ON js.id = jsm.job_slip_id LEFT JOIN loc_user_proj_info upi ON upi.bp_user_id = jsm.user_id",
+      "WHERE js.deleted = 0 AND jsa.deleted = 0 AND jsm.deleted = 0;",
+    );
+
+    const expected = lines(
+      "SELECT js.start_time            AS jobslipstarttime,",
+      "       js.end_time              AS jobslipendtime,",
+      "       js.job_area_ids          AS jobareaids,",
+      "       jsm.job_slip_id,",
+      "       jsm.flag,",
+      "       upi.worker_basic_info_id AS workerid",
+      "FROM loc_job_slip js",
+      "    LEFT JOIN loc_job_slip_audit jsa ON js.id = jsa.job_slip_id",
+      "    LEFT JOIN loc_job_slip_manager jsm ON js.id = jsm.job_slip_id",
+      "    LEFT JOIN loc_user_proj_info upi ON upi.bp_user_id = jsm.user_id",
+      "WHERE js.deleted = 0",
+      "      AND jsa.deleted = 0",
+      "      AND jsm.deleted = 0;",
+    );
+
+    const formatted = await format(sql);
+    expect(formatted).toBe(expected);
+    expect(await formatSqlText(sql, "mysql")).toBe(expected);
+
+    const projection = formatted.split("\n").slice(0, 6);
+    const fieldStartColumns = projection.map((line, index) => (index === 0 ? line.indexOf("js.start_time") : line.search(/\S/)));
+    expect(new Set(fieldStartColumns)).toEqual(new Set([7]));
+    expect(new Set(projection.filter((line) => line.includes(" AS ")).map((line) => line.indexOf("AS"))).size).toBe(1);
+  });
+
   it("preserves comments and width wrapping inside CASE expressions", async () => {
     const commented = await format(lines("SELECT id, CASE WHEN a = 1 THEN 'one' -- retain this", "ELSE 'other' END AS label FROM t;"));
     expect(commented).toContain("-- retain this\n");
@@ -228,10 +285,10 @@ describe("sql layout", () => {
     expect(await format("SELECT a FROM t UNION ALL SELECT b FROM u;")).toBe(lines("SELECT a", "FROM t", "UNION ALL", "SELECT b", "FROM u;"));
   });
 
-  it("keeps comments and does not fold them onto a line", async () => {
+  it("keeps a trailing comment on its line without swallowing the next item", async () => {
     const sql = lines("-- heading", "SELECT a, -- why", "       b", "FROM t; /* trailing */");
 
-    expect(await format(sql)).toBe(lines("-- heading", "SELECT a,", "       -- why", "       b", "FROM t;", "", "/* trailing */"));
+    expect(await format(sql)).toBe(lines("-- heading", "SELECT a, -- why", "       b", "FROM t;", "", "/* trailing */"));
   });
 
   it("keeps PostgreSQL casts tight", async () => {

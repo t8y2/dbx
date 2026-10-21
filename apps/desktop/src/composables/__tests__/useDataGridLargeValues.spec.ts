@@ -64,7 +64,7 @@ function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>, 
           databaseType: computed(() => databaseType),
           connectionId: computed(() => `${databaseType}-1`),
           executionDatabase: computed(() => "MAXIMO"),
-          resultSourceColumns: computed(() => ["ID", "APP"]),
+          resultSourceColumns: computed(() => result.value.columns),
           allColumnTypes: computed(() => result.value.column_types ?? []),
           renderedGridColumns: computed(() => []),
           showTranspose: ref(false),
@@ -371,6 +371,66 @@ describe("useDataGridLargeValues", () => {
     expect(mocks.readLargeValueChunk).toHaveBeenCalledWith(expect.objectContaining({ valueRef: "original-locator", connectionId: "oracle-1", clientSessionId: "original-session" }));
   });
 
+  it("loads full PostgreSQL preview values before clear SQL generation so rollback keeps the original", async () => {
+    const full = JSON.stringify(Array.from({ length: 50 }, (_, n) => ({ date: "2026-10-15", n })));
+    const result = previewResult("json", `${full.slice(0, 18)}...`, full.length);
+    const { largeValues } = mountLargeValues("postgres", result);
+    const first = result.value.rows[0];
+    const dirtyRows = new Map([[0, new Map([[1, null]])]]);
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue('"ID" = 1');
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "public"."APP_DATA" WHERE ("ID" = 1) LIMIT 1');
+    mocks.executeMulti.mockResolvedValue([{ columns: ["ID", "APP"], rows: [[1, full]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    await largeValues.prepareSaveBaseline({ dirtyRows, deletedRows: new Set() });
+
+    expect(result.value.rows[0]).toBe(first);
+    expect(result.value.rows[0]![1]).toBe(full);
+    expect(dirtyRows.get(0)!.get(1)).toBeNull();
+    expect(result.value.large_value_cells).toEqual([]);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.not.objectContaining({ largeValuePreviewSize: expect.anything() }));
+    expect(mocks.readLargeValueChunk).not.toHaveBeenCalled();
+  });
+
+  it("loads every PostgreSQL preview of a deleted row and leaves untouched previews alone", async () => {
+    const result = previewResult("jsonb", "[1, 2...", 4096);
+    result.value.columns.push("DOC");
+    result.value.column_types!.push("json");
+    result.value.rows[0]!.push('{"a"...');
+    result.value.rows.push([2, "[3, 4...", '{"b"...']);
+    result.value.large_value_cells = [
+      { row_index: 0, column_index: 1, original_bytes: 4096 },
+      { row_index: 0, column_index: 2, original_bytes: 4096 },
+      { row_index: 1, column_index: 1, original_bytes: 4096 },
+      { row_index: 1, column_index: 2, original_bytes: 4096 },
+    ];
+    const { largeValues } = mountLargeValues("postgres", result);
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue('"ID" = 1');
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "public"."APP_DATA" WHERE ("ID" = 1) LIMIT 1');
+    mocks.executeMulti.mockResolvedValue([{ columns: ["ID", "APP", "DOC"], rows: [[1, "[1, 2, 3]", '{"a": 1}']], affected_rows: 0, execution_time_ms: 1 }]);
+
+    await largeValues.prepareSaveBaseline({ dirtyRows: new Map(), deletedRows: new Set([0]) });
+
+    expect(result.value.rows[0]).toEqual([1, "[1, 2, 3]", '{"a": 1}']);
+    expect(result.value.rows[1]).toEqual([2, "[3, 4...", '{"b"...']);
+    expect(result.value.large_value_cells).toEqual([
+      { row_index: 1, column_index: 1, original_bytes: 4096 },
+      { row_index: 1, column_index: 2, original_bytes: 4096 },
+    ]);
+  });
+
+  it("blocks save and keeps the PostgreSQL preview when its full value cannot be loaded", async () => {
+    const result = previewResult("json", '{"date":"2026-10-1...', 4096);
+    const { largeValues } = mountLargeValues("postgres", result);
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue('"ID" = 1');
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "public"."APP_DATA" WHERE ("ID" = 1) LIMIT 1');
+    mocks.executeMulti.mockResolvedValue([{ columns: ["ID", "APP"], rows: [], affected_rows: 0, execution_time_ms: 1 }]);
+
+    await expect(largeValues.prepareSaveBaseline({ dirtyRows: new Map([[0, new Map([[1, null]])]]), deletedRows: new Set() })).rejects.toThrow("grid.largeValueRowUnavailable");
+
+    expect(result.value.rows[0]).toEqual([1, '{"date":"2026-10-1...']);
+    expect(result.value.large_value_cells).toHaveLength(1);
+  });
+
   it("blocks save on expired snapshots and keeps every original preview for retry", async () => {
     const result = previewResult("CLOB", "preview", 1);
     result.value.large_value_context = { connectionId: "oracle-1", database: "MAXIMO" };
@@ -420,6 +480,19 @@ describe("useDataGridLargeValues", () => {
     await preparation;
     expect(result.value.rows[0]).toEqual([1, "first complete", "second complete"]);
     expect(result.value.large_value_cells).toEqual([]);
+  });
+  it("hydrates every large value cell on the current page in one batch", async () => {
+    const result = previewResult("text", "preview", 9);
+    result.value.large_value_context = { connectionId: "postgres-1", database: "MAXIMO" };
+    result.value.large_value_cells![0]!.value_ref = "page-locator";
+    mocks.readLargeValueChunk.mockResolvedValue({ status: "ok", data: "full text", next_offset: 9, eof: true, value_kind: "text" });
+    const { largeValues } = mountLargeValues("postgres", result);
+
+    await expect(largeValues.hydrateLargeValueCells([1], [0, 1])).resolves.toBe(1);
+
+    expect(result.value.rows[0]).toEqual([1, "full text"]);
+    expect(result.value.large_value_cells).toEqual([]);
+    expect(result.value.large_value_refs).toContain("page-locator");
   });
   it.each([
     ["postgres", 3],

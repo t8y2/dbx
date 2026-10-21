@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -300,6 +301,7 @@ public final class JdbcExecutor {
                     try (ResultSet rs = stmt.getResultSet()) {
                         result = readResultSet(rs, elapsed, effectiveMaxRows, valueReader);
                     }
+                    appendStatementReaderMessages(result, stmt, statementMessageReader);
                     // `elapsed` stops at `stmt.execute()`. Retrieving and
                     // converting the rows above is frequently the dominant
                     // cost of a statement, so report the whole duration the
@@ -316,7 +318,9 @@ public final class JdbcExecutor {
                         false
                     );
                 }
-                return withStatementMessages(result, stmt, effectiveMaxRows, statementMessageReader);
+                QueryResult completed = withStatementMessages(result, stmt, effectiveMaxRows, statementMessageReader);
+                completed.setExecution_time_ms(System.currentTimeMillis() - start);
+                return completed;
                 } finally {
                     activeStatements.remove(stmt);
                 }
@@ -418,6 +422,21 @@ public final class JdbcExecutor {
         Function<String, String> setSchemaSql,
         Supplier<String> resetSchemaSql,
         QueryPageOptions options,
+        ResultValueReader valueReader,
+        StatementMessageReader statementMessageReader,
+        boolean advancePastUpdateCounts
+    ) {
+        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader,
+            statementMessageReader, sessions, advancePastUpdateCounts);
+    }
+
+    public QueryPageResult executePage(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        QueryPageOptions options,
         ResultValueReader valueReader
     ) {
         return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader, StatementMessageReader.NONE, sessions);
@@ -469,6 +488,20 @@ public final class JdbcExecutor {
     ) {
         return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader,
             StatementMessageReader.NONE, sessions, false, true);
+    }
+
+    public QueryPageResult executeBoundedPage(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        QueryPageOptions options,
+        ResultValueReader valueReader,
+        StatementMessageReader statementMessageReader
+    ) {
+        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader,
+            statementMessageReader, sessions, false, true);
     }
 
     public QueryPageResult startTableRead(
@@ -600,6 +633,7 @@ public final class JdbcExecutor {
                     } else {
                         appendStatementWarnings(result, stmt);
                     }
+                    result.setExecution_time_ms(System.currentTimeMillis() - start);
                     activeStatements.remove(stmt);
                     stmt.close();
                     QueryPageResult page = new QueryPageResult(
@@ -642,7 +676,8 @@ public final class JdbcExecutor {
                     sqlTypeByIndex,
                     typeNameByIndex,
                     Math.max(options.getMaxRows(), 1),
-                    valueReader
+                    valueReader,
+                    statementMessageReader
                 );
                 createdSession = session;
                 targetSessions.put(sessionId, session);
@@ -939,7 +974,7 @@ public final class JdbcExecutor {
             while (rows.size() < effectivePageSize && session.rowsRead < session.maxRows) {
                 if (!session.resultSet.next()) {
                     QueryPageResult page = sessionPageResult(session, rows, executionTimeMs, false, null, false);
-                    closeSession(targetSessions, session.id);
+                    appendStatementReaderMessages(page, closeSessionMessages(targetSessions, session.id));
                     return page;
                 }
                 rows.add(rowValues(session.resultSet, session.valueReader, session.sqlTypeByIndex, session.typeNameByIndex));
@@ -949,14 +984,14 @@ public final class JdbcExecutor {
             if (session.rowsRead >= session.maxRows) {
                 boolean truncated = session.resultSet.next();
                 QueryPageResult page = sessionPageResult(session, rows, executionTimeMs, truncated, null, false);
-                closeSession(targetSessions, session.id);
+                appendStatementReaderMessages(page, closeSessionMessages(targetSessions, session.id));
                 return page;
             }
 
             boolean hasMore = session.resultSet.next();
             if (!hasMore) {
                 QueryPageResult page = sessionPageResult(session, rows, executionTimeMs, false, null, false);
-                closeSession(targetSessions, session.id);
+                appendStatementReaderMessages(page, closeSessionMessages(targetSessions, session.id));
                 return page;
             }
 
@@ -990,9 +1025,13 @@ public final class JdbcExecutor {
     }
 
     private boolean closeSession(ConcurrentHashMap<String, QuerySession> targetSessions, String sessionId) {
+        return closeSessionMessages(targetSessions, sessionId) != null;
+    }
+
+    private List<String> closeSessionMessages(ConcurrentHashMap<String, QuerySession> targetSessions, String sessionId) {
         QuerySession session = targetSessions.remove(sessionId);
         if (session == null) {
-            return false;
+            return null;
         }
         synchronized (session) {
             activeStatements.remove(session.statement);
@@ -1000,12 +1039,17 @@ public final class JdbcExecutor {
                 session.resultSet.close();
             } catch (Exception ignored) {
             }
+            List<String> messages = Collections.emptyList();
+            try {
+                messages = session.statementMessageReader.close(session.statement);
+            } catch (Exception ignored) {
+            }
             try {
                 session.statement.close();
             } catch (Exception ignored) {
             }
+            return messages == null ? Collections.emptyList() : messages;
         }
-        return true;
     }
 
     static String safeColumnTypeName(ResultSetMetaData meta, int columnIndex) {
@@ -1144,6 +1188,32 @@ public final class JdbcExecutor {
         return messageResult;
     }
 
+    private static void appendStatementReaderMessages(
+        QueryResult result,
+        Statement statement,
+        StatementMessageReader reader
+    ) {
+        try {
+            List<String> messages = reader.close(statement);
+            if (messages != null) {
+                for (String message : messages) {
+                    if (message != null) result.addInformationalMessage(message, null);
+                }
+            }
+        } catch (Exception ignored) {
+            // Driver-specific informational output is advisory.
+        }
+    }
+
+    private static void appendStatementReaderMessages(QueryPageResult page, List<String> messages) {
+        if (messages == null || messages.isEmpty()) return;
+        List<Map<String, Object>> result = new ArrayList<>(page.getMessages());
+        for (String message : messages) {
+            if (message != null) result.add(Map.of("severity", "INFO", "message", message));
+        }
+        page.setMessages(result);
+    }
+
     private QueryResult emptyQueryResult(long start) {
         return new QueryResult(
             Collections.emptyList(),
@@ -1217,6 +1287,10 @@ public final class JdbcExecutor {
         StatementMessageReader NONE = statement -> Collections.emptyList();
 
         List<String> read(Statement statement) throws SQLException;
+
+        default List<String> close(Statement statement) throws SQLException {
+            return Collections.emptyList();
+        }
     }
 
     /**
@@ -1262,6 +1336,7 @@ public final class JdbcExecutor {
         private final String[] typeNameByIndex;
         private final int maxRows;
         private final ResultValueReader valueReader;
+        private final StatementMessageReader statementMessageReader;
         private int rowsRead;
         private List<Object> pendingRow;
         private long lastAccessedAtMillis;
@@ -1275,7 +1350,8 @@ public final class JdbcExecutor {
             int[] sqlTypeByIndex,
             String[] typeNameByIndex,
             int maxRows,
-            ResultValueReader valueReader
+            ResultValueReader valueReader,
+            StatementMessageReader statementMessageReader
         ) {
             this.id = id;
             this.statement = statement;
@@ -1286,6 +1362,7 @@ public final class JdbcExecutor {
             this.typeNameByIndex = typeNameByIndex;
             this.maxRows = maxRows;
             this.valueReader = valueReader;
+            this.statementMessageReader = statementMessageReader;
             this.lastAccessedAtMillis = System.currentTimeMillis();
         }
     }

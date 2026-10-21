@@ -12,6 +12,7 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 
 const props = defineProps<{
+  tabId?: string;
   pluginId: string;
   contributionId: string;
   connectionId?: string;
@@ -144,6 +145,19 @@ function openFilesystem(pluginId: string, providerId: string, context?: PluginWo
   });
 }
 
+function onSetTitle(title: string | null) {
+  if (props.tabId) {
+    queryStore.setPluginWorkbenchTabTitle(props.tabId, title);
+  }
+}
+
+function onGetTitle(): string {
+  if (props.tabId) {
+    return queryStore.getPluginWorkbenchTabTitle(props.tabId) ?? "";
+  }
+  return "";
+}
+
 onMounted(start);
 watch(() => [props.pluginId, props.contributionId, props.connectionId, props.context?.connectionId], start);
 
@@ -158,6 +172,18 @@ defineExpose({ refresh });
       <AlertTriangle class="mt-0.5 size-4 shrink-0" />
       <span>{{ error || t("pluginPlatform.workbenchUnavailableFallback") }}</span>
     </div>
-    <PluginWorkbenchHost v-else class="min-h-0 flex-1" :plugin="entry.plugin" :contribution="entry.contribution" :context="hostContext" @open-workbench="openWorkbench" @open-filesystem="openFilesystem" @close-tab="emit('closeTab')" @recommendations="emit('recommendations', $event)" />
+    <PluginWorkbenchHost
+      v-else
+      class="min-h-0 flex-1"
+      :plugin="entry.plugin"
+      :contribution="entry.contribution"
+      :context="hostContext"
+      :set-title="onSetTitle"
+      :get-title="onGetTitle"
+      @open-workbench="openWorkbench"
+      @open-filesystem="openFilesystem"
+      @close-tab="emit('closeTab')"
+      @recommendations="emit('recommendations', $event)"
+    />
   </div>
 </template>

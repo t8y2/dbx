@@ -329,6 +329,18 @@ func (a *rocketMQAgent) queryMessageTrace(params map[string]any) (any, error) {
 }
 
 func (a *rocketMQAgent) sendMessage(params map[string]any) (any, error) {
+	a.mu.RLock()
+	messaging, mode := a.messaging, a.connection.Mode
+	a.mu.RUnlock()
+	if mode == "proxy" {
+		if messaging == nil {
+			return nil, fmt.Errorf("RocketMQ agent is not connected")
+		}
+		return messaging.Send(params)
+	}
+	if _, _, err := a.requireClient(); err != nil {
+		return nil, err
+	}
 	topic, err := requireString(params, "topic")
 	if err != nil {
 		return nil, err

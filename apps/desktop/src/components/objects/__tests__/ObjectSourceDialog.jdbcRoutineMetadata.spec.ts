@@ -89,7 +89,7 @@ describe("ObjectSourceDialog generic JDBC routine metadata", () => {
     expect(document.querySelector("[data-query-editor-stub]")).toBeNull();
     expect(document.body.textContent).not.toContain("Object source is not supported");
     expect(mocks.getObjectSource).toHaveBeenCalledTimes(1);
-    expect([...document.querySelectorAll("button")].some((button) => button.textContent?.trim() === "contextMenu.editView")).toBe(false);
+    expect([...document.querySelectorAll("button")].some((button) => button.textContent?.trim() === "contextMenu.editObject" || button.textContent?.trim() === "contextMenu.editView")).toBe(false);
   });
 
   it("keeps a legacy source payload without the optional field on the existing preview path", async () => {

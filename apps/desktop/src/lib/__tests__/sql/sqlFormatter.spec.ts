@@ -1,7 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { canFormatSqlForDatabaseType, compressSqlText, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
+import {
+  canFormatSqlForDatabaseType,
+  compressSqlText,
+  formatSqlForDisplay as formatSqlForDisplayWithBuildDefaults,
+  formatSqlForEditing as formatSqlForEditingWithBuildDefaults,
+  formatSqlText as formatSqlTextWithBuildDefaults,
+  MAX_SQL_FORMAT_CHARS,
+  sqlFormatDialectForDbType,
+  UnsupportedStructuredInputError,
+} from "@/lib/sql/sqlFormatter";
+import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { extractSqlParameters } from "@/lib/sql/sqlParameters";
+import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+
+// Most cases in this regression suite pin the former compact layout while
+// checking dialect-specific token handling. New default-layout behavior is
+// exercised explicitly with the build-default aliases below.
+function withDbxLayout(settings: Partial<SqlFormatterSettings> = {}): Partial<SqlFormatterSettings> {
+  return { layoutStyle: "dbx", ...settings };
+}
+
+const formatSqlText = (sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = {}) => formatSqlTextWithBuildDefaults(sql, dialect, withDbxLayout(settings));
+const formatSqlForEditing = (sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = {}) => formatSqlForEditingWithBuildDefaults(sql, dialect, withDbxLayout(settings));
+const formatSqlForDisplay = (sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = {}) => formatSqlForDisplayWithBuildDefaults(sql, dialect, withDbxLayout(settings));
 
 describe("Neo4j Cypher formatting", () => {
   const reproduction = `MATCH (a:LibraryDomainOrganization) WHERE a.id= $id CALL apoc.path.expandConfig(a, {uniqueness:'RELATIONSHIP_GLOBAL', minLevel:0, maxLevel:-1, relationshipFilter:'HasLibrary>|HasLibraryParameter>' }) YIELD path UNWIND relationships(path) as r WITH DISTINCT r WITH r, startNode(r) as s, endNode(r) as e OPTIONAL MATCH (s)-[:panda_data_master_version_rel]-(so) OPTIONAL MATCH (e)-[:panda_data_master_version_rel]-(eo) WITH r, CASE WHEN s.classType = 'COMMON' OR s.classType = 'INTERFACE' THEN s WHEN type(r) = 'panda_data_master_version_rel' THEN null ELSE so END as sm OPTIONAL MATCH (sm)-[permission:panda_dataPermission]->(target) WHERE target:panda_member AND target.id IN $memberIds AND permission.permissionType IN ['OWNER','ACTIVE','PASSIVE'] RETURN type(r) as relationType, sm, [s, e] as endpoints`;
@@ -138,13 +160,13 @@ describe("sqlFormatter", () => {
   });
 
   it("keeps a view's trailing line comment from swallowing the next column (issue #10278)", async () => {
-    // A `--` comment consumes the rest of its line, so the column that follows
-    // it in the view text has to start a new line; appending it to the comment
-    // would silently drop it from the DDL shown to the user.
+    // A `--` comment consumes the rest of its line. Keeping it on the previous
+    // field's line is safe only when the following column starts a new line,
+    // otherwise the column would silently disappear from the DDL shown to the user.
     const viewDdl = `CREATE VIEW "TEMP_TEST_VIEW" AS SELECT trunc(sysdate) AS dates, -- 测试\n(SELECT sysdate FROM dual t) AS nows\nFROM dual;`;
     const formatted = await formatSqlForDisplay(viewDdl, sqlFormatDialectForDbType("oracle"));
 
-    expect(formatted).toBe('CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates,\n       -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;');
+    expect(formatted).toBe('CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates, -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;');
   });
 
   it("keeps a short OceanBase Oracle view projection readable (issue #7540)", async () => {
@@ -484,6 +506,22 @@ LIMIT 100;`);
     await expect(formatSqlForEditing("SELECT 1 .\n", "dameng")).resolves.toBe("SELECT 1 .\n");
   });
 
+  it("keeps trailing SELECT comments on the field line (#12615)", async () => {
+    const source = `select a, -- first field\n b, -- second field\n c -- third field\nfrom t;`;
+    const formatted = await formatSqlForEditing(source, "postgres");
+
+    expect(formatted).toContain("SELECT a, -- first field\n");
+    expect(formatted).toContain("       b, -- second field\n");
+    expect(formatted).toContain("       c -- third field\nFROM t;");
+  });
+
+  it("keeps source-standalone SELECT comments on their own line", async () => {
+    const source = `select a,\n-- heading for b\n b\nfrom t;`;
+    const formatted = await formatSqlForEditing(source, "postgres");
+
+    expect(formatted).toContain("SELECT a,\n       -- heading for b\n       b\nFROM t;");
+  });
+
   it("preserves the newline before a trailing dot after a line comment", async () => {
     await expect(formatSqlForEditing("DELETE FROM accounts -- comment\n .", "dameng")).resolves.toBe("DELETE FROM accounts -- comment\n .");
   });
@@ -650,6 +688,168 @@ AND owner_id = 42`,
     expect(formatted).toContain("col1 -- first column");
     expect(formatted).toMatch(/,\s*col2\s*-- second column/);
   });
+
+  describe("dialect content boundaries", () => {
+    it.each([
+      ["postgres", "-- note", "AND", "\n", "dbx", "standard"],
+      ["postgres", "-- note", "OR", "\r\n", "classic", "standard"],
+      ["mysql", "# note", "XOR", "\n", "dbx", "standard"],
+      ["mysql", "# note", "AND", "\r\n", "classic", "standard"],
+      ["sqlserver", "-- note", "OR", "\r\n", "dbx", "tabularRight"],
+      ["mysql", "-- note", "AND", "\n", "dbx", "tabularLeft"],
+    ] as const)("keeps %s %s before %s as a code boundary (%j, %s, %s)", async (dialect, comment, operator, lineBreak, layoutStyle, indentStyle) => {
+      const source = `select a from t where x=1 ${comment}${lineBreak}${operator.toLowerCase()} y=2;`;
+      const settings = { layoutStyle, indentStyle, logicalOperatorNewline: "none" } as const;
+      const formatted = await formatSqlText(source, dialect, settings);
+      const tokens = (sql: string) => tokenizeSqlSemantic(sql, dialect).map((token) => token.normalized);
+      expect(formatted).toContain(`${comment}\n`);
+      expect(formatted).toMatch(new RegExp(`\\n\\s*${operator}\\s+y = 2;`));
+      expect(tokens(formatted)).toEqual(tokens(source));
+      expect(await formatSqlText(formatted, dialect, settings)).toBe(formatted);
+    });
+
+    it.each(["dbx", "classic"] as const)("still joins ordinary conditions and treats comment symbols in strings as data (%s)", async (layoutStyle) => {
+      const source = "select '-- not a comment' as note, '# not a comment' as other from t where x=1 and y=2 or z=3;";
+      const settings = { layoutStyle, logicalOperatorNewline: "none" } as const;
+      const formatted = await formatSqlText(source, "mysql", settings);
+      expect(formatted).toContain("'-- not a comment'");
+      expect(formatted).toContain("'# not a comment'");
+      expect(formatted).toContain("x = 1 AND y = 2 OR z = 3;");
+      expect(await formatSqlText(formatted, "mysql", settings)).toBe(formatted);
+    });
+
+    describe.each(["dbx", "classic"] as const)("Oracle alternative quoted literals (%s)", (layoutStyle) => {
+      it.each([
+        ["q", "[", "]", "\n"],
+        ["Q", "{", "}", "\r\n"],
+        ["nq", "(", ")", "\n"],
+        ["NQ", "<", ">", "\r\n"],
+        ["nQ", "!", "!", "\n"],
+        ["Nq", "~", "~", "\r\n"],
+      ] as const)("preserves %s with %s%s delimiters and %j newlines", async (prefix, open, close, lineBreak) => {
+        const literal = `${prefix}'${open}first 'quoted'${lineBreak}${lineBreak}-- AND is data${lineBreak}/* OR is data */ last${close}'`;
+        const adjacent = "q'~second 'quoted'\n\nlast~'";
+        const source = `select ${literal} as note, 'tail' as label, ${adjacent} as other from dual;\n\nselect :id from dual;`;
+        const settings = { layoutStyle, preserveEmptyLines: true, logicalOperatorNewline: "none" } as const;
+        const formatted = await formatSqlText(source, "oracle", settings);
+        const tokens = (sql: string) => tokenizeSqlSemantic(sql, "oracle").map((token) => token.normalized);
+        expect(formatted).toContain(literal);
+        expect(formatted).toContain(adjacent);
+        expect(formatted).toContain("'tail'");
+        expect(tokens(formatted)).toEqual(tokens(source));
+        expect(await formatSqlText(formatted, "oracle", settings)).toBe(formatted);
+      });
+    });
+
+    it("preserves a multiline q literal without empty-line preservation and leaves ordinary strings separate", async () => {
+      const literal = "q'[first 'quoted'\n\nlast]'";
+      const source = `select ${literal}, 'ordinary', q'!single 'quoted'!' from dual;`;
+      const formatted = await formatSqlText(source, "oracle", { preserveEmptyLines: false });
+      expect(formatted).toContain(literal);
+      expect(
+        tokenizeSqlSemantic(formatted, "oracle")
+          .filter((token) => token.kind === "string")
+          .map((token) => token.text),
+      ).toEqual([literal, "'ordinary'", "q'!single 'quoted'!'"]);
+    });
+
+    it.each(["dbx", "classic"] as const)("preserves spaces and tabs on a q literal's blank line in the base layout (%s)", async (layoutStyle) => {
+      const literal = "q'[first 'quoted'\r\n  \t\r\nlast]'";
+      const source = `select ${literal} as note from dual;\n\nselect 2;`;
+      const settings = { layoutStyle, preserveEmptyLines: true } as const;
+      const formatted = await formatSqlText(source, "oracle", settings);
+      expect(formatted).toContain(literal);
+      expect(tokenizeSqlSemantic(formatted, "oracle").map((token) => token.normalized)).toEqual(tokenizeSqlSemantic(source, "oracle").map((token) => token.normalized));
+      expect(await formatSqlText(formatted, "oracle", settings)).toBe(formatted);
+    });
+
+    it.each(["dbx", "classic"] as const)("does not apply FROM same-line layout inside protected contents (%s)", async (layoutStyle) => {
+      const literal = "q'[first 'quoted'\nFROM\n  literal_source\nlast]'";
+      const source = `select ${literal} as note from actual_source;`;
+      const settings = { layoutStyle, fromClauseLayout: "sameLine" } as const;
+      const formatted = await formatSqlText(source, "oracle", settings);
+      expect(formatted).toContain(literal);
+      expect(formatted).toContain("FROM actual_source");
+      expect(await formatSqlText(formatted, "oracle", settings)).toBe(formatted);
+    });
+
+    it.each([
+      ["postgres", "/* leading */"],
+      ["postgres", "-- leading"],
+      ["mysql", "# leading"],
+    ] as const)("keeps a leading %s comment below FROM (%s)", async (dialect, comment) => {
+      const source = `select a from\n ${comment}\n source_table;`;
+      const settings = { layoutStyle: "classic", fromClauseLayout: "sameLine" } as const;
+      const formatted = await formatSqlText(source, dialect, settings);
+      expect(formatted).toMatch(/FROM\n/);
+      expect(formatted).toContain(comment);
+      expect(tokenizeSqlSemantic(formatted, dialect).map((token) => token.normalized)).toEqual(tokenizeSqlSemantic(source, dialect).map((token) => token.normalized));
+      expect(await formatSqlText(formatted, dialect, settings)).toBe(formatted);
+    });
+
+    it("keeps quoted table names eligible for FROM same-line layout", async () => {
+      expect(await formatSqlText('select a from "Case Table";', "postgres", { layoutStyle: "classic", fromClauseLayout: "sameLine" })).toContain('FROM "Case Table"');
+    });
+
+    it.each([false, true])("does not normalize literal or block-comment line endings while restoring code paragraphs (rules=%s)", async (customRulesEnabled) => {
+      const literal = "$tag$first\r\n\r\nlast$tag$";
+      const comment = "/* first\r\n\r\nlast */";
+      const source = `select ${literal} as note from t;\n\n${comment}\n\nselect 2;`;
+      const settings = { customRulesEnabled, emptyLineMode: "preserve", preserveEmptyLines: true } as const;
+      const formatted = await formatSqlText(source, "postgres", settings);
+      expect(formatted).toContain(literal);
+      expect(formatted).toContain(comment);
+      expect(await formatSqlText(formatted, "postgres", settings)).toBe(formatted);
+    });
+
+    it.each(["", "\n"])("does not add a trailing empty line while restoring paragraphs at EOF %j", async (ending) => {
+      expect(await formatSqlText(`-- heading\n\nselect 1;${ending}`, "postgres", { preserveEmptyLines: true })).toBe("-- heading\n\nSELECT 1;");
+    });
+
+    it.each([
+      ["postgres", "/* first\r\n\r\nlast */", false],
+      ["postgres", "/* outer\r\n /* inner */\r\nlast */", true],
+      ["mysql", "/*+ MAX_EXECUTION_TIME(1000)\r\n NO_RANGE_OPTIMIZATION(t) */", false],
+      ["mysql", "/*!40101 SET @note = 'first\r\nlast' */", true],
+    ] as const)("preserves %s CR block comments and marker-like data (rules=%s)", async (dialect, comment, customRulesEnabled) => {
+      const markerLikeLiteral = "'/*__DBX_PRESERVE_BLOCK_COMMENT_0_0__*/'";
+      const otherComment = "/* another\r\ncomment */";
+      const source = `select a ${comment},b from t where x=1 and y=2;\n\n${otherComment}\nselect ${markerLikeLiteral} as note;`;
+      const settings = { customRulesEnabled, layoutStyle: "classic", logicalOperatorNewline: "none", commaPosition: "before", preserveEmptyLines: true } as const;
+      const formatted = await formatSqlText(source, dialect, settings);
+      expect(formatted).toContain(comment);
+      expect(formatted).toContain(otherComment);
+      expect(formatted).toContain(markerLikeLiteral);
+      expect(formatted.replace(markerLikeLiteral, "")).not.toContain("__DBX_PRESERVE_BLOCK_COMMENT_");
+      expect(tokenizeSqlSemantic(formatted, dialect).map((token) => token.normalized)).toEqual(tokenizeSqlSemantic(source, dialect).map((token) => token.normalized));
+      expect(await formatSqlText(formatted, dialect, settings)).toBe(formatted);
+    });
+
+    it("does not complete an unterminated CR block comment", async () => {
+      const source = "select a /* unfinished\r\n still unfinished";
+      const formatted = await formatSqlForEditing(source, "postgres", { preserveEmptyLines: true });
+      expect(formatted).not.toContain("*/");
+      expect(formatted).not.toContain("__DBX_PRESERVE_BLOCK_COMMENT_");
+    });
+
+    it.each([
+      ["postgres", "select * from t where c@?'$.x';", "c @? '$.x'"],
+      ["sqlserver", "select @myvar from t;", "@myvar"],
+      ["mysql", "select 'D d\\'D D' as note from t;", "'D d\\'D D'"],
+    ] as const)("preserves the %s operator, variable or escaped string boundary", async (dialect, source, expected) => {
+      const settings = { customRulesEnabled: true };
+      const formatted = await formatSqlText(source, dialect, settings);
+      expect(formatted).toContain(expected);
+      expect(await formatSqlText(formatted, dialect, settings)).toBe(formatted);
+    });
+
+    it.each(["\n", "\r\n"])("does not extend an empty line comment across %j", async (lineBreak) => {
+      const source = `--${lineBreak}select a,b from t;`;
+      const formatted = await formatSqlText(source, "postgres", { customRulesEnabled: true });
+      expect(formatted).toMatch(/^--\nSELECT/);
+      expect(tokenizeSqlSemantic(formatted, "postgres").map((token) => token.normalized)).toEqual(tokenizeSqlSemantic(source, "postgres").map((token) => token.normalized));
+    });
+  });
 });
 
 /**
@@ -779,25 +979,72 @@ describe("classic layout style (v0.6.15 reproduction)", () => {
     await expect(formatSqlText(sql, "oracle", { ...classic, functionCase: "upper" })).resolves.toBe(lines("SELECT", "  SUBSTRB(NAME, 1, 3),", "  INSTR2(NAME, 'x'),", "  LENGTHB(NAME)", "FROM", "  t;"));
   });
 
-  it("keeps DBX's own printer as the default and for the explicit dbx style", async () => {
+  it("uses the DBX layout by default and keeps classic selectable", async () => {
     const sql = "select * from task order by created_at desc;";
     const collapsed = "SELECT * FROM task ORDER BY created_at DESC;";
 
-    // Same input, opposite layouts: the collapsed form is the DBX printer's,
-    // so this proves the routing split rather than the goldens above.
-    expect(await formatSqlText(sql, "mysql", { layoutStyle: "dbx" })).toBe(collapsed);
-    expect(await formatSqlText(sql, "mysql")).toBe(collapsed);
-    // A settings object saved before `layoutStyle` existed normalizes to dbx.
-    expect(await formatSqlText(sql, "mysql", {} as Partial<SqlFormatterSettings>)).toBe(collapsed);
+    expect(await formatSqlTextWithBuildDefaults(sql, "mysql")).toBe(collapsed);
+    expect(await formatSqlTextWithBuildDefaults(sql, "mysql", {} as Partial<SqlFormatterSettings>)).toBe(collapsed);
+    expect(await formatSqlTextWithBuildDefaults(sql, "mysql", { layoutStyle: "classic" })).toBe("SELECT\n  *\nFROM task\nORDER BY\n  created_at DESC;");
+  });
+
+  it("formats multiple statements on separate blocks by default", async () => {
+    const sql = "select id, name from users; select count(*) from orders;";
+
+    await expect(formatSqlTextWithBuildDefaults(sql, "mysql")).resolves.toBe("SELECT id,\n       name\nFROM users;\n\nSELECT count(*) FROM orders;");
   });
 
   it("merges a classic FROM clause onto its source with a single space under the standard indent", async () => {
     // `sameLine` (the default) merges the clause line with the source line, and
     // the merge must not reuse the source's indent as the gap: that is the
     // tabular styles' alignment column, but under the standard indent it would
-    // read `FROM  t`. Selecting classic is now the only path to this merge, so
-    // the classic style is what pins its appearance.
+    // read `FROM  t`. This explicitly exercises sql-formatter's upstream layout.
     expect(await formatSqlText("select * from t", "mysql", classic)).toBe(lines("SELECT", "  *", "FROM", "  t"));
     expect(await formatSqlText("select * from t", "mysql", { ...classic, fromClauseLayout: "sameLine" })).toBe(lines("SELECT", "  *", "FROM t"));
+  });
+});
+
+describe("PostgreSQL MERGE formatting (#12592)", () => {
+  // sql-formatter 15's postgresql grammar predates PG15 MERGE, so the DBX
+  // layout printer used to emit one token per line for these statements.
+  const merge = "MERGE INTO target t USING source s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name);";
+
+  it("lays out the UPDATE and INSERT actions as clauses", async () => {
+    const formatted = await formatSqlText(merge, "postgres");
+
+    expect(formatted).toBe(["MERGE INTO target t USING source s ON t.id = s.id", "WHEN MATCHED THEN", "UPDATE SET name = s.name", "WHEN NOT MATCHED THEN", "INSERT (id, name)", "VALUES (s.id, s.name);"].join("\n"));
+    // Formatting is idempotent: the clause keywords stay clause boundaries.
+    await expect(formatSqlText(formatted, "postgres")).resolves.toBe(formatted);
+  });
+
+  it("keeps conditions, DELETE actions and RETURNING intact", async () => {
+    const sql = "MERGE INTO products p USING new_products np ON p.product_id = np.product_id WHEN MATCHED AND np.price > p.price THEN UPDATE SET price = np.price WHEN NOT MATCHED THEN INSERT (product_id, product_name, price) VALUES (np.product_id, np.product_name, np.price) RETURNING p.*;";
+
+    await expect(formatSqlText(sql, "postgres")).resolves.toBe(
+      [
+        "MERGE INTO products p USING new_products np ON p.product_id = np.product_id",
+        "WHEN MATCHED AND np.price > p.price THEN",
+        "UPDATE SET price = np.price",
+        "WHEN NOT MATCHED THEN",
+        "INSERT (product_id, product_name, price)",
+        "VALUES (np.product_id, np.product_name, np.price)",
+        "RETURNING p.*;",
+      ].join("\n"),
+    );
+
+    const deleteAction = "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id);";
+    await expect(formatSqlText(deleteAction, "postgres")).resolves.toBe(["MERGE INTO t USING s ON t.id = s.id", "WHEN MATCHED THEN DELETE", "WHEN NOT MATCHED THEN", "INSERT (id)", "VALUES (s.id);"].join("\n"));
+  });
+
+  it("does not change regular INSERT, UPDATE or JOIN formatting", async () => {
+    await expect(formatSqlText("insert into t (a, b) values (1, 2) on conflict (a) do update set b = excluded.b;", "postgres")).resolves.toBe("INSERT INTO t (a, b)\nVALUES (1, 2)\nON CONFLICT (a) DO UPDATE\nSET b = excluded.b;");
+    await expect(formatSqlText("update t set a = 1, b = 2 where id = 3;", "postgres")).resolves.toBe("UPDATE t SET a = 1, b = 2 WHERE id = 3;");
+    await expect(formatSqlText("select a.id, b.name from a join b on a.id = b.id where a.x = 1;", "postgres")).resolves.toBe("SELECT a.id,\n       b.name\nFROM a\n    JOIN b ON a.id = b.id\nWHERE a.x = 1;");
+  });
+
+  it("applies to PostgreSQL-compatible connections too", async () => {
+    // GaussDB / Kingbase / HighGo / openGauss reuse the postgres grammar.
+    expect(sqlFormatDialectForDbType("gaussdb")).toBe("postgres");
+    await expect(formatSqlText(merge, sqlFormatDialectForDbType("kingbase"))).resolves.toContain("WHEN MATCHED THEN\nUPDATE SET name = s.name");
   });
 });

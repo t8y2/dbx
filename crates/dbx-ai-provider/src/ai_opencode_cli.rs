@@ -5,11 +5,12 @@ use crate::ai_cli_agent::{
     CliAgentCommandSpec, CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
 };
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, RwLock};
 
 const OPENCODE_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENCODE_CONTROL_ENV: &[&str] = &[
@@ -23,6 +24,103 @@ const OPENCODE_CONTROL_ENV: &[&str] = &[
 
 pub type OpenCodeRunOptions = CliAgentRunOptions;
 pub type OpenCodeCommandSpec = CliAgentCommandSpec;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenCodeVersion {
+    V1,
+    V2,
+}
+
+static OPENCODE_DETECTED_V2: LazyLock<RwLock<HashMap<String, bool>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+pub fn resolve_configured_opencode_version(config: &AiConfig) -> Option<OpenCodeVersion> {
+    if let Some(version) = &config.opencode_cli_version {
+        let trimmed = version.trim().to_ascii_lowercase();
+        if trimmed == "v2" || trimmed == "2" || trimmed == "opencode2" {
+            return Some(OpenCodeVersion::V2);
+        }
+        if trimmed == "v1" || trimmed == "1" || trimmed == "opencode1" {
+            return Some(OpenCodeVersion::V1);
+        }
+    }
+    None
+}
+
+pub fn is_opencode_v2_program_name(program: &str) -> bool {
+    let lower = program.to_ascii_lowercase();
+    let file_name = Path::new(&lower).file_name().and_then(|n| n.to_str()).unwrap_or(&lower);
+    file_name.contains("opencode2")
+        || file_name.contains("opencode-2")
+        || file_name.contains("opencode-v2")
+        || file_name.contains("opencode_v2")
+}
+
+pub fn parse_opencode_version_is_v2(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    for token in lower.split_whitespace() {
+        let cleaned = token.trim_start_matches('v');
+        if let Some(major_str) = cleaned.split('.').next() {
+            if let Ok(major) = major_str.parse::<u32>() {
+                if major >= 2 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+pub async fn record_opencode_version_v2(program: &str) {
+    OPENCODE_DETECTED_V2.write().await.insert(program.to_string(), true);
+}
+
+pub async fn detect_opencode_version(program: &str) -> OpenCodeVersion {
+    if is_opencode_v2_program_name(program) {
+        return OpenCodeVersion::V2;
+    }
+    if let Some(&is_v2) = OPENCODE_DETECTED_V2.read().await.get(program) {
+        return if is_v2 { OpenCodeVersion::V2 } else { OpenCodeVersion::V1 };
+    }
+
+    let mut process = cli_command(program);
+    process.arg("--version");
+    let is_v2 = match tokio::time::timeout(Duration::from_millis(1500), process.output()).await {
+        Ok(Ok(output)) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            parse_opencode_version_is_v2(&stdout)
+        }
+        _ => false,
+    };
+
+    OPENCODE_DETECTED_V2.write().await.insert(program.to_string(), is_v2);
+    if is_v2 {
+        OpenCodeVersion::V2
+    } else {
+        OpenCodeVersion::V1
+    }
+}
+
+pub fn resolve_opencode_version_fast(config: &AiConfig) -> OpenCodeVersion {
+    if let Some(version) = resolve_configured_opencode_version(config) {
+        return version;
+    }
+    let program = opencode_program(config);
+    if is_opencode_v2_program_name(&program) {
+        return OpenCodeVersion::V2;
+    }
+    if let Ok(guard) = OPENCODE_DETECTED_V2.try_read() {
+        if let Some(&is_v2) = guard.get(&program) {
+            return if is_v2 { OpenCodeVersion::V2 } else { OpenCodeVersion::V1 };
+        }
+    }
+    OpenCodeVersion::V1
+}
+
+pub fn is_unrecognized_pure_flag(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("--pure")
+        && (lower.contains("unrecognized") || lower.contains("unknown") || lower.contains("unexpected"))
+}
 
 struct OpenCodeIsolatedCwd {
     path: PathBuf,
@@ -216,21 +314,48 @@ fn opencode_selection_args(config: &AiConfig) -> Vec<String> {
 }
 
 pub fn build_opencode_command(config: &AiConfig) -> OpenCodeCommandSpec {
+    let version = resolve_opencode_version_fast(config);
+    build_opencode_command_for_version(config, version)
+}
+
+pub fn build_opencode_command_for_version(config: &AiConfig, version: OpenCodeVersion) -> OpenCodeCommandSpec {
     let mut command = OpenCodeCommandSpec { program: opencode_program(config), args: Vec::new() };
-    command.args.extend(["run".to_string(), "--format".to_string(), "json".to_string(), "--pure".to_string()]);
+    command.args.extend(["run".to_string(), "--format".to_string(), "json".to_string()]);
+    if version == OpenCodeVersion::V1 {
+        command.args.push("--pure".to_string());
+    }
     command.args.extend(opencode_selection_args(config));
     command
 }
 
-fn resolved_models_command(config: &AiConfig) -> Result<OpenCodeCommandSpec, String> {
+pub fn resolved_models_command(config: &AiConfig) -> Result<OpenCodeCommandSpec, String> {
+    let version = resolve_opencode_version_fast(config);
+    resolved_models_command_for_version(config, version)
+}
+
+pub fn resolved_models_command_for_version(
+    config: &AiConfig,
+    version: OpenCodeVersion,
+) -> Result<OpenCodeCommandSpec, String> {
     let mut command = resolve_opencode_command(config)?;
-    command.args.extend(["models".to_string(), "--verbose".to_string(), "--pure".to_string()]);
+    command.args.extend(["models".to_string(), "--verbose".to_string()]);
+    if version == OpenCodeVersion::V1 {
+        command.args.push("--pure".to_string());
+    }
     Ok(command)
 }
 
-fn resolved_run_command(config: &AiConfig) -> Result<OpenCodeCommandSpec, String> {
+pub fn resolved_run_command(config: &AiConfig) -> Result<OpenCodeCommandSpec, String> {
+    let version = resolve_opencode_version_fast(config);
+    resolved_run_command_for_version(config, version)
+}
+
+pub fn resolved_run_command_for_version(
+    config: &AiConfig,
+    version: OpenCodeVersion,
+) -> Result<OpenCodeCommandSpec, String> {
     let resolved = resolve_opencode_command(config)?;
-    let mut command = build_opencode_command(config);
+    let mut command = build_opencode_command_for_version(config, version);
     command.program = resolved.program;
     command.args.splice(0..0, resolved.args);
     Ok(command)
@@ -241,7 +366,13 @@ pub fn build_opencode_prompt(system_prompt: &str, messages: &[crate::ai::AiMessa
 }
 
 pub async fn list_opencode_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
-    let command = resolved_models_command(config)?;
+    let mut version = if let Some(configured) = resolve_configured_opencode_version(config) {
+        configured
+    } else {
+        let program = opencode_program(config);
+        detect_opencode_version(&program).await
+    };
+    let command = resolved_models_command_for_version(config, version)?;
     let runtime = OpenCodeIsolatedCwd::create()?;
     let mut process = cli_command(&command.program);
     process.args(&command.args);
@@ -258,7 +389,34 @@ pub async fn list_opencode_models(config: &AiConfig) -> Result<Vec<AiModelInfo>,
         .map_err(|error| classify_opencode_spawn_error(&error.to_string()))?;
 
     if !output.status.success() {
-        return Err(classify_opencode_run_error(&combined_output(&output.stderr, &output.stdout)));
+        let err_output = combined_output(&output.stderr, &output.stdout);
+        if version == OpenCodeVersion::V1 && is_unrecognized_pure_flag(&err_output) {
+            let program = opencode_program(config);
+            record_opencode_version_v2(&program).await;
+            version = OpenCodeVersion::V2;
+            let retry_command = resolved_models_command_for_version(config, version)?;
+            let mut retry_process = cli_command(&retry_command.program);
+            retry_process.args(&retry_command.args);
+            for key in OPENCODE_CONTROL_ENV {
+                retry_process.env_remove(key);
+            }
+            retry_process
+                .envs(opencode_process_env(config, opencode_runtime_config(None))?)
+                .current_dir(&runtime.path)
+                .kill_on_drop(true);
+            let retry_output = tokio::time::timeout(OPENCODE_MODEL_DISCOVERY_TIMEOUT, retry_process.output())
+                .await
+                .map_err(|_| "[openCodeTimeout] OpenCode model discovery timed out".to_string())?
+                .map_err(|error| classify_opencode_spawn_error(&error.to_string()))?;
+            if !retry_output.status.success() {
+                return Err(classify_opencode_run_error(&combined_output(&retry_output.stderr, &retry_output.stdout)));
+            }
+            return parse_opencode_models(&String::from_utf8_lossy(&retry_output.stdout)).ok_or_else(|| {
+                "[openCodeNotAuthenticated] OpenCode returned no configured models. Sign in or configure a provider in OpenCode, then retry."
+                    .to_string()
+            });
+        }
+        return Err(classify_opencode_run_error(&err_output));
     }
     parse_opencode_models(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
         "[openCodeNotAuthenticated] OpenCode returned no configured models. Sign in or configure a provider in OpenCode, then retry."
@@ -413,10 +571,22 @@ pub async fn run_opencode_agent(
     cancelled: &Notify,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
+    let version = if let Some(configured) = resolve_configured_opencode_version(config) {
+        configured
+    } else {
+        let program = opencode_program(config);
+        detect_opencode_version(&program).await
+    };
     let runtime = OpenCodeIsolatedCwd::create()?;
-    let result = run_cli_jsonl_agent(
+    let command = resolved_run_command_for_version(config, version)?;
+    let on_event_arc = Arc::new(on_event);
+    let on_event_fn = {
+        let on_event_arc = Arc::clone(&on_event_arc);
+        move |event| on_event_arc(event)
+    };
+    let run_res = run_cli_jsonl_agent(
         CliAgentProcessSpec {
-            command: resolved_run_command(config)?,
+            command,
             env: opencode_process_env(config, opencode_runtime_config(Some(&options)))?,
             env_remove: OPENCODE_CONTROL_ENV.iter().map(|value| (*value).to_string()).collect(),
             current_dir: Some(runtime.path.clone()),
@@ -426,9 +596,38 @@ pub async fn run_opencode_agent(
             classify_run_error: classify_opencode_run_error,
         },
         cancelled,
-        on_event,
+        on_event_fn,
     )
-    .await?;
+    .await;
+
+    let result = match run_res {
+        Err(err) if version == OpenCodeVersion::V1 && is_unrecognized_pure_flag(&err) => {
+            let program = opencode_program(config);
+            record_opencode_version_v2(&program).await;
+            let v2_command = resolved_run_command_for_version(config, OpenCodeVersion::V2)?;
+            let on_event_fn2 = {
+                let on_event_arc = Arc::clone(&on_event_arc);
+                move |event| on_event_arc(event)
+            };
+            run_cli_jsonl_agent(
+                CliAgentProcessSpec {
+                    command: v2_command,
+                    env: opencode_process_env(config, opencode_runtime_config(Some(&options)))?,
+                    env_remove: OPENCODE_CONTROL_ENV.iter().map(|value| (*value).to_string()).collect(),
+                    current_dir: Some(runtime.path.clone()),
+                    stdin: Some(prompt.to_string()),
+                    dialect: CliAgentJsonlDialect::OpenCodeRun,
+                    classify_spawn_error: classify_opencode_spawn_error,
+                    classify_run_error: classify_opencode_run_error,
+                },
+                cancelled,
+                on_event_fn2,
+            )
+            .await?
+        }
+        other => other?,
+    };
+
     if result.trim().is_empty() {
         Err("[openCodeProtocolError] OpenCode completed without a text response".to_string())
     } else {
@@ -469,6 +668,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -526,6 +726,70 @@ mod tests {
         let command = build_opencode_command(&config("default"));
 
         assert_eq!(command.args, ["run", "--format", "json", "--pure"]);
+    }
+
+    #[test]
+    fn builds_run_command_for_opencode2_executable() {
+        let mut config = config("default");
+        config.opencode_cli_path = Some("/usr/local/bin/opencode2".to_string());
+
+        let command = build_opencode_command(&config);
+
+        assert_eq!(command.program, "/usr/local/bin/opencode2");
+        assert_eq!(command.args, ["run", "--format", "json"]);
+    }
+
+    #[test]
+    fn builds_run_command_for_opencode2_configured_version() {
+        let mut config = config("default");
+        config.opencode_cli_version = Some("v2".to_string());
+
+        let command = build_opencode_command(&config);
+
+        assert_eq!(command.program, "opencode");
+        assert_eq!(command.args, ["run", "--format", "json"]);
+    }
+
+    #[test]
+    fn models_command_omits_pure_flag_for_v2() {
+        let mut config = config("default");
+        config.opencode_cli_version = Some("v2".to_string());
+
+        let command = resolved_models_command(&config).unwrap();
+
+        assert_eq!(command.program, "opencode");
+        assert_eq!(command.args, ["models", "--verbose"]);
+    }
+
+    #[test]
+    fn parses_opencode_version_string() {
+        assert!(parse_opencode_version_is_v2("opencode v2.0.1"));
+        assert!(parse_opencode_version_is_v2("opencode 2.0.0"));
+        assert!(parse_opencode_version_is_v2("2.1.0"));
+        assert!(parse_opencode_version_is_v2("v2.0.0-beta.1"));
+        assert!(!parse_opencode_version_is_v2("opencode v1.4.2"));
+        assert!(!parse_opencode_version_is_v2("opencode 0.9.1"));
+        assert!(!parse_opencode_version_is_v2(""));
+    }
+
+    #[test]
+    fn detects_opencode_v2_from_program_name() {
+        assert!(is_opencode_v2_program_name("opencode2"));
+        assert!(is_opencode_v2_program_name("opencode-2"));
+        assert!(is_opencode_v2_program_name("opencode-v2"));
+        assert!(is_opencode_v2_program_name("/usr/local/bin/opencode2"));
+        assert!(is_opencode_v2_program_name(r"C:\Program Files\OpenCode\opencode2.exe"));
+        assert!(!is_opencode_v2_program_name("opencode"));
+        assert!(!is_opencode_v2_program_name("/usr/bin/opencode"));
+    }
+
+    #[test]
+    fn detects_unrecognized_pure_flag_error() {
+        assert!(is_unrecognized_pure_flag("Unrecognized flag: --pure in command opencode run"));
+        assert!(is_unrecognized_pure_flag("error: unknown flag: --pure"));
+        assert!(is_unrecognized_pure_flag("ERROR\n  Unrecognized flag: --pure"));
+        assert!(!is_unrecognized_pure_flag("connection failed"));
+        assert!(!is_unrecognized_pure_flag("unknown model"));
     }
 
     #[test]

@@ -123,7 +123,26 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     let Some(strategy) = estimated_plan_strategy(options.database_type) else {
         return explain_err("unsupported");
     };
+    build_explain_sql_with_strategy(options, strategy)
+}
 
+/// Builds the only validated GaussDB(DWS) Estimated Plan form. This does not
+/// make `DatabaseType::Gaussdb` generally supported: callers must first verify
+/// the explicit DWS connection profile and supported server version.
+pub fn build_gaussdb_dws_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
+    if options.database_type != Some(DatabaseType::Gaussdb) {
+        return explain_err("unsupported");
+    }
+    if options.analyze == Some(true) {
+        return explain_err("unsafe");
+    }
+    build_explain_sql_with_strategy(options, gaussdb_dws_estimated_plan_strategy())
+}
+
+fn build_explain_sql_with_strategy(
+    options: ExplainSqlOptions,
+    strategy: EstimatedPlanStrategy,
+) -> ExplainSqlBuildResult {
     let source = strip_trailing_semicolons(options.sql.trim());
     if source.is_empty() {
         return explain_err("empty");
@@ -237,6 +256,16 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
         _ => return None,
     };
     Some(strategy)
+}
+
+/// The version-gated strategy used only for an explicitly identified and
+/// validated Huawei DWS connection. Generic GaussDB remains unsupported.
+pub const fn gaussdb_dws_estimated_plan_strategy() -> EstimatedPlanStrategy {
+    EstimatedPlanStrategy {
+        sql_generation: EstimatedPlanSqlGeneration::Postgres,
+        acquisition: EstimatedPlanAcquisition::GeneratedSql,
+        format: EstimatedPlanFormat::Json,
+    }
 }
 
 /// Payload encoding defined by the estimated-plan strategy for this dialect.
@@ -834,6 +863,7 @@ fn is_postgresql_family_database(database_type: DatabaseType) -> bool {
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
             | DatabaseType::Vastbase
+            | DatabaseType::Gbase8c
             | DatabaseType::Kwdb
     )
 }
@@ -2134,6 +2164,56 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn gaussdb_dws_strategy_is_explicit_and_keeps_the_generic_dialect_closed() {
+        use EstimatedPlanAcquisition::GeneratedSql;
+        use EstimatedPlanFormat::Json;
+
+        let strategy = gaussdb_dws_estimated_plan_strategy();
+        assert_eq!(strategy.acquisition(), GeneratedSql);
+        assert_eq!(strategy.format(), Json);
+        assert!(estimated_plan_strategy(Some(DatabaseType::Gaussdb)).is_none());
+        assert!(!supports_explain_plan(Some(DatabaseType::Gaussdb)));
+
+        let result = build_gaussdb_dws_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            format: None,
+            analyze: None,
+            sql: "SELECT 1".to_string(),
+        });
+        assert_eq!(result.sql.as_deref(), Some("EXPLAIN (FORMAT JSON) SELECT 1"));
+        assert!(result.ok);
+
+        for options in [
+            ExplainSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                format: None,
+                analyze: Some(true),
+                sql: "SELECT 1".to_string(),
+            },
+            ExplainSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                format: None,
+                analyze: None,
+                sql: "DELETE FROM users".to_string(),
+            },
+        ] {
+            assert!(!build_gaussdb_dws_explain_sql(options).ok);
+        }
+
+        assert_eq!(
+            build_gaussdb_dws_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                format: None,
+                analyze: None,
+                sql: "SELECT 1".to_string(),
+            })
+            .reason
+            .as_deref(),
+            Some("unsupported")
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ const props = withDefaults(
     canExportXlsx?: boolean;
     displayMode?: "tabs" | "list";
     hasSiblingRunTabs?: boolean;
+    connectionColor?: string;
   }>(),
   {
     displayMode: "tabs",
@@ -132,6 +133,7 @@ watch(
               :title="activeItem?.label || activeItem?.title || (activeItem ? t('tabs.resultN', { n: activeItem.n }) : t('tabs.resultSets'))"
               :aria-label="activeItem?.displayLabel || activeItem?.label || (activeItem ? t('tabs.resultN', { n: activeItem.n }) : t('tabs.resultSets'))"
             >
+              <span v-if="connectionColor" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor }" aria-hidden="true" />
               <span class="truncate">{{ activeItem?.displayLabel || activeItem?.label || (activeItem ? t("tabs.resultN", { n: activeItem.n }) : t("tabs.resultSets")) }}</span>
               <ChevronDown class="h-3.5 w-3.5 shrink-0 opacity-70" />
             </Button>
@@ -148,6 +150,7 @@ watch(
           :title="activeItem?.label || activeItem?.title || (activeItem ? t('tabs.resultN', { n: activeItem.n }) : t('tabs.resultSets'))"
           :aria-label="activeItem?.displayLabel || activeItem?.label || (activeItem ? t('tabs.resultN', { n: activeItem.n }) : t('tabs.resultSets'))"
         >
+          <span v-if="connectionColor" data-result-connection-color class="mr-1 h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor }" aria-hidden="true" />
           <span class="truncate">{{ activeItem?.displayLabel || activeItem?.label || (activeItem ? t("tabs.resultN", { n: activeItem.n }) : t("tabs.resultSets")) }}</span>
         </Button>
       </div>
@@ -157,6 +160,7 @@ watch(
         <div ref="scroller" class="result-set-scroll flex h-full items-center gap-1 overflow-x-auto overflow-y-hidden px-1" @scroll="updateScrollButtons" @wheel="onTabsWheel">
           <LightTooltip v-for="item in items" :key="item.index" :text="item.label || item.title || t('tabs.resultN', { n: item.n })" :delay="150" :close-delay="0" nowrap>
             <Button size="sm" :variant="active && activeIndex === item.index ? 'default' : 'ghost'" class="h-6 max-w-48 shrink-0 px-2 text-xs" :data-active="active && activeIndex === item.index ? 'true' : undefined" :aria-pressed="active && activeIndex === item.index" @click="select(item)">
+              <span v-if="connectionColor" data-result-connection-color class="mr-1 h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor }" aria-hidden="true" />
               <span class="truncate">{{ item.displayLabel || item.label || t("tabs.resultN", { n: item.n }) }}</span>
             </Button>
           </LightTooltip>

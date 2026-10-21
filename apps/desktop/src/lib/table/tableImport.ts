@@ -61,6 +61,16 @@ export function resolveTableImportElapsed(liveElapsedMs: number, backendElapsedM
   return Math.max(live, backend ?? 0);
 }
 
+export function formatTableImportPreviewCell(value: unknown): string {
+  if (value === null) return "NULL";
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const marker = value as Record<string, unknown>;
+    if (Object.keys(marker).length === 1 && marker.$dbxSqlImportExpression === "currentTimestamp") return "CURRENT_TIMESTAMP";
+  }
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
 export function tableImportProgressPercent(progress: TableImportProgressLike | null | undefined): number {
   if (!progress) return 0;
   if (progress.status === "done") return 100;

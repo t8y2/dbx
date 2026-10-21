@@ -273,7 +273,9 @@ describe("tableMetaWithoutOptionalDatabaseQualifier — copy extractors (#9326)"
 describe("qualifiedTableName — GBase 8s", () => {
   it("omits the metadata owner for GBase 8s table data", () => {
     expect(qualifiedTableName({ databaseType: "informix", driverProfile: "gbase8s", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke" })).toBe("connection_smoke");
+    expect(qualifiedTableName({ databaseType: "gbase8s", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke" })).toBe("connection_smoke");
     expect(quoteTableDataIdentifier("informix", "connection_smoke", "")).toBe("connection_smoke");
+    expect(quoteTableDataIdentifier("gbase8s", "connection_smoke", "")).toBe("connection_smoke");
   });
 
   it("keeps native Informix owner qualification", () => {

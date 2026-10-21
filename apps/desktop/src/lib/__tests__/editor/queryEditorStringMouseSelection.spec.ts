@@ -1,5 +1,5 @@
 import { EditorSelection, EditorState } from "@codemirror/state";
-import type { EditorView, ViewUpdate } from "@codemirror/view";
+import type { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { sqlStringContentRangeAt, trimSqlStringWildcardBoundaries, type SqlSemanticSelectionOptions } from "@/lib/editor/sqlSemanticSelectionRanges";
@@ -183,5 +183,52 @@ describe("query editor SQL string mouse selection", () => {
     expect(doc.slice(1, 4)).toBe("a_b");
     // A range with no boundary wildcards is returned unchanged.
     expect(trimSqlStringWildcardBoundaries("abc", { from: 0, to: 3 })).toEqual({ from: 0, to: 3 });
+  });
+
+  it("does not treat PostgreSQL stored procedure or function bodies as string literal selections (#12966)", () => {
+    const procedure = ["CREATE OR REPLACE PROCEDURE public.process_orders(p_status text)", " LANGUAGE plpgsql", "AS $procedure$", "BEGIN", "    UPDATE orders SET status = p_status WHERE active = true;", "    SELECT * FROM my_table;", "END;", "$procedure$;"].join("\n");
+
+    const state = EditorState.create({ doc: procedure });
+    const view = fakeView(state).view;
+
+    // Double clicking on table name, variable, or statement inside the procedure body should not select the entire body.
+    for (const needle of ["my_table", "orders", "p_status", "UPDATE", "SELECT"]) {
+      const pos = procedure.indexOf(needle);
+      expect(contentAt(procedure, pos, 1, { dialect: "postgres" })).toBeNull();
+      expect(createQueryEditorStringMouseSelection(view, eventAt(pos), { dialect: "postgres" })).toBeNull();
+    }
+  });
+
+  it("does not select procedural bodies in single-line procedures, functions, DO blocks, or multi-line strings (#12966)", () => {
+    const cases: Array<{ doc: string; needle: string; options?: SqlSemanticSelectionOptions }> = [
+      {
+        doc: "CREATE PROCEDURE clear_logs() LANGUAGE sql AS $$ DELETE FROM app_logs; $$;",
+        needle: "app_logs",
+        options: { dialect: "postgres" },
+      },
+      {
+        doc: "CREATE OR REPLACE FUNCTION get_user_count() RETURNS int LANGUAGE sql AS $$ SELECT count(*) FROM users; $$;",
+        needle: "users",
+        options: { dialect: "postgres" },
+      },
+      {
+        doc: "DO $$\nBEGIN\n    PERFORM cleanup_temp_tables();\nEND;\n$$;",
+        needle: "cleanup_temp_tables",
+        options: { dialect: "postgres" },
+      },
+      {
+        doc: "SELECT 'first line\nsecond line with my_table\nthird line';",
+        needle: "my_table",
+        options: { dialect: "postgres" },
+      },
+    ];
+
+    for (const { doc, needle, options } of cases) {
+      const pos = doc.indexOf(needle);
+      const state = EditorState.create({ doc });
+      const view = fakeView(state).view;
+      expect(contentAt(doc, pos, 1, options)).toBeNull();
+      expect(createQueryEditorStringMouseSelection(view, eventAt(pos), options)).toBeNull();
+    }
   });
 });

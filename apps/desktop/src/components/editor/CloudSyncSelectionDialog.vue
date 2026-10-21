@@ -141,6 +141,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   pluginShortcuts: "shortcuts",
   objectBrowserShowCheckbox: "data",
   objectBrowserViewMode: "data",
+  objectBrowserAutoOpenDetailPanel: "navigation",
 };
 
 function editorSettingCategory(id: string): BackupSettingsCategoryId {

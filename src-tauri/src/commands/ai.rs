@@ -482,7 +482,22 @@ fn resolve_cli_provider_config(mut config: AiConfig) -> AiConfig {
         AiProvider::CodexCli => (&mut config.codex_cli_path, "codex"),
         AiProvider::ClaudeCodeCli => (&mut config.claude_code_cli_path, "claude"),
         AiProvider::PiAgentCli => (&mut config.pi_agent_cli_path, "pi"),
-        AiProvider::OpenCodeCli => (&mut config.opencode_cli_path, "opencode"),
+        AiProvider::OpenCodeCli => {
+            let default_cmd = if matches!(config.opencode_cli_version.as_deref(), Some("v2" | "2")) {
+                if super::mcp::locate_command("opencode2").is_some() {
+                    "opencode2"
+                } else {
+                    "opencode"
+                }
+            } else if super::mcp::locate_command("opencode").is_none()
+                && super::mcp::locate_command("opencode2").is_some()
+            {
+                "opencode2"
+            } else {
+                "opencode"
+            };
+            (&mut config.opencode_cli_path, default_cmd)
+        }
         AiProvider::CursorCli => (&mut config.cursor_cli_path, "agent"),
         AiProvider::GrokCli => (&mut config.grok_cli_path, "grok"),
         AiProvider::CodeBuddyCli => (&mut config.codebuddy_cli_path, "codebuddy"),
@@ -739,6 +754,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,

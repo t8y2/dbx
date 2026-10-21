@@ -335,6 +335,25 @@ describe("buildSelectAllSql", () => {
   it("falls back to double quotes for Kingbase when no identifier quote is reported", () => {
     expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, undefined, undefined, true)).toBe('SELECT * FROM "audit_schema"."events"');
   });
+
+  it("keeps the authored upper case when the keyword case is preserve or upper", () => {
+    // `preserve` means "do not rewrite what the template already says", so the
+    // default must stay byte-identical to the pre-#12933 output.
+    expect(buildSelectAllSql("mysql", { tableName: "users" })).toBe("SELECT * FROM `users`");
+    expect(buildSelectAllSql("mysql", { tableName: "users" }, undefined, undefined, false, true, "preserve")).toBe("SELECT * FROM `users`");
+    expect(buildSelectAllSql("mysql", { tableName: "users" }, undefined, undefined, false, true, "upper")).toBe("SELECT * FROM `users`");
+  });
+
+  it("lower-cases the generated keywords when the formatter is set to lower", () => {
+    expect(buildSelectAllSql("mysql", { tableName: "users" }, undefined, undefined, false, true, "lower")).toBe("select * from `users`");
+    // Identifiers keep their own case: only keywords follow the setting.
+    expect(buildSelectAllSql("sqlserver", { schema: "dbo", tableName: "Users" }, undefined, undefined, false, true, "lower")).toBe("select * from [dbo].[Users]");
+  });
+
+  it("lower-cases every keyword of the InfluxDB templates", () => {
+    expect(buildSelectAllSql("influxdb", { tableName: "cpu" }, undefined, undefined, false, true, "lower")).toBe('select * from "cpu" where time > now() - 5m order by time desc limit 100');
+    expect(buildSelectAllSql("influxdb3", { tableName: "cpu" }, undefined, undefined, false, true, "lower")).toBe("select * from \"cpu\" where time > now() - interval '5 minutes' order by time desc limit 100");
+  });
 });
 
 describe("isNewQueryPrefillSupported", () => {
@@ -390,6 +409,20 @@ describe("resolveNewQueryInitialSql", () => {
         quoteIdentifiers: false,
       }),
     ).toBe("SELECT * FROM public.users");
+  });
+
+  it("forwards the configured keyword case into the prefilled statement (#12933)", () => {
+    const base = {
+      activeTab: dataTab(),
+      prefillEnabled: true,
+      targetConnectionId: "conn-1",
+      targetDatabase: "app_db",
+      databaseType: "postgres" as const,
+    };
+    expect(resolveNewQueryInitialSql(base)).toBe('SELECT * FROM "users"');
+    expect(resolveNewQueryInitialSql({ ...base, keywordCase: "lower" })).toBe('select * from "users"');
+    expect(resolveNewQueryInitialSql({ ...base, keywordCase: "upper" })).toBe('SELECT * FROM "users"');
+    expect(resolveNewQueryInitialSql({ ...base, keywordCase: "preserve" })).toBe('SELECT * FROM "users"');
   });
 
   it("passes the Phoenix driver profile into the initial SQL builder", () => {

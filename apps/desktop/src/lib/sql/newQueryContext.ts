@@ -1,6 +1,7 @@
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { metricRangeQuery, qualifiedTableName } from "@/lib/table/tableSelectSql";
+import type { SqlFormatterCase } from "@/lib/sql/sqlFormatterConfig";
 import type { ConnectionConfig, DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
 export interface NewQueryTarget {
@@ -122,6 +123,8 @@ export interface ResolveNewQueryInitialSqlInput extends ResolveNewQueryTableInpu
   identifierQuote?: string;
   includeDatabaseName?: boolean;
   quoteIdentifiers?: boolean;
+  /** `设置 → SQL 格式化 → 关键词大小写`; the generated template follows it (#12933). */
+  keywordCase?: SqlFormatterCase;
 }
 
 // Database types whose "table" view does not use standard SQL `SELECT * FROM <table>`
@@ -185,16 +188,38 @@ export function resolveNewQueryTable(input: ResolveNewQueryTableInput): NewQuery
  * full-history scan the moment the user hits Run. VictoriaMetrics
  * already has its own metric range template above.
  */
-export function buildSelectAllSql(databaseType: DatabaseType | undefined, table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>, identifierQuote?: string, driverProfile?: string, includeDatabaseName = false, quoteIdentifiers = true): string {
+/**
+ * Returns a keyword caster for the generated templates.
+ *
+ * The templates below author their keywords in upper case, which is what
+ * `preserve` (and `upper`) must keep producing; only an explicit `lower`
+ * setting rewrites them. Generated SQL is user-authored content, so the
+ * `设置 → SQL 格式化 → 关键词大小写` preference has to apply here too,
+ * otherwise "新建查询" contradicts the formatter (#12933).
+ */
+function keywordCaser(mode: SqlFormatterCase | undefined): (keyword: string) => string {
+  return mode === "lower" ? (keyword) => keyword.toLowerCase() : (keyword) => keyword;
+}
+
+export function buildSelectAllSql(
+  databaseType: DatabaseType | undefined,
+  table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>,
+  identifierQuote?: string,
+  driverProfile?: string,
+  includeDatabaseName = false,
+  quoteIdentifiers = true,
+  keywordCase: SqlFormatterCase = "preserve",
+): string {
   if (databaseType === "victoriametrics") return metricRangeQuery(table.tableName);
   const ref = qualifiedTableName({ databaseType, driverProfile, identifierQuote, database: table.database, schema: table.schema, catalog: table.catalog, tableName: table.tableName, includeDatabaseName, quoteIdentifiers });
+  const kw = keywordCaser(keywordCase);
   if (databaseType === "influxdb") {
-    return `SELECT * FROM ${ref} WHERE time > now() - 5m ORDER BY time DESC LIMIT 100`;
+    return `${kw("SELECT")} * ${kw("FROM")} ${ref} ${kw("WHERE")} time > now() - 5m ${kw("ORDER BY")} time ${kw("DESC")} ${kw("LIMIT")} 100`;
   }
   if (databaseType === "influxdb3") {
-    return `SELECT * FROM ${ref} WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100`;
+    return `${kw("SELECT")} * ${kw("FROM")} ${ref} ${kw("WHERE")} time > now() - ${kw("INTERVAL")} '5 minutes' ${kw("ORDER BY")} time ${kw("DESC")} ${kw("LIMIT")} 100`;
   }
-  return `SELECT * FROM ${ref}`;
+  return `${kw("SELECT")} * ${kw("FROM")} ${ref}`;
 }
 
 /**
@@ -208,5 +233,5 @@ export function resolveNewQueryInitialSql(input: ResolveNewQueryInitialSqlInput)
   const table = resolveNewQueryTable(input);
   if (!table || table.connectionId !== input.targetConnectionId || table.database !== input.targetDatabase) return undefined;
 
-  return buildSelectAllSql(input.databaseType, table, input.identifierQuote, input.driverProfile, input.includeDatabaseName, input.quoteIdentifiers);
+  return buildSelectAllSql(input.databaseType, table, input.identifierQuote, input.driverProfile, input.includeDatabaseName, input.quoteIdentifiers, input.keywordCase);
 }

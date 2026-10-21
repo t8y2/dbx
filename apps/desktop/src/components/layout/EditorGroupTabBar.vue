@@ -2333,14 +2333,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             <!-- The collapsed rail has no row width for the label or the trailing
                                  close button (#12942); overlay it so a tab can be closed without
                                  expanding the rail and switching to it first. -->
-                            <button
-                              v-else
-                              class="compact-close-tab-button"
-                              :aria-label="t('contextMenu.closeTab')"
-                              :title="t('contextMenu.closeTab')"
-                              @pointerdown.stop
-                              @click.stop="closeTab(entry.tab)"
-                            >
+                            <button v-else class="compact-close-tab-button" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
                               <X class="h-2.5 w-2.5" />
                             </button>
                           </div>

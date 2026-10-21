@@ -89,7 +89,8 @@ describe("SidebarTreeRuntimeHost saved SQL context menu (#9127)", () => {
     expect(grouped[0]).toBe(filter);
     const hidden = buildSidebarMenuLayout(raw, "connection", "grouped", [], tr, { hiddenPrimaryIds: ["contextMenu.configureVisibleObjects"] });
     expect(hidden).not.toContain(filter);
-    expect(hidden.find((entry) => entry.sidebarActionId === "group.organize")?.children).toContainEqual(expect.objectContaining({ action: filter!.action }));
+    // Opting out removes the entry from the grouped layout entirely (#12791).
+    expect(menuLabels(hidden)).not.toContain(tr(dbType === "oracle" ? "visibleSchemas.title" : "contextMenu.configureVisibleObjects"));
   });
 
   it.each(["mysql", "postgres", "oracle", "sqlserver"])("puts database search in data tools and pinning directly in %s database and table menus", async (dbType) => {

@@ -2,6 +2,7 @@ import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlForma
 import { formatSqlLayout, type SqlLayoutOptions } from "@/lib/sql/layout";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 import { compressCypherText, formatCypherText } from "@/lib/sql/cypherFormatter";
+import { indentRoutineBlocks } from "@/lib/sql/routineBlockLayout";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 
 export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "oracle" | "clickhouse" | "dameng" | "duckdb" | "cypher" | "generic";
@@ -571,14 +572,19 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     return laidOut ?? formatWithFallback(input);
   };
 
+  // Routine bodies have no block nodes in sql-formatter's grammar, so the
+  // clause layout prints their statements at column 0. Re-indent them once all
+  // other passes have run, i.e. on text that is already the final SQL.
+  const applyRoutineBlockLayout = (formatted: string): string => indentRoutineBlocks(formatted, dialect, normalizedSettings.tabWidth, normalizedSettings.useTabs);
+
   try {
-    return finalizeFormattedSql(await formatOnce(protectedInput.sql));
+    return applyRoutineBlockLayout(finalizeFormattedSql(await formatOnce(protectedInput.sql)));
   } catch (err) {
     const trailingDot = dialect === "dameng" ? splitTrailingStandaloneDot(protectedInput.sql) : null;
     if (!trailingDot) throw err;
 
     try {
-      return finalizeFormattedSql(`${await formatOnce(trailingDot.body)}${trailingDot.suffix}`);
+      return applyRoutineBlockLayout(finalizeFormattedSql(`${await formatOnce(trailingDot.body)}${trailingDot.suffix}`));
     } catch {
       throw err;
     }

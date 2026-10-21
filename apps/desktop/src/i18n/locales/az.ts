@@ -6463,6 +6463,7 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "Cədvəl məlumatlarını idxal et",
+    titleDatabase: "Məlumatları idxal et",
     target: "Hədəf cədvəl",
     selectFile: "Fayl seç",
     changeFile: "Faylı dəyiş",

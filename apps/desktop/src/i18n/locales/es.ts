@@ -7088,6 +7088,7 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "Importar datos a tabla",
+    titleDatabase: "Importar datos",
     minimize: "Minimizar importación",
     restoreImport: "Restaurar importación",
     backgroundWarning: "Las filas pueden aparecer a medida que se escriben. El acceso simultáneo a la tabla de destino puede esperar o fallar debido a bloqueos de la base de datos, el aislamiento de transacciones o las restricciones.",

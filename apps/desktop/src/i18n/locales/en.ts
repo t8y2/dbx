@@ -7969,6 +7969,7 @@ export default {
   },
   tableImport: {
     title: "Import Table Data",
+    titleDatabase: "Import Data",
     minimize: "Minimize import",
     restoreImport: "Restore import",
     backgroundWarning: "Rows may appear as they are written. Concurrent access to the target table may wait or fail because of database locks, transaction isolation, or constraints.",

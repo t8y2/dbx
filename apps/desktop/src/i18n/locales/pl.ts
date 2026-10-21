@@ -7183,6 +7183,7 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "Aktualizacja zabezpieczeń danych",
+    titleDatabase: "Importuj dane",
     minimize: "Minimalizuj import",
     restoreImport: "Przywróć import",
     backgroundWarning: "Wiersze mogą pojawiać się w miarę ich zapisywania. Równoczesny dostęp do tabeli docelowej może oczekiwać lub zakończyć się błędem z powodu blokad bazy danych, izolacji transakcji lub ograniczeń.",

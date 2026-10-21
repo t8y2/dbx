@@ -7937,6 +7937,7 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "导入表数据",
+    titleDatabase: "导入数据",
     minimize: "收起导入窗口",
     restoreImport: "恢复导入窗口",
     backgroundWarning: "导入期间目标表可能逐批写入并暂时只显示部分数据；并发读写该表可能因数据库锁、事务隔离或约束而等待、冲突或失败。",

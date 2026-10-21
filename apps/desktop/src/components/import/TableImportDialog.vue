@@ -250,6 +250,13 @@ const requiredUnmappedColumns = computed(() =>
   ),
 );
 const isBatchImport = computed(() => targetMode.value === "create" && batchTasks.value.length > 1);
+/**
+ * The dialog is reachable from two entries: a table's own import (which lands on
+ * that table, `prefillTable` set) and the database-level "Import data" entry,
+ * which imports a backup and may create several tables. Both said
+ * "Import table data", which reads wrong for the second one (#13029).
+ */
+const dialogTitle = computed(() => (props.prefillTable ? t("tableImport.title") : t("tableImport.titleDatabase")));
 const selectedBatchTasks = computed(() => batchTasks.value.filter((task) => task.selected));
 const batchTargetNamesValid = computed(() => {
   const tableNames = selectedBatchTasks.value.map((task) => task.tableName.trim().toLowerCase());
@@ -1399,7 +1406,7 @@ watch(rawProgressPercent, (percent) => {
       <DialogHeader class="shrink-0 flex-row items-center pr-8" @pointerdown="startDialogDrag">
         <DialogTitle class="flex min-w-0 flex-1 items-center gap-2 text-base">
           <FileUp class="h-4 w-4" />
-          {{ t("tableImport.title") }}
+          {{ dialogTitle }}
         </DialogTitle>
         <Button variant="ghost" size="icon-sm" :aria-label="t('tableImport.minimize')" :title="t('tableImport.minimize')" @pointerdown.stop @click="minimizeImport">
           <Minimize2 class="h-4 w-4" />

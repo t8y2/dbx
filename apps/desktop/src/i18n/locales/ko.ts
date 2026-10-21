@@ -6789,6 +6789,7 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "테이블 데이터 가져오기",
+    titleDatabase: "데이터 가져오기",
     minimize: "가져오기 창 최소화",
     restoreImport: "가져오기 창 복원",
     backgroundWarning: "데이터를 쓰는 동안 행이 순차적으로 표시될 수 있습니다. 대상 테이블에 동시에 접근하면 데이터베이스 잠금, 트랜잭션 격리 또는 제약 조건으로 인해 대기하거나 실패할 수 있습니다.",

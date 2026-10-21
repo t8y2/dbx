@@ -7128,6 +7128,7 @@ export default withEnglishFallback({
 
   tableImport: {
     title: "Impor Data Tabel",
+    titleDatabase: "Impor Data",
     minimize: "Perkecil impor",
     restoreImport: "Pulihkan tampilan impor",
     backgroundWarning: "Baris mungkin muncul saat sedang ditulis. Akses bersamaan ke tabel target dapat menunggu atau gagal karena penguncian database, isolasi transaksi, atau batasan (constraint).",

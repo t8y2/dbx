@@ -8612,6 +8612,7 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "นำเข้าข้อมูล Table",
+    titleDatabase: "นำเข้าข้อมูล",
     minimize: "ย่อการนำเข้า",
     restoreImport: "เปิดหน้าต่างนำเข้าอีกครั้ง",
     backgroundWarning: "Rows อาจแสดงขณะเขียน การเข้าถึง Table เป้าหมายพร้อมกันอาจรอหรือล้มเหลวเนื่องจาก Lock ฐานข้อมูล Isolation ของ Transaction หรือ Constraint",

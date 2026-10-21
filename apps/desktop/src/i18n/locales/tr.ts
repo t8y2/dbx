@@ -6345,6 +6345,7 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "Tablo Verisi İçe Aktar",
+    titleDatabase: "Veri İçe Aktar",
     target: "Hedef tablo",
     selectFile: "Dosya Seç",
     changeFile: "Dosyayı Değiştir",

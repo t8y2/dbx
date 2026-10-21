@@ -67,6 +67,12 @@ describe("findGeneratorKey honors the column type with modifiers (#12994)", () =
   it("still prefers the auto-increment sequence over the declared type", () => {
     expect(findGeneratorKey("id", "bigint", true)).toBe("sequence");
   });
+
+  it("only treats the PostgreSQL serial pseudo-type as a sequence", () => {
+    expect(findGeneratorKey("value", "serial_number_code")).toBe("text");
+    expect(findGeneratorKey("value", "serial(8)")).toBe("sequence");
+    expect(findGeneratorKey("value", "smallserial")).toBe("sequence");
+  });
 });
 
 describe("generated values match the declared column type (#12994)", () => {

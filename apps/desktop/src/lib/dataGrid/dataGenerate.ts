@@ -1229,12 +1229,25 @@ export function isBooleanColumnType(dataType: string): boolean {
   return BOOLEAN_COLUMN_TYPE_RE.test(normalizeColumnDataType(raw));
 }
 
+/**
+ * `serial` and its aliases are the only types whose name contains "serial":
+ * PostgreSQL's `serial` / `smallserial` / `bigserial` pseudo-type (and the
+ * `serial2` / `serial4` / `serial8` spellings). Matching the substring instead
+ * classified any other type whose text mentions serial, such as the
+ * `serial_number_code` column the app-tests cover, as an integer.
+ */
+const SERIAL_TYPE_RE = /^(?:big|small)?serial[248]?$/;
+
+function isSerialType(dataType: string): boolean {
+  return SERIAL_TYPE_RE.test(normalizeColumnDataType(dataType));
+}
+
 export function findGeneratorKey(columnName: string, dataType: string, isAutoIncrement?: boolean): string {
   if (isAutoIncrement) return "sequence";
   const type = normalizeColumnDataType(dataType);
   // `serial` / `bigserial` increment by definition, so they stay on the sequence
   // generator even when the driver does not report a default for them.
-  if (type.includes("serial")) return "sequence";
+  if (isSerialType(dataType)) return "sequence";
   const isNumeric = /^number$/.test(type) || type.includes("int") || type.includes("bool") || /^bit\b/.test(type) || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
   const isDateTime = type.includes("date") || type.includes("timestamp") || /^time\b/.test(type);
   const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
@@ -1803,7 +1816,7 @@ export function generateValue(columnName: string, dataType: string, generatorKey
 
 function generateByType(type: string, rowIndex: number): unknown {
   const t = normalizeColumnDataType(type);
-  if (t.includes("int") || t.includes("serial") || t === "bigint" || t === "smallint" || t === "tinyint") return randInt(1, 1000);
+  if (t.includes("int") || isSerialType(type) || t === "bigint" || t === "smallint" || t === "tinyint") return randInt(1, 1000);
   if (t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real") return randDecimal(0, 10000, 2);
   if (t.includes("bool")) return Math.random() > 0.5 ? 1 : 0;
   // `datetime` / `timestamp` need a full timestamp; a bare TIME column only

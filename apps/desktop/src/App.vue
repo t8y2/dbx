@@ -171,6 +171,7 @@ import {
   switchToTabIndexFromShortcut,
   tabSwitcherDirectionFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
+import { DBX_VIM_ACTION_EVENT, type DbxVimActionEvent } from "@/lib/editor/vimDbxActions";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { initialTabSwitcherSelection, moveTabSwitcherSelection, tabSwitcherOrder } from "@/lib/tabs/tabSwitcher";
 import { createModifierDoubleTapShortcutController, isModifierDoubleTapShortcut, matchesModifierDoubleTapShortcut } from "@/lib/editor/modifierDoubleTapShortcut";
@@ -4578,6 +4579,29 @@ async function closeActiveSurface() {
     queryStore.closeTab(queryStore.activeTabId);
   }
 }
+// App-scoped `:dbx` actions. Editor-scoped ones are handled (and stopped) in
+// QueryEditor before the event bubbles up to window.
+function handleVimDbxAppAction(event: Event) {
+  const { action } = (event as DbxVimActionEvent).detail;
+  switch (action) {
+    case "newQuery":
+      void newQuery();
+      break;
+    case "closeTab":
+      void closeActiveSurface();
+      break;
+    case "reopenClosedTab":
+      queryStore.reopenClosedTab();
+      break;
+    case "openSettings":
+      openSettings();
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+}
+
 async function handleKeydown(e: KeyboardEvent) {
   if (e.defaultPrevented) return;
 
@@ -5129,6 +5153,7 @@ onMounted(async () => {
   window.addEventListener("keydown", handleTabSwitcherKeydownCapture, true);
   window.addEventListener("keydown", handleAuxiliarySearchKeydownCapture, true);
   window.addEventListener("keydown", handleKeydown);
+  window.addEventListener(DBX_VIM_ACTION_EVENT, handleVimDbxAppAction);
   window.addEventListener("keyup", handleKeyup, true);
   window.addEventListener("blur", handleTabSwitcherWindowBlur);
   document.addEventListener("visibilitychange", handleTabSwitcherVisibilityChange);
@@ -5225,6 +5250,7 @@ onUnmounted(() => {
   window.removeEventListener("keydown", handleTabSwitcherKeydownCapture, true);
   window.removeEventListener("keydown", handleAuxiliarySearchKeydownCapture, true);
   window.removeEventListener("keydown", handleKeydown);
+  window.removeEventListener(DBX_VIM_ACTION_EVENT, handleVimDbxAppAction);
   window.removeEventListener("keyup", handleKeyup, true);
   window.removeEventListener("blur", handleTabSwitcherWindowBlur);
   document.removeEventListener("visibilitychange", handleTabSwitcherVisibilityChange);

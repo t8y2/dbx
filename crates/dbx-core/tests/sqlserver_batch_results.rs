@@ -236,3 +236,47 @@ async fn sqlserver_duplicate_join_columns_page_without_leaking_rowcount() {
             .expect("execute query after ROWCOUNT page");
     assert_eq!(follow_up.rows.len(), 2);
 }
+
+/// The desktop grid only ever shows `max_rows` rows. Reading the rest of the
+/// TDS stream costs ~10-15us per discarded row, which is what turns a
+/// few-hundred-ms query into a 10s+ stall when the executed SQL is unbounded.
+/// The stopping path must return the same bounded result but leave the client
+/// flagged for pool replacement instead of draining the whole result.
+#[tokio::test]
+#[ignore = "requires DBX_TEST_SQLSERVER_HOST and DBX_TEST_SQLSERVER_PASSWORD"]
+async fn sqlserver_stops_reading_after_row_limit_and_flags_the_connection() {
+    let mut client = connect_sqlserver().await;
+
+    // A huge streaming result that needs no fixture tables: every SQL Server
+    // has sys.all_columns, and the cross join keeps producing rows forever.
+    let sql = "SELECT a.object_id, b.object_id FROM sys.all_columns a CROSS JOIN sys.all_columns b";
+
+    let started = std::time::Instant::now();
+    let result = sqlserver::execute_query_with_max_rows_stopping(&mut client, sql, Some(100))
+        .await
+        .expect("execute stopping query");
+    let elapsed = started.elapsed();
+
+    assert_eq!(result.rows.len(), 100);
+    assert!(result.truncated, "the row limit must still be reported as truncation");
+    assert!(client.take_abandoned_after_row_limit(), "the client must be flagged for pool replacement");
+    assert!(!client.take_abandoned_after_row_limit(), "the flag must be one-shot");
+    assert!(elapsed < Duration::from_secs(30), "stopping must not drain the result: {elapsed:?}");
+
+    // The abandoned client is never reused. A replacement connection (what the
+    // pool creates after removing the abandoned one) must work normally.
+    let mut replacement = connect_sqlserver().await;
+    let health = sqlserver::execute_query_with_max_rows(&mut replacement, "SELECT 1 AS ok", Some(10))
+        .await
+        .expect("replacement connection query");
+    assert_eq!(health.rows.len(), 1);
+
+    // A result that fits under the limit keeps the connection usable.
+    let mut small = connect_sqlserver().await;
+    let small_result = sqlserver::execute_query_with_max_rows_stopping(&mut small, "SELECT 1 AS ok", Some(10))
+        .await
+        .expect("execute small stopping query");
+    assert_eq!(small_result.rows.len(), 1);
+    assert!(!small_result.truncated);
+    assert!(!small.take_abandoned_after_row_limit());
+}

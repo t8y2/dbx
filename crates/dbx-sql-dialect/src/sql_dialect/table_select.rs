@@ -184,7 +184,8 @@ fn build_large_value_preview_items(options: &TableDataSelectSqlOptions) -> Optio
         let prefix_size = preview_size.saturating_add(1);
 
         let alias_kind = large_value_marker_alias_kind(kind, data_type);
-        let marker_name = format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{}", column_index + source_index_offset);
+        let marker_name =
+            format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{}", column_index + source_index_offset);
         let marker_alias = quote_table_identifier(database_type, &marker_name);
         let (preview, marker_kind) = match database_type {
             Some(DatabaseType::Mysql) if kind == LargeValuePreviewKind::Binary => {
@@ -236,7 +237,7 @@ fn build_large_value_preview_items(options: &TableDataSelectSqlOptions) -> Optio
         items.push(LargeValuePreviewItem { projection: marker, alias: marker_name });
         marker_count += 1;
     }
-    (marker_count > 0).then(|| items)
+    (marker_count > 0).then_some(items)
 }
 
 fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Option<String> {

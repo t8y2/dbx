@@ -1141,18 +1141,12 @@ fn builds_oracle_table_data_large_value_previews_with_bounded_substr() {
         ),
         "outer page projection: {sql}"
     );
-    assert!(
-        sql.contains("DBMS_LOB.SUBSTR(\"REQ_PAYLOAD\", 1000, 1) AS \"REQ_PAYLOAD\""),
-        "clob preview sql: {sql}"
-    );
+    assert!(sql.contains("DBMS_LOB.SUBSTR(\"REQ_PAYLOAD\", 1000, 1) AS \"REQ_PAYLOAD\""), "clob preview sql: {sql}");
     assert!(
         sql.contains("'T:999:' || DBMS_LOB.GETLENGTH(\"REQ_PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_1\""),
         "clob marker sql: {sql}"
     );
-    assert!(
-        sql.contains("DBMS_LOB.SUBSTR(\"RESP_PAYLOAD\", 1000, 1) AS \"RESP_PAYLOAD\""),
-        "nclob preview sql: {sql}"
-    );
+    assert!(sql.contains("DBMS_LOB.SUBSTR(\"RESP_PAYLOAD\", 1000, 1) AS \"RESP_PAYLOAD\""), "nclob preview sql: {sql}");
     assert!(
         sql.contains("'T:999:' || DBMS_LOB.GETLENGTH(\"RESP_PAYLOAD\") AS \"__DBX_LARGE_VALUE_BYTES_T_2\""),
         "nclob marker sql: {sql}"

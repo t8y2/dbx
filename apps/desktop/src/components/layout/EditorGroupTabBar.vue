@@ -2330,6 +2330,19 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
                               <X class="h-3 w-3" />
                             </button>
+                            <!-- The collapsed rail has no row width for the label or the trailing
+                                 close button (#12942); overlay it so a tab can be closed without
+                                 expanding the rail and switching to it first. -->
+                            <button
+                              v-else
+                              class="compact-close-tab-button"
+                              :aria-label="t('contextMenu.closeTab')"
+                              :title="t('contextMenu.closeTab')"
+                              @pointerdown.stop
+                              @click.stop="closeTab(entry.tab)"
+                            >
+                              <X class="h-2.5 w-2.5" />
+                            </button>
                           </div>
                         </TooltipTrigger>
                         <TooltipContent v-if="isConnectionlessPluginTab(entry.tab)" :side="tabTooltipSide" data-plugin-title-tooltip>

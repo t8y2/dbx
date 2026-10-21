@@ -74,11 +74,13 @@ function mountBar(
   specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; pluginCenterOpen: boolean; pluginCenterActive: boolean; driverUpdateCount: number },
   toolbarActions?: EditorToolbarActions,
   onSaveAllTabs?: () => void,
+  extraProps: Record<string, unknown> = {},
 ): Mounted {
   const store = useQueryStore();
   const host = createHost();
   const app = createApp(EditorGroupTabBar, {
     groupId,
+    ...extraProps,
     tabs: tabs.map((id) => store.tabs.find((candidate) => candidate.id === id)!),
     activeTabId,
     "onActivate-tab": onActivateTab,
@@ -801,6 +803,30 @@ describe("EditorGroupTabBar behavior", () => {
     await settle();
     expect(bar.dataset.hasMaxTabWidth).toBe("false");
     expect(bar.style.getPropertyValue("--tab-max-width")).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("offers a close button on every tab in the collapsed vertical rail", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabPlacement = "left";
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const { app, host } = mountBar(store.groups[0].id, [firstId, secondId], firstId, pinia, undefined, undefined, undefined, undefined, { tabBarCollapsed: true });
+    await settle();
+
+    // The rail is icon-only, so both a background tab and the active tab must
+    // expose a close affordance without the user switching to it first (#12942).
+    for (const tabId of [firstId, secondId]) {
+      const closeButtons = tabPill(host, tabId).querySelectorAll<HTMLButtonElement>("button[aria-label='Close']");
+      expect(closeButtons, tabId).toHaveLength(1);
+    }
+
+    tabPill(host, secondId).querySelector<HTMLButtonElement>("button[aria-label='Close']")!.click();
+    await settle();
+    expect(store.tabs.some((tab) => tab.id === secondId)).toBe(false);
 
     app.unmount();
     host.remove();

@@ -333,6 +333,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
           whereInput: target.whereInput,
           primaryKeys,
           columns: columns.map((column) => column.name),
+          ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, pageLimit),
           includeRowId: true,
           orderBy: defaultSort.orderBy,
           limit: pageLimit,

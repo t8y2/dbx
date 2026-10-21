@@ -94,7 +94,7 @@ export interface LargeValueSnapshotDownloadTarget {
 }
 const materializedSnapshotBytes = new WeakMap<QueryResult, Map<string, number>>();
 type LargeValueCellRequest = {
-  item: LargeValueRowItem;
+  rowId: number;
   sourceIndex: number;
   columnIndex: number;
   originalBytes: number;
@@ -331,7 +331,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       if (sourceColumn && !selectedColumns.some((column) => column.toLocaleLowerCase() === sourceColumn.toLocaleLowerCase())) selectedColumns.push(sourceColumn);
     }
     const selectedColumnTypes = selectedColumns.map((column) => tableMeta.columns.find((candidate) => candidate.name.toLocaleLowerCase() === column.toLocaleLowerCase())?.data_type ?? "");
-    const predicates = await Promise.all([...requests.values()].map((request) => largeValueRowPredicate(request.item, primaryKeyIndexes)));
+    const predicates = await Promise.all([...requests.values()].map((request) => largeValueRowPredicate(request.sourceIndex, primaryKeyIndexes)));
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
     const sql = await buildTableSelectSql({
       databaseType: options.databaseType.value,
@@ -480,8 +480,8 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     return chunks;
   }
 
-  async function largeValueRowPredicate(item: LargeValueRowItem, primaryKeyIndexes: number[]): Promise<string> {
-    const originalRow = item.sourceIndex === undefined ? undefined : options.result.value.rows[item.sourceIndex];
+  async function largeValueRowPredicate(sourceIndex: number, primaryKeyIndexes: number[]): Promise<string> {
+    const originalRow = options.result.value.rows[sourceIndex];
     if (!originalRow) throw new Error(options.translate("grid.largeValueRowUnavailable"));
     const tableMeta = options.tableMeta.value!;
     const conditions = await Promise.all(
@@ -504,7 +504,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     const tableMeta = options.tableMeta.value!;
     const sourceColumn = options.resultSourceColumns.value[columnIndex];
     if (!sourceColumn) throw new Error(options.translate("grid.largeValueColumnUnavailable"));
-    const predicates = await Promise.all(requests.map((request) => largeValueRowPredicate(request.item, primaryKeyIndexes)));
+    const predicates = await Promise.all(requests.map((request) => largeValueRowPredicate(request.sourceIndex, primaryKeyIndexes)));
     const selectedColumns = [...new Set([...tableMeta.primaryKeys, sourceColumn])];
     const sql = await buildTableSelectSql({
       databaseType: options.databaseType.value,
@@ -545,9 +545,9 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       const originalRow = options.result.value.rows[request.sourceIndex];
       const identity = originalRow ? largeValueIdentityKey(originalRow, primaryKeyIndexes) : "";
       if (!valuesByIdentity.has(identity)) throw new Error(options.translate("grid.largeValueRowUnavailable"));
-      const rowValues = resolved.get(request.item.id) ?? new Map<number, CellValue>();
+      const rowValues = resolved.get(request.rowId) ?? new Map<number, CellValue>();
       rowValues.set(columnIndex, valuesByIdentity.get(identity) ?? null);
-      resolved.set(request.item.id, rowValues);
+      resolved.set(request.rowId, rowValues);
     }
   }
 
@@ -589,7 +589,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
           continue;
         }
         const requests = requestsByColumn.get(columnIndex) ?? [];
-        requests.push({ item, sourceIndex: item.sourceIndex, columnIndex, originalBytes: metadata.original_bytes });
+        requests.push({ rowId: item.id, sourceIndex: item.sourceIndex, columnIndex, originalBytes: metadata.original_bytes });
         requestsByColumn.set(columnIndex, requests);
       }
     }
@@ -722,8 +722,57 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     });
   }
 
+  /**
+   * Rollback statements are built from the baseline rows, so a changed or deleted
+   * cell that still holds a truncated server preview (no `value_ref`, e.g.
+   * PostgreSQL json/text) must be replaced with its full value first. Otherwise
+   * the recorded rollback SQL carries the `...`-suffixed preview (issue #12964).
+   */
+  async function preparePreviewSaveBaseline(changes: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; deletedRows: ReadonlySet<number> }, signal: AbortSignal): Promise<void> {
+    const source = options.result.value;
+    const cells = (source.large_value_cells ?? []).filter((cell) => !cell.value_ref && (changes.deletedRows.has(cell.row_index) || changes.dirtyRows.get(cell.row_index)?.has(cell.column_index)));
+    if (!cells.length) return;
+    const connectionId = options.connectionId.value;
+    const database = options.executionDatabase.value;
+    const tableMeta = options.tableMeta.value;
+    if (!connectionId || !tableMeta?.tableName || tableMeta.primaryKeys.length === 0) throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
+    const primaryKeyIndexes = tableMeta.primaryKeys.map(largeValueSourceColumnIndex);
+    if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
+    const operation = options.resultLifecycle.beginOperation();
+    const isCurrent = () => !signal.aborted && options.result.value === source && options.connectionId.value === connectionId && options.executionDatabase.value === database && options.resultLifecycle.isCurrent(operation);
+    const requestsByColumn = new Map<number, LargeValueCellRequest[]>();
+    for (const cell of cells) {
+      const requests = requestsByColumn.get(cell.column_index) ?? [];
+      // Keyed by source index: this map never leaves the function.
+      requests.push({ rowId: cell.row_index, sourceIndex: cell.row_index, columnIndex: cell.column_index, originalBytes: cell.original_bytes });
+      requestsByColumn.set(cell.column_index, requests);
+    }
+    const resolved: ResolvedLargeValueCells = new Map();
+    for (const [columnIndex, requests] of requestsByColumn) {
+      for (const chunk of chunkLargeValueRequests(requests)) {
+        await fetchLargeValueRequestChunk(columnIndex, chunk, primaryKeyIndexes, resolved);
+        if (!isCurrent()) throw new Error("LOB result context changed");
+      }
+    }
+    // Preserve row identity so the editor keeps pending edits, deletes and undo history.
+    for (const [sourceIndex, values] of resolved) {
+      const row = source.rows[sourceIndex];
+      if (!row) throw new Error(options.translate("grid.largeValueRowUnavailable"));
+      for (const [columnIndex, value] of values) {
+        row[columnIndex] = value;
+        visibleLargeValuePreviewCaches.get(source)?.forget(sourceIndex, columnIndex);
+      }
+    }
+    const resolvedKeys = new Set(cells.map((cell) => largeValueCellKey(cell.row_index, cell.column_index)));
+    source.large_value_cells = source.large_value_cells?.filter((cell) => !resolvedKeys.has(largeValueCellKey(cell.row_index, cell.column_index)));
+    options.largeValueResolutionVersion.value += 1;
+    options.clearCellFormatCache();
+    options.invalidateResultEstimate(source);
+  }
+
   async function prepareSaveBaseline(changes: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; deletedRows: ReadonlySet<number> }): Promise<void> {
     const snapshotSignal = snapshotController.signal;
+    await preparePreviewSaveBaseline(changes, snapshotSignal);
     const source = options.result.value;
     const cells = (source.large_value_cells ?? []).filter((cell) => cell.value_ref && (changes.deletedRows.has(cell.row_index) || changes.dirtyRows.get(cell.row_index)?.has(cell.column_index)));
     const context = source.large_value_context;

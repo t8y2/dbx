@@ -294,6 +294,34 @@ export function isObjectSourceSaveShortcutTarget(target: { closest(selector: str
   return !!target?.closest("[data-object-source-editor], [data-object-source-preview]");
 }
 
+/**
+ * Which surface the "save" shortcut should act on.
+ *
+ * The settings page, plugin center and driver store replace the content area but
+ * keep the previously active query tab activated, so `activeTab.mode === "query"`
+ * stays true while one of those surfaces is on screen. Without this decision the
+ * save shortcut popped the "SQL saved" dialog on top of the settings page instead
+ * of applying the edited draft (#13020).
+ */
+export type SaveShortcutSurface = "settings" | "query" | "none";
+
+export interface SaveShortcutSurfaceInput {
+  settingsPageOpen?: boolean;
+  pluginCenterOpen?: boolean;
+  driverStoreOpen?: boolean;
+  activeTabMode?: string | null;
+  saveSqlDialogOpen?: boolean;
+}
+
+export function saveShortcutSurface(input: SaveShortcutSurfaceInput): SaveShortcutSurface {
+  if (input.settingsPageOpen) return "settings";
+  // Browsing surfaces have nothing to save, and must not fall through to the
+  // query branch just because a query tab is still the active tab.
+  if (input.pluginCenterOpen || input.driverStoreOpen) return "none";
+  if (input.activeTabMode !== "query" || input.saveSqlDialogOpen) return "none";
+  return "query";
+}
+
 export function isCopyCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("copyCurrentRow", shortcuts));
 }

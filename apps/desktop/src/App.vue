@@ -168,6 +168,7 @@ import {
   isToggleZenModeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
+  saveShortcutSurface,
   switchToTabIndexFromShortcut,
   tabSwitcherDirectionFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
@@ -4782,11 +4783,30 @@ async function handleKeydown(e: KeyboardEvent) {
   if (isSaveShortcut(e, shortcuts) && e.target instanceof Element && isObjectSourceSaveShortcutTarget(e.target)) {
     return;
   }
-  if (activeTab.value?.mode === "query" && !showSaveSqlDialog.value && isSaveShortcut(e, shortcuts)) {
-    e.preventDefault();
-    e.stopPropagation();
-    void openSaveSqlDialog();
-    return;
+  if (isSaveShortcut(e, shortcuts)) {
+    // The settings page, plugin center and driver store keep the previously active
+    // query tab activated, so the active tab alone cannot decide who Ctrl+S belongs
+    // to. Without the surface check the shortcut popped the save-SQL dialog on top of
+    // the settings page and silently dropped the edited draft (#13020).
+    const saveShortcutTarget = saveShortcutSurface({
+      settingsPageOpen: showSettingsPage.value,
+      pluginCenterOpen: showPluginCenter.value,
+      driverStoreOpen: showDriverStore.value,
+      activeTabMode: activeTab.value?.mode ?? null,
+      saveSqlDialogOpen: showSaveSqlDialog.value,
+    });
+    if (saveShortcutTarget === "settings") {
+      e.preventDefault();
+      e.stopPropagation();
+      void settingsPageRef.value?.applySettingsFromShortcut();
+      return;
+    }
+    if (saveShortcutTarget === "query") {
+      e.preventDefault();
+      e.stopPropagation();
+      void openSaveSqlDialog();
+      return;
+    }
   }
   // CodeMirror ignores keydown events after an IME composition changes the
   // document, so this app-level fallback must share the editor shortcut guard.

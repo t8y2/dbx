@@ -648,7 +648,7 @@ function closeSettings() {
   requestCloseSettings(false);
 }
 
-defineExpose({ requestClose: closeSettings });
+defineExpose({ requestClose: closeSettings, applySettingsFromShortcut });
 
 function cancelUnsavedSettingsClose() {
   showUnsavedSettingsCloseConfirm.value = false;
@@ -2595,6 +2595,15 @@ async function applySettingsAndClose() {
   if (await applySettingsForResult()) {
     closeSettings();
   }
+}
+
+// Ctrl+S on the settings page behaves like the "Apply" button: persist the draft
+// but stay open (the shortcut means "save", not "save and quit"). Mirrors the
+// button's own disabled state so a key press cannot bypass an apply blocker, and
+// never fires when there is nothing to persist.
+async function applySettingsFromShortcut() {
+  if (!hasChanges()) return;
+  await applySettings();
 }
 
 async function restartDbxForDuckDbIsolation() {

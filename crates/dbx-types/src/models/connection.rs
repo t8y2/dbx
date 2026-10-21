@@ -493,6 +493,12 @@ pub struct SshTunnelConfig {
     pub connect_timeout_secs: u64,
     #[serde(default)]
     pub expose_lan: bool,
+    /// Fixed local port for the connection's primary tunnel when this is the
+    /// last transport layer. Unset means a random free port. A shared tunnel
+    /// profile (`profile_id`) supplies its own configuration, so a fixed port
+    /// is not applied to a layer that references one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_port: Option<u16>,
     #[serde(default)]
     pub use_ssh_agent: bool,
     /// Custom SSH agent socket path (e.g. `~/.ssh/agent.sock`).
@@ -3889,6 +3895,40 @@ mod tests {
         assert!(saved.get("transport_layers").is_some());
         for key in ["ssh_tunnels", "ssh_host", "ssh_password", "proxy_host", "proxy_password", "proxy_enabled"] {
             assert!(saved.get(key).is_none(), "legacy key {key} should not serialize");
+        }
+    }
+
+    #[test]
+    fn ssh_layer_local_port_is_optional_and_round_trips() {
+        let cases = [(serde_json::json!({}), None), (serde_json::json!({ "local_port": 4059 }), Some(4059_u16))];
+        for (layer_fields, expected) in cases {
+            let mut layer =
+                serde_json::json!({ "type": "ssh", "id": "ssh-1", "host": "bastion", "port": 22, "user": "deploy" });
+            layer.as_object_mut().unwrap().extend(layer_fields.as_object().unwrap().clone());
+            let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+                "id": "id",
+                "name": "name",
+                "db_type": "mysql",
+                "host": "10.1.2.3",
+                "port": 3306,
+                "username": "root",
+                "password": "",
+                "database": null,
+                "transport_layers": [layer]
+            }))
+            .unwrap();
+            let TransportLayerConfig::Ssh(ssh) = &config.transport_layers[0] else {
+                panic!("expected ssh layer");
+            };
+            assert_eq!(ssh.local_port, expected);
+
+            let saved = serde_json::to_value(&config).unwrap();
+            match expected {
+                Some(port) => assert_eq!(saved["transport_layers"][0]["local_port"], port),
+                None => assert!(saved["transport_layers"][0].get("local_port").is_none()),
+            }
+            let restored: ConnectionConfig = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored.transport_layers, config.transport_layers);
         }
     }
 

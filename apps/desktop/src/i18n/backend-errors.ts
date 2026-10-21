@@ -139,6 +139,7 @@ const patterns: [RegExp, string][] = [
 
   // SSH keyboard-interactive prompts (for example JumpServer TOTP).
   [/^(?:SSH layer \d+ failed:\s*)?SSH keyboard-interactive authentication was cancelled$/, "connection.sshTotpCancelled"],
+  [/^(?:SSH layer \d+ failed:\s*)?Failed to bind requested local port (\d+): ([\s\S]+)$/, "connection.sshLocalPortBindFailed"],
 
   // Query result export limits (crates/dbx-core/src/data/query_result_export.rs)
   [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
@@ -202,6 +203,7 @@ const paramNames: Record<string, string | string[]> = {
   "settings.tunnelsSocksUnsupportedAuth": "method",
   "settings.tunnelsSocksConnectRejected": "code",
   "settings.tunnelsSocksUnsupportedAddrType": "type",
+  "connection.sshLocalPortBindFailed": ["port", "error"],
   "driverStore.jreDirRemoveFailedWindows": ["path", "error"],
   "driverStore.jreDirRemoveFailed": ["path", "error"],
   "driverStore.jreInUseByDrivers": ["jre", "drivers"],

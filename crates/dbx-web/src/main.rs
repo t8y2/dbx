@@ -569,6 +569,8 @@ async fn serve() -> Result<(), String> {
         ))
     };
 
+    app_state.set_honor_fixed_ssh_local_ports(true);
+
     // Password hash: env var takes priority, then database
     let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))

@@ -51,6 +51,7 @@ import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSum
 import { insertSqliteRemoteTransportLayer, isSqliteRemoteTransportLayerType, sqliteRemoteTransportError } from "@/lib/connection/sqliteRemoteTransport";
 import { sanitizeConnectionCredentials } from "@/lib/connection/credentialSanitizer";
 import { applySshAuthMethod, inferSshAuthMethod } from "@/lib/connection/sshAuthMethod";
+import { editableSshLocalPort, normalizeSshLocalPort, sshLocalPortState, sshLocalPortSupportedForConnection } from "@/lib/connection/sshLocalPort";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
 import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from "./connectionEditDraftSync";
 import { createConnectionNoteVisibilityDraft, persistConnectionNoteVisibilityDraft as persistConnectionNoteVisibilityDraftState, resetConnectionNoteVisibilityDraft, setConnectionNoteVisibilityDraft, syncConnectionNoteVisibilityDraft } from "./connectionNoteVisibilityDraft";
@@ -555,6 +556,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     key_passphrase: hop.key_passphrase || "",
     connect_timeout_secs: Number(hop.connect_timeout_secs) || 5,
     expose_lan: !!hop.expose_lan,
+    local_port: hop.enabled === false ? normalizeSshLocalPort(hop.local_port) : editableSshLocalPort(hop.local_port),
     use_ssh_agent: !!hop.use_ssh_agent,
     ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
     ssh_agent_key_fingerprint: hop.ssh_agent_key_fingerprint || "",
@@ -6634,6 +6636,7 @@ function addHttpTunnel() {
 function duplicateTransportLayer(layer: TransportLayerConfig) {
   if (sqliteRemoteTransportRestricted.value && !isSqliteRemoteTransportLayerType(layer.type)) return;
   const next = normalizeTransportLayer({ ...layer, id: uuid(), name: layer.name ? `${layer.name} copy` : "" });
+  if (next.type === "ssh") delete next.local_port;
   form.value.transport_layers = sqliteRemoteTransportRestricted.value ? insertSqliteRemoteTransportLayer(transportLayers.value, next) : [...transportLayers.value, next];
   selectedTransportLayerId.value = next.id;
   resetTestState();
@@ -6719,11 +6722,19 @@ function updateSelectedSshAuthMethod(value: unknown) {
   resetTestState();
 }
 
+function updateSelectedSshLocalPort(value: unknown) {
+  const layer = selectedSshLayer.value;
+  if (!layer) return;
+  layer.local_port = editableSshLocalPort(value);
+  resetTestState();
+}
+
 function validateTransportLayers(config: LegacyConnectionConfig) {
   const layers = config.transport_layers || [];
   if (config.db_type === "sqlite" && sqliteRemoteTransportError(layers)) {
     throw new Error(t("connection.sqliteTransportSshOnly"));
   }
+  const lastEnabledIndex = layers.reduce((last, layer, index) => (layer.enabled === false ? last : index), -1);
   layers.forEach((layer, index) => {
     if (layer.enabled === false) return;
     // Profile-referencing layers are stubs: the shared profile supplies the
@@ -6753,6 +6764,10 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
       if (!Number.isFinite(timeout) || timeout < 1 || timeout > 300) {
         throw new Error(t("connection.sshHopInvalidTimeout", { hop: label }));
       }
+      const localPortState = sshLocalPortState(layer.local_port);
+      if (localPortState === "invalid") throw new Error(t("connection.sshHopInvalidLocalPort", { hop: label }));
+      if (localPortState === "valid" && index !== lastEnabledIndex) throw new Error(t("connection.sshHopLocalPortNotLast", { hop: label }));
+      if (localPortState === "valid" && !sshLocalPortSupportedForConnection(config, mqSystemKind.value)) throw new Error(t("connection.sshHopLocalPortUnsupported", { hop: label }));
     }
   });
 }
@@ -11021,6 +11036,13 @@ function openExternalUrl(url: string) {
                         <input type="checkbox" v-model="selectedSshLayer.expose_lan" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
                         <span class="text-xs text-muted-foreground">{{ t("connection.sshExposeLan") }}</span>
                       </label>
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshLocalPort") }}</Label>
+                      <div class="col-span-3 space-y-1">
+                        <Input :model-value="selectedSshLayer.local_port ?? ''" type="number" min="1" max="65535" step="1" :placeholder="t('connection.sshLocalPortPlaceholder')" :disabled="selectedSshLayer.enabled === false" @update:model-value="updateSelectedSshLocalPort" />
+                        <p class="text-xs text-muted-foreground">{{ t("connection.sshLocalPortHint") }}</p>
+                      </div>
                     </div>
                     <div class="grid grid-cols-4 items-start gap-4">
                       <span />

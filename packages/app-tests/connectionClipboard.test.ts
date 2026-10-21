@@ -2,7 +2,7 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
-import type { ConnectionConfig, SidebarLayout, TreeNode } from "../../apps/desktop/src/types/database.ts";
+import type { ConnectionConfig, SidebarLayout, TransportLayerConfig, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function installMemoryStorage() {
   const values = new Map<string, string>();
@@ -153,5 +153,19 @@ test("pastes multiple copied connections in the copied order", async () => {
     await store.pasteConnectionClipboard(null);
 
     assert.deepEqual(connectionLabels(store.treeNodes), ["First", "Second", "Second (Copy)", "First (Copy)"]);
+  });
+});
+
+test("pasted connections do not claim the fixed SSH local port of the original", async () => {
+  const proxy: TransportLayerConfig = { type: "proxy", id: "proxy", proxy_type: "socks5", host: "proxy.example.com", port: 1080 };
+  const tunnel: TransportLayerConfig = { type: "ssh", id: "bastion", host: "bastion.example.com", port: 22, user: "root" };
+  const original: ConnectionConfig = { ...conn("conn-1", "Tunnelled MySQL"), transport_layers: [{ ...tunnel, local_port: 4059 }, proxy] };
+
+  await withConnectionStore([original], { groups: [], order: [{ type: "connection", id: "conn-1" }] }, async (store) => {
+    store.copyConnectionsToTreeClipboard(["conn-1"]);
+    await store.pasteConnectionClipboard(null);
+
+    assert.deepEqual(store.connections.find((connection) => connection.name === "Tunnelled MySQL (Copy)")?.transport_layers, [tunnel, proxy]);
+    assert.deepEqual(store.connections.find((connection) => connection.id === "conn-1")?.transport_layers, [{ ...tunnel, local_port: 4059 }, proxy]);
   });
 });

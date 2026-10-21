@@ -2126,6 +2126,7 @@ pub fn run() {
             dbx_core::db::sqlite_worker::enable_sqlite_ssh_runtime(env!("CARGO_PKG_VERSION"));
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
+            state.set_honor_fixed_ssh_local_ports(true);
             let oidc_app_handle = app.handle().clone();
             state.set_mongo_oidc_browser_opener(Arc::new(move |url| {
                 oidc_app_handle

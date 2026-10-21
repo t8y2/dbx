@@ -317,6 +317,14 @@ export interface SshTunnelConfig {
   key_passphrase?: string;
   connect_timeout_secs?: number;
   expose_lan?: boolean;
+  /**
+   * Fixed local port (1-65535) the tunnel listens on while the connection is
+   * open, so other local tools can reuse it. Only the last enabled layer uses
+   * it, and only when it is an inline SSH layer (not a shared tunnel profile).
+   * Absent means a random free port. It binds `0.0.0.0` instead of `127.0.0.1`
+   * when `expose_lan` is on.
+   */
+  local_port?: number;
   use_ssh_agent?: boolean;
   ssh_agent_sock_path?: string;
   /**

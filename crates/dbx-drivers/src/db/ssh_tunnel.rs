@@ -1788,31 +1788,17 @@ impl TunnelManager {
         requested_local_port: Option<u16>,
         proxy_command: &str,
     ) -> Result<u16, String> {
-        {
-            let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed)? {
-                if requested_local_port.is_none_or(|requested| requested == port) {
-                    return Ok(port);
-                }
-            }
+        let healthy = Self::healthy_port(&*self.tunnels.lock().await, connection_id, TunnelKind::Fixed);
+        if let Some(port) = healthy.filter(|port| requested_local_port.is_none_or(|requested| requested == *port)) {
+            return Ok(port);
         }
 
         let start_lock = self.start_lock(connection_id).await;
         let _start_guard = start_lock.lock().await;
 
         // A concurrent caller may have completed while this task waited.
-        {
-            let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed)? {
-                if requested_local_port.is_none_or(|requested| requested == port) {
-                    return Ok(port);
-                }
-                if let Some(entry) = tunnels.remove(connection_id) {
-                    for handle in entry.handles {
-                        handle.abort();
-                    }
-                }
-            }
+        if let Some(port) = self.active_port(connection_id, TunnelKind::Fixed, requested_local_port).await? {
+            return Ok(port);
         }
         let (handle, local_port, status) = spawn_tunnel(
             connect_host,
@@ -1865,25 +1851,15 @@ impl TunnelManager {
         allow_exec_channel_proxy: bool,
         proxy_command: &str,
     ) -> Result<u16, String> {
-        {
-            let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Socks5)? {
-                return Ok(port);
-            }
+        let healthy = Self::healthy_port(&*self.tunnels.lock().await, connection_id, TunnelKind::Socks5);
+        if let Some(port) = healthy {
+            return Ok(port);
         }
 
         let start_lock = self.start_lock(connection_id).await;
         let _start_guard = start_lock.lock().await;
-        {
-            let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Socks5)? {
-                return Ok(port);
-            }
-            if let Some(entry) = tunnels.remove(connection_id) {
-                for handle in entry.handles {
-                    handle.abort();
-                }
-            }
+        if let Some(port) = self.active_port(connection_id, TunnelKind::Socks5, None).await? {
+            return Ok(port);
         }
 
         let (handle, local_port, status) = spawn_socks5_proxy(
@@ -1928,33 +1904,73 @@ impl TunnelManager {
     ///   instead of replaying the recorded failure until the retry budget runs
     ///   out.
     /// * `Ok(Some(port))` — the tunnel is healthy.
+    ///
+    /// The handles of an evicted entry are pushed to `evicted` instead of only
+    /// being aborted: the caller must `abort_and_join` them once it has released
+    /// the tunnels lock, because a task keeps its listener bound until it is
+    /// actually dropped.
     fn get_active_port(
         tunnels: &mut HashMap<String, TunnelEntry>,
         connection_id: &str,
         expected_kind: TunnelKind,
+        evicted: &mut Vec<JoinHandle<()>>,
     ) -> Result<Option<u16>, String> {
         let Some(entry) = tunnels.get(connection_id) else {
             return Ok(None);
         };
         if entry.kind != expected_kind || entry.handles.iter().all(|h| h.is_finished()) {
-            if let Some(entry) = tunnels.remove(connection_id) {
-                for handle in entry.handles {
-                    handle.abort();
-                }
-            }
+            evicted.extend(tunnels.remove(connection_id).into_iter().flat_map(|entry| entry.handles));
             return Ok(None);
         }
         let local_port = entry.local_port;
         let failure = entry.statuses.iter().find_map(|status| status.failure());
         if let Some(failure) = failure {
-            if let Some(entry) = tunnels.remove(connection_id) {
-                for handle in entry.handles {
-                    handle.abort();
-                }
-            }
+            evicted.extend(tunnels.remove(connection_id).into_iter().flat_map(|entry| entry.handles));
             return Err(failure);
         }
         Ok(Some(local_port))
+    }
+
+    /// Port of a cached tunnel that is usable right now. Unlike
+    /// [`Self::get_active_port`] it never evicts, so the lock-free fast path
+    /// leaves a stale or failed entry to the caller that holds the start lock.
+    /// Evicting there would let a concurrent starter rebind the same fixed port
+    /// while the evicted task still owns its listener.
+    fn healthy_port(
+        tunnels: &HashMap<String, TunnelEntry>,
+        connection_id: &str,
+        expected_kind: TunnelKind,
+    ) -> Option<u16> {
+        let entry = tunnels.get(connection_id)?;
+        let usable = entry.kind == expected_kind
+            && !entry.handles.iter().all(|h| h.is_finished())
+            && entry.statuses.iter().all(|status| status.failure().is_none());
+        usable.then_some(entry.local_port)
+    }
+
+    /// [`Self::get_active_port`] for a caller that holds the start lock: evicted
+    /// tunnels are joined before returning, so a following bind of the same
+    /// local port cannot hit `EADDRINUSE`. A healthy tunnel on another port than
+    /// `required_port` is evicted too.
+    async fn active_port(
+        &self,
+        connection_id: &str,
+        expected_kind: TunnelKind,
+        required_port: Option<u16>,
+    ) -> Result<Option<u16>, String> {
+        let mut evicted = Vec::new();
+        let active = {
+            let mut tunnels = self.tunnels.lock().await;
+            match Self::get_active_port(&mut tunnels, connection_id, expected_kind, &mut evicted) {
+                Ok(Some(port)) if required_port.is_some_and(|required| required != port) => {
+                    evicted.extend(tunnels.remove(connection_id).into_iter().flat_map(|entry| entry.handles));
+                    Ok(None)
+                }
+                active => active,
+            }
+        };
+        abort_and_join(evicted).await;
+        active
     }
 
     pub async fn start_chain(
@@ -1967,20 +1983,15 @@ impl TunnelManager {
         if hops.is_empty() {
             return Err("No SSH tunnel hops configured".to_string());
         }
-        {
-            let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed)? {
-                return Ok(port);
-            }
+        let healthy = Self::healthy_port(&*self.tunnels.lock().await, connection_id, TunnelKind::Fixed);
+        if let Some(port) = healthy {
+            return Ok(port);
         }
 
         let start_lock = self.start_lock(connection_id).await;
         let _start_guard = start_lock.lock().await;
-        {
-            let mut tunnels = self.tunnels.lock().await;
-            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id, TunnelKind::Fixed)? {
-                return Ok(port);
-            }
+        if let Some(port) = self.active_port(connection_id, TunnelKind::Fixed, None).await? {
+            return Ok(port);
         }
         let mut handles = Vec::new();
         let mut statuses = Vec::new();
@@ -2044,29 +2055,30 @@ impl TunnelManager {
     /// for this connection" can't be handed a port with no live SSH session
     /// behind it — the same bug this fix closes for `start_tunnel` et al.
     pub async fn local_port(&self, connection_id: &str) -> Option<u16> {
-        let mut tunnels = self.tunnels.lock().await;
-        let entry = tunnels.get(connection_id)?;
-        let is_dead = entry.handles.iter().all(|h| h.is_finished())
-            || entry.statuses.iter().any(|status| status.failure().is_some());
-        if is_dead {
-            if let Some(entry) = tunnels.remove(connection_id) {
-                for handle in entry.handles {
-                    handle.abort();
-                }
+        let (local_port, evicted) = {
+            let mut tunnels = self.tunnels.lock().await;
+            let entry = tunnels.get(connection_id)?;
+            let is_dead = entry.handles.iter().all(|h| h.is_finished())
+                || entry.statuses.iter().any(|status| status.failure().is_some());
+            if is_dead {
+                (None, tunnels.remove(connection_id))
+            } else {
+                (Some(entry.local_port), None)
             }
-            return None;
+        };
+        if let Some(entry) = evicted {
+            abort_and_join(entry.handles).await;
         }
-        Some(entry.local_port)
+        local_port
     }
 
     pub async fn stop_tunnel(&self, connection_id: &str) {
         let start_lock = self.start_lock(connection_id).await;
         let _start_guard = start_lock.lock().await;
 
-        if let Some(entry) = self.tunnels.lock().await.remove(connection_id) {
-            for handle in entry.handles {
-                handle.abort();
-            }
+        let removed = self.tunnels.lock().await.remove(connection_id);
+        if let Some(entry) = removed {
+            abort_and_join(entry.handles).await;
         }
 
         let mut start_locks = self.start_locks.lock().await;
@@ -2087,12 +2099,20 @@ impl TunnelManager {
 
     pub async fn stop_all_tunnels(&self) {
         let tunnels = std::mem::take(&mut *self.tunnels.lock().await);
-        for entry in tunnels.into_values() {
-            for handle in entry.handles {
-                handle.abort();
-            }
-        }
+        abort_and_join(tunnels.into_values().flat_map(|entry| entry.handles).collect()).await;
         self.start_locks.lock().await.clear();
+    }
+}
+
+/// Aborts tunnel tasks and waits until they are dropped. A task owns its
+/// `TcpListener`, so returning before that happens lets a caller that rebinds
+/// the same fixed local port right away hit `EADDRINUSE`.
+async fn abort_and_join(handles: Vec<JoinHandle<()>>) {
+    for handle in &handles {
+        handle.abort();
+    }
+    for handle in handles {
+        let _ = handle.await;
     }
 }
 
@@ -2267,14 +2287,48 @@ async fn bind_tunnel_listener(
     };
 
     let bind_addr = if expose_to_lan { "0.0.0.0" } else { "127.0.0.1" };
-    let listener = TcpListener::bind((bind_addr, local_port)).await.map_err(|error| {
+    let bind_error = |error: std::io::Error| {
         if requested_local_port.is_some() {
             format!("Failed to bind requested local port {local_port}: {error}")
         } else {
             format!("Failed to bind local port: {error}")
         }
-    })?;
+    };
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    if requested_local_port.is_some() {
+        probe_sibling_bind_address(bind_addr, local_port).map_err(bind_error)?;
+    }
+    let listener = TcpListener::bind((bind_addr, local_port)).await.map_err(bind_error)?;
     Ok((listener, local_port))
+}
+
+/// BSD and macOS let a bind succeed next to a listener on the other of
+/// `127.0.0.1` / `0.0.0.0` for the same port once SO_REUSEADDR is set, which
+/// tokio always does. A requested port would then be taken silently and traffic
+/// for one address would reach the wrong listener. Binding the sibling address
+/// first makes that conflict fail the way it does on Linux. The probe only
+/// binds, so it never accepts a connection.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+fn probe_sibling_bind_address(bind_addr: &str, port: u16) -> std::io::Result<()> {
+    let sibling: std::net::Ipv4Addr =
+        if bind_addr == "0.0.0.0" { std::net::Ipv4Addr::LOCALHOST } else { std::net::Ipv4Addr::UNSPECIFIED };
+    let socket = tokio::net::TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(std::net::SocketAddr::from((sibling, port)))
 }
 
 pub fn effective_hop_timeout(hop: &SshTunnelConfig) -> u64 {
@@ -2333,16 +2387,19 @@ mod tests {
     use super::resolve_ssh_agent_socket_path;
     use super::SshClient;
     use super::{
-        agent_attempts_stopped_error, bind_tunnel_listener, classify_agent_attempt, connect_and_authenticate,
-        describe_terminal_auth_failure, effective_hop_timeout, netcat_proxy_command, normalize_ssh_fingerprint,
-        openssh_padding_len, plan_chain, read_ssh_string, sanitize_unencrypted_openssh_comment_bytes,
-        server_offers_keyboard_interactive, server_offers_password, ssh_client_config, tofu_prompt_deadline,
-        AgentAttempt, HostKeyState, HostKeyVerifier, PlannedTunnel, TunnelEntry, TunnelKind, TunnelManager,
-        TunnelStatus, TOFU_PROMPT_TIMEOUT,
+        abort_and_join, agent_attempts_stopped_error, bind_tunnel_listener, classify_agent_attempt,
+        connect_and_authenticate, describe_terminal_auth_failure, effective_hop_timeout, netcat_proxy_command,
+        normalize_ssh_fingerprint, openssh_padding_len, plan_chain, read_ssh_string,
+        sanitize_unencrypted_openssh_comment_bytes, server_offers_keyboard_interactive, server_offers_password,
+        ssh_client_config, tofu_prompt_deadline, AgentAttempt, HostKeyState, HostKeyVerifier, PlannedTunnel,
+        TunnelEntry, TunnelKind, TunnelManager, TunnelStatus, TOFU_PROMPT_TIMEOUT,
     };
     use super::{windows_ssh_agent_endpoints, WindowsSshAgentEndpoint, WINDOWS_OPENSSH_AGENT_PIPE};
+    use crate::db::http_tunnel::HttpTunnelManager;
+    use crate::db::proxy_tunnel::ProxyTunnelManager;
     use crate::db::ssh_prompt;
-    use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
+    use crate::db::transport_layer_tunnel::{start_transport_layers_with_final_ssh_local_port, stop_transport_layers};
+    use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig, TransportLayerConfig};
     use russh::client;
     use russh::client::{AuthResult, Handler};
     use russh::keys::decode_secret_key;
@@ -2529,6 +2586,42 @@ mod tests {
         assert!(error.contains(&format!("requested local port {port}")));
     }
 
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn requested_local_port_conflicts_with_a_listener_on_the_sibling_address() {
+        // (label, address another listener already holds, expose_to_lan, expect a conflict)
+        let cases = [
+            ("free port, loopback bind", None, false, false),
+            ("free port, LAN bind", None, true, false),
+            ("same loopback address", Some("127.0.0.1"), false, true),
+            ("wildcard listener under a loopback bind", Some("0.0.0.0"), false, true),
+            ("loopback listener under a LAN bind", Some("127.0.0.1"), true, true),
+        ];
+
+        for (label, held_address, expose_to_lan, expect_conflict) in cases {
+            let (holder, port) = match held_address {
+                Some(address) => {
+                    let holder = std::net::TcpListener::bind((address, 0)).unwrap();
+                    let port = holder.local_addr().unwrap().port();
+                    (Some(holder), port)
+                }
+                None => (None, free_local_port().await),
+            };
+
+            let bound = bind_tunnel_listener(expose_to_lan, Some(port)).await;
+
+            match (bound, expect_conflict) {
+                (Ok((_listener, local_port)), false) => assert_eq!(local_port, port, "{label}"),
+                (Err(error), true) => {
+                    assert!(error.contains(&format!("Failed to bind requested local port {port}")), "{label}: {error}")
+                }
+                (Ok(_), true) => panic!("{label}: the bind should have failed"),
+                (Err(error), false) => panic!("{label}: the bind should have succeeded: {error}"),
+            }
+            drop(holder);
+        }
+    }
+
     fn hop(id: &str, host: &str, port: u16) -> SshTunnelConfig {
         SshTunnelConfig {
             profile_id: String::new(),
@@ -2543,6 +2636,7 @@ mod tests {
             key_passphrase: String::new(),
             connect_timeout_secs: 5,
             expose_lan: false,
+            local_port: None,
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             ssh_agent_key_fingerprint: String::new(),
@@ -2774,8 +2868,81 @@ mod tests {
             TunnelEntry { handles: vec![handle], statuses: vec![status], local_port: 54321, kind: TunnelKind::Fixed },
         )]);
 
-        assert_eq!(TunnelManager::get_active_port(&mut tunnels, "conn", TunnelKind::Fixed), Ok(Some(54321)));
+        let mut evicted = Vec::new();
+
+        assert_eq!(
+            TunnelManager::get_active_port(&mut tunnels, "conn", TunnelKind::Fixed, &mut evicted),
+            Ok(Some(54321))
+        );
         assert!(tunnels.contains_key("conn"));
+        assert!(evicted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn healthy_port_reports_only_usable_entries_and_never_evicts() {
+        let failed = Arc::new(TunnelStatus::new_connected());
+        failed.record_failure("SSH public key authentication failed".to_string());
+        let finished = tokio::spawn(async {});
+        while !finished.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        // (label, handle, status, kind, expected port)
+        let cases = [
+            (
+                "healthy",
+                tokio::spawn(std::future::pending::<()>()),
+                Arc::new(TunnelStatus::new_connected()),
+                TunnelKind::Fixed,
+                Some(54321),
+            ),
+            ("recorded failure", tokio::spawn(std::future::pending::<()>()), failed, TunnelKind::Fixed, None),
+            ("every task finished", finished, Arc::new(TunnelStatus::new_connected()), TunnelKind::Fixed, None),
+            (
+                "other kind",
+                tokio::spawn(std::future::pending::<()>()),
+                Arc::new(TunnelStatus::new_connected()),
+                TunnelKind::Socks5,
+                None,
+            ),
+        ];
+
+        for (label, handle, status, kind, expected) in cases {
+            let mut tunnels = std::collections::HashMap::from([(
+                "conn".to_string(),
+                TunnelEntry { handles: vec![handle], statuses: vec![status], local_port: 54321, kind },
+            )]);
+
+            assert_eq!(TunnelManager::healthy_port(&tunnels, "conn", TunnelKind::Fixed), expected, "{label}");
+            assert!(tunnels.contains_key("conn"), "{label}");
+            for entry in tunnels.drain().map(|(_, entry)| entry) {
+                abort_and_join(entry.handles).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn evicting_a_failed_tunnel_releases_its_local_port_before_the_error_is_returned() {
+        let manager = TunnelManager::new(std::env::temp_dir().to_path_buf());
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let status = Arc::new(TunnelStatus::new_connected());
+        status.record_failure("SSH tunnel lost its session and could not reconnect".to_string());
+        // The reconnect loop keeps its listener while it backs off, so the task does too.
+        let handle = tokio::spawn(async move {
+            let _listener = listener;
+            std::future::pending::<()>().await;
+        });
+        manager.tunnels.lock().await.insert(
+            "fixed-port".to_string(),
+            TunnelEntry { handles: vec![handle], statuses: vec![status], local_port: port, kind: TunnelKind::Fixed },
+        );
+
+        let error = start_echo_tunnel(&manager, 22, Some(port)).await.unwrap_err();
+
+        assert!(error.contains("could not reconnect"), "{error}");
+        assert!(!manager.tunnels.lock().await.contains_key("fixed-port"));
+        std::net::TcpListener::bind(("127.0.0.1", port)).expect("the evicted tunnel must have released its port");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3538,6 +3705,158 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
         server_task.abort();
     }
 
+    async fn start_direct_echo_server(
+        data_dir: &std::path::Path,
+    ) -> (u16, Arc<std::sync::Mutex<Option<(String, u32)>>>, tokio::task::JoinHandle<()>) {
+        let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
+        let server_config = server::Config { keys: vec![server_key], ..Default::default() };
+        let ssh_port = portpicker::pick_unused_port().expect("no free port");
+        let target = Arc::new(std::sync::Mutex::new(None));
+        let mut server = DirectEchoServer { target: target.clone() };
+        let server_task = tokio::spawn(async move {
+            let _ = server.run_on_address(Arc::new(server_config), ("127.0.0.1", ssh_port)).await;
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        HostKeyVerifier::new(data_dir.join("known_hosts"))
+            .learn("127.0.0.1", ssh_port, &test_server_public_key())
+            .unwrap();
+        (ssh_port, target, server_task)
+    }
+
+    async fn free_local_port() -> u16 {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        probe.local_addr().unwrap().port()
+    }
+
+    async fn start_echo_tunnel(
+        manager: &TunnelManager,
+        ssh_port: u16,
+        requested_local_port: Option<u16>,
+    ) -> Result<u16, String> {
+        manager
+            .start_tunnel_on_local_port(
+                "fixed-port",
+                "127.0.0.1",
+                ssh_port,
+                "127.0.0.1",
+                ssh_port,
+                "user",
+                "",
+                "",
+                "",
+                false,
+                "",
+                "",
+                "none",
+                5,
+                "db.internal",
+                5432,
+                false,
+                false,
+                requested_local_port,
+                "",
+            )
+            .await
+    }
+
+    async fn assert_echoes_through(local_port: u16) {
+        let mut client = TcpStream::connect(("127.0.0.1", local_port)).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut echoed = [0_u8; 4];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut echoed))
+            .await
+            .expect("tunnel echo timeout")
+            .expect("tunnel echo read");
+        assert_eq!(&echoed, b"ping");
+    }
+
+    #[tokio::test]
+    async fn requested_local_port_tunnel_listens_on_that_port_and_forwards() {
+        let _guard = prompt_test_lock().lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let dir = tempdir().unwrap();
+        let (ssh_port, target, server_task) = start_direct_echo_server(dir.path()).await;
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let local_port = free_local_port().await;
+
+        let bound = start_echo_tunnel(&manager, ssh_port, Some(local_port)).await.unwrap();
+
+        assert_eq!(bound, local_port);
+        assert_echoes_through(local_port).await;
+        assert_eq!(*target.lock().unwrap(), Some(("db.internal".to_string(), 5432)));
+        assert_eq!(start_echo_tunnel(&manager, ssh_port, None).await.unwrap(), local_port);
+
+        manager.stop_tunnel("fixed-port").await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn stopping_a_tunnel_releases_its_requested_local_port_before_returning() {
+        let _guard = prompt_test_lock().lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let dir = tempdir().unwrap();
+        let (ssh_port, _target, server_task) = start_direct_echo_server(dir.path()).await;
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let local_port = free_local_port().await;
+
+        for stop_all in [false, true] {
+            let label = if stop_all { "stop_all_tunnels" } else { "stop_tunnel" };
+            assert_eq!(start_echo_tunnel(&manager, ssh_port, Some(local_port)).await.unwrap(), local_port, "{label}");
+            if stop_all {
+                manager.stop_all_tunnels().await;
+            } else {
+                manager.stop_tunnel("fixed-port").await;
+            }
+
+            let rebound = start_echo_tunnel(&manager, ssh_port, Some(local_port))
+                .await
+                .unwrap_or_else(|error| panic!("rebind after {label} failed: {error}"));
+
+            assert_eq!(rebound, local_port, "{label}");
+            assert_echoes_through(local_port).await;
+            manager.stop_tunnel("fixed-port").await;
+        }
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn transport_layers_bind_the_requested_final_ssh_local_port_across_restarts() {
+        let _guard = prompt_test_lock().lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let dir = tempdir().unwrap();
+        let (ssh_port, target, server_task) = start_direct_echo_server(dir.path()).await;
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let proxy_tunnels = ProxyTunnelManager::new();
+        let http_tunnels = HttpTunnelManager::new();
+        let local_port = free_local_port().await;
+        let layers = vec![TransportLayerConfig::Ssh(SshTunnelConfig {
+            password: String::new(),
+            auth_method: "none".to_string(),
+            ..hop("ssh-layer", "127.0.0.1", ssh_port)
+        })];
+
+        for restart in 0..2 {
+            let bound = start_transport_layers_with_final_ssh_local_port(
+                "conn",
+                &layers,
+                "db.internal",
+                5432,
+                Some(local_port),
+                &manager,
+                &proxy_tunnels,
+                &http_tunnels,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("start {restart} failed: {error}"));
+
+            assert_eq!(bound, local_port, "start {restart}");
+            assert_echoes_through(local_port).await;
+            stop_transport_layers("conn", layers.len(), &manager, &proxy_tunnels, &http_tunnels).await;
+        }
+        assert_eq!(*target.lock().unwrap(), Some(("db.internal".to_string(), 5432)));
+        server_task.abort();
+    }
+
     struct NetcatFallbackServer {
         command: Arc<std::sync::Mutex<Vec<u8>>>,
     }
@@ -4137,6 +4456,72 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
         );
 
         manager.stop_tunnel("reconnect-auth").await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn restarting_a_failed_tunnel_on_the_same_local_port_reports_the_ssh_error_not_a_bind_conflict() {
+        let _guard = prompt_test_lock().lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+
+        let publickey_attempts = Arc::new(AtomicUsize::new(0));
+        let (ssh_port, server_task) = start_key_once_then_reject_server(publickey_attempts).await;
+        let dir = tempdir().unwrap();
+        HostKeyVerifier::new(dir.path().join("known_hosts"))
+            .learn("127.0.0.1", ssh_port, &test_server_public_key())
+            .unwrap();
+        let key_path = dir.path().join("id_ed25519");
+        std::fs::write(&key_path, TEST_SERVER_KEY_PEM).unwrap();
+        let key_path = key_path.to_str().unwrap().to_string();
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let local_port = free_local_port().await;
+        let start = || {
+            manager.start_tunnel_on_local_port(
+                "fixed-reconnect",
+                "127.0.0.1",
+                ssh_port,
+                "127.0.0.1",
+                ssh_port,
+                "user",
+                "",
+                &key_path,
+                "",
+                false,
+                "",
+                "",
+                "key",
+                5,
+                "db.internal",
+                3306,
+                false,
+                false,
+                Some(local_port),
+                "",
+            )
+        };
+        assert_eq!(start().await.unwrap(), local_port);
+
+        // The first client makes the server drop the session; the reconnect is then refused.
+        let mut client = TcpStream::connect(("127.0.0.1", local_port)).await.unwrap();
+        let mut buf = [0_u8; 1];
+        let _ = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf)).await;
+        let failed = async {
+            loop {
+                let failure = manager.tunnels.lock().await.get("fixed-reconnect").and_then(|e| e.statuses[0].failure());
+                if failure.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), failed).await.expect("the reconnect should have been refused");
+
+        let evicted = start().await.unwrap_err();
+        assert!(evicted.contains("could not reconnect"), "{evicted}");
+        let restarted = start().await.unwrap_err();
+        assert!(!restarted.contains("Failed to bind requested local port"), "{restarted}");
+
+        manager.stop_tunnel("fixed-reconnect").await;
         server_task.abort();
     }
 

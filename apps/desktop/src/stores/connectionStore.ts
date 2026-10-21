@@ -199,6 +199,7 @@ import { isXuguPublicSynonymScope, isXuguSchedulerJobScope, isXuguSyntheticScope
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable, packageMemberGroupOwnerId } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
+import { withoutSshLocalPorts } from "@/lib/connection/sshLocalPort";
 import { driverProfileObjectTreeProfileForConnection } from "@/lib/database/driverProfileExtensions";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
@@ -4241,7 +4242,7 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const entry of clipboard.connections) {
       await addConnection(
         {
-          ...entry.config,
+          ...withoutSshLocalPorts(entry.config),
           id: uuid(),
           name: `${entry.config.name} (Copy)`,
         },

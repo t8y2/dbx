@@ -7110,6 +7110,11 @@ impl Storage {
             let mut copy: ConnectionConfig = serde_json::from_str(&source_json).map_err(|error| error.to_string())?;
             copy.id = copy_id.clone();
             copy.name = copy_name;
+            for layer in &mut copy.transport_layers {
+                if let TransportLayerConfig::Ssh(ssh) = layer {
+                    ssh.local_port = None;
+                }
+            }
             let copy_json = serde_json::to_string(&copy).map_err(|error| error.to_string())?;
             tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![copy_id, copy_json])
                 .map_err(|error| error.to_string())?;
@@ -11733,6 +11738,7 @@ mod tests {
             key_passphrase: String::new(),
             connect_timeout_secs: 5,
             expose_lan: false,
+            local_port: None,
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             ssh_agent_key_fingerprint: String::new(),

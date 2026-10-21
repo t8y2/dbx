@@ -3045,6 +3045,7 @@ mod unavailable_backend_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dbx_core::models::connection::TransportLayerConfig;
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -3141,8 +3142,27 @@ mod tests {
     async fn local_connection_mutations_succeed_without_desktop() {
         let data_dir = tempfile::tempdir().unwrap();
         let backend = connection_mutation_backend(data_dir.path()).await;
-        backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
+        let mut source = mutation_test_connection();
+        source.transport_layers = serde_json::from_value(json!([
+            { "type": "ssh", "id": "ssh-1", "host": "bastion", "port": 22, "user": "deploy", "local_port": 4059 }
+        ]))
+        .unwrap();
+        backend.add_connection_for_mcp(source).await.unwrap();
         backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
+        let ssh_local_ports = |connections: &[ConnectionConfig], id: &str| -> Vec<Option<u16>> {
+            let connection = connections.iter().find(|connection| connection.id == id).unwrap();
+            connection
+                .transport_layers
+                .iter()
+                .filter_map(|layer| match layer {
+                    TransportLayerConfig::Ssh(ssh) => Some(ssh.local_port),
+                    _ => None,
+                })
+                .collect()
+        };
+        let connections = backend.load_connections().await.unwrap();
+        assert_eq!(ssh_local_ports(&connections, "source"), vec![Some(4059)]);
+        assert_eq!(ssh_local_ports(&connections, "copy"), vec![None]);
         assert!(backend.remove_connection_for_mcp("source").await.unwrap());
         let connections = backend.load_connections().await.unwrap();
         assert_eq!(connections.len(), 1);
@@ -4818,6 +4838,50 @@ mod tests {
         let installed = backend.state().plugins.list_installed().unwrap();
         let plugin = installed.iter().find(|plugin| plugin.manifest.id == "io.dbx.gated").unwrap();
         assert!(!plugin.compatibility.compatible, "{:?}", plugin.compatibility.errors);
+    }
+
+    #[tokio::test]
+    async fn standalone_open_leaves_fixed_ssh_local_ports_to_the_desktop_app() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let fixed_port = held.local_addr().unwrap().port();
+        let closed_port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "tunnelled",
+            "name": "tunnelled",
+            "db_type": "mysql",
+            "host": "db.internal",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "transport_layers": [{
+                "type": "ssh",
+                "id": "ssh-1",
+                "host": "127.0.0.1",
+                "port": closed_port,
+                "user": "user",
+                "auth_method": "none",
+                "connect_timeout_secs": 2,
+                "local_port": fixed_port
+            }]
+        }))
+        .unwrap();
+        let bind_error = format!("Failed to bind requested local port {fixed_port}");
+
+        let standalone_dir = tempfile::tempdir().unwrap();
+        let standalone_path = standalone_dir.path().join("dbx.db");
+        drop(Storage::open(&standalone_path).await.unwrap());
+        let standalone = LocalBackend::open(&standalone_path).await.unwrap();
+        let error = standalone.state().connection_host_port(&config.id, &config).await.unwrap_err();
+        assert!(!error.contains(&bind_error), "{error}");
+
+        let embedded_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&embedded_dir.path().join("dbx.db")).await.unwrap();
+        let app_state = Arc::new(AppState::new(storage));
+        app_state.set_honor_fixed_ssh_local_ports(true);
+        let embedded = LocalBackend::from_app_state(app_state, embedded_dir.path().to_path_buf());
+        let error = embedded.state().connection_host_port(&config.id, &config).await.unwrap_err();
+        assert!(error.contains(&bind_error), "{error}");
     }
 
     #[test]

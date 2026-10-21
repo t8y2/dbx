@@ -130,6 +130,18 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     key: "connection.sshTotpCancelled",
   },
   {
+    name: "SSH fixed local port already in use",
+    message: "Failed to bind requested local port 4059: Address already in use (os error 48)",
+    key: "connection.sshLocalPortBindFailed",
+    params: { port: "4059", error: "Address already in use (os error 48)" },
+  },
+  {
+    name: "SSH fixed local port on a later layer",
+    message: "SSH layer 2 failed: Failed to bind requested local port 4059: Only one usage of each socket address is normally permitted. (os error 10048)",
+    key: "connection.sshLocalPortBindFailed",
+    params: { port: "4059", error: "Only one usage of each socket address is normally permitted. (os error 10048)" },
+  },
+  {
     name: "streaming export unsupported",
     message: "Streaming export is unsupported for this query. Simplify it or use a supported driver.",
     key: "exportProgress.streamingUnsupported",

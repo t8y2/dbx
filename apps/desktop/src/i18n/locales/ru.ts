@@ -3270,6 +3270,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Копировать SQL текущей страницы",
     copyActualExecutionSql: "Копировать фактически выполненный SQL",
     pageProbeDescription: "На этой странице отображается не более {count} строк; дополнительно считывается не более 1 строки, чтобы определить, есть ли следующая страница.",
+    tableDataPreviewMuteToday: "Больше не показывать сегодня",
   },
   exportProgress: {
     streamingUnsupported: "Потоковый экспорт не поддерживается для этого запроса. Упростите его или используйте поддерживаемый драйвер.",

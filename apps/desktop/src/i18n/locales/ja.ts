@@ -3210,6 +3210,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "現在のページの SQL をコピー",
     copyActualExecutionSql: "実際に実行された SQL をコピー",
     pageProbeDescription: "このページには最大 {count} 行を表示し、次のページがあるかどうかを判断するために最大 1 行を追加で読み取ります。",
+    tableDataPreviewMuteToday: "今日は再表示しない",
   },
   exportProgress: {
     streamingUnsupported: "このクエリはストリーミングエクスポートに対応していません。クエリを簡略化するか、対応しているドライバーを使用してください。",

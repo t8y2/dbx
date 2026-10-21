@@ -3188,6 +3188,7 @@ export default withEnglishFallback({
     tableDataPreviewDismiss: "不再提示",
     tableDataPreviewLoaded: "已載入目前頁面 {count} 個完整文字儲存格",
     tableDataPreviewLoadFailed: "載入完整文字失敗：{message}",
+    tableDataPreviewMuteToday: "今日不再提示",
   },
   exportProgress: {
     streamingUnsupported: "目前查詢暫不支援串流匯出，請簡化查詢或使用支援的驅動程式。",

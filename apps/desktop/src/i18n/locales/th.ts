@@ -3493,6 +3493,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "คัดลอก SQL ของหน้าปัจจุบัน",
     copyActualExecutionSql: "คัดลอก SQL ที่ดำเนินการจริง",
     pageProbeDescription: "หน้านี้แสดงได้สูงสุด {count} แถว และอ่านเพิ่มได้สูงสุด 1 แถวเพื่อตรวจสอบว่ามีหน้าถัดไปหรือไม่",
+    tableDataPreviewMuteToday: "ไม่ต้องแจ้งเตือนอีกในวันนี้",
   },
   exportProgress: {
     streamingUnsupported: "ไม่รองรับการส่งออกแบบ Streaming สำหรับ Query นี้ ทำให้เรียบง่ายขึ้นหรือใช้ Driver ที่รองรับ",

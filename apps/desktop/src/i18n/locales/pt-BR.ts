@@ -3186,6 +3186,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Copiar SQL da página atual",
     copyActualExecutionSql: "Copiar SQL de execução real",
     pageProbeDescription: "Esta página exibe no máximo {count} linhas, com leitura adicional de no máximo 1 linha para determinar se há uma próxima página.",
+    tableDataPreviewMuteToday: "Não mostrar novamente hoje",
   },
   exportProgress: {
     streamingUnsupported: "A exportação em streaming não é compatível com esta consulta. Simplifique-a ou use um driver compatível.",

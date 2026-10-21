@@ -2187,6 +2187,7 @@ async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
           schema: node.schema,
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+          keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           tableName: node.label,
           columns: [],
         });
@@ -2288,6 +2289,7 @@ async function newSelectTemplate() {
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+            keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
             tableName: context.node.label,
             columns: context.columns,
           }),
@@ -2307,6 +2309,7 @@ async function newSelectTemplate() {
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+      keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       tableName: context.node.label,
       columns: context.columns,
     });

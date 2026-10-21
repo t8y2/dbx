@@ -11191,7 +11191,7 @@ async fn mysql_object_source(
 ) -> Result<String, String> {
     let primary_sql = mysql_object_source_sql(database, name, kind);
     let primary_column_index = mysql_object_source_ddl_column_index(kind);
-    let mut conn = db::mysql::get_conn_with_timeout(pool, db::connection_timeout()).await?;
+    let mut conn = db::mysql::get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
 
     match read_mysql_object_source_row(&mut conn, &primary_sql, primary_column_index).await {
         Ok(source) => Ok(source),

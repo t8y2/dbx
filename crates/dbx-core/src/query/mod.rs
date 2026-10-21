@@ -1839,10 +1839,16 @@ async fn do_execute_typed(
             let connection_id = conn.id();
             if let Some(ref execution_id) = options.execution_id {
                 let kill_opts = conn.opts().clone();
+                // The interrupt runs after the user asked to cancel; give the
+                // dedicated kill connection the same infrastructure budget as
+                // the query path instead of the old compile-time 5 s.
+                let kill_timeout = operation_budget.checkout_timeout;
                 state.running_queries.register_interrupt(execution_id, move || {
                     let kill_opts = kill_opts.clone();
                     tokio::spawn(async move {
-                        if let Err(error) = db::mysql::kill_query_with_opts(kill_opts, connection_id).await {
+                        if let Err(error) =
+                            db::mysql::kill_query_with_opts(kill_opts, connection_id, kill_timeout).await
+                        {
                             log::warn!("Failed to cancel MySQL query {connection_id}: {error}");
                         }
                     });

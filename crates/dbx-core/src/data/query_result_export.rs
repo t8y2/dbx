@@ -1623,10 +1623,13 @@ async fn try_export_mysql_query_result_stream(
     let kill_opts = conn.opts().clone();
     if let Some(execution_id) = request.execution_id.clone() {
         let interrupt_kill_opts = kill_opts.clone();
+        let kill_timeout = operation_budget.checkout_timeout;
         state.running_queries.register_interrupt(&execution_id, move || {
             let kill_opts = interrupt_kill_opts.clone();
             tokio::spawn(async move {
-                if let Err(error) = crate::db::mysql::kill_query_with_opts(kill_opts, mysql_connection_id).await {
+                if let Err(error) =
+                    crate::db::mysql::kill_query_with_opts(kill_opts, mysql_connection_id, kill_timeout).await
+                {
                     log::warn!("Failed to cancel MySQL export query {mysql_connection_id}: {error}");
                 }
             });
@@ -1760,7 +1763,9 @@ async fn try_export_mysql_query_result_stream(
     )
     .await;
     if stream_result.as_ref().is_err_and(|error| error == &timeout_error) {
-        let _ = crate::db::mysql::kill_query_with_opts(kill_opts, mysql_connection_id).await;
+        let _ =
+            crate::db::mysql::kill_query_with_opts(kill_opts, mysql_connection_id, operation_budget.checkout_timeout)
+                .await;
     }
     watcher_done.cancel();
 

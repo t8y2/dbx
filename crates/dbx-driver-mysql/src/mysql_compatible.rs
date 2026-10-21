@@ -84,7 +84,7 @@ fn catalog_table_ref(catalog: &str, database: &str, table: &str) -> String {
 /// `default_catalog` in StarRocks (both with `Type=internal`); detection is
 /// type-based (see `CatalogInfo::is_internal`), not name-based.
 pub async fn list_catalogs(pool: &MySqlPool) -> Result<Vec<crate::db::CatalogInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter("SHOW CATALOGS").await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let catalogs: Vec<crate::db::CatalogInfo> = rows
@@ -124,7 +124,7 @@ fn normalize_catalogs(mut catalogs: Vec<crate::db::CatalogInfo>) -> Vec<crate::d
 
 /// `SHOW DATABASES FROM <catalog>` → databases in the given catalog.
 pub async fn list_databases_show_from(pool: &MySqlPool, catalog: &str) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let sql = format!("SHOW DATABASES FROM {}", quote_identifier(catalog));
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -137,7 +137,7 @@ pub async fn list_databases_show_from(pool: &MySqlPool, catalog: &str) -> Result
 /// not fetched (the caller only needs names + types for browsing).
 pub async fn list_tables_show_from(pool: &MySqlPool, catalog: &str, database: &str) -> Result<Vec<TableInfo>, String> {
     let sql = format!("SHOW TABLES FROM {}", catalog_database_ref(catalog, database));
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let mut tables: Vec<TableInfo> = rows

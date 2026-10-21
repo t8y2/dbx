@@ -6335,9 +6335,18 @@ pub async fn kill_query(pool: &MySqlPool, connection_id: u32) -> Result<(), Stri
     Ok(())
 }
 
-pub async fn kill_query_with_opts(opts: mysql_async::Opts, connection_id: u32) -> Result<(), String> {
+/// Kills a query through a dedicated connection rebuilt from its `Opts`.
+///
+/// Cancel paths run while the original pool may be busy, so this opens a new
+/// physical connection. `timeout` is the caller's infrastructure budget (the
+/// connection's configured connect/checkout timeout), not the old compile-time
+/// 5 s: on a slow link a hardcoded budget turns cancellation into a failure.
+pub async fn kill_query_with_opts(
+    opts: mysql_async::Opts,
+    connection_id: u32,
+    timeout: Duration,
+) -> Result<(), String> {
     let start = Instant::now();
-    let timeout = super::connection_timeout();
     let mut conn = tokio::time::timeout(timeout, mysql_async::Conn::new(opts))
         .await
         .map_err(|_| {

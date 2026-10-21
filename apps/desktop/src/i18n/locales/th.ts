@@ -3484,6 +3484,8 @@ export default withEnglishFallback({
     tableDataPreviewLoading: "กำลังโหลดข้อความฉบับเต็มของหน้าปัจจุบัน…",
     tableDataPreviewDismiss: "ไม่แสดงอีก",
     tableDataPreviewDontShowAgain: "ไม่ต้องแสดงอีกเลย",
+    tableDataPreviewLoadPageShort: "ข้อความเต็ม",
+    tableDataPreviewLoadPageHint: "คลิกเพื่อโหลดข้อความเต็มของหน้านี้",
     tableDataPreviewLoaded: "โหลดเซลล์ข้อความฉบับเต็มในหน้าปัจจุบันแล้ว {count} เซลล์",
     tableDataPreviewLoadFailed: "โหลดข้อความฉบับเต็มไม่สำเร็จ: {message}",
     searchValuesOrCountTooltip: "ค้นหาค่าหรือกรองตามจำนวน (เช่น >1, >=2, =1, count>1)",

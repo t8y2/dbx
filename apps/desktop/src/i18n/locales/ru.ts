@@ -3261,6 +3261,8 @@ export default withEnglishFallback({
     tableDataPreviewLoading: "Загрузка полного текста текущей страницы…",
     tableDataPreviewDismiss: "Больше не показывать",
     tableDataPreviewDontShowAgain: "Больше не показывать",
+    tableDataPreviewLoadPageShort: "Полный текст",
+    tableDataPreviewLoadPageHint: "Нажмите, чтобы загрузить полный текст этой страницы",
     tableDataPreviewLoaded: "Загружено {count} ячеек с полным текстом на текущей странице",
     tableDataPreviewLoadFailed: "Не удалось загрузить полный текст: {message}",
     searchValuesOrCountTooltip: "Поиск значений или фильтрация по количеству (например, >1, >=2, =1, count>1)",

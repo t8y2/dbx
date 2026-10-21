@@ -492,7 +492,7 @@ function readTableDataPreviewNoticeHidden(): boolean {
 }
 const tableDataPreviewNoticeHidden = ref(readTableDataPreviewNoticeHidden());
 const tableDataPreviewTruncated = computed(() => !!props.tableMeta && (props.result.large_value_cells?.length ?? 0) > 0);
-const showTableDataPreviewNotice = computed(() => tableDataPreviewTruncated.value && !tableDataFullTextMode.value && (tableDataPreviewNoticeHidden.value || !tableDataPreviewNoticeDismissed.value));
+const showTableDataPreviewNotice = computed(() => tableDataPreviewTruncated.value && !tableDataFullTextMode.value && !tableDataPreviewNoticeHidden.value && !tableDataPreviewNoticeDismissed.value);
 const tableDataFullTextEnabled = computed(() => !!props.tableMeta && tableDataFullTextMode.value);
 const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
@@ -5983,8 +5983,9 @@ function dismissTableDataPreviewNotice() {
   tableDataPreviewNoticeDismissed.value = true;
 }
 
-/// Persistently silences the banner across tables and pages. The compact icon
-/// in the same strip keeps "load the full text for this page" reachable.
+/// Persistently silences the banner across tables and pages. The toolbar action
+/// row keeps "load the full text for this page" reachable without leaving an
+/// empty banner line behind.
 function hideTableDataPreviewNoticeForGood() {
   tableDataPreviewNoticeHidden.value = true;
   try {
@@ -14693,6 +14694,21 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             @wheel="onDataGridTopbarFixedActionWheel"
           >
             <template #leading>
+              <!-- Once the banner is silenced for good, the full-text entry moves
+                   into the existing action row rather than keeping an empty
+                   banner line of its own. -->
+              <Tooltip v-if="tableDataPreviewTruncated && tableDataPreviewNoticeHidden && !tableDataFullTextMode">
+                <TooltipTrigger as-child>
+                  <Button variant="ghost" size="sm" :disabled="tableDataFullTextLoading" class="data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5" @click="loadCurrentPageFullText">
+                    <Info class="data-grid-topbar-action-icon w-3 h-3 text-amber-600 dark:text-amber-400" />
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbarActions }">{{ t("grid.tableDataPreviewLoadPageShort") }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-sm">
+                  <p>{{ t("grid.tableDataPreviewNotice") }}</p>
+                  <p class="mt-1 opacity-80">{{ t("grid.tableDataPreviewLoadPageHint") }}</p>
+                </TooltipContent>
+              </Tooltip>
               <slot v-if="hasResultToolbarActionsSlot" name="result-toolbar-actions" :compact="compactDataGridToolbarActions" />
               <DataGridVirtualRowIdentifier
                 v-if="showVirtualRowIdentifierControl"
@@ -14854,38 +14870,26 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @apply="applyStructuredSortRules"
         />
         <!-- Large table preview notice: explicit opt-in instead of guessing from column width (#12289).
-             Once "don't show again" is used it collapses to an icon so the full-text load stays reachable (#12906). -->
+             Once "don't show again" is used the banner disappears and the full-text entry moves into the
+             toolbar action row, so no extra line is kept just for an icon (#12906). -->
         <div v-if="showTableDataPreviewNotice" data-grid-preview-notice class="shrink-0 px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-700 dark:text-amber-300 flex flex-wrap items-center gap-x-2 gap-y-1">
-          <button
-            v-if="tableDataPreviewNoticeHidden"
-            type="button"
-            class="flex items-center gap-1 rounded px-0.5 py-0 text-amber-600/80 hover:bg-amber-500/10 hover:text-amber-800 disabled:opacity-50 dark:text-amber-400/80 dark:hover:text-amber-200"
-            :title="t('grid.tableDataPreviewNotice')"
-            :aria-label="t('grid.tableDataPreviewNotice')"
-            :disabled="tableDataFullTextLoading"
-            @click="loadCurrentPageFullText"
-          >
-            <Info class="h-3.5 w-3.5 shrink-0" />
+          <Info class="h-3.5 w-3.5 shrink-0" />
+          <span>{{ t("grid.tableDataPreviewNotice") }}</span>
+          <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 disabled:opacity-50 dark:hover:text-amber-100" :disabled="tableDataFullTextLoading" @click="loadCurrentPageFullText">
+            {{ tableDataFullTextLoading ? t("grid.tableDataPreviewLoading") : t("grid.tableDataPreviewLoadPage") }}
           </button>
-          <template v-else>
-            <Info class="h-3.5 w-3.5 shrink-0" />
-            <span>{{ t("grid.tableDataPreviewNotice") }}</span>
-            <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 disabled:opacity-50 dark:hover:text-amber-100" :disabled="tableDataFullTextLoading" @click="loadCurrentPageFullText">
-              {{ tableDataFullTextLoading ? t("grid.tableDataPreviewLoading") : t("grid.tableDataPreviewLoadPage") }}
-            </button>
-            <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 dark:hover:text-amber-100" @click="hideTableDataPreviewNoticeForGood">
-              {{ t("grid.tableDataPreviewDontShowAgain") }}
-            </button>
-            <button
-              type="button"
-              class="ml-auto shrink-0 rounded p-0.5 text-amber-600/70 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400/70 dark:hover:text-amber-200"
-              :title="t('grid.tableDataPreviewDismiss')"
-              :aria-label="t('grid.tableDataPreviewDismiss')"
-              @click="dismissTableDataPreviewNotice"
-            >
-              <X class="h-3.5 w-3.5" />
-            </button>
-          </template>
+          <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 dark:hover:text-amber-100" @click="hideTableDataPreviewNoticeForGood">
+            {{ t("grid.tableDataPreviewDontShowAgain") }}
+          </button>
+          <button
+            type="button"
+            class="ml-auto shrink-0 rounded p-0.5 text-amber-600/70 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400/70 dark:hover:text-amber-200"
+            :title="t('grid.tableDataPreviewDismiss')"
+            :aria-label="t('grid.tableDataPreviewDismiss')"
+            @click="dismissTableDataPreviewNotice"
+          >
+            <X class="h-3.5 w-3.5" />
+          </button>
         </div>
 
         <!-- Truncation warning banner -->

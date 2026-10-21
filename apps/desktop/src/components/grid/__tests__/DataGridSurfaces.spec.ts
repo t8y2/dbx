@@ -2732,13 +2732,18 @@ describe("DataGrid large-table preview notice", () => {
     localStorage.removeItem(HIDDEN_KEY);
   });
 
+  function fullTextEntry(host: HTMLElement) {
+    return [...host.querySelectorAll("button")].find((button) => button.textContent?.trim() === "grid.tableDataPreviewLoadPageShort");
+  }
+
   // #12906: the banner only stayed away for the current result, so every new
   // table brought it back. "Don't show again" has to persist across tables and
-  // leave an icon that still loads the full text.
-  it("persists the don't-show-again choice and keeps the full-text icon", async () => {
+  // keep the full text one click away.
+  it("persists the don't-show-again choice without leaving an empty banner row", async () => {
     const grid = mountGrid();
     await nextTick();
     expect(grid.notice()?.textContent).toContain("grid.tableDataPreviewNotice");
+    expect(fullTextEntry(grid.host)).toBeUndefined();
 
     const dontShowAgain = [...grid.host.querySelectorAll("button")].find((button) => button.textContent?.trim() === "grid.tableDataPreviewDontShowAgain");
     expect(dontShowAgain).toBeTruthy();
@@ -2746,16 +2751,16 @@ describe("DataGrid large-table preview notice", () => {
     await nextTick();
 
     expect(localStorage.getItem(HIDDEN_KEY)).toBe("1");
-    // The strip stays (so the full text is still one click away) but the text
-    // and the dismiss action are gone.
-    expect(grid.notice()?.textContent).not.toContain("grid.tableDataPreviewNotice");
-    expect(grid.notice()?.querySelector("button")?.getAttribute("title")).toBe("grid.tableDataPreviewNotice");
+    // The banner row is gone entirely; the full-text action moved into the
+    // existing toolbar action row so no empty strip is left behind.
+    expect(grid.notice()).toBeNull();
+    expect(fullTextEntry(grid.host)).toBeTruthy();
     grid.destroy();
 
     const reopened = mountGrid();
     await nextTick();
-    expect(reopened.notice()?.textContent).not.toContain("grid.tableDataPreviewNotice");
-    expect(reopened.notice()?.querySelector("button")?.getAttribute("title")).toBe("grid.tableDataPreviewNotice");
+    expect(reopened.notice()).toBeNull();
+    expect(fullTextEntry(reopened.host)).toBeTruthy();
     reopened.destroy();
   });
 });

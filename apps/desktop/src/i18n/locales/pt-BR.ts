@@ -3177,6 +3177,8 @@ export default withEnglishFallback({
     tableDataPreviewLoading: "Carregando o texto completo da página atual…",
     tableDataPreviewDismiss: "Não mostrar novamente",
     tableDataPreviewDontShowAgain: "Nunca mais mostrar",
+    tableDataPreviewLoadPageShort: "Texto completo",
+    tableDataPreviewLoadPageHint: "Clique para carregar o texto completo desta página",
     tableDataPreviewLoaded: "Carregadas {count} células de texto completo na página atual",
     tableDataPreviewLoadFailed: "Falha ao carregar o texto completo: {message}",
     searchValuesOrCountTooltip: "Pesquisar valores ou filtrar por quantidade (ex.: >1, >=2, =1, count>1)",

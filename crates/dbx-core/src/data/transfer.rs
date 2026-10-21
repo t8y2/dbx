@@ -4557,10 +4557,18 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
             DatabaseType::SqlServer => "INT".into(),
             _ => "INTEGER".into(),
         },
-        "bigint" | "int8" => "BIGINT".into(),
+        // Oracle has no BIGINT/TINYINT spelling. `INTEGER` and `SMALLINT` are ANSI
+        // synonyms for NUMBER(38, 0), so they hold the full MySQL range (#12976:
+        // a MySQL -> OceanBase Oracle structure transfer failed with ORA-00900 at
+        // `BIGINT NOT NULL`). Other targets keep their native widths.
+        "bigint" | "int8" => match target_db {
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => "INTEGER".into(),
+            _ => "BIGINT".into(),
+        },
         "smallint" | "int2" => "SMALLINT".into(),
         "tinyint" => match target_db {
             target_db if is_postgres_transfer_dialect(target_db) => "SMALLINT".into(),
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => "SMALLINT".into(),
             _ => "TINYINT".into(),
         },
         "serial" | "bigserial" | "smallserial" => match target_db {
@@ -22882,6 +22890,61 @@ SELECT 1 FROM dual"#
         // no precision to lose.
         assert_eq!(map_column_type("NUMBER", &DatabaseType::Oracle, &DatabaseType::OceanbaseOracle), "NUMERIC");
         assert_eq!(map_column_type("NUMBER", &DatabaseType::Oracle, &DatabaseType::Dameng), "NUMERIC");
+    }
+
+    #[test]
+    fn map_column_type_uses_oracle_family_integer_types_for_mysql_widths() {
+        // Issue #12976: MySQL `bigint` / `tinyint` were emitted verbatim, but
+        // Oracle-compatible targets have no BIGINT/TINYINT type. INTEGER and
+        // SMALLINT are ANSI synonyms for NUMBER(38, 0) and cover the source range.
+        for target in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("BIGINT", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("bigint unsigned", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("BIGINT(20)", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("int8", &DatabaseType::Postgres, &target), "INTEGER");
+            assert_eq!(map_column_type("tinyint", &DatabaseType::Mysql, &target), "SMALLINT");
+            assert_eq!(map_column_type("TINYINT(1)", &DatabaseType::Mysql, &target), "SMALLINT");
+            assert_eq!(map_column_type("int", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("smallint", &DatabaseType::Mysql, &target), "SMALLINT");
+        }
+
+        // Other targets keep their native integer spellings.
+        assert_eq!(map_column_type("bigint", &DatabaseType::Postgres, &DatabaseType::Mysql), "BIGINT");
+        assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &DatabaseType::Postgres), "BIGINT");
+        assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &DatabaseType::SqlServer), "BIGINT");
+        assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &DatabaseType::Dameng), "BIGINT");
+        assert_eq!(map_column_type("tinyint", &DatabaseType::SqlServer, &DatabaseType::Mysql), "TINYINT");
+        assert_eq!(map_column_type("tinyint", &DatabaseType::Mysql, &DatabaseType::SqlServer), "TINYINT");
+        assert_eq!(map_column_type("tinyint", &DatabaseType::Mysql, &DatabaseType::Dameng), "TINYINT");
+    }
+
+    #[test]
+    fn transfer_create_table_mysql_bigint_to_oceanbase_oracle_uses_integer() {
+        let columns = vec![
+            db::ColumnInfo { is_primary_key: true, ..test_column("ID", "bigint") },
+            test_column("GROUPNO", "int"),
+            test_column("GROUPDESC", "varchar(100)"),
+            test_column("TINY", "tinyint"),
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &columns,
+            "CLAIM",
+            "nw",
+            "NWGJ",
+            &DatabaseType::OceanbaseOracle,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("\"ID\" INTEGER"), "{ddl}");
+        assert!(ddl.contains("\"GROUPNO\" INTEGER"), "{ddl}");
+        assert!(ddl.contains("\"GROUPDESC\" VARCHAR(100 CHAR)"), "{ddl}");
+        assert!(ddl.contains("\"TINY\" SMALLINT"), "{ddl}");
+        assert!(!ddl.contains("BIGINT"), "{ddl}");
+        assert!(!ddl.contains("TINYINT"), "{ddl}");
     }
 
     #[test]

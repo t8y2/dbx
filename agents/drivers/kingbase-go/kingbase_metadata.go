@@ -1980,10 +1980,7 @@ func (s *server) cacheMissingColumnGenerationCapability(err error) bool {
 func applyColumnGenerationMetadata(column *columnInfo, identity, generated string, expression sql.NullString) error {
 	identity = strings.ToLower(strings.TrimSpace(identity))
 	generated = strings.ToLower(strings.TrimSpace(generated))
-	if generated != "" {
-		if generated != "s" || identity != "" {
-			return fmt.Errorf("column %q has unsupported generation metadata (identity=%q, generated=%q)", column.Name, identity, generated)
-		}
+	if generated == "s" {
 		if !expression.Valid || strings.TrimSpace(expression.String) == "" {
 			return fmt.Errorf("generated column %q has no generation expression", column.Name)
 		}
@@ -1991,11 +1988,12 @@ func applyColumnGenerationMetadata(column *columnInfo, identity, generated strin
 		// in the established extra clause, never in column_default.
 		column.Extra = stringPtr("GENERATED ALWAYS AS (" + expression.String + ") STORED")
 		column.ColumnDefault = nil
-	} else if identity != "" {
-		column.Extra = kingbaseIdentityClause(identity)
-		if column.Extra == nil {
-			return fmt.Errorf("column %q has unsupported identity metadata %q", column.Name, identity)
-		}
+		return nil
+	}
+	// Unrecognised identity codes (KingbaseES reports e.g. "i") keep the plain
+	// column default instead of failing the whole table load.
+	if clause := kingbaseIdentityClause(identity); clause != nil {
+		column.Extra = clause
 		column.ColumnDefault = nil
 	}
 	return nil

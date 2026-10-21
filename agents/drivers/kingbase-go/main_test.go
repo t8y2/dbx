@@ -3977,6 +3977,9 @@ func TestColumnDDLDefinitionPreservesCompatibilityExtras(t *testing.T) {
 	if extra := kingbaseIdentityClause(""); extra != nil {
 		t.Fatalf("non-identity column must not expose an extra clause: %#v", extra)
 	}
+	if extra := kingbaseIdentityClause("i"); extra != nil {
+		t.Fatalf("unrecognised identity code must not expose an extra clause: %#v", extra)
+	}
 }
 
 func TestRenderTableDDLUsesBacktickIdentifiersInMySQLCompatMode(t *testing.T) {

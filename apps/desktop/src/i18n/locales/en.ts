@@ -9266,7 +9266,7 @@ export default {
     iconThemeBlack: "Black",
     iconThemeBlackDescription: "Use the black DBX logo in the app.",
     iconThemeBlackDescriptionMac: "Use the black logo in the app; Dock uses a black plate, menu bar follows the system.",
-    linuxFloatingFrame: "Linux window transparency",
+    linuxFloatingFrame: "Window transparency",
     linuxFloatingFrameDescription: "Automatically enable the transparent frame on supported desktops. Turn off if the window flickers. Apply and restart DBX to take effect. Environment overrides take priority.",
     showTrayIcon: "Show tray/menu bar icon",
     showTrayIconDescription: "When disabled, no icon is shown, but closing the window still hides DBX in the background as before.",

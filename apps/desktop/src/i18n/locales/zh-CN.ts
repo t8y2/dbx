@@ -9234,7 +9234,7 @@ export default withEnglishFallback({
     iconThemeBlack: "黑色",
     iconThemeBlackDescription: "应用内使用黑色 DBX 标识。",
     iconThemeBlackDescriptionMac: "应用内使用黑色标识；Dock 使用黑色底板，菜单栏跟随系统。",
-    linuxFloatingFrame: "Linux 窗口透明效果",
+    linuxFloatingFrame: "窗口透明效果",
     linuxFloatingFrameDescription: "在支持的桌面上自动启用透明边框。窗口闪烁时可关闭，应用并重启 DBX 后生效。环境变量设置优先。",
     showTrayIcon: "显示系统托盘/菜单栏图标",
     showTrayIconDescription: "关闭后不显示图标，但关闭窗口仍会像之前一样隐藏到后台。",

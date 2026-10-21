@@ -1579,18 +1579,22 @@ mod tests {
 
     #[test]
     fn marker_round_trips_and_is_version_scoped() {
+        let version = env!("CARGO_PKG_VERSION");
+        let other_version = "0.0.0-other-build";
         let profile = compat_profile(3).unwrap();
-        let contents = compatibility_marker_contents("0.6.49", profile);
-        assert_eq!(parse_compatibility_marker(&contents, "0.6.49"), Some(3));
-        assert_eq!(parse_compatibility_marker(&contents, "0.6.50"), None);
-        assert!(expected_marker_mismatch(&contents, "0.6.49", 3));
-        assert!(!expected_marker_mismatch(&contents, "0.6.49", 2));
+        let contents = compatibility_marker_contents(version, profile);
+        assert_eq!(parse_compatibility_marker(&contents, version), Some(3));
+        assert_eq!(parse_compatibility_marker(&contents, other_version), None);
+        assert!(!expected_marker_mismatch(&contents, version, 3));
+        assert!(expected_marker_mismatch(&contents, other_version, 3));
+        assert!(expected_marker_mismatch(&contents, version, 2));
     }
 
     #[test]
     fn legacy_marker_maps_to_the_first_profile() {
-        let contents = "version=0.6.49\nmode=isolated-profile-no-sandbox-disable-gpu\n";
-        assert_eq!(parse_compatibility_marker(contents, "0.6.49"), Some(1));
+        let version = env!("CARGO_PKG_VERSION");
+        let contents = format!("version={version}\nmode=isolated-profile-no-sandbox-disable-gpu\n");
+        assert_eq!(parse_compatibility_marker(&contents, version), Some(1));
     }
 
     #[test]

@@ -6701,8 +6701,15 @@ function dedupeAndSort(items: SqlCompletionItem[]): SqlCompletionItem[] {
 }
 
 function compareCompletionItems(left: SqlCompletionItem, right: SqlCompletionItem): number {
-  const leftSurfacesFirst = left.type === "variable" || left.type === "sequence";
-  const rightSurfacesFirst = right.type === "variable" || right.type === "sequence";
+  // `variable` is a templating placeholder, not a schema object: it has to win
+  // over same-prefix tables/columns. Sequences deliberately are not in this
+  // set — surfacing them unconditionally pushed them ahead of the table's own
+  // columns in a `WHERE <prefix>` position, which is the reported #12927
+  // regression. They still rank above functions through
+  // `getTypePriorityBoost` and stay the only candidates in `nextval(...)`
+  // style contexts.
+  const leftSurfacesFirst = left.type === "variable";
+  const rightSurfacesFirst = right.type === "variable";
   if (leftSurfacesFirst !== rightSurfacesFirst) return leftSurfacesFirst ? -1 : 1;
   if (!left.exactMatch !== !right.exactMatch) return left.exactMatch ? -1 : 1;
   const leftBonus = getHistoryBoost(left.label, left.type);
@@ -6721,7 +6728,10 @@ function getTypePriorityBoost(type: SqlCompletionItem["type"]): number {
     case "variable":
       return 220;
     case "sequence":
-      return 220;
+      // Below `column` / `table` / `schema`: a bare prefix after `WHERE` is far
+      // more likely a column than a sequence, and a sequence is still offered
+      // (and wins outright) wherever nothing else matches (#12927).
+      return 150;
     case "text":
       return 220;
     case "function":

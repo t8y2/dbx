@@ -518,6 +518,40 @@ describe("PostgreSQL sequence literal completion", () => {
     expect(items.some((item) => item.label === "order_seq")).toBe(false);
   });
 
+  it("ranks the table's own columns above same-prefix sequences (#12927)", () => {
+    // Sequences used to surface ahead of every other candidate type, so after
+    // `WHERE cust` the Dameng/Oracle list opened with sequences and pushed the
+    // columns the user was typing out of view.
+    const sql = "select * from orders where cust";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "orders", schema: "APP" }],
+      objects: [
+        { name: "CUSTOMER_SEQ", schema: "APP", type: "sequence" },
+        { name: "CUSTOMER_LOG_SEQ", schema: "APP", type: "sequence" },
+      ],
+      columnsByTable: new Map([
+        [
+          "APP.orders",
+          [
+            { name: "CUSTOMER_ID", table: "orders", schema: "APP" },
+            { name: "CUSTOMER_NAME", table: "orders", schema: "APP" },
+          ],
+        ],
+      ]),
+      databaseType: "dameng",
+      dialect: "oracle",
+      currentSchema: "APP",
+    });
+
+    const labels = items.map((item) => item.label);
+    const firstColumn = labels.indexOf("CUSTOMER_ID");
+    const firstSequence = labels.indexOf("CUSTOMER_SEQ");
+    expect(firstColumn).toBeGreaterThanOrEqual(0);
+    expect(firstSequence).toBeGreaterThanOrEqual(0);
+    expect(firstColumn).toBeLessThan(firstSequence);
+    expect(items[0]).toMatchObject({ label: "CUSTOMER_ID", type: "column" });
+  });
+
   it("suggests Oracle sequences in SQL expressions and select lists", () => {
     const sql = "SELECT ord";
     const unqualifiedItems = buildSqlCompletionItems(sql, sql.length, {

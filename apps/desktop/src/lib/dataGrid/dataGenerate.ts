@@ -1196,20 +1196,59 @@ const KnownColumnPatterns: Array<{ pattern: RegExp; generatorKey: string }> = [
   { pattern: /owner|creator|author|created_by|updated_by|modified_by|operator|user$/i, generatorKey: "full_name" },
 ];
 
+/**
+ * Column metadata carries the full SQL type, modifiers included: `time(3)`,
+ * `bit(1)`, `numeric(10,2)`, `character varying(64)`,
+ * `timestamp(6) without time zone`. Comparing that raw string made every
+ * comparison below miss the moment a modifier was present — `time(3)` and
+ * `bit(1)` columns fell through to the plain text generator and received values
+ * the server rejects for that column (#12994). Strip the modifiers and collapse
+ * whitespace so the classifier sees the bare type name.
+ *
+ * `tinyint(1)` is the one type that still needs its modifier, which is why
+ * {@link isBooleanColumnType} looks at the original string.
+ */
+export function normalizeColumnDataType(dataType: string): string {
+  return dataType
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const BOOLEAN_COLUMN_TYPE_RE = /^(?:bool|boolean|bit)$/;
+const TINYINT_BOOLEAN_WIDTH_RE = /^tinyint\s*\(\s*1\s*\)$/;
+const BIT_WIDTH_RE = /^bit\s*\(\s*(\d+)\s*\)$/;
+
+/** `bool` / `boolean` / `bit(1)` / MySQL's `tinyint(1)` all hold a boolean flag. */
+export function isBooleanColumnType(dataType: string): boolean {
+  const raw = dataType.toLowerCase().trim();
+  if (TINYINT_BOOLEAN_WIDTH_RE.test(raw)) return true;
+  const bitWidth = BIT_WIDTH_RE.exec(raw);
+  if (bitWidth) return Number(bitWidth[1]) === 1;
+  return BOOLEAN_COLUMN_TYPE_RE.test(normalizeColumnDataType(raw));
+}
+
 export function findGeneratorKey(columnName: string, dataType: string, isAutoIncrement?: boolean): string {
   if (isAutoIncrement) return "sequence";
-  const type = dataType.toLowerCase();
-  const isNumeric = /^number(?:\s*\([^)]*\))?$/.test(type.trim()) || type.includes("int") || type === "smallint" || type === "bigint" || type.includes("bool") || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
-  const isDateTime = type.includes("date") || type.includes("timestamp") || type === "time";
+  const type = normalizeColumnDataType(dataType);
+  // `serial` / `bigserial` increment by definition, so they stay on the sequence
+  // generator even when the driver does not report a default for them.
+  if (type.includes("serial")) return "sequence";
+  const isNumeric = /^number$/.test(type) || type.includes("int") || type.includes("bool") || /^bit\b/.test(type) || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
+  const isDateTime = type.includes("date") || type.includes("timestamp") || /^time\b/.test(type);
   const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
-  const isBoolType = type === "bool" || type === "boolean" || type === "bit" || type === "tinyint(1)";
+  const isBoolType = isBooleanColumnType(dataType);
   const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(columnName);
   if (isNumeric || isDateTime || isBinary) {
-    if (type.includes("serial")) return "sequence";
-    if (isBoolType || (isNumeric && isBoolName)) return "enum";
+    // A `bit` / `bit(n)` column only accepts 0/1 at every width, so it stays on
+    // the enum generator instead of receiving a random integer that overflows it.
+    if (isBoolType || /^bit\b/.test(type) || (isNumeric && isBoolName)) return "enum";
     if (/status|state/i.test(columnName)) return "enum";
     if (isNumeric) return "number";
-    if (type === "time") return "time";
+    // `time`, `time(6)` and `time without time zone` must not fall through to the
+    // datetime generator: a full timestamp is not a valid value for a TIME column.
+    if (/^time\b/.test(type)) return "time";
     if (isDateTime) return "datetime";
     if (isBinary) return "text";
   }
@@ -1446,9 +1485,9 @@ function buildDefaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, ge
   }
 
   if (generatorKey === "enum") {
-    const t = attrs.dataType.toLowerCase();
-    const isNum = t.includes("int") || t.includes("bool") || t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real";
-    const isBoolType = t === "bool" || t === "boolean" || t === "bit" || t === "tinyint(1)";
+    const normalizedType = normalizeColumnDataType(attrs.dataType);
+    const isNum = normalizedType.includes("int") || normalizedType.includes("bool") || /^bit\b/.test(normalizedType) || normalizedType.includes("decimal") || normalizedType.includes("numeric") || normalizedType.includes("float") || normalizedType.includes("double") || normalizedType === "real";
+    const isBoolType = isBooleanColumnType(attrs.dataType);
     const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(_columnName);
     if (isBoolType || (isNum && isBoolName)) {
       params.values = "0\n1";
@@ -1763,12 +1802,15 @@ export function generateValue(columnName: string, dataType: string, generatorKey
 }
 
 function generateByType(type: string, rowIndex: number): unknown {
-  const t = type.toLowerCase();
+  const t = normalizeColumnDataType(type);
   if (t.includes("int") || t.includes("serial") || t === "bigint" || t === "smallint" || t === "tinyint") return randInt(1, 1000);
   if (t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real") return randDecimal(0, 10000, 2);
   if (t.includes("bool")) return Math.random() > 0.5 ? 1 : 0;
+  // `datetime` / `timestamp` need a full timestamp; a bare TIME column only
+  // accepts a clock time, so it must not reuse the timestamp generator (#12994).
+  if (t.includes("timestamp") || t.includes("datetime")) return randTimestamp(new Date("2020-01-01"), new Date("2025-12-31"));
+  if (/^time\b/.test(t)) return generateTimeInRange();
   if (t.includes("date")) return randDate(new Date("2020-01-01"), new Date("2025-12-31"));
-  if (t.includes("time")) return randTimestamp(new Date("2020-01-01"), new Date("2025-12-31"));
   return `value_${rowIndex + 1}`;
 }
 

@@ -1156,12 +1156,23 @@ watch(
 );
 
 watch(
-  () => [props.activeTab.id, props.activeTab.result, props.activeTab.results, props.activeTab.isExecuting, props.activeOutputView] as const,
+  () => [props.activeTab.id, props.activeTab.result, props.activeTab.results, props.activeTab.isExecuting, props.activeTab.batchSqlExecution, props.activeOutputView] as const,
   () => {
     // The output view belongs to the shared result surface. An editor-only
     // surface (a background group's editor) must never redirect the global
     // view when its own tab finishes executing.
     if (props.editorOnly) return;
+    // A batch run reports its progress statement by statement, and only the
+    // summary view shows that, so a run of several statements opens there
+    // instead of on the first statement's grid. The switch is recorded against
+    // the run it happened in: a user who picks another view mid-run keeps it,
+    // and the next run switches again.
+    const batchExecution = props.activeTab.batchSqlExecution;
+    if (batchExecution && batchExecution.finishedAt === undefined && batchExecution.total > 1 && props.activeOutputView === "result" && props.activeTab.uiState?.batchSummaryExecutionId !== batchExecution.executionId) {
+      queryStore.updateTabUiState(props.activeTab.id, { activeOutputView: "summary", batchSummaryExecutionId: batchExecution.executionId });
+      emit("update:activeOutputView", props.activeTab.id, "summary");
+      return;
+    }
     if (props.activeTab.isExecuting) return;
     if (props.activeOutputView === "graph" && !canShowGraphOutput.value) {
       emit("update:activeOutputView", props.activeTab.id, "result");

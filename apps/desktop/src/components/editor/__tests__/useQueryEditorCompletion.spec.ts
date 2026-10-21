@@ -362,6 +362,47 @@ describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (se
   });
 });
 
+describe("SQL completion trailing space insertion", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  it.each([
+    ["at end of doc", "sele", 4, "SELECT "],
+    ["before a newline", "sele\n", 4, "SELECT \n"],
+    ["in the middle statement of a multi-statement doc", "SELECT 1;\nsele\nSELECT 2;", 14, "SELECT 1;\nSELECT \nSELECT 2;"],
+  ])("appends trailing space when insertSpaceAfterCompletion is enabled (%s)", async (_name, doc, cursor, expected) => {
+    const { provide, currentView, settings } = createHarness({ databaseType: "mysql", dialect: "mysql", modelValue: doc });
+    settings.editorSettings.insertSpaceAfterCompletion = true;
+    currentView.dispatch({ selection: { anchor: cursor } });
+    const result = await provide();
+    const option = result?.options.find((candidate) => candidate.label === "SELECT");
+    expect(option).toBeDefined();
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, cursor);
+    expect(currentView.state.doc.toString()).toBe(expected);
+  });
+
+  it("does not append trailing space when insertSpaceAfterCompletion is disabled", async () => {
+    const { provide, currentView, settings } = createHarness({ databaseType: "mysql", dialect: "mysql", modelValue: "sele" });
+    settings.editorSettings.insertSpaceAfterCompletion = false;
+    currentView.dispatch({ selection: { anchor: 4 } });
+    const result = await provide();
+    const option = result?.options.find((candidate) => candidate.label === "SELECT");
+    expect(option).toBeDefined();
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, 4);
+    expect(currentView.state.doc.toString()).toBe("SELECT");
+  });
+
+  it("does not append duplicate space when next character is already whitespace", async () => {
+    const { provide, currentView, settings } = createHarness({ databaseType: "mysql", dialect: "mysql", modelValue: "sele FROM users;" });
+    settings.editorSettings.insertSpaceAfterCompletion = true;
+    currentView.dispatch({ selection: { anchor: 4 } });
+    const result = await provide();
+    const option = result?.options.find((candidate) => candidate.label === "SELECT");
+    expect(option).toBeDefined();
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, 4);
+    expect(currentView.state.doc.toString()).toBe("SELECT FROM users;");
+  });
+});
+
 describe("QueryEditor completion provider ownership", () => {
   it.each(["cursor", "document", "view", "composition", "mode"])("rejects asynchronous analysis after a %s change", async (change) => {
     let resolve!: (result: SqlCompletionAnalysisResult) => void;

@@ -971,7 +971,8 @@ function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEv
   // Right-click must stay instant: resolve from completion/tree caches and keep the legacy table fallback when metadata is unavailable.
   const candidate = resolveQueryContextCandidateDatabase(parsedCandidate, connectionStore.lookupLocalCompletionDatabases(parsedCandidate.connectionId, parsedCandidate.database, MAX_COMPLETION_TABLES));
   const tables = connectionStore.lookupLocalCompletionTables(candidate.connectionId, candidate.database, candidate.tableName, MAX_COMPLETION_TABLES, candidate.schema, props.catalog);
-  contextObjectTarget.value = resolveQueryContextObjectTarget(candidate, tables);
+  const preferredSchema = props.schema ?? connectionStore.getConfig(props.connectionId)?.default_schema;
+  contextObjectTarget.value = resolveQueryContextObjectTarget(candidate, tables, preferredSchema);
 }
 
 function focusEditor() {

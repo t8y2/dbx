@@ -24,6 +24,20 @@ describe("SQL completion insertion", () => {
     expect(appendSqlCompletionSpace("SALARY", { enabled: true, itemType: "column", nextCharacter: ";" })).toBe("SALARY ");
   });
 
+  it("keeps the space when the cursor sits before a line break (#12934)", () => {
+    // A line break is not horizontal separation: without this the setting
+    // silently stopped working for any statement followed by a newline, which
+    // is the normal shape of a multi-statement editor.
+    expect(appendSqlCompletionSpace("SELECT", { enabled: true, itemType: "keyword", nextCharacter: "\n" })).toBe("SELECT ");
+    expect(appendSqlCompletionSpace("SELECT", { enabled: true, itemType: "keyword", nextCharacter: "\r" })).toBe("SELECT ");
+    expect(appendSqlCompletionSpace("orders", { enabled: true, itemType: "table", nextCharacter: "\n" })).toBe("orders ");
+  });
+
+  it("still skips the space when horizontal whitespace already separates the token", () => {
+    expect(appendSqlCompletionSpace("SELECT", { enabled: true, itemType: "keyword", nextCharacter: " " })).toBe("SELECT");
+    expect(appendSqlCompletionSpace("SELECT", { enabled: true, itemType: "keyword", nextCharacter: "\t" })).toBe("SELECT");
+  });
+
   it("honors the setting and leaves snippet-like completions unchanged", () => {
     expect(appendSqlCompletionSpace("SELECT", { enabled: false, itemType: "keyword" })).toBe("SELECT");
     expect(appendSqlCompletionSpace("CASE ${value}", { enabled: true, itemType: "snippet" })).toBe("CASE ${value}");

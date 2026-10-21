@@ -238,6 +238,7 @@ async fn live_oracle_transfer_places_tables_in_target_default_tablespace() {
         objects: None,
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        target_column_name_case: TransferColumnNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,

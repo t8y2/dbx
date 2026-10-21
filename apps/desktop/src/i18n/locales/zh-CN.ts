@@ -3277,6 +3277,7 @@ export default withEnglishFallback({
     tableDataPreviewLoadPage: "加载当前页完整文本",
     tableDataPreviewLoading: "正在加载当前页完整文本…",
     tableDataPreviewDismiss: "不再提示",
+    tableDataPreviewMuteToday: "今日不再提示",
     tableDataPreviewLoaded: "已加载当前页 {count} 个完整文本单元格",
     tableDataPreviewLoadFailed: "加载完整文本失败：{message}",
     largeValueRowUnavailable: "无法在数据库中定位该行，操作已取消，未使用预览值。",

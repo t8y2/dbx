@@ -3345,6 +3345,7 @@ export default {
     tableDataPreviewLoadPage: "Load full text for this page",
     tableDataPreviewLoading: "Loading full text for this page…",
     tableDataPreviewDismiss: "Don't show again",
+    tableDataPreviewMuteToday: "Don't show again today",
     tableDataPreviewLoaded: "Loaded full text for {count} cells on this page",
     tableDataPreviewLoadFailed: "Failed to load full text: {message}",
     largeValueRowUnavailable: "The row could not be located in the database. The operation was canceled without using the preview value.",

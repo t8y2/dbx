@@ -167,6 +167,7 @@ import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail
 import { displayCellValue, firstLineCellDisplayValue, gridCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
 import { cellExternalUrl } from "@/lib/dataGrid/cellExternalUrl";
 import { getApplicablePreviewActions, type PreviewAction } from "@/lib/dataGrid/resultPreviewRegistry";
+import { isTableDataPreviewNoticeMutedToday, muteTableDataPreviewNoticeForToday, TABLE_DATA_PREVIEW_NOTICE_SNOOZE_CHANGED_EVENT } from "@/lib/dataGrid/tableDataPreviewNotice";
 import "@/lib/dataGrid/geometryMapPreview";
 import {
   BINARY_CELL_DOWNLOAD_MODES,
@@ -479,8 +480,11 @@ const largeValueResolutionVersion = ref(0);
 const tableDataFullTextMode = ref(false);
 const tableDataFullTextLoading = ref(false);
 const tableDataPreviewNoticeDismissed = ref(false);
+// "Don't show again today" snoozes the notice for every table until the local
+// day rolls over, independently of the current-result dismissal.
+const tableDataPreviewNoticeMutedToday = ref(isTableDataPreviewNoticeMutedToday());
 const tableDataPreviewTruncated = computed(() => !!props.tableMeta && (props.result.large_value_cells?.length ?? 0) > 0);
-const showTableDataPreviewNotice = computed(() => tableDataPreviewTruncated.value && !tableDataFullTextMode.value && !tableDataPreviewNoticeDismissed.value);
+const showTableDataPreviewNotice = computed(() => tableDataPreviewTruncated.value && !tableDataFullTextMode.value && !tableDataPreviewNoticeDismissed.value && !tableDataPreviewNoticeMutedToday.value);
 const tableDataFullTextEnabled = computed(() => !!props.tableMeta && tableDataFullTextMode.value);
 const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
@@ -5944,6 +5948,8 @@ watch(
   () => {
     tableDataFullTextMode.value = false;
     tableDataPreviewNoticeDismissed.value = false;
+    // Re-read the snooze so a new result after midnight shows the notice again.
+    tableDataPreviewNoticeMutedToday.value = isTableDataPreviewNoticeMutedToday();
   },
 );
 
@@ -5969,6 +5975,15 @@ async function loadCurrentPageFullText() {
 
 function dismissTableDataPreviewNotice() {
   tableDataPreviewNoticeDismissed.value = true;
+}
+
+function dismissTableDataPreviewNoticeForToday() {
+  tableDataPreviewNoticeMutedToday.value = true;
+  muteTableDataPreviewNoticeForToday();
+}
+
+function syncTableDataPreviewNoticeSnooze() {
+  tableDataPreviewNoticeMutedToday.value = isTableDataPreviewNoticeMutedToday();
 }
 
 const exportContextCell = computed(() => {
@@ -8940,6 +8955,8 @@ function restoreGridFocusAfterActivation() {
 }
 
 onActivated(restoreGridFocusAfterActivation);
+// A tab kept alive overnight may reactivate after the snooze day rolled over.
+onActivated(syncTableDataPreviewNoticeSnooze);
 
 onMounted(resumeCanvasGridWork);
 onActivated(resumeCanvasGridWork);
@@ -8949,6 +8966,7 @@ onMounted(() => {
   window.visualViewport?.addEventListener("resize", refreshDataGridViewportMetrics);
   window.addEventListener("dbx:ui-scale-applied", refreshDataGridViewportMetrics);
   window.addEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onSynchronizedTableDataGridColumnOrderChanged);
+  window.addEventListener(TABLE_DATA_PREVIEW_NOTICE_SNOOZE_CHANGED_EVENT, syncTableDataPreviewNoticeSnooze);
   window.addEventListener("dbx:before-tab-switch", captureTabSwitchViewSnapshot);
   window.addEventListener("blur", clearInternalClipboardCopy);
   window.addEventListener("blur", onSqlPreviewResizeEnd);
@@ -8996,6 +9014,7 @@ onUnmounted(() => {
   window.visualViewport?.removeEventListener("resize", refreshDataGridViewportMetrics);
   window.removeEventListener("dbx:ui-scale-applied", refreshDataGridViewportMetrics);
   window.removeEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onSynchronizedTableDataGridColumnOrderChanged);
+  window.removeEventListener(TABLE_DATA_PREVIEW_NOTICE_SNOOZE_CHANGED_EVENT, syncTableDataPreviewNoticeSnooze);
   window.removeEventListener("dbx:before-tab-switch", captureTabSwitchViewSnapshot);
   window.removeEventListener("blur", clearInternalClipboardCopy);
   window.removeEventListener("blur", onSqlPreviewResizeEnd);
@@ -14836,9 +14855,12 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 disabled:opacity-50 dark:hover:text-amber-100" :disabled="tableDataFullTextLoading" @click="loadCurrentPageFullText">
             {{ tableDataFullTextLoading ? t("grid.tableDataPreviewLoading") : t("grid.tableDataPreviewLoadPage") }}
           </button>
+          <button type="button" class="ml-auto shrink-0 text-amber-600/80 underline underline-offset-2 decoration-dotted hover:text-amber-900 dark:text-amber-400/80 dark:hover:text-amber-100" @click="dismissTableDataPreviewNoticeForToday">
+            {{ t("grid.tableDataPreviewMuteToday") }}
+          </button>
           <button
             type="button"
-            class="ml-auto shrink-0 rounded p-0.5 text-amber-600/70 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400/70 dark:hover:text-amber-200"
+            class="shrink-0 rounded p-0.5 text-amber-600/70 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400/70 dark:hover:text-amber-200"
             :title="t('grid.tableDataPreviewDismiss')"
             :aria-label="t('grid.tableDataPreviewDismiss')"
             @click="dismissTableDataPreviewNotice"

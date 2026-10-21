@@ -194,7 +194,7 @@ export function indentRoutineBlocks(sql: string, dialectId: string, indentWidth:
       forceBreak = true;
     } else if (tokenValue.kind === "punctuation" && tokenValue.text === ";" && tokenValue.depth === 0) {
       forceBreak = true;
-    } else if (tokenValue.kind === "comment" && tokenValue.text.startsWith("--")) {
+    } else if (tokenValue.kind === "comment" && (tokenValue.text.startsWith("--") || tokenValue.text.startsWith("#"))) {
       forceBreak = true;
     } else if (isHeaderSeparator) {
       headerDone = true;

@@ -49,6 +49,14 @@ describe("routine block layout", () => {
     expect(await formatSqlText(once, "sqlserver")).toBe(once);
   });
 
+  it("preserves the end of MySQL hash comments before a routine header", () => {
+    const sql = "# keep this comment\nCREATE PROCEDURE p() BEGIN SELECT 1; END;";
+    const formatted = indentRoutineBlocks(sql, "mysql", 2, false);
+
+    expect(formatted).toMatch(/^# keep this comment\nCREATE PROCEDURE/);
+    expect(tokenStream(formatted, "mysql")).toEqual(tokenStream(sql, "mysql"));
+  });
+
   it("keeps a CASE expression on the line its clause produced", async () => {
     const formatted = await formatSqlText("CREATE PROCEDURE p AS BEGIN SELECT CASE WHEN a = 1 THEN 'x' ELSE 'y' END AS label FROM t; END", "sqlserver");
 

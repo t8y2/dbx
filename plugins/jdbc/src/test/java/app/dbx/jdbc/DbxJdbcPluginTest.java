@@ -42,6 +42,7 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class DbxJdbcPluginTest {
@@ -1828,8 +1829,27 @@ final class DbxJdbcPluginTest {
         assertEquals(true, DbxJdbcPlugin.driverQuirks(hive).schemasAsDatabasesFallback());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kingbase).ignoreCatalogForSchemaMetadata());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).useCatalogFallbackSql());
-        assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).schemasAsDatabasesFallback());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(taos).preferExecuteQueryForResultSetSql());
+
+        JsonNode sqlserver = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:sqlserver://127.0.0.1:1433;databaseName=appdb"
+            }
+            """);
+        JsonNode jtds = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:jtds:sqlserver://127.0.0.1:1433/appdb"
+            }
+            """);
+        JsonNode sqlserverClass = MAPPER.readTree("""
+            {
+              "jdbc_driver_class": "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+            }
+            """);
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(sqlserver).mergeEmptyCatalogSchemas());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(jtds).mergeEmptyCatalogSchemas());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(sqlserverClass).mergeEmptyCatalogSchemas());
+        assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).mergeEmptyCatalogSchemas());
     }
 
     @Test
@@ -1916,11 +1936,111 @@ final class DbxJdbcPluginTest {
                 explainCall.indexOf("'", explainCall.indexOf("'") + 1)
             );
             assertEquals(1, calls.stream().filter(call -> call.startsWith("prepare:SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY")).count());
-            assertEquals(1, calls.stream().filter(call -> call.equals("prepare:DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?")).count());
+            // EXPLAIN PLAN resolves its plan table in the session user's schema, so the plugin
+            // reads and cleans up that exact table instead of the CURRENT_SCHEMA-relative name.
+            assertEquals(1, calls.stream().filter(call -> call.startsWith("prepare:SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('SYSTEM.PLAN_TABLE'")).count());
+            assertEquals(1, calls.stream().filter(call -> call.equals("prepare:DELETE FROM SYSTEM.PLAN_TABLE WHERE STATEMENT_ID = ?")).count());
             assertEquals(2, calls.stream().filter(call -> call.equals("bind:1:" + statementId)).count());
         } finally {
             closeAndDeregister(connection, driver);
         }
+    }
+
+    @Test
+    void oracleExplainKeepsPlanRowsVisibleWhenThePlanTableDeletesRowsOnCommit() throws Exception {
+        // A schema whose PLAN_TABLE is GLOBAL TEMPORARY TABLE ... ON COMMIT DELETE ROWS drops
+        // the rows written by EXPLAIN PLAN at the auto-commit Oracle applies between two
+        // statements; DBMS_XPLAN.DISPLAY then reports "cannot fetch plan for statement_id".
+        // Both statements therefore have to share one transaction, and the cleanup DELETE must
+        // be committed rather than rolled back.
+        List<String> calls = new ArrayList<>();
+        OracleExplainDriver driver = new OracleExplainDriver(calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:oracle:dbx-explain:test",
+              "username": "system",
+              "query_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("getExplainInfo", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT * FROM DUAL",
+                  "timeoutSecs": 30,
+                  "mode": "explain"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("Plan hash value: 123\nTABLE ACCESS FULL DUAL", response.path("result").path("plan").asText());
+            int begin = callIndex(calls, call -> call.equals("setAutoCommit:false"));
+            int explain = callIndex(calls, call -> call.startsWith("prepare:EXPLAIN PLAN SET STATEMENT_ID = 'DBX_"));
+            int display = callIndex(calls, call -> call.startsWith("prepare:SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY"));
+            int cleanup = callIndex(calls, call -> call.equals("prepare:DELETE FROM SYSTEM.PLAN_TABLE WHERE STATEMENT_ID = ?"));
+            int commit = callIndex(calls, call -> call.equals("commit"));
+            int restore = callIndex(calls, call -> call.equals("setAutoCommit:true"));
+            assertTrue(begin >= 0 && begin < explain, calls.toString());
+            assertTrue(display > explain, calls.toString());
+            assertTrue(cleanup > display, calls.toString());
+            assertTrue(commit > cleanup, calls.toString());
+            assertTrue(restore > commit, calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    private static int callIndex(List<String> calls, java.util.function.Predicate<String> match) {
+        for (int index = 0; index < calls.size(); index++) {
+            if (match.test(calls.get(index))) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    @Test
+    void oracleExplainPlanTableMirrorsTheNameExplainPlanResolves() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleExplainPlanTable", Connection.class);
+        method.setAccessible(true);
+
+        // A session user PLAN_TABLE wins, because that is what EXPLAIN PLAN resolves first.
+        assertEquals(
+            "SYSTEM.PLAN_TABLE",
+            method.invoke(null, oraclePlanTableProbeConnection("SYSTEM.PLAN_TABLE", "SYS.PLAN_TABLE$"))
+        );
+        // Without one, EXPLAIN PLAN falls through to the PUBLIC synonym, whose target must be
+        // named explicitly: a bare PLAN_TABLE would follow CURRENT_SCHEMA instead.
+        assertEquals(
+            "SYS.PLAN_TABLE$",
+            method.invoke(null, oraclePlanTableProbeConnection(null, "SYS.PLAN_TABLE$"))
+        );
+        // Nothing resolvable keeps the caller on the plain unqualified name.
+        assertNull(method.invoke(null, oraclePlanTableProbeConnection(null, null)));
+    }
+
+    private static Connection oraclePlanTableProbeConnection(String sessionPlanTable, String publicPlanTable) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "prepareStatement" -> (PreparedStatement) Proxy.newProxyInstance(
+                    DbxJdbcPluginTest.class.getClassLoader(),
+                    new Class<?>[] { PreparedStatement.class },
+                    (statement, statementMethod, statementArgs) -> switch (statementMethod.getName()) {
+                        case "executeQuery" -> rowsResultSet(
+                            new String[] { "SESSION_PLAN_TABLE", "PUBLIC_PLAN_TABLE" },
+                            new Object[][] { { sessionPlanTable, publicPlanTable } }
+                        );
+                        case "close" -> null;
+                        default -> defaultValue(statementMethod.getReturnType());
+                    }
+                );
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
     }
 
     @Test
@@ -2228,6 +2348,202 @@ final class DbxJdbcPluginTest {
                   }
                 }
                 """);
+        }
+    }
+
+    @Test
+    void listSchemasMergesBuiltinSchemasForSqlServerWithCustomSchemas() throws Exception {
+        String url = "jdbc:sqlserver://sqlserver-mock.example.test:1433;databaseName=appdb";
+        Driver driver = new SqlServerSchemaMockDriver(
+            url,
+            List.of("sales", "custom"),
+            List.of("dbo", "guest", "INFORMATION_SCHEMA", "sys")
+        );
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("listSchemas", """
+                {
+                  "connection": {
+                    "connection_string": "%s",
+                    "username": "sa",
+                    "password": "secret"
+                  },
+                  "database": "appdb"
+                }
+                """.formatted(url));
+
+            assertFalse(response.has("error"), response.toString());
+            List<String> schemaNames = new ArrayList<>();
+            for (JsonNode item : response.path("result")) {
+                schemaNames.add(item.path("name").asText(item.asText()));
+            }
+            assertTrue(schemaNames.contains("sales"), schemaNames.toString());
+            assertTrue(schemaNames.contains("custom"), schemaNames.toString());
+            assertTrue(schemaNames.contains("dbo"), schemaNames.toString());
+            assertTrue(schemaNames.contains("sys"), schemaNames.toString());
+        } finally {
+            DriverManager.deregisterDriver(driver);
+            request("close", """
+                {
+                  "connection": {
+                    "connection_string": "%s",
+                    "username": "sa",
+                    "password": "secret"
+                  }
+                }
+                """.formatted(url));
+        }
+    }
+
+    @Test
+    void listSchemasMergesBuiltinSchemasForSqlServerWithoutCustomSchemas() throws Exception {
+        String url = "jdbc:sqlserver://sqlserver-empty-mock.example.test:1433;databaseName=appdb";
+        Driver driver = new SqlServerSchemaMockDriver(
+            url,
+            List.of(),
+            List.of("dbo", "guest", "INFORMATION_SCHEMA", "sys")
+        );
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("listSchemas", """
+                {
+                  "connection": {
+                    "connection_string": "%s",
+                    "username": "sa",
+                    "password": "secret"
+                  },
+                  "database": "appdb"
+                }
+                """.formatted(url));
+
+            assertFalse(response.has("error"), response.toString());
+            List<String> schemaNames = new ArrayList<>();
+            for (JsonNode item : response.path("result")) {
+                schemaNames.add(item.path("name").asText(item.asText()));
+            }
+            assertFalse(schemaNames.contains("sales"), schemaNames.toString());
+            assertTrue(schemaNames.contains("dbo"), schemaNames.toString());
+            assertTrue(schemaNames.contains("sys"), schemaNames.toString());
+        } finally {
+            DriverManager.deregisterDriver(driver);
+            request("close", """
+                {
+                  "connection": {
+                    "connection_string": "%s",
+                    "username": "sa",
+                    "password": "secret"
+                  }
+                }
+                """.formatted(url));
+        }
+    }
+
+    @Test
+    void listSchemasPreservesJtdsFallbackWhenEmptyCatalogOverloadIsUnimplemented() throws Exception {
+        String url = "jdbc:jtds:sqlserver://sqlserver-legacy-mock.example.test:1433/appdb";
+        List<String> calls = new ArrayList<>();
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getSchemas".equals(method.getName())) {
+                    if (args != null && args.length == 2) {
+                        calls.add((String) args[0]);
+                        throw new AbstractMethodError("getSchemas(String, String) is not implemented");
+                    }
+                    calls.add("getSchemas()");
+                    return rowsResultSet(
+                        new String[] { "TABLE_SCHEM" },
+                        new Object[][] { { "dbo" }, { "sales" } }
+                    );
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        Connection jdbcConnection = (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "getAutoCommit" -> true;
+                case "isClosed" -> false;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        Driver driver = testDriver(url, jdbcConnection);
+        String connection = """
+            { "connection_string": "%s" }
+            """.formatted(url);
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("listSchemas", """
+                {
+                  "connection": %s,
+                  "database": "appdb"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(MAPPER.readTree("[\"dbo\", \"sales\"]"), response.path("result"));
+            assertEquals(List.of("appdb", "getSchemas()", ""), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void listSchemasFallsBackWhenInformixStyleGetSchemasOverloadThrowsSqlException() throws Exception {
+        // #12213: IfxDatabaseMetaData.getSchemas(String, String) rejects the two-arg overload
+        // with a plain SQLException("不支持方法 ...") rather than AbstractMethodError.
+        String url = "jdbc:gbasedbt-sqli://gbase8s-mock.example.test:9088/sysmaster:GBASEDBTSERVER=gbase8s";
+        List<String> calls = new ArrayList<>();
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getSchemas".equals(method.getName())) {
+                    if (args != null && args.length == 2) {
+                        calls.add("getSchemas(" + args[0] + ", " + args[1] + ")");
+                        throw new SQLException("不支持方法 : IfxDatabaseMetaData.getSchemas(String, String)");
+                    }
+                    calls.add("getSchemas()");
+                    return rowsResultSet(
+                        new String[] { "TABLE_SCHEM" },
+                        new Object[][] { { "informix" }, { "appuser" } }
+                    );
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        Connection jdbcConnection = (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "getAutoCommit" -> true;
+                case "isClosed" -> false;
+                case "getSchema" -> "informix";
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        Driver driver = testDriver(url, jdbcConnection);
+        String connection = """
+            { "connection_string": "%s" }
+            """.formatted(url);
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("listSchemas", """
+                {
+                  "connection": %s,
+                  "database": "sysmaster"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(MAPPER.readTree("[\"informix\", \"appuser\"]"), response.path("result"));
+            assertEquals(List.of("getSchemas(sysmaster, null)", "getSchemas()"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
         }
     }
 
@@ -2620,7 +2936,7 @@ final class DbxJdbcPluginTest {
         assertEquals("create_by", result.path(2).path("name").asText());
         assertEquals("CHARACTER VARYING(64 byte)", result.path(2).path("data_type").asText());
         assertEquals(64, result.path(2).path("character_maximum_length").asInt());
-        assertEquals(true, sql.get(1).contains("format_type(a.atttypid, a.atttypmod) AS data_type"));
+        assertEquals(true, sql.get(1).contains("CASE WHEN t.typname = 'json' THEN 'json' WHEN t.typname = '_json' THEN 'json[]' ELSE format_type(a.atttypid, a.atttypmod) END AS data_type"));
         assertEquals(true, sql.get(1).contains("FROM sys_catalog.sys_attribute"));
     }
 
@@ -2985,6 +3301,39 @@ final class DbxJdbcPluginTest {
                     """.formatted(connection));
 
                 assertFalse(response.has("error"), failure.getClass().getSimpleName() + ": " + response);
+                assertEquals(0, response.path("result").size(), failure.getClass().getSimpleName() + ": " + response);
+            } finally {
+                closeAndDeregister(connection, driver);
+            }
+        }
+    }
+
+    @Test
+    void listSchemasDegradesToEmptyWhenDriverRejectsSchemaMetadata() throws Exception {
+        // #11127: jTDS against SQL Server 2000 throws AbstractMethodError (not a proper
+        // SQLException) from DatabaseMetaData.getSchemas(String, String) because its
+        // implementation predates that JDBC overload. Clicking a table/database in the
+        // sidebar must degrade gracefully instead of failing the whole connection.
+        for (Throwable failure : List.of(
+            new SQLFeatureNotSupportedException("schemas not supported"),
+            new UnsupportedOperationException("unsupported"),
+            new AbstractMethodError("unsupported")
+        )) {
+            String connection = """
+                { "connection_string": "jdbc:dbx-schema-metadata:%s" }
+                """.formatted(failure.getClass().getSimpleName());
+            Driver driver = testDriver("jdbc:dbx-schema-metadata:", schemaMetadataConnection(failure));
+            DriverManager.registerDriver(driver);
+            try {
+                JsonNode response = request("listSchemas", """
+                    {
+                      "connection": %s,
+                      "database": "public"
+                    }
+                    """.formatted(connection));
+
+                assertFalse(response.has("error"), failure.getClass().getSimpleName() + ": " + response);
+                assertEquals(true, response.path("result").isArray(), failure.getClass().getSimpleName() + ": " + response);
                 assertEquals(0, response.path("result").size(), failure.getClass().getSimpleName() + ": " + response);
             } finally {
                 closeAndDeregister(connection, driver);
@@ -3951,6 +4300,41 @@ final class DbxJdbcPluginTest {
         );
     }
 
+    private static Connection schemaMetadataConnection(Throwable failure) {
+        ResultSet emptySchemas = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "next" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getSchemas".equals(method.getName()) && args != null && args.length == 2) {
+                    throw failure;
+                }
+                if ("getSchemas".equals(method.getName())) {
+                    return emptySchemas;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
     private static Connection transactionMetadataConnection(Throwable metadataFailure, boolean supportsTransactions) {
         boolean[] autoCommit = { true };
         DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
@@ -4682,6 +5066,122 @@ final class DbxJdbcPluginTest {
         return value == null ? "<null>" : String.valueOf(value);
     }
 
+    private static final class RoutineColumnsDriver implements Driver {
+        private final String urlPrefix;
+        private final List<String> calls;
+        private final boolean unsupported;
+
+        private RoutineColumnsDriver(String urlPrefix, List<String> calls, boolean unsupported) {
+            this.urlPrefix = urlPrefix;
+            this.calls = calls;
+            this.unsupported = unsupported;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? routineColumnsConnection(calls, unsupported) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith(urlPrefix);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection routineColumnsConnection(List<String> calls, boolean unsupported) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getSearchStringEscape".equals(method.getName())) {
+                    return "\\";
+                }
+                if ("getProcedureColumns".equals(method.getName())) {
+                    calls.add("getProcedureColumns:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1])
+                        + ":" + metadataArgument(args[2]) + ":" + metadataArgument(args[3]));
+                    if (unsupported) {
+                        throw new SQLFeatureNotSupportedException("routine columns unavailable");
+                    }
+                    return rowsResultSet(
+                        new String[] {
+                            "COLUMN_NAME", "COLUMN_TYPE", "DATA_TYPE", "TYPE_NAME", "LENGTH",
+                            "NULLABLE", "SCALE", "PRECISION", "ORDINAL_POSITION"
+                        },
+                        new Object[][] {
+                            { "p_out", DatabaseMetaData.procedureColumnOut, Types.VARCHAR, "VARCHAR", 80,
+                                DatabaseMetaData.procedureNullable, null, null, 3 },
+                            { null, DatabaseMetaData.procedureColumnReturn, Types.INTEGER, "INTEGER", 4,
+                                DatabaseMetaData.procedureNullableUnknown, 0, 10, 0 },
+                            { "p_id", DatabaseMetaData.procedureColumnIn, Types.BIGINT, "BIGINT", 8,
+                                DatabaseMetaData.procedureNoNulls, 0, 19, 1 },
+                            { null, DatabaseMetaData.procedureColumnInOut, Types.DECIMAL, "DECIMAL", 16,
+                                DatabaseMetaData.procedureNullable, 3, 12, 2 },
+                            { "p_mystery", null, null, null, null, null, null, null, null }
+                        }
+                    );
+                }
+                if ("getFunctionColumns".equals(method.getName())) {
+                    calls.add("getFunctionColumns:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1])
+                        + ":" + metadataArgument(args[2]) + ":" + metadataArgument(args[3]));
+                    if (unsupported) {
+                        throw new SQLFeatureNotSupportedException("routine columns unavailable");
+                    }
+                    return rowsResultSet(
+                        new String[] {
+                            "COLUMN_NAME", "COLUMN_TYPE", "DATA_TYPE", "TYPE_NAME", "LENGTH",
+                            "NULLABLE", "SCALE", "PRECISION", "ORDINAL_POSITION"
+                        },
+                        new Object[][] {
+                            { "answer", DatabaseMetaData.functionColumnOut, Types.INTEGER, "INTEGER", 4,
+                                DatabaseMetaData.functionNullable, 0, 10, 2 },
+                            { null, DatabaseMetaData.functionReturn, Types.NUMERIC, "NUMERIC", 16,
+                                DatabaseMetaData.functionNullableUnknown, 2, 15, 0 },
+                            { "value", DatabaseMetaData.functionColumnIn, Types.INTEGER, "INTEGER", 4,
+                                DatabaseMetaData.functionNoNulls, 0, 10, 1 }
+                        }
+                    );
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
     private static void closeAndDeregister(String connection, Driver driver) throws Exception {
         try {
             request("close", """
@@ -4738,6 +5238,7 @@ final class DbxJdbcPluginTest {
     }
 
     private static Connection oracleExplainConnection(List<String> calls, boolean parameterMetadataSupported) {
+        boolean[] autoCommit = { true };
         return (Connection) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { Connection.class },
@@ -4747,6 +5248,20 @@ final class DbxJdbcPluginTest {
                     calls,
                     parameterMetadataSupported
                 );
+                case "getAutoCommit" -> autoCommit[0];
+                case "setAutoCommit" -> {
+                    autoCommit[0] = (Boolean) args[0];
+                    calls.add("setAutoCommit:" + args[0]);
+                    yield null;
+                }
+                case "commit" -> {
+                    calls.add("commit");
+                    yield null;
+                }
+                case "rollback" -> {
+                    calls.add("rollback");
+                    yield null;
+                }
                 case "isClosed" -> false;
                 case "close" -> null;
                 default -> defaultValue(method.getReturnType());
@@ -4760,6 +5275,21 @@ final class DbxJdbcPluginTest {
         boolean parameterMetadataSupported
     ) {
         calls.add("prepare:" + sql);
+        if (sql.contains("FROM ALL_SYNONYMS")) {
+            // The plugin resolves the plan table EXPLAIN PLAN will use before reading it back.
+            return (PreparedStatement) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { PreparedStatement.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "executeQuery" -> rowsResultSet(
+                        new String[] { "SESSION_PLAN_TABLE", "PUBLIC_PLAN_TABLE" },
+                        new Object[][] { { "SYSTEM.PLAN_TABLE", "SYS.PLAN_TABLE$" } }
+                    );
+                    case "setQueryTimeout", "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
         int parameterCount = oracleExplainMockParameterCount(sql);
         return (PreparedStatement) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
@@ -5444,6 +5974,122 @@ final class DbxJdbcPluginTest {
         }
     }
 
+    private static final class SqlServerSchemaMockDriver implements Driver {
+        private final String url;
+        private final List<String> catalogSchemas;
+        private final List<String> emptyCatalogSchemas;
+
+        private SqlServerSchemaMockDriver(String url, List<String> catalogSchemas, List<String> emptyCatalogSchemas) {
+            this.url = url;
+            this.catalogSchemas = catalogSchemas;
+            this.emptyCatalogSchemas = emptyCatalogSchemas;
+        }
+
+        @Override
+        public Connection connect(String connectUrl, Properties info) throws SQLException {
+            if (!acceptsURL(connectUrl)) {
+                return null;
+            }
+            return (Connection) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Connection.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "isClosed" -> false;
+                    case "isValid" -> true;
+                    case "close" -> null;
+                    case "getMetaData" -> sqlServerMetaData();
+                    case "getCatalog" -> "appdb";
+                    case "getSchema" -> "dbo";
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        private DatabaseMetaData sqlServerMetaData() {
+            return (DatabaseMetaData) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { DatabaseMetaData.class },
+                (proxy, method, args) -> {
+                    if ("getSchemas".equals(method.getName())) {
+                        if (args != null && args.length == 2) {
+                            String catalog = (String) args[0];
+                            if ("appdb".equals(catalog)) {
+                                return stringColumnResultSet("TABLE_SCHEM", catalogSchemas);
+                            }
+                            if ("".equals(catalog)) {
+                                return stringColumnResultSet("TABLE_SCHEM", emptyCatalogSchemas);
+                            }
+                            if (catalog == null) {
+                                List<String> all = new ArrayList<>(catalogSchemas);
+                                all.addAll(emptyCatalogSchemas);
+                                return stringColumnResultSet("TABLE_SCHEM", all);
+                            }
+                        }
+                    }
+                    return defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        private static ResultSet stringColumnResultSet(String columnLabel, List<String> values) {
+            return (ResultSet) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { ResultSet.class },
+                new java.lang.reflect.InvocationHandler() {
+                    private int index = -1;
+
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        return switch (method.getName()) {
+                            case "next" -> ++index < values.size();
+                            case "getString" -> {
+                                if (args != null && args.length > 0 && columnLabel.equals(args[0])) {
+                                    yield values.get(index);
+                                }
+                                if (args != null && args.length > 0 && Integer.valueOf(1).equals(args[0])) {
+                                    yield values.get(index);
+                                }
+                                yield null;
+                            }
+                            case "close" -> null;
+                            default -> defaultValue(method.getReturnType());
+                        };
+                    }
+                }
+            );
+        }
+
+        @Override
+        public boolean acceptsURL(String connectUrl) {
+            return url.equals(connectUrl);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String connectUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
     public static final class ErrorOnLoad {
         private static final Object FAILURE = fail();
 
@@ -5726,6 +6372,147 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void getObjectSourceReturnsSortedProcedureMetadataWithoutInventingSource() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-routine-columns-procedure:";
+        Driver driver = new RoutineColumnsDriver(url, calls, false);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "catalog1",
+                  "schema": "APP",
+                  "name": "process_order",
+                  "object_type": "PROCEDURE"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            JsonNode result = response.path("result");
+            assertEquals("", result.path("source").asText());
+            assertFalse(result.path("editable").asBoolean(true));
+            assertEquals(List.of("getProcedureColumns:catalog1:APP:process\\_order:%"), calls);
+            JsonNode parameters = result.path("routine_parameters");
+            assertEquals(5, parameters.size());
+            assertEquals("RETURN", parameters.path(0).path("name").asText());
+            assertEquals("RETURN", parameters.path(0).path("mode").asText());
+            assertEquals(0, parameters.path(0).path("ordinal").asInt());
+            assertFalse(parameters.path(0).has("nullable"));
+            assertEquals("p_id", parameters.path(1).path("name").asText());
+            assertEquals("IN", parameters.path(1).path("mode").asText());
+            assertEquals(Types.BIGINT, parameters.path(1).path("jdbc_type").asInt());
+            assertEquals(19, parameters.path(1).path("precision").asInt());
+            assertFalse(parameters.path(1).path("nullable").asBoolean(true));
+            assertTrue(parameters.path(2).path("name").isNull());
+            assertEquals("INOUT", parameters.path(2).path("mode").asText());
+            assertEquals(3, parameters.path(2).path("scale").asInt());
+            assertTrue(parameters.path(2).path("nullable").asBoolean());
+            assertEquals("OUT", parameters.path(3).path("mode").asText());
+            assertEquals(80, parameters.path(3).path("length").asInt());
+            assertEquals("UNKNOWN", parameters.path(4).path("mode").asText());
+            assertFalse(parameters.path(4).has("ordinal"));
+            assertFalse(parameters.path(4).has("jdbc_type"));
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceUsesFunctionColumnConstants() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-routine-columns-function:";
+        Driver driver = new RoutineColumnsDriver(url, calls, false);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "catalog1",
+                  "schema": "APP",
+                  "name": "calculate_total",
+                  "object_type": "FUNCTION"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(List.of("getFunctionColumns:catalog1:APP:calculate\\_total:%"), calls);
+            JsonNode parameters = response.path("result").path("routine_parameters");
+            assertEquals("RETURN", parameters.path(0).path("mode").asText());
+            assertEquals("IN", parameters.path(1).path("mode").asText());
+            assertEquals("OUT", parameters.path(2).path("mode").asText());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceKeepsRoutineDetailsAvailableWhenColumnMetadataIsUnsupported() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-routine-columns-unsupported:";
+        Driver driver = new RoutineColumnsDriver(url, calls, true);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "catalog1",
+                  "schema": "APP",
+                  "name": "legacy_proc",
+                  "object_type": "PROCEDURE"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("", response.path("result").path("source").asText());
+            assertFalse(response.path("result").path("editable").asBoolean(true));
+            assertFalse(response.path("result").has("routine_parameters"));
+            assertEquals(List.of("getProcedureColumns:catalog1:APP:legacy\\_proc:%"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceKeepsSybaseRoutineBehaviorUnchanged() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:sybase:Tds:sybase-routine-unsupported-test:5000";
+        Driver driver = new SybaseViewSourceDriver(url, calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%s" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "dbo",
+                  "name": "legacy_proc",
+                  "object_type": "PROCEDURE"
+                }
+                """.formatted(connection));
+
+            assertEquals(
+                "Object source is not supported by this JDBC driver",
+                response.path("error").path("message").asText()
+            );
+            assertTrue(calls.isEmpty());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
     void getObjectSourceKeepsUnsupportedObjectTypesOnPlainJdbcDrivers() throws Exception {
         JsonNode response = request("getObjectSource", """
             {
@@ -5740,5 +6527,28 @@ final class DbxJdbcPluginTest {
             "Object source is not supported by this JDBC driver",
             response.path("error").path("message").asText()
         );
+    }
+
+    @Test
+    void oracleStatementTrimKeepsThePlSqlUnitTerminator() {
+        List<String> units = List.of(
+            "DECLARE\n  l NUMBER;\nBEGIN\n  l := 1;\nEND;",
+            "CREATE OR REPLACE EDITIONABLE FUNCTION \"APP\".\"F\" (p VARCHAR2) RETURN VARCHAR2 IS\n"
+                + "  l VARCHAR2(200);\nBEGIN\n  RETURN l;\nEND;",
+            "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;",
+            "CREATE OR REPLACE PACKAGE BODY pkg AS\n  FUNCTION f RETURN NUMBER IS\n  BEGIN\n    RETURN 1;\n  END;\nEND pkg;",
+            "-- leading comment\nBEGIN\n  NULL;\nEND;"
+        );
+        for (String unit : units) {
+            assertEquals(unit, DbxJdbcPlugin.trimStatementSql(unit, true));
+            assertEquals(unit, DbxJdbcPlugin.trimStatementSql(unit + "\n/", true));
+        }
+    }
+
+    @Test
+    void oracleStatementTrimStillDropsThePlainSqlSemicolon() {
+        assertEquals("SELECT 1 FROM DUAL", DbxJdbcPlugin.trimStatementSql("SELECT 1 FROM DUAL;", true));
+        assertEquals("BEGIN\n  NULL;\nEND IF", DbxJdbcPlugin.trimStatementSql("BEGIN\n  NULL;\nEND IF;", true));
+        assertEquals("BEGIN\n  NULL;\nEND", DbxJdbcPlugin.trimStatementSql("BEGIN\n  NULL;\nEND;", false));
     }
 }

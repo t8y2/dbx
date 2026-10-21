@@ -75,6 +75,78 @@ describe("settings search", () => {
     expect(searchSettings(entries, "line number", "en").map((entry) => entry.id)).toEqual(["editor-line-numbers"]);
   });
 
+  it("indexes the new formatter rules and preview in the formatter settings group", () => {
+    const formatterEntries = resolveSettingsSearchEntries(
+      SETTINGS_SEARCH_DEFINITIONS.filter((entry) => entry.id.startsWith("formatter-")),
+      { isWeb: false, visibleCategories: new Set<SettingsCategory>(["formatter"]) },
+      (key) =>
+        ({
+          "settings.sqlFormatterCustomRules": "Custom SQL rules",
+          "settings.sqlFormatterListLayout": "General list layout",
+          "settings.sqlFormatterSelectListLayout": "SELECT list",
+          "settings.sqlFormatterInsertListLayout": "INSERT list",
+          "settings.sqlFormatterUpdateListLayout": "UPDATE list",
+          "settings.sqlFormatterListItemAlignment": "List item alignment",
+          "settings.sqlFormatterEmptyLineMode": "Empty line mode",
+          "settings.sqlFormatterAlignSelectAliases": "Align SELECT aliases",
+          "settings.sqlFormatterAlignUpdateAssignments": "Align UPDATE assignments",
+          "settings.sqlFormatterSelectCommaPosition": "SELECT comma position",
+          "settings.sqlFormatterInsertCommaPosition": "INSERT comma position",
+          "settings.sqlFormatterUpdateCommaPosition": "UPDATE comma position",
+          "settings.sqlFormatterWhereLogicalOperatorNewline": "WHERE logical operator newline",
+          "settings.sqlFormatterOnLogicalOperatorNewline": "ON logical operator newline",
+          "settings.sqlFormatterExpressionLogicalOperatorNewline": "Expression logical operator newline",
+          "settings.sqlFormatterNewlineBeforeJoinOn": "Newline before JOIN ON",
+          "settings.sqlFormatterCollapseShortStatements": "Collapse short statements",
+          "settings.sqlFormatterPreview": "Formatting preview",
+        })[key] ?? key,
+      categoryLabels,
+    );
+    expect(searchSettings(formatterEntries, "SELECT list", "en").map((entry) => entry.id)).toContain("formatter-select-layout");
+    expect(searchSettings(formatterEntries, "preview", "en").map((entry) => entry.id)).toContain("formatter-preview");
+    expect(searchSettings(formatterEntries, "empty line", "en").map((entry) => entry.id)).toContain("formatter-empty-line-mode");
+    expect(searchSettings(formatterEntries, "align UPDATE", "en").map((entry) => entry.id)).toContain("formatter-align-update-assignments");
+    expect(searchSettings(formatterEntries, "WHERE logical", "en").map((entry) => entry.id)).toContain("formatter-where-logical-newline");
+    expect(formatterEntries.find((entry) => entry.id === "formatter-custom-rules")?.targetId).toBe("formatter");
+    expect(formatterEntries.every((entry) => entry.route?.formatterMode === "form" || entry.route?.formatterMode === "json")).toBe(true);
+  });
+
+  it("indexes the query editor caret-browsing preference (#11827)", () => {
+    const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-caret-browsing");
+    expect(definition).toEqual({
+      id: "editor-caret-browsing",
+      category: "editor",
+      titleKey: "settings.caretBrowsing",
+      descriptionKey: "settings.caretBrowsingDescription",
+      targetId: "editor",
+    });
+
+    const entries = resolveSettingsSearchEntries(
+      [definition!],
+      { isWeb: false, visibleCategories: new Set<SettingsCategory>(["editor"]) },
+      (key) =>
+        ({
+          "settings.caretBrowsing": "光标浏览 (F7)",
+          "settings.caretBrowsingDescription": "允许按 F7 切换浏览器的插入光标浏览模式",
+        })[key] ?? key,
+      categoryLabels,
+    );
+    expect(searchSettings(entries, "光标", "zh-CN")).toEqual([
+      expect.objectContaining({
+        id: "editor-caret-browsing",
+        category: "editor",
+        targetId: "editor",
+      }),
+    ]);
+    expect(searchSettings(entries, "F7", "zh-CN")).toEqual([
+      expect.objectContaining({
+        id: "editor-caret-browsing",
+        category: "editor",
+        targetId: "editor",
+      }),
+    ]);
+  });
+
   it("indexes SQL Server space confirmation when SQL Server exists or an exported setting is enabled", () => {
     const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-sqlserver-space-completion");
     expect(definition).toEqual(
@@ -104,13 +176,39 @@ describe("settings search", () => {
   });
 
   it("indexes the multi-statement default view and its settings control", () => {
-    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
-      id: "multi-statement-default-view",
-      category: "data",
-      titleKey: "settings.multiStatementDefaultView",
-      descriptionKey: "settings.multiStatementDefaultViewDescription",
-      targetId: "multi-statement-default-view",
-    });
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual(
+      expect.objectContaining({
+        id: "multi-statement-default-view",
+        category: "data",
+        titleKey: "settings.multiStatementDefaultView",
+        descriptionKey: "settings.multiStatementDefaultViewDescription",
+        targetId: "multi-statement-default-view",
+      }),
+    );
+  });
+
+  it("indexes the default explain view and its settings control", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual(
+      expect.objectContaining({
+        id: "default-explain-view",
+        category: "data",
+        titleKey: "settings.defaultExplainView",
+        descriptionKey: "settings.defaultExplainViewDescription",
+        targetId: "default-explain-view",
+      }),
+    );
+  });
+
+  it("indexes the query result export file name source setting (#12092)", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual(
+      expect.objectContaining({
+        id: "data-export-file-name-source",
+        category: "data",
+        titleKey: "settings.queryResultExportFileNameSource",
+        descriptionKey: "settings.queryResultExportFileNameSourceDescription",
+        targetId: "data-export-file-name-source",
+      }),
+    );
   });
 
   it("places SQL file limits in their owning settings categories", () => {
@@ -184,7 +282,19 @@ describe("settings search", () => {
   it("exposes WebDAV sync in Web settings without exposing snippet sync", () => {
     const webEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["sync"]) }, translate, categoryLabels);
 
-    expect(webEntries.map((entry) => entry.id)).toEqual(["sync-webdav", "sync-webdav-endpoint", "sync-webdav-username", "sync-webdav-password", "sync-webdav-remote-path", "sync-webdav-auto-upload", "sync-secrets", "sync-secrets-passphrase"]);
+    expect(webEntries.map((entry) => entry.id)).toEqual([
+      "sync-webdav",
+      "sync-webdav-endpoint",
+      "sync-webdav-username",
+      "sync-webdav-password",
+      "sync-webdav-remote-path",
+      "sync-webdav-user-agent",
+      "sync-webdav-auto-upload",
+      "sync-secrets",
+      "sync-secrets-passphrase",
+      "sync-sync-remember-web-dav-password",
+      "sync-sync-auto-upload",
+    ]);
   });
 
   it("matches Chinese text as a Unicode substring", () => {
@@ -297,12 +407,15 @@ describe("settings search", () => {
       { titleKey: "transfer.dataTransfer", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.driverManager", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.theme", category: "appearance", targetId: "appearance" },
+      { titleKey: "settings.webLogoPosition", category: "appearance", targetId: "appearance-web-logo-position" },
       { titleKey: "settings.sidebarObjectInfoMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.insertSpaceAfterCompletion", category: "editor", targetId: "editor" },
+      { titleKey: "settings.functionCompletionIncludeParams", category: "editor", targetId: "editor" },
       { titleKey: "settings.completionTriggerMode", category: "editor", targetId: "editor" },
       { titleKey: "settings.tableCompletionSchemaQualification", category: "editor", targetId: "editor" },
       { titleKey: "settings.autoAliasTables", category: "editor", targetId: "editor" },
       { titleKey: "settings.clickTableNavigationTarget", category: "navigation", targetId: "navigation" },
+      { titleKey: "settings.objectBrowserAutoOpenDetailPanel", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.prefillNewQueryWithSelect", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.generateSqlIncludeDatabaseName", category: "editor", targetId: "editor" },
       { titleKey: "settings.generateSqlQuoteIdentifiers", category: "editor", targetId: "editor" },
@@ -315,13 +428,28 @@ describe("settings search", () => {
       { titleKey: "settings.sqlFormatterIndent", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterTabWidth", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterIndentStyle", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterLayoutStyle", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterLogicalOperatorNewline", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterCommaPosition", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterFromClauseLayout", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterExpressionWidth", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterLinesBetweenQueries", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterPreserveEmptyLines", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterDenseOperators", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterNewlineBeforeSemicolon", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterParamTypes", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterListItemAlignment", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterEmptyLineMode", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterAlignSelectAliases", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterAlignUpdateAssignments", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterSelectCommaPosition", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterInsertCommaPosition", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterUpdateCommaPosition", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterWhereLogicalOperatorNewline", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterOnLogicalOperatorNewline", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterExpressionLogicalOperatorNewline", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterNewlineBeforeJoinOn", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterCollapseShortStatements", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.routineSourceOpenMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.disconnectTabHandlingMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.compactColumnHeaderActions", category: "data", targetId: "data" },
@@ -334,9 +462,12 @@ describe("settings search", () => {
       { titleKey: "settings.queryExportKeysetOptimizationEnabled", category: "data", targetId: "data" },
       { titleKey: "ai.defaultAiMode", category: "ai", targetId: "ai" },
       { titleKey: "ai.defaultAutoRouting", category: "ai", targetId: "ai" },
+      { titleKey: "ai.includeQueryResult", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxAgentTurns", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxRetriesGlobal", category: "ai", targetId: "ai" },
       { titleKey: "ai.globalInstructions", category: "ai", targetId: "ai" },
+      { titleKey: "settings.aiSqlApplyTarget", category: "editor", targetId: "editor" },
+      { titleKey: "settings.aiSqlApplyTarget", category: "ai", targetId: "ai" },
     ];
 
     for (const expectedControl of expectedControls) {

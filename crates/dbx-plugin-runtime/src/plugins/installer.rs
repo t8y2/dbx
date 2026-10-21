@@ -568,6 +568,9 @@ impl PluginPackageInstaller {
         make_backend_executable(&compatibility.backend_executable)?;
 
         let update_guard = self.lifecycle.as_ref().map(|lifecycle| lifecycle.begin_update(&manifest.id)).transpose()?;
+        if let Some(guard) = &update_guard {
+            guard.drain_runtimes()?;
+        }
         let container_dir = self.root_dir.join(&manifest.id);
         migrate_legacy_container(&container_dir)?;
         let versions_dir = container_dir.join(VERSIONS_DIR);
@@ -705,6 +708,9 @@ impl PluginPackageInstaller {
 
     fn rollback_locked(&self, plugin_id: &str) -> Result<PluginRollbackResult, String> {
         let update_guard = self.lifecycle.as_ref().map(|lifecycle| lifecycle.begin_update(plugin_id)).transpose()?;
+        if let Some(guard) = &update_guard {
+            guard.drain_runtimes()?;
+        }
         let container_dir = self.root_dir.join(plugin_id);
         let current = read_latest_activation(&container_dir)?
             .ok_or_else(|| format!("Plugin '{plugin_id}' does not have an active version"))?;

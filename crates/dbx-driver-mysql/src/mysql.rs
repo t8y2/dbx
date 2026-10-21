@@ -153,7 +153,8 @@ pub async fn get_event_info<P: MySqlPoolAccess + ?Sized>(
     let mut conn = get_conn_with_health_check(pool).await?;
     let sql = format!(
         "SELECT EVENT_SCHEMA, EVENT_NAME, DEFINER, TIME_ZONE, EVENT_TYPE, EXECUTE_AT, INTERVAL_VALUE, INTERVAL_FIELD, STARTS, ENDS, STATUS, ON_COMPLETION, EVENT_COMMENT, EVENT_DEFINITION, CREATED, LAST_ALTERED, LAST_EXECUTED FROM information_schema.EVENTS WHERE EVENT_SCHEMA = {} AND EVENT_NAME = {} LIMIT 1",
-        quote_value(database), quote_value(name)
+        quote_value(database),
+        quote_value(name)
     );
     let row = conn
         .query_first::<mysql_async::Row, _>(sql)
@@ -689,15 +690,32 @@ pub async fn database_connection_info(
     let product_name = nonblank(product_name.into()).unwrap_or_else(|| "MySQL".to_string());
     let mut conn = get_conn_with_health_check(pool).await?;
 
+    let server_comment = query_first_nonblank_string(&mut conn, "SELECT @@version_comment").await;
+    let version_sql = database_product_version_query(&product_name, server_comment.as_deref());
+    let mut product_version = query_first_nonblank_string(&mut conn, version_sql).await;
+    if product_version.is_none() && version_sql == "SELECT current_version()" {
+        // VERSION() reports MySQL compatibility (often 5.1.0), not StarRocks.
+        product_version = server_comment.clone();
+    }
     Ok(DatabaseConnectionInfo {
         product_name: Some(product_name),
-        product_version: query_first_nonblank_string(&mut conn, "SELECT VERSION()").await,
+        product_version,
         current_database: query_first_nonblank_string(&mut conn, "SELECT COALESCE(DATABASE(), '')").await,
-        server_comment: query_first_nonblank_string(&mut conn, "SELECT @@version_comment").await,
+        server_comment,
         server_charset: query_first_nonblank_string(&mut conn, "SELECT @@character_set_server").await,
         server_collation: query_first_nonblank_string(&mut conn, "SELECT @@collation_server").await,
         ..DatabaseConnectionInfo::default()
     })
+}
+
+fn database_product_version_query(product_name: &str, server_comment: Option<&str>) -> &'static str {
+    if product_name.to_ascii_lowercase().contains("starrocks")
+        || server_comment.is_some_and(|comment| comment.to_ascii_lowercase().contains("starrocks"))
+    {
+        "SELECT current_version()"
+    } else {
+        "SELECT VERSION()"
+    }
 }
 
 pub fn protocol_product_name(config: &ConnectionConfig) -> String {
@@ -1288,7 +1306,12 @@ fn mysql_row_to_json_with_srids_and_previews(
             if let Some((preview, original_bytes)) =
                 preview_bytes.and_then(|limit| mysql_bounded_value_preview(row, index, limit, protected_indexes))
             {
-                large_value_cells.push(LargeValueCell { row_index, column_index: index, original_bytes });
+                large_value_cells.push(LargeValueCell {
+                    row_index,
+                    column_index: index,
+                    original_bytes,
+                    value_ref: None,
+                });
                 return preview;
             }
             mysql_value_to_json_with_effective_type(row, index, effective_types.get(index).map(String::as_str))
@@ -1396,7 +1419,7 @@ pub async fn connect_with_ca_cert_pool_limit_idle_and_setup_database(
         idle_timeout_secs,
         setup_database,
         extra_setup_queries,
-        MySqlSetupMode::Standard,
+        MySqlSetupMode::default_for_url(url),
     )
     .await
 }
@@ -1648,6 +1671,10 @@ const MYSQL_DEFAULT_CHARSET: &str = "utf8mb4";
 const MYSQL_LEGACY_CHARSET: &str = "utf8";
 
 impl MySqlSetupMode {
+    pub fn default_for_url(url: &str) -> Self {
+        mysql_url_setup_mode(url).unwrap_or(Self::Standard)
+    }
+
     fn group_concat_max_len_query(self, url: &str) -> Option<String> {
         match self {
             // An explicit Connector/J style `sessionVariables=group_concat_max_len=...`
@@ -1982,6 +2009,13 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     // `Unknown system variable 'group_concat_'` with `max_len` cut off
     // (issue #10197). The truncated prefix is specific enough on its own.
     let proxy_truncated_variable_rejected = lower.contains("unknown system variable 'group_concat_'");
+    // ProxySQL rejects queries with error 9006 when an unparseable expression SET
+    // (such as `cast(greatest(...))`) causes ProxySQL to lock the connection to
+    // hostgroup 0 under `mysql-set_query_lock_on_hostgroup=1`, conflicting with
+    // read/write split rules routing queries to another hostgroup (issue #11307).
+    let proxysql_hostgroup_locked = lower.contains("error 9006")
+        || (lower.contains("proxysql") && lower.contains("locked to hostgroup"))
+        || (lower.contains("connection is locked to hostgroup") && lower.contains("trying to reach hostgroup"));
     if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected || setup_argument_rejected))
         || txsql_truncated_name_rejected
         || gaea_setup_expression_rejected
@@ -1989,6 +2023,7 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
         || sphinxql_setup_query_rejected
         || gateway_session_variable_rejected
         || proxy_truncated_variable_rejected
+        || proxysql_hostgroup_locked
     {
         return Some(MySqlSetupMode::Compatible);
     }
@@ -2187,7 +2222,7 @@ fn mysql_ssl_opts(
 }
 
 fn mysql_setup_queries(url: &str, extra_setup_queries: &[String]) -> Vec<String> {
-    mysql_setup_queries_with_mode(url, extra_setup_queries, MySqlSetupMode::Standard)
+    mysql_setup_queries_with_mode(url, extra_setup_queries, MySqlSetupMode::default_for_url(url))
 }
 
 fn mysql_setup_queries_for_database(
@@ -2195,7 +2230,12 @@ fn mysql_setup_queries_for_database(
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
 ) -> Vec<String> {
-    mysql_setup_queries_for_database_with_mode(url, setup_database, extra_setup_queries, MySqlSetupMode::Standard)
+    mysql_setup_queries_for_database_with_mode(
+        url,
+        setup_database,
+        extra_setup_queries,
+        MySqlSetupMode::default_for_url(url),
+    )
 }
 
 fn mysql_setup_queries_with_mode(url: &str, extra_setup_queries: &[String], setup_mode: MySqlSetupMode) -> Vec<String> {
@@ -2452,6 +2492,30 @@ fn mysql_local_infile_paths(url: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+fn mysql_url_setup_mode(url: &str) -> Option<MySqlSetupMode> {
+    let (_, query) = url.split_once('?')?;
+    let query = query.split('#').next().unwrap_or(query);
+    for segment in query.split('&') {
+        let (key, value) = match segment.split_once('=') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => (segment.trim(), "true"),
+        };
+        if key.eq_ignore_ascii_case("proxysql") && mysql_url_param_value_is_true(value) {
+            return Some(MySqlSetupMode::LiteralFloor);
+        }
+        if key.eq_ignore_ascii_case("setupmode") || key.eq_ignore_ascii_case("setup_mode") {
+            if value.eq_ignore_ascii_case("literalfloor") || value.eq_ignore_ascii_case("literal_floor") {
+                return Some(MySqlSetupMode::LiteralFloor);
+            } else if value.eq_ignore_ascii_case("compatible") {
+                return Some(MySqlSetupMode::Compatible);
+            } else if value.eq_ignore_ascii_case("standard") {
+                return Some(MySqlSetupMode::Standard);
+            }
+        }
+    }
+    None
+}
+
 fn split_mysql_session_variables(value: &str) -> Vec<String> {
     let chars: Vec<char> = value.chars().collect();
     let mut assignments = Vec::new();
@@ -2619,6 +2683,7 @@ async fn verify_pool_connection(pool: &MySqlPool, timeout: Duration) -> Result<(
     super::with_connection_timeout("MySQL", timeout, async {
         let mut conn = pool.get_conn().await.map_err(|e| format!("MySQL connection failed: {e}"))?;
         conn.ping().await.map_err(|e| format!("MySQL ping failed: {e}"))?;
+        conn.query_drop("SELECT 1").await.map_err(|e| format!("MySQL connection verification query failed: {e}"))?;
         Ok(())
     })
     .await
@@ -2653,6 +2718,7 @@ fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
         || (lower.contains("1615") && lower.contains("re-prepared"))
         || lower.contains("com_stmt_prepare")
         || lower.contains("can't parse")
+        || lower.contains("1295")
         || lower.contains("buf doesn't have enough data")
         || lower.contains("prepared statement protocol")
         || lower.contains("this command is not supported in the prepared statement protocol yet")
@@ -2873,6 +2939,9 @@ fn is_dbx_handled_mysql_url_param(key: &str) -> bool {
             | "forceconnectiontimezonetosession"
             | "sessionvariables"
             | "localinfilepath"
+            | "proxysql"
+            | "setupmode"
+            | "setup_mode"
     )
 }
 
@@ -3230,7 +3299,9 @@ pub async fn list_tables_filtered(
         .collect();
 
     if tables.is_empty() {
-        log::debug!("Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables");
+        log::debug!(
+            "Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables"
+        );
         return list_tables_show_filtered(pool, database, filter)
             .await
             .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types, table_name_filter));
@@ -3395,6 +3466,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                routine_id: None,
                 signature: None,
             });
         }
@@ -3422,6 +3494,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: None,
+                routine_id: None,
                 signature: None,
             });
         }
@@ -3450,6 +3523,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: get_opt_str(&row, "data_type"),
+                routine_id: None,
                 signature: None,
             });
         }
@@ -3473,6 +3547,7 @@ pub async fn completion_assistant_search(
                         .map(|s| fix_potential_double_encoding(&s))
                         .filter(|s| !s.is_empty()),
                     data_type: Some(get_str_by_name(&row, "data_type")),
+                    routine_id: None,
                     signature: None,
                 });
             }
@@ -4944,6 +5019,8 @@ where
                 name,
                 data_type: column_type,
                 resolved_schema: None,
+                resolved_table: None,
+                resolved_object_type: None,
                 is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
                 column_default: get_opt_str(row, "COLUMN_DEFAULT"),
                 extra: get_opt_str(row, "EXTRA"),
@@ -5017,6 +5094,8 @@ async fn fetch_columns_show(
                 name,
                 data_type: get_str_by_name(row, "Type"),
                 resolved_schema: None,
+                resolved_table: None,
+                resolved_object_type: None,
                 is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
                 column_default: get_opt_str(row, "Default"),
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
@@ -7029,6 +7108,9 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                 let index_position = indexes.len();
                 index_positions.insert(name.clone(), index_position);
                 indexes.push(IndexInfo {
+                    key_directions: Vec::new(),
+                    visibility: None,
+                    key_metadata_complete: false,
                     name: name.clone(),
                     columns: Vec::new(),
                     is_unique: get_opt_i32(&row, "NON_UNIQUE").unwrap_or(1) == 0,
@@ -7132,6 +7214,64 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
         .collect())
 }
 
+/// Reads all foreign keys for a database with two catalog queries. The
+/// per-table variant above is intentionally kept for table metadata panels;
+/// destructive database-wide operations use this bounded variant instead.
+pub async fn list_foreign_keys_for_database(
+    pool: &MySqlPool,
+    database: &str,
+) -> Result<HashMap<String, Vec<ForeignKeyInfo>>, String> {
+    let column_sql = format!(
+        "SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, \
+         REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+         FROM information_schema.KEY_COLUMN_USAGE \
+         WHERE TABLE_SCHEMA = {} AND REFERENCED_TABLE_NAME IS NOT NULL \
+         ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
+        quote_value(database),
+    );
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let column_result = conn.query_iter(&column_sql).await.map_err(|e| e.to_string())?;
+    let column_rows: Vec<mysql_async::Row> = column_result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    if column_rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rule_sql = format!(
+        "SELECT TABLE_NAME, CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE \
+         FROM information_schema.REFERENTIAL_CONSTRAINTS \
+         WHERE CONSTRAINT_SCHEMA = {}",
+        quote_value(database),
+    );
+    let rule_result = conn.query_iter(&rule_sql).await.map_err(|e| e.to_string())?;
+    let rule_rows: Vec<mysql_async::Row> = rule_result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let rules = rule_rows
+        .iter()
+        .map(|row| {
+            (
+                (get_str_by_name(row, "TABLE_NAME"), get_str_by_name(row, "CONSTRAINT_NAME")),
+                (get_str_by_name(row, "UPDATE_RULE"), get_str_by_name(row, "DELETE_RULE")),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut result: HashMap<String, Vec<ForeignKeyInfo>> = HashMap::new();
+    for row in &column_rows {
+        let table = get_str_by_name(row, "TABLE_NAME");
+        let name = get_str_by_name(row, "CONSTRAINT_NAME");
+        let (on_update, on_delete) = rules.get(&(table.clone(), name.clone())).cloned().unwrap_or_default();
+        result.entry(table).or_default().push(ForeignKeyInfo {
+            name,
+            column: get_str_by_name(row, "COLUMN_NAME"),
+            ref_schema: Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
+            ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
+            ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
+            on_update: Some(on_update).filter(|value| !value.is_empty()),
+            on_delete: Some(on_delete).filter(|value| !value.is_empty()),
+        });
+    }
+    Ok(result)
+}
+
 pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
     let sql = format!(
         "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT \
@@ -7165,6 +7305,16 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn product_version_uses_starrocks_function_only_for_starrocks() {
+        assert_eq!(super::database_product_version_query("StarRocks", None), "SELECT current_version()");
+        assert_eq!(
+            super::database_product_version_query("Custom label", Some("StarRocks version 3.5.0")),
+            "SELECT current_version()"
+        );
+        assert_eq!(super::database_product_version_query("MySQL", Some("MySQL Community Server")), "SELECT VERSION()");
+    }
+
     use super::*;
     use mysql_async::{consts::ColumnType, Column, Value};
     use mysql_common::row::new_row;
@@ -8744,6 +8894,8 @@ mod tests {
             name: " state value".to_string(),
             data_type: "unknown".to_string(),
             resolved_schema: Some("analytics".to_string()),
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: true,
             column_default: Some("seed".to_string()),
             is_primary_key: true,
@@ -9045,7 +9197,10 @@ mod tests {
         assert_eq!(values[0], serde_json::json!("k".repeat(2048)));
         assert_eq!(values[1].as_str().map(str::len), Some(1027));
         assert!(values[1].as_str().is_some_and(|value| value.ends_with("...")));
-        assert_eq!(cells, vec![LargeValueCell { row_index: 7, column_index: 1, original_bytes: 32 * 1024 }]);
+        assert_eq!(
+            cells,
+            vec![LargeValueCell { row_index: 7, column_index: 1, original_bytes: 32 * 1024, value_ref: None }]
+        );
     }
 
     #[test]
@@ -9070,7 +9225,10 @@ mod tests {
             mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(512), &protected, &[]);
 
         assert_eq!(values[0], serde_json::json!("k".repeat(2048)));
-        assert_eq!(cells, vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 4096 }]);
+        assert_eq!(
+            cells,
+            vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 4096, value_ref: None }]
+        );
     }
 
     #[test]
@@ -9110,7 +9268,10 @@ mod tests {
         assert!(values[1].as_str().is_some_and(|value| value.ends_with("...")));
         assert_eq!(values[2].as_str().map(str::len), Some(2 + 420 * 2));
         assert_eq!(values[3], serde_json::json!("B:419:25143"));
-        assert_eq!(cells, vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 10_000 }]);
+        assert_eq!(
+            cells,
+            vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 10_000, value_ref: None }]
+        );
     }
 
     #[test]
@@ -9397,6 +9558,13 @@ mod tests {
     }
 
     #[test]
+    fn mysql_navicat_unsupported_prepare_error_can_retry_with_text_protocol() {
+        let error = "Server error: ERROR 1295 (HY000): Prepared statements are not supported by Navicat HTTP tunnels";
+
+        assert!(mysql_error_should_retry_with_text_protocol(error));
+    }
+
+    #[test]
     fn mysql_reprepared_statement_error_can_retry_with_text_protocol() {
         let error = "Server error: ERROR HY000 (1615): Prepared statement needs to be re-prepared";
 
@@ -9627,11 +9795,7 @@ mod tests {
                 Some(MySqlSetupMode::Compatible),
                 "{error}"
             );
-            assert_eq!(
-                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
-                None,
-                "{error}"
-            );
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None, "{error}");
         }
     }
 
@@ -9649,11 +9813,7 @@ mod tests {
                 Some(MySqlSetupMode::Compatible),
                 "{error}"
             );
-            assert_eq!(
-                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
-                None,
-                "{error}"
-            );
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None, "{error}");
         }
     }
 
@@ -9758,6 +9918,10 @@ mod tests {
             // is the floor expression failing to parse rather than the variable being
             // missing, so the literal rung still applies (issue #10197).
             "MySQL connection failed: Server error: `ERROR 1193 (HY000): Unknown system variable 'group_concat_'`",
+            // ProxySQL error 9006 when expression SET locks connection to hostgroup 0 (issue #11307).
+            "MySQL connection verification query failed: Server error: `ERROR 9006 (Y0000): ProxySQL Error: connection is locked to hostgroup 0 but trying to reach hostgroup 1`",
+            "Server error: `ERROR 9006 (Y0000): ProxySQL Error: connection is locked to hostgroup 0 but trying to reach hostgroup 1`",
+            "Server error: `ProxySQL Error: connection is locked to hostgroup 0 but trying to reach hostgroup 1`",
         ] {
             let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error)
                 .or_else(|| mysql_setup_probe_fallback_mode(MySqlSetupMode::Standard, url, error))
@@ -9768,6 +9932,65 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn mysql_proxysql_hostgroup_locked_error_retries_with_literal_floor() {
+        let error = "MySQL connection verification query failed: Server error: `ERROR 9006 (Y0000): ProxySQL Error: connection is locked to hostgroup 0 but trying to reach hostgroup 1`";
+        let fallback = mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error)
+            .expect("ProxySQL error 9006 must trigger setup fallback");
+        assert_eq!(fallback, MySqlSetupMode::Compatible);
+        assert_eq!(
+            mysql_setup_fallback_ladder(fallback, error),
+            vec![MySqlSetupMode::Compatible, MySqlSetupMode::LiteralFloor]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_mode_url_detection() {
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?proxysql=true"),
+            MySqlSetupMode::LiteralFloor
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?proxysql=1"),
+            MySqlSetupMode::LiteralFloor
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?setupMode=literalFloor"),
+            MySqlSetupMode::LiteralFloor
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?setup_mode=literal_floor"),
+            MySqlSetupMode::LiteralFloor
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?setupMode=compatible"),
+            MySqlSetupMode::Compatible
+        );
+        assert_eq!(
+            MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app?setupMode=standard"),
+            MySqlSetupMode::Standard
+        );
+        assert_eq!(MySqlSetupMode::default_for_url("mysql://root:pw@host:3306/app"), MySqlSetupMode::Standard);
+    }
+
+    #[test]
+    fn mysql_setup_queries_prefers_literal_floor_for_proxysql_url() {
+        let queries = mysql_setup_queries("mysql://host:3306/db?proxysql=true", &[]);
+        assert_eq!(queries, vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+
+        let queries_flag = mysql_setup_queries("mysql://host:3306/db?setupMode=literalFloor", &[]);
+        assert_eq!(queries_flag, vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+    }
+
+    #[test]
+    fn mysql_url_strips_proxysql_and_setupmode_parameters() {
+        let url = "mysql://root:pw@host:3306/app?proxysql=true&setupMode=literalFloor&require_ssl=true";
+        let async_url = mysql_async_url(url);
+        assert!(!async_url.contains("proxysql"), "{async_url}");
+        assert!(!async_url.contains("setupMode"), "{async_url}");
+        assert_eq!(async_url.as_ref(), "mysql://root:pw@host:3306/app?require_ssl=true");
     }
 
     #[test]

@@ -1,11 +1,12 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
+import { createApp, defineComponent, h, markRaw, nextTick, ref, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { QueryResult } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import type { DataGridToolbarActionCapability } from "@/lib/dataGrid/dataGridToolbar";
 
 vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/composables/useDataGridColumnResize")>();
@@ -67,7 +68,7 @@ function mountWithProvider(render: () => ReturnType<typeof h>) {
   return mounted;
 }
 
-function mountToolbar() {
+function mountToolbar(autoRefreshEnabled = false) {
   return mountWithProvider(() =>
     h(DataGridToolbar, {
       compact: true,
@@ -77,7 +78,7 @@ function mountToolbar() {
         shortLabel: "Auto",
         startLabel: "Start auto-refresh",
         stopLabel: "Stop auto-refresh",
-        enabled: false,
+        enabled: autoRefreshEnabled,
         intervalSeconds: 30,
         sweepKey: 0,
         intervalOptions: [10, 30, 60],
@@ -94,7 +95,7 @@ function mountToolbar() {
   );
 }
 
-function mountGrid() {
+function mountGrid(resultOverride?: Partial<QueryResult>) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -103,16 +104,18 @@ function mountGrid() {
     shortcuts: { ...settingsStore.editorSettings.shortcuts, goToColumn: "Mod+G" },
   });
   const result = markRaw<QueryResult>({
-    columns: ["id"],
-    rows: [[1]],
+    columns: ["id", "name"],
+    rows: [[1, "Ada"]],
     affected_rows: 0,
     execution_time_ms: 0,
+    ...resultOverride,
   });
+  const grid = ref<{ goToColumnToolbarCapability: DataGridToolbarActionCapability }>();
   const host = document.createElement("div");
   document.body.append(host);
   const Root = defineComponent({
     setup() {
-      return () => h(TooltipProvider, { delayDuration: 0 }, { default: () => h(DataGrid, { result, databaseType: "mysql", context: "table-data" }) });
+      return () => h(TooltipProvider, { delayDuration: 0 }, { default: () => h(DataGrid, { ref: grid, result, databaseType: "mysql", context: "table-data" }) });
     },
   });
   const app = createApp(Root);
@@ -122,7 +125,7 @@ function mountGrid() {
   app.mount(host);
   const mounted = { app, host };
   mountedApps.push(mounted);
-  return mounted;
+  return { ...mounted, grid };
 }
 
 async function settle() {
@@ -197,15 +200,44 @@ describe("data grid icon-only toolbar tooltips", () => {
     expect(showsTooltip("Auto-refresh results")).toBe(true);
   });
 
-  it("shows a tooltip for the go to column control", async () => {
+  it.each([false, true])("marks the interval as selected only when auto refresh is enabled (%s)", async (enabled) => {
+    const { host } = mountToolbar(enabled);
+    await settle();
+    await click(toolbarButton(host, "autoRefresh"));
+
+    const intervalItem = [...document.querySelectorAll<HTMLElement>('[data-slot="dropdown-menu-item"]')].find((item) => item.textContent?.trim() === "Refresh every 30s");
+    expect(intervalItem).toBeDefined();
+    expect(!!intervalItem!.querySelector("svg")).toBe(enabled);
+  });
+
+  it("opens the column lookup side panel through its toolbar capability", async () => {
+    const { host, grid } = mountGrid();
+    await settle();
+
+    expect(grid.value?.goToColumnToolbarCapability.visible).toBe(true);
+    expect(grid.value?.goToColumnToolbarCapability.label).toBe("Go to column");
+
+    await grid.value!.goToColumnToolbarCapability.onTrigger();
+    await settle();
+
+    expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
+    expect(host.querySelector('[data-slot="popover-content"]')).toBeNull();
+  });
+
+  it("hides the bottom pagination export menu when the result has no columns", async () => {
+    const { host } = mountGrid({ columns: [], rows: [] });
+    await settle();
+
+    const bottomExportMenu = Array.from(host.querySelectorAll("button")).find((btn) => btn.getAttribute("aria-label") === "Export");
+    expect(bottomExportMenu).toBeUndefined();
+  });
+
+  it("shows the bottom pagination export menu when the result has columns", async () => {
     const { host } = mountGrid();
     await settle();
 
-    const button = toolbarButton(host, "navigation");
-    await hover(button);
-
-    expect(showsTooltip("Go to column")).toBe(true);
-    expect(visibleTooltipTexts().some((text) => text.includes("Go to column (") && text.includes("G)"))).toBe(true);
+    const bottomExportMenu = Array.from(host.querySelectorAll("button")).find((btn) => btn.getAttribute("aria-label") === "Export");
+    expect(bottomExportMenu).not.toBeUndefined();
   });
 });
 
@@ -232,12 +264,15 @@ describe("data grid toolbar overlay surfaces anchor to their trigger", () => {
     expectPositionedSurface("dropdown-menu-content");
   });
 
-  it("positions the go to column popover after a click", async () => {
-    const { host } = mountGrid();
+  it("keeps the column lookup surface in the grid side panel", async () => {
+    const { host, grid } = mountGrid();
     await settle();
 
-    await click(toolbarButton(host, "navigation"));
+    await grid.value!.goToColumnToolbarCapability.onTrigger();
+    await settle();
 
-    expectPositionedSurface("popover-content");
+    const panel = host.querySelector<HTMLElement>("[data-column-lookup-panel]");
+    expect(panel).not.toBeNull();
+    expect(panel?.querySelector('input[placeholder="Search column/comment..."]')).not.toBeNull();
   });
 });

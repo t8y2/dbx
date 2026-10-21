@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   writePluginLocalFileChunk: vi.fn(),
   closePluginLocalFile: vi.fn(),
   openPluginWorkbench: vi.fn(),
+  isTauriRuntime: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/tauri", () => ({
@@ -32,7 +33,7 @@ vi.mock("@/lib/backend/api", () => ({
   readPluginUiAsset: mocks.readPluginUiAsset,
   subscribePluginEvents: mocks.subscribePluginEvents,
 }));
-vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: vi.fn() }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false), themeRevision: ref(0) }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { uiFontFamily: "", fontFamily: "", fontSize: 14 } }) }));
@@ -40,11 +41,22 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     repushPluginConnection: mocks.repushPluginConnection,
     reopenPluginConnection: mocks.reopenPluginConnection,
+    connections: [
+      { id: "conn-mysql", name: "Prod MySQL", db_type: "mysql", plugin_connection_provider: undefined, plugin_connection_type: undefined, read_only: false },
+      { id: "conn-sample", name: "Sample Connection", db_type: "plugin", plugin_connection_provider: "sample.provider", plugin_connection_type: "sample", read_only: true },
+    ],
+    connectedIds: new Set(["conn-mysql"]),
   }),
 }));
-vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openPluginWorkbench: mocks.openPluginWorkbench }) }));
+vi.mock("@/stores/queryStore", () => ({
+  useQueryStore: () => ({
+    openPluginWorkbench: mocks.openPluginWorkbench,
+    pluginWorkbenchTitles: vi.fn((_id: string) => ["Terminal 1"]),
+  }),
+}));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ locale: ref("en"), t: (key: string) => key }) }));
 
+import { clearPluginUiHtmlCache } from "@/lib/plugins/pluginUiHtmlCache";
 import PluginWorkbenchHost from "./PluginWorkbenchHost.vue";
 
 const plugin: InstalledPlugin = {
@@ -72,7 +84,13 @@ describe("PluginWorkbenchHost initialization", () => {
   let root: HTMLDivElement;
 
   beforeEach(() => {
+    clearPluginUiHtmlCache();
     vi.clearAllMocks();
+    mocks.isTauriRuntime.mockReturnValue(false);
+    const settings = (window as unknown as { happyDOM: { settings: Record<string, boolean> } }).happyDOM.settings;
+    settings.disableJavaScriptFileLoading = true;
+    settings.disableCSSFileLoading = true;
+    settings.handleDisabledFileLoadingAsSuccess = true;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => window.setTimeout(() => callback(0), 0));
     vi.stubGlobal("getComputedStyle", () => Object.assign([], { getPropertyValue: () => "" }));
     mocks.readPluginUiEntry.mockResolvedValue({ dataBase64: btoa("<!doctype html><html><body></body></html>"), contentType: "text/html" });
@@ -106,6 +124,23 @@ describe("PluginWorkbenchHost initialization", () => {
     postMessage.mockClear();
     return { frame: frame!, postMessage, ready };
   }
+
+  it("passes the packaged module URL and existing asset CSP into srcdoc", async () => {
+    mocks.isTauriRuntime.mockReturnValue(true);
+    vi.stubEnv("PROD", true);
+    vi.stubGlobal("location", { protocol: "tauri:" });
+    mocks.readPluginUiEntry.mockResolvedValue({
+      dataBase64: btoa('<!doctype html><html><head></head><body><script type="module" src="./entry/app.mjs"></script></body></html>'),
+      contentType: "text/html",
+    });
+
+    const { frame } = await mountHost();
+    const srcdoc = frame.getAttribute("srcdoc") ?? "";
+    expect(srcdoc).toContain('<script type="module" src="dbx-plugin://localhost/sample/entry/app.mjs"></script>');
+    expect(srcdoc).toContain('<base href="dbx-plugin://localhost/sample/entry/">');
+    expect(srcdoc).toContain("script-src 'unsafe-inline' blob: dbx-plugin:;");
+    expect(mocks.readPluginUiAsset).not.toHaveBeenCalled();
+  });
 
   it("runs reinit before one init when load precedes ready", async () => {
     const firstReinit = deferred();
@@ -293,5 +328,39 @@ describe("PluginWorkbenchHost initialization", () => {
     document.dispatchEvent(payload("leave"));
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "dragstate", active: false }), "*");
     elementFromPoint.mockRestore();
+  });
+
+  it("serves all connections with connected status when plugin has host.connections:read", async () => {
+    const pluginWithPerm: InstalledPlugin = {
+      manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions: ["host.connections:read"], drivers: [], contributions: [] },
+      compatibility: { compatible: true },
+    };
+    app = createApp(PluginWorkbenchHost, { plugin: pluginWithPerm, contribution, context: { connectionId: "connection" } });
+    app.mount(root);
+    await flushWorkbenchLoad();
+    const frame = root.querySelector("iframe")!;
+    const target = frame.contentWindow!;
+    const postMessage = vi.spyOn(target, "postMessage").mockImplementation(() => {});
+    window.dispatchEvent(new MessageEvent("message", { source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } }));
+    await vi.waitFor(() => expect(mocks.repushPluginConnection).toHaveBeenCalled());
+    postMessage.mockClear();
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: target,
+        data: { source: "dbx-plugin", version: 1, type: "request", id: "conn-req-1", method: "host.getConnections", params: {} },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: "dbx-host",
+          type: "response",
+          id: "conn-req-1",
+          result: expect.arrayContaining([expect.objectContaining({ id: "conn-mysql", name: "Prod MySQL", dbType: "mysql", dialect: "mysql", connected: true, isConnected: true }), expect.objectContaining({ id: "conn-sample", name: "Sample Connection", connected: false, isConnected: false })]),
+        }),
+        "*",
+      ),
+    );
   });
 });

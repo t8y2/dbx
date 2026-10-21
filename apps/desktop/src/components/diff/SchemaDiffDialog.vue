@@ -9,6 +9,7 @@ import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, Alert
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { supportsDatabaseCompare } from "@/lib/database/databaseCompareCapabilities";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
 import SchemaDiffConfigSelector from "@/components/diff/SchemaDiffConfigSelector.vue";
@@ -22,7 +23,7 @@ import SideBySideTextDiff, { type TextDiffSide } from "@/components/common/SideB
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
-import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
+import { buildContinueOnErrorDeployLog, buildDeployTxResult, type DeployTxResult } from "@/lib/schema/deployTxResult";
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
 import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { countSchemaDiffActionableObjects, partitionSchemaDiffObjectsByResultTab, swapSchemaDiffRoutineMappings } from "@/lib/schema/schemaDiffRoutine";
@@ -163,7 +164,7 @@ const executing = ref(false);
 const lastDiffResult = ref<SchemaDiffPreparation | null>(null);
 const targetDbVersion = ref<string | null>(null);
 const showResultDialog = ref(false);
-const deployResult = ref<{ success: boolean; status?: string; message: string; affectedRows?: number; error?: string } | null>(null);
+const deployResult = ref<DeployTxResult | null>(null);
 
 const partitionedDiffObjects = computed(() => partitionSchemaDiffObjectsByResultTab(diffObjects.value));
 const tableDiffObjects = computed(() => partitionedDiffObjects.value.tableObjects);
@@ -198,6 +199,23 @@ const showRenamePanel = ref(true);
 
 // Rollback / forward SQL mode in deploy step
 const deploySqlMode = ref<"forward" | "rollback">("forward");
+
+// Deploy review: bracket the deploy script with MySQL's FOREIGN_KEY_CHECKS toggle.
+// Only MySQL honours the session variable, so the option is offered — and sent to
+// the backend — for MySQL targets alone; the backend re-checks the target type and
+// returns every other engine's script unchanged.
+const ignoreForeignKeyChecks = ref(false);
+const continueOnError = ref(false);
+const isMysqlDeployTarget = computed(() => targetEngineDbType.value === "mysql");
+const effectiveIgnoreForeignKeyChecks = computed(() => ignoreForeignKeyChecks.value && isMysqlDeployTarget.value);
+
+// Ticking the box rewrites the script through the plan generator, so the header
+// and trailer come from the same backend implementation the copy, export and
+// deploy paths all read from, and unticking restores the plain script.
+watch(ignoreForeignKeyChecks, () => {
+  if (step.value !== "deploy-review" || !lastDiffResult.value) return;
+  void regenerateSelectedDeploySql();
+});
 
 // Dialog size memory (width + height + splitpanes ratio)
 const DIALOG_SIZE_KEY = "dbx-schema-diff-size";
@@ -419,6 +437,8 @@ function resetComparisonResultState() {
   permissionDiffs.value = [];
   dependencyGraph.value = null;
   deploySqlMode.value = "forward";
+  ignoreForeignKeyChecks.value = false;
+  continueOnError.value = false;
   showConfirmDialog.value = false;
   showResultDialog.value = false;
   deployResult.value = null;
@@ -587,6 +607,14 @@ function runWithoutTargetIdentityReset(action: () => void): void {
   }
 }
 
+function handleSourceConnectionChange(connectionId: string): void {
+  if (connectionId === sourceConnectionId.value) return;
+  sourceConnectionId.value = connectionId;
+  sourceDatabase.value = "";
+  sourceSchema.value = "";
+  clearCompareObjectSelection();
+}
+
 function clearCompareObjectSelection(): void {
   if (!activeConfig.value) return;
   updateActiveConfigOptions(
@@ -729,6 +757,7 @@ function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
 function handleCompare(): void {
   const sourceConfig = store.getConfig(sourceConnectionId.value);
   const targetConfig = store.getConfig(targetConnectionId.value);
+  if (!supportsDatabaseCompare(sourceConfig, "schema") || !supportsDatabaseCompare(targetConfig, "schema")) return;
   const targetDbType = (targetConfig?.db_type || "mysql") as DatabaseType;
   const sourceDbType = sourceConfig?.db_type || targetDbType;
   const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, targetDbType);
@@ -817,6 +846,7 @@ function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
     sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceEngineDbType.value ? databaseTypeToDialectKind(sourceEngineDbType.value) : undefined,
     fieldMappings: options.fieldMappings,
     enableRollback: options.enableRollback,
+    ignoreForeignKeyChecks: effectiveIgnoreForeignKeyChecks.value,
   };
 }
 
@@ -987,6 +1017,13 @@ async function executeDeploySql() {
       sql: selectedDeploySql.value,
       source: t("production.sourceSchemaDiff"),
       execute: async () => {
+        if (continueOnError.value) {
+          const results = await api.executeMulti(targetConnectionId.value, targetDatabase.value, selectedDeploySql.value, targetSchema.value || undefined, undefined, {
+            continueOnError: true,
+            maxRows: 1,
+          });
+          return buildContinueOnErrorDeployLog(results);
+        }
         const txLog = await api.executeScriptWith2pc(targetConnectionId.value, targetDatabase.value, [selectedDeploySql.value], targetSchema.value, destructiveStatements.value.length > 0);
         return txLog;
       },
@@ -1193,6 +1230,7 @@ function handleDeleteHistoryConfig(configId: string) {
 }
 
 async function fetchDbVersion(connectionId: string, database: string, schema: string) {
+  if (!supportsDatabaseCompare(store.getConfig(connectionId), "schema")) return;
   try {
     await store.ensureConnected(connectionId);
     const config = store.getConfig(connectionId);
@@ -1307,7 +1345,8 @@ const targetConnectionInfo = computed(() => {
         <SchemaDiffConfigStep
           v-if="step === 'config'"
           class="shrink-0"
-          v-model:source-connection-id="sourceConnectionId"
+          :source-connection-id="sourceConnectionId"
+          @update:source-connection-id="handleSourceConnectionChange"
           v-model:source-database="sourceDatabase"
           v-model:source-schema="sourceSchema"
           v-model:target-connection-id="targetConnectionId"
@@ -1495,6 +1534,9 @@ const targetConnectionInfo = computed(() => {
         <template v-else-if="step === 'deploy-review'">
           <SchemaDiffDeployStep
             v-model:deploy-sql="selectedDeploySql"
+            v-model:ignore-foreign-key-checks="ignoreForeignKeyChecks"
+            v-model:continue-on-error="continueOnError"
+            :show-ignore-foreign-key-checks="isMysqlDeployTarget"
             :selected-objects="currentTabDiffObjects"
             :target-connection-id="targetConnectionId"
             :target-database="targetDatabase"
@@ -1582,6 +1624,14 @@ const targetConnectionInfo = computed(() => {
                 <li v-for="(item, index) in destructiveStatements" :key="`${item.objectType}-${index}`" class="truncate" :title="item.statement">{{ item.action.toUpperCase() }} {{ item.objectType }}: {{ item.statement }}</li>
               </ul>
             </div>
+
+            <label class="flex items-start gap-2 rounded border border-yellow-300 bg-yellow-50 p-3 text-xs text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950/30 dark:text-yellow-200" :class="executing ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'">
+              <input v-model="continueOnError" type="checkbox" class="mt-0.5 accent-primary" :disabled="executing" />
+              <span>
+                <span class="font-medium">{{ t("diff.continueOnError") }}</span>
+                <span class="mt-1 block">{{ t("diff.continueOnErrorHint") }}</span>
+              </span>
+            </label>
           </div>
 
           <DialogFooter>
@@ -1601,14 +1651,24 @@ const targetConnectionInfo = computed(() => {
             <DialogTitle class="flex items-center gap-2" :class="deployResult?.success ? 'text-green-500' : 'text-destructive'">
               <AlertTriangle v-if="!deployResult?.success" class="h-5 w-5" />
               <CircleCheck v-else class="h-5 w-5" />
-              <template v-if="deployResult?.status === 'mixed'">{{ t("diff.deployMixedTitle") }}</template>
+              <template v-if="deployResult?.status === 'completed_with_errors'">{{ t("diff.deployCompletedWithErrorsTitle") }}</template>
+              <template v-else-if="deployResult?.status === 'mixed'">{{ t("diff.deployMixedTitle") }}</template>
               <template v-else-if="deployResult?.status === 'rolled_back'">{{ t("diff.deployRolledBackTitle") }}</template>
               <template v-else>{{ deployResult?.success ? t("diff.deploySuccess") : t("diff.deployFailed") }}</template>
             </DialogTitle>
           </DialogHeader>
 
           <div class="py-2">
-            <div v-if="deployResult?.status === 'mixed'" class="space-y-2">
+            <div v-if="deployResult?.status === 'completed_with_errors'" class="space-y-2">
+              <p class="text-sm text-destructive-foreground">{{ deployResult.message }}</p>
+              <div v-if="deployResult.failures?.length" class="max-h-56 space-y-2 overflow-auto rounded border border-destructive/30 bg-destructive/5 p-2 text-xs">
+                <div v-for="failure in deployResult.failures" :key="failure.index" class="space-y-1">
+                  <div class="font-medium text-destructive">{{ t("diff.statementNumber", { index: failure.index + 1 }) }}</div>
+                  <pre class="whitespace-pre-wrap font-mono">{{ failure.error }}</pre>
+                </div>
+              </div>
+            </div>
+            <div v-else-if="deployResult?.status === 'mixed'" class="space-y-2">
               <p class="text-sm text-destructive-foreground">{{ deployResult.message }}</p>
               <div class="bg-yellow-50 border border-yellow-300 p-3 rounded text-xs text-yellow-800">
                 {{ t("diff.deployMixedWarning") }}

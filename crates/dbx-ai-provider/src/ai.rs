@@ -99,7 +99,7 @@ pub enum AiProvider {
     ClaudeCodeCli,
     #[serde(rename = "pi-agent-cli")]
     PiAgentCli,
-    #[serde(rename = "opencode-cli")]
+    #[serde(rename = "opencode-cli", alias = "opencode2-cli")]
     OpenCodeCli,
     #[serde(rename = "cursor-cli")]
     CursorCli,
@@ -340,6 +340,13 @@ pub struct AiChatSelectionState {
     /// Whether opening the AI panel should restore the most recently updated conversation.
     #[serde(default)]
     pub restore_last_conversation: bool,
+    /// Whether to include query result data previews in AI context (#12757).
+    /// Defaults to false to avoid sending sensitive row data to AI.
+    #[serde(default)]
+    pub include_query_result: bool,
+    /// Inverted alias for include_query_result (#12757).
+    #[serde(default)]
+    pub exclude_query_result: bool,
     /// Prompt template ids auto-applied when the AI panel opens, keyed by
     /// connection db_type. BTreeMap keeps serialized key order stable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -359,6 +366,8 @@ impl Default for AiChatSelectionState {
             default_mode: None,
             default_auto_routing: false,
             restore_last_conversation: false,
+            include_query_result: false,
+            exclude_query_result: false,
             default_templates_by_db_type: BTreeMap::new(),
             last_used_templates_by_db_type: BTreeMap::new(),
         }
@@ -458,6 +467,8 @@ pub struct AiConfig {
     pub opencode_cli_path: Option<String>,
     #[serde(default)]
     pub opencode_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub opencode_cli_version: Option<String>,
     #[serde(default)]
     pub cursor_cli_path: Option<String>,
     #[serde(default)]
@@ -597,6 +608,11 @@ pub struct AiStreamChunk {
     pub delta: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_delta: Option<String>,
+    /// Provider termination reason observed on the final stream event.
+    /// `length` means output was cut by the provider limit, not that the model
+    /// completed a final answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
     pub done: bool,
 }
 
@@ -636,8 +652,27 @@ pub struct AiChatMessage {
     /// a reloaded transcript can still tell the model the content is gone
     /// instead of showing an empty turn. Absent on records written before the
     /// field existed.
+    ///
+    /// NOTE (2026-10-01): the sync surface carries no conversations member today
+    /// — `cloud_sync::SyncSnapshot` has no such field, and there is no projection
+    /// to exclude one from — so the reason this field holds today is write
+    /// amplification rather than sync exposure. If conversations ever do join the
+    /// snapshot, the original reason applies again as written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selections_omitted: Option<bool>,
+    /// Which skills this conversation has had loaded (prd 09-30 Req 13), written
+    /// onto the newest assistant message of every snapshot.
+    ///
+    /// Only the FACT is persisted, never the body: a body can reach 1 MiB per
+    /// skill, `ai_conversations.messages_json` is an unbounded TEXT column with no
+    /// per-message or per-record cap, and the whole message array is re-serialised
+    /// on every save (send, streamed snapshot, chip click). A body here would be
+    /// written in full each time, and would ride along with anything that ships a
+    /// conversation record. Same shape as `selections_omitted` above, which keeps a
+    /// footprint instead of its payload; the panel holds the body in memory for the
+    /// current session and re-reads it from disk when a request needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_skill_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -670,6 +705,24 @@ pub struct AiConversation {
     /// survives a restart and is restored when the conversation reopens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_input: Option<String>,
+    /// Ask/Agent mode the user picked for THIS conversation (#12075), written
+    /// only when the user operates the picker.
+    ///
+    /// Plain string, not an enum, and deliberately so: a future mode must not
+    /// need a schema migration, and the frontend validates unknown values back
+    /// down to `settings.defaultAiMode` (R9's fail-open, mirroring DBeaver's
+    /// unknown-`promptGeneratorId` fallback). `None` means "the user never
+    /// picked", which the frontend resolves through `pluginContext.mode` and then
+    /// the settings default — the capability limits (vector DB, plugin without a
+    /// connection) never write back here, so the user's own choice survives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_mode: Option<String>,
+    /// Picker action for this conversation, including the UI-only `auto` entry
+    /// (#9118 / R8): the record stores the ENTRY the user chose, not the action a
+    /// send happened to route to. Same string/`None` semantics as
+    /// [`AiConversation::assistant_mode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_action: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1366,6 +1419,17 @@ fn openai_stream_has_finish_reason(event: &serde_json::Value) -> bool {
     })
 }
 
+/// Normalizes provider-specific output-limit labels into the two values the
+/// agent event contract exposes. Other stop reasons (for example tool calls or
+/// a normal stop) are intentionally not surfaced as truncation.
+fn output_limit_finish_reason(reason: &str) -> Option<&'static str> {
+    match reason.to_ascii_lowercase().as_str() {
+        "length" => Some("length"),
+        "max_tokens" | "max_output_tokens" => Some("max_tokens"),
+        _ => None,
+    }
+}
+
 pub fn responses_stream_text(event: &serde_json::Value) -> Option<&str> {
     let event_type = event["type"].as_str().unwrap_or_default();
     if !event_type.is_empty() && event_type != "response.output_text.delta" {
@@ -1472,7 +1536,10 @@ fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &
     }
 
     if matches!(config.provider, AiProvider::MiniMax) {
-        body["thinking"] = json!({ "type": "disabled" });
+        // Flash is adaptive-only, even when a saved legacy toggle is off.
+        if !config.model.trim().eq_ignore_ascii_case("MiniMax-M3.1-Flash") {
+            body["thinking"] = json!({ "type": "disabled" });
+        }
     } else if matches!(config.provider, AiProvider::Ollama) {
         // Ollama's OpenAI-compatible API uses reasoning_effort instead of
         // forwarding provider-specific chat template arguments.
@@ -1889,6 +1956,7 @@ fn ai_endpoint_is_loopback(config: &AiConfig) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
+    let host = host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
     host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().map(|addr| addr.is_loopback()).unwrap_or(false)
 }
 
@@ -1897,7 +1965,10 @@ pub fn build_ai_http_client(config: &AiConfig, timeout_secs: u64) -> Result<reqw
     if config.skip_tls_verify {
         builder = builder.danger_accept_invalid_certs(true);
     }
-    if config.proxy_enabled && !config.proxy_url.trim().is_empty() && !ai_endpoint_is_loopback(config) {
+    if ai_endpoint_is_loopback(config) {
+        // Skipping an explicit proxy alone still allows environment and system proxies.
+        builder = builder.no_proxy();
+    } else if config.proxy_enabled && !config.proxy_url.trim().is_empty() {
         let proxy_url = normalize_ai_proxy_url(&config.proxy_url);
         let proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| format!("Invalid AI proxy URL: {e}"))?;
         builder = builder.proxy(proxy);
@@ -3838,6 +3909,7 @@ async fn stream_claude(
                                         session_id: session_id.clone(),
                                         delta: text.to_string(),
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     });
                                 }
@@ -3854,6 +3926,7 @@ async fn stream_claude(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -3936,6 +4009,7 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning),
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
@@ -3945,6 +4019,7 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
@@ -3955,6 +4030,7 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning.to_string()),
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
@@ -3964,11 +4040,27 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
                                 }
                                 if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
+                                    if let Some(reason) = event["choices"].get(0).and_then(|choice| choice["finish_reason"].as_str()).filter(|reason| !reason.is_empty()) {
+                                        on_chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: String::new(),
+                                            reasoning_delta: None,
+                                            finish_reason: Some(reason.to_string()),
+                                            // Not `done`: this stream is not over. Both frontends
+                                            // stop listening on the first `done` chunk, and this
+                                            // stream deliberately keeps reading for up to a second
+                                            // after the finish reason to collect the trailing usage
+                                            // chunk. The batcher holds this reason and attaches it to
+                                            // the real terminal chunk.
+                                            done: false,
+                                        });
+                                    }
                                     finish_reason_deadline =
                                         Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
                                 }
@@ -3991,6 +4083,7 @@ async fn stream_openai(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -4067,6 +4160,7 @@ async fn stream_responses_api(
                                         session_id: session_id.clone(),
                                         delta: text.to_string(),
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     });
                                 }
@@ -4083,6 +4177,7 @@ async fn stream_responses_api(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -4161,6 +4256,7 @@ async fn stream_gemini(
                                         session_id: session_id.clone(),
                                         delta: text,
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     });
                                 }
@@ -4175,6 +4271,7 @@ async fn stream_gemini(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -4202,6 +4299,8 @@ pub enum StreamToolEvent {
     ToolCallProviderPayload { index: u32, payload: serde_json::Value },
     /// A tool_use / function_call block has ended.
     ToolCallComplete { index: u32 },
+    /// Provider termination reason, retained even when no tool call was emitted.
+    FinishReason { reason: String },
 }
 
 /// Partially accumulated tool call during streaming.
@@ -4234,6 +4333,16 @@ impl StreamingToolCallAccumulator {
     pub fn process(&mut self, event: StreamToolEvent, on_chunk: &impl Fn(AiStreamChunk)) {
         match event {
             StreamToolEvent::Chunk(chunk) => on_chunk(chunk),
+            // Carries the reason on a non-terminal chunk on purpose: `done` ends the
+            // stream for the consumer, and the batcher is built to attach this reason
+            // to the terminal chunk that follows.
+            StreamToolEvent::FinishReason { reason } => on_chunk(AiStreamChunk {
+                session_id: String::new(),
+                delta: String::new(),
+                reasoning_delta: None,
+                finish_reason: Some(reason),
+                done: false,
+            }),
             StreamToolEvent::ToolCallStart { index, id, name } => {
                 // Merge with any existing entry for this index instead of
                 // overwriting it. Some OpenAI-compatible providers (e.g. GLM)
@@ -4428,6 +4537,11 @@ async fn stream_claude_with_tools(
                                             let existing_input = token_usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
                                             token_usage = Some(TokenUsage { input_tokens: existing_input, output_tokens: o as u32 });
                                         }
+                                        if let Some(reason) = event["delta"]["stop_reason"].as_str()
+                                            .and_then(output_limit_finish_reason)
+                                        {
+                                            on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                        }
                                     }
                                     "content_block_start" => {
                                         let idx = event["index"].as_u64().unwrap_or(0) as u32;
@@ -4454,6 +4568,7 @@ async fn stream_claude_with_tools(
                                                         session_id: session_id.clone(),
                                                         delta: text.to_string(),
                                                         reasoning_delta: None,
+                                                        finish_reason: None,
                                                         done: false,
                                                     }));
                                                 }
@@ -4465,6 +4580,7 @@ async fn stream_claude_with_tools(
                                                         session_id: session_id.clone(),
                                                         delta: String::new(),
                                                         reasoning_delta: Some(thinking.to_string()),
+                                                        finish_reason: None,
                                                         done: false,
                                                     }));
                                                 }
@@ -4611,6 +4727,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning),
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4620,6 +4737,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4630,6 +4748,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning.to_string()),
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4639,6 +4758,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4665,6 +4785,9 @@ async fn stream_openai_with_tools(
                                     }
                                 }
                                 if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
+                                    if let Some(reason) = event["choices"].get(0).and_then(|choice| choice["finish_reason"].as_str()).filter(|reason| !reason.is_empty()) {
+                                        on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                    }
                                     finish_reason_deadline =
                                         Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
                                 }
@@ -4772,6 +4895,12 @@ async fn stream_responses_with_tools(
                                 if let Some(usage) = responses_token_usage(&event) {
                                     token_usage = Some(usage);
                                 }
+                                if let Some(reason) = event["response"]["incomplete_details"]["reason"]
+                                    .as_str()
+                                    .and_then(output_limit_finish_reason)
+                                {
+                                    on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                }
 
                                 if let Some(text) = responses_stream_text(&event) {
                                     emitted.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4779,6 +4908,7 @@ async fn stream_responses_with_tools(
                                         session_id: session_id.clone(),
                                         delta: text.to_string(),
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     }));
                                 }
@@ -5025,6 +5155,12 @@ async fn stream_gemini_with_tools(
                                     token_usage = Some(TokenUsage { input_tokens: p as u32, output_tokens: c as u32 });
                                 }
                                 if let Some(candidates) = event["candidates"].as_array() {
+                                    if let Some(reason) = candidates[0]["finishReason"]
+                                        .as_str()
+                                        .and_then(output_limit_finish_reason)
+                                    {
+                                        on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                    }
                                     if let Some(parts) = candidates[0]["content"]["parts"].as_array() {
                                         for part in parts {
                                             // Text
@@ -5034,6 +5170,7 @@ async fn stream_gemini_with_tools(
                                                     session_id: session_id.clone(),
                                                     delta: text.to_string(),
                                                     reasoning_delta: None,
+                                                    finish_reason: None,
                                                     done: false,
                                                 }));
                                             }
@@ -5182,10 +5319,10 @@ mod tests {
         gemini_text, is_agens_endpoint, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers,
         maybe_tag_retry_after, measure_first_stream_chunk, merge_global_max_retries, minimax_stream_semantics,
         ollama_selected_model_tool_support, openai_message_content, openai_response_text, openai_stream_reasoning,
-        openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
-        parse_model_list_response, parse_retry_after, parse_retry_after_secs, provider_requires_api_key,
-        redact_secrets, redact_url_query, resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_effort_core,
-        resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
+        openai_stream_text, output_limit_finish_reason, parse_dynamic_effort_capability,
+        parse_gemini_model_list_response, parse_model_list_response, parse_retry_after, parse_retry_after_secs,
+        provider_requires_api_key, redact_secrets, redact_url_query, resolve_endpoint, resolve_gemini_stream_endpoint,
+        resolve_model_effort_core, resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
         responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
         retain_ollama_completion_models, retry_after_secs, set_chat_completion_token_limit, stream, stream_claude,
         stream_claude_with_tools, stream_data_payload, stream_error, stream_openai_with_tools, stream_with_tools,
@@ -5197,6 +5334,15 @@ mod tests {
         MINIMAX_REASONING_DETAILS_PAYLOAD_KEY, TEST_PROMPT,
     };
     use super::{redacted_http_detail, sensitive_values};
+
+    #[test]
+    fn normalizes_provider_output_limit_reasons() {
+        assert_eq!(output_limit_finish_reason("length"), Some("length"));
+        assert_eq!(output_limit_finish_reason("MAX_TOKENS"), Some("max_tokens"));
+        assert_eq!(output_limit_finish_reason("max_output_tokens"), Some("max_tokens"));
+        assert_eq!(output_limit_finish_reason("stop"), None);
+        assert_eq!(output_limit_finish_reason("tool_calls"), None);
+    }
 
     #[test]
     fn structured_image_attachment_becomes_openai_image_content() {
@@ -5259,6 +5405,8 @@ mod tests {
         // Same for the opt-in auto-routing flag: a blob written before it existed
         // must load as false (concrete action stays the default).
         assert!(!legacy.default_auto_routing);
+        assert!(!legacy.include_query_result);
+        assert!(!legacy.exclude_query_result);
 
         let agent: AiChatSelectionState = serde_json::from_str(r#"{"version":1,"defaultMode":"agent"}"#).unwrap();
         assert_eq!(agent.default_mode, Some(AiAssistantMode::Agent));
@@ -5270,6 +5418,8 @@ mod tests {
         let serialized = serde_json::to_value(agent).unwrap();
         assert_eq!(serialized["defaultMode"], serde_json::json!("agent"));
         assert_eq!(serialized["defaultAutoRouting"], serde_json::json!(false));
+        assert_eq!(serialized["includeQueryResult"], serde_json::json!(false));
+        assert_eq!(serialized["excludeQueryResult"], serde_json::json!(false));
     }
 
     struct CapturedJsonRequest {
@@ -5304,13 +5454,17 @@ mod tests {
                     let (name, value) = line.split_once(':')?;
                     name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
                 })
-                .unwrap();
+                .unwrap_or(0);
             while request.len() < header_end + content_length {
                 let read = socket.read(&mut chunk).await.unwrap();
                 assert!(read > 0, "request ended before body was complete");
                 request.extend_from_slice(&chunk[..read]);
             }
-            let body = serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+            let body = if content_length == 0 {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap()
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: {response_content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
                 response_body.len()
@@ -5506,6 +5660,7 @@ mod tests {
                 pi_agent_cli_env: Default::default(),
                 opencode_cli_path: None,
                 opencode_cli_env: Default::default(),
+                opencode_cli_version: None,
                 cursor_cli_path: None,
                 cursor_cli_env: Default::default(),
                 grok_cli_path: None,
@@ -6143,6 +6298,7 @@ mod tests {
         assert!(config.pi_agent_cli_env.is_empty());
         assert!(config.opencode_cli_path.is_none());
         assert!(config.opencode_cli_env.is_empty());
+        assert!(config.opencode_cli_version.is_none());
         assert!(config.cursor_cli_path.is_none());
         assert!(config.cursor_cli_env.is_empty());
         assert!(config.codebuddy_cli_path.is_none());
@@ -6179,6 +6335,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6222,6 +6379,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6253,6 +6411,29 @@ mod tests {
     }
 
     #[test]
+    fn ai_http_client_identifies_loopback_endpoints() {
+        for (endpoint, expected) in [
+            ("http://localhost:3456/v1", true),
+            ("http://LOCALHOST:3456/v1", true),
+            ("http://127.0.0.1:3456/v1", true),
+            ("http://127.12.34.56:3456/v1", true),
+            ("http://[::1]:3456/v1", true),
+            ("http://192.168.1.2:3456/v1", false),
+            ("http://10.0.0.1:3456/v1", false),
+            ("http://[fd00::1]:3456/v1", false),
+            ("https://api.example.com/v1", false),
+            ("http://localhost.example.com/v1", false),
+            ("invalid endpoint", false),
+        ] {
+            let config: AiConfig = serde_json::from_value(serde_json::json!({
+                "provider": "openai-compatible", "endpoint": endpoint
+            }))
+            .unwrap();
+            assert_eq!(super::ai_endpoint_is_loopback(&config), expected, "{endpoint}");
+        }
+    }
+
+    #[test]
     fn ai_http_client_bypasses_proxy_for_loopback_endpoint() {
         let config = AiConfig {
             provider: AiProvider::OpenaiCompatible,
@@ -6280,6 +6461,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6321,6 +6503,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6366,6 +6549,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6408,6 +6592,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6469,6 +6654,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6506,6 +6692,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6546,6 +6733,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6653,6 +6841,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6741,6 +6930,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6856,6 +7046,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -6906,6 +7097,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7078,6 +7270,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7124,6 +7317,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7218,6 +7412,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7567,6 +7762,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7800,6 +7996,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7853,6 +8050,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7909,6 +8107,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -7959,6 +8158,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -8010,6 +8210,63 @@ mod tests {
         assert_eq!(captured.body["max_completion_tokens"], 64);
         assert_eq!(captured.body["thinking"]["type"], "disabled");
         assert!(captured.body.get("max_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn minimax_catalog_prefers_flash_without_changing_saved_models() {
+        let (endpoint, server) = spawn_json_capture_server(
+            "application/json",
+            r#"{"data":[
+            {"id":"MiniMax-M2.7"},{"id":"MiniMax-M3"},{"id":"MiniMax-M3.1-Flash"}
+        ]}"#,
+        )
+        .await;
+        let mut config = minimax_test_config(endpoint.trim_end_matches("/messages"));
+        config.model = "MiniMax-M2.7".to_string();
+        let models = list_models_core(&config).await.unwrap();
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["MiniMax-M3.1-Flash", "MiniMax-M3"]
+        );
+        assert_eq!(config.model, "MiniMax-M2.7");
+        assert!(server.await.unwrap().headers.starts_with("GET /v1/models "));
+    }
+
+    #[tokio::test]
+    async fn minimax_flash_completion_preserves_model_and_serializes_supported_effort() {
+        for model in ["MiniMax-M3.1-Flash", "MiniMax-M3", "MiniMax-M2.7", "private-model"] {
+            for effort in [None, Some(AiEffortSelection::ProviderDefault)] {
+                let (endpoint, server) =
+                    spawn_json_capture_server("application/json", r#"{"choices":[{"message":{"content":"ok"}}]}"#)
+                        .await;
+                let mut request = minimax_test_request(endpoint.trim_end_matches("/messages"));
+                request.config.model = model.to_string();
+                request.config.enable_thinking = false;
+                request.config.runtime_effort = effort.clone();
+                assert_eq!(complete(&request).await.unwrap(), "ok");
+                let captured = server.await.unwrap();
+                assert_eq!(captured.body["model"], model);
+                assert_eq!(captured.body["reasoning_split"], true);
+                assert!(captured.body.get("reasoning_effort").is_none());
+                if model == "MiniMax-M3.1-Flash" || effort.is_some() {
+                    assert!(captured.body.get("thinking").is_none());
+                } else {
+                    assert_eq!(captured.body["thinking"]["type"], "disabled");
+                }
+                assert!(captured.body.get("service_tier").is_none());
+            }
+        }
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            let (endpoint, server) =
+                spawn_json_capture_server("application/json", r#"{"choices":[{"message":{"content":"ok"}}]}"#).await;
+            let mut request = minimax_test_request(endpoint.trim_end_matches("/messages"));
+            request.config.model = "MiniMax-M3.1-Flash".to_string();
+            request.config.runtime_effort = Some(AiEffortSelection::Enum(effort.to_string()));
+            assert_eq!(complete(&request).await.unwrap(), "ok");
+            let captured = server.await.unwrap();
+            assert_eq!(captured.body["reasoning_effort"], effort);
+            assert!(captured.body.get("thinking").is_none());
+        }
     }
 
     #[test]
@@ -8288,12 +8545,45 @@ mod tests {
         );
         let (capture_endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
         let endpoint = capture_endpoint.trim_end_matches("/v1/messages").to_string();
-        let request = minimax_test_request(endpoint);
+        let mut request = minimax_test_request(endpoint);
+        request.config.model = "MiniMax-M3.1-Flash".to_string();
+        request.config.enable_thinking = false;
+        request.config.runtime_effort = Some(AiEffortSelection::Enum("high".to_string()));
+        request.messages[0]
+            .images
+            .push(AiInlineImage { media_type: "image/png".to_string(), data: "aGVsbG8=".to_string() });
+        let details = serde_json::json!([{"type": "reasoning.text", "text": "Inspect tables"}]);
+        request.messages.push(AiMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            images: vec![],
+            tool_call_id: None,
+            tool_calls: vec![ToolCallRef {
+                id: "previous_call".to_string(),
+                name: "list_tables".to_string(),
+                arguments: serde_json::json!({"schema": "public"}),
+                provider_payload: Some(serde_json::json!({MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: details})),
+            }],
+        });
+        request.messages.push(AiMessage {
+            role: "tool".to_string(),
+            content: "users".to_string(),
+            images: vec![],
+            tool_call_id: Some("previous_call".to_string()),
+            tool_calls: vec![],
+        });
+        let tools = [crate::agent_events::ToolDefinition {
+            name: "list_tables".into(),
+            description: "List tables".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"schema": {"type": "string"}}}),
+            read_only: true,
+            parallel_ok: true,
+        }];
         let chunks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let observed = chunks.clone();
 
         let (calls, _) =
-            stream_with_tools(&request.config, &request, "minimax-tool-test", &[], &Notify::new(), move |chunk| {
+            stream_with_tools(&request.config, &request, "minimax-tool-test", &tools, &Notify::new(), move |chunk| {
                 observed.lock().unwrap().push(chunk)
             })
             .await
@@ -8323,6 +8613,15 @@ mod tests {
         assert!(captured.headers.starts_with("POST /v1/chat/completions "));
         assert_eq!(captured.body["reasoning_split"], true);
         assert_eq!(captured.body["max_completion_tokens"], 64);
+        assert_eq!(captured.body["model"], "MiniMax-M3.1-Flash");
+        assert_eq!(captured.body["reasoning_effort"], "high");
+        assert!(captured.body.get("thinking").is_none());
+        assert_eq!(captured.body["tools"][0]["function"]["name"], "list_tables");
+        assert_eq!(captured.body["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,aGVsbG8=");
+        assert_eq!(captured.body["messages"][2]["reasoning_details"], details);
+        assert_eq!(captured.body["messages"][2]["tool_calls"][0]["function"]["arguments"], r#"{"schema":"public"}"#);
+        assert_eq!(captured.body["messages"][3]["tool_call_id"], "previous_call");
+        assert_eq!(captured.body["messages"][3]["content"], "users");
     }
 
     #[test]
@@ -8353,6 +8652,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -8430,6 +8730,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -8503,6 +8804,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,

@@ -20,6 +20,8 @@ pub struct SavedSqlFolder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedSqlFile {
+    #[serde(default)]
+    pub is_default_query: bool,
     pub id: String,
     pub connection_id: String,
     pub folder_id: Option<String>,

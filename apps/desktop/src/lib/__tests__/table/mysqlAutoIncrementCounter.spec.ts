@@ -1,5 +1,7 @@
+import zhCN from "@/i18n/locales/zh-CN";
+import { createI18n } from "vue-i18n";
 import { describe, expect, it, vi } from "vitest";
-import { buildMysqlAutoIncrementCounterStatement, canEditMysqlAutoIncrementCounter, mysqlAutoIncrementCounterDraft, refreshMysqlAutoIncrementCounterDraft } from "@/lib/table/mysqlAutoIncrementCounter";
+import { buildMysqlAutoIncrementCounterStatement, canEditMysqlAutoIncrementCounter, mysqlAutoIncrementCounterDraft, refreshMysqlAutoIncrementCounterDraft, translateMysqlAutoIncrementWarning } from "@/lib/table/mysqlAutoIncrementCounter";
 
 function existingColumn(autoIncrement: boolean) {
   return {
@@ -37,21 +39,33 @@ describe("MySQL table AUTO_INCREMENT counter", () => {
     });
   });
 
-  it("is editable only for existing native-MySQL tables with an active auto-increment column draft", () => {
+  it("is editable for supported MySQL-family tables with an active auto-increment column draft", () => {
     const nativeMysql = { db_type: "mysql", driver_profile: "mysql" } as any;
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [existingColumn(true)])).toBe(true);
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [{ ...existingColumn(true), original: undefined }])).toBe(true);
-    expect(canEditMysqlAutoIncrementCounter(nativeMysql, true, [existingColumn(true)])).toBe(false);
+    expect(canEditMysqlAutoIncrementCounter(nativeMysql, true, [existingColumn(true)])).toBe(true);
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [existingColumn(false)])).toBe(false);
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [{ ...existingColumn(true), markedForDrop: true }])).toBe(false);
 
     for (const connection of [
-      { db_type: "jdbc", driver_profile: "mysql" },
       { db_type: "mysql", driver_profile: "mariadb" },
       { db_type: "mysql", driver_profile: "tidb" },
       { db_type: "mysql", driver_profile: "oceanbase" },
+      { db_type: "mysql", driver_profile: "tdsql" },
+      { db_type: "mysql", driver_profile: "polardb" },
+      { db_type: "mysql", driver_profile: "greatsql" },
+      { db_type: "mysql", driver_profile: "custom_mysql" },
       { db_type: "mysql", driver_profile: "dolt" },
       { db_type: "goldendb", driver_profile: "goldendb" },
+    ] as const) {
+      expect(canEditMysqlAutoIncrementCounter(connection as any, false, [existingColumn(true)])).toBe(true);
+    }
+
+    for (const connection of [
+      { db_type: "jdbc", driver_profile: "mysql" },
+      { db_type: "mysql", driver_profile: "doris" },
+      { db_type: "mysql", driver_profile: "selectdb" },
+      { db_type: "mysql", driver_profile: "starrocks" },
     ] as const) {
       expect(canEditMysqlAutoIncrementCounter(connection as any, false, [existingColumn(true)])).toBe(false);
     }
@@ -91,5 +105,18 @@ describe("MySQL table AUTO_INCREMENT counter", () => {
 
     await expect(buildMysqlAutoIncrementCounterStatement({ ...common, originalValue: undefined, value: undefined })).resolves.toBeUndefined();
     await expect(buildMysqlAutoIncrementCounterStatement({ ...common, originalValue: "1", value: "1e3" })).rejects.toThrow("AUTO_INCREMENT must be a decimal integer");
+  });
+});
+
+describe("MySQL auto-increment warning translations", () => {
+  const i18n = createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } });
+  const t = (key: string, params: Record<string, unknown> = {}) => i18n.global.t(key, params);
+  it("translates backend warnings and preserves unusual column names as text", () => {
+    expect(translateMysqlAutoIncrementWarning(t, "MySQL allows only one AUTO_INCREMENT column per table.")).toBe("MySQL 每张表只能有一个自增字段。");
+    expect(translateMysqlAutoIncrementWarning(t, "AUTO_INCREMENT requires an auto-increment column.")).toBe("需要为表配置自增字段。");
+    expect(translateMysqlAutoIncrementWarning(t, "AUTO_INCREMENT requires a native MySQL auto-increment column.")).toBe("需要为表配置自增字段。");
+    const column = 'id"<tag>\n{value}';
+    expect(translateMysqlAutoIncrementWarning(t, `AUTO_INCREMENT column "${column}" requires a supporting index (first key column for InnoDB).`)).toBe(`自增字段“${column}”必须有有效索引；使用 InnoDB 时，该字段必须位于索引首列。`);
+    expect(translateMysqlAutoIncrementWarning(t, "Unknown backend warning")).toBe("Unknown backend warning");
   });
 });

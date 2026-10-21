@@ -520,6 +520,11 @@ pub async fn ai_agent_stream(
         // The loop below runs on its own current-thread runtime; plugin
         // sidecar calls must stay on the server runtime that owns the sessions.
         host_runtime: Some(tokio::runtime::Handle::current()),
+        // Always false, and deliberately not a request field: the on-demand
+        // skill tools read the user's local skill files, which the web server
+        // never exposes (prd 09-30-skill-listing-use-skill, Requirement 16).
+        // A future caller cannot opt in by adding a JSON key.
+        allow_skills: false,
     };
 
     let sid = session_id.clone();
@@ -602,6 +607,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,
@@ -711,6 +717,7 @@ mod tests {
             pi_agent_cli_env: Default::default(),
             opencode_cli_path: None,
             opencode_cli_env: Default::default(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: Default::default(),
             grok_cli_path: None,

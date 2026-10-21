@@ -1272,6 +1272,34 @@ mod tests {
         assert!(value.get("messages").is_none());
     }
 
+    #[test]
+    fn format_query_preserves_exact_decimal_values_in_json_table_and_csv() {
+        let value = "9007199254740993.123456789012";
+        let result = QueryResult {
+            columns: vec!["amount".to_string()],
+            column_types: vec!["NUMBER(38,12)".to_string()],
+            column_sortables: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![serde_json::from_str(value).unwrap()]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            server_execute_time_us: None,
+            query_timings_ms: None,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        let json_output = format_query("local", &result, OutputFormat::Json).unwrap();
+        let json_value: Value = serde_json::from_str(&json_output).unwrap();
+        assert_eq!(json_value["rows"][0]["amount"].as_number().unwrap().as_str(), value);
+        assert!(format_query("local", &result, OutputFormat::Table).unwrap().contains(value));
+        assert!(format_query("local", &result, OutputFormat::Csv).unwrap().contains(value));
+    }
+
     #[tokio::test]
     async fn routes_legacy_mongo_insert_through_shared_mongo_backend() {
         let flags = parse_flags(&args(&[

@@ -11,6 +11,7 @@ function savedSqlCopySortKey(name: string): { base: string; copyIndex: number } 
 }
 
 function compareSavedSqlFiles(left: SavedSqlFile, right: SavedSqlFile): number {
+  if (!!left.isDefaultQuery !== !!right.isDefaultQuery) return left.isDefaultQuery ? -1 : 1;
   const leftKey = savedSqlCopySortKey(left.name);
   const rightKey = savedSqlCopySortKey(right.name);
   return savedSqlNameCollator.compare(leftKey.base, rightKey.base) || leftKey.copyIndex - rightKey.copyIndex || savedSqlNameCollator.compare(left.name, right.name) || left.id.localeCompare(right.id);

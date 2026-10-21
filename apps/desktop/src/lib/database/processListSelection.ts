@@ -2,12 +2,12 @@ import { orderedListRangeIndices, orderedListSelectionIntent } from "../selectio
 
 /** Rows are identified by the server session id, matching the process list grid. */
 export interface ProcessListSelectionRow {
-  id: number;
+  id: string | number;
 }
 
 export interface ProcessListSelectionState {
-  selected: Set<number>;
-  anchorId: number | null;
+  selected: Set<string | number>;
+  anchorId: string | number | null;
 }
 
 /**
@@ -22,7 +22,7 @@ export interface ProcessListSelectionState {
  * The next state is derived from the current selection because the grid binds
  * `:checked` without cancelling the native checkbox activation.
  */
-export function processListSelectionAfterClick(rows: ProcessListSelectionRow[], state: ProcessListSelectionState, id: number, event: Pick<MouseEvent, "shiftKey" | "metaKey" | "ctrlKey">): ProcessListSelectionState {
+export function processListSelectionAfterClick(rows: ProcessListSelectionRow[], state: ProcessListSelectionState, id: string | number, event: Pick<MouseEvent, "shiftKey" | "metaKey" | "ctrlKey">): ProcessListSelectionState {
   const targetIndex = rows.findIndex((row) => row.id === id);
   if (targetIndex < 0) return state;
   const checked = !state.selected.has(id);

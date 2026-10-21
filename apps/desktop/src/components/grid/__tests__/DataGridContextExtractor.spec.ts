@@ -4,7 +4,9 @@ import { createApp, defineComponent, h, markRaw, nextTick, shallowRef, type App,
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import type { QueryResult } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
+import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
+import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_PREVIEW_MAX_ROWS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const mocks = vi.hoisted(() => ({
@@ -12,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(async ({ whereInput }: { whereInput?: string }) => `SELECT payload FROM events${whereInput ? ` WHERE ${whereInput}` : ""}`),
   executeMulti: vi.fn(),
   cancelQuery: vi.fn(),
+  extractDataGridSelection: vi.fn(),
   copyToClipboard: vi.fn(),
   toast: vi.fn(),
 }));
@@ -21,6 +24,7 @@ vi.mock("@/lib/backend/api", () => ({
   buildTableSelectSql: mocks.buildTableSelectSql,
   executeMulti: mocks.executeMulti,
   cancelQuery: mocks.cancelQuery,
+  extractDataGridSelection: mocks.extractDataGridSelection,
 }));
 
 vi.mock("@/composables/useToast", () => ({
@@ -135,7 +139,7 @@ function pasteGridCell(host: HTMLElement, value: string) {
   gridRoot.dispatchEvent(paste);
 }
 
-function mountGrid(initialResult = largeValueResult(), onReload?: () => void) {
+function mountGrid(initialResult = largeValueResult(), onReload?: () => void, databaseType: DatabaseType = "mysql", tableMeta?: DataGridTableMeta, columnLayoutScopeKey?: string) {
   const result = shallowRef(markRaw(initialResult));
   const onExecuteSql = vi.fn().mockResolvedValue(undefined);
   const pinia = createPinia();
@@ -155,12 +159,13 @@ function mountGrid(initialResult = largeValueResult(), onReload?: () => void) {
             default: () =>
               h(DataGrid, {
                 result: result.value,
-                databaseType: "mysql",
+                databaseType,
                 connectionId: "connection-1",
                 database: "dbx",
+                ...(columnLayoutScopeKey ? { columnLayoutScopeKey } : {}),
                 context: "table-data",
                 editable: true,
-                tableMeta: {
+                tableMeta: tableMeta ?? {
                   tableName: "events",
                   columns: [
                     { name: "id", data_type: "int" },
@@ -187,6 +192,7 @@ function mountGrid(initialResult = largeValueResult(), onReload?: () => void) {
   mountedApps.push(mounted);
   return {
     host,
+    settingsStore,
     onExecuteSql,
     replaceResult: (nextResult: QueryResult) => (result.value = markRaw(nextResult)),
     unmount: () => {
@@ -261,6 +267,24 @@ afterEach(() => {
 });
 
 describe("DataGrid context menu target lifecycle", () => {
+  it("offers original text for a single column spanning multiple rows", async () => {
+    const lines = ["CREATE view v_Test as", "\tselect 'quoted' as value", '-- "keep quotes"'];
+    mocks.extractDataGridSelection.mockResolvedValueOnce({ text: lines.join("\n"), mimeType: "text/plain", fileExtension: "txt", rowCount: 3, columnCount: 1 });
+    mocks.copyToClipboard.mockResolvedValueOnce(true);
+    const { host } = mountGrid({ columns: ["id", "payload"], rows: lines.map((line, index) => [index + 1, line]), affected_rows: 0, execution_time_ms: 0 });
+    await settle();
+    columnHeader(host, 1).click();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+
+    contextMenuButton("Original Text (Single Column)").click();
+
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith(lines.join("\n")));
+    expect(mocks.extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: lines.map((line) => [line]) }));
+  });
+
   it("does not reuse a closed header target for a later select-all menu", async () => {
     const { host } = mountGrid(hydratedResult(1, "value"));
     await settle();
@@ -328,6 +352,36 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(document.body.textContent).toContain("Grid Snapshot");
   });
 
+  it("formats Oracle date cells to display format in grid snapshot", async () => {
+    const oracleResult: QueryResult = {
+      columns: ["id", "created_at"],
+      column_types: ["number", "DATE"],
+      rows: [[1, "2026-10-09T10:56:57"]],
+      affected_rows: 0,
+      execution_time_ms: 0,
+    };
+    const oracleTableMeta: DataGridTableMeta = {
+      tableName: "events",
+      columns: [
+        { name: "id", data_type: "number" },
+        { name: "created_at", data_type: "DATE" },
+      ],
+      primaryKeys: ["id"],
+    };
+    const { host } = mountGrid(oracleResult, undefined, "oracle", oracleTableMeta);
+    await settle();
+
+    openContextMenu(rowNumber(host));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Screenshot selected rows");
+    contextMenuButton("Screenshot selected rows").click();
+    await settle();
+    expect(document.body.textContent).toContain("Grid Snapshot");
+    expect(document.body.textContent).toContain("2026-10-09 10:56:57");
+    expect(document.body.textContent).not.toContain("2026-10-09T10:56:57");
+  });
+
   it.each(["WHERE", "ORDER BY"] as const)("keeps the native context menu for the %s condition editor", async (placeholder) => {
     const { host } = mountGrid(hydratedResult(1, "value"));
     await settle();
@@ -362,7 +416,7 @@ describe("DataGrid context menu target lifecycle", () => {
     contextMenuButton("Export").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     await settle();
 
-    expect(contextMenuButton("Cell Text").disabled).toBe(false);
+    expect(contextMenuButton("Original Text (Single Column)").disabled).toBe(false);
     expect(contextMenuButton("JSON Array").disabled).toBe(false);
     expect(contextMenuButton("SQL Select").disabled).toBe(false);
   });
@@ -382,31 +436,28 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(contextMenuButton("SQL Select").disabled).toBe(true);
   });
 
-  async function openGridSearchAndType(host: HTMLElement, query: string) {
-    await settle();
-    const gridRoot = host.querySelector<HTMLElement>("[data-grid-root]");
-    if (!gridRoot) throw new Error("Grid root not found");
-    gridRoot.dispatchEvent(new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true, cancelable: true }));
-    await settle();
-    const input = host.querySelector<HTMLInputElement>("input[type=search]");
-    if (!input) throw new Error("Search input not found");
-    input.value = query;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    await settle();
-    // useDataGridSearch 防抖 150ms，等待 deferredSearchText 生效
-    await new Promise((resolve) => setTimeout(resolve, 400));
-  }
-
-  it("marks the search overlay when truncated large values may hide matches (issue #7279)", async () => {
+  it("shows the large table preview notice when values are truncated", async () => {
     const { host } = mountGrid(largeValueResult(1, "preview"));
-    await openGridSearchAndType(host, "prev");
-    expect(host.querySelector("[data-grid-search-truncated-hint]")).toBeTruthy();
+    await settle();
+    expect(host.querySelector("[data-grid-preview-notice]")).toBeTruthy();
   });
 
-  it("does not show the truncation hint for fully loaded values", async () => {
+  it("does not show the large table preview notice for fully loaded values", async () => {
     const { host } = mountGrid(hydratedResult(1, "preview"));
-    await openGridSearchAndType(host, "prev");
-    expect(host.querySelector("[data-grid-search-truncated-hint]")).toBeNull();
+    await settle();
+    expect(host.querySelector("[data-grid-preview-notice]")).toBeNull();
+  });
+
+  it("re-shows the large table preview notice after pagination replaces the result (#12289)", async () => {
+    const { host, replaceResult } = mountGrid(largeValueResult(1, "preview"));
+    await settle();
+    expect(host.querySelector("[data-grid-preview-notice]")).toBeTruthy();
+    host.querySelector<HTMLElement>("[data-grid-preview-notice] button[title]")!.click();
+    await settle();
+    expect(host.querySelector("[data-grid-preview-notice]")).toBeNull();
+    replaceResult(largeValueResult(1, "next-page"));
+    await settle();
+    expect(host.querySelector("[data-grid-preview-notice]")).toBeTruthy();
   });
 
   it("offers toolbar-equivalent refresh in the cell context menu (issue #7273)", async () => {
@@ -482,6 +533,242 @@ describe("DataGrid context menu target lifecycle", () => {
     contextMenuButton("Copy Column Name").click();
 
     await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("payload"));
+  });
+
+  it("copies column metadata from the header without reading row values", async () => {
+    const { host } = mountGrid();
+    openContextMenu(columnHeader(host, 1));
+    await settle();
+    contextMenuButton("Copy Column Metadata").click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("Name\tType\tSource\tNullable\tComment\npayload\ttext\tpayload\t\t"));
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+  });
+
+  it("copies selected duplicate result aliases from a zero-row query without fetching data", async () => {
+    const layoutScopeKey = "column-metadata-reordered-test";
+    localStorage.setItem(`dbx-data-grid-column-layout:${layoutScopeKey}`, JSON.stringify({ version: 1, orderKeys: ["expression\u00000", "payload\u00001", "payload\u00000"], hiddenKeys: [] }));
+    const result: QueryResult = {
+      columns: ["id", "payload", "payload", "expression"],
+      column_types: ["int", "text", "jsonb"],
+      rows: [],
+      affected_rows: 0,
+      execution_time_ms: 0,
+      hidden_column_indexes: [0],
+    };
+    const { host } = mountGrid(
+      result,
+      undefined,
+      "postgres",
+      {
+        tableName: "events",
+        primaryKeys: [],
+        columns: [{ name: "payload", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: "payload source" }],
+      },
+      layoutScopeKey,
+    );
+    await settle();
+    const headers = [...host.querySelectorAll<HTMLElement>("[data-grid-column-index]")];
+    expect(headers.map((header) => header.dataset.gridColumnIndex)).toEqual(["3", "2", "1"]);
+    headers.forEach((header) => header.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+    openContextMenu(headers.at(-1)!);
+    await settle();
+    contextMenuButton("Copy Column Metadata").click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("Name\tType\tSource\tNullable\tComment\nexpression\t\t\t\t\npayload\tjsonb\tpayload\tYES\tpayload source\npayload\ttext\tpayload\tYES\tpayload source"));
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+  });
+
+  it("keeps SQL Select available in Copy as by default and restores it after hiding it", async () => {
+    const { host, settingsStore } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+    columnHeader(host, 1).click();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    expect(contextMenuLabels()).toContain("SQL Select");
+
+    settingsStore.updateEditorSettings({ dataGridVisibleCopyExtractors: DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS.filter((item) => item !== "sql-select") });
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    await settle();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    expect(contextMenuLabels()).not.toContain("SQL Select");
+
+    contextMenuButton("Configure Data Extractors…").click();
+    await settle();
+    const restore = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Restore defaults");
+    expect(restore).toBeTruthy();
+    restore!.click();
+    await settle();
+    const save = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Save");
+    expect(save).toBeTruthy();
+    save!.click();
+    await settle();
+    expect(settingsStore.editorSettings.dataGridVisibleCopyExtractors).toContain("sql-select");
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    await settle();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    expect(contextMenuLabels()).toContain("SQL Select");
+  });
+
+  it("copies the full current result using temporary advanced-copy options without saving settings", async () => {
+    const rows = Array.from({ length: DATA_GRID_EXTRACTOR_PREVIEW_MAX_ROWS + 2 }, (_, index) => [index + 1, `value-${index + 1}`]);
+    const { host, settingsStore } = mountGrid({ columns: ["id", "payload"], rows, affected_rows: 0, execution_time_ms: 0 });
+    await settle();
+    selectAllHeader(host).click();
+    openContextMenu(selectAllHeader(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    contextMenuButton("Advanced copy…").click();
+    await settle();
+
+    expect(mocks.extractDataGridSelection).not.toHaveBeenCalled();
+    const php = document.querySelector<HTMLInputElement>('input[type="radio"][value="php"]');
+    expect(php).toBeTruthy();
+    php!.click();
+    await settle();
+    mocks.extractDataGridSelection.mockResolvedValueOnce({ text: "<?php return ['value'];", mimeType: "text/x-php", fileExtension: "php", rowCount: rows.length, columnCount: 1 });
+    mocks.copyToClipboard.mockResolvedValueOnce(true);
+    const copy = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.trim() === "Copy").at(-1);
+    expect(copy).toBeTruthy();
+    expect(copy!.disabled).toBe(false);
+    copy!.click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("<?php return ['value'];"));
+    const request = mocks.extractDataGridSelection.mock.calls[0]?.[0] as { rows: unknown[][]; extractor: string };
+    expect(request.extractor).toBe("php");
+    expect(request.rows).toHaveLength(DATA_GRID_EXTRACTOR_PREVIEW_MAX_ROWS + 2);
+    expect(request.rows[0]?.[0]).toBe(1);
+    expect(request.rows.at(-1)?.[0]).toBe(DATA_GRID_EXTRACTOR_PREVIEW_MAX_ROWS + 2);
+    expect(settingsStore.editorSettings.dataGridCopyExtractor).toBe("smart");
+  });
+
+  it("does not write to the clipboard when the advanced-copy dialog closes during extraction", async () => {
+    const pending = deferred<{ text: string; mimeType: string; fileExtension: string; rowCount: number; columnCount: number }>();
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+    columnHeader(host, 1).click();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    contextMenuButton("Advanced copy…").click();
+    await settle();
+    mocks.extractDataGridSelection.mockReturnValueOnce(pending.promise);
+    const copy = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.trim() === "Copy").at(-1)!;
+    copy.click();
+    await vi.waitFor(() => expect(mocks.extractDataGridSelection).toHaveBeenCalledOnce());
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Cancel")!.click();
+    await settle();
+    pending.resolve({ text: "stale copy", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 2 });
+    await settle();
+    expect(mocks.copyToClipboard).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("invalidates advanced copy when the result changes during extraction", async () => {
+    const pending = deferred<{ text: string; mimeType: string; fileExtension: string; rowCount: number; columnCount: number }>();
+    const { host, replaceResult } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+    columnHeader(host, 1).click();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    contextMenuButton("Advanced copy…").click();
+    await settle();
+    mocks.extractDataGridSelection.mockReturnValueOnce(pending.promise);
+    const copy = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.trim() === "Copy").at(-1)!;
+    copy.click();
+    await vi.waitFor(() => expect(mocks.extractDataGridSelection).toHaveBeenCalledOnce());
+    replaceResult(hydratedResult(2, "updated"));
+    await settle();
+    pending.resolve({ text: "stale result", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 2 });
+    await settle();
+    expect(mocks.copyToClipboard).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')).not.toBeNull());
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("result or selection changed");
+  });
+
+  it("keeps clipboard success when the result changes after clipboard writing starts", async () => {
+    const pendingClipboard = deferred<boolean>();
+    const { host, replaceResult } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+    columnHeader(host, 1).click();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    contextMenuButton("Advanced copy…").click();
+    await settle();
+    mocks.extractDataGridSelection.mockResolvedValueOnce({ text: "copied", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    mocks.copyToClipboard.mockReturnValueOnce(pendingClipboard.promise);
+    const copy = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.trim() === "Copy").at(-1)!;
+    copy.click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("copied"));
+
+    replaceResult(hydratedResult(2, "updated"));
+    await settle();
+    pendingClipboard.resolve(true);
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it.each(["result", "selection"] as const)("discards advanced-copy preview when the %s changes while it is pending", async (changed) => {
+    const pendingPreview = deferred<{ text: string; mimeType: string; fileExtension: string; rowCount: number; columnCount: number; sourceRowCount: number; truncated: boolean }>();
+    const { host, replaceResult } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+    columnHeader(host, 1).click();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    contextMenuButton("Advanced copy…").click();
+    await settle();
+    mocks.extractDataGridSelection.mockReturnValueOnce(pendingPreview.promise);
+    const previewToggle = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Preview"));
+    expect(previewToggle).toBeTruthy();
+    previewToggle!.click();
+    await vi.waitFor(() => expect(mocks.extractDataGridSelection).toHaveBeenCalledOnce());
+
+    if (changed === "result") replaceResult(hydratedResult(2, "updated"));
+    else selectAllHeader(host).click();
+    await settle();
+    pendingPreview.resolve({ text: "stale preview", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1, sourceRowCount: 1, truncated: false });
+    await settle();
+
+    const preview = [...document.querySelectorAll<HTMLElement>("pre")].find((element) => element.textContent?.includes("result or selection changed"));
+    expect(preview).toBeTruthy();
+    expect(document.body.textContent).not.toContain("stale preview");
+  });
+
+  it("invalidates advanced copy when the selection changes during extraction", async () => {
+    const pending = deferred<{ text: string; mimeType: string; fileExtension: string; rowCount: number; columnCount: number }>();
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+    columnHeader(host, 1).click();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    contextMenuButton("Advanced copy…").click();
+    await settle();
+    mocks.extractDataGridSelection.mockReturnValueOnce(pending.promise);
+    const copy = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.trim() === "Copy").at(-1)!;
+    copy.click();
+    await vi.waitFor(() => expect(mocks.extractDataGridSelection).toHaveBeenCalledOnce());
+    selectAllHeader(host).click();
+    await settle();
+    pending.resolve({ text: "stale selection", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 2 });
+    await settle();
+    expect(mocks.copyToClipboard).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')).not.toBeNull());
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("result or selection changed");
   });
 
   it("keeps the initial select-all menu on the data selection target", async () => {

@@ -37,6 +37,8 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
     "host.ai",
     "host.clipboard:read",
     "host.data:read",
+    "host.connections:read",
+    "host.connections::read",
 ];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
@@ -115,6 +117,8 @@ pub struct PluginManifest {
     pub executable: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drivers: Vec<PluginDriverManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<PluginCapabilityManifest>,
 }
 
 fn default_plugin_protocol_version() -> u32 {
@@ -192,6 +196,14 @@ pub struct PluginDriverManifest {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginCapabilityManifest {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

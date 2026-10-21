@@ -56,7 +56,12 @@ describe("AI conversation owns its connection binding (#9902)", () => {
   it("does not expose Agent mode for a plugin conversation without a connection", () => {
     expect(source).toContain("function canUsePluginAgentMode");
     expect(source).toContain('if (mode === "agent" && !canUsePluginAgentMode()) return;');
-    expect(source).toContain('request.mode === "agent" && !pluginConnection ? "ask"');
+    // #12075 moved the downgrade out of this function: the request now records
+    // the mode it ASKED for and the picker's capability replay degrades what is
+    // shown, so connecting later brings Agent mode back. The rule itself is
+    // covered in `lib/ai/__tests__/aiConversationPicker.spec.ts`
+    // ("degrades a plugin conversation without a connection…").
+    expect(bodyOf("function openPluginConversation(request: AiPluginConversationRequest)")).toContain('picker.select({ mode: request.mode ?? request.context.mode ?? "ask", action: "general" })');
   });
 
   it("rebinding the conversation never rewrites the editor tab or the global active connection", () => {

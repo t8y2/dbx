@@ -1,6 +1,9 @@
 package com.dbx.agent.sqlserverlegacy;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
+import com.dbx.agent.ExecuteQueryOptions;
+import com.dbx.agent.JdbcExecutor;
+import com.dbx.agent.QueryResult;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DdlBuilder;
@@ -63,12 +66,127 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         Arrays.asList("TABLE", "VIEW", "SYSTEM TABLE")
     );
     private volatile boolean sqlServer2000Mode;
+    private volatile boolean manualTransactionSession;
+    private volatile boolean manualTransactionExecuted;
 
     public SqlServerLegacyAgent() {
         super(PROFILE);
         // AbstractJdbcAgent loads the JDBC driver before building the URL, so relax
         // the legacy TLS policy here before the driver can initialize JSSE.
         enableLegacyTlsAlgorithms();
+    }
+
+    @Override
+    public Map<String, Object> beginManualTransaction(String schema) {
+        Connection conn = getConnection();
+        if (conn == null) throw new IllegalStateException("Not connected");
+        // Metadata is advisory when an old JDBC driver cannot implement it.
+        // A definitive false is different from an unavailable metadata method.
+        return unchecked(() -> {
+            java.sql.DatabaseMetaData metadata = null;
+            boolean unsupported = false;
+            try {
+                metadata = conn.getMetaData();
+                unsupported = !metadata.supportsTransactions();
+            } catch (SQLException | AbstractMethodError unavailable) {
+                // setAutoCommit is the authoritative operation in this case.
+            }
+            if (unsupported) throw new IllegalStateException("DBX_MANUAL_TRANSACTION_UNSUPPORTED: JDBC driver reports transactions are unsupported");
+            if (!conn.getAutoCommit()) throw new IllegalStateException("Manual transaction already open");
+            conn.setAutoCommit(false);
+            manualTransactionSession = true;
+            manualTransactionExecuted = false;
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("ok", true);
+            result.put("manualTransactionBatch", true);
+            if (metadata != null) {
+                try {
+                    result.put("productVersion", metadata.getDatabaseProductVersion());
+                    result.put("productType", metadata.getDatabaseProductName());
+                    result.put("driverName", metadata.getDriverName());
+                    result.put("driverVersion", metadata.getDriverVersion());
+                } catch (SQLException | AbstractMethodError unavailable) {
+                    // Diagnostics must not turn a successful BEGIN into a failure.
+                }
+            }
+            return result;
+        });
+    }
+
+    @Override
+    public Map<String, Object> commitManualTransaction() {
+        Connection conn = getConnection();
+        if (conn == null) throw new IllegalStateException("Not connected");
+        return unchecked(() -> {
+            if (conn.getAutoCommit()) throw new IllegalStateException("No manual transaction open");
+            if (manualTransactionExecuted && transactionCount(conn, 30) != 1) throw new IllegalStateException("DBX_MANUAL_TRANSACTION_STATE_LOST: commit state cannot be confirmed");
+            conn.commit();
+            // This is a dedicated, terminal session. Do not setAutoCommit(true):
+            // a failure in that cleanup must not obscure an acknowledged COMMIT.
+            return Collections.singletonMap("ok", (Object) true);
+        });
+    }
+
+    @Override
+    public Map<String, Object> rollbackManualTransaction() {
+        Connection conn = getConnection();
+        if (conn == null) throw new IllegalStateException("Not connected");
+        return unchecked(() -> {
+            if (conn.getAutoCommit()) throw new IllegalStateException("No manual transaction open");
+            if (manualTransactionExecuted && transactionCount(conn, 30) == 0) throw new IllegalStateException("DBX_MANUAL_TRANSACTION_STATE_LOST: transaction already ended; rollback cannot be confirmed");
+            conn.rollback();
+            return Collections.singletonMap("ok", (Object) true);
+        });
+    }
+
+    @Override
+    public boolean permitsAutomaticReconnect() {
+        return !manualTransactionSession;
+    }
+
+    @Override
+    public List<QueryResult> executeQueryResults(String sql, String schema, ExecuteQueryOptions options) {
+        Connection conn = getConnection();
+        if (conn == null) throw new IllegalStateException("Not connected");
+        return unchecked(() -> {
+            if (!manualTransactionSession) {
+                beforeQueryExecution(conn, options.getTimeoutSecs());
+                return JdbcExecutor.current().executeAll(conn, sql, options.getMaxRows(),
+                    options.getFetchSize(), options.getTimeoutSecs(), resultValueReader());
+            }
+            if (conn.getAutoCommit()) throw new IllegalStateException("DBX_MANUAL_TRANSACTION_STATE_LOST: autoCommit changed");
+            beforeQueryExecution(conn, options.getTimeoutSecs());
+            int before = transactionCount(conn, options.getTimeoutSecs());
+            if (before == 0 && !manualTransactionExecuted) {
+                // JDBC may defer its physical BEGIN. Open the DBX transaction before
+                // the first user batch, including PRINT/read-only procedures. Explicit
+                // BEGIN with IMPLICIT_TRANSACTIONS ON would open two transactions.
+                JdbcExecutor.current().executeAll(conn, "SET IMPLICIT_TRANSACTIONS OFF; BEGIN TRANSACTION", 1, null,
+                    options.getTimeoutSecs(), resultValueReader());
+                before = transactionCount(conn, options.getTimeoutSecs());
+            }
+            if (before != 1) throw new IllegalStateException("DBX_MANUAL_TRANSACTION_STATE_LOST: transaction not active or nested");
+            manualTransactionExecuted = true;
+            List<QueryResult> results = JdbcExecutor.current().executeAll(conn, sql, options.getMaxRows(),
+                options.getFetchSize(), options.getTimeoutSecs(), resultValueReader());
+            int after = transactionCount(conn, options.getTimeoutSecs());
+            if (after != 1) {
+                throw new IllegalStateException("DBX_MANUAL_TRANSACTION_STATE_LOST: transaction ended or changed inside the batch");
+            }
+            return results;
+        });
+    }
+
+    private static int transactionCount(Connection conn, int timeoutSecs) throws SQLException {
+        try (java.sql.Statement stmt = conn.createStatement()) {
+            stmt.setQueryTimeout(timeoutSecs > 0 ? timeoutSecs : 30);
+            try (ResultSet rows = stmt.executeQuery("SELECT @@TRANCOUNT")) {
+                if (!rows.next()) throw new SQLException("Missing SQL Server transaction status");
+                int count = rows.getInt(1);
+                while (rows.next()) { /* consume status response */ }
+                return count;
+            }
+        }
     }
 
     @Override
@@ -116,7 +234,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
                     throw fallbackError;
                 }
             }
-            throw withLegacyTlsDiagnostics(error);
+            throw withLegacyTlsDiagnostics(error, jdbcDriverVersion(), requestedTlsProtocol(params));
         }
     }
 
@@ -141,6 +259,8 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     @Override
     protected void afterDisconnect() {
+        manualTransactionSession = false;
+        manualTransactionExecuted = false;
         sqlServer2000Mode = false;
     }
 
@@ -305,7 +425,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         if (urlParams == null || urlParams.trim().isEmpty()) {
             return properties;
         }
-        for (String pair : urlParams.trim().split("[&;]")) {
+        for (String pair : connectionPropertyParts(urlParams.trim(), true)) {
             String value = pair.trim();
             int separator = value.indexOf('=');
             if (separator <= 0) {
@@ -326,35 +446,57 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     @Override
     public String getTableComment(String schema, String table) {
-        if (sqlServer2000Mode) {
-            return null;
-        }
         return unchecked(() -> {
-            try (PreparedStatement statement = requireConnection().prepareStatement(tableCommentSql())) {
-                statement.setString(1, schema);
-                statement.setString(2, table);
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    if (resultSet.next()) {
-                        String comment = resultSet.getString("table_comment");
-                        return comment != null && !comment.trim().isEmpty() ? comment : null;
-                    }
+            try {
+                return readTableComment(tableCommentSql(), schema, table);
+            } catch (SQLException | RuntimeException error) {
+                // sys.extended_properties is absent on SQL Server 2000, where the property
+                // lives in sysproperties; the compatibility function answers on every version.
+                // Bailing out on the driver mode instead used to hide a table comment that had
+                // just been written whenever the connection ran on the jTDS fallback. (#11606)
+                System.err.println(
+                    "[sqlserver-legacy] sys.extended_properties table comment unavailable; trying compatibility function: "
+                        + error.getMessage()
+                );
+            }
+            try {
+                return readTableComment(sqlServer2000TableCommentSql(), schema, table);
+            } catch (SQLException | RuntimeException error) {
+                System.err.println("[sqlserver-legacy] table comment unavailable: " + error.getMessage());
+                return null;
+            }
+        });
+    }
+
+    private String readTableComment(String sql, String schema, String table) throws SQLException {
+        try (PreparedStatement statement = requireConnection().prepareStatement(sql)) {
+            statement.setString(1, schema);
+            statement.setString(2, table);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    String comment = resultSet.getString("table_comment");
+                    return comment != null && !comment.trim().isEmpty() ? comment : null;
                 }
             }
-            return null;
-        });
+        }
+        return null;
     }
 
     @Override
     public List<ColumnInfo> getColumns(String schema, String table) {
         String resolvedSchema = metadataSchema(schema, table);
         List<ColumnInfo> columns = super.getColumns(resolvedSchema, table);
-        if (!sqlServer2000Mode || columns.isEmpty()) {
+        if (columns.isEmpty()) {
             return columns;
         }
         try {
+            // JDBC REMARKS from sp_columns is always NULL on SQL Server, so the
+            // MS_Description comments must be read from the catalog directly.
             return mergeSqlServer2000ColumnComments(
                 columns,
-                readSqlServer2000ColumnComments(resolvedSchema, table)
+                sqlServer2000Mode
+                    ? readSqlServer2000ColumnComments(resolvedSchema, table)
+                    : readColumnCommentsFromQuery(columnCommentsSql(), resolvedSchema, table)
             );
         } catch (SQLException | RuntimeException error) {
             // Comments are optional metadata. Keep the table usable when the
@@ -362,7 +504,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             // Legacy drivers can also throw runtime errors from their catalog
             // code, mirroring the RuntimeException guards in getTableDdl.
             System.err.println(
-                "[sqlserver-legacy] SQL Server 2000 column comments unavailable: "
+                "[sqlserver-legacy] SQL Server column comments unavailable: "
                     + error.getClass().getName()
                     + ": "
                     + error.getMessage()
@@ -425,6 +567,17 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             }
         }
         return columns;
+    }
+
+    static String columnCommentsSql() {
+        return "SELECT c.name AS column_name, CAST(ep.value AS nvarchar(max)) AS column_comment, "
+            + "ep.name AS property_name "
+            + "FROM sys.columns c "
+            + "JOIN sys.objects o ON o.object_id = c.object_id "
+            + "JOIN sys.schemas s ON s.schema_id = o.schema_id "
+            + "JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = c.object_id "
+            + "AND ep.minor_id = c.column_id AND ep.name = N'MS_Description' "
+            + "WHERE s.name = ? AND o.name = ? AND o.type IN ('U', 'V')";
     }
 
     static String sqlServer2000ColumnCommentsSql() {
@@ -618,6 +771,16 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             + "AND s.name = ? AND t.name = ?";
     }
 
+    /**
+     * SQL Server 2000 stores extended properties in sysproperties and has no
+     * sys.extended_properties view; the compatibility function answers on every version,
+     * so a jTDS connection can still read back a comment written as MS_Description. (#11606)
+     */
+    static String sqlServer2000TableCommentSql() {
+        return "SELECT CONVERT(nvarchar(4000), value) AS table_comment "
+            + "FROM ::fn_listextendedproperty(N'MS_Description', N'USER', ?, N'TABLE', ?, NULL, NULL)";
+    }
+
     static String appendTableCommentDdl(String ddl, String schema, String table, String comment) {
         if (comment == null || comment.trim().isEmpty()) {
             return ddl;
@@ -634,12 +797,133 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     static String legacyTlsUrl(ConnectParams params) {
         Map<String, String> properties = baseConnectionProperties(params);
-        properties.put("encrypt", "true");
+        // ENCRYPT is stripped from baseConnectionProperties; resolve it explicitly.
+        // Default remains true for TLS 1.0 legacy servers; honor encrypt=false /
+        // sqlserverEncryption=disabled for instances (or proxies) without SSL.
+        String encrypt = requestedEncrypt(params);
+        properties.put("encrypt", encrypt);
         properties.put("trustServerCertificate", "true");
-        properties.put("sslProtocol", "TLSv1");
+        if (!"false".equalsIgnoreCase(encrypt)) {
+            properties.put("sslProtocol", requestedTlsProtocol(params));
+        }
         return appendProperties(baseJdbcUrl(params), properties);
     }
 
+    /**
+     * Reads encrypt / sqlserverEncryption from url_params or connection_string.
+     * Defaults to true so existing TLS 1.0 encrypted endpoints keep working.
+     */
+    private static String requestedEncrypt(ConnectParams params) {
+        String value = firstProperty(params.getUrl_params(), new String[]{"encrypt", "sqlserverEncryption"}, true);
+        if (value == null) {
+            value = firstProperty(params.getConnection_string(), new String[]{"encrypt", "sqlserverEncryption"}, false);
+        }
+        if (value == null) {
+            return "true";
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("{") && normalized.endsWith("}")) {
+            normalized = normalized.substring(1, normalized.length() - 1).replace("}}", "}").toLowerCase(Locale.ROOT);
+        }
+        if (normalized.equals("disabled") || normalized.equals("disable") || normalized.equals("false")
+            || normalized.equals("0") || normalized.equals("off") || normalized.equals("no")) {
+            return "false";
+        }
+        if (normalized.equals("true") || normalized.equals("1") || normalized.equals("yes")
+            || normalized.equals("on") || normalized.equals("required")) {
+            return "true";
+        }
+        // strict (TDS 8.0) is not supported by this legacy driver path; other unrecognized
+        // values are rejected instead of silently downgraded to the encrypted default.
+        throw new IllegalArgumentException(
+            "Unsupported SQL Server encrypt value '" + value.trim() + "'; use true, false or strict");
+    }
+
+    /** Returns the last matching property value for any of the given keys. */
+    private static String firstProperty(String properties, String[] keys, boolean urlParams) {
+        if (properties == null) {
+            return null;
+        }
+        String found = null;
+        for (String property : connectionPropertyParts(properties, urlParams)) {
+            String part = property.trim();
+            while (part.startsWith("?")) {
+                part = part.substring(1).trim();
+            }
+            int separator = part.indexOf('=');
+            if (separator <= 0) {
+                continue;
+            }
+            String key = part.substring(0, separator).trim();
+            for (String candidate : keys) {
+                if (candidate.equalsIgnoreCase(key)) {
+                    found = part.substring(separator + 1).trim();
+                }
+            }
+        }
+        return found;
+    }
+
+    private static String requestedTlsProtocol(ConnectParams params) {
+        // Keep the legacy default for existing SQL Server 2000 connections, but
+        // allow an explicit modern protocol when this driver is used on 2019/2022.
+        String protocol = tlsProtocolProperty(params.getConnection_string(), "TLSv1", false);
+        protocol = tlsProtocolProperty(params.getUrl_params(), protocol, true);
+        switch (protocol.toUpperCase(Locale.ROOT)) {
+            case "TLS": return "TLS";
+            case "TLSV1": return "TLSv1";
+            case "TLSV1.1": return "TLSv1.1";
+            case "TLSV1.2": return "TLSv1.2";
+            case "TLSV1.3": return "TLSv1.3";
+            default: throw new IllegalArgumentException("Unsupported SQL Server sslProtocol; use TLS, TLSv1, TLSv1.1, TLSv1.2 or TLSv1.3");
+        }
+    }
+
+    private static String tlsProtocolProperty(String properties, String fallback, boolean urlParams) {
+        if (properties == null) return fallback;
+        String protocol = fallback;
+        for (String property : connectionPropertyParts(properties, urlParams)) {
+            String part = property.trim();
+            while (part.startsWith("?")) part = part.substring(1).trim();
+            int separator = part.indexOf('=');
+            if (separator > 0 && "sslProtocol".equalsIgnoreCase(part.substring(0, separator).trim())) {
+                String value = part.substring(separator + 1).trim();
+                protocol = value.startsWith("{") && value.endsWith("}")
+                    ? value.substring(1, value.length() - 1).replace("}}", "}") : value;
+            }
+        }
+        return protocol;
+    }
+    private static List<String> connectionPropertyParts(String value, boolean ampersandDelimiter) {
+        List<String> parts = new ArrayList<>();
+        int start = 0;
+        boolean propertyValue = false;
+        boolean valueStarted = false;
+        boolean escaped = false;
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (escaped) {
+                if (ch == '}') {
+                    if (i + 1 < value.length() && value.charAt(i + 1) == '}') i++;
+                    else escaped = false;
+                }
+                continue;
+            }
+            if (ch == ';' || (ampersandDelimiter && ch == '&')) {
+                parts.add(value.substring(start, i));
+                start = i + 1;
+                propertyValue = false;
+                valueStarted = false;
+            } else if (!propertyValue && ch == '=') {
+                propertyValue = true;
+            } else if (propertyValue && !valueStarted && !Character.isWhitespace(ch)) {
+                valueStarted = true;
+                escaped = ch == '{';
+            }
+        }
+        parts.add(value.substring(start));
+        return parts;
+    }
     static String relaxedDisabledAlgorithms(String current) {
         if (current == null || current.trim().isEmpty()) {
             return "";
@@ -659,15 +943,15 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     static String legacyTlsDiagnostics() {
-        return legacyTlsDiagnostics(jdbcDriverVersion());
+        return legacyTlsDiagnostics(jdbcDriverVersion(), "TLSv1");
     }
 
-    private static String legacyTlsDiagnostics(String jdbcVersion) {
+    private static String legacyTlsDiagnostics(String jdbcVersion, String protocol) {
         String disabledAlgorithms = Security.getProperty(TLS_DISABLED_ALGORITHMS_KEY);
         return "DBX SQL Server legacy TLS diagnostics: java=" + System.getProperty("java.version", "unknown")
             + ", javaVendor=" + System.getProperty("java.vendor", "unknown")
             + ", jdbc=" + jdbcVersion
-            + ", sslProtocol=TLSv1"
+            + ", sslProtocol=" + protocol
             + ", tlsV1Disabled=" + isDisabled(disabledAlgorithms, "TLSV1")
             + ", tlsRsaDisabled=" + isDisabled(disabledAlgorithms, "TLS_RSA_*")
             + ", rsaPkcs1Sha1HandshakeDisabled="
@@ -681,9 +965,13 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     static SQLException withLegacyTlsDiagnostics(SQLException error, String jdbcVersion) {
+        return withLegacyTlsDiagnostics(error, jdbcVersion, "TLSv1");
+    }
+
+    static SQLException withLegacyTlsDiagnostics(SQLException error, String jdbcVersion, String protocol) {
         String message = error.getMessage() == null ? error.toString() : error.getMessage();
         return new SQLException(
-            message + "\n\n" + legacyTlsDiagnostics(jdbcVersion),
+            message + "\n\n" + legacyTlsDiagnostics(jdbcVersion, protocol),
             error.getSQLState(),
             error.getErrorCode(),
             error
@@ -774,7 +1062,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     private static String sanitizeSqlServerUrl(String value) {
         String trimmed = trimSqlServerUrl(value);
-        String[] parts = trimmed.split(";");
+        String[] parts = connectionPropertyParts(trimmed, false).toArray(new String[0]);
         if (parts.length <= 1) {
             return trimmed;
         }
@@ -804,7 +1092,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             return properties;
         }
 
-        for (String pair : urlParams.trim().split("[&;]")) {
+        for (String pair : connectionPropertyParts(urlParams.trim(), true)) {
             String value = pair.trim();
             while (value.startsWith("?") || value.startsWith("&") || value.startsWith(";")) {
                 value = value.substring(1).trim();

@@ -2,14 +2,17 @@ import type { DatabaseType } from "@/types/database";
 
 export interface CanGoNextDataGridPageOptions {
   hasMore?: boolean;
+  pageHasMore?: boolean;
+  maxRows?: number;
   rowCount: number;
   pageSize: number;
   pageOffset?: number;
   currentPage?: number;
   totalRowCount?: number;
-  // True when every result row is already in memory (SQL editor result with no
-  // server-side pagination). rowCount IS the authoritative total in that case,
-  // so a full final page must not appear as "more available".
+  // True when the result came back without server-side pagination (SQL editor
+  // statements such as SHOW that cannot be wrapped in LIMIT/OFFSET). The grid
+  // renders every loaded row at once, so the result is a single page: re-running
+  // the statement for another page would return the same rows again.
   allRowsLoaded?: boolean;
 }
 
@@ -21,10 +24,12 @@ export interface CompleteLocalDataGridResultOptions {
   totalRowCount?: number;
   truncated?: boolean;
   hasMore?: boolean;
+  pageHasMore?: boolean;
 }
 
 export interface CanFetchNextDataGridSegmentOptions {
   hasMore?: boolean;
+  pageHasMore?: boolean;
   loadedRowCount: number;
   pageSize: number;
   totalRowCount?: number;
@@ -34,6 +39,15 @@ export interface CanFetchNextDataGridSegmentOptions {
 export interface DataGridLoadAllSegment {
   offset: number;
   limit: number;
+}
+
+export interface DataGridSurfaceBusyOptions {
+  isRefreshingData: boolean;
+  loading: boolean;
+  pageJumpBusy: boolean;
+  rowPreparationBusy?: boolean;
+  manualTotalRowCountLoading?: boolean;
+  manualTotalRowCountCoversSurface?: boolean;
 }
 
 export type DataGridInexactTotalRowCountMode = "at-least" | "estimated";
@@ -67,16 +81,65 @@ export function showDataGridRerunTotalCountAction(options: { canCalculateTotalRo
   return typeof options.displayedTotalRowCount === "number" && Number.isFinite(options.displayedTotalRowCount) && options.displayedTotalRowCount >= 0;
 }
 
+/**
+ * The full-surface overlay (translucent cover + spinner + elapsed timer) is for
+ * real data reloads and page navigation only. A plain "count total rows" click
+ * runs in the background and reports progress in the result footer; covering
+ * the grid made it look like the table itself was being refreshed.
+ */
+export function isDataGridSurfaceBusy(options: DataGridSurfaceBusyOptions): boolean {
+  const manualCountCoversSurface = options.manualTotalRowCountLoading === true && options.manualTotalRowCountCoversSurface === true;
+  return options.isRefreshingData || options.loading || manualCountCoversSurface || options.pageJumpBusy || options.rowPreparationBusy === true;
+}
+
 export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean; maxRows?: number }): number | undefined {
   const total = options.paginationTotalRowCount ?? (options.totalRowCountIsExact ? options.serverKnownTotalRowCount : undefined);
   if (total === undefined || options.maxRows === undefined) return total;
   return Math.min(total, options.maxRows);
 }
 
+/** A rewritten SQL page proves exhaustion only after a short (possibly empty) tail. */
+export function hasShortDataGridSqlPage(options: { rowCount: number; pageOffset?: number; pageLimit?: number; executedPageOffset?: number; executedPageLimit?: number }): boolean {
+  const offset = options.pageOffset ?? 0;
+  const lastOffset = options.executedPageOffset ?? offset;
+  const limit = options.executedPageLimit ?? options.pageLimit;
+  const lastRows = options.rowCount - (lastOffset - offset);
+  return limit !== undefined && limit > 0 && lastRows >= 0 && lastRows < limit;
+}
+
+export interface ReconcileDataGridExactTotalOptions {
+  offset: number;
+  rowCount: number;
+  exactTotal: number;
+}
+
+/**
+ * Total to display after a page landed with rows beyond the exact counted
+ * total, or `undefined` when the counted total still describes the page.
+ *
+ * The COUNT that produced the exact total and the query that served the page
+ * are two separate snapshots: rows can land between them (a table being
+ * written to), and an agent result session serves the snapshot it was opened
+ * with even after newer rows were counted. Rendering that page against the
+ * stale total shows row indexes past the claimed end of the result (#10968) —
+ * adopt the observed extent instead, so the displayed total always covers
+ * every row the grid actually shows.
+ */
+export function reconcileDataGridExactTotalWithObservedPage(options: ReconcileDataGridExactTotalOptions): number | undefined {
+  const { offset, rowCount, exactTotal } = options;
+  if (!Number.isSafeInteger(offset) || offset < 0) return undefined;
+  if (!Number.isSafeInteger(rowCount) || rowCount <= 0) return undefined;
+  if (!Number.isSafeInteger(exactTotal) || exactTotal < 0) return undefined;
+  const observedExtent = offset + rowCount;
+  if (observedExtent <= exactTotal) return undefined;
+  return observedExtent;
+}
+
 export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridResultOptions): boolean {
-  if (!options.isResultsContext || options.truncated === true || options.hasMore === true) return false;
+  if (!options.isResultsContext || options.truncated === true || options.hasMore === true || options.pageHasMore === true) return false;
   if (options.pageLimit === undefined) return true;
   if ((options.pageOffset ?? 0) !== 0) return false;
+  if (options.pageHasMore === false) return true;
 
   const pageLimit = Math.max(1, options.pageLimit);
   if (options.rowCount < pageLimit) return true;
@@ -86,24 +149,27 @@ export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridRes
 }
 
 export function canGoNextDataGridPage(options: CanGoNextDataGridPageOptions): boolean {
-  if (options.hasMore === true) return true;
+  if (options.allRowsLoaded === true) return false;
 
   const pageSize = Math.max(1, options.pageSize);
   const currentOffset = typeof options.pageOffset === "number" && options.pageOffset >= 0 ? options.pageOffset : Math.max(0, (options.currentPage ?? 1) - 1) * pageSize;
+  // Lookahead describes the source; discrete navigation still respects the row cap.
+  if (typeof options.pageHasMore === "boolean") {
+    if (options.maxRows !== undefined && currentOffset + pageSize >= options.maxRows) return false;
+    return options.pageHasMore;
+  }
+  if (options.hasMore === true) return true;
 
   const totalRowCount = options.totalRowCount;
   if (typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0) {
     return currentOffset + pageSize < totalRowCount;
   }
 
-  if (options.allRowsLoaded === true) {
-    return currentOffset + pageSize < options.rowCount;
-  }
-
   return options.rowCount >= pageSize;
 }
 
 export function canFetchNextDataGridSegment(options: CanFetchNextDataGridSegmentOptions): boolean {
+  if (typeof options.pageHasMore === "boolean") return options.pageHasMore;
   if (options.hasMore === true) return true;
 
   const totalRowCount = options.totalRowCount;
@@ -136,6 +202,21 @@ export function dataGridLoadAllSegment(loadedRowCount: number, maxRows: number, 
 }
 
 /**
+ * Target cumulative row count for the initial chunk of an explicit "load all"
+ * run. Each chunk is bounded by `chunkLimit` (the per-request result-row cap,
+ * e.g. 100,000), but an existing dataset that has already reached or exceeded
+ * `chunkLimit` must still be able to start loading subsequent chunks up to
+ * `totalRowCount` (if known) or by another chunk increment (#10752).
+ */
+export function dataGridLoadAllInitialTarget(loadedRowCount: number, chunkLimit: number, totalRowCount?: number): number {
+  const loaded = Number.isFinite(loadedRowCount) ? Math.max(0, Math.trunc(loadedRowCount)) : 0;
+  const chunk = Number.isFinite(chunkLimit) ? Math.max(1, Math.trunc(chunkLimit)) : 1;
+  const chunkCap = loaded < chunk ? chunk : loaded + chunk;
+  const total = typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0 ? Math.trunc(totalRowCount) : undefined;
+  return total !== undefined ? Math.min(chunkCap, total) : chunkCap;
+}
+
+/**
  * Next chunk of an explicit "load all" run, issued after the previous chunk
  * completed. The per-request result-row cap bounds each request, not the run:
  * the button promises every remaining row (the confirm dialog quotes the real
@@ -152,4 +233,40 @@ export function dataGridLoadAllNextSegment(options: { loadedRowCount: number; re
   const totalRowCount = typeof options.totalRowCount === "number" && Number.isFinite(options.totalRowCount) && options.totalRowCount >= 0 ? Math.trunc(options.totalRowCount) : undefined;
   if (totalRowCount !== undefined && loadedRowCount >= totalRowCount) return null;
   return { offset: loadedRowCount, limit: totalRowCount !== undefined ? Math.min(requestedLimit, totalRowCount - loadedRowCount) : requestedLimit };
+}
+
+/**
+ * Whether an explicit "load all" entry point may issue an append request at
+ * all. Everything already known to be complete must short-circuit to the
+ * reveal-only path: re-requesting against an exhausted result made the grid
+ * append whatever the backend answered with, duplicating rows on engines
+ * whose cursor or pagination layer does not honor the requested offset
+ * (#11321: clicking load-all a second time doubled a fully loaded 10-row
+ * result). Two independent completion signals are gated:
+ * - `allRowsLoaded` — the grid's own "no more rows" marker, set when a chunk
+ *   came back short; must gate the run even when the total is unknown;
+ * - `localResultComplete` — a result fetched without a row limit already
+ *   holds every row the backend will return; paging it cannot yield more.
+ * `loadedRowCount >= exactTotal` covers totals learned after either marker.
+ *
+ * The marker is ambiguous, though: the load watcher and the non-loadAll
+ * append-completion path also set it when the result-row CAP is hit — and a
+ * capped result is not exhausted. Load-all is the only way to fetch the rest
+ * (#10752), so `resultRowCap` releases the marker when the run sits at or
+ * past the cap. Worst case for a genuinely exhausted capped result is one
+ * empty append before the loop terminates.
+ */
+export function canStartDataGridLoadAll(options: { hasMore?: boolean; loadedRowCount: number; pageSize: number; totalRowCount?: number; exactTotal?: number; allRowsLoaded: boolean; localResultComplete: boolean; resultRowCap?: number }): boolean {
+  const loadedRowCount = Number.isFinite(options.loadedRowCount) ? Math.max(0, Math.trunc(options.loadedRowCount)) : 0;
+  const resultRowCap = typeof options.resultRowCap === "number" && Number.isFinite(options.resultRowCap) && options.resultRowCap > 0 ? Math.trunc(options.resultRowCap) : undefined;
+  const atResultRowCap = resultRowCap !== undefined && loadedRowCount >= resultRowCap;
+  if ((options.allRowsLoaded && !atResultRowCap) || options.localResultComplete) return false;
+  if (typeof options.exactTotal === "number" && Number.isFinite(options.exactTotal) && options.exactTotal >= 0 && loadedRowCount >= options.exactTotal) return false;
+  return canFetchNextDataGridSegment({
+    hasMore: options.hasMore,
+    loadedRowCount: options.loadedRowCount,
+    pageSize: options.pageSize,
+    totalRowCount: options.totalRowCount,
+    allRowsLoaded: options.localResultComplete,
+  });
 }

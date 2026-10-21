@@ -17,6 +17,7 @@ const DataDictionaryDialog = defineAsyncComponent(() => import("@/components/doc
 const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
 const MongoImportDialog = defineAsyncComponent(() => import("@/components/document/MongoImportDialog.vue"));
 const MongoDatabaseDumpDialog = defineAsyncComponent(() => import("@/components/document/MongoDatabaseDumpDialog.vue"));
+const DamengDumpDialog = defineAsyncComponent(() => import("@/components/document/DamengDumpDialog.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/components/config/ConfigConnectionSelectDialog.vue"));
@@ -307,6 +308,7 @@ watch(
     :database="dialogs.mongoDatabaseDumpPrefillDatabase.value"
     :mode="dialogs.mongoDatabaseDumpMode.value"
   />
+  <DamengDumpDialog v-if="dialogs.showDamengDumpDialog.value" v-model:open="dialogs.showDamengDumpDialog.value" :connection-id="dialogs.damengDumpPrefillConnectionId.value" :database="dialogs.damengDumpPrefillDatabase.value" :mode="dialogs.damengDumpMode.value" />
   <DataGenerateDialog
     v-if="dialogs.showTableDataGenerateDialog.value"
     v-model:open="dialogs.showTableDataGenerateDialog.value"
@@ -320,6 +322,7 @@ watch(
     v-if="dialogs.showFieldLineageDialog.value"
     v-model:open="dialogs.showFieldLineageDialog.value"
     :prefill-connection-id="dialogs.lineagePrefillConnectionId.value"
+    :prefill-database-type="dialogs.lineagePrefillDatabaseType.value"
     :prefill-database="dialogs.lineagePrefillDatabase.value"
     :prefill-schema="dialogs.lineagePrefillSchema.value"
     :prefill-table="dialogs.lineagePrefillTable.value"

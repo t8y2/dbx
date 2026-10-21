@@ -149,6 +149,31 @@ describe("QueryEditor completion-key ownership", () => {
     expect(completion.suppressAutoStartUntil).toBeGreaterThan(Date.now());
   });
 
+  it("accepts the first completion once a pending Enter retry becomes active", async () => {
+    const { keys, view, status, runtime, accept, newline, settings } = createHarness();
+    status.mockReturnValue("pending");
+    settings.editorSettings.selectFirstCompletionOnOpen = true;
+    expect(keys.handleEnter(view)).toBe(true);
+    expect(newline).not.toHaveBeenCalled();
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletionIndex = () => 0;
+    accept.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(5);
+    expect(accept).toHaveBeenCalledOnce();
+    expect(view.state.doc.toString()).toBe("abc");
+  });
+
+  it("inserts one newline when a pending Enter retry expires", async () => {
+    const { keys, view, status, settings, newline, completion } = createHarness();
+    status.mockReturnValue("pending");
+    settings.editorSettings.selectFirstCompletionOnOpen = true;
+    expect(keys.handleEnter(view)).toBe(true);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(newline).toHaveBeenCalledOnce();
+    expect(view.state.doc.toString()).toBe("abc\n");
+    expect(completion.suppressAutoStartUntil).toBeGreaterThan(Date.now());
+  });
+
   it("cancels Enter retries without cancelling another editor's pending Tab", async () => {
     const first = createHarness();
     const second = createHarness();

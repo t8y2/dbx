@@ -1,16 +1,23 @@
 //! Prepare target CREATE TABLE and deferred foreign keys without executing DDL.
 //!
-//! The transfer pass and the ownership preview share this planning helper so both always
-//! agree on the DDL that will run and the names it will use. Nothing here executes DDL:
-//! execution stays with `execute_transfer_create_table_ddl_on_pool` and the caller.
+//! The transfer pass and the structure-only SQL preview share this planning helper, so both
+//! always agree on the DDL that will run and the names it will use. Nothing here executes
+//! DDL: execution stays with `execute_transfer_create_table_ddl_on_pool` and the caller. The
+//! preview is still a plan, not a frozen script — the transfer pass re-reads source and
+//! target metadata (and re-runs its fail-closed checks) when it starts.
 
 use super::*;
+
+fn xugu_table_ddl_is_unavailable(sql: &str) -> bool {
+    sql.trim().is_empty() || sql.contains("XuguDB did not expose enough metadata to reconstruct")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PreparedTableDdl {
     pub ddl: String,
     pub reused_source_ddl: bool,
     pub deferred_fk_alters: Vec<String>,
+    pub deferred_fk_names: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -27,6 +34,9 @@ pub(super) async fn prepare_table_ddl(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
 ) -> Result<PreparedTableDdl, String> {
     let rebuild = request.drop_target_before_create;
+    // Every column reference below (CREATE TABLE, keys) uses the target-side names.
+    let target_columns = request.target_columns(columns);
+    let columns = target_columns.as_slice();
 
     let foreign_keys = if let Some(foreign_keys) = known_foreign_keys.get(table) {
         foreign_keys.clone()
@@ -77,7 +87,7 @@ pub(super) async fn prepare_table_ddl(
         target_db_type,
         source_driver_profile.as_deref(),
         target_driver_profile.as_deref(),
-        target_table == table,
+        target_table == table && request.preserves_column_names(),
     ) && (request.quote_target_column_names
         || !matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss));
 
@@ -116,7 +126,9 @@ pub(super) async fn prepare_table_ddl(
             match db::doris::get_catalog_table_ddl(&pool, catalog, &request.source_database, table).await {
                 Ok(ddl) => (ddl, true),
                 Err(err) => {
-                    log::warn!("[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL");
+                    log::warn!(
+                        "[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL"
+                    );
                     (
                         generate_create_table_ddl_with_column_quoting(
                             columns,
@@ -134,19 +146,30 @@ pub(super) async fn prepare_table_ddl(
                 }
             }
         } else {
-            match crate::schema::get_table_ddl_core(
+            match crate::schema::get_table_transfer_ddl_core(
                 state,
                 &request.source_connection_id,
                 &request.source_database,
                 &request.source_schema,
                 table,
-                None,
             )
             .await
             {
+                Ok(ddl)
+                    if matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+                        && xugu_table_ddl_is_unavailable(&ddl) =>
+                {
+                    return Err(format!(
+                        "Cannot transfer Xugu table '{table}': the source Agent could not return complete table DDL. \
+                         Check metadata privileges and retry; generating a reduced table definition could lose identity, \
+                         constraints, indexes, or partitioning."
+                    ));
+                }
                 Ok(ddl) => (ddl, true),
                 Err(e)
-                    if rebuild || matches!((source_db_type, target_db_type), (DatabaseType::H2, DatabaseType::H2)) =>
+                    if rebuild
+                        || matches!((source_db_type, target_db_type), (DatabaseType::H2, DatabaseType::H2))
+                        || matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu)) =>
                 {
                     // Rebuilds and H2-to-H2 transfers must not silently discard source
                     // constraints or generated columns when native DDL cannot be read.
@@ -192,7 +215,17 @@ pub(super) async fn prepare_table_ddl(
             target_table,
         ) {
             reused_source_ddl = source_ddl_was_read;
-            rewritten
+            // openGauss's `pg_get_tabledef()` DDL carries storage options the PG-compatible
+            // targets reject (`WITH (orientation=row, compression=no)` → #9037). The profiles
+            // are passed in because a plain PostgreSQL connection profiled as openGauss reads
+            // that same DDL.
+            normalize_reused_opengauss_table_ddl(
+                &rewritten,
+                source_db_type,
+                source_driver_profile.as_deref(),
+                target_db_type,
+                target_driver_profile.as_deref(),
+            )
         } else {
             // The reused DDL's CREATE TABLE head could not be renamed safely; fall back
             // to the generated DDL rather than creating the table under the wrong name.
@@ -228,13 +261,18 @@ pub(super) async fn prepare_table_ddl(
     // metadata behind `foreign_keys` is trustworthy before anything is stripped.
     let mut ddl = ddl;
     let mut deferred_fk_alters = Vec::new();
+    let mut deferred_fk_names = Vec::new();
     if supports_deferred_mysql_foreign_keys(target_db_type) && !foreign_keys.is_empty() {
         ddl = strip_inline_foreign_key_constraint_lines(&ddl);
+        deferred_fk_names = group_foreign_keys_by_constraint_name(&foreign_keys)
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
         deferred_fk_alters =
             generate_mysql_foreign_key_alter_statements(&foreign_keys, request, target_table, target_db_type);
     }
 
-    Ok(PreparedTableDdl { ddl, reused_source_ddl, deferred_fk_alters })
+    Ok(PreparedTableDdl { ddl, reused_source_ddl, deferred_fk_alters, deferred_fk_names })
 }
 
 #[cfg(test)]
@@ -428,9 +466,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(prepared.deferred_fk_alters, vec![
-            "ALTER TABLE `resolved_child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
-        ]);
+        assert_eq!(
+            prepared.deferred_fk_alters,
+            vec![
+                "ALTER TABLE `resolved_child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
+            ]
+        );
         assert!(prepared.ddl.contains("`resolved_child`"), "{}", prepared.ddl);
     }
 
@@ -454,5 +495,14 @@ mod tests {
             .await;
             assert!(result.is_err(), "incomplete source metadata must fail before any target DDL: {result:?}");
         }
+    }
+
+    #[test]
+    fn xugu_native_ddl_placeholder_or_empty_text_is_not_treated_as_a_valid_table_definition() {
+        assert!(xugu_table_ddl_is_unavailable("  "));
+        assert!(xugu_table_ddl_is_unavailable(
+            "-- XuguDB did not expose enough metadata to reconstruct APP.T.\n-- grant access"
+        ));
+        assert!(!xugu_table_ddl_is_unavailable("CREATE TABLE \"APP\".\"T\" (\"ID\" INTEGER)"));
     }
 }

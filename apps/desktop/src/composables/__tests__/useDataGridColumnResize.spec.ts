@@ -348,6 +348,33 @@ describe("useDataGridColumnResize", () => {
     expect(remounted.columnWidths.value).toEqual(first.columnWidths.value);
   });
 
+  it("restores adjusted column widths for external SQL file executions across tab reopens", () => {
+    const firstTab = { id: "tab-instance-1", externalSqlPath: "/queries/monthly_report.sql", activeResultIndex: 0 };
+    const secondTab = { id: "tab-instance-2", externalSqlPath: "/queries/monthly_report.sql", activeResultIndex: 0 };
+    const firstKey = resultGridColumnWidthCacheKey(firstTab);
+    const secondKey = resultGridColumnWidthCacheKey(secondTab);
+
+    expect(secondKey).toBe(firstKey);
+
+    const firstGrid = createResizeState({
+      columns: ["id", "report_data"],
+      rows: [[1, "summary"]],
+      cacheKey: firstKey,
+    });
+    firstGrid.initColumnWidths();
+    firstGrid.onResizeStart(1, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 350 }));
+
+    const secondGrid = createResizeState({
+      columns: ["id", "report_data"],
+      rows: [[2, "another summary"]],
+      cacheKey: secondKey,
+    });
+    secondGrid.initColumnWidths();
+
+    expect(secondGrid.columnWidths.value[1]).toBe(firstGrid.columnWidths.value[1]);
+  });
+
   it("isolates widths by result cache key", () => {
     const first = createResizeState({ columns: ["id"], rows: [["x".repeat(120)]], cacheKey: "result-a" });
     first.initColumnWidths();
@@ -386,6 +413,49 @@ describe("useDataGridColumnResize", () => {
     const remounted = createResizeState({ columns: ["description"], rows: [[1]], cacheKey: "result-a", density: "compact", headerTextWidth: 200 });
     remounted.initColumnWidths();
     expect(remounted.columnWidths.value[0]).not.toBe(fittedWidth);
+  });
+
+  it("preserves manually resized column widths while invalidating auto columns when density or font metrics change", async () => {
+    const state = createResizeState({
+      columns: ["id", "description"],
+      rows: [[1, "x".repeat(120)]],
+      cacheKey: "result-manual-preservation",
+    });
+    state.initColumnWidths();
+
+    const initialAutoWidth = state.columnWidths.value[1];
+
+    // User manually resizes column 0
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 260 }));
+    const manualWidth = state.columnWidths.value[0];
+    expect(manualWidth).toBeGreaterThan(160);
+
+    // Change density from standard to compact
+    state.setDensity("compact");
+    await nextTick();
+
+    // Manually resized column 0 preserves its exact width
+    expect(state.columnWidths.value[0]).toBe(manualWidth);
+    // Auto calculated column 1 recalculates with compact density
+    expect(state.columnWidths.value[1]).not.toBe(initialAutoWidth);
+
+    // Remount with compact density and new font metric
+    state.setHeaderTextWidth(220);
+    await nextTick();
+    const remounted = createResizeState({
+      columns: ["id", "description"],
+      rows: [[2, "short"]],
+      cacheKey: "result-manual-preservation",
+      density: "compact",
+      headerTextWidth: 220,
+    });
+    remounted.initColumnWidths();
+
+    // Manually resized column 0 is restored from cache
+    expect(remounted.columnWidths.value[0]).toBe(manualWidth);
+    // Auto column 1 is recalculated from the new rows and font metrics
+    expect(remounted.columnWidths.value[1]).not.toBe(initialAutoWidth);
   });
 
   it("evicts the least recently used width states at the cache limit", () => {

@@ -17,7 +17,9 @@ import {
   tabColorStyle,
   tabConnectionColor,
   tabDatabaseIconType,
+  findTabWithSameTitleSuffix,
   tabDisplayTitle,
+  tabDisplayTitleParts,
   tabDisplayTitles,
   syncTabTitleNumbers,
   tabIconClass,
@@ -52,6 +54,9 @@ beforeEach(() => {
     removeItem: vi.fn((key: string) => values.delete(key)),
   });
   setActivePinia(createPinia());
+  // Compact titles are the shipped default now (#12310); pin the flag so these
+  // assertions keep describing full titles and compact cases opt in themselves.
+  useSettingsStore().editorSettings.compactTabTitle = false;
 });
 
 function queryTab(overrides: Partial<QueryTab>): QueryTab {
@@ -305,6 +310,26 @@ describe("query result grid identity", () => {
     expect(resultGridColumnWidthCacheKey(rerun)).toBe(resultGridColumnWidthCacheKey(first));
     expect(resultGridColumnWidthCacheKey({ ...first, activeResultIndex: 1 })).not.toBe(resultGridColumnWidthCacheKey(first));
   });
+
+  it("identifies external SQL file tabs stably across different tab IDs and normalizes paths", () => {
+    const tab1 = queryTab({ id: "tab-uuid-1", externalSqlPath: "/workspace/query.sql", activeResultIndex: 0 });
+    const tab2 = queryTab({ id: "tab-uuid-2", externalSqlPath: "\\workspace\\query.sql", activeResultIndex: 0 });
+    const tabOtherResult = queryTab({ id: "tab-uuid-3", externalSqlPath: "/workspace/query.sql", activeResultIndex: 1 });
+
+    expect(resultGridColumnWidthCacheKey(tab1)).toBe("result-column-width-file-/workspace/query.sql-0");
+    expect(resultGridColumnWidthCacheKey(tab2)).toBe(resultGridColumnWidthCacheKey(tab1));
+    expect(resultGridColumnWidthCacheKey(tabOtherResult)).toBe("result-column-width-file-/workspace/query.sql-1");
+  });
+
+  it("identifies saved SQL queries stably across different tab IDs", () => {
+    const tab1 = queryTab({ id: "tab-uuid-1", savedSqlId: "saved-sql-42", activeResultIndex: 0 });
+    const tab2 = queryTab({ id: "tab-uuid-2", savedSqlId: "saved-sql-42", activeResultIndex: 0 });
+    const tabOtherResult = queryTab({ id: "tab-uuid-3", savedSqlId: "saved-sql-42", activeResultIndex: 2 });
+
+    expect(resultGridColumnWidthCacheKey(tab1)).toBe("result-column-width-saved-saved-sql-42-0");
+    expect(resultGridColumnWidthCacheKey(tab2)).toBe(resultGridColumnWidthCacheKey(tab1));
+    expect(resultGridColumnWidthCacheKey(tabOtherResult)).toBe("result-column-width-saved-saved-sql-42-2");
+  });
 });
 
 describe("result run labels", () => {
@@ -462,6 +487,150 @@ describe("tab group presentation", () => {
     expect(titles.get("tab-1")).toBe("orders.sql 1");
     expect(titles.get("tab-2")).toBe("orders.sql 2");
     expect(titles.get("tab-preview")).toBe("SQL");
+  });
+
+  it("does not collide query tabs with object browser or table data tabs sharing the same title", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    useSettingsStore().editorSettings.compactTabTitle = true;
+
+    // In compact mode, object tab displays "test" (schema), data tab displays "test" (tableName), query tab displays "test" (custom title)
+    const objectTab = queryTab({ id: "tab-obj", mode: "objects", title: "test", database: "test", objectBrowser: { schema: "test" } });
+    const dataTab = queryTab({ id: "tab-data", mode: "data", title: "test", tableMeta: { schema: "public", tableName: "test", columns: [], primaryKeys: [] } });
+    const queryTab1 = queryTab({ id: "tab-query-1", mode: "query", title: "test", customTitle: true });
+    const queryTab2 = queryTab({ id: "tab-query-2", mode: "query", title: "test", customTitle: true });
+
+    const titles = titlesWithNumbers([objectTab, dataTab, queryTab1, queryTab2]);
+    // Object and table tabs are not in query mode, so they must not be numbered or affected by query tabs
+    expect(titles.get("tab-obj")).toBe("test");
+    expect(titles.get("tab-data")).toBe("test");
+    // Multiple query tabs with the same title still collide with each other and receive numeric suffixes
+    expect(titles.get("tab-query-1")).toBe("test 1");
+    expect(titles.get("tab-query-2")).toBe("test 2");
+  });
+
+  describe("custom title suffix", () => {
+    const dataTab = (id: string, overrides: Partial<QueryTab> = {}) => queryTab({ id, mode: "data", title: "ticket_bug", tableMeta: { schema: "feedback_v2", tableName: "ticket_bug", columns: [], primaryKeys: [] }, ...overrides });
+
+    function seedConnection() {
+      useConnectionStore().connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    }
+
+    it("shows the custom suffix instead of the automatic number", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 pending");
+      // The custom tab leaves the numbered pool, so the other tab is alone in it
+      // and keeps its plain title rather than becoming "… 1".
+      expect(titles.get("tab-2")).toBe("ticket_bug@db.feedback_v2");
+    });
+
+    it("keeps numbering the remaining tabs when only some have a custom suffix", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2"), dataTab("tab-3")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 pending");
+      expect(titles.get("tab-2")).toBe("ticket_bug@db.feedback_v2 1");
+      expect(titles.get("tab-3")).toBe("ticket_bug@db.feedback_v2 2");
+    });
+
+    it("splits the label into base and suffix so the suffix can be rendered untruncated", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2"), dataTab("tab-3")];
+      syncTabTitleNumbers(tabs, translate);
+
+      const parts = tabDisplayTitleParts(tabs, translate);
+      expect(parts.get("tab-1")).toEqual({ base: "ticket_bug@db.feedback_v2", suffix: "pending" });
+      expect(parts.get("tab-2")).toEqual({ base: "ticket_bug@db.feedback_v2", suffix: "1" });
+    });
+
+    it("falls back to a number when the custom suffix is cleared", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2")];
+      titlesWithNumbers(tabs);
+
+      delete tabs[0]!.titleSuffix;
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 1");
+      expect(titles.get("tab-2")).toBe("ticket_bug@db.feedback_v2 2");
+    });
+
+    it("treats a blank custom suffix as no suffix", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "   " }), dataTab("tab-2")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 1");
+    });
+
+    it("does not mint an automatic number that another tab already claimed as a custom suffix", () => {
+      seedConnection();
+      const tabs = [dataTab("tab-1", { titleSuffix: "1" }), dataTab("tab-2"), dataTab("tab-3")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("ticket_bug@db.feedback_v2 1");
+      expect(titles.get("tab-2")).toBe("ticket_bug@db.feedback_v2 2");
+      expect(titles.get("tab-3")).toBe("ticket_bug@db.feedback_v2 3");
+    });
+
+    it("applies the custom suffix in compact mode too", () => {
+      seedConnection();
+      useSettingsStore().editorSettings.compactTabTitle = true;
+      const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2")];
+
+      expect(titlesWithNumbers(tabs).get("tab-1")).toBe("ticket_bug pending");
+    });
+
+    it("lists the full custom suffix in the tab tooltip, because the strip may ellipsize it", () => {
+      seedConnection();
+      const withSuffix = tabTooltipLines(dataTab("tab-1", { titleSuffix: "客服待处理单" }), translate);
+      expect(withSuffix[0]).toEqual({ label: "tabs.tooltipSuffix", value: "客服待处理单" });
+
+      const without = tabTooltipLines(dataTab("tab-2"), translate);
+      expect(without.some((line) => line.label === "tabs.tooltipSuffix")).toBe(false);
+    });
+
+    describe("findTabWithSameTitleSuffix", () => {
+      it("finds another tab that already shows the same custom suffix", () => {
+        seedConnection();
+        const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2")];
+        syncTabTitleNumbers(tabs, translate);
+
+        expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, "pending", translate)?.id).toBe("tab-1");
+        expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, " pending ", translate)?.id).toBe("tab-1");
+      });
+
+      it("also finds a tab whose automatic number equals the requested suffix", () => {
+        seedConnection();
+        const tabs = [dataTab("tab-1"), dataTab("tab-2"), dataTab("tab-3")];
+        syncTabTitleNumbers(tabs, translate);
+
+        expect(findTabWithSameTitleSuffix(tabs, tabs[2]!, "1", translate)?.id).toBe("tab-1");
+      });
+
+      it("ignores the tab being edited, different tables, empty suffixes and unused suffixes", () => {
+        seedConnection();
+        const tabs = [dataTab("tab-1", { titleSuffix: "pending" }), dataTab("tab-2"), dataTab("tab-3", { tableMeta: { schema: "feedback_v2", tableName: "other", columns: [], primaryKeys: [] } })];
+        syncTabTitleNumbers(tabs, translate);
+
+        expect(findTabWithSameTitleSuffix(tabs, tabs[0]!, "pending", translate)).toBeUndefined();
+        expect(findTabWithSameTitleSuffix(tabs, tabs[2]!, "pending", translate)).toBeUndefined();
+        expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, "", translate)).toBeUndefined();
+        expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, "done", translate)).toBeUndefined();
+      });
+
+      it("ignores tabs of a different mode sharing the same base title and suffix", () => {
+        seedConnection();
+        const data = dataTab("tab-data", { titleSuffix: "pending" });
+        const query = queryTab({ id: "tab-query", mode: "query", customTitle: true, title: tabDisplayTitle(data, translate) });
+        syncTabTitleNumbers([data, query], translate);
+
+        expect(findTabWithSameTitleSuffix([data, query], query, "pending", translate)).toBeUndefined();
+      });
+    });
   });
 
   it("does not expose the internal objects mode in object browser tab titles", () => {
@@ -808,6 +977,7 @@ describe("statement execution markers", () => {
 
 describe("shared tab presentation helpers", () => {
   it("classifies tab icon colors without MQ special-casing", () => {
+    expect(tabIconClass(queryTab({}))).toBe("text-blue-400");
     expect(tabIconClass(queryTab({ mode: "data" }))).toContain("text-green-500");
     const connectionStore = useConnectionStore();
     connectionStore.connections = [{ id: "dynamodb-1", name: "DynamoDB", db_type: "dynamodb", driver_profile: "dynamodb", color: "" } as ConnectionConfig];
@@ -861,6 +1031,30 @@ describe("shared tab presentation helpers", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("restricts connection tab coloring to active tab when scope is active (#12955)", () => {
+    const settings = useSettingsStore().editorSettings;
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "conn-1", name: "One", db_type: "mysql", color: "#3b82f6" }] as ConnectionConfig[];
+    const tab = queryTab({ connectionId: "conn-1" });
+
+    settings.colorizeConnectionTabs = true;
+    settings.colorizeConnectionTabsScope = "all";
+    const activeAll = tabColorStyle(tab, true, false);
+    const inactiveAll = tabColorStyle(tab, false, false);
+    expect(activeAll?.["--app-tab-background"]).toBe("rgba(59, 130, 246, 0.24)");
+    expect(activeAll?.borderColor).toBe("rgba(59, 130, 246, 0.72)");
+    expect(inactiveAll?.["--app-tab-background"]).toBe("rgba(59, 130, 246, 0.09)");
+    expect(inactiveAll?.borderColor).toBe("rgba(59, 130, 246, 0.18)");
+
+    settings.colorizeConnectionTabsScope = "active";
+    const activeScope = tabColorStyle(tab, true, false);
+    const inactiveScope = tabColorStyle(tab, false, false);
+    expect(activeScope?.["--app-tab-background"]).toBe("rgba(59, 130, 246, 0.24)");
+    expect(activeScope?.borderColor).toBe("rgba(59, 130, 246, 0.72)");
+    expect(inactiveScope?.borderColor).toBeUndefined();
+    expect(inactiveScope?.["--app-tab-background"]).toBeUndefined();
   });
 
   it("swaps inline color-mix tab colors for concrete rgba on legacy WebViews", () => {

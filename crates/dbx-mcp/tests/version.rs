@@ -107,3 +107,40 @@ fn background_keychain_denial_is_noninteractive_and_never_provisions_a_key() {
     assert!(error.contains("--authorize-keychain"), "{error}");
     assert!(!directory.path().join(".dbx/secret.key").exists());
 }
+
+#[test]
+fn keychain_verification_child_rejects_extra_arguments_without_opening_storage() {
+    let directory = tempfile::tempdir().unwrap();
+    let data_dir = directory.path().join("must-not-exist");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dbx-mcp"))
+        .args(["--verify-keychain-access", "--transport", "stdio"])
+        .env("DBX_DATA_DIR", &data_dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: dbx-mcp --verify-keychain-access"));
+    assert!(!data_dir.exists());
+}
+
+#[cfg(all(target_os = "macos", feature = "os-keyring"))]
+#[test]
+fn keychain_verification_child_reads_noninteractively_and_never_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dbx-mcp"));
+    let log = intercept_keychain(&mut command, directory.path());
+    let output = command
+        .arg("--verify-keychain-access")
+        .env("DBX_DATA_DIR", directory.path().join("data"))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let reads = std::fs::read_to_string(&log).expect("the child must probe the intercepted credential provider");
+    assert!(reads.contains("lookup interaction=0"), "{reads}");
+    assert!(!reads.contains("interaction=1"), "{reads}");
+    assert!(!reads.contains("write"), "{reads}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("KEYRING_ACCESS_FAILED"));
+    assert!(!directory.path().join("data").exists());
+}

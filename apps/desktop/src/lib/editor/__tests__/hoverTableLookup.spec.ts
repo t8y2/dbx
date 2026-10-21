@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchHoverTableCandidates, normalizeTableHoverLookupMode, pickHoverTableMatch, resolveHoverTableLookupTarget } from "@/lib/editor/hoverTableLookup";
+import { matchHoverTableCandidates, normalizeTableHoverLookupMode, pickHoverObjectMatch, pickHoverTableMatch, resolveHoverTableLookupTarget } from "@/lib/editor/hoverTableLookup";
 
 describe("normalizeTableHoverLookupMode", () => {
   it("defaults to fallback", () => {
@@ -153,6 +153,31 @@ describe("pickHoverTableMatch", () => {
 
   it("returns null when the table name is missing", () => {
     expect(pickHoverTableMatch("missing", tables, "public")).toBeNull();
+  });
+});
+
+describe("pickHoverObjectMatch", () => {
+  const objects = [
+    { name: "cleanup", schema: "reporting", type: "procedure" },
+    { name: "cleanup", schema: "public", type: "procedure" },
+    { name: "cleanup", schema: "public", parentName: "PKG", type: "procedure" },
+  ];
+
+  it("prefers the selected schema and standalone routines over package members", () => {
+    expect(pickHoverObjectMatch("cleanup", objects, "public")).toEqual({ name: "cleanup", schema: "public", type: "procedure" });
+  });
+
+  it("falls back to package members when no standalone routine matches", () => {
+    expect(pickHoverObjectMatch("cleanup", [{ name: "cleanup", schema: "app", parentName: "PKG", type: "procedure" }], "app")).toEqual({
+      name: "cleanup",
+      schema: "app",
+      parentName: "PKG",
+      type: "procedure",
+    });
+  });
+
+  it("returns null when the object name is missing", () => {
+    expect(pickHoverObjectMatch("missing", objects, "public")).toBeNull();
   });
 });
 

@@ -18,6 +18,58 @@ describe("useDataGridAutoRefresh", () => {
     autoRefresh.stop();
   });
 
+  it.each([5, 10, 30, 60, 300])("starts refreshing when the %i second interval is selected", (seconds) => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const autoRefresh = useDataGridAutoRefresh({ canRefresh: computed(() => true), refresh });
+
+    autoRefresh.setIntervalSeconds(seconds);
+
+    expect(autoRefresh.enabled.value).toBe(true);
+    vi.advanceTimersByTime(seconds * 1000 - 1);
+    expect(refresh).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(refresh).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(seconds * 1000);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    autoRefresh.stop();
+  });
+
+  it("restarts refreshing when the same interval is selected after disabling", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const autoRefresh = useDataGridAutoRefresh({ canRefresh: computed(() => true), refresh, initialIntervalSeconds: 5 });
+
+    autoRefresh.toggle();
+    autoRefresh.toggle();
+    vi.advanceTimersByTime(5000);
+    expect(refresh).not.toHaveBeenCalled();
+
+    autoRefresh.setIntervalSeconds(5);
+    vi.advanceTimersByTime(5000);
+
+    expect(autoRefresh.enabled.value).toBe(true);
+    expect(refresh).toHaveBeenCalledOnce();
+    autoRefresh.stop();
+  });
+
+  it("replaces the running countdown when a different interval is selected", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const autoRefresh = useDataGridAutoRefresh({ canRefresh: computed(() => true), refresh, initialIntervalSeconds: 5 });
+
+    autoRefresh.toggle();
+    vi.advanceTimersByTime(4000);
+    autoRefresh.setIntervalSeconds(10);
+    vi.advanceTimersByTime(9999);
+    expect(refresh).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(refresh).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(10000);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    autoRefresh.stop();
+  });
+
   it("does not refresh while the operation is unavailable", () => {
     vi.useFakeTimers();
     const refresh = vi.fn();

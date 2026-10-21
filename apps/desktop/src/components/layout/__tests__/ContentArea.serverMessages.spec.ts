@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QueryResult, QueryTab } from "@/types/database";
 
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
-vi.mock("@/components/grid/DataGrid.vue", () => ({ default: { render: () => h("div", { "data-test": "data-grid" }) } }));
+vi.mock("@/components/transfer/QueryResultTransferDialog.vue", () => ({ __esModule: true, default: { render: () => null } }));
+vi.mock("@/components/grid/DataGrid.vue", () => ({ __esModule: true, default: { render: () => h("div", { "data-test": "data-grid" }) } }));
 
 import ContentArea from "../ContentArea.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -24,7 +25,7 @@ async function mountResults(results: QueryResult[], activeIndex: number) {
   setActivePinia(pinia);
   const connection = { id: "sqlserver", name: "SQL Server", db_type: "sqlserver" as const, host: "localhost", port: 1433, username: "", password: "" };
   useConnectionStore().connections = [connection];
-  const tab: QueryTab = { id: "query", title: "Query", connectionId: connection.id, database: "app", mode: "query", sql: "EXEC demo", isExecuting: false, results, result: results[activeIndex], activeResultIndex: activeIndex };
+  const tab = reactive<QueryTab>({ id: "query", title: "Query", connectionId: connection.id, database: "app", mode: "query", sql: "EXEC demo", isExecuting: false, results, result: results[activeIndex], activeResultIndex: activeIndex });
   useQueryStore().tabs.push(tab);
   const state = reactive({ view: "result" as "result" | "messages" });
   const host = document.createElement("div");
@@ -55,7 +56,7 @@ async function mountResults(results: QueryResult[], activeIndex: number) {
   cleanups.push(() => app.unmount());
   await nextTick();
   await nextTick();
-  return { host, state };
+  return { host, state, tab };
 }
 
 describe("SQL Server messages in the result surface", () => {
@@ -77,5 +78,51 @@ describe("SQL Server messages in the result surface", () => {
     expect(state.view).toBe("messages");
     expect(host.textContent).toContain("before notice");
     expect(host.querySelector('[data-test="data-grid"]')).toBeNull();
+  });
+});
+
+describe("live server output", () => {
+  it("opens Messages while running and retains output after cancellation", async () => {
+    const { host, state, tab } = await mountResults([], 0);
+    tab.isExecuting = true;
+    await nextTick();
+    tab.liveQueryMessages = [{ severity: "NOTICE", message: "running output" }];
+    await nextTick();
+    expect(state.view).toBe("messages");
+    expect(host.textContent).toContain("running output");
+    tab.isExecuting = false;
+    await nextTick();
+    expect(host.textContent).toContain("running output");
+    expect(host.querySelector('[data-test="data-grid"]')).toBeNull();
+  });
+
+  it("marks autoSwitchedToMessagesDuringExecution in tab uiState when live messages arrive (#11822)", async () => {
+    const { state, tab } = await mountResults([], 0);
+    tab.isExecuting = true;
+    await nextTick();
+    tab.liveQueryMessages = [{ severity: "INFO", message: "function info message" }];
+    await nextTick();
+    expect(state.view).toBe("messages");
+    expect(useQueryStore().tabs.find((t) => t.id === tab.id)?.uiState?.autoSwitchedToMessagesDuringExecution).toBe(true);
+  });
+
+  it("clears autoSwitchedToMessagesDuringExecution when user explicitly selects an output view (#11822)", async () => {
+    const { host, state, tab } = await mountResults([], 0);
+    tab.isExecuting = true;
+    await nextTick();
+    tab.liveQueryMessages = [{ severity: "INFO", message: "function info message" }];
+    await nextTick();
+    expect(state.view).toBe("messages");
+    expect(useQueryStore().tabs.find((t) => t.id === tab.id)?.uiState?.autoSwitchedToMessagesDuringExecution).toBe(true);
+
+    tab.result = { columns: ["val"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    tab.results = [tab.result];
+    await nextTick();
+
+    const buttons = host.querySelectorAll<HTMLButtonElement>("[data-query-result-view-switcher] button");
+    buttons[0]?.click();
+    await nextTick();
+    expect(state.view).toBe("result");
+    expect(useQueryStore().tabs.find((t) => t.id === tab.id)?.uiState?.autoSwitchedToMessagesDuringExecution).toBe(false);
   });
 });

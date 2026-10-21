@@ -18,7 +18,10 @@ import {
   type PluginWorkbenchContext,
   type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
-import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
+import { getCachedPluginUiHtml, getOrLoadPluginUiHtml, pluginUiAssetBaseUrl } from "@/lib/plugins/pluginUiHtmlCache";
+import { isPluginGraphicsEngineEnabled } from "@/lib/plugins/pluginGraphicsEngine";
+import { beginFloatingWindowDrag, closeFloatingWindows, endFloatingWindowDrag, openFloatingWindow, setFloatingWindowSize } from "@/lib/plugins/pluginFloatingWindow";
+import { isFloatingPluginWindow } from "@/lib/app/windowContext";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
@@ -37,6 +40,8 @@ const props = withDefaults(
     plugin: InstalledPlugin;
     contribution: PluginUiContribution;
     context?: PluginWorkbenchContext;
+    setTitle?: (title: string | null) => Promise<void> | void;
+    getTitle?: () => Promise<string> | string;
   }>(),
   { context: () => ({}) },
 );
@@ -54,6 +59,9 @@ const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
 const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
+// Per-plugin grant for `script-src 'unsafe-eval'`; flipping it rebuilds the
+// sandbox document (and must not reuse a doc cached under the other setting).
+const graphicsEngineEnabled = computed(() => isPluginGraphicsEngineEnabled(settingsStore.editorSettings.pluginGraphicsEngineIds, props.plugin.manifest.id));
 
 // --- Plugin AI generation consent (E2) --------------------------------------
 // Every host.ai.generateText send is consented through this in-app dialog: it
@@ -469,6 +477,19 @@ function onHostFileDrop(event: Event): void {
 
 const title = computed(() => `${props.plugin.manifest.name} · ${props.contribution.label}`);
 
+/**
+ * The §8.3 surface this host renders on. The tab surface keeps a minimum height
+ * (a workbench needs room to be usable); the dock and floating-window surfaces
+ * are sized by their own container, where a floor would make the frame taller
+ * than the visible area and swallow clicks near its bottom edge. The floating
+ * surface is transparent: the widget paints its own shape.
+ */
+const surface = computed(() => (typeof props.context?.surface === "string" ? props.context.surface : "tab"));
+const hostSurfaceClass = computed(() => (surface.value === "tab" ? "min-h-40 bg-background" : surface.value === "window" ? "min-h-0 bg-transparent" : "min-h-0 bg-background"));
+/** The loading overlays must not paint an opaque box inside a transparent floating window. */
+const overlayClass = computed(() => (surface.value === "window" ? "bg-transparent" : "bg-background"));
+const isFloatingSurface = isFloatingPluginWindow();
+
 /** Collect resolved DBX design tokens so the sandbox can theme itself with the same values. */
 function currentBridgeTheme(): PluginBridgeTheme {
   const tokens: Record<string, string> = {};
@@ -505,27 +526,112 @@ function createBridge() {
       ...(isTauriRuntime() ? aiCompletion : {}),
       setAiRecommendations: (update) => emit("recommendations", update),
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
+      // Only expose the title APIs on surfaces that implement them (workbench
+      // tab and dock hosts pass the props); the bridge derives the
+      // `workbenchTitle` capability from their presence, so floating windows
+      // and sidebar hosts must not advertise a silent no-op.
+      ...(() => {
+        const setTitleProp = props.setTitle;
+        const getTitleProp = props.getTitle;
+        return {
+          ...(setTitleProp
+            ? {
+                setTitle: async (newTitle: string | null) => {
+                  await setTitleProp(newTitle);
+                },
+              }
+            : {}),
+          ...(getTitleProp
+            ? {
+                getTitle: async () => await getTitleProp(),
+              }
+            : {}),
+        };
+      })(),
       // §4/§5 bridge command execution, scoped to this plugin's own manifest:
       // the single-plugin registry is equivalent here because findCommand /
       // findWorkbench / enablement never cross plugins. Panel commands dock,
       // tab commands open tabs, §4.1 reuse with `instance_key` placeholder
-      // scoping — identical to menu execution.
-      executeCommand: (pluginId, commandId, context) => executePluginCommand(createFrontendPluginRegistry([props.plugin], appLocale.value), useQueryStore(), pluginId, commandId, context),
+      // scoping — identical to menu execution. Not offered on the floating
+      // surface: every command action opens a shell surface (a dock entry or a
+      // workbench tab) that a floating widget window does not have, so it would
+      // resolve successfully and show nothing. There, plugins navigate with
+      // openWorkbench / floating.open, which the host routes to the main window.
+      ...(isFloatingSurface ? {} : { executeCommand: (pluginId: string, commandId: string, context?: Record<string, unknown>) => executePluginCommand(createFrontendPluginRegistry([props.plugin], appLocale.value), useQueryStore(), pluginId, commandId, context) }),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
       // PR-A4 generic extension point: a read-only, secret-free, plugin-scoped connection list (for in-panel connection switching).
-      listConnections: (ownerPluginId) => {
+      // Extended for #12603 with `host.connections:read` / options.all to return all connections.
+      listConnections: (ownerPluginId, options?: { all?: boolean }) => {
+        const connectionStore = useConnectionStore();
+        const queryStore = useQueryStore();
+        const connectedIds = connectionStore.connectedIds;
+        if (options?.all) {
+          return connectionStore.connections.map((connection) => {
+            const connected = connectedIds.has(connection.id);
+            return {
+              id: connection.id,
+              name: connection.name,
+              dbType: connection.db_type,
+              dialect: connection.db_type,
+              databaseType: connection.db_type,
+              connected,
+              isConnected: connected,
+              readOnly: connection.read_only === true,
+              database: connection.database,
+              schema: connection.default_schema,
+              providerId: connection.plugin_connection_provider ?? "",
+              connectionType: connection.plugin_connection_type,
+              workbenchTitles: queryStore.pluginWorkbenchTitles(connection.id),
+            };
+          });
+        }
         const providerIds = new Set((props.plugin.manifest.contributions || []).filter((candidate) => candidate.type === "connection-provider").map((candidate) => candidate.id));
         if (ownerPluginId !== props.plugin.manifest.id) return [];
-        return useConnectionStore()
-          .connections.filter((connection) => providerIds.has(connection.plugin_connection_provider ?? ""))
-          .map((connection) => ({
+        return connectionStore.connections
+          .filter((connection) => providerIds.has(connection.plugin_connection_provider ?? ""))
+          .map((connection) => {
+            const connected = connectedIds.has(connection.id);
+            return {
+              id: connection.id,
+              name: connection.name,
+              dbType: connection.db_type,
+              dialect: connection.db_type,
+              databaseType: connection.db_type,
+              connected,
+              isConnected: connected,
+              providerId: connection.plugin_connection_provider ?? "",
+              connectionType: connection.plugin_connection_type,
+              readOnly: connection.read_only === true,
+              database: connection.database,
+              schema: connection.default_schema,
+              // #193b — dock/tab titles bound to the connection (dock first), so plugins can label session rows after renamed terminals.
+              workbenchTitles: queryStore.pluginWorkbenchTitles(connection.id),
+            };
+          });
+      },
+      listAllConnections: () => {
+        const connectionStore = useConnectionStore();
+        const queryStore = useQueryStore();
+        const connectedIds = connectionStore.connectedIds;
+        return connectionStore.connections.map((connection) => {
+          const connected = connectedIds.has(connection.id);
+          return {
             id: connection.id,
             name: connection.name,
+            dbType: connection.db_type,
+            dialect: connection.db_type,
+            databaseType: connection.db_type,
+            connected,
+            isConnected: connected,
+            readOnly: connection.read_only === true,
+            database: connection.database,
+            schema: connection.default_schema,
             providerId: connection.plugin_connection_provider ?? "",
             connectionType: connection.plugin_connection_type,
-            readOnly: connection.read_only === true,
-          }));
+            workbenchTitles: queryStore.pluginWorkbenchTitles(connection.id),
+          };
+        });
       },
       // Both plan calls carry the plugin's declared `host.plans:read` gate in the
       // bridge; the backend owns EXPLAIN generation, the timeout, and the plan cap.
@@ -541,6 +647,16 @@ function createBridge() {
         await api.setPluginDataGrant(pluginId, connectionId, true);
       },
       closeTab: () => emit("closeTab"),
+      // Floating widget windows (§8.3 surface "window"). Desktop-only: the web
+      // host omits them so capabilities.floating stays false and the plugin can
+      // fall back to an in-shell surface. Opening and closing work from any
+      // window; the geometry calls act on the window that hosts the caller and
+      // reject elsewhere, so a tab can never move a window it is not inside.
+      openFloatingWindow: isTauriRuntime() ? (request) => openFloatingWindow(request) : undefined,
+      closeFloatingWindows: isTauriRuntime() ? (labels) => closeFloatingWindows(labels) : undefined,
+      beginFloatingDrag: isTauriRuntime() ? () => beginFloatingWindowDrag() : undefined,
+      endFloatingDrag: isTauriRuntime() ? (snap) => endFloatingWindowDrag(snap) : undefined,
+      setFloatingSize: isTauriRuntime() ? (width, height) => setFloatingWindowSize(width, height) : undefined,
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
@@ -640,18 +756,6 @@ async function savePluginFile(request: PluginSaveFileRequest, data: Uint8Array):
   return { path: fileName };
 }
 
-/**
- * Base URL prefix for lazy-loaded plugin UI assets. wry serves custom schemes
- * natively on WKWebView/webkit2gtk but maps them onto http(s) subdomains on
- * WebView2, so the host page's own protocol picks the form the webview will
- * actually request. The web host has no plugin asset protocol.
- */
-function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | undefined {
-  if (!isTauriRuntime()) return undefined;
-  const origin = location.protocol === "http:" || location.protocol === "https:" ? `${location.protocol}//dbx-plugin.localhost/${pluginId}/` : `dbx-plugin://localhost/${pluginId}/`;
-  return entryDirectory ? `${origin}${entryDirectory}/` : origin;
-}
-
 async function loadWorkbench() {
   const generation = ++loadGeneration;
   // An identity rebuild swaps the plugin this component serves; retire the
@@ -682,12 +786,17 @@ async function loadWorkbench() {
     const { html, entryDirectory } = cachedHtml;
     // The final sandbox document is cached alongside the html: generating it
     // re-runs megabyte-scale string surgery on every boot.
-    if (!cachedHtml.sandboxDoc) {
-      cachedHtml.sandboxDoc = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
-        baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
-      });
+    const allowUnsafeEval = graphicsEngineEnabled.value;
+    if (!cachedHtml.sandboxDoc || cachedHtml.sandboxDoc.allowUnsafeEval !== allowUnsafeEval) {
+      cachedHtml.sandboxDoc = {
+        allowUnsafeEval,
+        doc: pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
+          baseUrl: pluginUiAssetBaseUrl(props.plugin.manifest.id, entryDirectory),
+          allowUnsafeEval,
+        }),
+      };
     }
-    source.value = cachedHtml.sandboxDoc;
+    source.value = cachedHtml.sandboxDoc.doc;
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
     createBridge();
@@ -744,7 +853,7 @@ onMounted(async () => {
 // Identity changes require rebuilding the sandbox document; context and locale
 // changes are pushed through the bridge so plugin UI state survives them.
 watch(
-  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id] as const,
+  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id, graphicsEngineEnabled.value] as const,
   () => void loadWorkbench(),
 );
 watch(
@@ -794,8 +903,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="relative flex size-full min-h-40 overflow-hidden bg-background">
-    <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center bg-background text-sm text-muted-foreground">
+  <div class="relative flex size-full overflow-hidden" :class="hostSurfaceClass">
+    <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center text-sm text-muted-foreground" :class="overlayClass">
       <Loader2 class="mr-2 size-4 animate-spin" />
       {{ t("pluginPlatform.loadingTitle", { title }) }}
     </div>
@@ -804,13 +913,17 @@ onBeforeUnmount(() => {
       <span>{{ error }}</span>
     </div>
     <template v-else>
-      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
+      <!-- `allow` delegates fullscreen into the sandboxed frame: without the
+           Permissions-Policy entry, requestFullscreen() rejects there no matter
+           which sandbox tokens are set (the legacy `allow-fullscreen` sandbox
+           flag was removed from the platform and logs an error when present). -->
+      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write; fullscreen" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
       <!-- Cover until the frame has actually painted: the iframe stays mounted
            underneath so its load event can fire (v-else on the overlay would
            deadlock), it just isn't visible yet. Fully opaque so the covered
            phase is visually identical to the host background, and faded out
            instead of removed so the reveal is never a hard swap. -->
-      <div class="absolute inset-0 z-10 flex items-center justify-center bg-background text-sm text-muted-foreground transition-opacity duration-150 ease-out" :class="frameReady ? 'pointer-events-none opacity-0' : 'opacity-100'">
+      <div class="absolute inset-0 z-10 flex items-center justify-center text-sm text-muted-foreground transition-opacity duration-150 ease-out" :class="[overlayClass, frameReady ? 'pointer-events-none opacity-0' : 'opacity-100']">
         <Loader2 class="mr-2 size-4 animate-spin" />
         {{ t("pluginPlatform.loadingTitle", { title }) }}
       </div>

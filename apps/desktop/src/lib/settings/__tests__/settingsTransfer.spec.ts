@@ -14,6 +14,17 @@ function fileWith(editor: Record<string, unknown>, overrides: Record<string, unk
 }
 
 describe("settingsTransfer", () => {
+  it("round-trips column comment placement as a data preference and rejects non-booleans", () => {
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, dataGridColumnCommentsInInfoArea: true, dataGridTransposeMetadataInInfoColumn: true });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.dataGridColumnCommentsInInfoArea).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.dataGridTransposeMetadataInInfoColumn).toBe(true);
+    expect(transferCategoryForKey("dataGridTransposeMetadataInInfoColumn")).toBe("data");
+    expect(transferCategoryForKey("dataGridColumnCommentsInInfoArea")).toBe("data");
+    expect(parseSettingsTransferFile(fileWith({ dataGridColumnCommentsInInfoArea: "true" })).ok).toBe(false);
+    expect(parseSettingsTransferFile(fileWith({ dataGridTransposeMetadataInInfoColumn: "true" })).ok).toBe(false);
+  });
   it("round-trips an opt-out of comment-first result names and rejects non-booleans", () => {
     const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, resultTabPreferComments: false });
     const result = parseSettingsTransferFile(text);
@@ -21,6 +32,15 @@ describe("settingsTransfer", () => {
     if (result.ok) expect(result.value.editorSettings.resultTabPreferComments).toBe(false);
     expect(transferCategoryForKey("resultTabPreferComments")).toBe("data");
     expect(parseSettingsTransferFile(fileWith({ resultTabPreferComments: "false" })).ok).toBe(false);
+  });
+
+  it("round-trips functionCompletionIncludeParams as an editor setting and rejects non-booleans", () => {
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, functionCompletionIncludeParams: false });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.functionCompletionIncludeParams).toBe(false);
+    expect(transferCategoryForKey("functionCompletionIncludeParams")).toBe("editor");
+    expect(parseSettingsTransferFile(fileWith({ functionCompletionIncludeParams: "false" })).ok).toBe(false);
   });
 
   it("round-trips the welcome page mode and rejects invalid values", () => {
@@ -48,6 +68,34 @@ describe("settingsTransfer", () => {
     expect(result.value.editorSettings.snippets).toEqual(DEFAULT_EDITOR_SETTINGS.snippets);
     expect(result.value.categories).toContain("snippets");
     expect(result.value.categories).toContain("shortcuts");
+  });
+
+  it("round-trips custom model generation templates", () => {
+    const settings: EditorSettings = {
+      ...DEFAULT_EDITOR_SETTINGS,
+      modelGenerationTemplates: [{ id: "model-1", name: "GraphQL", extension: "graphql", body: "type {{class.name}} {}" }],
+    };
+    const result = parseSettingsTransferFile(serializeSettingsTransfer(settings));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.modelGenerationTemplates).toEqual(settings.modelGenerationTemplates);
+    expect(result.value.categories).toContain("editor");
+  });
+
+  it("rejects malformed model generation templates instead of dropping them", () => {
+    const missingBody = parseSettingsTransferFile(fileWith({ modelGenerationTemplates: [{ id: "broken", name: "Broken", extension: "ts" }] }));
+    expect(missingBody.ok).toBe(false);
+    if (!missingBody.ok) expect(missingBody.error.detail).toContain("modelGenerationTemplates");
+
+    const duplicateIds = parseSettingsTransferFile(
+      fileWith({
+        modelGenerationTemplates: [
+          { id: "same", name: "One", extension: "ts", body: "one" },
+          { id: "same", name: "Two", extension: "ts", body: "two" },
+        ],
+      }),
+    );
+    expect(duplicateIds.ok).toBe(false);
   });
 
   it("keeps connection timeout ownership out of the payload", () => {
@@ -130,6 +178,19 @@ describe("settingsTransfer", () => {
     if (!result.ok) return;
     expect(result.error.code).toBe("invalid-fields");
     expect(result.error.detail).toContain("appLayout");
+  });
+
+  it("round-trips sidebarDensity in navigation category and rejects invalid values", () => {
+    const valid = parseSettingsTransferFile(fileWith({ sidebarDensity: "compact" }));
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    expect(valid.value.editorSettings.sidebarDensity).toBe("compact");
+    expect(valid.value.categories).toContain("navigation");
+
+    const invalid = parseSettingsTransferFile(fileWith({ sidebarDensity: "ultra-compact" }));
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) return;
+    expect(invalid.error.detail).toContain("sidebarDensity");
   });
 
   it("rejects pass-through boolean flags with non-boolean values", () => {
@@ -452,6 +513,87 @@ describe("settingsTransfer", () => {
     expect(result.error.detail).toContain("sqlFormatter");
   });
 
+  it("rejects unknown formatter option keys", () => {
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutEngine: "dbx" } }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("sqlFormatter");
+  });
+
+  it("rejects an invalid value for a formatter option that is present", () => {
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutStyle: "upstream" } }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("sqlFormatter");
+  });
+
+  it("imports a formatter payload exported before commaPosition existed", () => {
+    // Regression: v0.6.35 made the completeness check require every current
+    // key, so files exported by any earlier version failed to import at all.
+    const legacy: Record<string, unknown> = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter };
+    delete legacy.commaPosition;
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: legacy }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.sqlFormatter?.commaPosition).toBe("after");
+    expect(result.value.editorSettings.sqlFormatter?.keywordCase).toBe(DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase);
+  });
+
+  it("imports a formatter payload missing both post-transfer keys and defaults them", () => {
+    const legacy: Record<string, unknown> = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter };
+    delete legacy.commaPosition;
+    delete legacy.layoutStyle;
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: legacy }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.sqlFormatter?.layoutStyle).toBe("dbx");
+    expect(result.value.editorSettings.sqlFormatter?.commaPosition).toBe("after");
+  });
+
+  it("imports a pre-custom-rules application backup without dropping existing settings", () => {
+    const current = DEFAULT_EDITOR_SETTINGS.sqlFormatter;
+    const oldKeys = [
+      "layoutStyle",
+      "keywordCase",
+      "dataTypeCase",
+      "functionCase",
+      "identifierCase",
+      "indentStyle",
+      "useTabs",
+      "tabWidth",
+      "logicalOperatorNewline",
+      "commaPosition",
+      "fromClauseLayout",
+      "expressionWidth",
+      "linesBetweenQueries",
+      "preserveEmptyLines",
+      "denseOperators",
+      "newlineBeforeSemicolon",
+      "paramTypes",
+    ];
+    const legacy = Object.fromEntries(Object.entries(current).filter(([key]) => oldKeys.includes(key)));
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: legacy }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.sqlFormatter).toMatchObject({ ...legacy, customRulesEnabled: false, selectListLayout: "vertical" });
+  });
+
+  it("preserves custom rules and a 76-column width in application backups", () => {
+    const sqlFormatter = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, customRulesEnabled: true, selectListLayout: "wrap", updateListLayout: "vertical", expressionWidth: 76 };
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.sqlFormatter).toEqual(sqlFormatter);
+  });
+
+  it("accepts and transfers sql variable syntax overrides with boolean flags", () => {
+    const overrides = { postgres: { substitution: true }, oracle: { substitution: false } };
+    const result = parseSettingsTransferFile(fileWith({ sqlVariableSyntaxOverrides: overrides }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.sqlVariableSyntaxOverrides).toEqual(overrides);
+  });
+
   it("rejects malformed sql variable syntax overrides", () => {
     const result = parseSettingsTransferFile(fileWith({ sqlVariableSyntaxOverrides: { mysql: { positional: "yes" } } }));
     expect(result.ok).toBe(false);
@@ -476,6 +618,11 @@ describe("settingsTransfer", () => {
     expect(collectTransferCategories(["csvNullMode", "csvQuoteMode"])).toEqual(["data"]);
   });
 
+  it("maps queryResultExportFileNameSource into the data category (#12092)", () => {
+    expect(transferCategoryForKey("queryResultExportFileNameSource")).toBe("data");
+    expect(collectTransferCategories(["queryResultExportFileNameSource", "pageSize"])).toEqual(["data"]);
+  });
+
   it("round-trips zebra row background in data category", () => {
     expect(transferCategoryForKey("dataGridZebraRowBg")).toBe("data");
 
@@ -487,5 +634,38 @@ describe("settingsTransfer", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.editorSettings.dataGridZebraRowBg).toBe("#232323");
+  });
+
+  it("round-trips crosshair row and column backgrounds in data category", () => {
+    expect(transferCategoryForKey("dataGridCrosshairRowBg")).toBe("data");
+    expect(transferCategoryForKey("dataGridCrosshairColBg")).toBe("data");
+
+    const text = serializeSettingsTransfer({
+      ...DEFAULT_EDITOR_SETTINGS,
+      dataGridCrosshairRowBg: "#232323",
+      dataGridCrosshairColBg: "#343434",
+    });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.dataGridCrosshairRowBg).toBe("#232323");
+    expect(result.value.editorSettings.dataGridCrosshairColBg).toBe("#343434");
+  });
+
+  it("round-trips caretBrowsingEnabled in editor category (#11827)", () => {
+    expect(transferCategoryForKey("caretBrowsingEnabled")).toBe("editor");
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, caretBrowsingEnabled: true });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.caretBrowsingEnabled).toBe(true);
+  });
+
+  it("round-trips aiSqlApplyTargetMode and rejects invalid values (#12438)", () => {
+    expect(transferCategoryForKey("aiSqlApplyTargetMode")).toBe("editor");
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, aiSqlApplyTargetMode: "new" });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.aiSqlApplyTargetMode).toBe("new");
+    expect(parseSettingsTransferFile(fileWith({ aiSqlApplyTargetMode: "invalid" })).ok).toBe(false);
   });
 });

@@ -95,6 +95,16 @@ pub async fn save_saved_sql_file(state: State<'_, Arc<AppState>>, file: SavedSql
 }
 
 #[tauri::command]
+pub async fn save_default_query_content(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    sql: String,
+    updated_at: String,
+) -> Result<(), String> {
+    state.storage.save_default_query_content(&id, &sql, &updated_at).await
+}
+
+#[tauri::command]
 pub async fn delete_saved_sql_file(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.storage.delete_saved_sql_file(&id).await
 }

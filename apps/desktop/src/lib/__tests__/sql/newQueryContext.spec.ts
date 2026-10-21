@@ -106,6 +106,83 @@ describe("resolveNewQueryTarget", () => {
       })?.schema,
     ).toBe("reporting");
   });
+
+  it("prefers the active tab over a selected sidebar node when no explicit source is given", () => {
+    // Every ad-hoc entry (app toolbar, shortcut, welcome screen, editor-group
+    // "+") resolves through this default order, so a sidebar node that merely
+    // happens to be selected must not outrank the editor the user is looking at
+    // (issue #11517).
+    expect(
+      resolveNewQueryTarget({
+        activeTab: { connectionId: "conn-tab", database: "bilibili" },
+        selectedTreeNode: { connectionId: "conn-tree", database: "reporting" },
+        connections: [
+          { id: "conn-tree", host: "localhost", database: "reporting", db_type: "mysql" },
+          { id: "conn-tab", host: "localhost", database: "bilibili", db_type: "mysql" },
+        ],
+      }),
+    ).toMatchObject({ connectionId: "conn-tab", database: "bilibili" });
+  });
+
+  it("falls back to the single online connection instead of the first configured one", () => {
+    expect(
+      resolveNewQueryTarget({
+        connections: [
+          { id: "conn-unused", host: "localhost", database: "unused_db", db_type: "mysql" },
+          { id: "conn-online", host: "localhost", database: "online_db", db_type: "mysql" },
+        ],
+        connectedSqlConnectionIds: new Set(["conn-online"]),
+      }),
+    ).toMatchObject({ connectionId: "conn-online", database: "online_db", shouldRefreshDefaultDatabase: true });
+  });
+
+  it("leaves the connection unselected when several configured connections are offline", () => {
+    expect(
+      resolveNewQueryTarget({
+        connections: [
+          { id: "conn-first", host: "localhost", database: "first_db", db_type: "mysql" },
+          { id: "conn-second", host: "localhost", database: "second_db", db_type: "mysql" },
+        ],
+        connectedSqlConnectionIds: new Set<string>(),
+      }),
+    ).toBeNull();
+  });
+
+  it("leaves the connection unselected when multiple SQL connections are online", () => {
+    // An ambiguous online state must not pick a connection on its own (#11517).
+    expect(
+      resolveNewQueryTarget({
+        connections: [
+          { id: "conn-first", host: "localhost", database: "first_db", db_type: "mysql" },
+          { id: "conn-second", host: "localhost", database: "second_db", db_type: "mysql" },
+          { id: "conn-third", host: "localhost", database: "third_db", db_type: "mysql" },
+        ],
+        connectedSqlConnectionIds: new Set(["conn-second", "conn-third"]),
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps the sole configured connection as the legacy fallback", () => {
+    expect(
+      resolveNewQueryTarget({
+        connections: [{ id: "conn-only", host: "localhost", database: "only_db", db_type: "mysql" }],
+        connectedSqlConnectionIds: new Set<string>(),
+      }),
+    ).toMatchObject({ connectionId: "conn-only", database: "only_db" });
+  });
+
+  it("keeps the last active connection ahead of the single online connection", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeConnectionId: "conn-active",
+        connections: [
+          { id: "conn-active", host: "localhost", database: "active_db", db_type: "mysql" },
+          { id: "conn-online", host: "localhost", database: "online_db", db_type: "mysql" },
+        ],
+        connectedSqlConnectionIds: new Set(["conn-online"]),
+      }),
+    ).toMatchObject({ connectionId: "conn-active" });
+  });
 });
 
 describe("resolveNewQueryTable", () => {
@@ -235,6 +312,14 @@ describe("buildSelectAllSql", () => {
     expect(buildSelectAllSql("influxdb3", { tableName: "cpu" })).toBe(`SELECT * FROM "cpu" WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100`);
   });
 
+  it("honors lower keywordCase for new-query SQL prefill (#12933)", () => {
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, true, "lower")).toBe('select * from "users"');
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, true, "upper")).toBe('SELECT * FROM "users"');
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, true, "preserve")).toBe('SELECT * FROM "users"');
+    expect(buildSelectAllSql("influxdb", { tableName: "cpu" }, undefined, undefined, false, true, "lower")).toBe('select * from "cpu" where time > now() - 5m order by time desc limit 100');
+    expect(buildSelectAllSql("influxdb3", { tableName: "cpu" }, undefined, undefined, false, true, "lower")).toBe(`select * from "cpu" where time > now() - interval '5 minutes' order by time desc limit 100`);
+  });
+
   it("bracket-quotes a SQL Server table", () => {
     expect(buildSelectAllSql("sqlserver", { schema: "dbo", tableName: "users" })).toBe("SELECT * FROM [dbo].[users]");
     expect(buildSelectAllSql("sqlserver", { tableName: "users" })).toBe("SELECT * FROM [users]");
@@ -315,6 +400,19 @@ describe("resolveNewQueryInitialSql", () => {
     ).toBe("SELECT * FROM public.users");
   });
 
+  it("honors lower keywordCase when resolving initial new-query SQL (#12933)", () => {
+    expect(
+      resolveNewQueryInitialSql({
+        activeTab: dataTab(),
+        prefillEnabled: true,
+        targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
+        databaseType: "postgres",
+        keywordCase: "lower",
+      }),
+    ).toBe('select * from "users"');
+  });
+
   it("passes the Phoenix driver profile into the initial SQL builder", () => {
     expect(
       resolveNewQueryInitialSql({
@@ -388,5 +486,63 @@ describe("resolveNewQueryInitialSql", () => {
         databaseType: "neo4j",
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("resolveNewQueryTarget schema qualification", () => {
+  const connections = [{ id: "sql-1", host: "localhost", database: "app", default_schema: "dbo", db_type: "sqlserver" as const }];
+
+  it("keeps an implicit tab schema for browsing but out of the SQL scope", () => {
+    const target = resolveNewQueryTarget({
+      activeTab: { connectionId: "sql-1", database: "app", schema: "core" },
+      connections,
+      preferredSource: "tab",
+    });
+    expect(target?.schema).toBe("core");
+    expect(target?.schemaQualifiesSql).toBeUndefined();
+  });
+
+  it("propagates a schema the user explicitly selected on the tab", () => {
+    const target = resolveNewQueryTarget({
+      activeTab: { connectionId: "sql-1", database: "app", schema: "core", schemaQualifiesSql: true },
+      connections,
+      preferredSource: "tab",
+    });
+    expect(target?.schema).toBe("core");
+    expect(target?.schemaQualifiesSql).toBe(true);
+  });
+
+  it("treats a sidebar schema node as an explicit selection", () => {
+    const target = resolveNewQueryTarget({
+      selectedTreeNode: { type: "schema", connectionId: "sql-1", database: "app", schema: "core", label: "core" },
+      connections,
+      preferredSource: "sidebar",
+    });
+    expect(target?.schema).toBe("core");
+    expect(target?.schemaQualifiesSql).toBe(true);
+  });
+
+  it("does not promote the connection default schema from a connection node", () => {
+    const target = resolveNewQueryTarget({
+      selectedTreeNode: { type: "database", connectionId: "sql-1", database: "app", label: "app" },
+      connections,
+      preferredSource: "sidebar",
+    });
+    expect(target?.schema).toBe("dbo");
+    expect(target?.schemaQualifiesSql).toBeUndefined();
+  });
+
+  it("treats an object schema from table metadata as explicit", () => {
+    const target = resolveNewQueryTarget({
+      activeTab: {
+        connectionId: "sql-1",
+        database: "app",
+        tableMeta: { schema: "sales", tableName: "orders", columns: [], primaryKeys: [] },
+      },
+      connections,
+      preferredSource: "tab",
+    });
+    expect(target?.schema).toBe("sales");
+    expect(target?.schemaQualifiesSql).toBe(true);
   });
 });

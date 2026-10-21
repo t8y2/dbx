@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllSegment, dataGridUserFacingPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllInitialTarget, dataGridLoadAllSegment, dataGridUserFacingPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
 
 test("estimated display totals do not become pagination bounds", () => {
   assert.equal(
@@ -171,6 +171,15 @@ test("user LIMIT larger than the page size still pages up to the bound", () => {
   assert.equal(canGoNextDataGridPage({ rowCount: 100, pageSize: 100, pageOffset: 400, totalRowCount: 500 }), false);
 });
 
+test("a result loaded without server-side pagination is a single page", () => {
+  // `SHOW BINLOG EVENTS` cannot be wrapped in LIMIT/OFFSET, so every row comes
+  // back at once and the grid renders all of them. Another page would only
+  // shift the row numbers over the same rows (#12107).
+  assert.equal(canGoNextDataGridPage({ rowCount: 5_693, pageSize: 100, allRowsLoaded: true }), false);
+  assert.equal(canGoNextDataGridPage({ rowCount: 5_693, pageSize: 100, totalRowCount: 5_693, allRowsLoaded: true }), false);
+  assert.equal(canGoNextDataGridPage({ hasMore: true, rowCount: 100_000, pageSize: 100, allRowsLoaded: true }), false);
+});
+
 test("infinite scroll compares cumulative loaded rows with a known total", () => {
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, totalRowCount: 2_000 }), true);
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 2_000, pageSize: 1_000, totalRowCount: 2_000 }), false);
@@ -195,6 +204,25 @@ test("load-all requests every remaining row up to the configured cap", () => {
 test("load-all does not request past the cap or after the result is complete", () => {
   assert.equal(dataGridLoadAllSegment(5_000, 5_000, true), null);
   assert.equal(dataGridLoadAllSegment(100, 5_000, false), null);
+});
+
+test("load-all initial target calculates chunk target across boundaries and known totals", () => {
+  // Below cap: targets cap or total
+  assert.equal(dataGridLoadAllInitialTarget(100, 100_000, 260_000), 100_000);
+  assert.equal(dataGridLoadAllInitialTarget(100, 100_000, 50_000), 50_000);
+  assert.equal(dataGridLoadAllInitialTarget(100, 100_000), 100_000);
+
+  // At or past cap: targets next chunk increment up to total
+  assert.equal(dataGridLoadAllInitialTarget(100_000, 100_000, 260_000), 200_000);
+  assert.equal(dataGridLoadAllInitialTarget(200_000, 100_000, 260_000), 260_000);
+  assert.equal(dataGridLoadAllInitialTarget(260_000, 100_000, 260_000), 260_000);
+
+  // When total is reached, dataGridLoadAllSegment returns null
+  const target = dataGridLoadAllInitialTarget(260_000, 100_000, 260_000);
+  assert.equal(dataGridLoadAllSegment(260_000, target, true), null);
+
+  // Without known total, continues by chunk increment
+  assert.equal(dataGridLoadAllInitialTarget(100_000, 100_000), 200_000);
 });
 
 // --- auto-redirect page calculation after refresh ---

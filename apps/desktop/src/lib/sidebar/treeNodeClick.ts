@@ -1,9 +1,23 @@
 import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { supportsConnectionQueryActions } from "@/lib/database/databaseFeatureSupport";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
 export type TreeNodeRowAction = "open-data" | "open-source" | "open-extension-details" | "open-event-trigger-details" | "open-saved-sql" | "open-object-browser" | "open-object-browser-and-expand" | "locate-column" | "toggle" | "none";
-export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-database-browser" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-extension-details" | "open-event-trigger-details" | "open-saved-sql" | "locate-column" | "toggle" | "none";
+export type TreeNodeRowDoubleClickAction =
+  | "open-data"
+  | "activate-data"
+  | "open-database-browser"
+  | "open-object-browser"
+  | "open-object-browser-and-expand"
+  | "open-source"
+  | "open-extension-details"
+  | "open-event-trigger-details"
+  | "open-saved-sql"
+  | "locate-column"
+  | "open-structure-editor"
+  | "toggle"
+  | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
@@ -54,6 +68,19 @@ const databaseActivationNodeTypes = new Set<TreeNodeType>(["database", "schema",
 export function shouldBrowseObjectsOnDatabaseActivation(type: TreeNodeType, enabled: boolean): boolean {
   return enabled && databaseActivationNodeTypes.has(type);
 }
+const queryOnActivationNodeTypes = new Set<TreeNodeType>(["connection", "database", "schema", "mongo-db"]);
+
+/**
+ * Whether activating this row should open (or focus) the connection's query
+ * page for the "open query on connection open" preference. Specialized
+ * workbench connections (nacos, consul, hbase, etcd, zookeeper, plugin, mq, mqtt,
+ * meilisearch, salesforce) keep their dedicated surfaces instead — the same
+ * `supportsConnectionQueryActions` gate the context menu applies to its
+ * "New Query" entry.
+ */
+export function shouldOpenQueryOnTreeNodeActivation(node: Pick<TreeNode, "type" | "connectionId">, dbType: DatabaseType | undefined, enabled: boolean): boolean {
+  return enabled && !!node.connectionId && queryOnActivationNodeTypes.has(node.type) && supportsConnectionQueryActions(dbType);
+}
 const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "job", "package", "package-body", "type", "type-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
 const tableChildGroupNodeTypes = new Set<TreeNodeType>(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-constraints", "group-partitions", "group-table-partitions", "group-table-subpartitions"]);
@@ -64,6 +91,8 @@ const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-materialized-views",
   "group-procedures",
   "group-functions",
+  "group-internal-functions",
+  "group-udf-functions",
   "group-triggers",
   "group-events",
   "group-sequences",
@@ -160,11 +189,16 @@ export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetai
 
 export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false, dbType?: DatabaseType, canOpenDatabaseBrowser = false, browseObjectsOnDatabaseActivation = false): TreeNodeRowDoubleClickAction {
   // Single-click activation already handles the first click in a dblclick
-  // sequence. Only double-click activation needs a second-stage table action.
+  // sequence. Most rows have no trailing action, while field/index rows have
+  // an explicit structure-editor action in either activation mode.
   if (type === "table") return activation === "double" ? "activate-data" : "none";
   // 双击激活模式下，双击连接节点应当展开树（与单击模式下单击展开一致），
   // “打开数据库浏览”只保留给单击激活模式下的双击手势。
   if (type === "connection" && canOpenDatabaseBrowser && activation !== "double") return "open-database-browser";
+  // Field and index rows have an explicit double-click action regardless of
+  // the sidebar activation preference. Single-click field navigation remains
+  // responsible for locating a column in the data grid.
+  if (type === "column" || type === "index") return "open-structure-editor";
   if (activation === "double") {
     if (canOpenObjectBrowser && shouldBrowseObjectsOnDatabaseActivation(type, browseObjectsOnDatabaseActivation)) {
       return canExpand ? "open-object-browser-and-expand" : "open-object-browser";
@@ -173,7 +207,6 @@ export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBr
     if (type === "extension") return "open-extension-details";
     if (type === "event-trigger") return "open-event-trigger-details";
     if (dataNodeTypes.has(type)) return "open-data";
-    if (type === "column") return "locate-column";
     if (type === "type" && customTypeCapabilities(dbType).details) return canExpand ? "toggle" : "none";
     if (sourceNodeTypes.has(type) && canOpenTreeNodeSource(type, dbType)) return "open-source";
     if (savedSqlNodeTypes.has(type)) return "open-saved-sql";

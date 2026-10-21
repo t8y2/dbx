@@ -176,6 +176,21 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertDbmsOutputFailureFallsBack(new SQLException("permission denied", "42000"));
     }
 
+    /**
+     * 达梦中文环境在无权限时只回「权限不足」（vendorCode -5669，SQLState 28000），消息里不带
+     * `dbms_output` 字样。这类错误同样只是可选的 DBMS_OUTPUT 初始化失败，不能阻断用户自己的 SQL
+     * （#11875 反馈人点名的同源问题）。
+     */
+    @Test
+    void chinesePermissionDeniedOnDbmsOutputDoesNotBlockUserSql() {
+        assertDbmsOutputFailureFallsBack(new SQLException("权限不足", "28000", -5669));
+
+        // DM 常在首个异常上挂 cause / nextException，链上任意一环是权限错误都应降级。
+        SQLException wrapped = new SQLException("执行失败", "HY000");
+        wrapped.setNextException(new SQLException("权限不足", "28000", -5669));
+        assertDbmsOutputFailureFallsBack(wrapped);
+    }
+
     @Test
     void dbmsOutputTimeoutDisablesFutureAttempts() {
         DamengAgent agent = new DamengAgent();

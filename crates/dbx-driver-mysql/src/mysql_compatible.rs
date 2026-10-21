@@ -201,6 +201,8 @@ pub async fn get_columns_show_from(
                 name,
                 data_type: get_str_by_name(row, "Type"),
                 resolved_schema: None,
+                resolved_table: None,
+                resolved_object_type: None,
                 is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
                 column_default: get_opt_str(row, "Default"),
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
@@ -320,6 +322,9 @@ fn table_key_index(name: &str, line: &str, is_unique: bool, is_primary: bool, in
         return None;
     }
     Some(IndexInfo {
+        key_directions: Vec::new(),
+        visibility: None,
+        key_metadata_complete: false,
         name: name.to_string(),
         columns,
         is_unique,
@@ -343,6 +348,9 @@ fn secondary_index(line: &str) -> Option<IndexInfo> {
         return None;
     }
     Some(IndexInfo {
+        key_directions: Vec::new(),
+        visibility: None,
+        key_metadata_complete: false,
         name,
         columns,
         is_unique: false,

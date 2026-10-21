@@ -100,9 +100,10 @@ public final class DdlBuilder {
             if (!column.getIs_nullable()) {
                 line.append(" NOT NULL");
             }
-            if (notBlank(column.getColumn_default())) {
+            String columnDefault = sanitizeDefault(column.getColumn_default());
+            if (notBlank(columnDefault)) {
                 line.append(" DEFAULT ");
-                line.append(column.getColumn_default());
+                line.append(columnDefault);
             }
             columnLines.add(line.toString());
         }
@@ -387,9 +388,10 @@ public final class DdlBuilder {
     }
 
     private static String quoteIdent(String identifier, boolean useBacktick) {
+        String clean = sanitizeString(identifier);
         return useBacktick
-            ? JdbcIdentifiers.INSTANCE.backtick(identifier)
-            : JdbcIdentifiers.INSTANCE.doubleQuote(identifier);
+            ? JdbcIdentifiers.INSTANCE.backtick(clean)
+            : JdbcIdentifiers.INSTANCE.doubleQuote(clean);
     }
 
     private static String qualifiedName(String schema, String name, boolean useBacktick) {
@@ -438,11 +440,45 @@ public final class DdlBuilder {
         return matcher.matches() ? "IDENTITY(" + matcher.group(1) + "," + matcher.group(2) + ")" : null;
     }
 
+    private static String sanitizeString(String value) {
+        if (value == null) {
+            return "";
+        }
+        int nullIdx = value.indexOf('\0');
+        return nullIdx >= 0 ? value.substring(0, nullIdx) : value;
+    }
+
+    private static String sanitizeDefault(String defaultValue) {
+        if (defaultValue == null) {
+            return null;
+        }
+        int nullIdx = defaultValue.indexOf('\0');
+        if (nullIdx < 0) {
+            return defaultValue;
+        }
+        String truncated = defaultValue.substring(0, nullIdx).trim();
+        return truncated.isEmpty() ? null : truncated;
+    }
+
     private static boolean notBlank(String value) {
-        return value != null && !value.trim().isEmpty();
+        if (value == null) {
+            return false;
+        }
+        int nullIdx = value.indexOf('\0');
+        if (nullIdx >= 0) {
+            value = value.substring(0, nullIdx);
+        }
+        return !value.trim().isEmpty();
     }
 
     private static String sqlStringBody(String value) {
+        if (value == null) {
+            return "";
+        }
+        int nullIdx = value.indexOf('\0');
+        if (nullIdx >= 0) {
+            value = value.substring(0, nullIdx);
+        }
         return value.replace("'", "''");
     }
 

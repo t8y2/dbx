@@ -174,6 +174,15 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     connectionStore.mongoDatabaseDumpSource = { connectionId: node.connectionId, database: node.database, mode };
   }
 
+  function openDamengDump(mode: "export" | "import") {
+    const node = activeNode.value;
+    if ((node.type !== "database" && node.type !== "schema") || !node.connectionId || !node.database) return;
+    // For Dameng (single-database, schema-aware) the schema node's database
+    // field carries the schema name; plain database nodes use it directly.
+    const schema = node.type === "schema" && node.schema ? node.schema : node.database;
+    connectionStore.damengDumpSource = { connectionId: node.connectionId, database: schema, mode };
+  }
+
   function openStructureEditor() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
@@ -200,6 +209,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     if (node.type !== "column" || !node.connectionId || !node.database || !node.tableName || !column) return;
     connectionStore.fieldLineageSource = {
       connectionId: node.connectionId,
+      databaseType: connectionStore.getConfig(node.connectionId)?.db_type,
       database: node.database,
       schema: node.schema,
       tableName: node.tableName,
@@ -209,6 +219,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
 
   return {
     openAllDatabasesExport,
+    openDamengDump,
     openDataCompare,
     openDatabaseExport,
     openDatabaseSearch,

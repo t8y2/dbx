@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
+import { computed, defineAsyncComponent, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
 import type { PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
@@ -11,9 +11,12 @@ import { useSidebarDatabaseSpecificMutationRuntime } from "@/composables/useSide
 import { useSidebarTableMutationRuntime } from "@/composables/useSidebarTableMutationRuntime";
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
 import { useSidebarTreeToolRuntime } from "@/composables/useSidebarTreeToolRuntime";
+import { canDropDatabaseNode, notifyDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { canDropDatabaseTables, canEmptyDatabaseTables, useDatabaseTableEmpty } from "@/composables/useDatabaseTableEmpty";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import {
+  Ban,
   BarChart3,
   BookOpen,
   Braces,
@@ -31,6 +34,8 @@ import {
   Plug,
   Unplug,
   Pin,
+  Package,
+  PackageOpen,
   PlugZap,
   ArrowRightLeft,
   Download,
@@ -51,6 +56,7 @@ import {
   Code2,
   Wrench,
   ListFilter,
+  ListPlus,
   Clipboard,
   UsersRound,
   ShieldCheck,
@@ -82,7 +88,7 @@ import { parseDynamicMenuResponse, renderDynamicMenuEntries, type DynamicMenuAct
 import type { PluginContextMenuInvocation } from "@/lib/plugins/pluginContext";
 import type { InstalledPlugin, PluginContextMenuContribution, PluginWorkbenchContribution } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -111,9 +117,12 @@ import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguSyntheticTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
 import { buildXuguSchedulerJobSql, type XuguSchedulerJobAction } from "@/lib/database/xuguSchedulerJobSql";
 import { canViewDatabaseObjectDependencies, databaseDependencyProviderFor } from "@/lib/database/databaseObjectDependencies";
+import { oracleTarget } from "@/lib/database/oracleObjectDependencies";
+import type { ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
-import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
-import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
+import { sidebarObjectTemplateForGroup } from "@/lib/sidebar/databaseObjectTemplates";
+import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate, insertTemplatePrimaryKeyConflicts } from "@/lib/table/tableSqlTemplates";
+import SqlTemplateInsertRowsDialog from "@/components/sidebar/SqlTemplateInsertRowsDialog.vue";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { qualifiedTableName } from "@/lib/table/tableSelectSql";
 import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
@@ -123,7 +132,6 @@ import {
   canEditDatabaseProperties as canEditDatabasePropertiesForNode,
   connectionNamespaceCreationTarget,
   editableDatabasePropertyGroups,
-  supportsDatabaseCreation,
   supportsDatabaseSearch,
   supportsConnectionDatabaseBrowser,
   supportsConnectionQueryActions,
@@ -142,12 +150,25 @@ import {
   isSingleDatabase,
   schemaNodeHasLoadableName,
 } from "@/lib/database/databaseCapabilities";
-import { copyDisplayPathForTreeNode, copyNameForTreeNode, isDirectNavigationTreeNode, isDocumentBrowserTreeNode, isRepeatableNavigationTreeNode, objectSourceTargetForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import {
+  copyDisplayPathForTreeNode,
+  copyNameForTreeNode,
+  isDirectNavigationTreeNode,
+  isDocumentBrowserTreeNode,
+  isRepeatableNavigationTreeNode,
+  objectSourceTargetForTreeNode,
+  shouldOpenQueryOnTreeNodeActivation,
+  shouldRunTreeNodeRowAction,
+  treeNodeRowAction,
+  treeNodeRowDoubleClickAction,
+} from "@/lib/sidebar/treeNodeClick";
+import { qualifiedNameForSidebarNode } from "@/lib/sidebar/sidebarTableNameCopy";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
-import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isModRShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isModRShortcut, isPasteSidebarSelectionShortcut, isRefreshDataShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
+import { sidebarNodeSupportsStructureEdit } from "@/lib/sidebar/sidebarTreeStructureShortcut";
 import { dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
 import { attachedDatabaseNameFromPath, buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, buildSqliteAttachDatabaseSql, supportsCreateDatabaseCharset, supportsCreateDatabaseLocale, uniqueAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
 import { appendCreateDatabaseErrorHint } from "@/lib/database/createDatabaseErrorHints";
@@ -170,15 +191,24 @@ import {
   buildMysqlAutoIncrementSql,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
-  supportsNativeMysqlAutoIncrement,
+  supportsMysqlAutoIncrement as connectionSupportsMysqlAutoIncrement,
   supportsSchemaComment,
   type DropTableChildObjectSqlOptions,
   type DropObjectSqlOptions,
   type MysqlAutoIncrementSqlOptions,
   type TableChildObjectType,
 } from "@/lib/database/dbAdminSql";
+import { executeOceanbaseTableClone, executeOceanbaseTableCloneData, oceanbaseCloneDataPreparationError, OceanbaseTableCloneError, type OceanbaseTableClone } from "@/lib/database/oceanbaseTableClone";
+import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
+import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
-import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
+import { prepareOracleRoutineRename, executeOracleRoutineRename, OracleRoutineRenameFailure, type OracleRoutineRenamePlan } from "@/lib/table/oracleRoutineRename";
+import { prepareOracleTableRename, executeOracleTableRename, OracleTableRenameFailure, type OracleTableRenamePlan } from "@/lib/table/oracleTableRename";
+import { executeOraclePackageSaveAs, OraclePackageSaveAsFailure, prepareOraclePackageSaveAs, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
+import { buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
@@ -213,9 +243,12 @@ import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { buildSidebarDdlTemplateSql, formatSidebarDdlTemplateForDisplay } from "@/lib/sidebar/sidebarDdlTemplate";
 import { resolveSidebarDdlTargets } from "@/lib/sidebar/sidebarDdlTargets";
 import { sidebarTableDataExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
+import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
+import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { formatSidebarTableCopyText, type FormatSidebarTableNamesOptions } from "@/lib/sidebar/sidebarTableNameCopy";
 import { supportsScheduledDatabaseBackup } from "@/lib/backup/scheduledDatabaseBackup";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { passwordViewerEnabled } from "@/lib/security/passwordViewer";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildConnectionUrlCopy, CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS, connectionUrlCopyFormats, type ConnectionUrlCopyFormat } from "@/lib/connection/connectionUrlBuilder";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
@@ -228,8 +261,10 @@ import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
+import { buildTriggerToggleSql, supportsTriggerToggle } from "@/lib/database/triggerToggleSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
 import { createSidebarMenuContext, normalizeSidebarMenuDescriptors } from "@/lib/sidebar/sidebarTreeMenuDescriptors";
 import { driverProfileDatabaseWorkspace } from "@/lib/database/driverProfileExtensions";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
@@ -256,6 +291,8 @@ import {
   showStructureDocCopyDialog,
   structurePreviewSql,
   structurePreviewTitle,
+  structurePreviewDefaultFileName,
+  structurePreviewDdlStorageType,
   structurePreviewError,
   structureDocCopyText,
   structureDocCopyTitle,
@@ -301,6 +338,7 @@ import {
   showPasteDialog,
   pasteTableMode,
   pasteTableEntries,
+  pasteTableFromClipboard,
   showCreateDatabaseDialog,
   createDatabaseName,
   createDatabaseCharset,
@@ -331,6 +369,8 @@ import {
   dropDatabaseLoading,
   showDropMongoCollectionConfirm,
   dropMongoCollectionLoading,
+  showClearMongoCollectionConfirm,
+  clearMongoCollectionLoading,
   showDropMongoIndexConfirm,
   dropMongoIndexLoading,
   showDropAllMongoIndexesConfirm,
@@ -380,6 +420,8 @@ import {
 } from "./sidebarTreeDialogState";
 
 const { t, locale: appLocale } = useI18n();
+const cloneDialog = useOceanbaseCloneDialog(t);
+const { state: cloneDialogState, open: cloneDialogOpen } = cloneDialog;
 
 const connectionStore = useConnectionStore();
 
@@ -425,6 +467,11 @@ const props = defineProps<{
   highlighted?: boolean;
 }>();
 
+const ModelGenerateDialog = defineAsyncComponent(() => import("@/components/generate/ModelGenerateDialog.vue"));
+const modelGenerationTarget = shallowRef<TreeNode | null>(null);
+function openModelGeneration() {
+  modelGenerationTarget.value = { ...activeNode.value };
+}
 const activeNode = shallowRef<TreeNode>(props.node);
 let acceptedSelectionIds: readonly string[] | null = null;
 let latestNavigationRequestId = 0;
@@ -460,6 +507,7 @@ const { copyStructureAs, copyStructureDocText, copyStructurePreview, exportData,
 
 const {
   openAllDatabasesExport,
+  openDamengDump,
   openDataCompare,
   openDatabaseExport,
   openDatabaseSearch,
@@ -495,7 +543,7 @@ const emit = defineEmits<{
   "context-menu": [event: MouseEvent, node: TreeNode, items: ContextMenuItem[]];
   "open-ddl": [node: TreeNode];
   "open-elasticsearch-index-metadata": [node: TreeNode, kind: ElasticsearchIndexMetadataKind];
-  "open-object-source": [node: TreeNode, initialEditing: boolean];
+  "open-object-source": [node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection];
   "open-procedure": [node: TreeNode];
   "open-settings": [initialTab: string];
   "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
@@ -510,6 +558,8 @@ const emit = defineEmits<{
   "open-extension-details": [node: TreeNode];
   "open-event-trigger-details": [node: TreeNode];
 }>();
+
+const { requestEmptyDatabaseTables, requestDropDatabaseTables } = useDatabaseTableEmpty((request) => emit("open-danger-dialog", request));
 
 const {
   setNodeAsDefaultDatabase,
@@ -535,6 +585,9 @@ const {
   connectionGroupDisconnectMenuLabel,
   canDisconnectConnectionGroup,
   disconnectConnectionGroup,
+  connectionGroupConnectMenuLabel,
+  canConnectConnectionGroup,
+  connectConnectionGroup,
   canForgetSessionCredential,
   disconnectAndForgetConnectionPassword,
   cancelConnectionAttempt,
@@ -576,6 +629,7 @@ const {
   canDropMongoDatabase,
   canDropMilvusDatabase,
   canDropMongoCollection,
+  canClearMongoCollection,
   canDropMilvusCollection,
   canRenameMongoCollection,
   canCloneMongoCollection,
@@ -630,6 +684,7 @@ const {
   openDeleteNacosNamespaceConfirm,
   confirmDeleteNacosNamespace,
   dropMongoCollection,
+  clearMongoCollection,
   dropMilvusCollection,
   dropMongoIndex,
   dropAllMongoIndexes,
@@ -646,11 +701,16 @@ const {
   confirmFlushRedisDb,
   confirmDropMongoDatabase,
   confirmDropMongoCollection,
+  confirmClearMongoCollection,
   confirmDropMilvusDatabase,
   confirmDropMilvusCollection,
   confirmDropMongoIndex,
   confirmDropAllMongoIndexes,
-} = useSidebarDatabaseSpecificMutationRuntime({ activeNode, connectionStore });
+} = useSidebarDatabaseSpecificMutationRuntime({
+  activeNode,
+  connectionStore,
+  refreshDataTabsForTable: (target) => queryStore.refreshDataTabsForTable(target),
+});
 
 const {
   isTableNotView,
@@ -775,6 +835,8 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-materialized-views",
   "group-procedures",
   "group-functions",
+  "group-internal-functions",
+  "group-udf-functions",
   "group-sequences",
   "group-synonyms",
   "group-jobs",
@@ -847,6 +909,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   if (node.isLoading) {
     if (node.isExpanded) {
       node.isExpanded = false;
+      collapseSubtreeDescendants(node);
       if (shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
       connectionStore.cancelTreeNodeLoad(node.id);
       emitNodeToggled(node, true, false);
@@ -859,8 +922,17 @@ async function toggle(requestId = beginNavigationRequest()) {
   emit("search-toggle", node);
   const wasExpanded = !!node.isExpanded;
 
+  // A search result is a projection over children that are already loaded for
+  // the query. Expanding a collapsed result must only remove it from the
+  // projection's collapsed set; entering the normal load path here can replace
+  // the live subtree with the filtered projection and leave the sidebar blank.
+  if (!wasExpanded && node.children?.length && sidebarTreeContext?.isSearchProjectionActive?.()) {
+    return;
+  }
+
   if (node.type === "connection-group") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     connectionStore.toggleConnectionGroupCollapsed(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -868,12 +940,14 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "group-partitions") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.type === "table-vgroup") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     if (node.vgroupId) connectionStore.toggleTableVGroupCollapsed(node, node.vgroupId);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -881,6 +955,7 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.children !== undefined) {
     node.isExpanded = node.children.length > 0 ? !node.isExpanded : false;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
@@ -892,6 +967,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   // schema and replace the package's member list with unrelated objects.
   if (currentDatabaseType() === "xugu" && (node.type === "group-procedures" || node.type === "group-functions") && node.parentType === "package") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     // Package member groups have no group-level reload path: their children
     // are hydrated together with the owning package. Releasing a large group
     // here would leave it empty on the next local-only expand.
@@ -902,10 +978,13 @@ async function toggle(requestId = beginNavigationRequest()) {
   // Keep the click path aligned with every object-group definition. In
   // particular, schema-level trigger/type groups have no tableName, so they
   // must use the generic object loader rather than the table-trigger loader.
-  const databaseObjectGroup = !!objectTypesForGroupNode(node.type);
+  // !node.tableName is generic: table-level structure groups (columns/indexes/fkeys/constraints/partitions/table triggers)
+  // stay off the schema-level object-group loader, not just triggers.
+  const databaseObjectGroup = !!objectTypesForGroupNode(node.type) && !node.tableName;
   const needsConfiguredTablePageDrain = node.type === "group-tables" && connectionStore.getConfig(node.connectionId || "")?.sidebar_auto_load_all_tables === true && hasTableTreeLoadMore(node.children ?? []);
   if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node) && !needsConfiguredTablePageDrain) {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -913,18 +992,21 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.type === "type-attributes" || node.type === "type-methods") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if (node.type === "saved-sql-root" || node.type === "saved-sql-folder") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
 
   if ((node.type === "group-extensions" || node.type === "group-event-triggers") && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded);
     return;
@@ -934,6 +1016,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   // with the tablespace listing; expanding them is a pure local toggle.
   if (node.type === "tablespace" || node.type === "group-datafiles") {
     node.isExpanded = !node.isExpanded;
+    if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
     return;
   }
@@ -941,6 +1024,7 @@ async function toggle(requestId = beginNavigationRequest()) {
   if (node.type === "group-tablespaces") {
     if (connectionStore.canUseLoadedTreeNodeToggle(node)) {
       node.isExpanded = !node.isExpanded;
+      if (!node.isExpanded) collapseSubtreeDescendants(node);
       if (wasExpanded && shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
       emitNodeToggled(node, wasExpanded);
       return;
@@ -950,7 +1034,10 @@ async function toggle(requestId = beginNavigationRequest()) {
       emitNodeToggled(node, wasExpanded);
     } catch (e: any) {
       if (!isCurrentNavigationRequest(requestId)) return;
-      if (!wasExpanded) node.isExpanded = false;
+      if (!wasExpanded) {
+        node.isExpanded = false;
+        collapseSubtreeDescendants(node);
+      }
       const errMsg = e?.message || String(e);
       if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
       toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
@@ -967,6 +1054,7 @@ async function toggle(requestId = beginNavigationRequest()) {
 
   if (node.isExpanded) {
     node.isExpanded = false;
+    collapseSubtreeDescendants(node);
     if (shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded, false);
     return;
@@ -1005,7 +1093,7 @@ async function toggle(requestId = beginNavigationRequest()) {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "dynamodb") {
         await connectionStore.loadDynamoDbTables(node.connectionId);
-      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch" || config?.db_type === "meilisearch" || config?.db_type === "solr") {
+      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch" || config?.db_type === "meilisearch" || config?.db_type === "solr" || config?.db_type === "couchdb") {
         // Expand: list indices/cores (like other db types list databases).
         await connectionStore.loadElasticsearchIndices(node.connectionId);
       } else if (config?.db_type === "milvus") {
@@ -1188,6 +1276,13 @@ function runRowClickAction(clickDetail: number) {
   // after that follow-up click has resolved to a real action, otherwise it
   // makes the first click's pending connection/expansion request look stale.
   const requestId = beginNavigationRequest();
+  // Activation preference: single-click activation also opens (or focuses)
+  // the connection's query page. It must stay behind the activation gate
+  // above so "double" activation keeps single clicks inert, and it must not
+  // return early: the native row action (expand, browse objects) still runs.
+  if (shouldOpenQueryOnActivation(node)) {
+    void newQuery({ reuseQueryTabByScope: true });
+  }
   if (action === "open-data") {
     scheduleOpenData(node);
   } else if (action === "locate-column") {
@@ -1278,6 +1373,14 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
+  if (isEditSidebarTableStructureShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    if (canOpenStructureEditor.value) {
+      openStructureEditor();
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+  }
   if (isSidebarTreeArrowKey(event) && handleSidebarTreeArrowKey(event)) {
     event.preventDefault();
     event.stopPropagation();
@@ -1289,7 +1392,7 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
-  if (isModRShortcut(event) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "F5")) {
+  if (isRefreshDataShortcut(event, settingsStore.editorSettings.shortcuts) || isModRShortcut(event) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "F5")) {
     if (!requestRefreshSelectedNode()) return;
     event.preventDefault();
     event.stopPropagation();
@@ -1440,6 +1543,7 @@ function requestPasteTreeClipboard(): boolean {
   if (clipboard?.kind !== "table-copy") return false;
   if (canTransferTreeClipboardToCurrentNode()) return openTransferFromTreeClipboard();
   if (!canPasteTreeClipboardToCurrentNode()) return false;
+  pasteTableFromClipboard.value = true;
   pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
@@ -1459,9 +1563,16 @@ function requestRefreshSelectedNode(): boolean {
   return true;
 }
 
+function refreshNode(targetNode?: TreeNode): boolean {
+  const node = targetNode ?? (connectionStore.selectedTreeNodeId ? findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget({ id: connectionStore.selectedTreeNodeId } as TreeNode)) : null) ?? activeNode.value;
+  if (!node) return false;
+  activateRuntimeNode(node);
+  return requestRefreshSelectedNode();
+}
+
 function canRefreshTreeNodeShortcut(): boolean {
   const type = activeNode.value.type;
-  if (type === "connection" || type === "database" || type === "schema" || type === "table" || type === "view" || type === "procedure" || type === "function") {
+  if (type === "connection" || type === "database" || type === "schema" || type === "table" || type === "view" || type === "materialized_view" || type === "sequence" || type === "trigger" || type === "event" || type === "package" || type === "procedure" || type === "function") {
     return true;
   }
   return isGroupLabel(activeNode.value) && type !== "group-partitions";
@@ -1606,6 +1717,14 @@ function requestDeleteSelectedNode(): boolean {
 }
 
 function onDoubleClick(event: MouseEvent) {
+  // In double-click activation mode the dblclick is the activation moment, so
+  // the query page opens here once. In single-click activation mode the first
+  // click of the sequence already opened it, and the trailing dblclick must
+  // keep its native gestures (for example the connection database browser).
+  if (settingsStore.editorSettings.sidebarActivation === "double" && shouldOpenQueryOnActivation(activeNode.value)) {
+    beginNavigationRequest();
+    void newQuery({ reuseQueryTabByScope: true });
+  }
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   if (activeNode.value.type === "event") {
     beginNavigationRequest();
@@ -1618,8 +1737,8 @@ function onDoubleClick(event: MouseEvent) {
     return;
   }
   const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value, settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
-  // In single-click mode the trailing dblclick normally has no action and must
-  // leave the first click's request ownership intact.
+  // Most trailing dblclick events are intentionally inert in single-click
+  // mode, but field and index rows have an explicit editor action.
   if (action === "none") return;
   const requestId = beginNavigationRequest();
   if (action === "open-database-browser") {
@@ -1635,6 +1754,8 @@ function onDoubleClick(event: MouseEvent) {
     activateDataTableFromDoubleClick();
   } else if (action === "locate-column") {
     locateColumnInDataGrid(activeNode.value);
+  } else if (action === "open-structure-editor") {
+    if (canOpenStructureEditor.value) openStructureEditor();
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
   } else if (action === "open-extension-details") {
@@ -1847,7 +1968,8 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
       return;
     }
     if (hasTreeNodeDatabaseContext(node)) {
-      const tabId = queryStore.openObjectBrowser(node.connectionId, node.database, node.schema, node.catalog, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
+      const database = node.schema && connectionUsesVisibleSchemaFilter(connection) ? connection.database || node.database : node.database;
+      const tabId = queryStore.openObjectBrowser(node.connectionId, database, node.schema, node.catalog, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
       if (focusSearch) await nextTick(() => requestObjectBrowserSearchFocus(tabId));
       return;
     }
@@ -2039,9 +2161,18 @@ function openDataInNewTabImmediately(node: TreeNode = activeNode.value) {
   emit("open-data", node, false, "new-tab", (target, request) => openData(target, request, "new-tab"));
 }
 
-async function newQuery() {
+function shouldOpenQueryOnActivation(node: TreeNode): boolean {
+  // The db-type gate matches the context menu's "New Query" entry, so
+  // specialized workbench connections keep their dedicated surfaces.
+  return shouldOpenQueryOnTreeNodeActivation(node, currentDatabaseType(), settingsStore.editorSettings.openQueryOnConnectionOpen);
+}
+
+async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
   const node = activeNode.value;
   if (!node.connectionId) return;
+  // Activation opens the persistent default SQL file for this database;
+  // the context-menu entry keeps creating a fresh tab per invocation.
+  const openDefault = options.reuseQueryTabByScope === true;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
@@ -2058,19 +2189,23 @@ async function newQuery() {
           schema: node.schema,
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+          keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           tableName: node.label,
           columns: [],
         });
         openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, sql);
         return;
       }
-      queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog);
+      if (openDefault) await queryStore.openDefaultQuery({ connectionId: node.connectionId, database: node.database, catalog: node.catalog });
+      else queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog, { schemaQualifiesSql: true });
       return;
     }
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
-    const options = await getDatabaseOptions(node.connectionId);
-    queryStore.createTab(node.connectionId, resolveDefaultDatabase(connection, options), undefined, "query", connection.default_schema);
+    const databaseOptions = await getDatabaseOptions(node.connectionId);
+    const database = resolveDefaultDatabase(connection, databaseOptions);
+    if (openDefault) await queryStore.openDefaultQuery({ connectionId: node.connectionId, database });
+    else queryStore.createTab(node.connectionId, database, undefined, "query", connection.default_schema);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(e?.message || String(e));
@@ -2123,22 +2258,20 @@ async function loadTemplateContext(allowView = false, node: TreeNode = activeNod
   return { node, dbType, driverProfile: config?.driver_profile, identifierQuote, tableSchema, columns, tableType };
 }
 
-async function openMultiTableSqlTemplate(targets: Array<TreeNode & { connectionId: string; database: string }>, buildSql: (context: NonNullable<Awaited<ReturnType<typeof loadTemplateContext>>>) => string, allowView: boolean, titlePrefix: string) {
-  const parts: string[] = [];
-  const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
-  for (const target of targets) {
-    const context = await loadTemplateContext(allowView, target);
-    if (!context) continue;
-    parts.push(buildSql(context));
-  }
+type TableTemplateContext = NonNullable<Awaited<ReturnType<typeof loadTemplateContext>>>;
+
+async function openMultiTableSqlTemplate(targets: Array<TreeNode & { connectionId: string; database: string }>, buildSql: (context: TableTemplateContext) => string, allowView: boolean, titlePrefix: string) {
+  const contexts = (await Promise.all(targets.map((target) => loadTemplateContext(allowView, target)))).filter((context): context is TableTemplateContext => context !== null);
+  const parts = contexts.map((context) => buildSql(context));
   if (!parts.length) return;
   const sql = parts.length === 1 ? parts[0]! : joinExportedDdls(parts);
   const title = targets.length === 1 ? undefined : `${titlePrefix} - ${targets.map((target) => target.label).join(", ")}`;
+  const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
   openSqlTemplateTab(tabTarget.connectionId, tabTarget.database, tabTarget.schema, tabTarget.catalog, sql, title);
 }
 
 function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, catalog: string | undefined, sql: string, title?: string) {
-  const tabId = queryStore.createTab(connectionId, database, title, "query", schema, undefined, catalog, { forceWordWrap: true });
+  const tabId = queryStore.createTab(connectionId, database, title, "query", schema, undefined, catalog, { forceWordWrap: true, schemaQualifiesSql: true });
   queryStore.updateSql(tabId, sql);
 }
 
@@ -2158,6 +2291,7 @@ async function newSelectTemplate() {
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+            keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
             tableName: context.node.label,
             columns: context.columns,
           }),
@@ -2177,6 +2311,7 @@ async function newSelectTemplate() {
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+      keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       tableName: context.node.label,
       columns: context.columns,
     });
@@ -2187,46 +2322,72 @@ async function newSelectTemplate() {
 }
 
 async function newInsertTemplate() {
+  await runInsertTemplate(1);
+}
+
+const insertTemplateRowsOpen = ref(false);
+let insertTemplateRowsPrefetch: Promise<TableTemplateContext[] | null> | null = null;
+
+async function loadInsertTemplateContexts(): Promise<TableTemplateContext[]> {
+  const targets = selectedDdlTargets().filter((target) => target.type === "table");
+  if (targets.length > 1) {
+    const contexts = await Promise.all(targets.map((target) => loadTemplateContext(false, target)));
+    return contexts.filter((context): context is TableTemplateContext => context !== null);
+  }
+  const context = await loadTemplateContext(false);
+  return context ? [context] : [];
+}
+
+function openInsertTemplateRowsDialog() {
+  insertTemplateRowsOpen.value = true;
+  // Run the health check + getColumns roundtrips while the user picks a row
+  // count, so confirming the dialog does not wait on them again.
+  insertTemplateRowsPrefetch = loadInsertTemplateContexts().catch((e) => {
+    console.warn("[DBX][tableSqlTemplate:prefetch:error]", e);
+    return null;
+  });
+}
+
+async function confirmInsertTemplateRows(count: number) {
+  const prefetched = insertTemplateRowsPrefetch;
+  insertTemplateRowsPrefetch = null;
+  await runInsertTemplate(count, prefetched ? await prefetched : null);
+}
+
+function insertTemplateOptions(context: TableTemplateContext, rowCount: number) {
+  return {
+    databaseType: context.dbType,
+    driverProfile: context.driverProfile,
+    identifierQuote: context.identifierQuote,
+    catalog: context.node.catalog,
+    database: context.node.database,
+    schema: context.tableSchema,
+    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+    tableName: context.node.label,
+    columns: context.columns,
+    tableType: context.tableType,
+    rowCount,
+  };
+}
+
+function warnInsertTemplatePkConflicts(contexts: TableTemplateContext[], rowCount: number) {
+  const conflicts = contexts.flatMap((context) => insertTemplatePrimaryKeyConflicts(context.columns, rowCount));
+  if (conflicts.length) {
+    toast(t("contextMenu.insertRowsPkConflictWarning", { columns: conflicts.map((conflict) => conflict.column).join(", "), rows: rowCount }), 6000);
+  }
+}
+
+async function runInsertTemplate(rowCount: number, prefetchedContexts?: TableTemplateContext[] | null) {
   try {
-    const targets = selectedDdlTargets().filter((target) => target.type === "table");
-    if (targets.length > 1) {
-      await openMultiTableSqlTemplate(
-        targets,
-        (context) =>
-          buildTableInsertTemplate({
-            databaseType: context.dbType,
-            driverProfile: context.driverProfile,
-            identifierQuote: context.identifierQuote,
-            catalog: context.node.catalog,
-            database: context.node.database,
-            schema: context.tableSchema,
-            includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
-            tableName: context.node.label,
-            columns: context.columns,
-            tableType: context.tableType,
-          }),
-        false,
-        "INSERT",
-      );
-      return;
-    }
-    const context = await loadTemplateContext(false);
-    if (!context) return;
-    const sql = buildTableInsertTemplate({
-      databaseType: context.dbType,
-      driverProfile: context.driverProfile,
-      identifierQuote: context.identifierQuote,
-      catalog: context.node.catalog,
-      database: context.node.database,
-      schema: context.tableSchema,
-      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
-      tableName: context.node.label,
-      columns: context.columns,
-      tableType: context.tableType,
-    });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
+    const contexts = prefetchedContexts ?? (await loadInsertTemplateContexts());
+    if (!contexts.length) return;
+    warnInsertTemplatePkConflicts(contexts, rowCount);
+    const parts = contexts.map((context) => buildTableInsertTemplate(insertTemplateOptions(context, rowCount)));
+    const sql = parts.length === 1 ? parts[0]! : joinExportedDdls(parts);
+    const tabTarget = contexts.find((context) => context.node.id === activeNode.value.id)?.node ?? contexts[0]!.node;
+    const title = contexts.length === 1 ? undefined : `INSERT - ${contexts.map((context) => context.node.label).join(", ")}`;
+    openSqlTemplateTab(tabTarget.connectionId!, tabTarget.database!, tabTarget.schema, tabTarget.catalog, sql, title);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
@@ -2333,7 +2494,7 @@ async function openSidebarMultiTableDdlTab(targets: Array<TreeNode & { connectio
       return buildViewDdl({
         databaseType: databaseTypeForNode(target),
         identifierQuote: connectionStore.connectionIdentifierQuote?.(target.connectionId),
-        schema,
+        schema: connectionTableSqlSchema(connectionStore.getConfig(target.connectionId), schema),
         name: target.label,
         source: result.source,
       });
@@ -2398,6 +2559,78 @@ async function openDdlForSelection(node: TreeNode, selectedNodeIds: readonly str
   return true;
 }
 
+function openStructureEditorForSelection(node: TreeNode): boolean {
+  activateRuntimeNode(node);
+  if (!canOpenStructureEditor.value) return false;
+  openStructureEditor();
+  return true;
+}
+
+function selectedColumnNodes(node: TreeNode): Array<TreeNode & { connectionId: string; database: string; tableName: string }> {
+  if (node.type !== "column" || !node.connectionId || !node.database || !node.tableName) return [];
+  const selectedIds = acceptedSelectionIds ?? connectionStore.selectedTreeNodeIds;
+  const selected = orderSelectedTreeNodes(visibleTreeNodes(), selectedIds).filter(
+    (candidate): candidate is TreeNode & { connectionId: string; database: string; tableName: string } =>
+      candidate.type === "column" &&
+      (candidate.id === node.id || (candidate.connectionId === node.connectionId && candidate.database === node.database && (candidate.schema || "") === (node.schema || "") && (candidate.catalog || "") === (node.catalog || "") && candidate.tableName === node.tableName)),
+  );
+  return selected.length > 0 ? selected : [node as TreeNode & { connectionId: string; database: string; tableName: string }];
+}
+
+async function openColumnDdl() {
+  const node = activeNode.value;
+  const columnNodes = selectedColumnNodes(node);
+  if (!columnNodes.length) return;
+  const firstNode = columnNodes[0]!;
+  const config = connectionStore.getConfig(firstNode.connectionId);
+  const databaseType = effectiveDatabaseTypeForConnection(config);
+  const columns = columnNodes.map((columnNode) => columnNode.meta as ColumnInfo | undefined);
+  if (columns.some((column) => !column)) return;
+  const drafts = createColumnDrafts(columns as ColumnInfo[], databaseType);
+  if (!drafts.length || drafts.length !== columnNodes.length) return;
+  for (const draft of drafts) {
+    // Keep the original snapshot so MySQL generated-column expressions remain
+    // available to the SQL builder. The internal id marks this request as an
+    // ADD preview without changing the meaning of originalPosition.
+    draft.id = `ddl-preview:${draft.id}`;
+    draft.markedForDrop = false;
+  }
+
+  const tableSchema = connectionObjectTreeNodeSchema(config, firstNode.database, firstNode.schema);
+  const options: BuildSingleColumnAlterSqlOptions[] = drafts.map((columnDraft) => ({
+    databaseType,
+    driverProfile: config?.driver_profile,
+    schema: tableSchema,
+    tableName: firstNode.tableName,
+    column: columnDraft,
+  }));
+  const names = drafts.map((draft) => draft.name).join(", ");
+  const tableLabel = `${firstNode.tableName}.${names}`;
+  structurePreviewTitle.value = t("contextMenu.exportStructurePreviewTitle", { name: tableLabel });
+  structurePreviewDefaultFileName.value = `${firstNode.tableName}.columns.sql`;
+  structurePreviewDdlStorageType.value = undefined;
+  structurePreviewError.value = "";
+  structurePreviewSql.value = "";
+  isLoadingStructurePreview.value = true;
+  showStructurePreviewDialog.value = true;
+
+  try {
+    await connectionStore.ensureConnected(firstNode.connectionId);
+    const results = await Promise.all(options.map((option) => api.buildSingleColumnAlterSql(option)));
+    structurePreviewSql.value = joinExportedDdls(results.flatMap((result) => result.statements));
+    const warnings = results.flatMap((result) => result.warnings);
+    if (!structurePreviewSql.value) {
+      structurePreviewError.value = warnings.join("\n") || t("customType.ddl.empty");
+    } else if (warnings.length > 0) {
+      toast(warnings.join("\n"), 5000);
+    }
+  } catch (error: any) {
+    structurePreviewError.value = translateBackendError(t, error);
+  } finally {
+    isLoadingStructurePreview.value = false;
+  }
+}
+
 function openElasticsearchIndexMetadata(kind: ElasticsearchIndexMetadataKind) {
   emit("open-elasticsearch-index-metadata", createSidebarActionTarget(activeNode.value), kind);
 }
@@ -2447,20 +2680,48 @@ async function copyDisplayPath() {
   }
 }
 
+async function copyQualifiedName() {
+  const active = activeNode.value;
+  const selected = selectedTreeNodesInVisibleOrder();
+  const targets = selected.some((node) => node.id === active.id) ? selected : [active];
+  const connectionId = active.connectionId;
+  if (!connectionId || targets.some((node) => node.connectionId !== connectionId)) {
+    toast(t("contextMenu.copyQualifiedNameSameConnection"), 4000);
+    return;
+  }
+  const options = sidebarTableCopyFormatOptions(active);
+  const names = targets.map((node) => qualifiedNameForSidebarNode(node, options));
+  const invalid = names.findIndex((name) => !name);
+  if (invalid >= 0) {
+    toast(t("contextMenu.copyQualifiedNameUnavailable", { name: targets[invalid]?.label ?? "" }), 4000);
+    return;
+  }
+  try {
+    await copyToClipboard(names.join("\n"));
+    toast(t("connection.copied"), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 function copyNameMenuItem(): ContextMenuItem {
   const node = activeNode.value;
   const connectionName = node.connectionId ? connectionStore.getConfig(node.connectionId)?.name || "" : "";
-  if (copyDisplayPathForTreeNode(node, connectionName)) {
+  const displayPath = copyDisplayPathForTreeNode(node, connectionName);
+  const qualifiedName = qualifiedNameForSidebarNode(node, sidebarTableCopyFormatOptions(node));
+  if (displayPath || qualifiedName) {
     return {
+      sidebarActionId: "contextMenu.copyName",
       label: t("contextMenu.copyName"),
       icon: Copy,
       children: [
-        { label: t("contextMenu.name"), action: copyName, icon: Copy },
-        { label: t("contextMenu.fullPath"), action: copyDisplayPath, icon: Copy },
+        { sidebarActionId: "contextMenu.name", label: t("contextMenu.name"), action: copyName, icon: Copy },
+        ...(displayPath ? [{ sidebarActionId: "contextMenu.fullPath", label: t("contextMenu.fullPath"), action: copyDisplayPath, icon: Copy }] : []),
+        ...(qualifiedName ? [{ sidebarActionId: "contextMenu.copyQualifiedName", label: t("contextMenu.copyQualifiedName"), action: copyQualifiedName, icon: Copy }] : []),
       ],
     };
   }
-  return { label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value };
+  return { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value };
 }
 
 const CONNECTION_URL_COPY_LABEL_KEYS: Record<ConnectionUrlCopyFormat, string> = {
@@ -2486,9 +2747,10 @@ function connectionUrlCopyMenuItem(databaseOverride?: string): ContextMenuItem |
   const node = activeNode.value;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
   if (!config) return null;
-  const formats = connectionUrlCopyFormats(config);
+  const formats = connectionUrlCopyFormats(config).filter((format) => passwordViewerEnabled.value || !CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS.has(format));
   if (formats.length === 0) return null;
   return {
+    sidebarActionId: "contextMenu.copyConnectionInfo",
     label: t("contextMenu.copyConnectionInfo"),
     icon: Link2,
     children: formats.map((format) => ({
@@ -2621,10 +2883,11 @@ function dropObjectSqlOptions(): DropObjectSqlOptions | null {
 
 function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | null {
   if (node.type !== "view" && node.type !== "materialized_view" && node.type !== "procedure" && node.type !== "function" && node.type !== "event") return null;
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
   return {
     databaseType: tableStructureDatabaseTypeForNode(node),
     objectType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : node.type === "function" ? "FUNCTION" : "EVENT",
-    schema: node.schema,
+    schema: connectionTableSqlSchema(config, node.schema),
     name: node.objectName || node.label,
     signature: node.signature,
     // Cloud Spanner's dialect decides the quote; the static per-type mapping cannot.
@@ -2739,8 +3002,9 @@ async function refreshDropTableChildObjectPreviewSql() {
   dropTableChildObjectPreviewSql.value = options ? await buildDropTableChildObjectSql(options).catch(() => "") : "";
 }
 
-function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false) {
-  const node = activeNode.value;
+function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false, dependencyNode?: TreeNode) {
+  const node = dependencyNode || activeNode.value;
+  const initialSection = dependencyNode ? "dependencies" : undefined;
   if (!node.connectionId || !node.database) return;
   if (viewPackageBody && (node.type !== "package" || node.xuguPackageBodyAvailable !== true || currentDatabaseType() !== "xugu")) return;
   const sourceNode: TreeNode = viewPackageBody ? { ...node, type: "package-body" } : node;
@@ -2763,11 +3027,12 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
       schema,
       catalog: node.catalog,
       initialEditing,
+      initialSection,
       request: { name: sourceTarget.name, objectType: sourceTarget.objectType, signature: sourceNode.signature },
     });
     return;
   }
-  emit("open-object-source", sourceNode, initialEditing);
+  emit("open-object-source", sourceNode, initialEditing, initialSection);
 }
 
 function openProcedureExecution() {
@@ -2780,13 +3045,20 @@ async function openDatabaseObjectDependencies() {
   const node = activeNode.value;
   const provider = databaseDependencyProviderFor(currentDatabaseType());
   if (!provider || !node.connectionId || !node.database || !provider.supports(node)) return;
+  if (currentDatabaseType() === "oracle" || currentDatabaseType() === "oceanbase-oracle") {
+    const target = oracleTarget(node);
+    if (!target) return;
+    openObjectSourceDialog(false, false, { ...node, type: target.type.toLowerCase() as "procedure" | "function" | "package", schema: target.schema, objectName: target.name, label: target.name, parentType: undefined, parentName: undefined, parentSchema: undefined });
+    return;
+  }
   const sql = provider.buildQuery(node);
   if (!sql) return;
 
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
-    const objectName = node.objectName || node.label;
+    const target = provider.targetLabel?.(node);
+    const objectName = target ? `${target.packageScope ? `${t("common.package")} ` : ""}${target.name}` : node.objectName || node.label;
     const tabId = queryStore.createTab(node.connectionId, node.database, `${t("contextMenu.viewDependencies")} - ${objectName}`, "query", node.schema, undefined, node.catalog, { forceNew: true });
     queryStore.updateSql(tabId, sql);
     await queryStore.executeTabSql(tabId, sql);
@@ -2859,6 +3131,99 @@ async function executeXuguSchedulerJobAction(action: XuguSchedulerJobAction) {
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+function findTreeNodeById(nodes: readonly TreeNode[], id: string): TreeNode | null {
+  for (const item of nodes) {
+    if (item.id === id) return item;
+    if (item.children?.length) {
+      const found = findTreeNodeById(item.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+async function toggleTriggerState(node: TreeNode, enabled: boolean) {
+  if (!node.connectionId || !node.database) return;
+  const databaseType = databaseTypeForNode(node);
+  const triggerName = node.meta && "name" in node.meta ? (node.meta as TriggerInfo).name : node.objectName || node.label.replace(/\s+\(.+\)$/, "");
+  if (!triggerName) return;
+
+  const sql = buildTriggerToggleSql({
+    databaseType,
+    schema: node.schema,
+    tableName: node.tableName,
+    triggerName,
+    enabled,
+  });
+  if (!sql) return;
+
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
+    const updatedMeta: TriggerInfo = {
+      // The fallback must satisfy TriggerInfo; the spread ternary's narrower
+      // arm is what tripped vue-tsc (TS2322) in CI.
+      ...(node.meta && typeof node.meta === "object" ? (node.meta as TriggerInfo) : { name: triggerName, event: "", timing: "" }),
+      enabled,
+    };
+    // `node` may be a frozen action-target copy (createSidebarActionTarget);
+    // assigning to it throws in strict mode, and the live node below is the
+    // only assignment that matters.
+    const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? findTreeNodeById(connectionStore.treeNodes, node.id);
+    if (liveNode) {
+      liveNode.meta = updatedMeta;
+    }
+    toast(t(enabled ? "contextMenu.enableTriggerSuccess" : "contextMenu.disableTriggerSuccess", { name: triggerName }), 3000);
+    await connectionStore.refreshTreeNode(node);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+function triggerToggleMenuItems(node: TreeNode): ContextMenuItem[] {
+  const dbType = databaseTypeForNode(node);
+  if (!supportsTriggerToggle(dbType)) return [];
+  const triggerName = node.meta && "name" in node.meta ? (node.meta as TriggerInfo).name : node.objectName || node.label.replace(/\s+\(.+\)$/, "");
+  if (!triggerName) return [];
+  if (["postgres", "kingbase", "opengauss", "vastbase", "highgo", "uxdb", "gaussdb", "kwdb"].includes(dbType || "") && !node.tableName) {
+    return [];
+  }
+
+  const trigger = node.meta as TriggerInfo | undefined;
+  const currentEnabled = trigger?.enabled;
+  const items: ContextMenuItem[] = [];
+
+  if (currentEnabled === false) {
+    items.push({
+      label: t("contextMenu.enableTrigger"),
+      action: () => toggleTriggerState(node, true),
+      icon: Play,
+    });
+  } else if (currentEnabled === true) {
+    items.push({
+      label: t("contextMenu.disableTrigger"),
+      action: () => toggleTriggerState(node, false),
+      icon: Ban,
+    });
+  } else {
+    items.push(
+      {
+        label: t("contextMenu.enableTrigger"),
+        action: () => toggleTriggerState(node, true),
+        icon: Play,
+      },
+      {
+        label: t("contextMenu.disableTrigger"),
+        action: () => toggleTriggerState(node, false),
+        icon: Ban,
+      },
+    );
+  }
+
+  return items;
 }
 
 function requestDropObject() {
@@ -3128,7 +3493,7 @@ function selectedBatchMysqlAutoIncrementTargets(): TreeNode[] {
   const targets = selectedBatchTableTargets();
   return targets.filter((node) => {
     const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
-    return supportsNativeMysqlAutoIncrement(config);
+    return connectionSupportsMysqlAutoIncrement(config);
   });
 }
 
@@ -3180,7 +3545,7 @@ async function confirmBatchMysqlAutoIncrement() {
     }
     try {
       const config = connectionStore.getConfig(target.connectionId);
-      if (!supportsNativeMysqlAutoIncrement(config)) throw new Error("Setting AUTO_INCREMENT is supported only for native MySQL connections.");
+      if (!connectionSupportsMysqlAutoIncrement(config)) throw new Error("Setting AUTO_INCREMENT is supported only for compatible MySQL-family connections.");
       await connectionStore.ensureConnected(target.connectionId);
       const sqlOptions = batchMysqlAutoIncrementSqlOptionsForNode(target);
       const sql = await buildMysqlAutoIncrementSql(sqlOptions);
@@ -3236,27 +3601,53 @@ function requestDropSelectedNode(): boolean {
   return false;
 }
 
-function nodeRenameObjectType(): RenameableObjectType | null {
-  if (activeNode.value.type === "table") return "TABLE";
-  if (activeNode.value.type === "view") return "VIEW";
-  if (activeNode.value.type === "materialized_view") return "MATERIALIZED_VIEW";
-  if (activeNode.value.type === "procedure") return "PROCEDURE";
-  if (activeNode.value.type === "function") return "FUNCTION";
+function nodeRenameObjectType(node: TreeNode = activeNode.value): RenameableObjectType | null {
+  if (node.type === "table") return "TABLE";
+  if (node.type === "view") return "VIEW";
+  if (node.type === "materialized_view") return "MATERIALIZED_VIEW";
+  if (node.type === "procedure") return "PROCEDURE";
+  if (node.type === "function") return "FUNCTION";
   return null;
 }
 
 const canRenameObject = computed(() => {
-  const objectType = nodeRenameObjectType();
-  return !!objectType && (supportsObjectRename(currentDatabaseType(), objectType) || supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any));
+  const node = activeNode.value;
+  const objectType = nodeRenameObjectType(node);
+  return !!objectType && (supportsObjectRename(currentDatabaseType(), objectType) || (databaseTypeForNode(node) === "oceanbase-oracle" && (objectType === "PROCEDURE" || objectType === "FUNCTION")) || supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any));
 });
 
 function openRenameObjectDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
-  renameObjectName.value = activeNode.value.label;
+  const node = sidebarFormTarget.value ?? activeNode.value;
+  const targetKey = JSON.stringify([node.connectionId, node.database, node.schema || node.database, node.type, node.objectName || node.label, databaseTypeForNode(node)]);
+  if (targetKey !== currentSidebarViewRenameTargetKey) renameObjectName.value = node.label;
   renameObjectError.value = "";
   renameObjectPreviewSql.value = "";
+  viewRenamePlan.value = undefined;
+  routineRenamePlan.value = undefined;
+  tableRenamePlan.value = undefined;
   showRenameObjectDialog.value = true;
+}
+
+let currentPackageSaveAsSourceKey = "";
+function openPackageSaveAsDialog(node = activeNode.value) {
+  if ((databaseTypeForNode(node) !== "oracle" && databaseTypeForNode(node) !== "oceanbase-oracle") || (node.type !== "package" && node.type !== "package-body")) return;
+  const oldName = node.objectName || node.label;
+  const sourceKey = JSON.stringify([node.connectionId, node.database, node.schema || node.database, oldName, databaseTypeForNode(node)]);
+  const sameTarget = sourceKey === currentPackageSaveAsSourceKey;
+  currentPackageSaveAsSourceKey = sourceKey;
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  packageSaveAsTarget.value = node;
+  if (!sameTarget) {
+    packageSaveAsName.value = `${oldName}_COPY`;
+    packageSaveAsDrafts.value = {};
+  }
+  packageSaveAsPlan.value = undefined;
+  packageSaveAsError.value = "";
+  packageSaveAsDiagnostic.value = "";
+  packageSaveAsOpen.value = true;
 }
 
 function openRenameDatabaseDialog() {
@@ -3265,6 +3656,9 @@ function openRenameDatabaseDialog() {
   renameObjectName.value = activeNode.value.label;
   renameObjectError.value = "";
   renameObjectPreviewSql.value = "";
+  viewRenamePlan.value = undefined;
+  viewRenameDrafts.value = {};
+  routineRenamePlan.value = undefined;
   showRenameObjectDialog.value = true;
 }
 
@@ -3279,6 +3673,8 @@ async function executeTreeNodeSqlWithProductionGuard(
     isCancelledBeforeDispatch?: () => boolean;
     beforeExecute?: () => Promise<void>;
     markDispatched?: () => void;
+    timeoutSecs?: number;
+    execute?: (timeoutSecs: number) => ReturnType<typeof api.executeQuery>;
   } = {},
 ) {
   if (!node.connectionId) return undefined;
@@ -3304,19 +3700,43 @@ async function executeTreeNodeSqlWithProductionGuard(
       await options.beforeExecute?.();
       if (options.isCancelledBeforeDispatch?.()) throw new Error("Operation cancelled before it was sent to the database.");
       options.markDispatched?.();
-      return options.executeAsScript ? api.executeScript(node.connectionId!, database, sql, options.schema ?? node.schema) : api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema, executionId, { timeoutSecs });
+      if (options.execute) return options.execute(options.timeoutSecs ?? timeoutSecs);
+      return options.executeAsScript ? api.executeScript(node.connectionId!, database, sql, options.schema ?? node.schema) : api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema, executionId, { timeoutSecs: options.timeoutSecs ?? timeoutSecs });
     },
   });
 }
 
 let renameObjectPreviewRequestId = 0;
+let currentSidebarViewRenameTargetKey = "";
+const viewRenamePlan = ref<OracleViewRenamePlan>();
+const viewRenameDrafts = ref<Record<string, string>>({});
+const routineRenamePlan = ref<OracleRoutineRenamePlan>();
+const routineRenameDrafts = ref<Record<string, string>>({});
+const tableRenamePlan = ref<OracleTableRenamePlan>();
+const tableRenameDrafts = ref<Record<string, string>>({});
+const packageSaveAsOpen = ref(false);
+const packageSaveAsTarget = ref<TreeNode | null>(null);
+const packageSaveAsName = ref("");
+const packageSaveAsPlan = ref<OraclePackageSaveAsPlan>();
+const packageSaveAsDrafts = ref<{ spec?: string; body?: string }>({});
+const packageSaveAsLoading = ref(false);
+const packageSaveAsExecuting = ref(false);
+const packageSaveAsError = ref("");
+const packageSaveAsDiagnostic = ref("");
+const viewRenameLoading = ref(false);
+const viewRenameValidating = ref(false);
+const packageSaveAsValidating = ref(false);
+const viewRenameExecuting = ref(false);
 
 async function refreshRenameObjectPreviewSql() {
-  const node = activeNode.value;
+  const node = sidebarFormTarget.value ?? activeNode.value;
   const requestId = ++renameObjectPreviewRequestId;
   const newName = renameObjectName.value.trim();
   if (!showRenameObjectDialog.value || !newName || newName === node.label) {
     renameObjectPreviewSql.value = "";
+    viewRenamePlan.value = undefined;
+    routineRenamePlan.value = undefined;
+    tableRenamePlan.value = undefined;
     return;
   }
   // Database rename path
@@ -3333,16 +3753,63 @@ async function refreshRenameObjectPreviewSql() {
     }
     return;
   }
-  const objectType = nodeRenameObjectType();
+  const objectType = nodeRenameObjectType(node);
   if (!objectType) {
     renameObjectPreviewSql.value = "";
     return;
   }
+  if ((databaseTypeForNode(node) === "oracle" || databaseTypeForNode(node) === "oceanbase-oracle") && (objectType === "PROCEDURE" || objectType === "FUNCTION") && node.connectionId && node.database) {
+    const targetKey = JSON.stringify([node.connectionId, node.database, node.schema || node.database, objectType, node.objectName || node.label, newName]);
+    const drafts = { ...routineRenameDrafts.value };
+    viewRenameLoading.value = true;
+    try {
+      const plan = await prepareOracleRoutineRename({ connectionId: node.connectionId, database: node.database, databaseType: databaseTypeForNode(node) as "oracle" | "oceanbase-oracle", schema: node.schema || node.database, objectType, oldName: node.objectName || node.label, newName }, drafts);
+      const currentNode = sidebarFormTarget.value ?? activeNode.value;
+      const currentTargetKey = JSON.stringify([currentNode.connectionId, currentNode.database, currentNode.schema || currentNode.database, nodeRenameObjectType(currentNode), currentNode.objectName || currentNode.label, renameObjectName.value.trim()]);
+      if (requestId === renameObjectPreviewRequestId && showRenameObjectDialog.value && targetKey === currentTargetKey && JSON.stringify(drafts) === JSON.stringify(routineRenameDrafts.value)) {
+        routineRenamePlan.value = plan;
+        renameObjectError.value = "";
+        renameObjectPreviewSql.value = plan.statements.join("\n\n");
+      }
+    } catch (error) {
+      if (requestId === renameObjectPreviewRequestId) renameObjectError.value = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (requestId === renameObjectPreviewRequestId) viewRenameLoading.value = false;
+    }
+    return;
+  }
+  if ((databaseTypeForNode(node) === "oracle" || databaseTypeForNode(node) === "oceanbase-oracle") && objectType === "TABLE" && node.connectionId && node.database) {
+    viewRenameLoading.value = true;
+    try {
+      const databaseType = databaseTypeForNode(node) as "oracle" | "oceanbase-oracle";
+      const plan = await prepareOracleTableRename({ connectionId: node.connectionId, database: node.database, databaseType, schema: node.schema || node.database, oldName: node.objectName || node.label, newName }, tableRenameDrafts.value);
+      if (requestId === renameObjectPreviewRequestId) {
+        tableRenamePlan.value = plan;
+        renameObjectError.value = "";
+        renameObjectPreviewSql.value = `-- ${t("objects.tableRenameCoverage")}\n\n${plan.statements.join("\n\n")}`;
+      }
+    } catch (error) {
+      if (requestId === renameObjectPreviewRequestId) renameObjectError.value = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (requestId === renameObjectPreviewRequestId) viewRenameLoading.value = false;
+    }
+    return;
+  }
   if (supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any)) {
-    renameObjectPreviewSql.value = `-- Recreate ${objectType} from source, then drop the original object.`;
+    renameObjectPreviewSql.value = t("objects.routineRenamePreview");
     return;
   }
   try {
+    if (databaseTypeForNode(node) === "oceanbase-oracle" && objectType === "VIEW" && node.connectionId && node.database) {
+      viewRenameLoading.value = true;
+      const plan = await prepareOracleViewRename({ connectionId: node.connectionId, database: node.database, schema: node.schema || node.database, oldName: node.objectName || node.label, newName }, viewRenameDrafts.value);
+      if (requestId === renameObjectPreviewRequestId) {
+        viewRenamePlan.value = plan;
+        renameObjectError.value = "";
+        renameObjectPreviewSql.value = `-- ${t("objects.viewRenameCoverage")}\n\n${plan.statements.join("\n\n")}`;
+      }
+      return;
+    }
     const sql = await buildRenameObjectSql({
       databaseType: currentDatabaseType(),
       objectType,
@@ -3351,23 +3818,249 @@ async function refreshRenameObjectPreviewSql() {
       newName,
     });
     if (requestId === renameObjectPreviewRequestId) renameObjectPreviewSql.value = sql;
-  } catch {
-    if (requestId === renameObjectPreviewRequestId) renameObjectPreviewSql.value = "";
+  } catch (error) {
+    if (requestId === renameObjectPreviewRequestId) {
+      renameObjectPreviewSql.value = "";
+      if (databaseTypeForNode(node) === "oceanbase-oracle" && objectType === "VIEW") renameObjectError.value = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    if (requestId === renameObjectPreviewRequestId) viewRenameLoading.value = false;
   }
 }
 
-watch([showRenameObjectDialog, renameObjectName, () => activeNode.value.label, () => activeNode.value.schema, () => activeNode.value.type, () => currentDatabaseType()], () => {
-  void refreshRenameObjectPreviewSql();
-});
+function editSidebarViewRenameDraft(name: string, source: string) {
+  viewRenameDrafts.value = { ...viewRenameDrafts.value, [name]: source };
+  if (viewRenamePlan.value) viewRenamePlan.value = { ...viewRenamePlan.value, executable: false };
+}
+
+function editSidebarTableRenameDraft(name: string, source: string) {
+  tableRenameDrafts.value = { ...tableRenameDrafts.value, [name]: source };
+  if (tableRenamePlan.value) tableRenamePlan.value = { ...tableRenamePlan.value, executable: false };
+}
+
+function editSidebarRoutineRenameDraft(name: string, source: string) {
+  routineRenameDrafts.value = { ...routineRenameDrafts.value, [name]: source };
+  ++renameObjectPreviewRequestId;
+  if (routineRenamePlan.value) routineRenamePlan.value = { ...routineRenamePlan.value, executable: false };
+}
+
+async function validateSidebarRoutineRenameDrafts() {
+  if (routineRenamePlan.value) routineRenamePlan.value = { ...routineRenamePlan.value, executable: false };
+  viewRenameValidating.value = true;
+  try {
+    await refreshRenameObjectPreviewSql();
+  } finally {
+    viewRenameValidating.value = false;
+  }
+}
+
+async function validateSidebarTableRenameDrafts(clearDrafts = false) {
+  if (clearDrafts) tableRenameDrafts.value = {};
+  viewRenameValidating.value = true;
+  try {
+    await refreshRenameObjectPreviewSql();
+  } finally {
+    viewRenameValidating.value = false;
+  }
+}
+
+async function validateSidebarViewRenameDrafts(clearDrafts = false) {
+  if (clearDrafts) viewRenameDrafts.value = {};
+  viewRenameValidating.value = true;
+  try {
+    await refreshRenameObjectPreviewSql();
+  } finally {
+    viewRenameValidating.value = false;
+  }
+}
+
+watch(
+  () => {
+    const target = sidebarFormTarget.value ?? activeNode.value;
+    return [showRenameObjectDialog.value, renameObjectName.value, target.connectionId, target.database, target.schema, target.type, target.objectName, target.label, databaseTypeForNode(target)];
+  },
+  (_value, _oldValue, onCleanup) => {
+    ++renameObjectPreviewRequestId;
+    const target = sidebarFormTarget.value ?? activeNode.value;
+    const targetKey =
+      ((databaseTypeForNode(target) === "oracle" || databaseTypeForNode(target) === "oceanbase-oracle") && ["procedure", "function", "table"].includes(target.type)) || (databaseTypeForNode(target) === "oceanbase-oracle" && target.type === "view")
+        ? JSON.stringify([target.connectionId, target.database, target.schema || target.database, target.type, target.objectName || target.label, databaseTypeForNode(target)])
+        : "";
+    if (targetKey !== currentSidebarViewRenameTargetKey) {
+      currentSidebarViewRenameTargetKey = targetKey;
+      viewRenameDrafts.value = {};
+      viewRenamePlan.value = undefined;
+      routineRenamePlan.value = undefined;
+      tableRenamePlan.value = undefined;
+      routineRenameDrafts.value = {};
+      tableRenameDrafts.value = {};
+    } else if (viewRenamePlan.value) viewRenamePlan.value = { ...viewRenamePlan.value, executable: false };
+    if (routineRenamePlan.value) routineRenamePlan.value = { ...routineRenamePlan.value, executable: false };
+    if (tableRenamePlan.value) tableRenamePlan.value = { ...tableRenamePlan.value, executable: false };
+    const databaseType = databaseTypeForNode(target);
+    const supportedTarget = ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && (target.type === "table" || target.type === "procedure" || target.type === "function")) || (databaseType === "oceanbase-oracle" && target.type === "view");
+    if (!supportedTarget) {
+      viewRenamePlan.value = undefined;
+      routineRenamePlan.value = undefined;
+      tableRenamePlan.value = undefined;
+      void refreshRenameObjectPreviewSql();
+      return;
+    }
+    const timer = setTimeout(() => void refreshRenameObjectPreviewSql(), 250);
+    onCleanup(() => clearTimeout(timer));
+  },
+);
+
+let packageSaveAsPreviewRequestId = 0;
+watch(
+  () => {
+    const target = packageSaveAsTarget.value;
+    return [packageSaveAsOpen.value, packageSaveAsName.value, target?.connectionId, target?.database, target?.schema, target?.type, target?.objectName, target?.label, target ? databaseTypeForNode(target) : undefined];
+  },
+  (_value, _oldValue, onCleanup) => {
+    const requestId = ++packageSaveAsPreviewRequestId;
+    const target = packageSaveAsTarget.value;
+    const newName = packageSaveAsName.value.trim();
+    const oldName = target?.objectName || target?.label || "";
+    const sourceKey = target ? JSON.stringify([target.connectionId, target.database, target.schema || target.database, oldName, databaseTypeForNode(target)]) : "";
+    if (sourceKey && sourceKey !== currentPackageSaveAsSourceKey) {
+      currentPackageSaveAsSourceKey = sourceKey;
+      packageSaveAsDrafts.value = {};
+    }
+    packageSaveAsPlan.value = undefined;
+    packageSaveAsError.value = "";
+    packageSaveAsDiagnostic.value = "";
+    if (!packageSaveAsOpen.value || !target || !target.connectionId || !target.database || !newName) return;
+    const databaseType = databaseTypeForNode(target);
+    if ((databaseType !== "oracle" && databaseType !== "oceanbase-oracle") || (target.type !== "package" && target.type !== "package-body") || newName === oldName) return;
+    const timer = setTimeout(async () => {
+      packageSaveAsLoading.value = true;
+      const drafts = { ...packageSaveAsDrafts.value };
+      try {
+        const plan = await prepareOraclePackageSaveAs({ connectionId: target.connectionId!, database: target.database!, databaseType, schema: target.schema || target.database!, oldName, newName }, drafts);
+        if (requestId === packageSaveAsPreviewRequestId && packageSaveAsTarget.value === target && packageSaveAsName.value.trim() === newName && JSON.stringify(packageSaveAsDrafts.value) === JSON.stringify(drafts)) packageSaveAsPlan.value = plan;
+      } catch (error) {
+        if (requestId === packageSaveAsPreviewRequestId) packageSaveAsDiagnostic.value = error instanceof Error ? error.message : String(error);
+      } finally {
+        if (requestId === packageSaveAsPreviewRequestId) packageSaveAsLoading.value = false;
+      }
+    }, 250);
+    onCleanup(() => clearTimeout(timer));
+  },
+);
+
+function editPackageSaveAsDraft(part: "spec" | "body", source: string) {
+  packageSaveAsDrafts.value = { ...packageSaveAsDrafts.value, [part]: source };
+  ++packageSaveAsPreviewRequestId;
+  if (packageSaveAsPlan.value) packageSaveAsPlan.value = { ...packageSaveAsPlan.value, executable: false };
+}
+
+async function validatePackageSaveAsDrafts() {
+  const target = packageSaveAsTarget.value;
+  const newName = packageSaveAsName.value.trim();
+  if (!target?.connectionId || !target.database || !newName) return;
+  const databaseType = databaseTypeForNode(target);
+  if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle") return;
+  const oldName = target.objectName || target.label;
+  if (newName === oldName) return;
+  const requestId = ++packageSaveAsPreviewRequestId;
+  const drafts = { ...packageSaveAsDrafts.value };
+  const targetKey = JSON.stringify([target.connectionId, target.database, target.schema || target.database, oldName, databaseType]);
+  packageSaveAsValidating.value = true;
+  try {
+    const plan = await prepareOraclePackageSaveAs({ connectionId: target.connectionId, database: target.database, databaseType, schema: target.schema || target.database, oldName, newName }, drafts);
+    const current = packageSaveAsTarget.value;
+    const currentKey = current ? JSON.stringify([current.connectionId, current.database, current.schema || current.database, current.objectName || current.label, databaseTypeForNode(current)]) : "";
+    if (requestId === packageSaveAsPreviewRequestId && packageSaveAsTarget.value === target && packageSaveAsOpen.value && packageSaveAsName.value.trim() === newName && targetKey === currentKey && JSON.stringify(packageSaveAsDrafts.value) === JSON.stringify(drafts)) packageSaveAsPlan.value = plan;
+  } catch (error) {
+    packageSaveAsDiagnostic.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    packageSaveAsValidating.value = false;
+  }
+}
+
+async function confirmPackageSaveAs() {
+  const target = packageSaveAsTarget.value;
+  const plan = packageSaveAsPlan.value;
+  if (!target || !target.connectionId || !target.database || !plan?.executable || !packageSaveAsOpen.value) return;
+  if (plan.target.connectionId !== target.connectionId || plan.target.database !== target.database || plan.target.schema !== (target.schema || target.database) || plan.target.oldName !== (target.objectName || target.label) || plan.target.newName !== packageSaveAsName.value.trim()) {
+    packageSaveAsError.value = t("objects.packageSaveAsMetadataProblem");
+    return;
+  }
+  packageSaveAsExecuting.value = true;
+  packageSaveAsError.value = "";
+  packageSaveAsDiagnostic.value = "";
+  const isCurrentPlan = () => {
+    const current = packageSaveAsTarget.value;
+    return (
+      packageSaveAsOpen.value &&
+      packageSaveAsPlan.value === plan &&
+      !!current &&
+      current.connectionId === plan.target.connectionId &&
+      current.database === plan.target.database &&
+      (current.schema || current.database) === plan.target.schema &&
+      (current.objectName || current.label) === plan.target.oldName &&
+      databaseTypeForNode(current) === plan.target.databaseType &&
+      packageSaveAsName.value.trim() === plan.target.newName
+    );
+  };
+  try {
+    await connectionStore.ensureConnected(target.connectionId);
+    const executed = await executeTreeNodeSqlWithProductionGuard(target, plan.statements.join("\n\n"), {
+      execute: async () => {
+        await executeOraclePackageSaveAs(plan, () => {
+          const current = packageSaveAsTarget.value;
+          return (
+            packageSaveAsPlan.value === plan &&
+            packageSaveAsOpen.value &&
+            !!current &&
+            current.connectionId === plan.target.connectionId &&
+            current.database === plan.target.database &&
+            (current.schema || current.database) === plan.target.schema &&
+            (current.objectName || current.label) === plan.target.oldName &&
+            packageSaveAsName.value.trim() === plan.target.newName &&
+            databaseTypeForNode(current) === plan.target.databaseType
+          );
+        });
+        return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+      },
+    });
+    if (!executed) return;
+    toast(t("objects.packageSaveAsSuccess", { oldName: plan.target.oldName, newName: plan.canonicalNewName }));
+    packageSaveAsOpen.value = false;
+    await connectionStore.refreshObjectListTreeNode(target.connectionId, target.database, target.schema || target.database);
+  } catch (error) {
+    if (isCurrentPlan()) {
+      packageSaveAsError.value = t("objects.packageSaveAsFailed");
+      packageSaveAsDiagnostic.value = error instanceof Error ? error.message : String(error);
+      packageSaveAsPlan.value = { ...plan, executable: false };
+    }
+    if (error instanceof OraclePackageSaveAsFailure && error.dispatched) {
+      try {
+        await connectionStore.refreshObjectListTreeNode(plan.target.connectionId, plan.target.database, plan.target.schema);
+      } catch {
+        // Keep the package DDL failure visible when metadata refresh also fails.
+      }
+    }
+  } finally {
+    packageSaveAsExecuting.value = false;
+  }
+}
 
 async function confirmRenameObject() {
   const node = sidebarFormTarget.value ?? activeNode.value;
-  const newName = renameObjectName.value.trim();
+  let newName = renameObjectName.value.trim();
   if (!newName || newName === node.label || !node.connectionId || !node.database) return;
   renameObjectError.value = "";
   let renameApplied = false;
+  let updatedViewDependencies: number | undefined;
+  let updatedTableDependencies: number | undefined;
+  let tableRenameFreeze: ReturnType<typeof freezeSourceIdentities> | undefined;
   try {
     const dbType = databaseTypeForNode(node);
+    if (node.type === "table" && dbType === "dameng") {
+      tableRenameFreeze = freezeSourceIdentities([{ connectionId: node.connectionId, database: node.database, schema: node.schema || node.database, objectType: "TABLE", name: node.label }]);
+    }
     await connectionStore.ensureConnected(node.connectionId);
 
     // Database rename path
@@ -3422,9 +4115,79 @@ async function confirmRenameObject() {
       return;
     }
 
-    const objectType = node.type === "table" ? "TABLE" : node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : node.type === "function" ? "FUNCTION" : null;
+    const objectType = nodeRenameObjectType(node);
     if (!objectType) return;
-    if (supportsSourceBackedRoutineRename(dbType, objectType as any)) {
+    if ((dbType === "oracle" || dbType === "oceanbase-oracle") && objectType === "TABLE") {
+      const plan = tableRenamePlan.value;
+      const schema = node.schema || node.database;
+      if (!plan || plan.target.newName !== newName || plan.target.oldName !== (node.objectName || node.label) || plan.target.schema !== schema || plan.target.connectionId !== node.connectionId || plan.target.database !== node.database) throw new Error(t("objects.viewRenameRefresh"));
+      if (!plan.executable) throw new Error(t("objects.viewRenameValidationPending"));
+      viewRenameExecuting.value = true;
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.statements.join("\n\n"), {
+        database: node.database,
+        schema,
+        execute: async () => {
+          await executeOracleTableRename(plan, tableRenameDrafts.value, () => {
+            const current = sidebarFormTarget.value ?? activeNode.value;
+            return (
+              tableRenamePlan.value === plan &&
+              showRenameObjectDialog.value &&
+              current.connectionId === plan.target.connectionId &&
+              current.database === plan.target.database &&
+              (current.schema || current.database) === plan.target.schema &&
+              (current.objectName || current.label) === plan.target.oldName
+            );
+          });
+          return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+        },
+      });
+      if (executed === undefined) return;
+      newName = plan.canonicalNewName;
+      updatedTableDependencies = plan.dependents.length;
+    } else if (dbType === "oceanbase-oracle" && objectType === "VIEW") {
+      const plan = viewRenamePlan.value;
+      if (!plan || plan.target.newName !== newName || plan.target.oldName !== (node.objectName || node.label) || plan.target.schema !== (node.schema || node.database) || plan.target.connectionId !== node.connectionId || plan.target.database !== node.database)
+        throw new Error(t("objects.viewRenameRefresh"));
+      if (!plan.executable) throw new Error(t("objects.viewRenameValidationPending"));
+      viewRenameExecuting.value = true;
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.statements.join("\n"), {
+        execute: async () => {
+          await executeOracleViewRename(plan, () => viewRenamePlan.value === plan && showRenameObjectDialog.value && (sidebarFormTarget.value ?? activeNode.value).connectionId === plan.target.connectionId && (sidebarFormTarget.value ?? activeNode.value).database === plan.target.database);
+          return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+        },
+      });
+      if (executed === undefined) return;
+      newName = plan.canonicalNewName;
+      updatedViewDependencies = plan.views.length - 1;
+    } else if ((dbType === "oracle" || dbType === "oceanbase-oracle") && (objectType === "PROCEDURE" || objectType === "FUNCTION")) {
+      const plan = routineRenamePlan.value;
+      const schema = node.schema || node.database;
+      if (!plan || plan.target.newName !== newName || plan.target.oldName !== (node.objectName || node.label) || plan.target.schema !== schema || plan.target.connectionId !== node.connectionId || plan.target.database !== node.database) throw new Error(t("objects.viewRenameRefresh"));
+      if (!plan.executable) throw new Error(t("objects.viewRenameValidationPending"));
+      viewRenameExecuting.value = true;
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.statements.join("\n\n"), {
+        database: node.database,
+        schema,
+        execute: async () => {
+          await executeOracleRoutineRename(plan, () => {
+            const current = sidebarFormTarget.value ?? activeNode.value;
+            const currentType = nodeRenameObjectType(current);
+            return (
+              routineRenamePlan.value === plan &&
+              showRenameObjectDialog.value &&
+              current.connectionId === plan.target.connectionId &&
+              current.database === plan.target.database &&
+              (current.schema || current.database) === plan.target.schema &&
+              (current.objectName || current.label) === plan.target.oldName &&
+              currentType === plan.target.objectType
+            );
+          });
+          return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+        },
+      });
+      if (executed === undefined) return;
+      newName = plan.canonicalNewName;
+    } else if (supportsSourceBackedRoutineRename(dbType, objectType as any)) {
       const schema = node.schema || node.database;
       const source = await api.getObjectSource(node.connectionId, node.database, schema, node.objectName || node.label, objectType as any, node.signature);
       const statements = await buildRoutineRenameObjectSourceStatements({
@@ -3435,9 +4198,15 @@ async function confirmRenameObject() {
         newName,
         source: source.source,
       });
-      for (const sql of statements) {
-        await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema });
-      }
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, statements.join(";\n"), {
+        database: node.database,
+        schema,
+        execute: async (timeoutSecs) => {
+          await executeObjectSourceSave(node.connectionId!, node.database!, dbType!, statements, schema, timeoutSecs);
+          return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
+        },
+      });
+      if (executed === undefined) return;
     } else {
       const sql = await buildRenameObjectSql({
         databaseType: dbType,
@@ -3446,21 +4215,51 @@ async function confirmRenameObject() {
         oldName: node.label,
         newName,
       });
-      await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+      const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
+        database: node.database,
+        schema: node.schema,
+        markDispatched: () => tableRenameFreeze?.markDispatched(),
+      });
+      if (executed === undefined) return;
     }
     renameApplied = true;
-    toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
+    toast(
+      updatedTableDependencies !== undefined
+        ? t("objects.tableRenameSuccess", { oldName: node.label, newName, count: updatedTableDependencies })
+        : updatedViewDependencies !== undefined
+          ? t("objects.viewRenameSuccess", { oldName: node.label, newName, count: updatedViewDependencies })
+          : t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }),
+      3000,
+    );
     showRenameObjectDialog.value = false;
     const renamedNode: TreeNode = { ...node, label: newName, objectName: newName, tableName: newName };
     await refreshTableList(node);
     connectionStore.replacePinnedTreeNode(node, renamedNode);
   } catch (e: any) {
+    if (e instanceof OracleViewRenameFailure) {
+      connectionStore.removePinnedTreeNodes([node]);
+      renameObjectPreviewSql.value += `\n\n-- ${t("objects.viewRenameRecovery")}\n${e.plan.views.map((view) => view.source).join("\n\n")}`;
+    }
+    if (e instanceof OracleRoutineRenameFailure) {
+      renameObjectError.value = e.message;
+      if (routineRenamePlan.value) routineRenamePlan.value = { ...routineRenamePlan.value, executable: false };
+    }
+    if (e instanceof OracleTableRenameFailure) {
+      renameObjectError.value = e.message;
+      if (tableRenamePlan.value) tableRenamePlan.value = { ...tableRenamePlan.value, executable: false };
+      if (e.completed.some((step) => step.startsWith("TABLE "))) connectionStore.removePinnedTreeNodes([node]);
+    }
+    if (viewRenamePlan.value) viewRenamePlan.value = { ...viewRenamePlan.value, executable: false, issues: [...viewRenamePlan.value.issues, { code: "metadata_drift", message: e?.message || String(e), repairable: false }] };
     if (renameApplied) {
       // The database mutation succeeded even when metadata refresh did not;
       // remove the old pin instead of allowing it to revive later.
       connectionStore.removePinnedTreeNodes([node]);
     }
     renameObjectError.value = e?.message || String(e);
+  } finally {
+    tableRenameFreeze?.cancel();
+    tableRenameFreeze?.finish();
+    viewRenameExecuting.value = false;
   }
 }
 
@@ -3799,12 +4598,12 @@ const canSetCreateDatabaseCharset = computed(() => {
 
 const canSetCreateDatabaseLocale = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return connectionNamespaceCreationTarget(config) === "database" && supportsCreateDatabaseLocale(config?.db_type, config?.driver_profile);
+  return connectionNamespaceCreationTarget(config) === "database" && supportsCreateDatabaseLocale(config?.db_type);
 });
 
 const canDropDatabase = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return activeNode.value.type === "database" && !isSqlServerLinkedNode(activeNode.value) && (supportsDatabaseCreation(config?.db_type) || supportsCreateDatabaseLocale(config?.db_type, config?.driver_profile));
+  return canDropDatabaseNode(activeNode.value, config);
 });
 
 const databasePropertyGroups = computed(() => {
@@ -4512,7 +5311,7 @@ async function confirmDropDatabase() {
   }
 
   const connectionId = node.connectionId;
-  if (!connectionId || dropDatabaseLoading.value) return;
+  if (!connectionId || dropDatabaseLoading.value || !canDropDatabaseNode(node, connectionStore.getConfig(connectionId))) return false;
   dropDatabaseLoading.value = true;
   try {
     await connectionStore.ensureConnected(connectionId);
@@ -4534,6 +5333,8 @@ async function confirmDropDatabase() {
       connectionStore.removeTreeNode(node.id);
     }
     showDropDatabaseConfirm.value = false;
+    notifyDatabaseBrowserMutation({ connectionId, database: node.database || node.label, operation: "drop-database" });
+    queryStore.closeDatabaseTabs(connectionId, node.database || node.label);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   } finally {
@@ -4615,12 +5416,22 @@ async function confirmDropSchema() {
   }
 }
 
-function duplicateStructure(source: TreeNode = activeNode.value) {
+function copyAsNewTable(source: TreeNode = activeNode.value) {
   if (!isDuplicateStructureSource(source)) return;
   if (databaseTypeForNode(source) === "victoriametrics") return;
-  duplicateStructureSource.value = source;
-  duplicateTableName.value = `${source.label}_copy`;
-  showDuplicateDialog.value = true;
+  pasteTableFromClipboard.value = false;
+  pasteTableMode.value = defaultPasteTableMode(databaseTypeForNode(source));
+  pasteTableEntries.value = [
+    {
+      sourceName: source.label,
+      targetName: `${source.label}_copy`,
+      connectionId: source.connectionId,
+      database: source.database,
+      schema: normalizeTreeClipboardSchema(source.connectionId, source.database, source.schema),
+      tableComment: source.comment,
+    },
+  ];
+  showPasteDialog.value = true;
 }
 
 function isDuplicateStructureSource(node: TreeNode): node is DuplicateStructureSource {
@@ -4628,14 +5439,21 @@ function isDuplicateStructureSource(node: TreeNode): node is DuplicateStructureS
 }
 
 async function confirmDuplicateStructure() {
-  const node = duplicateStructureSource.value || (isDuplicateStructureSource(activeNode.value) ? activeNode.value : null);
+  const node = duplicateStructureSource.value || activeNode.value;
+  return databaseTypeForNode(node) === "oceanbase-oracle" ? cloneDialog.run(confirmDuplicateStructureImpl) : confirmDuplicateStructureImpl();
+}
+
+async function confirmDuplicateStructureImpl() {
+  const sourceNode = duplicateStructureSource.value || (isDuplicateStructureSource(activeNode.value) ? activeNode.value : null);
+  const node = sourceNode ? { ...sourceNode } : null;
   const newName = duplicateTableName.value.trim();
   if (!newName || !node) return;
   if (databaseTypeForNode(node) === "victoriametrics") return;
+  const databaseType = databaseTypeForNode(node);
+  const identifierQuote = connectionStore.connectionIdentifierQuote?.(node.connectionId);
   showDuplicateDialog.value = false;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const databaseType = databaseTypeForNode(node);
     const plan = await buildDuplicateTableStructurePlan({
       connectionId: node.connectionId,
       database: node.database,
@@ -4645,24 +5463,49 @@ async function confirmDuplicateStructure() {
       sourceName: node.label,
       targetName: newName,
       tableComment: node.comment,
-      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
+      identifierQuote,
     });
-    await executeTreeNodeSqlWithProductionGuard(node, plan.sql, {
+    if (!(await cloneDialog.request([{ plan, scope: [node.connectionId, node.database, node.catalog || ""] }]))) return;
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.sql, {
       database: node.database,
       schema: node.schema,
       executeAsScript: plan.executeAsScript,
+      execute: plan.oceanbaseClone ? (timeoutSecs) => executeOceanbaseTableClone(plan.oceanbaseClone!, (sql) => api.executeQuery(node.connectionId, node.database, sql, plan.oceanbaseClone!.targetSchema, undefined, { timeoutSecs, catalog: node.catalog })) : undefined,
     });
+    if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }), 3000);
     await refreshTableList(node);
   } catch (e: any) {
+    if (e instanceof OceanbaseTableCloneError) {
+      const refreshed = await Promise.allSettled([connectionStore.refreshObjectListTreeNode(node.connectionId, node.database, e.targetSchema)]);
+      cloneDialog.showFailure(
+        e,
+        [],
+        refreshed.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])),
+      );
+      return;
+    }
+    if (databaseType === "oceanbase-oracle") {
+      cloneDialog.showFailure(e);
+      return;
+    }
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
 }
 
 async function confirmPasteTable() {
-  const entries = pasteTableEntries.value.filter((entry) => entry.targetName.trim());
+  const hasOceanbaseClone = pasteTableEntries.value.some((entry) => entry.connectionId && effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) === "oceanbase-oracle");
+  return hasOceanbaseClone ? cloneDialog.run(confirmPasteTableImpl) : confirmPasteTableImpl();
+}
+
+async function confirmPasteTableImpl() {
+  const entries = pasteTableEntries.value
+    .filter((entry) => entry.targetName.trim())
+    .map((entry) => ({ ...entry, databaseType: entry.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) : undefined, identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId) }));
   if (entries.length === 0) return;
-  const clipboardAtPasteStart = connectionStore.treeClipboard;
+  const shouldConsumeTableClipboard = pasteTableFromClipboard.value;
+  const clipboardAtPasteStart = shouldConsumeTableClipboard ? connectionStore.treeClipboard : null;
+  pasteTableFromClipboard.value = false;
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
@@ -4682,35 +5525,75 @@ async function confirmPasteTable() {
       schema: entry.schema,
     });
   };
+  const preparedClones = new Map<(typeof entries)[number], DuplicateTableStructurePlan>();
+  if (mode !== "data-only") {
+    try {
+      for (const entry of entries.filter((item) => item.databaseType === "oceanbase-oracle")) {
+        await connectionStore.ensureConnected(entry.connectionId);
+        preparedClones.set(
+          entry,
+          await buildDuplicateTableStructurePlan({
+            connectionId: entry.connectionId,
+            database: entry.database,
+            databaseType: entry.databaseType,
+            schema: entry.schema,
+            sourceName: entry.sourceName,
+            targetName: entry.targetName.trim(),
+            tableComment: entry.tableComment,
+            identifierQuote: entry.identifierQuote,
+          }),
+        );
+      }
+      if (!(await cloneDialog.request([...preparedClones].map(([entry, plan]) => ({ plan, scope: [entry.connectionId, entry.database, ""] }))))) return;
+    } catch (error) {
+      cloneDialog.showFailure(
+        error,
+        entries.map((entry) => `${entry.schema || ""}.${entry.targetName}`),
+      );
+      return;
+    }
+  }
+  let cloneFailure: { error: unknown; remaining: string[] } | undefined;
+  const completedCloneTargets: string[] = [];
   for (const entry of entries) {
-    const targetName = entry.targetName.trim();
+    let targetName = entry.targetName.trim();
+    let schema = entry.schema;
+    let completedClone: OceanbaseTableClone | undefined;
     try {
       await connectionStore.ensureConnected(entry.connectionId);
-      const databaseType = entry.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) : undefined;
+      const databaseType = entry.databaseType;
       let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
-        const plan = await buildDuplicateTableStructurePlan({
-          connectionId: entry.connectionId,
-          database: entry.database,
-          databaseType,
-          schema: entry.schema,
-          sourceName: entry.sourceName,
-          targetName,
-          tableComment: entry.tableComment,
-          identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId),
-        });
+        const plan =
+          preparedClones.get(entry) ||
+          (await buildDuplicateTableStructurePlan({
+            connectionId: entry.connectionId,
+            database: entry.database,
+            databaseType,
+            schema: entry.schema,
+            sourceName: entry.sourceName,
+            targetName,
+            tableComment: entry.tableComment,
+            identifierQuote: entry.identifierQuote,
+          }));
         sourceColumns = plan.sourceColumns;
+        if (plan.oceanbaseClone) {
+          targetName = plan.oceanbaseClone.targetName;
+          schema = plan.oceanbaseClone.targetSchema;
+        }
         const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, plan.sql, {
           database: entry.database,
           schema: entry.schema,
           executeAsScript: plan.executeAsScript,
+          execute: plan.oceanbaseClone ? (timeoutSecs) => executeOceanbaseTableClone(plan.oceanbaseClone!, (sql) => api.executeQuery(entry.connectionId, entry.database, sql, plan.oceanbaseClone!.targetSchema, undefined, { timeoutSecs })) : undefined,
         });
         if (!structureExecuted) {
           pasteCancelled = true;
           break;
         }
         hasMutatedTable = true;
-        queueRefreshTarget(entry);
+        completedClone = plan.oceanbaseClone;
+        queueRefreshTarget({ ...entry, schema });
       }
       if (copyData) {
         if (!sourceColumns) {
@@ -4722,14 +5605,20 @@ async function confirmPasteTable() {
         }
         const dataSql = await buildCopyTableDataSql({
           databaseType,
-          schema: entry.schema,
+          schema,
           sourceName: entry.sourceName,
           targetName,
-          normalizeNewTargetName: mode === "structure-and-data",
-          identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId),
+          normalizeNewTargetName: mode === "structure-and-data" && databaseType !== "oceanbase-oracle",
+          identifierQuote: entry.identifierQuote,
           ...dataCopyColumnOptions,
         });
-        const dataExecuted = await executeTreeNodeSqlWithProductionGuard(entry, dataSql, { database: entry.database, schema: entry.schema });
+        const clone = preparedClones.get(entry)?.oceanbaseClone;
+        const dataExecuted = await executeTreeNodeSqlWithProductionGuard(entry, dataSql, {
+          database: entry.database,
+          schema,
+          timeoutSecs: 0,
+          execute: clone ? (timeoutSecs) => executeOceanbaseTableCloneData(clone, dataSql, (sql) => api.executeQuery(entry.connectionId, entry.database, sql, schema, undefined, { timeoutSecs })) : undefined,
+        });
         if (!dataExecuted) {
           pasteCancelled = true;
           break;
@@ -4738,10 +5627,24 @@ async function confirmPasteTable() {
         queueRefreshTarget(entry);
       }
       successCount++;
-    } catch (e: any) {
+      if (preparedClones.has(entry)) completedCloneTargets.push(`${schema}.${targetName}`);
+    } catch (caught: any) {
+      // 在 catch 开头统一归一化克隆错误，保证块内后续所有引用都能拿到 e
+      const e = completedClone && !(caught instanceof OceanbaseTableCloneError) ? oceanbaseCloneDataPreparationError(completedClone, caught) : caught;
+      if (preparedClones.has(entry)) {
+        queueRefreshTarget({ ...entry, schema: e instanceof OceanbaseTableCloneError ? e.targetSchema : schema });
+        cloneFailure = {
+          error: e,
+          remaining: entries.slice(entries.indexOf(entry) + 1).map((pending) => {
+            const clone = preparedClones.get(pending)?.oceanbaseClone;
+            return `${clone?.targetSchema || pending.schema || ""}.${clone?.targetName || pending.targetName}`;
+          }),
+        };
+        break;
+      }
       pasteFailCount++;
-      firstPasteError ??= e;
-      console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
+      firstPasteError ??= caught;
+      console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, caught);
     }
   }
   for (const refreshTarget of refreshTargets.values()) {
@@ -4752,6 +5655,10 @@ async function confirmPasteTable() {
       refreshError ??= e;
       console.error(`Failed to refresh pasted tables for "${refreshTarget.database}"${refreshTarget.schema ? ` schema "${refreshTarget.schema}"` : ""}:`, e);
     }
+  }
+  if (cloneFailure) {
+    cloneDialog.showFailure(cloneFailure.error, cloneFailure.remaining, refreshError ? [refreshError] : [], completedCloneTargets);
+    return;
   }
   if (pasteCancelled) {
     if (hasMutatedTable && refreshFailCount === 0) {
@@ -4765,7 +5672,7 @@ async function confirmPasteTable() {
   }
   const pasteFeedback = tablePasteFeedback(successCount, pasteFailCount, firstPasteError);
   if (pasteFailCount === 0) {
-    if (connectionStore.treeClipboard === clipboardAtPasteStart) {
+    if (shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
     toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
@@ -4792,6 +5699,7 @@ function openPasteTableDialog() {
     toast(t("contextMenu.noTableToPaste"), 2000);
     return;
   }
+  pasteTableFromClipboard.value = true;
   pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
@@ -4864,10 +5772,10 @@ async function confirmDeleteHBaseTable() {
   }
 }
 
-function createMysqlObjectTemplate() {
+function createSidebarObjectTemplate() {
   const node = activeNode.value;
   if (!node.connectionId || !node.database) return;
-  const template = mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node);
+  const template = sidebarObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node);
   if (!template) return;
   connectionStore.activeConnectionId = node.connectionId;
   const tabId = queryStore.createTab(node.connectionId, node.database, t(template.titleKey), "query", node.schema, undefined, node.catalog);
@@ -4894,7 +5802,7 @@ const canOpenSqlFileExecution = computed(() => {
 const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce", "neo4j", "nebula"].includes(dbType || "");
+  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce", "neo4j", "nebula"].includes(dbType || "");
 });
 
 const canOpenScheduledBackups = computed(() => {
@@ -4931,8 +5839,7 @@ const canOpenTableImport = computed(() => {
 });
 
 const canOpenStructureEditor = computed(() => {
-  const editableNode = activeNode.value.type === "table" || ((activeNode.value.type === "column" || activeNode.value.type === "index") && !!activeNode.value.tableName);
-  return editableNode && !isSqlServerLinkedNode(activeNode.value) && !!activeNode.value.connectionId && !!activeNode.value.database && supportsTableStructureEditing(currentTableStructureDatabaseType());
+  return sidebarNodeSupportsStructureEdit(activeNode.value, currentTableStructureDatabaseType());
 });
 
 const canOpenFieldLineage = computed(() => {
@@ -5312,6 +6219,20 @@ routeDangerDialog(showDropMongoCollectionConfirm, () =>
   }),
 );
 
+routeDangerDialog(showClearMongoCollectionConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.clearCollectionTitle"),
+    message: t("contextMenu.clearCollectionMessage", { name: activeNode.value.label }),
+    detailsText: t("contextMenu.clearCollectionDetails"),
+    confirmLabel: t("contextMenu.clearCollection"),
+    get loading() {
+      return clearMongoCollectionLoading.value;
+    },
+    closeOnConfirm: false,
+    confirm: confirmClearMongoCollection,
+  }),
+);
+
 routeDangerDialog(showDropMongoIndexConfirm, () =>
   dangerRequest({
     title: t("contextMenu.confirmDropIndexTitle"),
@@ -5439,12 +6360,51 @@ function connectionDialogCapabilities() {
 }
 
 function objectDialogCapabilities() {
+  const renameTarget = computed(() => sidebarFormTarget.value ?? activeNode.value);
   return {
     showRenameObjectDialog,
     renameObjectName,
     renameObjectDialogTitle,
     renameObjectPreviewSql,
     renameObjectError,
+    viewRenamePlan,
+    viewRenameDrafts,
+    routineRenamePlan,
+    routineRenameDrafts,
+    tableRenamePlan,
+    tableRenameDrafts,
+    packageSaveAsOpen,
+    packageSaveAsTarget,
+    packageSaveAsName,
+    packageSaveAsPlan,
+    packageSaveAsDrafts,
+    packageSaveAsLoading,
+    packageSaveAsExecuting,
+    packageSaveAsValidating,
+    packageSaveAsError,
+    packageSaveAsDiagnostic,
+    confirmPackageSaveAs,
+    viewRenameLoading,
+    viewRenameValidating,
+    viewRenameExecuting,
+    isOracleViewRename: computed(() => databaseTypeForNode(renameTarget.value) === "oceanbase-oracle" && renameTarget.value.type === "view"),
+    isOracleRoutineRename: computed(() => {
+      const target = renameTarget.value;
+      return (databaseTypeForNode(target) === "oracle" || databaseTypeForNode(target) === "oceanbase-oracle") && (target.type === "procedure" || target.type === "function");
+    }),
+    isOracleTableRename: computed(() => {
+      const target = renameTarget.value;
+      return (databaseTypeForNode(target) === "oracle" || databaseTypeForNode(target) === "oceanbase-oracle") && target.type === "table";
+    }),
+    editSidebarViewRenameDraft,
+    editSidebarTableRenameDraft,
+    editSidebarRoutineRenameDraft,
+    editPackageSaveAsDraft,
+    validateSidebarViewRenameDrafts,
+    validateSidebarTableRenameDrafts,
+    validateSidebarRoutineRenameDrafts,
+    validatePackageSaveAsDrafts,
+    refreshRenameObjectPreviewSql,
     confirmRenameObject,
     showStructurePreviewDialog,
     structurePreviewTitle,
@@ -5464,6 +6424,7 @@ function objectDialogCapabilities() {
     showPasteDialog,
     pasteTableEntries,
     pasteTableMode,
+    pasteTableFromClipboard,
     pasteTableDataCopySupported: pasteTableDataCopySupported.value,
     confirmPasteTable,
   };
@@ -5622,7 +6583,7 @@ const shortcutDisconnectConnection = computed(() => settingsStore.editorSettings
 
 const shortcutRename = "F2";
 
-const shortcutRefresh = "F5";
+const shortcutRefresh = computed(() => settingsStore.editorSettings.shortcuts.refreshData || "F5");
 
 const shortcutDelete = "Delete";
 
@@ -5638,6 +6599,7 @@ function addToAiMenuItem(node: TreeNode): ContextMenuItem {
   const tables = node.type === "table" ? selectedAiTableTargets() : [];
   const count = tables.length;
   return {
+    sidebarActionId: "contextMenu.addToAi",
     label: count > 1 ? t("contextMenu.addToAiMultiple", { count }) : t("contextMenu.addToAi"),
     action: () => emit("add-to-ai", count > 1 ? tables : node),
     icon: Sparkles,
@@ -5652,10 +6614,11 @@ function exportDataSubmenu(includeSqlInsert = true): ContextMenuItem {
   ];
   if (includeSqlInsert) {
     children.push({ label: "SQL INSERT", action: () => exportData("sql", "source") });
-    children.push({ label: t("contextMenu.standardSqlInsert"), action: () => exportData("sql", "standard") });
+    children.push({ sidebarActionId: "contextMenu.standardSqlInsert", label: t("contextMenu.standardSqlInsert"), action: () => exportData("sql", "standard") });
   }
   children.push({ label: "XLSX", action: () => exportDataXlsx() });
   return {
+    sidebarActionId: "contextMenu.exportData",
     label: count > 1 ? t("contextMenu.exportDataMultiple", { count }) : t("contextMenu.exportData"),
     icon: Upload,
     children,
@@ -5664,17 +6627,19 @@ function exportDataSubmenu(includeSqlInsert = true): ContextMenuItem {
 
 function copyStructureAsSubmenu(): ContextMenuItem {
   return {
+    sidebarActionId: "contextMenu.copyStructureAs",
     label: t("contextMenu.copyStructureAs"),
     icon: Clipboard,
     children: [
-      { label: t("contextMenu.copyStructureAsTsv"), action: () => copyStructureAs("tsv") },
-      { label: t("contextMenu.copyStructureAsMarkdown"), action: () => copyStructureAs("markdown") },
+      { sidebarActionId: "contextMenu.copyStructureAsTsv", label: t("contextMenu.copyStructureAsTsv"), action: () => copyStructureAs("tsv") },
+      { sidebarActionId: "contextMenu.copyStructureAsMarkdown", label: t("contextMenu.copyStructureAsMarkdown"), action: () => copyStructureAs("markdown") },
     ],
   };
 }
 
 function moreActionsSubmenu(children: ContextMenuItem[]): ContextMenuItem {
   return {
+    sidebarActionId: "common.more",
     label: t("common.more"),
     icon: ListTree,
     variant: "destructive",
@@ -5720,6 +6685,7 @@ function savedSqlHistorySubmenu(): ContextMenuItem | null {
   if (!scope) return null;
   const files = rankSavedSqlHistory(savedSqlStore.allFiles, { ...scope, limit: 10 });
   return {
+    sidebarActionId: "contextMenu.sqlHistory",
     label: t("contextMenu.sqlHistory"),
     icon: ScrollText,
     children:
@@ -5731,6 +6697,7 @@ function savedSqlHistorySubmenu(): ContextMenuItem | null {
           }))
         : [
             {
+              sidebarActionId: "contextMenu.noSqlHistory",
               label: t("contextMenu.noSqlHistory"),
               disabled: true,
             },
@@ -5758,59 +6725,61 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
   // 2. Connection
   if (node.type === "connection") {
     if (isConnecting.value) {
-      items.push({ label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
+      items.push({ sidebarActionId: "connection.cancelConnecting", label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
     } else if (canDisconnectConnection()) {
-      items.push({ label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug, shortcut: shortcutDisconnectConnection.value });
+      items.push({ sidebarActionId: "contextMenu.disconnectConnection", label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug, shortcut: shortcutDisconnectConnection.value });
       // save_password=false 且本次运行期已输入密码：提供"断开并忘记本次密码"，
       // 清除会话凭据后下次连接需重新输入。
       if (canForgetSessionCredential()) {
         items.push({
+          sidebarActionId: "connection.disconnectAndForgetPassword",
           label: t("connection.disconnectAndForgetPassword"),
           action: disconnectAndForgetConnectionPassword,
           icon: Unplug,
         });
       }
     } else if (!isConnected.value) {
-      items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
+      items.push({ sidebarActionId: "contextMenu.openConnection", label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
     }
     items.push({ label: "", separator: true });
-    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     const connectionUrlCopyMenu = connectionUrlCopyMenuItem();
     if (connectionUrlCopyMenu) items.push(connectionUrlCopyMenu);
     items.push({ label: "", separator: true });
     const supportsQueryActions = supportsConnectionQueryActions(currentDatabaseType());
     const supportsAiContext = supportsAiAssistantContext(currentDatabaseType());
     if (supportsQueryActions) {
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       if (supportsAiContext) {
         items.push(addToAiMenuItem(node));
       }
     }
     if (canCreateMeilisearchIndex.value) {
-      items.push({ label: t("meilisearch.createIndex"), action: openCreateMeilisearchIndexDialog, icon: Plus });
+      items.push({ sidebarActionId: "meilisearch.createIndex", label: t("meilisearch.createIndex"), action: openCreateMeilisearchIndexDialog, icon: Plus });
     }
     const connectionWorkspace = node.connectionId ? driverProfileDatabaseWorkspace(connectionStore.getConfig(node.connectionId)?.driver_profile) : undefined;
     if (connectionWorkspace?.entryScopes.includes("connection")) {
       items.push({ label: t(connectionWorkspace.menuLabelKey), action: openProfileConnectionWorkspace, icon: GitBranch });
     }
     if (canOpenConnectionDatabaseBrowser.value) {
-      items.push({ label: t("contextMenu.openDatabaseBrowser"), action: openDatabaseBrowser, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.openDatabaseBrowser", label: t("contextMenu.openDatabaseBrowser"), action: openDatabaseBrowser, icon: TableProperties });
     }
     if (currentDatabaseType() === "redis") {
-      items.push({ label: t("contextMenu.instanceInfo"), action: openRedisInstanceInfo, icon: Info });
+      items.push({ sidebarActionId: "contextMenu.instanceInfo", label: t("contextMenu.instanceInfo"), action: openRedisInstanceInfo, icon: Info });
     }
     if (supportsQueryActions) {
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     }
     if (node.connectionId && connectionSupportsDatabaseUserAdmin(connectionStore.getConfig(node.connectionId))) {
-      items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
+      items.push({ sidebarActionId: "contextMenu.userAdmin", label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
-      items.push({ label: t(currentDatabaseType() === "xugu" ? "processList.transactionTitle" : "contextMenu.processList"), action: openProcessList, icon: Activity });
+      items.push({ sidebarActionId: "contextMenu.processList", label: t(currentDatabaseType() === "xugu" ? "processList.transactionTitle" : "contextMenu.processList"), action: openProcessList, icon: Activity });
     }
     if (currentDatabaseType() === "sqlserver") {
-      items.push({ label: t("contextMenu.sqlServerTrace"), action: openSqlServerActivityTrace, icon: Activity });
+      items.push({ sidebarActionId: "contextMenu.sqlServerTrace", label: t("contextMenu.sqlServerTrace"), action: openSqlServerActivityTrace, icon: Activity });
     }
     if (
       node.connectionId &&
@@ -5820,27 +6789,28 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
         connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) ||
         connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))
     ) {
-      items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
+      items.push({ sidebarActionId: "contextMenu.serverDashboard", label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
     }
     if (currentDatabaseType() === "dameng") {
-      items.push({ label: t("contextMenu.damengUsers"), action: openDamengUsers, icon: UsersRound });
-      items.push({ label: t("contextMenu.damengRoles"), action: openDamengRoles, icon: ShieldCheck });
-      items.push({ label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
+      items.push({ sidebarActionId: "contextMenu.damengUsers", label: t("contextMenu.damengUsers"), action: openDamengUsers, icon: UsersRound });
+      items.push({ sidebarActionId: "contextMenu.damengRoles", label: t("contextMenu.damengRoles"), action: openDamengRoles, icon: ShieldCheck });
+      items.push({ sidebarActionId: "contextMenu.damengJobAdmin", label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
     }
     if (canCopyFinalProxyPort.value) {
-      items.push({ label: t("contextMenu.copyFinalProxyPort"), action: copyFinalProxyPort, icon: Network });
+      items.push({ sidebarActionId: "contextMenu.copyFinalProxyPort", label: t("contextMenu.copyFinalProxyPort"), action: copyFinalProxyPort, icon: Network });
     }
     if (canOpenSqlFileExecution.value) {
-      items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
+      items.push({ sidebarActionId: "sqlFile.title", label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
     }
     if (canExportAllDatabases.value) {
-      items.push({ label: t("contextMenu.exportAllDatabases"), action: openAllDatabasesExport, icon: Upload });
+      items.push({ sidebarActionId: "contextMenu.exportAllDatabases", label: t("contextMenu.exportAllDatabases"), action: openAllDatabasesExport, icon: Upload });
     }
     if (canOpenScheduledBackups.value) {
-      items.push({ label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
+      items.push({ sidebarActionId: "databaseBackup.title", label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
     }
     if (canCreateDatabase.value) {
       items.push({
+        sidebarActionId: "contextMenu.createDatabase",
         label: connectionNamespaceCreationLabel(),
         action: openConnectionNamespaceCreation,
         icon: Plus,
@@ -5848,6 +6818,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     }
     if (canCreateNacosNamespace.value) {
       items.push({
+        sidebarActionId: "nacos.createNamespace",
         label: t("nacos.createNamespace"),
         action: openCreateNacosNamespaceDialog,
         icon: FolderPlus,
@@ -5867,19 +6838,20 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       }));
       if (!allMoveTargetsInGroup(null)) {
         groupChildren.push({ label: "", separator: true });
-        groupChildren.push({ label: t("connectionGroup.ungrouped"), action: () => moveToGroup(null) });
+        groupChildren.push({ sidebarActionId: "connectionGroup.ungrouped", label: t("connectionGroup.ungrouped"), action: () => moveToGroup(null) });
       }
       groupChildren.push({ label: "", separator: true });
-      groupChildren.push({ label: t("connectionGroup.newGroup"), action: moveToNewGroup, icon: FolderPlus });
-      items.push({ label: t("connectionGroup.moveToGroup"), icon: FolderInput, children: groupChildren });
+      groupChildren.push({ sidebarActionId: "connectionGroup.newGroup", label: t("connectionGroup.newGroup"), action: moveToNewGroup, icon: FolderPlus });
+      items.push({ sidebarActionId: "connectionGroup.moveToGroup", label: t("connectionGroup.moveToGroup"), icon: FolderInput, children: groupChildren });
     } else {
-      items.push({ label: t("connectionGroup.moveToNewGroup"), action: moveToNewGroup, icon: FolderPlus });
+      items.push({ sidebarActionId: "connectionGroup.moveToNewGroup", label: t("connectionGroup.moveToNewGroup"), action: moveToNewGroup, icon: FolderPlus });
     }
     items.push({
+      sidebarActionId: "contextMenu.refreshChildren",
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
-      shortcut: shortcutRefresh,
+      shortcut: shortcutRefresh.value,
     });
     const visibleFilterMenu = sidebarConnectionVisibleFilterMenu({
       canConfigureVisibleDatabases: canConfigureVisibleDatabases.value,
@@ -5888,6 +6860,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     });
     for (const entry of visibleFilterMenu) {
       items.push({
+        // Oracle's root namespace filter uses schemas, but shares the primary
+        // visible-object filter's preference and ordering with other engines.
+        sidebarActionId: entry.target === "visible-databases" ? "contextMenu.configureVisibleObjects" : "visibleSchemas.title",
         label: t(entry.label === "schemas" ? "visibleSchemas.title" : "contextMenu.configureVisibleObjects"),
         action: entry.target === "visible-schemas" ? openVisibleSchemasDialog : openVisibleDatabasesDialog,
         icon: ListFilter,
@@ -5895,14 +6870,16 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     }
     if (currentDatabaseType() === "nacos") {
       items.push({
+        sidebarActionId: "nacos.nacosVisibleNamespacesTitle",
         label: t("nacos.nacosVisibleNamespacesTitle"),
         action: openVisibleNacosNamespacesDialog,
         icon: ListFilter,
       });
     }
-    items.push({ label: t("contextMenu.editConnection"), action: editConnection, icon: Pencil, shortcut: shortcutEditConnection.value });
+    items.push({ sidebarActionId: "contextMenu.editConnection", label: t("contextMenu.editConnection"), action: editConnection, icon: Pencil, shortcut: shortcutEditConnection.value });
     if (revealConnectionFilePath.value) {
       items.push({
+        sidebarActionId: "contextMenu.revealDatabaseFile",
         label: t("contextMenu.revealDatabaseFile"),
         action: revealDatabaseFile,
         icon: FolderOpen,
@@ -5912,21 +6889,24 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
       const usesSsh = (config?.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
       items.push({
+        sidebarActionId: "contextMenu.backupSqliteDatabase",
         label: t("contextMenu.backupSqliteDatabase"),
         action: backupSqliteDatabase,
         icon: HardDriveDownload,
       });
       if (usesSsh) {
         items.push({
+          sidebarActionId: "contextMenu.restoreSqliteDatabase",
           label: t("contextMenu.restoreSqliteDatabase"),
           action: restoreSqliteDatabase,
           icon: HardDriveDownload,
         });
       }
     }
-    items.push({ label: connectionDuplicateMenuLabel(), action: duplicateConnection, icon: CopyPlus });
+    items.push({ sidebarActionId: "contextMenu.duplicateConnection", label: connectionDuplicateMenuLabel(), action: duplicateConnection, icon: CopyPlus });
     items.push({ label: "", separator: true });
     items.push({
+      sidebarActionId: "contextMenu.deleteConnection",
       label: connectionDeleteMenuLabel(),
       action: deleteConnection,
       icon: Trash2,
@@ -5948,6 +6928,14 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     items.push({ label: t("toolbar.newConnection"), action: newConnectionInGroup, icon: Plus });
     items.push({ label: t("connectionGroup.newGroup"), action: newSubgroup, icon: FolderPlus });
     items.push({
+      sidebarActionId: "connectionGroup.openConnections",
+      label: connectionGroupConnectMenuLabel(),
+      action: connectConnectionGroup,
+      icon: Plug,
+      disabled: !canConnectConnectionGroup(),
+    });
+    items.push({
+      sidebarActionId: "connectionGroup.closeConnections",
       label: connectionGroupDisconnectMenuLabel(),
       action: disconnectConnectionGroup,
       icon: Unplug,
@@ -5974,64 +6962,76 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
   return false;
 }
 
+function openCreateTableVGroupDialog(node: TreeNode) {
+  tableVGroupDialogScope.value = node;
+  tableVGroupDialogParentGroupId.value = null;
+  tableVGroupDialogTableNames.value = [];
+  tableVGroupName.value = "";
+  showTableVGroupDialog.value = true;
+}
+
 function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   appendTableVGroupContainerItems(node, items);
   // 4. Database / Schema
   if (node.type === "database" || node.type === "schema") {
     if (isXuguSyntheticTreeNode(currentDatabaseType(), node.type, node.schema)) {
-      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push({ sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       items.push({ label: "", separator: true });
       items.push({
+        sidebarActionId: "contextMenu.refreshChildren",
         label: t("contextMenu.refreshChildren"),
         action: refresh,
         icon: RefreshCw,
-        shortcut: shortcutRefresh,
+        shortcut: shortcutRefresh.value,
       });
       return true;
     }
     if (currentDatabaseType() === "hbase") {
-      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push({ sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       if (canCreateTable.value) {
         items.push({ label: "", separator: true });
-        items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+        items.push({ sidebarActionId: "contextMenu.createTable", label: t("contextMenu.createTable"), action: createTable, icon: Plus });
       }
       items.push({
+        sidebarActionId: "contextMenu.refreshChildren",
         label: t("contextMenu.refreshChildren"),
         action: refresh,
         icon: RefreshCw,
-        shortcut: shortcutRefresh,
+        shortcut: shortcutRefresh.value,
       });
       return true;
     }
     if (["neo4j", "nebula"].includes(currentDatabaseType() || "") && node.type === "database") {
-      if (canCloseDatabaseConnection.value) items.push({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
+      if (canCloseDatabaseConnection.value) items.push({ sidebarActionId: "contextMenu.closeDatabaseConnection", label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
       items.push(copyNameMenuItem());
       items.push({ label: "", separator: true });
-      if (canOpenObjectBrowser.value) items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      if (canOpenObjectBrowser.value) items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
       items.push({ label: isNodeDefaultDatabase.value ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"), action: isNodeDefaultDatabase.value ? clearNodeDefaultDatabase : setNodeAsDefaultDatabase, icon: Database });
-      if (canOpenSqlFileExecution.value) items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
+      if (canOpenSqlFileExecution.value) items.push({ sidebarActionId: "sqlFile.title", label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      items.push({ sidebarActionId: "contextMenu.refreshChildren", label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh.value });
       return true;
     }
     if (canCloseDatabaseConnection.value) {
       items.unshift({ label: "", separator: true });
-      items.unshift({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
+      items.unshift({ sidebarActionId: "contextMenu.closeDatabaseConnection", label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
     }
     items.push(copyNameMenuItem());
     const databaseUrlCopyMenu = connectionUrlCopyMenuItem(node.database || undefined);
     if (databaseUrlCopyMenu) items.push(databaseUrlCopyMenu);
     items.push({ label: "", separator: true });
     if (canOpenObjectBrowser.value) {
-      items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
     }
     if (supportsConnectionQueryActions(currentDatabaseType())) {
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       if (node.type === "database" && supportsAiAssistantContext(currentDatabaseType())) {
         items.push(addToAiMenuItem(node));
       }
@@ -6044,23 +7044,24 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (node.type === "database" && currentDatabaseType() !== "cloudflare-d1") {
       if (!isNodeDefaultDatabase.value) {
-        items.push({ label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
+        items.push({ sidebarActionId: "contextMenu.setDefaultDatabase", label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
       } else {
-        items.push({ label: t("contextMenu.clearDefaultDatabase"), action: clearNodeDefaultDatabase, icon: Database });
+        items.push({ sidebarActionId: "contextMenu.clearDefaultDatabase", label: t("contextMenu.clearDefaultDatabase"), action: clearNodeDefaultDatabase, icon: Database });
       }
     }
     if (node.type === "schema") {
       if (!isNodeDefaultSchema.value) {
-        items.push({ label: t("contextMenu.setDefaultSchema"), action: setNodeAsDefaultSchema, icon: Database });
+        items.push({ sidebarActionId: "contextMenu.setDefaultSchema", label: t("contextMenu.setDefaultSchema"), action: setNodeAsDefaultSchema, icon: Database });
       } else {
-        items.push({ label: t("contextMenu.clearDefaultSchema"), action: clearNodeDefaultSchema, icon: Database });
+        items.push({ sidebarActionId: "contextMenu.clearDefaultSchema", label: t("contextMenu.clearDefaultSchema"), action: clearNodeDefaultSchema, icon: Database });
       }
     }
     if (canEditDatabaseProperties.value) {
-      items.push({ label: t("contextMenu.editDatabaseProperties"), action: openEditDatabasePropertiesDialog, icon: SquarePen });
+      items.push({ sidebarActionId: "contextMenu.editDatabaseProperties", label: t("contextMenu.editDatabaseProperties"), action: openEditDatabasePropertiesDialog, icon: SquarePen });
     }
     if (canRenameDatabase.value) {
       items.push({
+        sidebarActionId: "contextMenu.renameDatabase",
         label: t("contextMenu.renameDatabase"),
         action: openRenameDatabaseDialog,
         icon: Pencil,
@@ -6068,51 +7069,74 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
     }
     if (canCreateTable.value) {
-      items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+      items.push({ sidebarActionId: "contextMenu.createTable", label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+    }
+    if (canCreateTable.value && isTableVGroupContainerNode(node) && !node.children?.some(isGroupLabel)) {
+      items.push({
+        sidebarActionId: "contextMenu.createGroup",
+        label: t("connectionGroup.createGroup"),
+        action: () => openCreateTableVGroupDialog(node),
+        icon: FolderPlus,
+      });
     }
     if (canOpenTableImport.value) {
-      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Download });
+      items.push({ sidebarActionId: "contextMenu.importData", label: t("contextMenu.importData"), action: openTableImport, icon: Download });
     }
     if (canCreateSchema.value) {
-      items.push({ label: t("contextMenu.createSchema"), action: openCreateSchemaDialog, icon: Plus });
+      items.push({ sidebarActionId: "contextMenu.createSchema", label: t("contextMenu.createSchema"), action: openCreateSchemaDialog, icon: Plus });
     }
     if (canEditSchemaComment.value) {
-      items.push({ label: t("contextMenu.editSchemaComment"), action: openEditSchemaCommentDialog, icon: SquarePen });
+      items.push({ sidebarActionId: "contextMenu.editSchemaComment", label: t("contextMenu.editSchemaComment"), action: openEditSchemaCommentDialog, icon: SquarePen });
     }
     if (canOpenSqlFileExecution.value) {
-      items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
+      items.push({ sidebarActionId: "sqlFile.title", label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
     }
     if (canOpenDiagram.value) {
-      items.push({ label: t("diagram.open"), action: openDiagram, icon: Network });
-      items.push({ label: t("docs.title"), action: openDocs, icon: BookOpen });
+      items.push({ sidebarActionId: "diagram.open", label: t("diagram.open"), action: openDiagram, icon: Network });
+      items.push({ sidebarActionId: "docs.title", label: t("docs.title"), action: openDocs, icon: BookOpen });
     }
     if (canOpenDatabaseSearch.value) {
-      items.push({ label: t("databaseSearch.open"), action: openDatabaseSearch, icon: Search });
+      items.push({ sidebarActionId: "databaseSearch.open", label: t("databaseSearch.open"), action: openDatabaseSearch, icon: Search });
     }
     items.push({
+      sidebarActionId: "contextMenu.refreshChildren",
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
-      shortcut: shortcutRefresh,
+      shortcut: shortcutRefresh.value,
     });
     if (canConfigureVisibleSchemas.value) {
       items.push({
+        sidebarActionId: "visibleSchemas.title",
         label: t("visibleSchemas.title"),
         action: openVisibleSchemasDialog,
         icon: ListFilter,
       });
     }
     items.push({ label: "", separator: true });
-    items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
-    items.push({ label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
-    items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    items.push({ sidebarActionId: "transfer.dataTransfer", label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
+    items.push({ sidebarActionId: "diff.title", label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
+    items.push({ sidebarActionId: "dataCompare.title", label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
+    items.push({ sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    // Native dexp/dimp (.dmp) shortcut — Dameng only; the dialog guides the user
+    // to the client bin-dir setting when the tools are not installed.
+    if (currentDatabaseType() === "dameng") {
+      items.push({ sidebarActionId: "damengDump.menuExport", label: t("damengDump.menuExport"), action: () => openDamengDump("export"), icon: Package });
+      items.push({ sidebarActionId: "damengDump.menuImport", label: t("damengDump.menuImport"), action: () => openDamengDump("import"), icon: PackageOpen });
+    }
     if (canOpenDataDictionary.value) {
-      items.push({ label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
+      items.push({ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
     }
     const destructiveActions: ContextMenuItem[] = [];
+    if (canEmptyDatabaseTables(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined)) {
+      destructiveActions.push({ sidebarActionId: "databaseEmpty.menu", label: t("databaseEmpty.menu"), action: () => void requestEmptyDatabaseTables(node), icon: Eraser, variant: "destructive" as const });
+    }
+    if (canDropDatabaseTables(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined)) {
+      destructiveActions.push({ sidebarActionId: "databaseDrop.menu", label: t("databaseDrop.menu"), action: () => void requestDropDatabaseTables(node), icon: Trash2, variant: "destructive" as const });
+    }
     if (canDropDatabase.value) {
       destructiveActions.push({
+        sidebarActionId: "contextMenu.dropDatabase",
         label: t("contextMenu.dropDatabase"),
         action: dropDatabase,
         icon: Trash2,
@@ -6129,6 +7153,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (canDropSchema.value) {
       items.push({
+        sidebarActionId: "contextMenu.dropSchema",
         label: t("contextMenu.dropSchema"),
         action: dropSchema,
         icon: Trash2,
@@ -6147,6 +7172,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   if (node.type === "saved-sql-root" || node.type === "saved-sql-folder") {
     if (supportsConnectionQueryActions(currentDatabaseType())) {
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
       items.push({ label: "", separator: true });
     }
     items.push({
@@ -6184,6 +7210,16 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   if (currentDatabaseType() === "hbase" && node.type === "group-tables") {
     if (canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+    }
+    if (isTableVGroupContainerNode(node)) {
+      items.push({
+        sidebarActionId: "contextMenu.createGroup",
+        label: t("connectionGroup.createGroup"),
+        action: () => openCreateTableVGroupDialog(node),
+        icon: FolderPlus,
+      });
+    }
+    if (canCreateTable.value || isTableVGroupContainerNode(node)) {
       items.push({ label: "", separator: true });
     }
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
@@ -6191,7 +7227,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
-      shortcut: shortcutRefresh,
+      shortcut: shortcutRefresh.value,
     });
     return true;
   }
@@ -6215,7 +7251,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
-      shortcut: shortcutRefresh,
+      shortcut: shortcutRefresh.value,
     });
     if (!connectionIsEffectivelyReadOnly(connectionStore.getConfig(node.connectionId || ""))) {
       items.push({ label: "", separator: true });
@@ -6231,7 +7267,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "nacos-access-control" || node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control" || node.type === "zookeeper-root" || node.type === "consul-root" || node.type === "consul-overview") {
+  if (node.type === "nacos-access-control" || node.type === "zookeeper-root" || node.type === "consul-root" || node.type === "consul-overview") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return true;
   }
@@ -6294,7 +7330,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
-      shortcut: shortcutRefresh,
+      shortcut: shortcutRefresh.value,
     });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
@@ -6321,7 +7357,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   if (node.type === "mongo-collection") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
-    items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
+    items.push({ label: t("contextMenu.viewData"), action: () => openMongoTreeData(node), icon: TableProperties });
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     // Creating and dropping indexes stay on the Indexes group node; the collection
     // only opens the manager panel, which offers creation from inside itself.
@@ -6350,9 +7386,16 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         { label: "BSON dump (gzip)", action: () => void exportMongoCollection("bsonGzip") },
       ],
     });
+    const mongoDestructiveActions: ContextMenuItem[] = [];
+    if (canClearMongoCollection?.value) {
+      mongoDestructiveActions.push({ label: t("contextMenu.clearCollection"), action: clearMongoCollection, icon: Eraser, variant: "destructive" as const });
+    }
     if (canDropMongoCollection.value) {
+      mongoDestructiveActions.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
+    }
+    if (mongoDestructiveActions.length > 0) {
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
+      items.push(moreActionsSubmenu(mongoDestructiveActions));
     }
     return true;
   }
@@ -6413,50 +7456,51 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   // 否则解析不出 scope，菜单只会静默失败。
   if (isTableVGroupGroupableRowType(node.type) && (node.type === "table" || !!tableVGroupScopeKey(resolveTableVGroupScopeFromNode(connectionStore.treeNodes, node)))) {
     const vgroupMoveItems = buildTableVGroupMoveMenuItems(node);
-    if (vgroupMoveItems.length) items.push({ label: t("tableVGroup.moveToGroup"), icon: FolderInput, children: vgroupMoveItems });
+    if (vgroupMoveItems.length) items.push({ sidebarActionId: "tableVGroup.moveToGroup", label: t("tableVGroup.moveToGroup"), icon: FolderInput, children: vgroupMoveItems });
   }
   // 6. Table / View / Materialized View
   if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
     if (currentDatabaseType() === "victoriametrics" && node.type === "table") {
-      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push({ sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
-      items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus });
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.openInNewDataTab", label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (supportsAiAssistantContext(currentDatabaseType())) {
         items.push(addToAiMenuItem(node));
       }
       items.push({ label: "", separator: true });
       items.push(exportDataSubmenu(false));
-      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      items.push({ sidebarActionId: "contextMenu.refreshChildren", label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh.value });
       appendPluginTableMenuItems(items, node);
       return true;
     }
     if (["neo4j", "nebula"].includes(currentDatabaseType() || "")) {
       items.push(copyNameMenuItem());
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
-      items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus, shortcut: shortcutOpenDataInNewTab.value });
-      if (currentDatabaseType() === "nebula") items.push({ label: t("contextMenu.viewDdl"), action: openDdl, icon: FileCode });
+      items.push({ sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.openInNewDataTab", label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus, shortcut: shortcutOpenDataInNewTab.value });
+      if (currentDatabaseType() === "nebula") items.push({ sidebarActionId: "contextMenu.viewDdl", label: t("contextMenu.viewDdl"), action: openDdl, icon: FileCode });
       if (currentDatabaseType() === "neo4j") items.push(exportDataSubmenu(false));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      items.push({ sidebarActionId: "contextMenu.refreshChildren", label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh.value });
       appendPluginTableMenuItems(items, node);
       return true;
     }
     const destructiveActions: ContextMenuItem[] = [];
     items.push(copyNameMenuItem());
-    items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     if (node.type === "table" && supportsAiAssistantContext(currentDatabaseType())) {
       items.push(addToAiMenuItem(node));
     }
     items.push({ label: "", separator: true });
-    items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+    items.push({ sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
     items.push({
+      sidebarActionId: "contextMenu.openInNewDataTab",
       label: t("contextMenu.openInNewDataTab"),
       action: openDataInNewTabImmediately,
       icon: CopyPlus,
@@ -6464,32 +7508,35 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     });
     if (node.type === "table") {
       items.push({
+        sidebarActionId: "contextMenu.viewDdl",
         label: t("contextMenu.viewDdl"),
         action: openDdl,
         icon: FileCode,
       });
     }
     if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
-      items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
+      items.push({ sidebarActionId: "contextMenu.viewDependencies", label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
     }
     if (node.type === "view" || node.type === "materialized_view") {
-      items.push({ label: t("contextMenu.editView"), action: () => openObjectSourceDialog(true), icon: Pencil });
-      items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+      items.push({ sidebarActionId: "contextMenu.editView", label: t("contextMenu.editView"), action: () => openObjectSourceDialog(true), icon: Pencil });
+      items.push({ sidebarActionId: "contextMenu.viewSource", label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
       if (node.type === "view" && currentDatabaseType() === "dameng" && buildDamengCompileViewSql({ schema: node.schema, name: node.objectName || node.label })) {
-        items.push({ label: t("contextMenu.compileObject"), action: compileDamengView, icon: Wrench });
+        items.push({ sidebarActionId: "contextMenu.compileObject", label: t("contextMenu.compileObject"), action: compileDamengView, icon: Wrench });
       }
       items.push({
+        sidebarActionId: "contextMenu.viewDdl",
         label: t("contextMenu.viewDdl"),
         action: openDdl,
         icon: FileCode,
       });
-      items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+      items.push({ sidebarActionId: "contextMenu.changeOpenMode", label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     }
     if (canOpenStructureEditor.value) {
-      items.push({ label: t("contextMenu.editStructure"), action: openStructureEditor, icon: PencilRuler });
+      items.push({ sidebarActionId: "contextMenu.editStructure", label: t("contextMenu.editStructure"), action: openStructureEditor, icon: PencilRuler });
     }
     if (canRenameObject.value) {
       items.push({
+        sidebarActionId: "contextMenu.renameObject",
         label: t("contextMenu.renameObject"),
         action: openRenameObjectDialog,
         icon: Pencil,
@@ -6498,6 +7545,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (node.type === "view" || node.type === "materialized_view") {
       destructiveActions.push({
+        sidebarActionId: "contextMenu.dropView",
         label: deleteMenuLabel(t("contextMenu.dropView")),
         action: deleteMenuAction(requestDropObject),
         icon: Trash2,
@@ -6505,13 +7553,16 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         variant: "destructive" as const,
       });
     }
+    if (node.type === "table") items.push({ sidebarActionId: "modelGeneration.title", label: t("modelGeneration.title"), action: openModelGeneration, icon: Code2 });
     items.push({
+      sidebarActionId: "contextMenu.generateSql",
       label: t("contextMenu.generateSql"),
       icon: FilePlus,
       children: isTableNotView.value
         ? [
             { label: "SELECT", action: newSelectTemplate, icon: TerminalSquare },
             { label: "INSERT", action: newInsertTemplate, icon: FilePlus },
+            { label: "INSERT (N)…", action: openInsertTemplateRowsDialog, icon: ListPlus },
             { label: "UPDATE", action: newUpdateTemplate, icon: SquarePen },
             { label: "DELETE", action: newDeleteTemplate, icon: ListX },
             { label: "DDL", action: generateDdlTemplate, icon: FileCode },
@@ -6524,35 +7575,36 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     const sqlHistoryMenu = savedSqlHistorySubmenu();
     if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     if (canOpenDiagram.value) {
-      items.push({ label: t("diagram.open"), action: openDiagram, icon: Network });
+      items.push({ sidebarActionId: "diagram.open", label: t("diagram.open"), action: openDiagram, icon: Network });
     }
     if (canOpenTableImport.value) {
-      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Download });
+      items.push({ sidebarActionId: "contextMenu.importData", label: t("contextMenu.importData"), action: openTableImport, icon: Download });
     }
     if (isTableNotView.value) {
-      items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
+      items.push({ sidebarActionId: "dataCompare.title", label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
     }
     items.push({ label: "", separator: true });
     items.push(exportDataSubmenu());
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
-    items.push({ label: t("contextMenu.exportStructure"), action: exportStructure, icon: FileCode });
+    items.push({ sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    items.push({ sidebarActionId: "contextMenu.exportStructure", label: t("contextMenu.exportStructure"), action: exportStructure, icon: FileCode });
     if (canOpenDataDictionary.value) {
-      items.push({ label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
+      items.push({ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
     }
     items.push(copyStructureAsSubmenu());
     if (isTableNotView.value) {
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.duplicateStructure"), action: duplicateStructure, icon: CopyPlus });
+      items.push({ sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: copyAsNewTable, icon: CopyPlus });
       // Keep menu copy aligned with keyboard copy so frozen multi-selection and single-row fallback stay compatible.
       items.push(...treeTableClipboardMenuItems(node));
       if (supportsVacuum.value) {
-        destructiveActions.push({ label: t("contextMenu.vacuumTable"), action: vacuumTable, icon: Activity, variant: "destructive" as const });
+        destructiveActions.push({ sidebarActionId: "contextMenu.vacuumTable", label: t("contextMenu.vacuumTable"), action: vacuumTable, icon: Activity, variant: "destructive" as const });
       }
       if (supportsMysqlAutoIncrement.value || batchAutoIncrementCount > 1) {
-        items.push({ label: autoIncrementMenuLabel(t("contextMenu.mysqlAutoIncrement")), action: autoIncrementMenuAction(mysqlAutoIncrement), icon: Gauge });
+        items.push({ sidebarActionId: "contextMenu.mysqlAutoIncrement", label: autoIncrementMenuLabel(t("contextMenu.mysqlAutoIncrement")), action: autoIncrementMenuAction(mysqlAutoIncrement), icon: Gauge });
       }
       if (supportsTruncate.value) {
         destructiveActions.push({
+          sidebarActionId: "contextMenu.truncateTable",
           label: truncateMenuLabel(t("contextMenu.truncateTable")),
           action: truncateMenuAction(truncateTable),
           icon: Scissors,
@@ -6560,12 +7612,14 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         });
       }
       destructiveActions.push({
+        sidebarActionId: "contextMenu.emptyTable",
         label: emptyMenuLabel(t("contextMenu.emptyTable")),
         action: emptyMenuAction(emptyTable),
         icon: Eraser,
         variant: "destructive" as const,
       });
       destructiveActions.push({
+        sidebarActionId: "contextMenu.dropTable",
         label: deleteMenuLabel(t("contextMenu.dropTable")),
         action: deleteMenuAction(dropTable),
         icon: Trash2,
@@ -6579,10 +7633,11 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     items.push({ label: "", separator: true });
     items.push({
+      sidebarActionId: "contextMenu.refreshChildren",
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
-      shortcut: shortcutRefresh,
+      shortcut: shortcutRefresh.value,
     });
     appendPluginTableMenuItems(items, node);
     return true;
@@ -6590,8 +7645,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   // 7. Column
   if (node.type === "column") {
-    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push(copyNameMenuItem());
     const columnActions: ContextMenuItem[] = [];
+    columnActions.push({ label: t("contextMenu.viewDdl"), action: openColumnDdl, icon: FileCode });
     if (canOpenStructureEditor.value) {
       columnActions.push({ label: t("contextMenu.editColumn"), action: openStructureEditor, icon: PencilRuler });
     }
@@ -6616,7 +7672,16 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   }
 
   if (node.type === "index" || node.type === "fkey" || (node.type === "trigger" && !!node.tableName)) {
-    items.push(node.type === "trigger" ? copyNameMenuItem() : { label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push(node.type === "trigger" || node.type === "index" ? copyNameMenuItem() : { label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    if (node.type === "trigger") {
+      items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+      items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+      const toggleItems = triggerToggleMenuItems(node);
+      if (toggleItems.length > 0) {
+        items.push({ label: "", separator: true });
+        items.push(...toggleItems);
+      }
+    }
     if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
@@ -6658,11 +7723,14 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (!isPackageMember && currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
-    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (!isPackageMember) {
+      items.push({ sidebarActionId: "contextMenu.editObject", label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
+    }
+    items.push({ sidebarActionId: "contextMenu.viewSource", label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (!isPackageMember) {
       items.push({ label: t("diff.title"), action: openSchemaDiffForRoutine, icon: ArrowRightLeft });
     }
-    if (!isPackageMember && canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
+    if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
       items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
     }
     items.push(copyNameMenuItem());
@@ -6680,7 +7748,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
-      shortcut: shortcutRefresh,
+      shortcut: shortcutRefresh.value,
     });
     if (!isPackageMember) {
       items.push({ label: "", separator: true });
@@ -6700,9 +7768,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     // Open that surface from the tree instead of routing through the generic source dialog.
     items.push({ label: t("contextMenu.editObject"), action: () => openObjectBrowser(false, true), icon: Pencil });
     items.push({ label: t("contextMenu.viewObject"), action: () => openObjectBrowser(true, true), icon: Eye });
-    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push(copyNameMenuItem());
     items.push({ label: t("contextMenu.dropObject"), action: deleteMenuAction(requestDropObject), icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
-    items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+    items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh.value });
     return true;
   }
 
@@ -6728,17 +7796,30 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("xuguSchedulerJob.drop"), action: () => executeXuguSchedulerJobAction("drop"), icon: Trash2, variant: "destructive" as const });
     }
     items.push({ label: "", separator: true });
-    items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+    items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh.value });
     return true;
   }
 
   if (node.type === "trigger" || node.type === "package" || node.type === "package-body") {
+    if ((databaseTypeForNode(node) === "oracle" || databaseTypeForNode(node) === "oceanbase-oracle") && (node.type === "package" || node.type === "package-body")) {
+      items.push({ label: t("objects.packageSaveAsTitle"), action: () => openPackageSaveAsDialog(node), icon: CopyPlus });
+    }
     if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
-    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (node.type === "package" || node.type === "package-body") {
+      items.push({ sidebarActionId: "contextMenu.editObject", label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
+    }
+    items.push({ sidebarActionId: "contextMenu.viewSource", label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
       items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
+    }
+    if (node.type === "trigger") {
+      const toggleItems = triggerToggleMenuItems(node);
+      if (toggleItems.length > 0) {
+        items.push({ label: "", separator: true });
+        items.push(...toggleItems);
+      }
     }
     if (node.type === "package" && currentDatabaseType() === "xugu" && node.xuguPackageBodyAvailable === true) {
       items.push({
@@ -6773,7 +7854,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
 function treeTableClipboardMenuItems(node: TreeNode): ContextMenuItem[] {
   if (currentDatabaseType() === "victoriametrics") return [];
-  const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: copySelectedNames, icon: Copy };
+  const copyItem: ContextMenuItem = { sidebarActionId: "contextMenu.copyTable", label: t("contextMenu.copyTable"), action: copySelectedNames, icon: Copy };
   if (!node.connectionId || !node.database) return [copyItem];
   const state = tableClipboardMenuState(
     normalizedTreeClipboardTableEntries(),
@@ -6786,7 +7867,7 @@ function treeTableClipboardMenuItems(node: TreeNode): ContextMenuItem[] {
     canTransferTreeClipboardToCurrentNode(),
   );
   if (state === "copy") return [copyItem];
-  const pasteItem: ContextMenuItem = { label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
+  const pasteItem: ContextMenuItem = { sidebarActionId: "contextMenu.pasteTable", label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
   return state === "paste" ? [pasteItem] : [copyItem, pasteItem];
 }
 
@@ -6795,20 +7876,15 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
   appendTableVGroupContainerItems(node, items);
   // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
-    const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
+    const objectTemplate = node.connectionId ? sidebarObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
     const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
     const canCreateGroupView = node.type === "group-views" && !!node.connectionId && !!node.database && !["neo4j", "nebula"].includes(currentDatabaseType() || "");
-    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateGroupView || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
+    const canCreateTableGroup = isTableVGroupContainerNode(node);
+    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateTableGroup || canCreateGroupView || !!objectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
-      if (canOpenTableImport.value) {
-        items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
-      }
-      if (canPasteTreeClipboardToCurrentNode() || canTransferTreeClipboardToCurrentNode()) {
-        items.push({ label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard });
-      }
     }
     if (canCreateGroupView) {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
@@ -6816,8 +7892,24 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     if (node.type === "group-events" && node.connectionId && node.database) {
       items.push({ label: t("contextMenu.createEvent"), action: openMysqlEventCreateEditor, icon: Plus });
     }
-    if (mysqlObjectTemplate) {
-      items.push({ label: t(mysqlObjectTemplate.titleKey), action: createMysqlObjectTemplate, icon: Plus });
+    if (objectTemplate) {
+      items.push({ label: t(objectTemplate.titleKey), action: createSidebarObjectTemplate, icon: Plus });
+    }
+    if (canCreateTableGroup) {
+      items.push({
+        sidebarActionId: "contextMenu.createGroup",
+        label: t("connectionGroup.createGroup"),
+        action: () => openCreateTableVGroupDialog(node),
+        icon: FolderPlus,
+      });
+    }
+    if (node.type === "group-tables" && canCreateTable.value) {
+      if (canOpenTableImport.value) {
+        items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
+      }
+      if (canPasteTreeClipboardToCurrentNode() || canTransferTreeClipboardToCurrentNode()) {
+        items.push({ label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard });
+      }
     }
     if (hasMongoCreateIndexAction) {
       items.push({ label: t("contextMenu.createMongoIndex"), action: openCreateMongoIndexDialog, icon: Plus });
@@ -6857,7 +7949,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
         label: t("contextMenu.refreshChildren"),
         action: refresh,
         icon: RefreshCw,
-        shortcut: shortcutRefresh,
+        shortcut: shortcutRefresh.value,
       });
     }
     return true;
@@ -6969,6 +8061,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
   // 1. Pin toggle
   if (canPin.value) {
     items.push({
+      sidebarActionId: "sidebar.togglePinnedObject",
       label: isPinned.value ? t("contextMenu.unpin") : t("contextMenu.pin"),
       action: togglePin,
       icon: Pin,
@@ -7150,7 +8243,14 @@ function activateRuntimeNode(node: TreeNode) {
 function emitNodeToggled(node: TreeNode, wasExpanded: boolean, expandedOverride?: boolean) {
   const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
   activeNode.value = liveNode;
-  emit("node-toggled", node, expandedOverride ?? !wasExpanded);
+  const isExpanded = expandedOverride ?? !wasExpanded;
+  if (!isExpanded) {
+    collapseSubtreeDescendants(node);
+    if (liveNode !== node) {
+      collapseSubtreeDescendants(liveNode);
+    }
+  }
+  emit("node-toggled", node, isExpanded);
 }
 
 function activateActionTarget(target: SidebarActionTarget) {
@@ -7272,12 +8372,28 @@ defineExpose({
   openPrimaryVisibleFilter,
   openDataInNewTab,
   openDdlForSelection,
+  openStructureEditorForSelection,
+  refreshNode,
   requestPaste,
   toggleNode,
 });
 </script>
 
 <template>
+  <DangerConfirmDialog
+    v-model:open="cloneDialogOpen"
+    :title="t(cloneDialogState?.failure ? 'oceanbaseCloneDialog.failed' : 'oceanbaseCloneDialog.title')"
+    :message="t(cloneDialogState?.failure ? 'oceanbaseCloneDialog.failedMessage' : 'oceanbaseCloneDialog.message')"
+    :details-text="cloneDialogState?.summary"
+    :details="cloneDialogState?.details"
+    :details-label="t('oceanbaseCloneDialog.details')"
+    :show-cancel="!cloneDialogState?.failure"
+    :confirm-label="cloneDialogState?.failure ? t('oceanbaseCloneDialog.close') : undefined"
+    :close-on-confirm="false"
+    @confirm="cloneDialog.confirm"
+  />
+  <ModelGenerateDialog v-if="modelGenerationTarget" :key="modelGenerationTarget.id" :target="modelGenerationTarget" @close="modelGenerationTarget = null" />
+  <SqlTemplateInsertRowsDialog v-model:open="insertTemplateRowsOpen" @confirm="confirmInsertTemplateRows" />
   <Dialog
     :open="!!pluginDialog"
     @update:open="

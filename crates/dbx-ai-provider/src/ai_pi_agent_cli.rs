@@ -877,6 +877,7 @@ mod tests {
             pi_agent_cli_env: HashMap::new(),
             opencode_cli_path: None,
             opencode_cli_env: HashMap::new(),
+            opencode_cli_version: None,
             cursor_cli_path: None,
             cursor_cli_env: HashMap::new(),
             grok_cli_path: None,

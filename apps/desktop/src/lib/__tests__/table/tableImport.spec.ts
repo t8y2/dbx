@@ -4,6 +4,7 @@ import {
   buildTableImportParseOptions,
   defaultTableImportEmptyStringAsNull,
   formatTableImportElapsed,
+  formatTableImportPreviewCell,
   importDataTypeForDatabase,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
@@ -70,6 +71,12 @@ describe("tableImport", () => {
     expect(formatTableImportElapsed(61_000)).toBe("1m 1s");
   });
 
+  it("shows SQL current timestamp markers without exposing internal JSON", () => {
+    expect(formatTableImportPreviewCell({ $dbxSqlImportExpression: "currentTimestamp" })).toBe("CURRENT_TIMESTAMP");
+    expect(formatTableImportPreviewCell({ $dbxSqlImportExpression: "other" })).toBe('{"$dbxSqlImportExpression":"other"}');
+    expect(formatTableImportPreviewCell({ value: 1 })).toBe('{"value":1}');
+  });
+
   it("uses the backend elapsed time as the terminal source of truth", () => {
     expect(resolveTableImportElapsed(1_500, 1_000, false)).toBe(1_500);
     expect(resolveTableImportElapsed(1_500, 2_000, false)).toBe(2_000);
@@ -97,6 +104,21 @@ describe("tableImport", () => {
 
   it("maps headerless columns by position even when generated names match a different target", () => {
     expect(autoMapImportColumns(["column_1", "column_2"], ["column_2", "column_1"], "position")).toEqual({ column_1: "column_2", column_2: "column_1" });
+  });
+
+  it("falls back to position mapping in auto mode when no column names match", () => {
+    expect(autoMapImportColumns(["col_a", "col_b", "col_c"], ["id", "name"])).toEqual({
+      col_a: "id",
+      col_b: "name",
+      col_c: "",
+    });
+  });
+
+  it("keeps name-only matches when explicitly using name mode", () => {
+    expect(autoMapImportColumns(["col_a", "col_b"], ["id", "name"], "name")).toEqual({
+      col_a: "",
+      col_b: "",
+    });
   });
 
   it("skips excess source columns and leaves excess target columns unmapped", () => {

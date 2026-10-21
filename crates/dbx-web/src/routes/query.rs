@@ -73,6 +73,8 @@ pub struct CloseClientConnectionSessionRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecuteBatchRequest {
+    #[serde(default)]
+    pub bound_statements: Option<Vec<dbx_core::db::BlobBoundStatement>>,
     pub connection_id: String,
     pub database: String,
     pub statements: Vec<String>,
@@ -142,6 +144,31 @@ pub struct BuildTableSelectSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BuildDatabaseSearchSqlRequest {
     pub options: dbx_core::database_search_sql::DatabaseSearchSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildDatabaseStructureSearchSqlRequest {
+    pub options: dbx_core::database_structure_search_sql::DatabaseStructureSearchSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildDatabaseSearchColumnsSqlRequest {
+    pub options: dbx_core::database_search_columns_sql::DatabaseSearchColumnsSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildDatabaseSearchProbeSqlRequest {
+    pub options: dbx_core::database_search_probe_sql::DatabaseSearchProbeSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportsDatabaseStructureSearchRequest {
+    pub database_type: Option<dbx_core::models::connection::DatabaseType>,
+    pub driver_profile: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -259,8 +286,36 @@ pub struct BuildExecutableObjectSourceRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ValidateOracleExecutableObjectSourceRequest {
+    pub input: dbx_core::object_source_sql::OracleObjectSourceValidationInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildRoutineRenameObjectSourceRequest {
     pub input: dbx_core::object_source_sql::RoutineRenameObjectSourceInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewriteOracleRoutineReferencesRequest {
+    pub input: dbx_core::object_source_sql::OracleRoutineReferenceRewriteInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewriteOracleTableReferencesRequest {
+    pub input: dbx_core::object_source_sql::OracleTableReferenceRewriteInput,
+}
+
+#[derive(Deserialize)]
+pub struct ParseOracleObjectNameRequest {
+    pub input: String,
+}
+
+#[derive(Deserialize)]
+pub struct BuildOracleViewRenameSourceRequest {
+    pub input: dbx_core::oracle_view_rename::OracleViewRenameSourceInput,
 }
 
 #[derive(Deserialize)]
@@ -272,7 +327,13 @@ pub struct BuildViewDdlRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildTableStructureSqlRequest {
+    #[serde(default)]
+    pub starrocks: Option<dbx_core::table_structure_sql::StarRocksAlterOptions>,
     pub options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    #[serde(default)]
+    pub server_version: Option<String>,
+    #[serde(default)]
+    pub dialect_options: Option<dbx_core::table_structure_sql::CreateTableDialectOptions>,
 }
 
 #[derive(Deserialize)]
@@ -646,6 +707,25 @@ pub async fn execute_batch(
     for statement in &req.statements {
         super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, statement, false).await?;
     }
+    if let Some(bound) = req.bound_statements.as_ref() {
+        for statement in bound {
+            super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, &statement.sql, false)
+                .await?;
+        }
+        return dbx_core::query::execute_blob_bound_statements(
+            &state.app,
+            &req.connection_id,
+            &database,
+            &req.statements,
+            bound,
+            req.schema.as_deref(),
+            req.use_transaction == Some(true),
+            req.timeout_secs,
+        )
+        .await
+        .map(Json)
+        .map_err(AppError::from);
+    }
     tracing::debug!(connection_id = %req.connection_id, "execute_batch");
     let result = dbx_core::query::execute_statements_with_transaction_option(
         &state.app,
@@ -675,6 +755,106 @@ pub async fn cancel_conditional_update(
     Json(req): Json<CancelRequest>,
 ) -> Json<dbx_core::query_cancel::CancellationWaitResult> {
     Json(state.app.running_queries.cancel_and_wait(&req.execution_id, CONDITIONAL_UPDATE_CANCEL_WAIT).await)
+}
+
+pub async fn read_large_value_chunk(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<dbx_core::query::LargeValueRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    dbx_core::query::request_large_value(&state.app, req, false).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn release_large_value(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<dbx_core::query::LargeValueRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    dbx_core::query::request_large_value(&state.app, req, true).await.map(Json).map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeValueDownloadRequest {
+    pub request: dbx_core::query::LargeValueRequest,
+    pub file_name: String,
+}
+
+pub async fn prepare_large_value_download(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<LargeValueDownloadRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut temporary = tempfile::NamedTempFile::new().map_err(|error| AppError::from(error.to_string()))?;
+    dbx_core::query::write_large_value_snapshot(&state.app, req.request, temporary.as_file_mut())
+        .await
+        .map_err(AppError::from)?;
+    let (_, path) = temporary.keep().map_err(|error| AppError::from(error.to_string()))?;
+    let download_id = uuid::Uuid::new_v4().to_string();
+    state.export_files.write().await.insert(
+        download_id.clone(),
+        crate::state::WebExportFile {
+            file_path: path.to_string_lossy().into_owned(),
+            download_filename: req.file_name,
+            format: "lob".to_string(),
+        },
+    );
+    let cleanup_state = state.clone();
+    let cleanup_id = download_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        if let Some(file) = cleanup_state.export_files.write().await.remove(&cleanup_id) {
+            let _ = tokio::fs::remove_file(file.file_path).await;
+        }
+    });
+    Ok(Json(serde_json::json!({ "downloadId": download_id })))
+}
+
+pub async fn download_large_value(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    let file = state
+        .export_files
+        .write()
+        .await
+        .remove(&id)
+        .ok_or_else(|| AppError::from("LOB download expired".to_string()))?;
+    super::mongodb_import_export::export_file_response(file).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotExportDownloadRequest {
+    pub request: dbx_core::query::snapshot_export::SnapshotExportRequest,
+    pub file_name: String,
+}
+
+pub async fn prepare_snapshot_export(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SnapshotExportDownloadRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut temporary = tempfile::NamedTempFile::new().map_err(|error| AppError::from(error.to_string()))?;
+    let format = req.request.format.clone();
+    dbx_core::query::snapshot_export::write_snapshot_export(&state.app, req.request, temporary.as_file_mut())
+        .await
+        .map_err(AppError::from)?;
+    let (_, path) = temporary.keep().map_err(|error| AppError::from(error.to_string()))?;
+    let download_id = uuid::Uuid::new_v4().to_string();
+    state.export_files.write().await.insert(
+        download_id.clone(),
+        crate::state::WebExportFile {
+            file_path: path.to_string_lossy().into_owned(),
+            download_filename: req.file_name,
+            format,
+        },
+    );
+    let cleanup_state = state.clone();
+    let cleanup_id = download_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        if let Some(file) = cleanup_state.export_files.write().await.remove(&cleanup_id) {
+            let _ = tokio::fs::remove_file(file.file_path).await;
+        }
+    });
+    Ok(Json(serde_json::json!({ "downloadId": download_id })))
 }
 
 pub async fn close_query_session(
@@ -746,6 +926,21 @@ pub async fn execute_in_transaction(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteBatchRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    if let Some(bound) = req.bound_statements.as_ref() {
+        return dbx_core::query::execute_blob_bound_statements(
+            &state.app,
+            &req.connection_id,
+            &req.database,
+            &req.statements,
+            bound,
+            req.schema.as_deref(),
+            true,
+            req.timeout_secs,
+        )
+        .await
+        .map(Json)
+        .map_err(AppError::from);
+    }
     tracing::debug!(connection_id = %req.connection_id, "execute_in_transaction");
     let result = dbx_core::query::execute_statements_in_transaction(
         &state.app,
@@ -765,6 +960,9 @@ pub async fn execute_script_with_2pc(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteBatchRequest>,
 ) -> Result<Json<dbx_core::query::SchemaDiffDeployResult>, AppError> {
+    if req.bound_statements.is_some() {
+        return Err(AppError::from("Bound BLOB saves must use a supported save execution endpoint.".to_string()));
+    }
     tracing::debug!(connection_id = %req.connection_id, "execute_script_with_2pc");
     // Single-connection real transaction (not per-statement auto-commit 2PC).
     let result = dbx_core::query::execute_schema_diff_deploy(
@@ -829,6 +1027,8 @@ pub struct GetExplainInfoRequest {
     pub schema: Option<String>,
     pub sql: String,
     pub mode: Option<String>,
+    pub execution_id: Option<String>,
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -849,14 +1049,15 @@ pub async fn get_explain_info(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GetExplainInfoRequest>,
 ) -> Result<Json<String>, AppError> {
-    let plan = dbx_core::agent_explain::get_agent_explain_info_core(
+    let plan = dbx_core::agent_explain::get_agent_explain_info_core_with_execution_id(
         &state.app,
         &req.connection_id,
         req.database.as_deref(),
         req.schema.as_deref(),
         &req.sql,
         req.mode.as_deref(),
-        None,
+        req.timeout_secs,
+        req.execution_id.as_deref(),
     )
     .await
     .map_err(AppError::from)?;
@@ -957,6 +1158,31 @@ pub async fn build_database_search_sql(
     Json(req): Json<BuildDatabaseSearchSqlRequest>,
 ) -> Json<Option<dbx_core::database_search_sql::DatabaseSearchSql>> {
     Json(dbx_core::database_search_sql::build_database_search_sql(req.options))
+}
+
+pub async fn build_database_structure_search_sql(
+    Json(req): Json<BuildDatabaseStructureSearchSqlRequest>,
+) -> Json<Option<dbx_core::database_structure_search_sql::DatabaseStructureSearchSql>> {
+    Json(dbx_core::database_structure_search_sql::build_database_structure_search_sql(req.options))
+}
+
+pub async fn build_database_search_columns_sql(
+    Json(req): Json<BuildDatabaseSearchColumnsSqlRequest>,
+) -> Json<Option<dbx_core::database_search_columns_sql::DatabaseSearchColumnsSql>> {
+    Json(dbx_core::database_search_columns_sql::build_database_search_columns_sql(req.options))
+}
+
+pub async fn build_database_search_probe_sql(
+    Json(req): Json<BuildDatabaseSearchProbeSqlRequest>,
+) -> Json<Option<dbx_core::database_search_probe_sql::DatabaseSearchProbeSql>> {
+    Json(dbx_core::database_search_probe_sql::build_database_search_probe_sql(req.options))
+}
+
+pub async fn supports_database_structure_search(Json(req): Json<SupportsDatabaseStructureSearchRequest>) -> Json<bool> {
+    Json(dbx_core::database_structure_search_sql::supports_database_structure_search(
+        req.database_type,
+        req.driver_profile.as_deref(),
+    ))
 }
 
 pub async fn build_search_result_where(Json(req): Json<BuildSearchResultWhereRequest>) -> Json<String> {
@@ -1069,6 +1295,20 @@ pub async fn build_executable_object_source_statements(
     dbx_core::object_source_sql::build_executable_object_source_statements(req.input).map(Json).map_err(AppError::from)
 }
 
+pub async fn validate_oracle_executable_object_source(
+    Json(req): Json<ValidateOracleExecutableObjectSourceRequest>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::object_source_sql::validate_oracle_executable_object_source(req.input)
+        .map(|()| Json(()))
+        .map_err(AppError::from)
+}
+
+pub async fn fingerprint_oracle_routine_object_source(
+    Json(req): Json<BuildExecutableObjectSourceRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::object_source_sql::fingerprint_oracle_routine_object_source(req.input).map(Json).map_err(AppError::from)
+}
+
 pub async fn build_executable_object_source_sql(
     Json(req): Json<BuildExecutableObjectSourceRequest>,
 ) -> Result<Json<String>, AppError> {
@@ -1087,14 +1327,42 @@ pub async fn build_routine_rename_object_source_statements(
         .map_err(AppError::from)
 }
 
+pub async fn rewrite_oracle_routine_references(
+    Json(req): Json<RewriteOracleRoutineReferencesRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::object_source_sql::rewrite_oracle_routine_references(req.input).map(Json).map_err(AppError::from)
+}
+
+pub async fn rewrite_oracle_table_references(
+    Json(req): Json<RewriteOracleTableReferencesRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::object_source_sql::rewrite_oracle_table_references(req.input).map(Json).map_err(AppError::from)
+}
+
 pub async fn build_view_ddl_sql(Json(req): Json<BuildViewDdlRequest>) -> Json<String> {
     Json(dbx_core::object_source_sql::build_view_ddl_sql(req.input))
+}
+
+pub async fn parse_oracle_object_name(Json(req): Json<ParseOracleObjectNameRequest>) -> Result<Json<String>, AppError> {
+    dbx_core::oracle_view_rename::parse_oracle_object_name(&req.input).map(Json).map_err(AppError::from)
+}
+
+pub async fn build_oracle_view_rename_source(
+    Json(req): Json<BuildOracleViewRenameSourceRequest>,
+) -> Result<Json<dbx_core::oracle_view_rename::OracleViewRenameSource>, AppError> {
+    dbx_core::oracle_view_rename::build_oracle_view_rename_source(req.input).map(Json).map_err(AppError::from)
+}
+
+pub async fn review_oracle_view_rename_source(
+    Json(req): Json<BuildOracleViewRenameSourceRequest>,
+) -> Json<dbx_core::oracle_view_rename::OracleViewRenameSourceReview> {
+    Json(dbx_core::oracle_view_rename::review_oracle_view_rename_source(req.input))
 }
 
 pub async fn build_table_structure_change_sql(
     Json(req): Json<BuildTableStructureSqlRequest>,
 ) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
-    Json(dbx_core::table_structure_sql::build_table_structure_change_sql(req.options))
+    Json(dbx_core::table_structure_sql::build_table_structure_change_sql_with_context(req.options, req.starrocks))
 }
 
 pub async fn build_table_owner_change_sql(
@@ -1149,7 +1417,11 @@ pub async fn apply_sqlite_table_structure_change(
 pub async fn build_create_table_sql(
     Json(req): Json<BuildTableStructureSqlRequest>,
 ) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
-    Json(dbx_core::table_structure_sql::build_create_table_sql(req.options))
+    Json(dbx_core::table_structure_sql::build_create_table_sql_with_dialect_options(
+        req.options,
+        req.server_version.as_deref(),
+        req.dialect_options.unwrap_or_default(),
+    ))
 }
 
 pub async fn build_single_column_alter_sql(
@@ -1352,6 +1624,7 @@ mod tests {
     async fn execute_script_with_2pc_returns_structured_result() {
         let (state, _dir) = test_web_state().await;
         let req = ExecuteBatchRequest {
+            bound_statements: None,
             connection_id: "conn-1".to_string(),
             database: "testdb".to_string(),
             statements: vec!["SELECT 1".to_string()],
@@ -1378,6 +1651,7 @@ mod tests {
     async fn execute_script_with_2pc_empty_statements_succeeds() {
         let (state, _dir) = test_web_state().await;
         let req = ExecuteBatchRequest {
+            bound_statements: None,
             connection_id: "conn-empty".to_string(),
             database: "testdb".to_string(),
             statements: vec![],
@@ -1401,6 +1675,7 @@ mod tests {
     async fn execute_script_with_2pc_propagates_structured_failure_fields() {
         let (state, _dir) = test_web_state().await;
         let req = ExecuteBatchRequest {
+            bound_statements: None,
             connection_id: "missing-conn".to_string(),
             database: "testdb".to_string(),
             statements: vec!["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()],
@@ -1426,6 +1701,7 @@ mod tests {
     async fn execute_script_with_2pc_blocks_unconfirmed_destructive_sql() {
         let (state, _dir) = test_web_state().await;
         let req = ExecuteBatchRequest {
+            bound_statements: None,
             connection_id: "missing-conn".to_string(),
             database: "testdb".to_string(),
             statements: vec!["DROP INDEX idx_old ON users".to_string()],

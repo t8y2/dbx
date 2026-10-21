@@ -1,14 +1,27 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlparser::dialect::OracleDialect;
+use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 
 use crate::models::connection::DatabaseType;
+use crate::sql::split_sql_statements_for_database;
 use crate::types::ObjectSourceKind;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditableObjectSourceSqlInput {
+    pub database_type: DatabaseType,
+    pub object_type: ObjectSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub name: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleObjectSourceValidationInput {
     pub database_type: DatabaseType,
     pub object_type: ObjectSourceKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -25,6 +38,31 @@ pub struct RoutineRenameObjectSourceInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub name: String,
+    pub new_name: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleRoutineReferenceRewriteInput {
+    pub database_type: DatabaseType,
+    pub caller_type: ObjectSourceKind,
+    pub target_type: ObjectSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub old_name: String,
+    pub new_name: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTableReferenceRewriteInput {
+    pub database_type: DatabaseType,
+    pub object_type: ObjectSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub old_name: String,
     pub new_name: String,
     pub source: String,
 }
@@ -71,7 +109,10 @@ pub fn supports_source_backed_routine_rename(
         return false;
     };
     database_type != DatabaseType::SqlServer
-        && (is_mysql_like(database_type) || is_postgres_like(database_type) || is_oracle_like(database_type))
+        && (is_mysql_like(database_type)
+            || is_postgres_like(database_type)
+            || is_oracle_like(database_type)
+            || database_type == DatabaseType::OceanbaseOracle)
 }
 
 pub fn build_routine_rename_object_source_statements(
@@ -85,6 +126,15 @@ pub fn build_routine_rename_object_source_statements(
     }
 
     let source = input.source.trim();
+    if input.database_type == DatabaseType::Oracle || input.database_type == DatabaseType::OceanbaseOracle {
+        validate_oracle_object_source(
+            input.database_type,
+            &input.object_type,
+            input.schema.as_deref(),
+            &input.name,
+            source,
+        )?;
+    }
     let declaration = if is_mysql_like(input.database_type) {
         mysql_routine_declaration(source)
     } else {
@@ -106,7 +156,14 @@ pub fn build_routine_rename_object_source_statements(
         return Err(format!("Cannot rewrite the {:?} name in the object source.", input.object_type));
     };
 
-    if is_oracle_like(input.database_type) {
+    if is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle {
+        let renamed_source = rewrite_oracle_routine_self_references(
+            &renamed_source,
+            &input.name,
+            &input.new_name,
+            input.schema.as_deref(),
+            input.object_type.clone(),
+        )?;
         return Ok(vec![
             ensure_semicolon(&renamed_source),
             format!(
@@ -126,7 +183,320 @@ pub fn build_routine_rename_object_source_statements(
     })
 }
 
+pub fn rewrite_oracle_routine_references(input: OracleRoutineReferenceRewriteInput) -> Result<String, String> {
+    if !(is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        || !matches!(
+            input.caller_type,
+            ObjectSourceKind::View | ObjectSourceKind::Procedure | ObjectSourceKind::Function
+        )
+    {
+        return Err("Static routine reference rewriting is supported only for Oracle-family views and routines.".into());
+    }
+    if input.old_name == input.new_name {
+        return Ok(input.source);
+    }
+    let tokens = Tokenizer::new(&OracleDialect {}, &input.source)
+        .tokenize_with_location()
+        .map_err(|error| format!("Cannot safely tokenize the dependent source: {error}"))?;
+    let significant = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+        .collect::<Vec<_>>();
+    if matches!(input.caller_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function) {
+        if let Some(execute_index) =
+            find_oracle_execute_immediate(significant.iter().copied().map(|index| (index, &tokens[index].token)))
+        {
+            let location = tokens[execute_index].span.start;
+            return Err(format!(
+                "Dynamic SQL must be rewritten as a verifiable static call at line {}, column {}.",
+                location.line, location.column
+            ));
+        }
+    }
+    if significant.windows(2).any(|pair| {
+        (token_word_is(&tokens[pair[0]].token, "FUNCTION") || token_word_is(&tokens[pair[0]].token, "PROCEDURE"))
+            && (token_matches_identifier(&tokens[pair[1]].token, &input.old_name)
+                || token_matches_identifier(&tokens[pair[1]].token, &input.new_name))
+    }) {
+        return Err(format!(
+            "A local routine named {} or {} may shadow the dependent reference.",
+            input.old_name, input.new_name
+        ));
+    }
+    let mut local_bindings = Vec::new();
+    if matches!(input.caller_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function) {
+        for body_start in 0..significant.len() {
+            if !token_word_is(&tokens[significant[body_start]].token, "AS")
+                && !token_word_is(&tokens[significant[body_start]].token, "IS")
+            {
+                continue;
+            }
+            if let Some(body_end) = (body_start + 1..significant.len())
+                .find(|position| token_word_is(&tokens[significant[*position]].token, "BEGIN"))
+            {
+                local_bindings.extend(significant[body_start + 1..body_end].iter().map(|index| &tokens[*index].token));
+            }
+
+            // Formal parameters are declared before AS/IS and can shadow the
+            // dependent name just like declarations in the block body.
+            if let Some(close) =
+                (0..body_start).rev().find(|position| tokens[significant[*position]].token == Token::RParen)
+            {
+                let mut nesting = 0usize;
+                let mut open = None;
+                for position in (0..=close).rev() {
+                    match tokens[significant[position]].token {
+                        Token::RParen => nesting += 1,
+                        Token::LParen => {
+                            nesting -= 1;
+                            if nesting == 0 {
+                                open = Some(position);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(open) = open {
+                    local_bindings.extend(significant[open + 1..close].iter().map(|index| &tokens[*index].token));
+                }
+            }
+        }
+
+        // Nested anonymous blocks can declare a collection or record after
+        // the outer BEGIN. Reject a possibly shadowed rewrite there too.
+        for declaration in 0..significant.len() {
+            if !token_word_is(&tokens[significant[declaration]].token, "DECLARE") {
+                continue;
+            }
+            if let Some(block_start) = (declaration + 1..significant.len())
+                .find(|position| token_word_is(&tokens[significant[*position]].token, "BEGIN"))
+            {
+                local_bindings
+                    .extend(significant[declaration + 1..block_start].iter().map(|index| &tokens[*index].token));
+            }
+        }
+    }
+    let mut edits = Vec::new();
+    for (position, token_index) in significant.iter().copied().enumerate() {
+        let token = &tokens[token_index];
+        if !token_matches_identifier(&token.token, &input.old_name) {
+            continue;
+        }
+        let previous = position.checked_sub(1).map(|index| &tokens[significant[index]].token);
+        let previous_previous = position.checked_sub(2).map(|index| &tokens[significant[index]].token);
+        if previous == Some(&Token::Period) {
+            let Some(Token::Word(owner)) = previous_previous else {
+                return Err(format!("Cannot determine which routine reference to rename: {}.", input.old_name));
+            };
+            if !input.schema.as_deref().is_some_and(|schema| identifier_matches(owner, schema)) {
+                continue;
+            }
+            if local_bindings
+                .iter()
+                .any(|binding| token_matches_identifier(binding, input.schema.as_deref().unwrap_or_default()))
+            {
+                return Err(format!(
+                    "The schema qualifier may be shadowed by a local declaration while rewriting {}.",
+                    input.old_name
+                ));
+            }
+        } else if local_bindings.iter().any(|binding| {
+            token_matches_identifier(binding, &input.old_name) || token_matches_identifier(binding, &input.new_name)
+        }) {
+            return Err(format!(
+                "A local declaration may shadow the {} or {} reference.",
+                input.old_name, input.new_name
+            ));
+        }
+        let next = significant.get(position + 1).map(|index| &tokens[*index].token);
+        let routine_caller = matches!(input.caller_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function);
+        let parenthesized_call = (input.target_type == ObjectSourceKind::Function
+            || (input.target_type == ObjectSourceKind::Procedure && routine_caller))
+            && matches!(next, Some(Token::LParen));
+        let procedure_call = input.target_type == ObjectSourceKind::Procedure
+            && matches!(input.caller_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function)
+            && matches!(next, Some(Token::SemiColon));
+        if parenthesized_call || procedure_call {
+            edits.push((token.span, quote_postgres_identifier(&input.new_name)));
+        } else if matches!(next, Some(Token::Period)) {
+            return Err(format!("The dependent reference {} is qualified in an unsupported form.", input.old_name));
+        }
+    }
+    if edits.is_empty() {
+        return Err(format!("The dependent source does not contain a verifiable static call to {}.", input.old_name));
+    }
+    let mut result = input.source;
+    for (span, replacement) in edits.into_iter().rev() {
+        let start = routine_location_to_byte_offset(&result, span.start)
+            .ok_or_else(|| "Cannot map routine token positions to the dependent source text.".to_string())?;
+        let end = routine_location_to_byte_offset(&result, span.end)
+            .ok_or_else(|| "Cannot map routine token positions to the dependent source text.".to_string())?;
+        if start >= end || end > result.len() {
+            return Err("Routine token positions overlap or exceed the dependent source text.".into());
+        }
+        result.replace_range(start..end, &replacement);
+    }
+    Ok(result)
+}
+
+pub fn rewrite_oracle_table_references(input: OracleTableReferenceRewriteInput) -> Result<String, String> {
+    if !(is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        || !matches!(
+            input.object_type,
+            ObjectSourceKind::Procedure | ObjectSourceKind::Function | ObjectSourceKind::Trigger
+        )
+    {
+        return Err(
+            "Static table reference rewriting supports only Oracle-family procedures, functions, and triggers.".into(),
+        );
+    }
+    let tokens = Tokenizer::new(&OracleDialect {}, &input.source)
+        .tokenize_with_location()
+        .map_err(|error| format!("Cannot safely tokenize the dependent source: {error}"))?;
+    let significant = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+        .collect::<Vec<_>>();
+    if let Some(execute_index) =
+        find_oracle_execute_immediate(significant.iter().copied().map(|index| (index, &tokens[index].token)))
+    {
+        let location = tokens[execute_index].span.start;
+        return Err(format!(
+            "Dynamic SQL is outside the supported table-reference subset at line {}, column {}.",
+            location.line, location.column
+        ));
+    }
+
+    let mut edits = Vec::new();
+    for (position, token_index) in significant.iter().copied().enumerate() {
+        let token = &tokens[token_index];
+        if !token_matches_identifier(&token.token, &input.old_name) {
+            continue;
+        }
+        let previous = position.checked_sub(1).map(|index| &tokens[significant[index]].token);
+        let previous_previous = position.checked_sub(2).map(|index| &tokens[significant[index]].token);
+        let next = significant.get(position + 1).map(|index| &tokens[*index].token);
+        let next_next = significant.get(position + 2).map(|index| &tokens[*index].token);
+
+        let owner_qualified = previous == Some(&Token::Period);
+        if owner_qualified {
+            let Some(Token::Word(owner)) = previous_previous else {
+                return Err(format!("Cannot determine which table reference to rename: {}.", input.old_name));
+            };
+            if !input.schema.as_deref().is_some_and(|schema| identifier_matches(owner, schema)) {
+                continue;
+            }
+            if position >= 3 && matches!(tokens[significant[position - 3]].token, Token::Period) {
+                return Err(format!("Three-part table reference {} is outside the supported subset.", input.old_name));
+            }
+        }
+        let context_position = if owner_qualified { position - 2 } else { position };
+        let context_previous = context_position.checked_sub(1).map(|index| &tokens[significant[index]].token);
+        let context_previous_previous = context_position.checked_sub(2).map(|index| &tokens[significant[index]].token);
+
+        let type_reference = next == Some(&Token::Period)
+            && next_next.is_some_and(|column| matches!(column, Token::Word(_)))
+            && significant
+                .get(position + 3)
+                .is_some_and(|index| matches!(tokens[*index].token, Token::Mod | Token::Char('%')))
+            && significant.get(position + 4).is_some_and(|index| token_word_is(&tokens[*index].token, "TYPE"));
+        let rowtype_reference = next.is_some_and(|value| matches!(value, Token::Mod | Token::Char('%')))
+            && next_next.is_some_and(|value| token_word_is(value, "ROWTYPE"));
+        let relation_reference = context_previous.is_some_and(|value| {
+            token_word_is(value, "FROM")
+                || token_word_is(value, "UPDATE")
+                || (input.object_type == ObjectSourceKind::Trigger && token_word_is(value, "ON"))
+        }) || (context_previous.is_some_and(|value| token_word_is(value, "INTO"))
+            && context_previous_previous
+                .is_some_and(|value| token_word_is(value, "INSERT") || token_word_is(value, "MERGE")));
+
+        if relation_reference && context_previous.is_some_and(|value| token_word_is(value, "FROM")) {
+            let multiple_relations = significant
+                .iter()
+                .skip(position + 1)
+                .map(|index| &tokens[*index].token)
+                .take_while(|candidate| {
+                    ![
+                        "WHERE",
+                        "GROUP",
+                        "ORDER",
+                        "HAVING",
+                        "CONNECT",
+                        "START",
+                        "UNION",
+                        "MINUS",
+                        "INTERSECT",
+                        "FETCH",
+                        "FOR",
+                    ]
+                    .iter()
+                    .any(|clause| token_word_is(candidate, clause))
+                        && !matches!(candidate, Token::SemiColon)
+                })
+                .any(|candidate| matches!(candidate, Token::Comma) || token_word_is(candidate, "JOIN"));
+            if multiple_relations {
+                return Err(format!(
+                    "Multiple relations in one FROM clause are outside the supported subset at line {}, column {}.",
+                    token.span.start.line, token.span.start.column
+                ));
+            }
+        }
+
+        if !(type_reference || rowtype_reference || relation_reference) {
+            return Err(format!(
+                "Cannot safely identify the table reference at line {}, column {}.",
+                token.span.start.line, token.span.start.column
+            ));
+        }
+        edits.push((token.span, quote_postgres_identifier(&input.new_name)));
+    }
+    if edits.is_empty() {
+        return Err(format!("The dependent source has no verifiable static reference to table {}.", input.old_name));
+    }
+    let mut result = input.source;
+    for (span, replacement) in edits.into_iter().rev() {
+        let start = routine_location_to_byte_offset(&result, span.start)
+            .ok_or_else(|| "Cannot map table-reference token positions to the dependent source text.".to_string())?;
+        let end = routine_location_to_byte_offset(&result, span.end)
+            .ok_or_else(|| "Cannot map table-reference token positions to the dependent source text.".to_string())?;
+        if start >= end || end > result.len() {
+            return Err("Table-reference token positions overlap or exceed the dependent source text.".into());
+        }
+        result.replace_range(start..end, &replacement);
+    }
+    Ok(result)
+}
+
 pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlInput) -> Result<Vec<String>, String> {
+    build_executable_object_source_statements_with_mysql_validation_name(input, None, true)
+}
+
+/// Builds executable MySQL routine replacement statements using a caller-owned
+/// validation name. Transfer callers pass a per-run name and preflight its
+/// absence, so validation never drops an unrelated user routine.
+pub fn build_mysql_routine_replacement_statements(
+    input: EditableObjectSourceSqlInput,
+    validation_name: &str,
+) -> Result<Vec<String>, String> {
+    if !is_mysql_like(input.database_type)
+        || !matches!(input.object_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function)
+    {
+        return Err("MySQL routine replacement is supported only for MySQL procedures and functions.".to_string());
+    }
+    if validation_name.trim().is_empty() {
+        return Err("MySQL routine validation name must not be empty.".to_string());
+    }
+    build_executable_object_source_statements_with_mysql_validation_name(input, Some(validation_name), false)
+}
+
+fn build_executable_object_source_statements_with_mysql_validation_name(
+    input: EditableObjectSourceSqlInput,
+    mysql_validation_name: Option<&str>,
+    drop_mysql_validation_before_create: bool,
+) -> Result<Vec<String>, String> {
     if input.database_type == DatabaseType::OceanbaseOracle && input.object_type == ObjectSourceKind::Sequence {
         return Ok(vec![oceanbase_sequence_edit_sql(&input)?]);
     }
@@ -136,6 +506,24 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
     } else {
         source
     };
+    if (input.database_type == DatabaseType::Oracle || input.database_type == DatabaseType::OceanbaseOracle)
+        && matches!(
+            input.object_type,
+            ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Package
+                | ObjectSourceKind::PackageBody
+        )
+        && source_starts_with_create(source)
+    {
+        validate_oracle_object_source(
+            input.database_type,
+            &input.object_type,
+            input.schema.as_deref(),
+            &input.name,
+            source,
+        )?;
+    }
     if input.database_type == DatabaseType::SqlServer {
         if input.object_type == ObjectSourceKind::View {
             return Ok(vec![build_sqlserver_alter_view_sql(input.schema.as_deref(), &input.name, source)]);
@@ -175,14 +563,21 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         return Ok(vec![executable_oracle_routine_ddl(source)]);
     }
 
-    if input.database_type == DatabaseType::Informix && input.object_type == ObjectSourceKind::View {
+    if matches!(input.database_type, DatabaseType::Informix | DatabaseType::Gbase8s)
+        && input.object_type == ObjectSourceKind::View
+    {
         return Ok(executable_informix_view_statements(input.schema.as_deref(), &input.name, source));
     }
 
     if is_mysql_like(input.database_type)
         && matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
     {
-        return Ok(executable_mysql_routine_statements(&input, source));
+        return Ok(executable_mysql_routine_statements(
+            &input,
+            source,
+            mysql_validation_name,
+            drop_mysql_validation_before_create,
+        ));
     }
 
     let create_statement = ensure_semicolon(source);
@@ -190,8 +585,177 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
     Ok(if let Some(cleanup) = cleanup { vec![create_statement, cleanup] } else { vec![create_statement] })
 }
 
+pub fn validate_oracle_executable_object_source(input: OracleObjectSourceValidationInput) -> Result<(), String> {
+    if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+        || !matches!(
+            input.object_type,
+            ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Package
+                | ObjectSourceKind::PackageBody
+        )
+    {
+        return Err("Strict object-source validation is supported only for Oracle routines and packages.".to_string());
+    }
+    validate_oracle_object_source(
+        input.database_type,
+        &input.object_type,
+        input.schema.as_deref(),
+        &input.name,
+        &input.source,
+    )
+}
+
+pub fn fingerprint_oracle_routine_object_source(input: EditableObjectSourceSqlInput) -> Result<String, String> {
+    if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+        || !matches!(input.object_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function)
+    {
+        return Err("Routine source fingerprinting is supported only for Oracle procedures and functions.".into());
+    }
+    validate_oracle_object_source(
+        input.database_type,
+        &input.object_type,
+        input.schema.as_deref(),
+        &input.name,
+        &input.source,
+    )?;
+
+    let tokens = Tokenizer::new(&OracleDialect {}, &input.source)
+        .tokenize_with_location()
+        .map_err(|error| format!("Cannot tokenize Oracle routine source: {error}"))?;
+    let mut tokens = tokens
+        .iter()
+        .filter(|token| {
+            !matches!(
+                &token.token,
+                Token::Whitespace(Whitespace::Space | Whitespace::Tab | Whitespace::Newline) | Token::EOF
+            )
+        })
+        .collect::<Vec<_>>();
+    let last_statement_token = tokens.iter().rposition(|token| {
+        !matches!(
+            token.token,
+            Token::Whitespace(Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment(_))
+        )
+    });
+    if last_statement_token.is_some_and(|index| tokens[index].token == Token::SemiColon) {
+        tokens.remove(last_statement_token.unwrap());
+    }
+    let token_fingerprints = tokens
+        .iter()
+        .map(|token| {
+            let start = routine_location_to_byte_offset(&input.source, token.span.start)
+                .ok_or_else(|| "Cannot map Oracle routine token positions to the source text.".to_string())?;
+            let end = routine_location_to_byte_offset(&input.source, token.span.end)
+                .ok_or_else(|| "Cannot map Oracle routine token positions to the source text.".to_string())?;
+            if start >= end || end > input.source.len() {
+                return Err("Oracle routine token positions overlap or exceed the source text.".to_string());
+            }
+            Ok(input.source[start..end].to_string())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    serde_json::to_string(&token_fingerprints)
+        .map_err(|error| format!("Cannot encode Oracle routine fingerprint: {error}"))
+}
+
 pub fn build_executable_object_source_sql(input: EditableObjectSourceSqlInput) -> Result<String, String> {
     Ok(build_executable_object_source_statements(input)?.join("\n"))
+}
+
+fn validate_oracle_object_source(
+    database_type: DatabaseType,
+    object_type: &ObjectSourceKind,
+    schema: Option<&str>,
+    name: &str,
+    source: &str,
+) -> Result<(), String> {
+    let initial_tokens =
+        Tokenizer::new(&OracleDialect {}, source).tokenize_with_location().map_err(|error| error.to_string())?;
+    let first_significant = initial_tokens.iter().find(|token| !matches!(token.token, Token::Whitespace(_)));
+    let source = if first_significant.is_some_and(|token| token_word_is(&token.token, "CREATE")) {
+        source.to_string()
+    } else if matches!(object_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function) {
+        format!("CREATE OR REPLACE {}", source.trim())
+    } else {
+        format!("CREATE {}", source.trim())
+    };
+    let statements = split_sql_statements_for_database(&source, database_type);
+    if statements.len() != 1 {
+        return Err("Oracle object source must contain exactly one complete object definition.".to_string());
+    }
+
+    let tokens =
+        Tokenizer::new(&OracleDialect {}, &source).tokenize_with_location().map_err(|error| error.to_string())?;
+    let significant = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+        .collect::<Vec<_>>();
+    let token_at = |position: usize| significant.get(position).map(|index| &tokens[*index].token);
+    let mut position = 0;
+    if !token_at(position).is_some_and(|token| token_word_is(token, "CREATE")) {
+        return Err("Oracle object source must begin with CREATE.".to_string());
+    }
+    position += 1;
+    if token_at(position).is_some_and(|token| token_word_is(token, "OR")) {
+        if !token_at(position + 1).is_some_and(|token| token_word_is(token, "REPLACE")) {
+            return Err("Oracle object source has an invalid CREATE prefix.".to_string());
+        }
+        position += 2;
+    }
+    if token_at(position)
+        .is_some_and(|token| token_word_is(token, "EDITIONABLE") || token_word_is(token, "NONEDITIONABLE"))
+    {
+        position += 1;
+    }
+
+    let kind_matches = match object_type {
+        ObjectSourceKind::Procedure => token_at(position).is_some_and(|token| token_word_is(token, "PROCEDURE")),
+        ObjectSourceKind::Function => token_at(position).is_some_and(|token| token_word_is(token, "FUNCTION")),
+        ObjectSourceKind::Package => {
+            token_at(position).is_some_and(|token| token_word_is(token, "PACKAGE"))
+                && !token_at(position + 1).is_some_and(|token| token_word_is(token, "BODY"))
+        }
+        ObjectSourceKind::PackageBody => {
+            token_at(position).is_some_and(|token| token_word_is(token, "PACKAGE"))
+                && token_at(position + 1).is_some_and(|token| token_word_is(token, "BODY"))
+        }
+        _ => false,
+    };
+    if !kind_matches {
+        return Err(format!("Oracle object source declaration does not match {object_type:?}."));
+    }
+    position += 1;
+    if *object_type == ObjectSourceKind::PackageBody {
+        position += 1;
+    }
+
+    let first_name = token_at(position).ok_or_else(|| "Oracle object source has no declaration name.".to_string())?;
+    let (owner, declared_name, consumed) = if token_at(position + 1) == Some(&Token::Period) {
+        let declared_name = token_at(position + 2)
+            .ok_or_else(|| "Oracle object source has an incomplete qualified name.".to_string())?;
+        (Some(first_name), declared_name, 3)
+    } else {
+        (None, first_name, 1)
+    };
+    if !oracle_identifier_matches(declared_name, name) {
+        return Err(format!("Oracle source declares a different object than {name}."));
+    }
+    if let Some(Token::Word(owner)) = owner {
+        if schema.is_some_and(|schema| !oracle_identifier_matches(&Token::Word(owner.clone()), schema)) {
+            return Err("Oracle object source owner does not match the selected schema.".to_string());
+        }
+    } else if owner.is_some() {
+        return Err("Oracle object source has an invalid owner identifier.".to_string());
+    }
+    if token_at(position + consumed).is_some_and(|token| token == &Token::Period) {
+        return Err("Three-part Oracle object names are not supported.".to_string());
+    }
+    Ok(())
+}
+
+fn oracle_identifier_matches(token: &Token, expected: &str) -> bool {
+    matches!(token, Token::Word(word) if identifier_matches(word, expected))
 }
 
 /// Convert a raw database object source into a form suitable for the source editor.
@@ -212,7 +776,9 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
         // Some providers return full view DDL instead of a bare SELECT body.
         return ensure_semicolon(source.trim());
     }
-    if input.database_type == DatabaseType::Informix && input.object_type == ObjectSourceKind::View {
+    if matches!(input.database_type, DatabaseType::Informix | DatabaseType::Gbase8s)
+        && input.object_type == ObjectSourceKind::View
+    {
         return editable_informix_view_ddl(input.schema.as_deref(), &input.name, &source);
     }
     if is_mysql_like(input.database_type)
@@ -540,6 +1106,11 @@ fn source_starts_with_create_or_alter(source: &str) -> bool {
     Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(executable)
 }
 
+fn source_starts_with_create(source: &str) -> bool {
+    let executable = &source[leading_sql_statement_start(source)..];
+    Regex::new(r"(?i)^CREATE\s+").unwrap().is_match(executable)
+}
+
 fn source_starts_with_alter(source: &str) -> bool {
     let executable = &source[leading_sql_statement_start(source)..];
     Regex::new(r"(?i)^ALTER\s+").unwrap().is_match(executable)
@@ -725,7 +1296,12 @@ fn drop_informix_view_if_exists(name: &str) -> String {
     format!("DROP VIEW IF EXISTS {};", name.trim())
 }
 
-fn executable_mysql_routine_statements(input: &EditableObjectSourceSqlInput, source: &str) -> Vec<String> {
+fn executable_mysql_routine_statements(
+    input: &EditableObjectSourceSqlInput,
+    source: &str,
+    custom_validation_name: Option<&str>,
+    drop_validation_before_create: bool,
+) -> Vec<String> {
     if !mysql_source_starts_with_create_routine(source) {
         return vec![ensure_semicolon(source)];
     }
@@ -739,18 +1315,26 @@ fn executable_mysql_routine_statements(input: &EditableObjectSourceSqlInput, sou
     // MySQL has no cross-version CREATE OR REPLACE for stored routines. Validate the CREATE
     // body under a temporary name first (same idea as Informix view saves) so a syntax error
     // cannot leave the original routine deleted after DROP.
-    let validation_name = mysql_validation_routine_name(create_name);
-    if let Some(validation_source) = replace_mysql_routine_declaration_name(source, &validation_name) {
-        statements.push(mysql_drop_routine_if_exists(
-            input.object_type.clone(),
-            input.schema.as_deref(),
-            &validation_name,
-        ));
+    let owned_validation_name;
+    let validation_name = if let Some(validation_name) = custom_validation_name {
+        validation_name
+    } else {
+        owned_validation_name = mysql_validation_routine_name(create_name);
+        &owned_validation_name
+    };
+    if let Some(validation_source) = replace_mysql_routine_declaration_name(source, validation_name) {
+        if drop_validation_before_create {
+            statements.push(mysql_drop_routine_if_exists(
+                input.object_type.clone(),
+                input.schema.as_deref(),
+                validation_name,
+            ));
+        }
         statements.push(ensure_semicolon(&validation_source));
         statements.push(mysql_drop_routine_if_exists(
             input.object_type.clone(),
             input.schema.as_deref(),
-            &validation_name,
+            validation_name,
         ));
     }
 
@@ -1070,6 +1654,185 @@ fn replace_sql_routine_declaration_name(source: &str, schema: Option<&str>, new_
     Some(format!("{}{}{}{}", &source[..full.start()], prefix, replacement, &source[full.end()..]))
 }
 
+fn rewrite_oracle_routine_self_references(
+    source: &str,
+    old_name: &str,
+    new_name: &str,
+    schema: Option<&str>,
+    object_type: ObjectSourceKind,
+) -> Result<String, String> {
+    let tokens = Tokenizer::new(&OracleDialect {}, source)
+        .tokenize_with_location()
+        .map_err(|error| format!("Cannot safely tokenize the routine source: {error}"))?;
+    let significant = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+        .collect::<Vec<_>>();
+    if old_name != new_name {
+        if let Some(execute_index) =
+            find_oracle_execute_immediate(significant.iter().copied().map(|index| (index, &tokens[index].token)))
+        {
+            let location = tokens[execute_index].span.start;
+            return Err(format!(
+                "Dynamic SQL must be rewritten as a verifiable static call at line {}, column {}.",
+                location.line, location.column
+            ));
+        }
+    }
+    let routine_kind_position = significant
+        .iter()
+        .position(|index| {
+            token_word_is(&tokens[*index].token, "FUNCTION") || token_word_is(&tokens[*index].token, "PROCEDURE")
+        })
+        .ok_or_else(|| "Cannot locate the routine declaration.".to_string())?;
+    let mut declaration_name_position = routine_kind_position + 1;
+    if significant.get(declaration_name_position + 1).is_some_and(|index| tokens[*index].token == Token::Period) {
+        declaration_name_position += 2;
+    }
+    let body_start = (declaration_name_position + 1..significant.len())
+        .find(|position| {
+            token_word_is(&tokens[significant[*position]].token, "AS")
+                || token_word_is(&tokens[significant[*position]].token, "IS")
+        })
+        .ok_or_else(|| "Cannot locate the routine body.".to_string())?;
+    let declaration_end = (body_start + 1..significant.len())
+        .find(|position| token_word_is(&tokens[significant[*position]].token, "BEGIN"))
+        .unwrap_or(significant.len());
+    if significant[body_start + 1..declaration_end]
+        .iter()
+        .any(|index| token_matches_identifier(&tokens[*index].token, old_name))
+    {
+        return Err(format!("A local declaration named {old_name} may shadow self-recursive calls."));
+    }
+    if (body_start + 1..significant.len()).any(|position| {
+        (token_word_is(&tokens[significant[position]].token, "FUNCTION")
+            || token_word_is(&tokens[significant[position]].token, "PROCEDURE"))
+            && significant
+                .get(position + 1)
+                .is_some_and(|index| token_matches_identifier(&tokens[*index].token, old_name))
+    }) {
+        return Err(format!("A local routine named {old_name} may shadow self-recursive calls."));
+    }
+    if old_name != new_name
+        && significant[body_start + 1..].iter().any(|index| token_matches_identifier(&tokens[*index].token, new_name))
+    {
+        return Err(format!(
+            "The new routine name {new_name} already occurs in the body and could capture an existing reference."
+        ));
+    }
+    let mut end = significant.len();
+    if significant.last().is_some_and(|index| tokens[*index].token == Token::SemiColon) {
+        end -= 1;
+    }
+    let outer_end = (end >= body_start + 2
+        && token_word_is(&tokens[significant[end - 2]].token, "END")
+        && token_matches_identifier(&tokens[significant[end - 1]].token, old_name))
+    .then_some(significant[end - 1]);
+
+    let mut edits = Vec::new();
+    for position in body_start..significant.len() {
+        let token_index = significant[position];
+        let token = &tokens[token_index];
+        if !token_matches_identifier(&token.token, old_name) {
+            continue;
+        }
+        if Some(token_index) == outer_end {
+            edits.push((token.span, quote_postgres_identifier(new_name)));
+            continue;
+        }
+        let previous = position.checked_sub(1).map(|index| &tokens[significant[index]].token);
+        let previous_previous = position.checked_sub(2).map(|index| &tokens[significant[index]].token);
+        let qualified_owner = if previous == Some(&Token::Period) {
+            let Some(Token::Word(owner)) = previous_previous else {
+                return Err(format!("Cannot determine which routine reference to rename: {old_name}."));
+            };
+            if schema.is_some_and(|schema| identifier_matches(owner, schema)) {
+                true
+            } else {
+                continue;
+            }
+        } else {
+            false
+        };
+        let next = significant.get(position + 1).map(|index| &tokens[*index].token);
+        let is_call = matches!(next, Some(Token::LParen))
+            || (object_type == ObjectSourceKind::Procedure && matches!(next, Some(Token::SemiColon)));
+        if is_call && (!matches!(previous, Some(Token::Period)) || qualified_owner) {
+            edits.push((token.span, quote_postgres_identifier(new_name)));
+        } else {
+            return Err(format!(
+                "Cannot safely determine whether {old_name} is a self-reference or another identifier."
+            ));
+        }
+    }
+
+    let mut result = source.to_string();
+    for (span, replacement) in edits.into_iter().rev() {
+        let start = routine_location_to_byte_offset(source, span.start)
+            .ok_or_else(|| "Cannot map routine token positions to the source text.".to_string())?;
+        let end = routine_location_to_byte_offset(source, span.end)
+            .ok_or_else(|| "Cannot map routine token positions to the source text.".to_string())?;
+        if start >= end || end > result.len() {
+            return Err("Routine token positions overlap or exceed the source text.".to_string());
+        }
+        result.replace_range(start..end, &replacement);
+    }
+    Ok(result)
+}
+
+fn routine_location_to_byte_offset(source: &str, location: sqlparser::tokenizer::Location) -> Option<usize> {
+    let mut line = 1;
+    let mut column = 1;
+    for (offset, character) in source.char_indices() {
+        if line == location.line && column == location.column {
+            return Some(offset);
+        }
+        if character == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line == location.line && column == location.column).then_some(source.len())
+}
+
+fn token_word_is(token: &Token, expected: &str) -> bool {
+    matches!(token, Token::Word(word) if word.value.eq_ignore_ascii_case(expected))
+}
+
+fn find_oracle_execute_immediate<'a>(tokens: impl IntoIterator<Item = (usize, &'a Token)>) -> Option<usize> {
+    let mut previous: Option<(usize, &'a Token)> = None;
+    for (index, token) in tokens {
+        if let Some((previous_index, previous_token)) = previous {
+            if token_unquoted_word_is(previous_token, "EXECUTE") && token_unquoted_word_is(token, "IMMEDIATE") {
+                return Some(previous_index);
+            }
+        }
+        previous = Some((index, token));
+    }
+    None
+}
+
+fn token_unquoted_word_is(token: &Token, expected: &str) -> bool {
+    matches!(token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected))
+}
+
+fn token_matches_identifier(token: &Token, expected: &str) -> bool {
+    matches!(token, Token::Word(word) if identifier_matches(word, expected))
+}
+
+fn identifier_matches(identifier: &sqlparser::tokenizer::Word, expected: &str) -> bool {
+    if identifier.quote_style.is_some() {
+        identifier.value == expected
+    } else if identifier.keyword != Keyword::NoKeyword {
+        false
+    } else {
+        identifier.value.to_ascii_uppercase() == expected
+    }
+}
+
 fn mysql_routine_declaration(source: &str) -> Option<RoutineDeclaration> {
     let re = Regex::new(
         r"(?is)^\s*CREATE\s+(?:DEFINER\s*=\s*(?:(?:`(?:``|[^`])+`|'(?:''|[^'])+'|[^\s]+)\s*@\s*(?:`(?:``|[^`])+`|'(?:''|[^'])+'|[^\s]+)|CURRENT_USER(?:\(\))?)\s+)?(FUNCTION|PROCEDURE)\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:`(?:``|[^`])+`|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:`(?:``|[^`])+`|[A-Za-z_][\w$]*))?)",
@@ -1156,6 +1919,64 @@ fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn oracle_routine_fingerprint(source: &str) -> Result<String, String> {
+        fingerprint_oracle_routine_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::OceanbaseOracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("APP".into()),
+            name: "CALLER_1".into(),
+            source: source.into(),
+        })
+    }
+
+    #[test]
+    fn oracle_routine_source_fingerprint_ignores_only_whitespace_and_one_final_semicolon() {
+        let submitted = "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN APP.P_NEW; APP.P_NEW; END;";
+        let readback = "CREATE OR REPLACE PROCEDURE APP.CALLER_1\n IS\nBEGIN APP.P_NEW; APP.P_NEW; END";
+
+        assert_eq!(oracle_routine_fingerprint(submitted).unwrap(), oracle_routine_fingerprint(readback).unwrap());
+    }
+
+    #[test]
+    fn oracle_routine_source_fingerprint_preserves_literals_comments_hints_and_identifiers() {
+        let base = "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN DBMS_OUTPUT.PUT_LINE('a b'); APP.P_NEW; END;";
+        for changed in [
+            "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN DBMS_OUTPUT.PUT_LINE('a  b'); APP.P_NEW; END;",
+            "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN /* changed */ DBMS_OUTPUT.PUT_LINE('a b'); APP.P_NEW; END;",
+            "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN /*+ changed */ DBMS_OUTPUT.PUT_LINE('a b'); APP.P_NEW; END;",
+            "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN DBMS_OUTPUT.PUT_LINE(q'{a  b}'); APP.P_NEW; END;",
+            "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN DBMS_OUTPUT.PUT_LINE(q'{a b}'); \"APP\".P_NEW; END;",
+            "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN DBMS_OUTPUT.PUT_LINE('a b'); APP.P_OTHER; END;",
+        ] {
+            assert_ne!(oracle_routine_fingerprint(base).unwrap(), oracle_routine_fingerprint(changed).unwrap());
+        }
+        let q_literal = "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN DBMS_OUTPUT.PUT_LINE(q'{a b}'); END;";
+        let changed_q_literal =
+            "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN DBMS_OUTPUT.PUT_LINE(q'{a  b}'); END;";
+        let nq_literal = "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN DBMS_OUTPUT.PUT_LINE(nq'{a b}'); END;";
+        let changed_nq_literal =
+            "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN DBMS_OUTPUT.PUT_LINE(nq'{a  b}'); END;";
+        assert_ne!(
+            oracle_routine_fingerprint(q_literal).unwrap(),
+            oracle_routine_fingerprint(changed_q_literal).unwrap()
+        );
+        assert_ne!(
+            oracle_routine_fingerprint(nq_literal).unwrap(),
+            oracle_routine_fingerprint(changed_nq_literal).unwrap()
+        );
+    }
+
+    #[test]
+    fn oracle_routine_source_fingerprint_rejects_wrong_identity_and_multiple_statements() {
+        for source in [
+            "CREATE OR REPLACE PROCEDURE OTHER.CALLER_1 IS BEGIN APP.P_NEW; END;",
+            "CREATE OR REPLACE PROCEDURE APP.OTHER IS BEGIN APP.P_NEW; END;",
+            "CREATE OR REPLACE PROCEDURE APP.CALLER_1 IS BEGIN APP.P_NEW; END; SELECT 1",
+        ] {
+            assert!(oracle_routine_fingerprint(source).is_err(), "accepted invalid source: {source}");
+        }
+    }
 
     fn ob_sequence(source: &str, schema: Option<&str>, name: &str) -> EditableObjectSourceSqlInput {
         EditableObjectSourceSqlInput {
@@ -1911,6 +2732,19 @@ mod tests {
     }
 
     #[test]
+    fn gbase8s_view_source_opened_for_editing_shows_unqualified_create_view() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Gbase8s,
+            object_type: ObjectSourceKind::View,
+            schema: Some("gbasedbt".to_string()),
+            name: "v_orders".to_string(),
+            source: "create view \"gbasedbt\".v_orders as select id from orders".to_string(),
+        });
+
+        assert_eq!(sql, "CREATE VIEW v_orders as select id from orders;");
+    }
+
+    #[test]
     fn view_ddl_wraps_postgres_body_as_create_or_replace_view() {
         let sql = build_view_ddl_sql(BuildViewDdlInput {
             database_type: Some(DatabaseType::Postgres),
@@ -2033,7 +2867,9 @@ mod tests {
 
             assert_eq!(
                 statements,
-                vec!["CREATE OR REPLACE PROCEDURE refresh_cache AS\nBEGIN\n  DELETE FROM cache_entries;\n  COMMIT;\nEND;"]
+                vec![
+                    "CREATE OR REPLACE PROCEDURE refresh_cache AS\nBEGIN\n  DELETE FROM cache_entries;\n  COMMIT;\nEND;"
+                ]
             );
         }
     }
@@ -2061,11 +2897,13 @@ mod tests {
             "CREATE PROCEDURE refresh_cache AS BEGIN NULL; END;",
             "CREATE OR REPLACE PROCEDURE refresh_cache AS BEGIN NULL; END;",
         ] {
-            let statements = build_executable_object_source_statements(input(
-                DatabaseType::Oracle,
-                ObjectSourceKind::Procedure,
-                source,
-            ))
+            let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+                database_type: DatabaseType::Oracle,
+                object_type: ObjectSourceKind::Procedure,
+                schema: Some("public".to_string()),
+                name: "REFRESH_CACHE".to_string(),
+                source: source.to_string(),
+            })
             .unwrap();
 
             assert_eq!(statements, vec![source]);
@@ -2164,6 +3002,59 @@ mod tests {
                 "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`() BEGIN SELECT 1; END;".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn mysql_routine_replace_sequence_keeps_the_create_last_for_the_desktop_run_path() {
+        // The desktop Run path of a routine source tab (issue #12855) executes every statement before the last one
+        // as the replace preparation and then runs the tab's own CREATE through the normal query pipeline. That only
+        // holds while the CREATE stays last; a rename ends with the cleanup DROP instead and is never prepared.
+        for (object_type, source) in [
+            (ObjectSourceKind::Procedure, "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`() BEGIN SELECT 1; END"),
+            (ObjectSourceKind::Function, "CREATE FUNCTION `refresh_cache`() RETURNS INT RETURN 1"),
+        ] {
+            let keyword = object_type_keyword(&object_type);
+            let input = |name: &str| EditableObjectSourceSqlInput {
+                database_type: DatabaseType::Mysql,
+                object_type: object_type.clone(),
+                schema: Some("app".to_string()),
+                name: name.to_string(),
+                source: source.to_string(),
+            };
+
+            let statements = build_executable_object_source_statements(input("refresh_cache")).unwrap();
+            let (create, preparation) = statements.split_last().unwrap();
+            assert_eq!(create, &format!("{source};"));
+            assert_eq!(preparation.len(), 4);
+            assert!(preparation[0].starts_with(&format!("DROP {keyword} IF EXISTS `app`.`dbx_routine_check_")));
+            assert!(preparation[1].starts_with("CREATE") && preparation[1].contains("`dbx_routine_check_"));
+            assert_eq!(preparation[2], preparation[0]);
+            assert_eq!(preparation[3], format!("DROP {keyword} IF EXISTS `app`.`refresh_cache`;"));
+
+            let renamed = build_executable_object_source_statements(input("refresh_cache_old")).unwrap();
+            assert_eq!(renamed.last().unwrap(), &format!("DROP {keyword} IF EXISTS `app`.`refresh_cache_old`;"));
+        }
+    }
+
+    #[test]
+    fn mysql_transfer_routine_replacement_uses_scoped_validation_name() {
+        let statements = build_mysql_routine_replacement_statements(
+            EditableObjectSourceSqlInput {
+                database_type: DatabaseType::Mysql,
+                object_type: ObjectSourceKind::Procedure,
+                schema: Some("app".to_string()),
+                name: "refresh_cache".to_string(),
+                source: "CREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END".to_string(),
+            },
+            "dbx_transfer_check_0123456789abcdef",
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 4);
+        assert!(statements[0].contains("CREATE PROCEDURE `dbx_transfer_check_0123456789abcdef`"));
+        assert!(statements[1].contains("DROP PROCEDURE IF EXISTS `app`.`dbx_transfer_check_0123456789abcdef`"));
+        assert!(statements[2].contains("DROP PROCEDURE IF EXISTS `app`.`refresh_cache`"));
+        assert!(!statements[0].contains("DROP"));
     }
 
     #[test]
@@ -2416,5 +3307,566 @@ mod tests {
                 "DROP PROCEDURE \"SYSDBA\".\"SP_TAB_BAKSET_REMOVE_BATCH\";",
             ]
         );
+    }
+
+    #[test]
+    fn oceanbase_routine_source_builder_rewrites_self_reference_for_planned_migration() {
+        let statements = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            database_type: DatabaseType::OceanbaseOracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("APP".into()),
+            name: "P_OLD".into(),
+            new_name: "P_NEW".into(),
+            source: "CREATE OR REPLACE PROCEDURE APP.P_OLD AS BEGIN P_OLD; END P_OLD;".into(),
+        })
+        .unwrap();
+
+        assert_eq!(statements[0], "CREATE OR REPLACE PROCEDURE \"APP\".\"P_NEW\" AS BEGIN \"P_NEW\"; END \"P_NEW\";");
+        assert_eq!(statements[1], "DROP PROCEDURE \"APP\".\"P_OLD\";");
+    }
+
+    #[test]
+    fn oracle_routine_rename_rejects_mismatched_owner_name_and_extra_sql() {
+        for source in [
+            "CREATE OR REPLACE PROCEDURE APP.P_OTHER AS BEGIN APP.P_OLD; END;",
+            "CREATE OR REPLACE PROCEDURE OTHER.P_OLD AS BEGIN NULL; END;",
+            "CREATE OR REPLACE PROCEDURE APP.P_OLD AS BEGIN NULL; END; DROP TABLE T;",
+        ] {
+            let result = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+                database_type: DatabaseType::Oracle,
+                object_type: ObjectSourceKind::Procedure,
+                schema: Some("APP".into()),
+                name: "P_OLD".into(),
+                new_name: "P_NEW".into(),
+                source: source.into(),
+            });
+            assert!(result.is_err(), "accepted unsafe source: {source}");
+        }
+    }
+
+    #[test]
+    fn oracle_executable_routine_rejects_wrong_identity_and_create_or_replace() {
+        for source in [
+            "CREATE OR REPLACE PROCEDURE APP.P_OTHER AS BEGIN NULL; END;",
+            "CREATE PROCEDURE OTHER.P_OLD AS BEGIN NULL; END;",
+            "CREATE OR REPLACE PROCEDURE APP.P_OLD AS BEGIN NULL; END; DROP TABLE T;",
+        ] {
+            let result = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+                database_type: DatabaseType::Oracle,
+                object_type: ObjectSourceKind::Procedure,
+                schema: Some("APP".into()),
+                name: "P_OLD".into(),
+                source: source.into(),
+            });
+            assert!(result.is_err(), "accepted unsafe source: {source}");
+        }
+    }
+
+    #[test]
+    fn oracle_executable_package_source_requires_exact_identity_and_one_unit() {
+        let valid = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Package,
+            schema: Some("APP".into()),
+            name: "P_NEW".into(),
+            source: "CREATE PACKAGE APP.P_NEW AS PROCEDURE RUN; END P_NEW;".into(),
+        })
+        .unwrap();
+        assert_eq!(valid.len(), 1);
+
+        for source in [
+            "CREATE PACKAGE APP.P_OTHER AS PROCEDURE RUN; END P_OTHER;",
+            "CREATE PACKAGE OTHER.P_NEW AS PROCEDURE RUN; END P_NEW;",
+            "CREATE PACKAGE APP.P_NEW AS PROCEDURE RUN; END P_NEW; BEGIN DROP TABLE T; END;",
+        ] {
+            let result = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+                database_type: DatabaseType::Oracle,
+                object_type: ObjectSourceKind::Package,
+                schema: Some("APP".into()),
+                name: "P_NEW".into(),
+                source: source.into(),
+            });
+            assert!(result.is_err(), "accepted unsafe package source: {source}");
+        }
+    }
+
+    #[test]
+    fn oracle_executable_source_respects_quoted_mixed_case_identity() {
+        let input = |source: &str| EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Package,
+            schema: Some("MiXeD".into()),
+            name: "Pkg".into(),
+            source: source.into(),
+        };
+
+        assert!(build_executable_object_source_statements(input(
+            "CREATE PACKAGE \"MiXeD\".\"Pkg\" AS PROCEDURE RUN; END \"Pkg\";"
+        ))
+        .is_ok());
+        for source in [
+            "CREATE PACKAGE MIXED.\"Pkg\" AS PROCEDURE RUN; END \"Pkg\";",
+            "CREATE PACKAGE \"MiXeD\".PKG AS PROCEDURE RUN; END PKG;",
+        ] {
+            assert!(
+                build_executable_object_source_statements(input(source)).is_err(),
+                "accepted identity with incorrect case semantics: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn oracle_strict_source_validation_checks_create_and_bare_definitions() {
+        let validate = |source: &str| {
+            validate_oracle_executable_object_source(OracleObjectSourceValidationInput {
+                database_type: DatabaseType::Oracle,
+                object_type: ObjectSourceKind::Procedure,
+                schema: Some("APP".into()),
+                name: "P_OLD".into(),
+                source: source.into(),
+            })
+        };
+
+        for source in [
+            "CREATE OR REPLACE PROCEDURE APP.P_OTHER AS BEGIN APP.P_OLD; END;",
+            "PROCEDURE APP.P_OTHER AS BEGIN APP.P_OLD; END;",
+            "CREATE PROCEDURE OTHER.P_OLD AS BEGIN NULL; END;",
+            "CREATE/*comment*/ OR REPLACE PROCEDURE APP.P_OTHER AS BEGIN NULL; END;",
+            "CREATE OR REPLACE FUNCTION APP.P_OLD RETURN NUMBER AS BEGIN RETURN 1; END;",
+            "CREATE OR REPLACE PROCEDURE APP.P_OLD AS BEGIN NULL; END; DROP TABLE T;",
+        ] {
+            assert!(validate(source).is_err(), "accepted unsafe source: {source}");
+        }
+
+        assert!(validate(
+            "CREATE/*prefix*/OR/*replace*/REPLACE/*kind*/PROCEDURE APP.P_OLD AS BEGIN IF 1 = 1 THEN NULL; END IF; EXECUTE IMMEDIATE 'BEGIN NULL; END;'; END;"
+        )
+        .is_ok());
+        assert!(validate(
+            "PROCEDURE APP.P_OLD AS BEGIN IF 1 = 1 THEN NULL; END IF; EXECUTE IMMEDIATE 'BEGIN NULL; END;'; END;"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn oracle_family_routine_rename_updates_self_recursion_and_outer_end_only() {
+        let source = r#"CREATE OR REPLACE FUNCTION "SYSDBA"."F_REC"(N NUMBER) RETURN NUMBER AS
+BEGIN
+  -- 注释中的 F_REC 必须保持不变。
+  IF N <= 1 THEN RETURN 'F_REC'; END IF;
+  RETURN "SYSDBA"."F_REC"(N - 1);
+END F_REC;"#
+            .replace('\n', "\r\n");
+        let statements = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            database_type: DatabaseType::Dameng,
+            object_type: ObjectSourceKind::Function,
+            schema: Some("SYSDBA".to_string()),
+            name: "F_REC".to_string(),
+            new_name: "F_REC_2".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements[0],
+            r#"CREATE OR REPLACE FUNCTION "SYSDBA"."F_REC_2"(N NUMBER) RETURN NUMBER AS
+BEGIN
+  -- 注释中的 F_REC 必须保持不变。
+  IF N <= 1 THEN RETURN 'F_REC'; END IF;
+  RETURN "SYSDBA"."F_REC_2"(N - 1);
+END "F_REC_2";"#
+                .replace('\n', "\r\n")
+        );
+    }
+
+    #[test]
+    fn oracle_family_routine_rename_does_not_treat_matching_schema_as_a_self_reference() {
+        let statements = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("F_REC".to_string()),
+            name: "F_REC".to_string(),
+            new_name: "F_REC_2".to_string(),
+            source: "CREATE OR REPLACE PROCEDURE \"F_REC\".\"F_REC\" AS BEGIN F_REC; END F_REC;".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements[0],
+            "CREATE OR REPLACE PROCEDURE \"F_REC\".\"F_REC_2\" AS BEGIN \"F_REC_2\"; END \"F_REC_2\";"
+        );
+    }
+
+    #[test]
+    fn oracle_family_routine_rename_rejects_ambiguous_old_name_use() {
+        let result = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Function,
+            schema: Some("APP".to_string()),
+            name: "F_REC".to_string(),
+            new_name: "F_REC_2".to_string(),
+            source: "CREATE FUNCTION APP.F_REC(N NUMBER) RETURN NUMBER AS BEGIN SELECT F_REC INTO N FROM T; RETURN N; END F_REC;".to_string(),
+        });
+
+        assert!(result.unwrap_err().contains("Cannot safely determine whether F_REC"));
+    }
+
+    #[test]
+    fn oracle_family_routine_rename_rejects_new_name_capture() {
+        let result = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Function,
+            schema: Some("APP".to_string()),
+            name: "F_REC".to_string(),
+            new_name: "F_REC_2".to_string(),
+            source: "CREATE FUNCTION APP.F_REC(N NUMBER) RETURN NUMBER AS BEGIN RETURN F_REC_2(N - 1); END F_REC;"
+                .to_string(),
+        });
+
+        assert!(result.unwrap_err().contains("could capture an existing reference"));
+    }
+
+    #[test]
+    fn oracle_family_routine_rename_rejects_local_routine_shadowing() {
+        let result = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Function,
+            schema: Some("APP".to_string()),
+            name: "F_REC".to_string(),
+            new_name: "F_REC_2".to_string(),
+            source: "CREATE FUNCTION APP.F_REC(N NUMBER) RETURN NUMBER AS FUNCTION F_REC(X NUMBER) RETURN NUMBER IS BEGIN RETURN X; END F_REC; BEGIN RETURN F_REC(N - 1); END F_REC;".to_string(),
+        });
+
+        assert!(result.unwrap_err().contains("may shadow self-recursive calls"));
+    }
+
+    #[test]
+    fn oracle_family_routine_rename_does_not_rewrite_keywords_matching_quoted_routine_name() {
+        let statements = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Function,
+            schema: Some("APP".to_string()),
+            name: "IF".to_string(),
+            new_name: "F_IF".to_string(),
+            source: "CREATE FUNCTION APP.\"IF\"(N NUMBER) RETURN NUMBER AS BEGIN IF N = 0 THEN RETURN 0; END IF; RETURN \"IF\"(N - 1); END \"IF\";".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements[0],
+            "CREATE FUNCTION \"APP\".\"F_IF\"(N NUMBER) RETURN NUMBER AS BEGIN IF N = 0 THEN RETURN 0; END IF; RETURN \"F_IF\"(N - 1); END \"F_IF\";"
+        );
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_changes_only_static_calls() {
+        let source = "CREATE OR REPLACE VIEW APP.V_CALL AS\r\nSELECT APP.F_OLD(ID), OTHER.F_OLD(ID), 'F_OLD()' AS NOTE FROM APP.T -- F_OLD()\r\n";
+        let rewritten = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::OceanbaseOracle,
+            caller_type: ObjectSourceKind::View,
+            target_type: ObjectSourceKind::Function,
+            schema: Some("APP".into()),
+            old_name: "F_OLD".into(),
+            new_name: "F_NEW".into(),
+            source: source.into(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            rewritten,
+            "CREATE OR REPLACE VIEW APP.V_CALL AS\r\nSELECT APP.\"F_NEW\"(ID), OTHER.F_OLD(ID), 'F_OLD()' AS NOTE FROM APP.T -- F_OLD()\r\n"
+        );
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_preserves_case_sensitive_sibling_calls() {
+        let rewritten = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::OceanbaseOracle,
+            caller_type: ObjectSourceKind::Function,
+            target_type: ObjectSourceKind::Function,
+            schema: Some("APP".into()),
+            old_name: "f_old".into(),
+            new_name: "f_new".into(),
+            source: "CREATE FUNCTION APP.CALLER RETURN NUMBER AS BEGIN RETURN \"f_old\"(1) + F_OLD(1); END;".into(),
+        })
+        .unwrap();
+
+        assert_eq!(rewritten, "CREATE FUNCTION APP.CALLER RETURN NUMBER AS BEGIN RETURN \"f_new\"(1) + F_OLD(1); END;");
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_rejects_new_name_capture_before_writing() {
+        let result = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            caller_type: ObjectSourceKind::Function,
+            target_type: ObjectSourceKind::Function,
+            schema: Some("APP".into()),
+            old_name: "F_OLD".into(),
+            new_name: "F_NEW".into(),
+            source: "CREATE FUNCTION APP.CALLER RETURN NUMBER AS FUNCTION F_NEW(X NUMBER) RETURN NUMBER IS BEGIN RETURN X; END; BEGIN RETURN F_OLD(1); END;".into(),
+        });
+        assert!(result.unwrap_err().contains("F_OLD or F_NEW"));
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_rejects_dynamic_old_name_even_with_static_call() {
+        let result = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            caller_type: ObjectSourceKind::Procedure,
+            target_type: ObjectSourceKind::Procedure,
+            schema: Some("SYS".into()),
+            old_name: "DBX50_OLD_20261014_8F31".into(),
+            new_name: "DBX50_NEW_20261014_8F31".into(),
+            source: "CREATE OR REPLACE PROCEDURE \"SYS\".\"DBX50_CALL_20261014_8F31\" IS BEGIN DBX50_OLD_20261014_8F31; EXECUTE IMMEDIATE 'BEGIN DBX50_OLD_20261014_8F31; END;'; END".into(),
+        });
+
+        let error = result.unwrap_err();
+        assert!(error.contains("Dynamic SQL"));
+        assert!(error.contains("line 1") && error.contains("column"));
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_rejects_dynamic_sql_forms_and_comment_separated_keywords() {
+        for dynamic_sql in
+            ["'BEGIN DBX50_OLD_20261014_8F31; END;'", "statement_text", "'BEGIN ' || 'DBX50_OLD_20261014_8F31; END;'"]
+        {
+            let source = format!(
+                "CREATE OR REPLACE PROCEDURE SYS.CALLER IS BEGIN DBX50_OLD_20261014_8F31; EXECUTE /* comment */ IMMEDIATE {dynamic_sql}; END;"
+            );
+            let result = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+                database_type: DatabaseType::Oracle,
+                caller_type: ObjectSourceKind::Procedure,
+                target_type: ObjectSourceKind::Procedure,
+                schema: Some("SYS".into()),
+                old_name: "DBX50_OLD_20261014_8F31".into(),
+                new_name: "DBX50_NEW_20261014_8F31".into(),
+                source,
+            });
+
+            let error = result.unwrap_err();
+            assert!(error.contains("Dynamic SQL"), "accepted dynamic SQL: {dynamic_sql}");
+            assert!(error.contains("line 1") && error.contains("column"));
+        }
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_ignores_execute_immediate_in_literals_comments_and_quoted_words() {
+        let source = "CREATE OR REPLACE PROCEDURE SYS.CALLER IS v VARCHAR2(200); BEGIN DBX50_OLD_20261014_8F31; SELECT \"EXECUTE\" IMMEDIATE INTO v FROM DUAL; v := 'EXECUTE IMMEDIATE DBX50_OLD_20261014_8F31'; v := q'[EXECUTE IMMEDIATE DBX50_OLD_20261014_8F31]'; v := nq'[EXECUTE IMMEDIATE DBX50_OLD_20261014_8F31]'; -- EXECUTE IMMEDIATE DBX50_OLD_20261014_8F31\n DBMS_OUTPUT.PUT_LINE(\"EXECUTE\"); EXECUTE \"IMMEDIATE\"; END;";
+        let rewritten = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            caller_type: ObjectSourceKind::Procedure,
+            target_type: ObjectSourceKind::Procedure,
+            schema: Some("SYS".into()),
+            old_name: "DBX50_OLD_20261014_8F31".into(),
+            new_name: "DBX50_NEW_20261014_8F31".into(),
+            source: source.into(),
+        })
+        .unwrap();
+
+        assert!(rewritten.contains("\"DBX50_NEW_20261014_8F31\";"));
+        assert!(rewritten.contains("'EXECUTE IMMEDIATE DBX50_OLD_20261014_8F31'"));
+        assert!(rewritten.contains("q'[EXECUTE IMMEDIATE DBX50_OLD_20261014_8F31]'"));
+        assert!(rewritten.contains("nq'[EXECUTE IMMEDIATE DBX50_OLD_20261014_8F31]'"));
+    }
+
+    #[test]
+    fn oracle_routine_self_reference_rewrite_rejects_dynamic_sql() {
+        let result = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("SYS".into()),
+            name: "DBX50_OLD_20261014_8F31".into(),
+            new_name: "DBX50_NEW_20261014_8F31".into(),
+            source: "CREATE OR REPLACE PROCEDURE SYS.DBX50_OLD_20261014_8F31 IS BEGIN DBX50_OLD_20261014_8F31; EXECUTE IMMEDIATE 'BEGIN DBX50_OLD_20261014_8F31; END;'; END;".into(),
+        });
+
+        let error = result.unwrap_err();
+        assert!(error.contains("Dynamic SQL"));
+        assert!(error.contains("line 1") && error.contains("column"));
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_handles_unqualified_calls_and_rejects_ambiguous_forms() {
+        let rewritten = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            caller_type: ObjectSourceKind::Procedure,
+            target_type: ObjectSourceKind::Procedure,
+            schema: Some("APP".into()),
+            old_name: "P_OLD".into(),
+            new_name: "P_NEW".into(),
+            source: "CREATE PROCEDURE APP.CALLER AS BEGIN P_OLD; P_OLD(1); END;".into(),
+        })
+        .unwrap();
+        assert_eq!(rewritten, "CREATE PROCEDURE APP.CALLER AS BEGIN \"P_NEW\"; \"P_NEW\"(1); END;");
+
+        let result = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            caller_type: ObjectSourceKind::Function,
+            target_type: ObjectSourceKind::Function,
+            schema: Some("APP".into()),
+            old_name: "F_OLD".into(),
+            new_name: "F_NEW".into(),
+            source: "CREATE FUNCTION APP.CALLER RETURN NUMBER AS BEGIN RETURN F_OLD.VALUE; END;".into(),
+        });
+        assert!(result.unwrap_err().contains("unsupported form"));
+
+        let scalar_reference = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            caller_type: ObjectSourceKind::Function,
+            target_type: ObjectSourceKind::Function,
+            schema: Some("APP".into()),
+            old_name: "F_OLD".into(),
+            new_name: "F_NEW".into(),
+            source: "CREATE FUNCTION APP.CALLER RETURN NUMBER AS F_OLD NUMBER; BEGIN RETURN F_OLD; END;".into(),
+        });
+        assert!(scalar_reference.unwrap_err().contains("local declaration may shadow"));
+
+        let procedure_from_view = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            caller_type: ObjectSourceKind::View,
+            target_type: ObjectSourceKind::Procedure,
+            schema: Some("APP".into()),
+            old_name: "P_OLD".into(),
+            new_name: "P_NEW".into(),
+            source: "CREATE VIEW APP.V_CALL AS SELECT P_OLD(1) FROM DUAL".into(),
+        });
+        assert!(procedure_from_view.unwrap_err().contains("does not contain a verifiable static call"));
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_rejects_shadowed_collection_calls() {
+        let result = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            caller_type: ObjectSourceKind::Function,
+            target_type: ObjectSourceKind::Function,
+            schema: Some("APP".into()),
+            old_name: "F_OLD".into(),
+            new_name: "F_NEW".into(),
+            source: "CREATE FUNCTION APP.CALLER RETURN NUMBER AS TYPE numbers IS TABLE OF NUMBER; F_OLD numbers; BEGIN RETURN F_OLD(1) + APP.F_OLD(1); END;".into(),
+        });
+
+        assert!(result.unwrap_err().contains("local declaration may shadow"));
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_rejects_shadowed_nested_block_and_parameter_names() {
+        for source in [
+            "CREATE FUNCTION APP.CALLER RETURN NUMBER AS BEGIN DECLARE TYPE numbers IS TABLE OF NUMBER; F_OLD numbers; BEGIN RETURN F_OLD(1) + APP.F_OLD(1); END; END;",
+            "CREATE FUNCTION APP.CALLER(F_OLD NUMBER) RETURN NUMBER AS BEGIN RETURN APP.F_OLD(1); END;",
+            "CREATE PROCEDURE APP.CALLER AS PROCEDURE helper IS BEGIN NULL; END; PROCEDURE worker IS TYPE numbers IS TABLE OF NUMBER; F_OLD numbers; BEGIN F_OLD(1) := 1; APP.F_OLD(1); END; BEGIN worker; END;",
+        ] {
+            let result = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+                database_type: DatabaseType::Oracle,
+                caller_type: ObjectSourceKind::Function,
+                target_type: ObjectSourceKind::Function,
+                schema: Some("APP".into()),
+                old_name: "F_OLD".into(),
+                new_name: "F_NEW".into(),
+                source: source.into(),
+            });
+
+            assert!(result.unwrap_err().contains("local declaration may shadow"));
+        }
+    }
+
+    #[test]
+    fn oracle_routine_caller_rewrite_rejects_shadowed_schema_qualifiers() {
+        let result = rewrite_oracle_routine_references(OracleRoutineReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            caller_type: ObjectSourceKind::Function,
+            target_type: ObjectSourceKind::Function,
+            schema: Some("APP".into()),
+            old_name: "F_OLD".into(),
+            new_name: "F_NEW".into(),
+            source: "CREATE FUNCTION APP.CALLER RETURN NUMBER AS APP RECORD; BEGIN RETURN APP.F_OLD(1); END;".into(),
+        });
+
+        assert!(result.unwrap_err().contains("schema qualifier may be shadowed"));
+    }
+
+    #[test]
+    fn oracle_table_reference_rewrite_updates_static_sql_and_record_types_only() {
+        let source = "CREATE OR REPLACE PROCEDURE APP.P AS r APP.T_OLD%ROWTYPE; v APP.T_OLD.V%TYPE; BEGIN SELECT COUNT(*) INTO v FROM APP.T_OLD; END;";
+        let rewritten = rewrite_oracle_table_references(OracleTableReferenceRewriteInput {
+            database_type: DatabaseType::OceanbaseOracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("APP".into()),
+            old_name: "T_OLD".into(),
+            new_name: "T_NEW".into(),
+            source: source.into(),
+        })
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "CREATE OR REPLACE PROCEDURE APP.P AS r APP.\"T_NEW\"%ROWTYPE; v APP.\"T_NEW\".V%TYPE; BEGIN SELECT COUNT(*) INTO v FROM APP.\"T_NEW\"; END;"
+        );
+    }
+
+    #[test]
+    fn oracle_table_reference_rewrite_updates_trigger_binding_without_touching_literals_or_other_owner() {
+        let source = "CREATE OR REPLACE TRIGGER APP.TR_OLD BEFORE INSERT ON APP.T_OLD FOR EACH ROW BEGIN :NEW.V := 'T_OLD'; -- T_OLD\n NULL; END;";
+        let rewritten = rewrite_oracle_table_references(OracleTableReferenceRewriteInput {
+            database_type: DatabaseType::OceanbaseOracle,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("APP".into()),
+            old_name: "T_OLD".into(),
+            new_name: "T_NEW".into(),
+            source: source.into(),
+        })
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "CREATE OR REPLACE TRIGGER APP.TR_OLD BEFORE INSERT ON APP.\"T_NEW\" FOR EACH ROW BEGIN :NEW.V := 'T_OLD'; -- T_OLD\n NULL; END;"
+        );
+
+        let other_owner = rewrite_oracle_table_references(OracleTableReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("APP".into()),
+            old_name: "T_OLD".into(),
+            new_name: "T_NEW".into(),
+            source: "CREATE PROCEDURE APP.P AS n NUMBER; BEGIN SELECT COUNT(*) INTO n FROM OTHER.T_OLD; END;".into(),
+        });
+        assert!(other_owner.unwrap_err().contains("no verifiable static reference"));
+    }
+
+    #[test]
+    fn oracle_table_reference_rewrite_rejects_ambiguous_and_dynamic_source() {
+        let ambiguous = rewrite_oracle_table_references(OracleTableReferenceRewriteInput {
+            database_type: DatabaseType::OceanbaseOracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("APP".into()),
+            old_name: "T_OLD".into(),
+            new_name: "T_NEW".into(),
+            source: "CREATE PROCEDURE APP.P AS T_OLD NUMBER; BEGIN NULL; END;".into(),
+        });
+        assert!(ambiguous.unwrap_err().contains("Cannot safely identify"));
+
+        let dynamic = rewrite_oracle_table_references(OracleTableReferenceRewriteInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("APP".into()),
+            old_name: "T_OLD".into(),
+            new_name: "T_NEW".into(),
+            source: "CREATE PROCEDURE APP.P AS BEGIN EXECUTE IMMEDIATE 'SELECT * FROM T_OLD'; END;".into(),
+        });
+        let dynamic_error = dynamic.unwrap_err();
+        assert!(dynamic_error.contains("Dynamic SQL"));
+        assert!(dynamic_error.contains("line 1, column 33"));
+
+        for source in [
+            "CREATE PROCEDURE APP.P AS n NUMBER; BEGIN SELECT COUNT(*) INTO n FROM APP.T_OLD o JOIN APP.T_OTHER x ON x.ID=o.ID; END;",
+            "CREATE PROCEDURE APP.P AS n NUMBER; BEGIN SELECT COUNT(*) INTO n FROM APP.T_OLD o, APP.T_OTHER x; END;",
+        ] {
+            let multiple_relations = rewrite_oracle_table_references(OracleTableReferenceRewriteInput {
+                database_type: DatabaseType::OceanbaseOracle,
+                object_type: ObjectSourceKind::Procedure,
+                schema: Some("APP".into()),
+                old_name: "T_OLD".into(),
+                new_name: "T_NEW".into(),
+                source: source.into(),
+            });
+            assert!(multiple_relations.is_err());
+        }
     }
 }

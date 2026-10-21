@@ -40,11 +40,12 @@ enum SqlServerQueryTransport {
 pub struct SqlServerClient {
     inner: SqlServerTdsClient,
     query_transport: SqlServerQueryTransport,
+    server_major_version: Option<u32>,
 }
 
 impl SqlServerClient {
     fn new(inner: SqlServerTdsClient) -> Self {
-        Self { inner, query_transport: SqlServerQueryTransport::Unknown }
+        Self { inner, query_transport: SqlServerQueryTransport::Unknown, server_major_version: None }
     }
 
     async fn ensure_query_transport(&mut self) -> SqlServerQueryTransport {
@@ -89,6 +90,24 @@ impl SqlServerClient {
         } else {
             self.inner.query(query, params).await
         }
+    }
+
+    /// Best-effort TDS ATTENTION to interrupt the in-flight batch. SQL Server
+    /// 2000 keeps executing a batch after TCP FIN, so desktop builds (feature
+    /// `native-attention`, vendored tiberius) signal the server over the wire
+    /// before the connection is discarded. ATTENTION is never proof of
+    /// rollback: every caller discards the connection right after.
+    #[cfg(feature = "native-attention")]
+    pub async fn send_attention(&mut self) -> tiberius::Result<()> {
+        self.inner.send_attention().await
+    }
+
+    /// No-op fallback for builds whose tiberius comes from crates.io
+    /// (standalone agent driver workspaces), where the wire call above does
+    /// not exist. Connection discard still aborts the session.
+    #[cfg(not(feature = "native-attention"))]
+    pub async fn send_attention(&mut self) -> tiberius::Result<()> {
+        Ok(())
     }
 }
 
@@ -136,6 +155,7 @@ pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:"
 pub const SQLSERVER_LEGACY_DRIVER_PROFILE: &str = "sqlserver-legacy";
 pub const SQLSERVER_LEGACY_DRIVER_LABEL: &str = "SQL Server legacy compatibility component";
 const SQLSERVER_DEFAULT_PORT: u16 = 1433;
+pub const SQLSERVER_MAX_ROUTING_REDIRECTS: usize = 2;
 const SQLSERVER_UNSAFE_PROBE_BLOCK_ERROR_PREFIX: &str = "SQL Server unsafe result type:";
 const SQLSERVER_RESULT_TYPE_PROBE_SQL: &str = "\
     DECLARE @dbx_use_describe_dmv bit = CASE \
@@ -283,13 +303,15 @@ struct SqlServerEndpoint<'a> {
 }
 
 fn sqlserver_endpoint(host: &str) -> SqlServerEndpoint<'_> {
-    if let Some((server, instance)) = host.split_once('\\') {
+    let trimmed = host.trim();
+    let without_tcp = if trimmed.to_ascii_lowercase().starts_with("tcp:") { trimmed[4..].trim() } else { trimmed };
+    if let Some((server, instance)) = without_tcp.split_once('\\') {
         if !server.trim().is_empty() && !instance.trim().is_empty() {
             return SqlServerEndpoint { host: server.trim(), instance_name: Some(instance.trim()) };
         }
     }
 
-    SqlServerEndpoint { host: host.trim(), instance_name: None }
+    SqlServerEndpoint { host: without_tcp, instance_name: None }
 }
 
 fn sqlserver_uses_named_instance_resolution(endpoint: &SqlServerEndpoint<'_>, port: u16, port_explicit: bool) -> bool {
@@ -306,12 +328,17 @@ pub async fn connect(
     user: &str,
     pass: &str,
     database: Option<&str>,
-    _url_params: Option<&str>,
+    url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
-    connect_with_port_explicit(host, port, false, user, pass, database, timeout).await
+    connect_with_port_explicit(host, port, false, user, pass, database, url_params, timeout).await
 }
 
+/// Connect with an explicit port flag and optional JDBC-style URL params.
+///
+/// When `encrypt=false` / `sqlserverEncryption=disabled` is present, skip the
+/// `EncryptionLevel::Required` attempt so non-TLS servers are not blocked for a
+/// full connect timeout before the Off/NotSupported fallbacks run.
 pub async fn connect_with_port_explicit(
     host: &str,
     port: u16,
@@ -319,8 +346,16 @@ pub async fn connect_with_port_explicit(
     user: &str,
     pass: &str,
     database: Option<&str>,
+    url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
+    if sqlserver_native_encryption_disabled(url_params) {
+        let skipped = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled".to_string();
+        return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
+            .await
+            .map_err(|fallback_errors| sqlserver_connect_failure_message(&skipped, &fallback_errors));
+    }
+
     match try_connect(host, port, port_explicit, user, pass, database, tiberius::EncryptionLevel::Required, timeout)
         .await
     {
@@ -405,6 +440,14 @@ fn sqlserver_connect_failure_message(encrypted_error: &str, fallback_errors: &[(
             "{encrypted_error}\n\n{SQLSERVER_LEGACY_TLS_HINT}\n\nAutomatic native legacy fallback also failed: {legacy_summary}"
         );
     }
+    if !encrypted_error.is_empty() && !encrypted_error.starts_with("encryption was disabled") {
+        if legacy_summary.is_empty() {
+            return encrypted_error.to_string();
+        }
+        return format!(
+            "{encrypted_error}\n\nThe SQL Server legacy compatibility fallbacks also failed:\n{legacy_summary}"
+        );
+    }
     legacy_summary
 }
 
@@ -456,38 +499,95 @@ async fn try_connect(
     encryption: tiberius::EncryptionLevel,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
-    let mut config = Config::new();
-    let endpoint = sqlserver_endpoint(host);
-    let uses_named_instance_resolution = sqlserver_uses_named_instance_resolution(&endpoint, port, port_explicit);
-    config.host(endpoint.host);
-    if let Some(instance_name) = endpoint.instance_name.filter(|_| uses_named_instance_resolution) {
-        config.instance_name(instance_name);
-    } else {
-        config.port(port);
-    }
-    config.authentication(AuthMethod::sql_server(user, pass));
-    if let Some(db) = database {
-        config.database(db);
-    }
-    config.trust_cert();
-    config.encryption(encryption);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let (mut current_host, parsed_port) = dbx_types::models::connection::normalize_sqlserver_host_port(host);
+    let mut current_port = parsed_port.unwrap_or(port);
+    let mut current_port_explicit = port_explicit || parsed_port.is_some();
+    let mut redirects = 0;
 
-    let tcp = if uses_named_instance_resolution {
-        tokio::time::timeout(timeout, TcpStream::connect_named(&config))
-            .await
-            .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
-            .map_err(|e| format!("SQL Server connection failed: {e}"))?
-    } else {
-        tokio::time::timeout(timeout, TcpStream::connect(config.get_addr()))
-            .await
-            .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
-            .map_err(|e| format!("SQL Server connection failed: {e}"))?
-    };
-    let client = tokio::time::timeout(timeout, Client::connect(config, tcp.compat_write()))
-        .await
-        .map_err(|_| format!("SQL Server handshake timed out ({}s)", timeout.as_secs()))?
-        .map_err(|e| format!("SQL Server connection failed: {e}"))?;
-    Ok(SqlServerClient::new(client))
+    loop {
+        let mut config = Config::new();
+        let endpoint = sqlserver_endpoint(&current_host);
+        let uses_named_instance_resolution =
+            sqlserver_uses_named_instance_resolution(&endpoint, current_port, current_port_explicit);
+        config.host(endpoint.host);
+        if let Some(instance_name) = endpoint.instance_name.filter(|_| uses_named_instance_resolution) {
+            config.instance_name(instance_name);
+        } else {
+            config.port(current_port);
+        }
+        config.authentication(AuthMethod::sql_server(user, pass));
+        if let Some(db) = database {
+            config.database(db);
+        }
+        config.trust_cert();
+        config.encryption(encryption);
+
+        let remaining_connect = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining_connect.is_zero() {
+            return Err(format!("SQL Server connection timed out ({}s)", timeout.as_secs()));
+        }
+
+        let tcp = if uses_named_instance_resolution {
+            tokio::time::timeout(remaining_connect, TcpStream::connect_named(&config))
+                .await
+                .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
+                .map_err(|e| {
+                    if redirects > 0 {
+                        format!("SQL Server connection on routed address `{current_host}:{current_port}` failed: {e}")
+                    } else {
+                        format!("SQL Server connection failed: {e}")
+                    }
+                })?
+        } else {
+            tokio::time::timeout(remaining_connect, TcpStream::connect(config.get_addr()))
+                .await
+                .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
+                .map_err(|e| {
+                    if redirects > 0 {
+                        format!("SQL Server connection on routed address `{current_host}:{current_port}` failed: {e}")
+                    } else {
+                        format!("SQL Server connection failed: {e}")
+                    }
+                })?
+        };
+        let _ = tcp.set_nodelay(true);
+
+        let remaining_handshake = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining_handshake.is_zero() {
+            return Err(format!("SQL Server handshake timed out ({}s)", timeout.as_secs()));
+        }
+
+        let client = match tokio::time::timeout(remaining_handshake, Client::connect(config, tcp.compat_write())).await
+        {
+            Ok(Ok(client)) => client,
+            Ok(Err(tiberius::error::Error::Routing { host: routed_host, port: routed_port })) => {
+                redirects += 1;
+                if redirects > SQLSERVER_MAX_ROUTING_REDIRECTS {
+                    return Err(format!(
+                        "SQL Server routing failed: exceeded maximum routing redirects ({SQLSERVER_MAX_ROUTING_REDIRECTS})"
+                    ));
+                }
+                log::info!(
+                    "SQL Server redirected connection to routed address `{routed_host}:{routed_port}` (redirect {redirects}/{SQLSERVER_MAX_ROUTING_REDIRECTS})"
+                );
+                current_host = routed_host;
+                current_port = routed_port;
+                current_port_explicit = true;
+                continue;
+            }
+            Ok(Err(e)) => {
+                return Err(if redirects > 0 {
+                    format!("SQL Server connection on routed address `{current_host}:{current_port}` failed: {e}")
+                } else {
+                    format!("SQL Server connection failed: {e}")
+                });
+            }
+            Err(_) => return Err(format!("SQL Server handshake timed out ({}s)", timeout.as_secs())),
+        };
+
+        return Ok(SqlServerClient::new(client));
+    }
 }
 
 fn row_to_json(row: &tiberius::Row) -> Vec<serde_json::Value> {
@@ -1630,14 +1730,19 @@ fn top_level_sqlserver_tokens(sql: &str) -> Vec<SqlServerToken> {
         }
         if ch == '/' && next == Some('*') {
             i += 2;
-            while i < sql.len() {
+            let mut comment_depth = 1usize;
+            while i < sql.len() && comment_depth > 0 {
                 let current = next_char(sql, i);
                 let following = next_char_at(sql, i + current.len_utf8());
-                if current == '*' && following == Some('/') {
+                if current == '/' && following == Some('*') {
+                    comment_depth += 1;
                     i += 2;
-                    break;
+                } else if current == '*' && following == Some('/') {
+                    comment_depth -= 1;
+                    i += 2;
+                } else {
+                    i += current.len_utf8();
                 }
-                i += current.len_utf8();
             }
             continue;
         }
@@ -2451,6 +2556,7 @@ pub async fn completion_assistant_search(
                 parent_name: row.get::<&str, _>(4).map(str::to_string),
                 comment: row.get::<&str, _>(5).filter(|s: &&str| !s.is_empty()).map(|s| (*s).to_string()),
                 data_type: row.get::<&str, _>(6).map(str::to_string),
+                routine_id: None,
                 signature: None,
             }
         })
@@ -2622,7 +2728,7 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
              CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, ep.value AS object_comment, {data_type} AS data_type \
              FROM sys.objects o \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
-             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
+             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
              WHERE o.type IN ({}) AND {object_visibility} {schema_filter} {object_like}",
             type_ids.join(",")
         ));
@@ -2738,7 +2844,7 @@ fn sqlserver_list_tables_sql_with_kind(
     let base_from = "FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep \
-           WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
+           WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
     let object_visibility = sqlserver_visible_object_predicate();
     let schema_filter = sqlserver_schema_name_predicate(schema, "s.name");
     let object_type_predicate = if table_objects_only { "o.type = 'U'" } else { "o.type IN ('U','V')" };
@@ -2873,7 +2979,7 @@ fn sqlserver_list_objects_sql(schema: &str) -> String {
          ep.value AS object_comment \
          FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
          WHERE s.name = '{s}' \
            AND o.type IN ('U','V','P','FN','IF','TF','FS','FT') \
            AND {object_visibility} \
@@ -2941,19 +3047,18 @@ pub async fn get_column_metadata(
     Ok(rows.iter().map(sqlserver_column_metadata_from_row).collect())
 }
 
-pub async fn get_temporal_table_metadata(
-    client: &mut SqlServerClient,
-    schema: &str,
-    table: &str,
-) -> Result<Option<SqlServerTemporalTableMetadata>, String> {
-    // Dynamic SQL keeps pre-2016 servers from binding the newer catalog columns.
-    // Retention metadata was added later, so it has its own feature check.
-    let sql = r#"IF OBJECT_ID(N'sys.periods') IS NOT NULL
+fn sqlserver_temporal_metadata_sql() -> String {
+    // `DECLARE @x <type> = <value>` is 2008+ syntax; SQL Server 2005 fails to
+    // parse the batch before the sys.periods guard can skip it, so keep the
+    // two-step DECLARE + SET form everywhere.
+    r#"IF OBJECT_ID(N'sys.periods') IS NOT NULL
 BEGIN
-    DECLARE @retention nvarchar(max) = N'CAST(NULL AS int), CAST(NULL AS nvarchar(30))';
+    DECLARE @retention nvarchar(max);
+    SET @retention = N'CAST(NULL AS int), CAST(NULL AS nvarchar(30))';
     IF COL_LENGTH(N'sys.tables', N'history_retention_period') IS NOT NULL
         SET @retention = N'CAST(t.history_retention_period AS int), t.history_retention_period_unit_desc';
-    DECLARE @sql nvarchar(max) = N'
+    DECLARE @sql nvarchar(max);
+    SET @sql = N'
         SELECT CAST(t.temporal_type AS int), cs.name, ce.name,
                hs.name, h.name, ps.name, parent.name, ' + @retention + N'
         FROM sys.tables t
@@ -2967,7 +3072,18 @@ BEGIN
         LEFT JOIN sys.schemas ps ON ps.schema_id = parent.schema_id
         WHERE s.name = COALESCE(NULLIF(@schema, N''''), SCHEMA_NAME()) AND t.name = @table';
     EXEC sys.sp_executesql @sql, N'@schema nvarchar(128), @table nvarchar(128)', @schema=@P1, @table=@P2;
-END"#;
+END"#
+        .to_string()
+}
+
+pub async fn get_temporal_table_metadata(
+    client: &mut SqlServerClient,
+    schema: &str,
+    table: &str,
+) -> Result<Option<SqlServerTemporalTableMetadata>, String> {
+    // Dynamic SQL keeps pre-2016 servers from binding the newer catalog columns.
+    // Retention metadata was added later, so it has its own feature check.
+    let sql = sqlserver_temporal_metadata_sql();
     let rows = client
         .query(sql, &[&schema, &table])
         .await
@@ -3157,7 +3273,7 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
            JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
            WHERE i.is_primary_key = 1 \
          ) pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id \
-         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
+         OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
          WHERE {schema_filter} AND o.name = '{t}' AND o.type IN ('U','V') \
          ORDER BY c.column_id"
     )
@@ -3179,6 +3295,9 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
             let cols_str = row.get::<&str, _>(1).unwrap_or("");
             let inc_str = row.get::<&str, _>(5).unwrap_or("");
             IndexInfo {
+                key_directions: Vec::new(),
+                visibility: None,
+                key_metadata_complete: false,
                 name: row.get::<&str, _>(0).unwrap_or("").to_string(),
                 columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
                 is_unique: row.get::<bool, _>(2).unwrap_or(false),
@@ -3209,7 +3328,14 @@ fn sqlserver_filter_definition_missing(error: &tiberius::error::Error) -> bool {
 }
 
 fn sqlserver_filter_definition_error(code: Option<u32>, message: &str) -> bool {
-    code == Some(207) && message.to_ascii_lowercase().contains("filter_definition")
+    if code != Some(207) {
+        return false;
+    }
+    // SQL Server 2005 (and other pre-2008 servers) lack both catalog columns
+    // referenced by the modern index SQL; the first invalid-column error is
+    // whichever appears earlier in the SELECT list (`has_filter` on 2008+).
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("filter_definition") || lowered.contains("has_filter")
 }
 
 fn sqlserver_indexes_sql(schema: &str, table: &str) -> String {
@@ -3341,13 +3467,14 @@ pub async fn get_table_comment(
     Ok(rows.first().and_then(|row| row.get::<&str, _>(0)).filter(|s| !s.is_empty()).map(|s| s.to_string()))
 }
 
-fn sqlserver_table_comment_sql(schema: &str, table: &str) -> String {
+pub fn sqlserver_table_comment_sql(schema: &str, table: &str) -> String {
     let s = schema.replace('\'', "''");
     let t = table.replace('\'', "''");
     format!(
         "SELECT CAST(ep.value AS NVARCHAR(MAX)) \
          FROM sys.extended_properties ep \
-         WHERE ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) \
+         WHERE ep.class = 1 \
+           AND ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) \
            AND ep.minor_id = 0 \
            AND ep.name = N'MS_Description'"
     )
@@ -3422,10 +3549,11 @@ pub async fn list_constraints(
                 match_type: None,
                 on_update: row.get::<&str, _>(7).filter(|value| !value.is_empty()).map(str::to_string),
                 on_delete: row.get::<&str, _>(8).filter(|value| !value.is_empty()).map(str::to_string),
-                deferrable: false,
-                initially_deferred: false,
-                enabled: row.get::<bool, _>(9).unwrap_or(true),
-                valid: row.get::<bool, _>(10).unwrap_or(true),
+                deferrable: Some(false),
+                initially_deferred: Some(false),
+                enabled: Some(row.get::<bool, _>(9).unwrap_or(true)),
+                valid: Some(row.get::<bool, _>(10).unwrap_or(true)),
+                oracle_metadata: None,
             }
         })
         .collect())
@@ -3958,6 +4086,98 @@ fn sqlserver_dml_output_returns_rows(sql: &str) -> bool {
     })
 }
 
+/// Transaction controls cannot be mixed with DBX-owned interactive transactions.
+/// The existing lexer skips comments, literals and delimited identifiers.
+pub fn manual_transaction_control_conflict(sql: &str) -> bool {
+    let tokens = top_level_sqlserver_tokens(sql);
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token.text.as_str(), "COMMIT" | "ROLLBACK" | "USE" | "SAVE")
+            || (token.text == "BEGIN"
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|next| matches!(next.text.as_str(), "TRAN" | "TRANSACTION" | "DISTRIBUTED")))
+            || (token.text == "SET" && tokens.get(index + 1).is_some_and(|next| next.text == "IMPLICIT_TRANSACTIONS"))
+    })
+}
+
+fn manual_transaction_status_error(error: String) -> String {
+    // Inspect the capability probe's server error, not a version allowlist or
+    // a failed login/transport. Preserve unrelated errors for their caller.
+    if sqlserver_error_number(&error) == Some(195) && error.to_ascii_uppercase().contains("XACT_STATE") {
+        format!(
+            "DBX_MANUAL_TRANSACTION_UNSUPPORTED: The native SQL Server driver requires XACT_STATE() \
+             to verify transaction safety. Use the SQL Server legacy compatibility driver \
+             (jTDS for SQL Server 2000). Server error: {error}"
+        )
+    } else {
+        error
+    }
+}
+
+/// SQL Server 2000 has no XACT_STATE(). Keep that absence explicit rather
+/// than infer committability from transaction count. Any execution error ends
+/// the owning session; COMMIT/ROLLBACK acknowledgement remains authoritative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ManualTransactionStatus {
+    pub count: i64,
+    pub xact_state: Option<i64>,
+}
+impl ManualTransactionStatus {
+    pub fn is_active(self) -> bool {
+        self.count == 1 && self.xact_state.is_none_or(|state| state == 1)
+    }
+}
+/// SQL Server 2000 (product major 8) never offers XACT_STATE() and this driver
+/// negotiates TDS 7.1 with it, so the product major identifies the legacy
+/// count-only status check without reaching into a patched-only tiberius API.
+fn uses_legacy_transaction_status(server_major: Option<u32>) -> bool {
+    server_major == Some(8)
+}
+
+/// Consume the full response, including transaction descriptor ENVCHANGE tokens.
+pub async fn manual_transaction_status(client: &mut SqlServerClient) -> Result<ManualTransactionStatus, String> {
+    if client.server_major_version.is_none() {
+        let version = execute_simple_batch_with_max_rows_metadata(
+            client,
+            "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128))",
+            Some(1),
+        )
+        .await?;
+        client.server_major_version = version
+            .iter()
+            .find_map(|result| result.result.rows.first())
+            .and_then(|row| row.first())
+            .and_then(serde_json::Value::as_str)
+            .and_then(|version| version.split('.').next())
+            .and_then(|major| major.parse().ok());
+        if client.server_major_version.is_none() {
+            return Err("SQL Server did not return its product version for transaction capability detection".to_owned());
+        }
+    }
+    let legacy = uses_legacy_transaction_status(client.server_major_version);
+    let results = execute_simple_batch_with_max_rows_metadata(
+        client,
+        if legacy {
+            "SELECT @@TRANCOUNT AS dbx_transaction_count"
+        } else {
+            "SELECT @@TRANCOUNT AS dbx_transaction_count, XACT_STATE() AS dbx_transaction_state"
+        },
+        Some(1),
+    )
+    .await
+    .map_err(manual_transaction_status_error)?;
+    results
+        .iter()
+        .find_map(|result| result.result.rows.first())
+        .and_then(|row| {
+            Some(ManualTransactionStatus {
+                count: row.first()?.as_i64()?,
+                xact_state: if legacy { None } else { Some(row.get(1)?.as_i64()?) },
+            })
+        })
+        .ok_or_else(|| "SQL Server did not return transaction status".to_owned())
+}
+
 fn contains_transaction_control(sql: &str) -> bool {
     let tokens = top_level_sqlserver_tokens(sql);
     tokens.iter().enumerate().any(|(index, token)| {
@@ -4075,6 +4295,75 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_transaction_status_keeps_legacy_and_modern_safety_explicit() {
+        use super::{uses_legacy_transaction_status as legacy, ManualTransactionStatus as Status};
+        assert!(legacy(Some(8)));
+        for major in [None, Some(9), Some(13), Some(16)] {
+            assert!(!legacy(major));
+        }
+        assert!(Status { count: 1, xact_state: None }.is_active());
+        assert!(Status { count: 1, xact_state: Some(1) }.is_active());
+        for count in [0, 2, -1] {
+            assert!(!Status { count, xact_state: None }.is_active());
+            assert!(!Status { count, xact_state: Some(1) }.is_active());
+        }
+        for state in [-1, 0, 2] {
+            assert!(!Status { count: 1, xact_state: Some(state) }.is_active());
+        }
+    }
+
+    #[test]
+    fn manual_transaction_status_missing_xact_state_is_unsupported() {
+        for message in [
+            "'XACT_STATE' is not a recognized built-in function name. (code: 195, state: 10, class: 15)",
+            "无法识别函数 'xact_state'。 (code: 195, state: 10, class: 15)",
+        ] {
+            let error = super::manual_transaction_status_error(message.to_owned());
+            assert!(error.starts_with("DBX_MANUAL_TRANSACTION_UNSUPPORTED:"), "{error}");
+            assert!(error.contains("legacy"));
+            assert!(error.contains(message));
+        }
+    }
+
+    #[test]
+    fn manual_transaction_status_other_errors_keep_their_original_category() {
+        for message in [
+            "Permission denied for XACT_STATE. (code: 229, state: 1, class: 14)",
+            "'OTHER_FUNCTION' is not a recognized function name. (code: 195, state: 10, class: 15)",
+            "Connection reset while querying XACT_STATE",
+            "XACT_STATE query timed out",
+        ] {
+            assert_eq!(super::manual_transaction_status_error(message.to_owned()), message);
+        }
+    }
+    #[test]
+    fn manual_transaction_controls_are_detected_without_false_positive_literals_or_try_blocks() {
+        for sql in [
+            "BEGIN TRAN",
+            "BEGIN DISTRIBUTED TRANSACTION",
+            "COMMIT",
+            "ROLLBACK TRANSACTION",
+            "SAVE TRANSACTION x",
+            "SET IMPLICIT_TRANSACTIONS OFF",
+            "USE [other_db]",
+            "IF 1=1 BEGIN COMMIT; END",
+        ] {
+            assert!(super::manual_transaction_control_conflict(sql), "{sql}");
+        }
+        for sql in [
+            "-- COMMIT\nSELECT 1",
+            "/* BEGIN TRANSACTION */ SELECT 1",
+            "/* outer /* inner */ COMMIT; USE other */ SELECT 1",
+            "SELECT 'ROLLBACK; USE db'",
+            "SELECT [COMMIT], [USE] FROM t",
+            "BEGIN TRY SELECT 1; END TRY BEGIN CATCH SELECT ERROR_MESSAGE(); END CATCH",
+            "DECLARE @message nvarchar(50) = N'SET IMPLICIT_TRANSACTIONS ON'",
+        ] {
+            assert!(!super::manual_transaction_control_conflict(sql), "{sql}");
+        }
+    }
+
     use super::{
         build_sqlserver_unsafe_type_query, capture_sqlserver_messages, completion_context_from_query_result,
         decode_sqlserver_spatial_values, format_sqlserver_numeric, is_blocking_sqlserver_unsafe_probe_error,
@@ -4091,16 +4380,18 @@ mod tests {
         sqlserver_probe_explicit_alias, sqlserver_query_messages, sqlserver_query_transport_for_engine_edition,
         sqlserver_query_transport_for_request, sqlserver_referential_action, sqlserver_schema_name_predicate,
         sqlserver_spatial_marker, sqlserver_split_name_list, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_triggers_sql,
-        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet,
-        SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_temporal_metadata_sql,
+        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
+        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn,
+        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
+        SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
         SpatialColumn,
     };
     use chrono::NaiveDate;
+    use std::time::Duration;
     use std::{borrow::Cow, time::Instant};
     use tiberius::{Column, ColumnData, ColumnType, IntoSql};
 
@@ -4516,6 +4807,18 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_endpoint_strips_tcp_prefix() {
+        assert_eq!(
+            super::sqlserver_endpoint(r"tcp:192.168.1.10\SQL2022"),
+            super::SqlServerEndpoint { host: "192.168.1.10", instance_name: Some("SQL2022") }
+        );
+        assert_eq!(
+            super::sqlserver_endpoint("tcp:db.example.com"),
+            super::SqlServerEndpoint { host: "db.example.com", instance_name: None }
+        );
+    }
+
+    #[test]
     fn sqlserver_named_instance_resolution_yields_to_explicit_port() {
         let endpoint = super::sqlserver_endpoint(r"db.example.com\SQLEXPRESS");
         assert!(super::sqlserver_uses_named_instance_resolution(&endpoint, 0, false));
@@ -4650,6 +4953,300 @@ mod tests {
         assert!(message.starts_with(encrypted_error));
         assert!(message.contains("This may be caused by an old SQL Server TLS/encryption configuration"));
         assert!(message.contains("Automatic native legacy fallback also failed:"));
+    }
+
+    #[test]
+    fn sqlserver_connect_failure_message_preserves_initial_routing_or_transport_error() {
+        let routed_error =
+            "SQL Server connection on routed address `worker.database.windows.net:1433` failed: connection refused";
+        let fallback_errors = vec![
+            (
+                "login-only encryption",
+                "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+                    .to_string(),
+            ),
+            (
+                "no-encryption compatibility fallback",
+                "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+                    .to_string(),
+            ),
+        ];
+
+        let message = super::sqlserver_connect_failure_message(routed_error, &fallback_errors);
+        assert!(message.starts_with(routed_error), "{message}");
+        assert!(message.contains("The SQL Server legacy compatibility fallbacks also failed:"), "{message}");
+        assert!(message.contains("login-only encryption failed:"), "{message}");
+        assert!(message.contains("no-encryption compatibility fallback failed:"), "{message}");
+
+        let redirect_limit_error = "SQL Server routing failed: exceeded maximum routing redirects (2)";
+        let message = super::sqlserver_connect_failure_message(redirect_limit_error, &fallback_errors);
+        assert!(message.starts_with(redirect_limit_error), "{message}");
+        assert!(message.contains("The SQL Server legacy compatibility fallbacks also failed:"), "{message}");
+
+        let skipped_msg = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled";
+        let message = super::sqlserver_connect_failure_message(skipped_msg, &fallback_errors);
+        assert!(!message.contains(skipped_msg), "{message}");
+        assert!(message.starts_with("login-only encryption failed:"), "{message}");
+    }
+
+    fn mock_tds_prelogin_response() -> Vec<u8> {
+        let mut packet = vec![
+            0x12, // PacketType::PreLogin
+            0x01, // PacketStatus::EndOfMessage
+            0x00, 0x20, // Length: 32 bytes (BE)
+            0x00, 0x00, // SPID
+            0x01, // Packet ID
+            0x00, // Window
+        ];
+        packet.extend_from_slice(&[0x00, 0x00, 0x10, 0x00, 0x06]); // token 0 (version), offset 16, len 6
+        packet.extend_from_slice(&[0x01, 0x00, 0x16, 0x00, 0x01]); // token 1 (encryption), offset 22, len 1
+        packet.extend_from_slice(&[0x04, 0x00, 0x17, 0x00, 0x01]); // token 4 (mars), offset 23, len 1
+        packet.push(0xFF); // terminator
+        packet.extend_from_slice(&[0x0F, 0x00, 0x00, 0x00, 0x00, 0x00]); // version 15.0.0
+        packet.push(0x02); // EncryptionLevel::NotSupported
+        packet.push(0x00); // mars: 0
+        packet
+    }
+
+    fn mock_tds_routing_response(host: &str, port: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(0xE3); // TokenType::EnvChange
+        let host_utf16: Vec<u16> = host.encode_utf16().collect();
+        let routing_data_len = 1 + 2 + 2 + (host_utf16.len() * 2) as u16;
+        let env_change_payload_len = 1 + 2 + routing_data_len;
+        payload.extend_from_slice(&env_change_payload_len.to_le_bytes());
+        payload.push(20); // EnvChangeTy::Routing
+        payload.extend_from_slice(&routing_data_len.to_le_bytes());
+        payload.push(0); // routing protocol: TCP
+        payload.extend_from_slice(&port.to_le_bytes());
+        payload.extend_from_slice(&(host_utf16.len() as u16).to_le_bytes());
+        for code_unit in host_utf16 {
+            payload.extend_from_slice(&code_unit.to_le_bytes());
+        }
+
+        // TokenDone: 0xFD
+        payload.push(0xFD);
+        payload.extend_from_slice(&0u16.to_le_bytes()); // status: 0
+        payload.extend_from_slice(&0u16.to_le_bytes()); // cur_cmd: 0
+        payload.extend_from_slice(&0u64.to_le_bytes()); // done_rows: 0 (8 bytes)
+
+        let total_len = (8 + payload.len()) as u16;
+        let mut packet = vec![
+            0x04, // PacketType::TabularResult
+            0x01, // PacketStatus::EndOfMessage
+            (total_len >> 8) as u8,
+            (total_len & 0xFF) as u8,
+            0x00,
+            0x00, // SPID
+            0x01, // Packet ID
+            0x00, // Window
+        ];
+        packet.extend(payload);
+        packet
+    }
+
+    fn mock_tds_loginack_response() -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(0xAD); // TokenType::LoginAck
+        let prog_name = "Microsoft SQL Server";
+        let prog_name_utf16: Vec<u16> = prog_name.encode_utf16().collect();
+        let loginack_len = (1 + 4 + 1 + prog_name_utf16.len() * 2 + 4) as u16;
+        payload.extend_from_slice(&loginack_len.to_le_bytes());
+        payload.push(1); // interface: SQL_TSQL
+        payload.extend_from_slice(&0x74000004u32.to_be_bytes()); // SqlServerN (TDS 7.4) in BigEndian
+        payload.push(prog_name_utf16.len() as u8);
+        for code_unit in prog_name_utf16 {
+            payload.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        payload.extend_from_slice(&0x0F000000u32.to_le_bytes()); // version: 15.0.0.0
+
+        // TokenDone: 0xFD
+        payload.push(0xFD);
+        payload.extend_from_slice(&0u16.to_le_bytes()); // status: 0
+        payload.extend_from_slice(&0u16.to_le_bytes()); // cur_cmd: 0
+        payload.extend_from_slice(&0u64.to_le_bytes()); // done_rows: 0 (8 bytes)
+
+        let total_len = (8 + payload.len()) as u16;
+        let mut packet = vec![
+            0x04, // PacketType::TabularResult
+            0x01, // PacketStatus::EndOfMessage
+            (total_len >> 8) as u8,
+            (total_len & 0xFF) as u8,
+            0x00,
+            0x00, // SPID
+            0x01, // Packet ID
+            0x00, // Window
+        ];
+        packet.extend(payload);
+        packet
+    }
+
+    async fn read_mock_tds_packet(stream: &mut tokio::net::TcpStream) -> std::io::Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let mut header = [0u8; 8];
+        stream.read_exact(&mut header).await?;
+        let len = u16::from_be_bytes([header[2], header[3]]) as usize;
+        if len < 8 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid TDS packet length"));
+        }
+        let mut payload = vec![0u8; len - 8];
+        stream.read_exact(&mut payload).await?;
+        let mut packet = header.to_vec();
+        packet.extend(payload);
+        Ok(packet)
+    }
+
+    #[tokio::test]
+    async fn sqlserver_try_connect_follows_tds_routing_redirect() {
+        use tokio::io::AsyncWriteExt;
+        let hop1_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hop1_port = hop1_listener.local_addr().unwrap().port();
+
+        let hop2_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hop2_port = hop2_listener.local_addr().unwrap().port();
+
+        let hop1_task = tokio::spawn(async move {
+            let (mut socket, _) = hop1_listener.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap(); // PreLogin
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap(); // Login7
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", hop2_port)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let hop2_task = tokio::spawn(async move {
+            let (mut socket, _) = hop2_listener.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap(); // PreLogin
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap(); // Login7
+            socket.write_all(&mock_tds_loginack_response()).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
+
+        let client = super::try_connect(
+            "127.0.0.1",
+            hop1_port,
+            true,
+            "sa",
+            "password",
+            None,
+            tiberius::EncryptionLevel::NotSupported,
+            Duration::from_secs(3),
+        )
+        .await;
+
+        hop1_task.await.unwrap();
+        hop2_task.await.unwrap();
+
+        assert!(client.is_ok(), "client connection failed: {:?}", client.err());
+    }
+
+    #[tokio::test]
+    async fn sqlserver_try_connect_enforces_max_routing_redirects() {
+        use tokio::io::AsyncWriteExt;
+        let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port1 = listener1.local_addr().unwrap().port();
+
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port2 = listener2.local_addr().unwrap().port();
+
+        let listener3 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port3 = listener3.local_addr().unwrap().port();
+
+        let t1 = tokio::spawn(async move {
+            let (mut socket, _) = listener1.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", port2)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let t2 = tokio::spawn(async move {
+            let (mut socket, _) = listener2.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", port3)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let t3 = tokio::spawn(async move {
+            let (mut socket, _) = listener3.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            // 3rd redirect exceeds limit of 2 redirects
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", 9999)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let result = super::try_connect(
+            "127.0.0.1",
+            port1,
+            true,
+            "sa",
+            "password",
+            None,
+            tiberius::EncryptionLevel::NotSupported,
+            Duration::from_secs(3),
+        )
+        .await;
+
+        t1.await.unwrap();
+        t2.await.unwrap();
+        t3.await.unwrap();
+
+        let err = result.err().expect("should fail after exceeding max routing redirects");
+        assert!(err.contains("exceeded maximum routing redirects (2)"), "unexpected error message: {err}");
+    }
+
+    #[tokio::test]
+    async fn sqlserver_try_connect_routed_address_failure_reports_routed_endpoint() {
+        use tokio::io::AsyncWriteExt;
+        let hop1_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hop1_port = hop1_listener.local_addr().unwrap().port();
+
+        // Pick a port that is guaranteed not to have a server listening
+        let dead_port = {
+            let temp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            temp.local_addr().unwrap().port()
+        };
+
+        let hop1_task = tokio::spawn(async move {
+            let (mut socket, _) = hop1_listener.accept().await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_prelogin_response()).await.unwrap();
+            read_mock_tds_packet(&mut socket).await.unwrap();
+            socket.write_all(&mock_tds_routing_response("127.0.0.1", dead_port)).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let result = super::try_connect(
+            "127.0.0.1",
+            hop1_port,
+            true,
+            "sa",
+            "password",
+            None,
+            tiberius::EncryptionLevel::NotSupported,
+            Duration::from_secs(3),
+        )
+        .await;
+
+        hop1_task.await.unwrap();
+
+        let err = result.err().expect("connection to closed port should fail");
+        assert!(
+            err.contains(&format!("SQL Server connection on routed address `127.0.0.1:{dead_port}` failed:")),
+            "error should mention routed address and port: {err}"
+        );
     }
 
     #[test]
@@ -4970,6 +5567,13 @@ mod tests {
             Some(207),
             "Token error: 列名 'filter_definition' 无效。 (code: 207)"
         ));
+        // SQL Server 2005 has neither filtered-index catalog column; the first
+        // invalid-column error is `has_filter`, which must also trigger fallback.
+        assert!(sqlserver_filter_definition_error(
+            Some(207),
+            "Token error: Column name 'has_filter' is invalid. (code: 207)"
+        ));
+        assert!(sqlserver_filter_definition_error(Some(207), "Invalid column name 'has_filter'."));
         assert!(!sqlserver_filter_definition_error(
             Some(207),
             "Token error: Column name 'other_column' is invalid. (code: 207)"
@@ -4981,13 +5585,24 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_temporal_metadata_sql_avoids_declare_inline_initialization() {
+        // `DECLARE @x <type> = <value>` is 2008+ syntax; on SQL Server 2005 the
+        // whole batch fails to parse before the sys.periods guard can skip it.
+        let sql = sqlserver_temporal_metadata_sql();
+        assert!(!sql.contains("DECLARE @retention nvarchar(max) ="));
+        assert!(!sql.contains("DECLARE @sql nvarchar(max) ="));
+        assert!(sql.contains("DECLARE @retention nvarchar(max);"));
+        assert!(sql.contains("DECLARE @sql nvarchar(max);"));
+    }
+
+    #[test]
     fn sqlserver_columns_sql_reads_column_comment_by_column_id() {
         let sql = sqlserver_columns_sql("dbo", "orders");
 
         assert!(sql.contains("FROM sys.objects o"));
         assert!(sql.contains("JOIN sys.columns c ON c.object_id = o.object_id"));
         assert!(sql.contains("sys.extended_properties ep"));
-        assert!(sql.contains("ep.major_id = c.object_id"));
+        assert!(sql.contains("ep.class = 1 AND ep.major_id = c.object_id"));
         assert!(sql.contains("ep.minor_id = c.column_id"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("c.is_computed = 1 THEN 'computed'"));
@@ -5036,6 +5651,7 @@ mod tests {
         let sql = sqlserver_table_comment_sql("dbo", "users");
 
         assert!(sql.contains("sys.extended_properties ep"));
+        assert!(sql.contains("ep.class = 1"));
         assert!(sql.contains("ep.minor_id = 0"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("QUOTENAME('dbo')"));
@@ -5482,6 +6098,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 
@@ -5511,6 +6128,7 @@ mod tests {
             parent_name: None,
             comment: None,
             data_type: None,
+            routine_id: None,
             signature: None,
         };
 

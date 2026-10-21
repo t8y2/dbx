@@ -25,6 +25,7 @@ export interface BackendError {
   /** Compatibility provenance. New callers should prefer origin metadata. */
   source: string;
   operationOutcome: "not_started" | "unknown";
+  transactionOutcome?: "committed" | "rolled_back" | "unknown";
   origin?: {
     subsystem: string;
     adapter: string;
@@ -161,6 +162,7 @@ function isBackendError(value: unknown): value is BackendError {
     }
   }
   if (candidate.detail !== undefined && typeof candidate.detail !== "string") return false;
+  if (candidate.transactionOutcome !== undefined && !["committed", "rolled_back", "unknown"].includes(String(candidate.transactionOutcome))) return false;
   // Optional driver-reported position. Malformed values are rejected so a
   // corrupted envelope never drives a wrong editor jump, while a missing field
   // stays valid (all non-PostgreSQL errors and older backends).

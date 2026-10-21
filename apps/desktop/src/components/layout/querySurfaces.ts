@@ -5,6 +5,7 @@ import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import type { SqlExecutionOverride, SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import type { ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
 
 export interface StatementRange {
   from: number;
@@ -64,6 +65,8 @@ export interface ContentAreaSurfaceProps {
   activeOutputView: TabOutputView;
   formatSqlRequest: { id: number; tabId: string } | null;
   compressSqlRequest: { id: number; tabId: string } | null;
+  /** Toolbar `a`/`A`: re-case keywords in the acting tab's editor (issue #11828). */
+  keywordCaseRequest: { id: number; tabId: string; mode: "upper" | "lower" } | null;
   selectedSql: string;
   cursorPos: number;
   blockDangerousRedisCommands: boolean;
@@ -105,6 +108,7 @@ export interface ContentAreaSurfaceEmits {
   viewTableDdl: [tabId: string, target: SqlObjectNavigationTarget];
   editTableStructure: [tabId: string, target: SqlObjectNavigationTarget];
   openObjectSource: [tabId: string, target: SqlObjectNavigationTarget, initialEditing: boolean];
+  openDependencyObject: [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
   openObjectTable: [tabId: string, target: { tableName: string; schema?: string; tableType?: string; catalog?: string; comment?: string | null }];
   openDatabaseSearchTarget: [tabId: string, target: NavigationTarget];
   objectSchemaChange: [tabId: string, schema: string | undefined];

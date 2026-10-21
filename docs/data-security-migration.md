@@ -17,11 +17,13 @@ DBX uses two independent key systems:
 | Local storage key | Desktop platform store, Web managed data-dir key, or `DBX_SECRET_KEY(_FILE)` | Protects Secret Store values in the local `dbx.db` | Never copied by sync |
 | Sync passphrase | Entered by the user during export/import | Protects sensitive fields in an encrypted sync package | Used with that package |
 
-Local keys are never written to a sync file. Copying `dbx.db` to another computer is not a supported cross-device migration method; use encrypted export/import instead. Local values use the `dbxenc1` envelope, AES-256-GCM, and authenticated data bound to the namespace and field name. Sync packages use a separate crypto format and passphrase.
+Local keys are never written to a sync file. For installed builds, copying `dbx.db` to another computer is not a supported cross-device migration method; use encrypted export/import instead. Windows portable builds move their managed key with the complete portable data directory. Local values use the `dbxenc1` envelope, AES-256-GCM, and authenticated data bound to the namespace and field name. Sync packages use a separate crypto format and passphrase.
 
 ## Supported environments
 
 Desktop builds use the platform credential store on macOS, Windows, and Linux.
+
+Windows portable builds instead use `data/.dbx/secret.key` so the complete data directory can move between computers. Existing portable ciphertext protected by Windows Credential Manager must be opened once by the new build on the original computer; DBX copies the old key only after verifying that it decrypts the data. If the original computer or key is unavailable, restore that key or a pre-migration backup. A replacement key cannot decrypt the ciphertext. Keeping the key beside the database trades protection against whole-drive copying or loss for portability.
 
 `dbx-web` uses `${DBX_DATA_DIR}/.dbx/secret.key` by default, whether it runs in Docker, under systemd, or directly from the binary. The key is created with restricted permissions only when migration starts or the first sensitive value is written. It is part of the same recovery unit as `dbx.db`; back up and restore both files together. A key stored in the data directory does not protect against disclosure of the entire data volume.
 
@@ -100,7 +102,7 @@ Import can restore metadata only or restore secrets as well. Wrong passphrases, 
 - Older sync package versions remain readable according to their compatibility rules.
 - Failed migrations keep the original data and backup and can be retried.
 - Successful migration backups remain until the user explicitly cleans them up.
-- Direct `dbx.db` copying is not a supported cross-platform migration path.
+- Installed builds cannot migrate by copying only `dbx.db`; Windows portable builds must copy the complete `data` directory.
 
 ## Troubleshooting
 
@@ -111,6 +113,8 @@ Confirm that the installed build includes the migration-cache fix. Export the re
 ### Key unavailable
 
 Allow DBX Desktop to access the platform credential store. For Web/Docker, confirm that `${DBX_DATA_DIR}/.dbx/secret.key` is present with the data volume, or that an explicitly configured `DBX_SECRET_KEY_FILE` is readable. Do not delete or replace the key used to encrypt an existing database.
+
+For Windows portable builds, keep `data/.dbx/secret.key` beside `dbx.db`. When upgrading existing portable data, launch the new build once on the original computer before moving the USB drive. DBX cannot generate a replacement key for ciphertext whose original key has been lost.
 
 ### Migration failed
 

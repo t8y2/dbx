@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 500
 dbType: prestosql
+compareModes: [schema, data]
 rustVariant: PrestoSql
 label: PrestoSQL
 runtimeMode: external

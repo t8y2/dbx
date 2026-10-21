@@ -1,7 +1,10 @@
+import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
+import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { Channel } from "@tauri-apps/api/core";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
+import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
 
@@ -36,7 +39,7 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
 
 import type { MigrationPreflight, MigrationReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
-export const migrationStatus = (): Promise<MigrationPreflight> => invoke("migration_status");
+export const migrationStatus = (retry = false): Promise<MigrationPreflight> => invoke("migration_status", { retry });
 export const migrationStart = (): Promise<MigrationReport> => invoke("migration_start");
 export const migrationRetry = (): Promise<MigrationReport> => invoke("migration_retry");
 export const migrationCleanupBackups = (): Promise<void> => invoke("migration_cleanup_backups");
@@ -116,12 +119,13 @@ import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
-import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
+import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult, CcSwitchImportResult } from "@/types/ai";
 import type { SalesforceCurrentUser, SalesforceOAuthAuthorizeParams, SalesforceOAuthDevicePollResult, SalesforceOAuthDeviceStartResult, SalesforceOAuthRefreshResult, SalesforceOAuthToken } from "@/types/salesforce";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
   ActivePluginSession,
+  ConnectionIdleClosedEvent,
   ConnectionLivenessMessage,
   PluginBinaryEvent,
   PluginConnectionActionResult,
@@ -157,7 +161,9 @@ import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSql
 import type { BuildCreatePartitionedTableSqlOptions, BuildTableOwnerChangeSqlOptions, BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TablePartitionSqlOptions, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
-import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput } from "@/lib/table/objectSourceEditor";
+import type { DatabaseStructureSearchSql, DatabaseStructureSearchSqlOptions } from "@/lib/database/databaseStructureSearch";
+import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput, FingerprintOracleRoutineObjectSourceInput, RewriteOracleRoutineReferencesInput, ValidateOracleExecutableObjectSourceInput } from "@/lib/table/objectSourceEditor";
+import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
@@ -325,12 +331,14 @@ export interface DesktopSettings {
   agent_store_dir?: string | null;
   custom_ai_skill_root_enabled?: boolean | null;
   custom_ai_skill_root?: string | null;
+  custom_ai_skill_auto_enabled?: boolean | null;
   sidebar_table_page_size?: number | null;
 }
 
 export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
+  promptHighRiskSql: boolean;
   allowedConnectionIds: string[] | null;
   allowedGroupIds: string[];
   allowedToolNames: string[] | null;
@@ -381,6 +389,7 @@ export interface WebDavConfig {
   username?: string;
   password?: string;
   remotePath?: string;
+  userAgent?: string;
 }
 
 export interface WebDavSyncSummary {
@@ -489,6 +498,8 @@ export interface SnippetSyncSummary {
   bytes: number;
   exportedAt?: string;
   appVersion?: string;
+  remoteContentHash?: string;
+  unchanged: boolean;
   legacyCleanupRequiredId?: string;
 }
 
@@ -501,6 +512,10 @@ export interface SnippetDownloadResult {
 
 export interface SnippetTokenStatus {
   hasSavedToken: boolean;
+}
+
+export interface SnippetPassphraseStatus {
+  hasSavedPassphrase: boolean;
 }
 
 export interface AppSupportInfo {
@@ -528,10 +543,15 @@ export interface QueryPaginationExecutionPlanOptions {
   pagination: QueryPagination;
   useAgentCursor: boolean;
   firstPageUsesActualSql?: boolean;
+  /** Optimizer hint injected into the generated count (dbx_count) and page (dbx_page) SQL.
+   *  Example: GaussDB parallel execution hint: + set(query_dop 8). */
+  executionHint?: string;
 }
 
 export interface QueryPaginationExecutionPlan {
   sqlToExecute: string;
+  /** Optional N+1 SQL page approved by the backend's strict read-only proof. */
+  pageProbeSql?: string;
   pageSql?: string;
   pageLimit?: number;
   pageOffset?: number;
@@ -551,6 +571,7 @@ export interface SortedQuerySqlOptions {
   columnIndex: number;
   column: string;
   direction: QuerySortDirection;
+  tieBreakerColumnIndexes?: number[];
 }
 
 export interface QuerySqlBuildResult {
@@ -592,13 +613,29 @@ export interface DriverInstallProgress {
 }
 
 export interface AiMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
   /** Transient images for this message. Persisted conversation history intentionally omits them. */
   images?: Array<{
     mediaType: string;
     data: string;
   }>;
+  /** For `role: "tool"`: the call this message answers. */
+  toolCallId?: string;
+  /** For `role: "assistant"`: the calls this turn made. The panel builds one of
+   *  these per request to replay a loaded skill as a real tool round; it is never
+   *  written to a conversation record. */
+  toolCalls?: AiToolCallRef[];
+}
+
+/** Mirrors `ToolCallRef` in `crates/dbx-ai-provider/src/ai.rs`. `providerPayload`
+ *  is provider-private replay data (Gemini thought signatures) that only a real
+ *  provider round can produce; a panel-built call leaves it unset. */
+export interface AiToolCallRef {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  providerPayload?: unknown;
 }
 
 export interface AiTaskContract {
@@ -632,6 +669,7 @@ export interface AiStreamChunk {
   session_id: string;
   delta: string;
   reasoning_delta?: string;
+  finish_reason?: string;
   done: boolean;
   /** Web-only explicit terminal error; Tauri reports invoke failures directly. */
   error?: string;
@@ -698,6 +736,7 @@ export type AgentEvent =
        */
       type: "response_complete";
     }
+  | { type: "output_truncated"; finish_reason: string }
   | { type: "agent_end"; input_tokens?: number; output_tokens?: number }
   | {
       type: "context_compacted";
@@ -729,6 +768,7 @@ export async function aiAgentStream(
   confirmedSchema?: string,
   _signal?: AbortSignal,
   selectedDatabases?: string[],
+  allowSkills = false,
 ): Promise<string> {
   const unlisten: UnlistenFn = await listen<TauriAgentEvent>("ai-agent-event", (event) => {
     const payload = event.payload;
@@ -753,6 +793,7 @@ export async function aiAgentStream(
       confirmedDatabase,
       confirmedSchema,
       selectedDatabases,
+      allowSkills,
     });
   } catch (e) {
     unlisten();
@@ -835,6 +876,14 @@ export async function deleteAiConfig(configId: string): Promise<void> {
   return invoke("delete_ai_config", { configId });
 }
 
+export async function loadCcSwitchAiConfigs(): Promise<CcSwitchImportResult> {
+  return invoke("load_cc_switch_ai_configs");
+}
+
+export async function loadMagpieAiConfigs(): Promise<CcSwitchImportResult> {
+  return invoke("load_magpie_ai_configs");
+}
+
 export async function loadAiConfig(): Promise<AiConfig | null> {
   return invoke("load_ai_config");
 }
@@ -891,6 +940,10 @@ export interface WebMcpHttpSettings {
   allowedOrigins: string[];
 }
 
+export interface WebCapabilities {
+  passwordViewerEnabled: boolean;
+}
+
 export async function loadMcpHttpServerSettings(): Promise<McpHttpServerSettings> {
   return invoke("load_mcp_http_server_settings");
 }
@@ -917,6 +970,10 @@ export async function saveWebMcpHttpSettings(_settings: WebMcpHttpSettings): Pro
 
 export async function rotateWebMcpToken(): Promise<WebMcpHttpStatus> {
   throw new Error("Web MCP settings are available only in DBX Web");
+}
+
+export async function loadWebCapabilities(): Promise<WebCapabilities> {
+  return { passwordViewerEnabled: true };
 }
 
 export async function loadMaxAgentTurns(): Promise<number> {
@@ -1060,6 +1117,15 @@ export async function requestAppClose(): Promise<void> {
   return invoke("request_app_close_from_window_controls");
 }
 
+/**
+ * #11787：告诉宿主快捷键录入态是否开启。Windows 上宿主据此关掉 WebView2 的浏览器加速键
+ * （F5/Ctrl+R 重载、Ctrl+F 查找、Ctrl+P 打印、Ctrl+± 缩放、F12 DevTools……），让这批键
+ * 在录入期间落到页面被录入态吞掉；退出录入即恢复。其余平台是空实现。
+ */
+export async function setShortcutRecording(recording: boolean): Promise<void> {
+  return invoke("set_shortcut_recording", { recording });
+}
+
 export interface DriverStoreMigrationResult {
   driver_store_dir: string | null;
   plugin_store_dir: string | null;
@@ -1172,6 +1238,18 @@ export async function forgetSnippetSavedToken(config: SnippetSyncConfig): Promis
   return invoke("forget_snippet_saved_token", { config });
 }
 
+export async function snippetPassphraseStatus(config: SnippetSyncConfig): Promise<SnippetPassphraseStatus> {
+  return invoke("snippet_passphrase_status", { config });
+}
+
+export async function saveSnippetSavedPassphrase(config: SnippetSyncConfig, passphrase: string): Promise<void> {
+  return invoke("save_snippet_saved_passphrase", { config, passphrase });
+}
+
+export async function forgetSnippetSavedPassphrase(config: SnippetSyncConfig): Promise<void> {
+  return invoke("forget_snippet_saved_passphrase", { config });
+}
+
 export async function snippetSyncSettings(provider: SnippetProvider, instanceUrl?: string): Promise<SnippetSyncSettings> {
   return invoke("snippet_sync_settings", { provider, instanceUrl });
 }
@@ -1188,7 +1266,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return invoke("snippet_sync_inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
@@ -1196,6 +1274,7 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
+    expectedRemoteContentHash,
   });
 }
 
@@ -1246,39 +1325,41 @@ export async function pendingOpenPluginInstallLinks(): Promise<string[]> {
 export interface ExternalSqlFileSnapshot {
   content: string;
   version: ExternalSqlFileVersion;
+  encoding?: import("@/types/database").QueryTab["externalSqlEncoding"];
 }
 
 export type ExternalSqlFileStatus = { kind: "present"; sizeBytes: number; modifiedNs: string } | { kind: "missing" };
 
 export type ExternalSqlFileWriteResult = { kind: "written"; version: ExternalSqlFileVersion } | { kind: "conflict"; currentVersion: ExternalSqlFileVersion } | { kind: "missing" };
 
-export async function readExternalSqlFileSnapshot(path: string, maxSizeBytes?: number): Promise<ExternalSqlFileSnapshot> {
-  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path, maxSizeBytes });
+export async function readExternalSqlFileSnapshot(path: string, maxSizeBytes?: number, encoding?: string): Promise<ExternalSqlFileSnapshot> {
+  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion; encoding?: ExternalSqlFileSnapshot["encoding"] } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path, maxSizeBytes, encoding: encoding ?? null });
   if (result.kind === "tooLarge") {
     throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
   }
-  return { content: result.content, version: result.version };
+  return { content: result.content, version: result.version, ...(result.encoding ? { encoding: result.encoding } : {}) };
 }
 
-export async function readExternalSqlFile(path: string, maxSizeBytes?: number): Promise<string> {
-  return (await readExternalSqlFileSnapshot(path, maxSizeBytes)).content;
+export async function readExternalSqlFile(path: string, maxSizeBytes?: number, encoding?: string): Promise<string> {
+  return (await readExternalSqlFileSnapshot(path, maxSizeBytes, encoding)).content;
 }
 
 export async function inspectExternalSqlFile(path: string): Promise<ExternalSqlFileStatus> {
   return invoke("inspect_external_sql_file", { path });
 }
 
-export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<ExternalSqlFileWriteResult> {
+export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean; encoding?: string } = {}): Promise<ExternalSqlFileWriteResult> {
   return invoke("write_external_sql_file", {
     path,
     content,
     expectedContentHash: options.expectedContentHash ?? null,
     expectedMissing: options.expectedMissing ?? false,
+    encoding: options.encoding ?? "utf8",
   });
 }
 
-export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
-  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension });
+export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string, encoding?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
+  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension, encoding: encoding ?? "utf8" });
 }
 
 export interface SqlFileEntry {
@@ -1288,8 +1369,8 @@ export interface SqlFileEntry {
   children: SqlFileEntry[];
 }
 
-export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string): Promise<SqlFileEntry[]> {
-  return invoke("list_sql_files_in_folder", { folderPath, fileFilter });
+export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string, includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
+  return invoke("list_sql_files_in_folder", { folderPath, fileFilter, includeEmptyDirectories });
 }
 
 export async function createSqlFileInFolder(rootPath: string, directoryPath: string, fileName: string): Promise<string> {
@@ -1302,6 +1383,18 @@ export async function renameSqlFileInFolder(rootPath: string, filePath: string, 
 
 export async function deleteSqlFileInFolder(rootPath: string, filePath: string): Promise<void> {
   return invoke("delete_sql_file_in_folder", { rootPath, filePath });
+}
+
+export async function createSqlFolderInFolder(rootPath: string, directoryPath: string, folderName: string): Promise<string> {
+  return invoke("create_sql_folder_in_folder", { rootPath, directoryPath, folderName });
+}
+
+export async function renameSqlFolderInFolder(rootPath: string, folderPath: string, folderName: string): Promise<string> {
+  return invoke("rename_sql_folder_in_folder", { rootPath, folderPath, folderName });
+}
+
+export async function deleteSqlFolderInFolder(rootPath: string, folderPath: string): Promise<void> {
+  return invoke("delete_sql_folder_in_folder", { rootPath, folderPath });
 }
 
 export interface GlobalSearchRequest {
@@ -1348,6 +1441,17 @@ export interface AiChatMessage {
    * the turn was not empty. Absent on records written before the field existed.
    */
   selectionsOmitted?: boolean;
+  /**
+   * Skills this conversation has had loaded (prd 09-30 Req 13), carried on the
+   * newest assistant turn of each snapshot.
+   *
+   * Only the fact, never the body: a body can reach 1 MiB per skill, the stored
+   * message array is an unbounded column with no per-message cap, and it is
+   * re-serialized in full on every save. Bodies stay in memory and are re-read
+   * from disk when a request needs them — the same shape as the #10058 selection
+   * footprint above, which keeps a flag instead of its payload.
+   */
+  loadedSkillIds?: string[];
 }
 
 export interface AiConversation {
@@ -1369,6 +1473,17 @@ export interface AiConversation {
   /** One editable "send later" input saved while an active run occupies the
    *  conversation (parent PRD §5). Persisted with the conversation. */
   queuedInput?: string;
+  /** Ask/Agent mode the user picked for THIS conversation (#12075). Written
+   *  only by a picker operation, so a capability limit (vector DB, plugin
+   *  without a connection) never replaces it. Absent means "never picked": the
+   *  panel then falls back to the plugin context's mode and the settings
+   *  default. Plain string on purpose — a future mode must not need a schema
+   *  migration, so unknown values are validated in the frontend instead. */
+  assistantMode?: string;
+  /** Picker action entry for this conversation, `auto` included (#9118 / R8):
+   *  the record keeps the ENTRY the user chose, not the action a send routed
+   *  to. Same semantics as `assistantMode`. */
+  assistantAction?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1691,7 +1806,18 @@ export async function getMysqlTableAutoIncrement(connectionId: string, database:
   return invoke("get_mysql_table_auto_increment", { connectionId, database, table });
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string, tableNameFilter?: import("@/types/database").TableNameFilter): Promise<ObjectInfo[]> {
+export async function listObjects(
+  connectionId: string,
+  database: string,
+  schema: string,
+  objectTypes?: (SidebarObjectKind | "EVENT")[],
+  filter?: string,
+  limit?: number,
+  offset?: number,
+  catalog?: string,
+  tableNameFilter?: import("@/types/database").TableNameFilter,
+  executionId?: string,
+): Promise<ObjectInfo[]> {
   return invoke("list_objects", {
     connectionId,
     database,
@@ -1702,6 +1828,7 @@ export async function listObjects(connectionId: string, database: string, schema
     offset,
     catalog,
     tableNameFilter,
+    executionId,
   });
 }
 
@@ -1744,7 +1871,7 @@ export async function listSchemaInfos(connectionId: string, database: string): P
 export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
   return invoke("get_custom_type_details", { connectionId, database, schema, name });
 }
-export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
+export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string): Promise<ColumnInfo[]> {
   return invoke("get_columns", {
     connectionId,
     database,
@@ -1752,6 +1879,7 @@ export async function getColumns(connectionId: string, database: string, schema:
     table,
     catalog,
     clientSessionId,
+    currentSchema,
   });
 }
 
@@ -1916,6 +2044,12 @@ export interface ExecuteMultiProgress {
   error?: BackendError;
 }
 
+export async function subscribeQueryMessages(executionId: string, onMessages: (messages: import("@/types/database").QueryMessage[]) => void): Promise<() => void> {
+  return listen<{ executionId: string; messages: import("@/types/database").QueryMessage[] }>("query-messages", (event) => {
+    if (event.payload.executionId === executionId) onMessages(event.payload.messages);
+  });
+}
+
 export async function executeMultiWithProgress(
   connectionId: string,
   database: string,
@@ -1959,6 +2093,10 @@ export async function refreshConnections(): Promise<void> {
   return invoke("refresh_connections");
 }
 
+export async function cancelQueryAndWait(executionId: string): Promise<{ requested: boolean; terminal: boolean }> {
+  return invokeBackend("cancel_conditional_update", { executionId });
+}
+
 export async function cancelQuery(executionId: string): Promise<boolean> {
   return invoke("cancel_query", { executionId });
 }
@@ -1970,6 +2108,27 @@ export interface ConditionalUpdateCancellationResult {
 
 export async function cancelConditionalUpdate(executionId: string): Promise<ConditionalUpdateCancellationResult> {
   return invoke("cancel_conditional_update", { executionId });
+}
+
+export async function readLargeValueChunk(request: import("./http").LargeValueRequest): Promise<import("./http").LargeValueChunk> {
+  return invoke("read_large_value_chunk", { request });
+}
+
+export async function releaseLargeValue(request: import("./http").LargeValueRequest): Promise<boolean> {
+  return invoke("release_large_value", { request });
+}
+
+export async function downloadLargeValue(request: import("./http").LargeValueRequest, filePath: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  await invoke("download_large_value", { request, filePath });
+  // A native command may already have persisted the file; this only retires its local caller.
+  signal?.throwIfAborted();
+}
+
+export async function exportSnapshotResult(request: import("./http").SnapshotExportRequest, filePath: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  await invoke("export_snapshot_result", { request, filePath });
+  signal?.throwIfAborted();
 }
 
 export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
@@ -1991,7 +2150,7 @@ export async function closeClientConnectionSession(connectionId: string, databas
   });
 }
 
-export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number, useTransaction?: boolean): Promise<QueryResult> {
+export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string, timeoutSecs?: number, useTransaction?: boolean, boundStatements?: BlobBoundStatement[]): Promise<QueryResult> {
   return invoke("execute_batch", {
     connectionId,
     database,
@@ -1999,6 +2158,7 @@ export async function executeBatch(connectionId: string, database: string, state
     schema,
     timeoutSecs,
     useTransaction,
+    boundStatements,
   });
 }
 
@@ -2016,22 +2176,36 @@ export async function executeScriptWith2pc(connectionId: string, database: strin
   });
 }
 
-export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string, catalog?: string): Promise<QueryResult> {
+export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string, catalog?: string, boundStatements?: BlobBoundStatement[]): Promise<QueryResult> {
   return invoke("execute_in_transaction", {
     connectionId,
     database,
     statements,
     schema,
     catalog,
+    boundStatements,
   });
 }
 
 export async function beginManualTransaction(connectionId: string, database: string, schema?: string, catalog?: string): Promise<string> {
-  return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
+  return invokeBackend("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
-export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean, pageSize?: number, resultSessionId?: string, classificationSql?: string): Promise<QueryResult[]> {
-  return invoke("execute_in_manual_transaction", {
+export async function executeInManualTransaction(
+  txnSessionId: string,
+  sql: string,
+  database: string,
+  schema?: string,
+  maxRows?: number,
+  tableDataPreview?: boolean,
+  pageSize?: number,
+  resultSessionId?: string,
+  classificationSql?: string,
+  executionId?: string,
+  timeoutSecs?: number,
+  boundStatements?: BlobBoundStatement[],
+): Promise<QueryResult[]> {
+  return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
     sql,
     database,
@@ -2041,15 +2215,18 @@ export async function executeInManualTransaction(txnSessionId: string, sql: stri
     pageSize,
     resultSessionId,
     classificationSql,
+    executionId,
+    timeoutSecs,
+    boundStatements,
   });
 }
 
 export async function commitManualTransaction(txnSessionId: string): Promise<QueryResult> {
-  return invoke("commit_manual_transaction", { txnSessionId });
+  return invokeBackend("commit_manual_transaction", { txnSessionId });
 }
 
 export async function rollbackManualTransaction(txnSessionId: string): Promise<QueryResult> {
-  return invoke("rollback_manual_transaction", { txnSessionId });
+  return invokeBackend("rollback_manual_transaction", { txnSessionId });
 }
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
@@ -2076,7 +2253,7 @@ export async function buildCreateUserSql(username: string, password: string, tab
   return invoke("build_create_user_sql", { username, password, tablespace });
 }
 
-export async function getExplainInfo(connectionId: string, database: string | undefined, schema: string | undefined, sql: string, mode: string): Promise<string | undefined> {
+export async function getExplainInfo(connectionId: string, database: string | undefined, schema: string | undefined, sql: string, mode: string, executionId?: string, timeoutSecs?: number): Promise<string | undefined> {
   // Preserve Agent/driver errors so the explain view can show the actionable cause.
   return invoke<string>("get_explain_info", {
     connectionId,
@@ -2084,6 +2261,8 @@ export async function getExplainInfo(connectionId: string, database: string | un
     schema,
     sql,
     mode,
+    ...(executionId ? { executionId } : {}),
+    ...(timeoutSecs === undefined ? {} : { timeoutSecs }),
   });
 }
 
@@ -2129,6 +2308,22 @@ export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): 
 
 export async function buildDatabaseSearchSql(options: DatabaseSearchSqlOptions): Promise<DatabaseSearchSql | null> {
   return invoke("build_database_search_sql", { options });
+}
+
+export async function buildDatabaseSearchColumnsSql(options: import("@/lib/database/databaseSearchColumns").DatabaseSearchColumnsSqlOptions): Promise<{ sql: string } | null> {
+  return invoke("build_database_search_columns_sql", { options });
+}
+
+export async function buildDatabaseSearchProbeSql(options: import("@/lib/database/databaseSearchProbe").DatabaseSearchProbeSqlOptions): Promise<{ sql: string; includedIndices: number[] } | null> {
+  return invoke("build_database_search_probe_sql", { options });
+}
+
+export async function buildDatabaseStructureSearchSql(options: DatabaseStructureSearchSqlOptions): Promise<DatabaseStructureSearchSql | null> {
+  return invoke("build_database_structure_search_sql", { options });
+}
+
+export async function supportsDatabaseStructureSearch(databaseType?: DatabaseType, driverProfile?: string): Promise<boolean> {
+  return invoke("supports_database_structure_search", { databaseType, driverProfile });
 }
 
 export async function buildSearchResultWhere(options: SearchResultWhereOptions): Promise<string> {
@@ -2227,6 +2422,14 @@ export async function buildExecutableObjectSourceStatements(input: BuildEditable
   return invoke("build_executable_object_source_statements", { input });
 }
 
+export async function validateOracleExecutableObjectSource(input: ValidateOracleExecutableObjectSourceInput): Promise<void> {
+  return invoke("validate_oracle_executable_object_source", { input });
+}
+
+export async function fingerprintOracleRoutineObjectSource(input: FingerprintOracleRoutineObjectSourceInput): Promise<string> {
+  return invoke("fingerprint_oracle_routine_object_source", { input });
+}
+
 export async function buildExecutableObjectSourceSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return invoke("build_executable_object_source_sql", { input });
 }
@@ -2239,12 +2442,32 @@ export async function buildRoutineRenameObjectSourceStatements(input: BuildRouti
   return invoke("build_routine_rename_object_source_statements", { input });
 }
 
+export async function rewriteOracleRoutineReferences(input: RewriteOracleRoutineReferencesInput): Promise<string> {
+  return invoke("rewrite_oracle_routine_references", { input });
+}
+
+export async function rewriteOracleTableReferences(input: OracleTableReferenceRewriteInput): Promise<string> {
+  return invoke("rewrite_oracle_table_references", { input });
+}
+
 export async function buildViewDdlSql(input: BuildViewDdlInput): Promise<string> {
   return invoke("build_view_ddl_sql", { input });
 }
 
-export async function buildTableStructureChangeSql(options: BuildTableStructureChangeSqlOptions): Promise<TableStructureChangeSql> {
-  return invoke("build_table_structure_change_sql", { options });
+export async function parseOracleObjectName(input: string): Promise<string> {
+  return invoke("parse_oracle_object_name", { input });
+}
+
+export async function buildOracleViewRenameSource(input: OracleViewRenameSourceInput): Promise<OracleViewRenameSource> {
+  return invoke("build_oracle_view_rename_source", { input });
+}
+
+export async function reviewOracleViewRenameSource(input: OracleViewRenameSourceInput): Promise<OracleViewRenameSourceReview> {
+  return invoke("review_oracle_view_rename_source", { input });
+}
+
+export async function buildTableStructureChangeSql(options: BuildTableStructureChangeSqlOptions, starrocks?: StarRocksAlterOptions): Promise<TableStructureChangeSql> {
+  return invoke("build_table_structure_change_sql", { options, starrocks });
 }
 
 export async function buildTableOwnerChangeSql(options: BuildTableOwnerChangeSqlOptions): Promise<TableStructureChangeSql> {
@@ -2276,8 +2499,8 @@ export async function applySqliteTableStructureChange(connectionId: string, data
   });
 }
 
-export async function buildCreateTableSql(options: BuildTableStructureChangeSqlOptions): Promise<TableStructureChangeSql> {
-  return invoke("build_create_table_sql", { options });
+export async function buildCreateTableSql(options: BuildTableStructureChangeSqlOptions, serverVersion?: string, dialectOptions?: CreateTableDialectOptions): Promise<TableStructureChangeSql> {
+  return invoke("build_create_table_sql", { options, serverVersion, dialectOptions });
 }
 
 export async function buildSingleColumnAlterSql(options: BuildSingleColumnAlterSqlOptions): Promise<TableStructureChangeSql> {
@@ -2296,7 +2519,16 @@ export async function analyzeEditableQueryEditability(sql: string): Promise<Quer
 export interface DataGridSaveGuard {
   sql: string;
   maxMatchedRows: number;
+  /** Set for predicates built from a physical row locator that must still match. */
+  minMatchedRows?: number;
   message: string;
+  minMessage?: string;
+}
+
+export interface BlobBoundStatement {
+  previewSql: string;
+  sql: string;
+  blobParameters: string[];
 }
 
 export interface DataGridSavePreparation {
@@ -2305,6 +2537,7 @@ export interface DataGridSavePreparation {
   rollbackStatements: string[];
   executionSchema?: string;
   keylessGuards?: DataGridSaveGuard[];
+  boundStatements?: BlobBoundStatement[];
 }
 
 export async function prepareDataGridSave(options: DataGridSaveStatementOptions, driverProfile?: string): Promise<DataGridSavePreparation> {
@@ -2428,6 +2661,10 @@ export async function listForeignKeys(connectionId: string, database: string, sc
   });
 }
 
+export async function listForeignKeysForDatabase(connectionId: string, database: string, schema: string, catalog?: string, executionId?: string): Promise<Record<string, ForeignKeyInfo[]>> {
+  return invoke("list_foreign_keys_for_database", { connectionId, database, schema, catalog, executionId });
+}
+
 export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<TriggerInfo[]> {
   return invoke("list_triggers", {
     connectionId,
@@ -2461,6 +2698,7 @@ export async function listPartitions(connectionId: string, database: string, sch
 export interface TablePartitionStatus {
   isPartitionedParent: boolean;
   isPartition: boolean;
+  isForeign: boolean;
 }
 
 export async function getTablePartitionStatus(connectionId: string, database: string, schema: string, table: string): Promise<TablePartitionStatus> {
@@ -2876,6 +3114,16 @@ export async function subscribeConnectionLiveness(onEvent: (event: ConnectionLiv
   return listen<ConnectionLivenessMessage>("dbx-connection-liveness", (event) => onEvent(event.payload));
 }
 
+/**
+ * 订阅后端「空闲自动断开」事件（issue #12112）。
+ *
+ * 后端在连接池因空闲超过 `idle_disconnect_secs` 关闭时发送 `dbx:connection-idle-closed`；
+ * 监听器收到的就是载荷本身（前端把该连接标记为未连接并保留已打开页签）。
+ */
+export async function subscribeConnectionIdleClosed(onEvent: (event: ConnectionIdleClosedEvent) => void): Promise<UnlistenFn> {
+  return listen<ConnectionIdleClosedEvent>("dbx:connection-idle-closed", (event) => onEvent(event.payload));
+}
+
 export async function listJdbcDrivers(): Promise<JdbcDriverInfo[]> {
   return invoke("list_jdbc_drivers");
 }
@@ -3064,6 +3312,10 @@ export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile
   return invoke("save_saved_sql_file", { file });
 }
 
+export async function saveDefaultQueryContent(id: string, sql: string, updatedAt: string): Promise<void> {
+  return invoke("save_default_query_content", { id, sql, updatedAt });
+}
+
 export async function deleteSavedSqlFile(id: string): Promise<void> {
   return invoke("delete_saved_sql_file", { id });
 }
@@ -3172,6 +3424,16 @@ export interface McpServerStatus {
 
 export async function checkMcpServerStatus(): Promise<McpServerStatus> {
   return invoke("check_mcp_server_status");
+}
+
+export type McpKeychainAccess = "authorized" | "needs_authorization" | "key_missing" | "unknown" | "not_applicable";
+
+export async function checkMcpKeychainAccess(): Promise<McpKeychainAccess> {
+  return invoke("check_mcp_keychain_access");
+}
+
+export async function authorizeMcpKeychain(): Promise<string> {
+  return invoke("authorize_mcp_keychain");
 }
 
 export async function installMcpServer(): Promise<string> {
@@ -3431,8 +3693,8 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
   });
 }
 
-export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
-  return invoke("redis_get_value", { connectionId, db, keyRaw });
+export async function redisGetValue(connectionId: string, db: number, keyRaw: string, previewLimitBytes?: number): Promise<RedisValue> {
+  return invoke("redis_get_value", { connectionId, db, keyRaw, previewLimitBytes });
 }
 
 export async function redisGetRawValue(connectionId: string, db: number, keyRaw: string): Promise<RedisBlob> {
@@ -3517,8 +3779,8 @@ export async function redisHashFieldSetExpireAt(connectionId: string, db: number
   return invoke("redis_hash_field_set_expire_at", { connectionId, db, keyRaw, field, expireAt });
 }
 
-export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
-  return invoke("redis_list_push", { connectionId, db, keyRaw, value, ttl });
+export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number, side?: "left" | "right"): Promise<void> {
+  return invoke("redis_list_push", { connectionId, db, keyRaw, value, ttl, side });
 }
 
 export async function redisListSet(connectionId: string, db: number, keyRaw: string, index: number, value: string): Promise<void> {
@@ -4660,8 +4922,8 @@ export async function vectorListCollections(connectionId: string, database?: str
   return documentListCollections(connectionId, database || "default");
 }
 
-export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<MongoDocumentResult> {
-  return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, collation, executionId);
+export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, includeTotal?: boolean): Promise<MongoDocumentResult> {
+  return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, collation, executionId, undefined, undefined, includeTotal);
 }
 
 export async function mongoFindOne(connectionId: string, database: string, collection: string, filter?: string, projection?: string, options?: string, executionId?: string): Promise<MongoDocumentResult> {
@@ -4694,6 +4956,7 @@ export async function documentFindDocuments(
   executionId?: string,
   cursor?: string,
   cursorPagination?: boolean,
+  includeTotal?: boolean,
 ): Promise<DocumentQueryResult> {
   return invoke("document_find_documents", {
     connectionId,
@@ -4707,6 +4970,7 @@ export async function documentFindDocuments(
     collation,
     cursor,
     cursorPagination,
+    includeTotal,
     executionId,
   });
 }
@@ -5294,6 +5558,115 @@ export interface HistoryConnectionOption extends HistoryConnectionFilter {
   databases: string[];
 }
 
+export type TaskType = "transfer";
+export type TaskLifecycleOwner = "tauri" | "web";
+export type TaskRunStatus = "running" | "succeeded" | "partial_failed" | "failed" | "cancelled";
+export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object";
+export type TaskItemStatus = "pending" | "running" | "succeeded" | "skipped" | "failed" | "cancelled" | "not_started" | "incomplete";
+export type TaskRowCountState = "not_applicable" | "known" | "unknown" | "incomplete";
+export type TransferRunContent = "structure_and_data" | "structure_only" | "data_only";
+export type TransferRunMode = "append" | "overwrite" | "upsert";
+export type TransferRunObjectSelectionMode = "unspecified" | "explicit";
+
+export interface TaskEndpointSnapshot {
+  connectionId: string;
+  databaseType: string;
+  database: string;
+  schema: string;
+  catalog?: string | null;
+}
+
+export interface TaskRun {
+  runId: string;
+  taskType: TaskType;
+  lifecycleOwner: TaskLifecycleOwner;
+  status: TaskRunStatus;
+  createdAt: string;
+  startedAt: string;
+  finishedAt?: string | null;
+  ownerInstanceId: string;
+  errorCode?: string | null;
+  safeErrorSummary?: string | null;
+  historyComplete: boolean;
+  source: TaskEndpointSnapshot;
+  target: TaskEndpointSnapshot;
+}
+
+export interface TransferRunDetails {
+  runId: string;
+  content: TransferRunContent;
+  mode: TransferRunMode;
+  batchSize: number;
+  createTable: boolean;
+  dropTargetBeforeCreate: boolean;
+  targetTableNameCase: "preserve" | "lower" | "upper";
+  quoteTargetColumnNames: boolean;
+  ownershipPolicy: "preserve" | "skip" | "reassign_missing";
+  filteredTableCount: number;
+  tableTotal: number;
+  objectSelectionMode: TransferRunObjectSelectionMode;
+  selectedObjectCount?: number | null;
+}
+
+export interface TaskRunDetail {
+  run: TaskRun;
+  transfer?: TransferRunDetails | null;
+}
+
+export interface TaskRunCursor {
+  createdAt: string;
+  runId: string;
+}
+
+export interface TaskRunListQuery {
+  limit?: number;
+  cursor?: TaskRunCursor | null;
+  taskType?: TaskType;
+  status?: TaskRunStatus;
+}
+
+export interface TaskRunPage {
+  items: TaskRun[];
+  nextCursor?: TaskRunCursor | null;
+}
+
+export interface TaskRunItem {
+  runId: string;
+  itemIndex: number;
+  itemKind: TaskItemKind;
+  sourceObject: string;
+  targetObject: string;
+  status: TaskItemStatus;
+  sourceRowCount?: number | null;
+  movedRowCount?: number | null;
+  targetRowCount?: number | null;
+  rowCountState: TaskRowCountState;
+  hasTableFilter: boolean;
+  safeErrorSummary?: string | null;
+}
+
+export interface TaskRunItemsQuery {
+  limit?: number;
+  afterItemIndex?: number;
+}
+
+export interface TaskRunItemsPage {
+  items: TaskRunItem[];
+  nextAfterItemIndex?: number | null;
+}
+
+export async function loadTaskRuns(query: TaskRunListQuery = {}): Promise<TaskRunPage> {
+  return invoke("load_task_runs", { query });
+}
+
+export async function loadTaskRun(runId: string): Promise<TaskRunDetail | null> {
+  return invoke("load_task_run", { runId });
+}
+
+export async function loadTaskRunItems(runId: string, query: TaskRunItemsQuery = {}): Promise<TaskRunItemsPage> {
+  return invoke("load_task_run_items", { runId, query });
+}
+
 export async function saveHistory(entry: HistoryEntry): Promise<void> {
   return invoke("save_history", { entry });
 }
@@ -5342,7 +5715,10 @@ export async function deleteHistoryEntry(id: string): Promise<void> {
 // --- SQL File Execution ---
 export type SqlFileStatus = "started" | "running" | "statementDone" | "statementFailed" | "done" | "error" | "cancelled";
 
+export type SqlFileEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
+
 export interface SqlFileRequest {
+  encoding?: SqlFileEncoding;
   executionId: string;
   connectionId: string;
   database: string;
@@ -5360,8 +5736,8 @@ export interface SqlFileTable {
   name: string;
 }
 
-export async function inspectSqlFileTables(filePath: string): Promise<SqlFileTable[]> {
-  return invoke("inspect_sql_file_tables", { filePath });
+export async function inspectSqlFileTables(filePath: string, encoding?: SqlFileEncoding): Promise<SqlFileTable[]> {
+  return invoke("inspect_sql_file_tables", { filePath, encoding });
 }
 
 export interface SqlFilePreview {
@@ -5374,6 +5750,11 @@ export interface SqlFilePreview {
   packageFilePaths?: string[];
   packagePartCount?: number;
   cleanupToken?: string;
+}
+
+export async function refreshSqlFilePreview(filePath: string, encoding: SqlFileEncoding): Promise<Pick<SqlFilePreview, "preview" | "canExecuteWithoutSelectedDatabase" | "establishesDatabaseContext">> {
+  const result = await previewSqlFile(filePath, encoding);
+  return { preview: result.preview, canExecuteWithoutSelectedDatabase: result.canExecuteWithoutSelectedDatabase, establishesDatabaseContext: result.establishesDatabaseContext };
 }
 
 export async function releaseSqlFilePreview(_cleanupToken: string): Promise<void> {}
@@ -5395,8 +5776,49 @@ export interface SqlFileProgress {
   fileName?: string;
 }
 
-export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> {
-  return invoke("preview_sql_file", { filePath });
+export async function previewSqlFile(filePath: string, encoding?: SqlFileEncoding): Promise<SqlFilePreview> {
+  return invoke("preview_sql_file", { filePath, encoding });
+}
+
+export type SqlFileFailureLogStatus = "available" | "degraded" | "unavailable";
+
+/** Health of one execution's failure log (dbx#11619). */
+export interface SqlFileFailureLogInfo {
+  status: SqlFileFailureLogStatus;
+  reason?: string;
+  /** Desktop only: the local log file, used by "open log folder". */
+  path?: string;
+}
+
+/** Stable identity of one failure row, matching what the backend logged. */
+export interface SqlFileFailureLogKey {
+  fileIndex: number;
+  statementIndex: number;
+}
+
+export interface SqlFileFailureLogTextPayload {
+  text?: string;
+  /** The derived text exceeded `limitBytes`; the caller should export to a file. */
+  tooLarge: boolean;
+  limitBytes: number;
+}
+
+export interface SqlFileFailureLogExportPayload {
+  records: number;
+  bytes: number;
+  format: string;
+}
+
+export async function sqlFileFailureLogInfo(executionId: string): Promise<SqlFileFailureLogInfo | null> {
+  return invoke("sql_file_failure_log_info", { executionId });
+}
+
+export async function exportSqlFileFailureLog(executionId: string, format: string, targetPath: string, keys?: SqlFileFailureLogKey[]): Promise<SqlFileFailureLogExportPayload> {
+  return invoke("export_sql_file_failure_log", { executionId, format, targetPath, keys });
+}
+
+export async function readSqlFileFailureLogText(executionId: string, format?: string, keys?: SqlFileFailureLogKey[]): Promise<SqlFileFailureLogTextPayload> {
+  return invoke("read_sql_file_failure_log_text", { executionId, format, keys });
 }
 
 export async function executeSqlFile(request: SqlFileRequest): Promise<void> {
@@ -5418,6 +5840,7 @@ export async function listenSqlFileProgress(handler: (progress: SqlFileProgress)
 // --- Data Transfer ---
 export type TransferMode = "append" | "overwrite" | "upsert";
 export type TransferTableNameCase = "preserve" | "lower" | "upper";
+export type TransferColumnNameCase = "preserve" | "lower" | "upper";
 export type TransferOwnershipPolicy = "preserve" | "skip" | "reassignMissing";
 export type TransferContent = "structureAndData" | "structureOnly" | "dataOnly";
 export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT";
@@ -5443,11 +5866,46 @@ export interface TransferRequest {
   objects: TransferObjectSelection[];
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
+  targetColumnNameCase?: TransferColumnNameCase;
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
+  /** Per-operation timeout for this transfer. Undefined inherits each connection; 0 disables the limit. */
+  operationTimeoutSecs?: number;
+  /**
+   * Optional per-source-table transfer filter.
+   * Key = source table name; value = a bare `WHERE` predicate
+   * (`id <= 90000`) or a complete `SELECT`
+   * (`select * from t_order where id <= 90000`). Missing/empty = full table.
+   */
+  tableFilters?: Record<string, string>;
   dropTargetBeforeCreate: boolean;
   dropTargetConfirmed: boolean;
+}
+
+export interface TransferStructurePreviewTable {
+  sourceTable: string;
+  targetTable: string;
+  /** The target table already exists, so this transfer plans no structure DDL for it. */
+  preexisting: boolean;
+  sql: string;
+}
+
+export type TransferStructureOperationKind = "createSchema" | "createTable" | "skipExistingTable" | "rebuildTable" | "createIndex" | "addForeignKey" | "createSequence" | "bindSequence" | "addComment";
+
+export interface TransferStructureOperation {
+  kind: TransferStructureOperationKind;
+  objectName?: string;
+  sourceTable?: string;
+  targetTable?: string;
+}
+
+export interface TransferStructurePreview {
+  sql: string;
+  tables: TransferStructurePreviewTable[];
+  operations: TransferStructureOperation[];
+  /** Whether selected non-table schema objects are expanded in the SQL preview. */
+  schemaObjectsExpanded: boolean;
 }
 
 export interface TransferOwnershipPreview {
@@ -5456,7 +5914,13 @@ export interface TransferOwnershipPreview {
   rebuild?: {
     sql: string;
     tables: Array<{ sourceTable: string; targetTable: string; backupTable?: string }>;
+    /** The rename phase on its own, so the structure plan can sit between rename and cleanup. */
+    backupSql?: string;
+    /** The drop-backups phase on its own. */
+    cleanupSql?: string;
   };
+  /** Structure-plan preview: present for structure-only transfers. */
+  structure?: TransferStructurePreview;
 }
 
 export interface TransferProgress {
@@ -5473,6 +5937,7 @@ export interface TransferProgress {
 }
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
+  const { operationTimeoutSecs, ...backendRequest } = request;
   return new Promise((resolve, reject) => {
     let unlisten: UnlistenFn | null = null;
     void (async () => {
@@ -5486,7 +5951,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
           }
         });
 
-        await invoke("start_transfer", { request });
+        await invoke("start_transfer", { request: backendRequest, operationTimeoutSecs });
         onStarted?.();
       } catch (e) {
         unlisten?.();
@@ -5898,6 +6363,7 @@ export interface DatabaseExportRequest {
   includeCreateDatabase?: boolean;
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
+  preserveOriginalLanguage?: boolean;
   failOnError?: boolean;
   preventOverwrite?: boolean;
   outputCompression?: "none" | "gzip";
@@ -5953,9 +6419,11 @@ export interface TableExportRequest {
   /** 与 `columns` 对齐的列 EXTRA 元数据（identity 等），用于 SQL INSERT 导出的 `SET IDENTITY_INSERT`。 */
   columnExtras?: Array<string | null | undefined>;
   columnComments?: Array<string | null> | null;
+  /** xlsx 专用：注释作为第二行表头（第 1 行列名、第 2 行注释、数据从第 3 行开始）。 */
+  headerCommentRows?: boolean;
   primaryKeys?: string[];
-  /** 导出 SQL 时是否排除主键列（对应数据提取设置里的“排除主键”）。 */
-  excludePrimaryKeys?: boolean;
+  /** SQL INSERT 导出使用的数据提取器主键模式。 */
+  primaryKeyMode?: "include" | "exclude-generated" | "exclude-all";
   whereInput?: string;
   orderBy?: string;
   skipCount?: boolean;
@@ -6019,9 +6487,13 @@ export interface QueryResultExportRequest {
   timeoutSecs?: number;
   keysetOptimizationEnabled: boolean;
   clientSessionId?: string;
+  /** Open manual transaction to read through, so the export sees its uncommitted changes. */
+  txnSessionId?: string;
   executionId?: string;
   dateTimeFormat?: string;
   exportTableName?: string;
+  /** Explicit INSERT target schema; separate from `schema`, which scopes query execution. */
+  exportSchema?: string;
   exportColumnTypes?: Array<string | null | undefined>;
   selectedColumns?: SqlExportColumnSelection[];
   /**
@@ -6031,10 +6503,12 @@ export interface QueryResultExportRequest {
   exportColumnExtras?: Array<string | null | undefined>;
   numericColumnRightAlign?: boolean;
   columnComments?: Array<string | null> | null;
+  /** xlsx 专用：注释作为第二行表头（第 1 行列名、第 2 行注释、数据从第 3 行开始）。 */
+  headerCommentRows?: boolean;
   autoFilter?: boolean;
   identifierQuote?: string;
-  /** 导出 SQL 时是否排除主键列（对应数据提取设置里的“排除主键”）。 */
-  excludePrimaryKeys?: boolean;
+  /** SQL INSERT 导出使用的数据提取器主键模式。 */
+  primaryKeyMode?: "include" | "exclude-generated" | "exclude-all";
   /** 结果集对应的原表主键列名，由前端从表元数据带入。 */
   primaryKeys?: string[];
 }
@@ -6173,6 +6647,53 @@ export async function recordDatabaseExportDestination(directory: string): Promis
   await invoke("record_database_export_destination", { directory });
 }
 
+export async function startDamengDump(request: DamengDumpRequest, onProgress: (progress: DamengDumpProgress) => void): Promise<DamengDumpProgress> {
+  let unlisten: UnlistenFn | undefined;
+  let settled = false;
+  let resolveTerminal: (progress: DamengDumpProgress) => void = () => {};
+  let rejectTerminal: (error: unknown) => void = () => {};
+
+  const terminalProgress = new Promise<DamengDumpProgress>((resolve, reject) => {
+    resolveTerminal = resolve;
+    rejectTerminal = reject;
+  });
+
+  const finish = (callback: () => void) => {
+    if (settled) return;
+    settled = true;
+    unlisten?.();
+    callback();
+  };
+
+  try {
+    unlisten = await listen<DamengDumpProgress>("dameng-dump-progress", (event) => {
+      if (event.payload.taskId !== request.taskId) return;
+      onProgress(event.payload);
+      if (event.payload.status === "error") {
+        finish(() => rejectTerminal(new BackendErrorException(event.payload.error || "Dameng dump failed")));
+      } else if (event.payload.status === "done" || event.payload.status === "cancelled") {
+        finish(() => resolveTerminal(event.payload));
+      }
+    });
+    await invoke("start_dameng_dump", { request });
+    return await terminalProgress;
+  } catch (error) {
+    if (!settled) {
+      settled = true;
+      unlisten?.();
+    }
+    throw error instanceof BackendErrorException ? error : new BackendErrorException(error);
+  }
+}
+
+export async function cancelDamengDump(taskId: string): Promise<void> {
+  await invoke("cancel_dameng_dump", { taskId });
+}
+
+export async function resolveDamengDumpTool(binDir: string, kind: DamengDumpKind): Promise<string> {
+  return invoke("resolve_dameng_dump_tool", { binDir, kind });
+}
+
 export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
   return invoke("export_query_result_csv", {
     request: {
@@ -6199,6 +6720,7 @@ export async function exportQueryResultXlsx(
   numericColumnRightAlign?: boolean,
   autoFilter?: boolean,
   dateTimeFormat?: string,
+  headerCommentRows?: boolean,
 ): Promise<void> {
   return invoke("export_query_result_xlsx", {
     request: {
@@ -6211,6 +6733,7 @@ export async function exportQueryResultXlsx(
       numericColumnRightAlign,
       autoFilter,
       dateTimeFormat,
+      headerCommentRows,
     },
   });
 }
@@ -6225,6 +6748,7 @@ export async function exportQueryResultsXlsx(
     rows: readonly (readonly XlsxCellValue[])[];
     numericColumnRightAlign?: boolean;
     autoFilter?: boolean;
+    headerCommentRows?: boolean;
   }[],
   autoFilter?: boolean,
   dateTimeFormat?: string,

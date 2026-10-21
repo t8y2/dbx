@@ -1,3 +1,45 @@
+<script lang="ts">
+// Aliased because `<script setup>` imports the same binding and the two blocks
+// share one module scope.
+import { reactive as createReactiveMap } from "vue";
+
+/**
+ * Per-conversation skill state, shared by every panel instance.
+ *
+ * Declared in a plain `<script>` block — not in `<script setup>`, where the
+ * bindings would be re-created per instance — because this has to outlive the
+ * component: closing the AI panel unmounts it, and the chip's "loaded" state
+ * (prd 09-30 Req 13) and the one-time hint flag (Req 14) must survive reopening
+ * the same conversation.
+ */
+
+/** A skill body this conversation has loaded, kept for the life of the app run. */
+interface LoadedSkillBody {
+  id: string;
+  name: string;
+  source: "custom" | "default";
+  content: string;
+}
+
+/**
+ * Which skills each conversation has loaded. This is the fact the transcript
+ * persists (see `AiChatMessage.loadedSkillIds`); the bodies do not go to disk at
+ * all, so this map plus the persisted ids are what the chips read.
+ */
+const conversationLoadedSkillIds = createReactiveMap(new Map<string, string[]>());
+/**
+ * Bodies loaded in this app run, session-only by design. A forced load can carry
+ * up to 1 MiB per skill, and the stored message array is an unbounded column that
+ * is re-serialized in full on every save — so only the ids above are persisted
+ * (the same shape as the #10058 selection footprint in
+ * `crates/dbx-ai-provider/src/ai.rs`). The body is re-read from disk when a
+ * request actually needs it.
+ */
+const conversationLoadedSkillBodies = createReactiveMap(new Map<string, LoadedSkillBody[]>());
+/** Conversations whose one-time hint has already been shown. */
+const conversationSkillHintSeen = new Set<string>();
+</script>
+
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, nextTick, onMounted, onUnmounted, reactive, ref, toRaw, watch, type Component } from "vue";
 import { uuid } from "@/lib/common/utils";
@@ -12,8 +54,10 @@ import {
   Bot,
   Camera,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Clock,
   Hourglass,
   CircleSlash,
@@ -65,9 +109,10 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useUserSkillStore } from "@/stores/userSkillStore";
-import { buildSelectedSkillChips, capSkillsToCharLimit, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
+import { buildSelectedSkillChips, duplicateSkillNames, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
 import { aiConversationTypographyCssVariables } from "@/lib/ai/aiTypography";
-import { ACTIVE_SKILLS_TOTAL_MAX, type ReadUserSkill, type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillRootSettings } from "@/types/userSkills";
+import { buildSkillListing, buildSkillListingLines } from "@/lib/ai/skillListing";
+import { type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillMeta, type UserSkillRootSettings, type UserSkillsListResult } from "@/types/userSkills";
 import { supportsAiAssistantContext } from "@/lib/database/databaseFeatureSupport";
 import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
@@ -78,7 +123,7 @@ import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import {
   buildAiContext,
   resolveAiDatabaseTarget,
-  resolveAiMentionDatabase,
+  resolveAiMentionDatabases,
   resolveAiNamespaceSelection,
   resolveDefaultAiSchema,
   aiDatabaseTypeForConnection,
@@ -88,7 +133,6 @@ import {
   isVectorDbType,
   isValidActionForMode,
   isAutoActionSelection,
-  defaultActionForMode,
   type AiAction,
   type AiActionSelection,
   type AiAssistantMode,
@@ -127,7 +171,7 @@ import {
   selectionContextBudgetError,
   truncateTextAttachmentContent,
 } from "@/lib/ai/aiAttachments";
-import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { isAiConfigModelCandidate, isCliProvider } from "@/lib/ai/aiConfigCandidates";
 import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
 import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
 import { applyStatusEvent, createGenerationStatus, createStatusTicker, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
@@ -150,7 +194,7 @@ import {
 } from "@/lib/ai/desktopAiRunRegistry";
 import { createDesktopAiRunSnapshotScheduler } from "@/lib/ai/desktopAiRunSnapshotScheduler";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
+import { addConfiguredAiModel, aiModelOptions, removeConfiguredAiModel } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
 import { useAiModelCatalog } from "@/composables/useAiModelCatalog";
@@ -161,13 +205,14 @@ import { databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
 import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+import type { AiSqlActionReport } from "@/lib/ai/aiSqlActionFeedback";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { buildAiAgentStepItems, formatAgentToolName, formatToolDurationMs, toolCallStepKey, updateAgentStepApproval, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, listUserSkills, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
@@ -178,9 +223,22 @@ import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseCapabilities";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
-import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
+import { parseExplainResult, parseOracleExplainText, parseDb2ExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
+import {
+  AI_TABLE_MENTION_CANDIDATE_LIMIT,
+  AI_TABLE_MENTION_SCHEMA_LIMIT,
+  aiTableMentionDatabasePlan,
+  aiTableMentionKey,
+  aiTableMentionQualifier,
+  filterAiTableMentionCandidates,
+  formatAiTableMention,
+  formatAiTableMentionLabel,
+  normalizeAiTableMentionQuery,
+  parseAiTableMentions,
+  withoutAiTableMentionsOfDatabases,
+  type AiTableMention,
+} from "@/lib/ai/aiTableMentions";
 import { handleAiTableReferenceDropEvent } from "@/lib/ai/aiTableReferenceDrop";
 import { DBX_TABLE_REFERENCE_DROP_EVENT, clearActiveTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { canSubmitAiPrompt, isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
@@ -192,13 +250,15 @@ import { saveTextFile } from "@/lib/export/saveTextFile";
 import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 import { buildAiConversationExport, type AiConversationExportFormat } from "@/lib/export/aiConversationExport";
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
+import { applyCapabilities, resolveConversationPicker, resolveDefaultPickerAction, type AiPickerAmbient, type AiPickerConversationRecord, type AiPickerSelection } from "@/lib/ai/aiConversationPicker";
+import { createAiConversationPickerController } from "@/lib/ai/aiConversationPickerState";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
 import AiToolApprovalCard from "@/components/editor/AiToolApprovalCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
 import { buildPluginAiRequest, createPluginAiConversation, pluginComposerConnectionLabel, pluginContextConnectionId, pluginContextFromMessages, pluginContextText, streamPluginAiConversation, type AiPluginContext, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const AiChartRenderer = defineAsyncComponent({
   // Lazy-load the chart renderer (and with it the whole echarts bundle): echarts
   // is only pulled in when a message actually renders a chart-json segment.
@@ -314,6 +374,14 @@ interface ChatMessage {
    */
   routedFrom?: "auto";
   routedAction?: AiAction;
+  /**
+   * Skills this conversation has had loaded (prd 09-30 Req 13), kept on the newest
+   * assistant turn of every snapshot. Only the fact is persisted: a body can reach
+   * 1 MiB per skill and the stored message array is re-serialized in full on every
+   * save, so bodies are re-read from disk when a request needs them (see
+   * `rehydrateLoadedSkillBodies`). Same shape as `selectionsOmitted`.
+   */
+  loadedSkillIds?: string[];
 }
 
 const props = defineProps<{
@@ -328,9 +396,9 @@ const props = defineProps<{
 // active tab, so AI-generated SQL could be written into, and executed on,
 // another connection's editor.
 const emit = defineEmits<{
-  appendSql: [sql: string, target: AiConversationBinding];
-  executeSql: [sql: string, target: AiConversationBinding];
-  tempRunSql: [sql: string, target: AiConversationBinding];
+  appendSql: [sql: string, target: AiConversationBinding, requestId?: number];
+  executeSql: [sql: string, target: AiConversationBinding, requestId?: number];
+  tempRunSql: [sql: string, target: AiConversationBinding, requestId?: number];
   requestAutoExecuteSql: [sql: string, target: AiConversationBinding];
   insertRedisCommand: [command: string, target: AiConversationBinding];
   executeRedisCommand: [command: string, target: AiConversationBinding];
@@ -346,13 +414,13 @@ const draftPluginContext = ref<AiPluginContext>();
 const pluginContext = computed(() => pluginContextFromMessages(messages.value) ?? draftPluginContext.value);
 const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
-// Stays a concrete action until the AI config loads: whether new conversations
-// land on the `auto` entry is decided by the Settings > AI toggle (see
-// `resolveDefaultActionSelection`).
-const activeAction = ref<AiActionSelection>("general");
 /** True while the Auto slow path (intent classifier) is in flight for the visible conversation. */
 const routingInFlight = ref(false);
-const assistantMode = ref<AiAssistantMode>("ask");
+// The Ask/Agent mode + action picker is created further down, once the binding
+// and plugin computeds it reads exist — reading `boundConnection` during setup
+// would throw a TDZ ReferenceError. It exposes the `assistantMode` /
+// `activeAction` refs this file has always used.
+//
 // The selection is loaded asynchronously. Apply it once when this panel mounts,
 // but do not let later setting changes alter an active conversation.
 let defaultModeInitialized = false;
@@ -400,27 +468,189 @@ function canUsePluginAgentMode(context = pluginContext.value, connection = bound
   return !context || !!connection;
 }
 
-watch(
-  [pluginContext, boundConnection],
-  ([context, connection]) => {
-    if (context && !connection && assistantMode.value === "agent") assistantMode.value = "ask";
+/**
+ * Ambient capabilities the mode/action selection has to be legal in, read lazily
+ * so a connection change, a settings toggle or a plugin context refresh applies
+ * on the next resolution without rebuilding the picker (R5/R10).
+ */
+function pickerAmbientFor(connection: ConnectionConfig | undefined, isPluginConversation: boolean): AiPickerAmbient {
+  return {
+    defaultMode: settings.defaultAiMode,
+    defaultAutoRouting: settings.defaultAutoRouting,
+    // Ongoing permission rather than a snapshot: the choice survives, the UI just
+    // cannot offer it. `pluginSession` mirrors `showActionButtons`'s first branch.
+    vectorDb: !!connection && isVectorDbType(connection.db_type),
+    pluginSession: isPluginConversation,
+    pluginWithoutConnection: isPluginConversation && !connection,
+  };
+}
+
+/** Ambient for the conversation on screen. */
+function pickerAmbient(): AiPickerAmbient {
+  return pickerAmbientFor(boundConnection.value, !!pluginContext.value);
+}
+
+/**
+ * The Ask/Agent mode + action picker (#12075). It owns both values as a pair, so
+ * restoring a conversation's own selection cannot be undone by the mode reset —
+ * see `aiConversationPickerState.ts` for why that used to happen and how the
+ * reset is kept for a genuine mode switch.
+ *
+ * `raw` belongs to the conversation: `onUserSelection` records a real picker
+ * operation (or an entry point that explicitly asks for a mode/action) while a
+ * restore and a capability limit only move the shown values (R9).
+ */
+const picker = createAiConversationPickerController({
+  ambient: pickerAmbient,
+  onUserSelection: (selection) => {
+    conversationPickerSelections.set(pickerSelectionKey(), selection);
+    // A pick has to reach disk right away, not at the next send: switching to
+    // another conversation and closing the panel both unmount/leave this chat
+    // without a save, so a choice held only in memory is exactly the "my
+    // selection was forgotten" symptom (#12075). `persistConversation` writes the
+    // live transcript, so the save cannot clobber a newer run snapshot with the
+    // stale list copy. A draft with no messages yet saves nothing — its pick
+    // rides the first snapshot that creates the record (R4).
+    if (conversationId.value) void persistConversation();
   },
-  { immediate: true },
-);
+});
+/** The shown mode; the next send uses it. */
+const assistantMode = picker.mode;
+/** The shown action entry (`auto` included); the next send resolves it (#9118). */
+const activeAction = picker.action;
+
+/**
+ * Which picker selection each conversation recorded, `raw` only — a capability
+ * limit never lands here (R9). Keyed by `skillStateKey`'s convention: a persisted
+ * conversation's id, or the single unsaved-chat slot, which `clearMessages()`
+ * rotates so two unsaved drafts can never trade values (R4). In-memory on
+ * purpose: the values are persisted onto the conversation record (see
+ * `pickerSnapshotFor`), and this map is what lets a chat with no record yet keep
+ * its choice until the first snapshot writes it.
+ */
+const conversationPickerSelections = createReactiveMap(new Map<string, AiPickerSelection>());
+
+/** Key the shown conversation's selection is filed under. */
+function pickerSelectionKey(): string {
+  return conversationId.value || unsavedConversationKey.value;
+}
+
+/** The reported `raw` values for one conversation record, if it has any. */
+function pickerRecordFor(conversation: AiConversation | undefined): AiPickerConversationRecord {
+  if (!conversation) return {};
+  return {
+    assistantMode: conversation.assistantMode,
+    assistantAction: conversation.assistantAction,
+    // R10 read priority: the legacy plugin field is only a fallback source, and
+    // the persisted plugin context lives on the RECORD (`plugin_context_json`).
+    // `AiChatMessage` never carried it — the panel rebuilds the message-level
+    // context from this field when it loads a transcript.
+    pluginContextMode: conversation.pluginContext?.mode,
+  };
+}
+
+/**
+ * The picker selection another conversation owns — its recorded values resolved
+ * through the R9 table, or an in-memory pick that has not been persisted yet.
+ *
+ * Capabilities are derived from THAT conversation's binding, not the visible
+ * one: a background retry of a vector-DB chat must be locked to `generate` even
+ * while a SQL editor is on screen (R7).
+ */
+function conversationPickerSelectionFor(convId: string): AiPickerSelection {
+  const conversation = conversations.value.find((item) => item.id === convId);
+  const connection = conversation?.connectionId ? connectionStore.getConfig(conversation.connectionId) : undefined;
+  const ambient = pickerAmbientFor(connection, !!pickerRecordFor(conversation).pluginContextMode || !!conversation?.pluginContext);
+  const pending = conversationPickerSelections.get(convId);
+  if (pending) return applyCapabilities(pending, ambient);
+  return resolveConversationPicker(pickerRecordFor(conversation), ambient).effective;
+}
+
+/**
+ * The picker values to persist with `targetConversationId`.
+ *
+ * Only a real picker operation is stored: the in-memory map first (a chat whose
+ * record does not exist yet, or one just picked), then the conversation's own
+ * recorded values — never `effective`. A vector DB or a disconnected plugin chat
+ * shows a degraded combination, and writing that back would silently replace the
+ * user's own choice (R9/R10).
+ */
+function pickerSnapshotFor(targetConversationId: string): { assistantMode?: string; assistantAction?: string } {
+  const selection = conversationPickerSelections.get(targetConversationId);
+  if (selection) return { assistantMode: selection.mode, assistantAction: selection.action };
+  const existing = conversations.value.find((conversation) => conversation.id === targetConversationId);
+  return { assistantMode: existing?.assistantMode, assistantAction: existing?.assistantAction };
+}
+
+/**
+ * Restores the shown conversation's own picker selection (R2), with the R9
+ * capability replay and the R10 read priority.
+ *
+ * `selectConversation` calls this after `conversationId` has moved, so both the
+ * record read and any in-memory pick belong to the arriving conversation. A
+ * read never records anything: an old record's fallback (settings default, or
+ * `pluginContext.mode` for a plugin chat) stays implicit instead of being
+ * promoted into the new columns (R10's "no double write").
+ */
+function restoreConversationPicker(conv: AiConversation) {
+  const resolution = resolveConversationPicker(pickerRecordFor(conv), pickerAmbient());
+  const pending = conversationPickerSelections.get(conv.id);
+  picker.restore(pending ? applyCapabilities(pending, pickerAmbient()) : resolution.effective);
+}
+
+/**
+ * Re-derives the shown pair after a capability changed — a plugin conversation's
+ * connection appearing or going away, a rebind to or from a vector DB.
+ *
+ * A capability limit belongs to `effective` alone, so when the environment
+ * changes the shown pair has to be recomputed from the conversation's own
+ * recording. A one-way degradation would strand the panel on the degraded value:
+ * `send()` reads the shown mode, so a connection that merely blipped would keep
+ * an Agent conversation in Ask for the rest of the session. `raw` is never
+ * touched, so the user's own choice is what comes back (R5/R9).
+ */
+function reapplyPickerCapabilities() {
+  const pending = conversationPickerSelections.get(pickerSelectionKey());
+  if (pending) {
+    picker.restore(applyCapabilities(pending, pickerAmbient()));
+    return;
+  }
+  const conversation = activeConversation.value;
+  if (conversation) {
+    picker.restore(resolveConversationPicker(pickerRecordFor(conversation), pickerAmbient()).effective);
+    return;
+  }
+  // A draft with no pick of its own keeps the new-chat default it already shows,
+  // constrained by the new capability (a vector DB still forces `generate`).
+  picker.restore(applyCapabilities({ mode: assistantMode.value, action: activeAction.value }, pickerAmbient()));
+}
+
+/**
+ * Moves the unsaved chat's picker selection onto the id it just adopted, exactly
+ * like `migrateUnsavedSkillState` does for skills: `send()` mints the id and
+ * reads the selection in the same tick, while the id watcher flushes later (R4).
+ */
+function migrateUnsavedPickerSelection(id: string) {
+  const unsavedKey = unsavedConversationKey.value;
+  if (!id || !unsavedKey || unsavedKey === id) return;
+  const selection = conversationPickerSelections.get(unsavedKey);
+  if (!selection) return;
+  conversationPickerSelections.delete(unsavedKey);
+  conversationPickerSelections.set(id, selection);
+}
 
 // `immediate` runs this during setup whenever the AI config finished loading
 // before the panel mounted (the usual case: the app loads it at startup), and
-// `resolveDefaultActionSelection` reads `boundConnection`. It must therefore
-// stay below the binding computeds, or setup throws a TDZ ReferenceError and
-// the panel never mounts.
+// the ambient it reads uses `boundConnection`. It must therefore stay below the
+// binding computeds, or setup throws a TDZ ReferenceError and the panel never
+// mounts.
 watch(
   () => settings.isAiConfigLoaded,
   (loaded) => {
     if (loaded && !defaultModeInitialized) {
-      assistantMode.value = settings.defaultAiMode;
-      // Same apply-once rule as the mode: later setting changes must not
-      // disturb an active conversation.
-      activeAction.value = resolveDefaultActionSelection(settings.defaultAiMode);
+      // The picker's mode watch lands the action on the same default entry this
+      // always used (`auto` when Settings > AI says so, #9118) — R3 unchanged.
+      picker.restoreDefault();
       defaultModeInitialized = true;
     }
   },
@@ -639,10 +869,217 @@ const userSkillStore = useUserSkillStore();
 const selectedSkillIds = ref<string[]>([]);
 const showSkillSelector = ref(false);
 const skillFailures = ref<ReadUserSkillFailure[]>([]);
+/** Force-loads in flight, so a chip can spin and a double click cannot inject the
+ *  same body twice. */
+const skillPreloadPending = ref<string[]>([]);
+
+/** Tool name backing the on-demand skill load (`crates/dbx-core/src/ai/skill_tools.rs`). */
+const USE_SKILL_TOOL_NAME = "use_skill";
+
 // Chips derive from the selection truth, not from the catalog: a skill that
 // vanished from discovery must keep a removable chip (prd.md:37) instead of
 // silently becoming an id the user can no longer drop.
-const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id)));
+const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id), loadedSkillIds.value));
+
+/**
+ * Per-root duplicate display names, keyed by source. Two same-named skills in one
+ * root are unresolvable for the model — `use_skill` addresses by name + source
+ * (ADR Decision 6) and the source is identical, so it can only answer "ambiguous".
+ * The selector flags those rows and tells the user the one fix that exists on
+ * their side: changing one of the two `SKILL.md` frontmatter names, which is the
+ * key this collision is computed from — the folder name plays no part. Cross-root
+ * name collisions are normal and are deliberately not flagged.
+ */
+const duplicateNamesBySource = computed(() => {
+  const bySource = new Map<"custom" | "default", Set<string>>();
+  for (const group of userSkillStore.groupedSkills) bySource.set(group.source, duplicateSkillNames(group.skills));
+  return bySource;
+});
+
+/**
+ * The skill a completed `use_skill` call actually loaded, as reported by the
+ * backend (`explain_data.skillId` — `crates/dbx-core/src/ai/skill_tools.rs`).
+ *
+ * Read from the tool *result*, never re-derived from the call arguments: the
+ * arguments say what the model asked for, and an ambiguous or missing name loads
+ * nothing at all. Mapping the arguments back through the catalog would light a
+ * chip for a body that never arrived, and the next send would then re-read and
+ * inject that wrong body into the prompt.
+ */
+function loadedSkillIdFromToolResult(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const explain = (result as { explain_data?: unknown }).explain_data;
+  if (!explain || typeof explain !== "object") return undefined;
+  const id = (explain as { skillId?: unknown }).skillId;
+  return typeof id === "string" && id ? id : undefined;
+}
+
+/**
+ * Loaded = this conversation's recorded facts (a model-initiated `use_skill` in
+ * one of its runs, a forced load, or the ids restored from its own transcript).
+ * Per-conversation and never recomputed per turn, so the chip cannot flicker
+ * between turns; a new chat starts over, and a different conversation reads its
+ * own key.
+ */
+/**
+ * Key for the per-conversation skill maps: the conversation's id once it has one,
+ * and otherwise an id for the unsaved chat — fresh per panel instance and per
+ * "new chat", because such a chat cannot be reopened, so no other instance may
+ * inherit its state.
+ */
+const unsavedConversationKey = ref(`unsaved:${uuid()}`);
+const skillStateKey = computed(() => conversationId.value || unsavedConversationKey.value);
+
+// A capability can come AND go while a conversation is on screen: the app's
+// connections load after the panel opens, a plugin conversation's connection is
+// added or removed, the user rebinds, or the selected conversation moves between
+// a vector DB and a relational one. Each of those re-derives the shown pair from
+// the conversation's own recording, which is what keeps `effective` equal to
+// capabilities(`raw`) at all times — the mode/action refs have no other writer.
+//
+// `immediate` runs this during setup, so it must stay below everything
+// `reapplyPickerCapabilities` reads — `unsavedConversationKey` included, exactly
+// like the panel-mount default watch further down.
+watch([pluginContext, boundConnection], () => reapplyPickerCapabilities(), { immediate: true });
+
+/**
+ * Loaded = this conversation's recorded facts (a model-initiated `use_skill` in
+ * one of its runs, a forced load, or the ids restored from its own transcript).
+ * Per-conversation and never recomputed per turn, so the chip cannot flicker
+ * between turns; a new chat starts over, and a different conversation reads its
+ * own key.
+ */
+const loadedSkillIds = computed<Set<string>>(() => new Set(conversationLoadedSkillIds.get(skillStateKey.value) ?? []));
+
+function recordConversationSkillLoad(key: string, id: string) {
+  const loaded = conversationLoadedSkillIds.get(key) ?? [];
+  if (loaded.includes(id)) return;
+  conversationLoadedSkillIds.set(key, [...loaded, id]);
+}
+
+/**
+ * Drops everything filed under the unsaved chat's slot and moves to a fresh one.
+ *
+ * A draft can never be reopened, so none of its state may outlive it: leaving it
+ * for an existing conversation would otherwise let the abandoned draft's loaded
+ * skills and its recorded mode/action ride into whichever conversation is opened
+ * next (#12075 review — the picker values are persisted, so the leak showed up as
+ * that conversation being re-opened with the draft's selection).
+ */
+function discardUnsavedDraftState() {
+  const unsavedKey = unsavedConversationKey.value;
+  skillHintLatch.value = null;
+  conversationSkillHintSeen.delete(unsavedKey);
+  conversationLoadedSkillIds.delete(unsavedKey);
+  conversationLoadedSkillBodies.delete(unsavedKey);
+  conversationPickerSelections.delete(unsavedKey);
+  unsavedConversationKey.value = `unsaved:${uuid()}`;
+}
+
+/**
+ * Moves the unsaved chat's skill state onto the id it just adopted. The id
+ * watcher covers this for the UI, but watchers flush later: `send()` mints the id
+ * and reads this state in the same tick, so it calls this again itself.
+ */
+function migrateUnsavedSkillState(id: string) {
+  const unsavedKey = unsavedConversationKey.value;
+  if (!unsavedKey || unsavedKey === id) return;
+  const facts = conversationLoadedSkillIds.get(unsavedKey);
+  if (facts) {
+    conversationLoadedSkillIds.delete(unsavedKey);
+    conversationLoadedSkillIds.set(id, facts);
+  }
+  const bodies = conversationLoadedSkillBodies.get(unsavedKey);
+  if (bodies) {
+    conversationLoadedSkillBodies.delete(unsavedKey);
+    conversationLoadedSkillBodies.set(id, bodies);
+  }
+}
+
+/**
+ * Seed the conversation's facts from its persisted transcript (Req 13 after a
+ * restart). Every snapshot writes the whole list onto the newest assistant turn,
+ * so the newest carrier is the authoritative one — older turns hold stale
+ * subsets, and reading the union would resurrect an id a later snapshot dropped
+ * (a skill that was deleted, say).
+ */
+function seedLoadedSkillsFromTranscript(conversationIdToSeed: string, transcript: readonly ChatMessage[]) {
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    const persisted = transcript[i].loadedSkillIds;
+    if (!persisted?.length) continue;
+    const existing = conversationLoadedSkillIds.get(conversationIdToSeed) ?? [];
+    const merged = [...existing, ...persisted.filter((id) => !existing.includes(id))];
+    conversationLoadedSkillIds.set(conversationIdToSeed, merged);
+    return;
+  }
+}
+
+/**
+ * Req 14's one-time hint: the first turn of a conversation in which something is
+ * selected and none of it has been loaded yet. It is latched rather than derived
+ * (so it does not re-render every turn) and it disappears on its own once the
+ * skill it names is loaded, or when the user drops its chip.
+ */
+const skillHintLatch = ref<{ key: string; id: string; name: string } | null>(null);
+const showSkillHint = computed(() => {
+  const latch = skillHintLatch.value;
+  if (!latch || latch.key !== skillStateKey.value) return false;
+  return selectedSkillIds.value.includes(latch.id) && !loadedSkillIds.value.has(latch.id);
+});
+const skillHintText = computed(() => t("ai.skillsPreloadHint", { name: skillHintLatch.value?.name ?? "" }));
+function preloadHintedSkill() {
+  const id = skillHintLatch.value?.id;
+  if (id) void preloadSkill(id);
+}
+/** The hint names one specific skill, so dropping that skill retires it. */
+function forgetSkillHintFor(id: string) {
+  if (skillHintLatch.value?.id === id) skillHintLatch.value = null;
+}
+watch([skillStateKey, () => selectedSkillChips.value.map((chip) => chip.id).join(","), () => [...loadedSkillIds.value].sort().join(",")], () => {
+  if (skillCapabilityUnavailable.value) return;
+  const key = skillStateKey.value;
+  if (conversationSkillHintSeen.has(key)) return;
+  const chips = selectedSkillChips.value;
+  if (!chips.length) return;
+  if (chips.some((chip) => loadedSkillIds.value.has(chip.id))) return;
+  conversationSkillHintSeen.add(key);
+  skillHintLatch.value = { key, id: chips[0].id, name: chips[0].name };
+});
+const selectedSkillsCollapsed = ref(false);
+const loadedSelectedSkillsCount = computed(() => selectedSkillChips.value.filter((chip) => chip.loaded).length);
+
+watch(
+  () => selectedSkillChips.value.length,
+  (len) => {
+    if (len === 0) {
+      selectedSkillsCollapsed.value = false;
+    }
+  },
+);
+// Minting the unsaved chat's id on its first send (or when queueing) is not a
+// conversation switch: move the unsaved chat's skill state onto the id it just
+// adopted, or the brand-new id would read as a fresh conversation (Req 14) and
+// would lose the bodies a forced load already put in this run's state (Req 13).
+//
+// `previous === ""` alone cannot tell the two apart: opening a conversation from
+// the list also moves the id from `""` to a value. A switch discards the draft
+// instead (`selectConversation`), and this guard keeps the adoption rule honest
+// even if some other path moves the id onto a record that already exists.
+watch(conversationId, (id, previous) => {
+  if (previous !== "" || !id) return;
+  if (conversations.value.some((conversation) => conversation.id === id)) return;
+  const unsavedKey = unsavedConversationKey.value;
+  if (conversationSkillHintSeen.delete(unsavedKey)) conversationSkillHintSeen.add(id);
+  const latch = skillHintLatch.value;
+  if (latch && latch.key === unsavedKey) skillHintLatch.value = { ...latch, key: id };
+  migrateUnsavedSkillState(id);
+  // The picker selection of the unsaved chat moves with it for the same reason:
+  // the new id must not read as a fresh conversation whose selection is unset,
+  // or the first snapshot would persist nothing (#12075 R4).
+  migrateUnsavedPickerSelection(id);
+});
+// The selector's capability state (predicate, gated open state, trigger label)
+// lives below `activeFullConfig`, next to the config it reads.
 const selectableSkillIds = computed(() => userSkillStore.groupedSkills.flatMap((group) => group.skills.map((skill) => skill.id)));
 const canSelectAllSkills = computed(() => !userSkillStore.isLoading && !userSkillStore.lastError && selectableSkillIds.value.some((id) => !selectedSkillIds.value.includes(id)));
 // Selector retry-on-open mirrors the template selector above.
@@ -682,6 +1119,7 @@ function deselectAllSkills() {
 function removeSelectedSkill(id: string) {
   selectedSkillIds.value = removeSkillIds(selectedSkillIds.value, [id]);
   skillFailures.value = [];
+  forgetSkillHintFor(id);
 }
 
 /** Banner Remove: drops every failed skill from the selection, so the next send is not blocked by a stale id. */
@@ -715,9 +1153,125 @@ function openSkillRootSettings() {
   emit("openSettings");
 }
 
-function selectedSkillsAgentStep(skills: ReadUserSkill[]): AiAgentStepItem {
+function selectedSkillsListedStep(skills: readonly UserSkillMeta[]): AiAgentStepItem {
   const details = skills.map((skill) => `${skill.name} (${t(userSkillSourceOfId(skill.id) === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault")})`).join(" · ");
-  return { key: "selected-skills", labelKey: "ai.agentSteps.skillsLoaded", tone: "success", toolName: skills.map((skill) => skill.name).join(", "), toolResult: details };
+  return { key: "selected-skills", labelKey: "ai.agentSteps.skillsListed", tone: "success", toolName: skills.map((skill) => skill.name).join(", "), toolResult: details };
+}
+
+/**
+ * Provider-shaped call id for the synthetic round. Gemini derives a tool result's
+ * function name from the id (`gemini-tc-<name>-<index>`, see `build_gemini_contents`
+ * in dbx-ai-provider), so a generic id would replay the result as "unknown" and
+ * the provider would reject the whole request.
+ */
+function skillLoadCallId(skillName: string): string {
+  return activeFullConfig.value?.provider === "gemini" ? `gemini-tc-${USE_SKILL_TOOL_NAME}-0` : `dbx-skill-${skillName}-${uuid()}`;
+}
+
+/** Same shape `use_skill` returns, minus the file listing: the panel's read API
+ *  returns the body only, and the model can still call `use_skill` for the list. */
+function skillToolResultText(name: string, source: string, content: string): string {
+  return `# Skill: ${name} [${source}]\n\n${content.trimEnd()}\n\nFollow this skill's instructions.\n`;
+}
+
+/** The pair a real `use_skill` round produces, for the request to replay. Built
+ *  per request — never written to the transcript or to storage. */
+function skillRoundMessages(bodies: readonly LoadedSkillBody[]): AiMessage[] {
+  return bodies.flatMap((body): AiMessage[] => {
+    const callId = skillLoadCallId(body.name);
+    return [
+      { role: "assistant", content: "", toolCalls: [{ id: callId, name: USE_SKILL_TOOL_NAME, arguments: { skill: body.name, source: body.source } }] },
+      { role: "tool", content: skillToolResultText(body.name, body.source, body.content), toolCallId: callId },
+    ];
+  });
+}
+
+/**
+ * Req 13's forced load: read the body now and remember it for this conversation.
+ *
+ * The body stays in this app run (`conversationLoadedSkillBodies`); only the fact
+ * that the skill is loaded is persisted. A failed read is reported and stores
+ * nothing — that refusal is the guard, since a body can be up to 1 MiB and a
+ * result that size would wreck the context instead of helping it.
+ */
+async function preloadSkill(id: string) {
+  if (skillCapabilityUnavailable.value) return;
+  // Re-loading would stack the same body into the request twice.
+  if (loadedSkillIds.value.has(id) || skillPreloadPending.value.includes(id)) return;
+  const name = userSkillStore.metaFor(id)?.name ?? id;
+  skillPreloadPending.value = [...skillPreloadPending.value, id];
+  try {
+    const result = await readUserSkills([id], skillRootSettings());
+    const skill = result.skills.find((entry) => entry.id === id);
+    if (!skill) {
+      const reason = result.failures.find((failure) => failure.id === id)?.reason ?? "unreadable";
+      // A toast, not the send-blocked banner: no request was refused here, and the
+      // banner's recovery actions all belong to a send that was.
+      toast(`${t("ai.skillsPreloadFailed")}: ${name} — ${t(skillFailureReasonKey(reason))}`, 5000);
+      return;
+    }
+    const key = skillStateKey.value;
+    const source = userSkillSourceOfId(id);
+    conversationLoadedSkillBodies.set(key, [...(conversationLoadedSkillBodies.get(key) ?? []), { id, name: skill.name, source, content: skill.content }]);
+    recordConversationSkillLoad(key, id);
+    // Only an already-stored conversation is re-persisted: a chip click must not
+    // create a conversation of its own (the first send snapshots the fact).
+    if (conversationId.value && conversations.value.some((conversation) => conversation.id === conversationId.value)) {
+      void persistConversation();
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    toast(`${t("ai.skillsPreloadFailed")}: ${name} — ${translateBackendError(t, message)}`, 5000);
+  } finally {
+    skillPreloadPending.value = skillPreloadPending.value.filter((pending) => pending !== id);
+  }
+}
+
+/**
+ * The bodies a request should replay: this run's loaded bodies, plus the ones a
+ * restart left as a fact without a body.
+ *
+ * Re-reading those is NOT ADR Decision 3's rejected auto-fallback. That decision
+ * forbade loading a skill the conversation never used into an unrelated
+ * conversation, because the body then stays in the history and burns tokens
+ * forever. This restores state the conversation already had, on the topic it is
+ * already on, and the ids come from what the user or the model actually loaded.
+ *
+ * A skill that has since been deleted or grown past the read limit cannot be
+ * restored: its id is dropped from the facts (so the chip stops claiming it is
+ * loaded and the next snapshot persists the correction) and the reason is shown.
+ */
+async function rehydrateLoadedSkillBodies(key: string): Promise<LoadedSkillBody[]> {
+  const ids = conversationLoadedSkillIds.get(key) ?? [];
+  if (!ids.length) return [];
+  const bodies = [...(conversationLoadedSkillBodies.get(key) ?? [])];
+  const missing = ids.filter((id) => !bodies.some((body) => body.id === id));
+  if (!missing.length) return bodies;
+  try {
+    const result = await readUserSkills(missing, skillRootSettings());
+    for (const skill of result.skills) {
+      bodies.push({ id: skill.id, name: skill.name, source: userSkillSourceOfId(skill.id), content: skill.content });
+    }
+    for (const failure of result.failures) {
+      const name = userSkillStore.metaFor(failure.id)?.name ?? failure.id;
+      toast(`${t("ai.skillsPreloadFailed")}: ${name} — ${t(skillFailureReasonKey(failure.reason))}`, 5000);
+    }
+    if (result.failures.length) {
+      const failed = new Set(result.failures.map((failure) => failure.id));
+      conversationLoadedSkillIds.set(
+        key,
+        ids.filter((id) => !failed.has(id)),
+      );
+    }
+  } catch (error) {
+    // The read itself failed (backend unavailable). Keep the facts — this is an
+    // environment failure, not evidence that the skills are gone — and send the
+    // request without the bodies rather than failing the whole send.
+    const message = error instanceof Error ? error.message : String(error);
+    toast(`${t("ai.skillsPreloadFailed")}: ${translateBackendError(t, message)}`, 5000);
+  }
+  conversationLoadedSkillBodies.set(key, bodies);
+  return bodies;
 }
 
 // Retry store load on selector open if prior init failed (e.g. backend not yet ready at mount)
@@ -1003,6 +1557,9 @@ function submitEdit(visibleIndex: number) {
   }
   draftPluginContext.value = pluginContext.value;
   messages.value = messages.value.slice(0, actualIndex);
+  // The truncated tail carried the positional SQL-block statuses of the messages
+  // that just disappeared; the regenerated message reuses those indices.
+  clearSqlActionBlockStatuses();
   editingMessageIndex.value = null;
   editingContent.value = "";
   selectedMentions.value = editingMentions.value.filter((mention): mention is AiTableMention & { kind: "table" } => mention.kind === "table").map(({ raw, schema, table }) => ({ raw, schema, table }));
@@ -1065,6 +1622,39 @@ const activeFullConfig = computed(() => {
 function isModelCandidate(config: AiConfigItem): boolean {
   return isAiConfigModelCandidate(config, getAiProviderPreset(config.provider, config.endpoint).requiresApiKey, supportsCliProviders);
 }
+
+// Skill capability belongs to DBX's built-in AI alone (prd 09-30 Req 15a): a CLI
+// run returns before the agent loop builds its tool list and its surface is the
+// DBX MCP server, so nothing in a CLI prompt can reference a skill.
+//
+// These sit here, after `activeFullConfig`, and not beside `showSkillSelector`:
+// `watch()` reads its source once at creation, so a predicate placed above the
+// config it reads throws the same "Cannot access before initialization" that once
+// kept this panel from opening at all.
+//
+// The predicate reads the very config the send path resolves, so the selector and
+// the send can never disagree about the provider.
+const skillCapabilityUnavailable = computed(() => isCliProvider(activeFullConfig.value?.provider));
+// The open state is gated here rather than left to the button's native `disabled`
+// attribute: `/skill` writes the selector ref directly, and a disabled button is
+// not guaranteed to stop a PopoverTrigger from opening. `showSkillSelector` stays
+// the source of truth (the retry-on-open watcher reads it); writing `true` while
+// unavailable is dropped, so no path reaches the silent "ticked but never sent"
+// state this state exists to remove.
+const skillSelectorOpen = computed<boolean>({
+  get: () => showSkillSelector.value && !skillCapabilityUnavailable.value,
+  set: (open) => {
+    showSkillSelector.value = open && !skillCapabilityUnavailable.value;
+  },
+});
+// Switching to a CLI provider while the selector is open must close it, otherwise
+// the stale `true` would reopen the popover on a switch back to a built-in model.
+watch(skillCapabilityUnavailable, (unavailable) => {
+  if (unavailable) showSkillSelector.value = false;
+});
+// A disabled control with no explanation is the silent state being removed: the
+// reason rides on the trigger's label and title whenever the capability is gone.
+const skillSelectorTriggerLabel = computed(() => t(skillCapabilityUnavailable.value ? "ai.skillsUnsupportedForCliProvider" : "ai.skillsEntry"));
 
 function getModelsForConfig(configId: string) {
   const config = settings.aiConfigs.find((item) => item.id === configId);
@@ -1156,12 +1746,47 @@ async function applyManualModel(configId: string) {
   const config = settings.aiConfigs.find((item) => item.id === configId);
   if (!config) return;
   try {
-    if (config.model.trim() !== modelId) {
-      await settings.updateAiConfigItem(configId, { models: addConfiguredAiModel(config.models, modelId) });
-    }
+    await settings.updateAiConfigItem(configId, { models: addConfiguredAiModel(config.models, modelId) });
     handleModelSelect(configId, modelId);
     manualModelConfigId.value = "";
     manualModelId.value = "";
+  } catch (error) {
+    toast(translateBackendError(t, error));
+  }
+}
+
+function canRemoveModel(config: AiConfigItem, modelId: string): boolean {
+  if (isCliProvider(config.provider) && modelId === "default") return false;
+  const isDiscovered = (modelCatalogs.get(config.id)?.models ?? []).some((m) => m.id === modelId);
+  if (isDiscovered) return false;
+  const preset = getAiProviderPreset(config.provider, config.endpoint);
+  if (preset.group === "partner" && (preset.models ?? []).some((m) => m.name.trim() === modelId)) {
+    return false;
+  }
+  return (config.models ?? []).some((m) => m.name.trim() === modelId);
+}
+
+async function handleRemoveModel(configId: string, modelId: string) {
+  const config = settings.aiConfigs.find((item) => item.id === configId);
+  if (!config) return;
+  const nextModels = removeConfiguredAiModel(config.models, modelId);
+  const updates: Partial<AiConfigItem> = { models: nextModels };
+  if (config.model.trim() === modelId) {
+    updates.model = isCliProvider(config.provider) ? "default" : (nextModels[0]?.name ?? "");
+  }
+  try {
+    await settings.updateAiConfigItem(configId, updates);
+    if (settings.activeModel?.configId === configId && settings.activeModel?.modelId === modelId) {
+      const remaining = aiModelOptions({ ...config, ...updates }, modelCatalogs.get(configId)?.models ?? []);
+      const nextActiveModelId = remaining[0]?.id;
+      if (nextActiveModelId) {
+        handleModelSelect(configId, nextActiveModelId);
+      } else {
+        settings.updateActiveModel(null);
+      }
+    }
+    effortCatalogs.delete(effortKey(configId, modelId));
+    closeEffortMenu();
   } catch (error) {
     toast(translateBackendError(t, error));
   }
@@ -1285,6 +1910,12 @@ let responsiveControlDragEpoch = 0;
 
 interface AiTableMentionCandidate {
   kind: "table";
+  /**
+   * Owning database (#11660): every listed candidate records the database it
+   * came from. Whether it is also displayed is decided by
+   * `aiTableMentionQualifier`, so a single-database list reads as before.
+   */
+  database?: string;
   schema?: string;
   name: string;
   tableType: string;
@@ -1368,7 +1999,10 @@ type AiSlashEntry = { type: "action"; button: AiActionButton } | { type: "skills
 
 const filteredCommands = computed<AiSlashEntry[]>(() => {
   const query = prompt.value.slice(commandStart.value + 1).toLowerCase();
-  const entries: AiSlashEntry[] = [...actionButtons.value.map((button): AiSlashEntry => ({ type: "action", button })), { type: "skills" }];
+  // `/skill` is dropped when the provider has no skill capability (Req 15a), so the
+  // palette never offers an action that cannot happen — the disabled trigger's
+  // label carries the reason.
+  const entries: AiSlashEntry[] = [...actionButtons.value.map((button): AiSlashEntry => ({ type: "action", button })), ...(skillCapabilityUnavailable.value ? [] : [{ type: "skills" } as AiSlashEntry])];
   return entries.filter((entry) => {
     const haystack = entry.type === "action" ? `${entry.button.action} ${t(entry.button.key)}` : `skill ${t("ai.skillsEntry")}`;
     return haystack.toLowerCase().includes(query);
@@ -1421,50 +2055,27 @@ const isRedisConnection = computed(() => boundConnection.value?.db_type === "red
 
 // Vector DBs hide the action menu and only expose collection tools.
 // Keep their action at `generate` so the task contract doesn't tell the LLM to call execute_query.
+// The same rule as `resolveDefaultPickerAction`'s vector branch: `mode` is
+// accepted for the call sites that have one at hand, but the capability decides.
+// The rebind itself is handled by `reapplyPickerCapabilities`, whose ambient
+// carries the vector-DB flag — including on the way back out, which the old
+// one-way force did not do.
 function resolveDefaultAction(mode: AiAssistantMode): AiAction {
-  if (boundConnection.value && isVectorDbType(boundConnection.value.db_type)) return "generate";
-  return defaultActionForMode(mode);
+  return resolveDefaultPickerAction(mode, pickerAmbient());
 }
 
-// The Settings > AI toggle lets new conversations land on the `auto` picker
-// entry (#9118); routing still resolves to a concrete action before any
-// request. Vector DBs keep the concrete `generate` action because their action
-// menu is hidden entirely.
-function resolveDefaultActionSelection(mode: AiAssistantMode): AiActionSelection {
-  if (settings.defaultAutoRouting && !(boundConnection.value && isVectorDbType(boundConnection.value.db_type))) return "auto";
-  return resolveDefaultAction(mode);
-}
-
-// Switching mode is a deliberate context change: land on that mode's default action so the
-// menu and behavior match the new intent. That default is the mode's concrete action, or
-// `auto` when Settings > AI enables it (#9118).
-//
-// `triggerAction` may set the action itself after programmatically switching mode (e.g. "Fix
-// with AI" invoked from Agent mode); `suppressModeActionReset` tells this watch to skip the
-// default reset so the menu keeps reflecting the action actually being run.
-let suppressModeActionReset = false;
-watch(assistantMode, (mode) => {
-  if (suppressModeActionReset) {
-    suppressModeActionReset = false;
-    return;
-  }
-  activeAction.value = resolveDefaultActionSelection(mode);
-});
-
-watch(
-  () => boundConnection.value?.db_type,
-  () => {
-    // Vector DBs hide the action picker, so keep the hidden action aligned with
-    // the collection-oriented prompt contract on initial render and connection changes.
-    if (boundConnection.value && isVectorDbType(boundConnection.value.db_type)) {
-      activeAction.value = "generate";
-    }
-  },
-  { immediate: true },
-);
+// Switching mode is a deliberate context change: the picker lands the action on
+// that mode's default entry (or `auto`, #9118). That reset lives in the picker
+// controller's own mode watch — the single writer of the pair — so a restore can
+// no longer be undone by it. Capability-driven changes go through
+// `reapplyPickerCapabilities` above; nothing writes the refs from here.
 
 function selectAction(action: AiActionSelection) {
-  activeAction.value = action;
+  // A genuine picker operation: the picker records it as the conversation's own
+  // `raw` value (and applies the capability limit to what is shown). The
+  // controller's mode watch would land on the mode default, so the action is set
+  // through the picker rather than the bare ref.
+  picker.selectAction(action);
   if (action === "fix" && aiContextTarget.value.result) {
     if (isQueryExecutionErrorResult(aiContextTarget.value.result)) {
       const errVal = aiContextTarget.value.result.rows[0]?.[0];
@@ -1486,19 +2097,15 @@ function routedActionOf(message: ChatMessage): AiAction | null {
 }
 
 /**
- * The "Auto · <action>" chip switches the picker to the action that was routed
- * for that message, so the user can keep iterating explicitly. The routed action
- * is always valid in the mode it was routed in; when the panel now stands in the
- * other mode, switch there first (the `suppressModeActionReset` handshake keeps
- * the mode-switch watch from overwriting the action we just set).
+ * The "Auto · <action>" chip switches the picker onto the action the router
+ * resolved for that message, so the user can keep iterating explicitly. The
+ * routed action is always valid in the mode it was routed in; when the panel now
+ * stands in the other mode the pair moves together — the picker owns both refs,
+ * so there is no mode-switch reset to work around.
  */
 function switchToRoutedAction(action: AiAction | null | undefined) {
   if (!action) return;
-  if (!isValidActionForMode(action, assistantMode.value)) {
-    suppressModeActionReset = true;
-    assistantMode.value = isValidActionForMode(action, "ask") ? "ask" : "agent";
-  }
-  activeAction.value = action;
+  picker.select({ mode: isValidActionForMode(action, assistantMode.value) ? assistantMode.value : isValidActionForMode(action, "ask") ? "ask" : "agent", action });
 }
 
 /** Mirrors `buildAiContext`'s `lastError`: only a real failed execution counts. */
@@ -1784,11 +2391,10 @@ const modeActionTriggerLabel = computed(() => {
 
 function switchModeActionTab(mode: "ask" | "agent") {
   if (mode === "agent" && !canUsePluginAgentMode()) return;
-  activeAction.value = resolveDefaultActionSelection(mode);
-  if (assistantMode.value !== mode) {
-    // Set the mode after the action so the tab label and picker stay aligned.
-    assistantMode.value = mode;
-  }
+  // Tab switch = a deliberate context change: the pair moves together (the
+  // picker lands on the new mode's default entry) and is recorded as this
+  // conversation's own selection (#12075).
+  picker.selectMode(mode);
 }
 
 function selectModeActionItem(action: AiActionSelection) {
@@ -1864,13 +2470,16 @@ function syncSelectedDatabases() {
   const active = selectedNamespace.value;
   const available = dbSelectOptions.value.map((option) => option.database);
   const retained = selectedDatabases.value.filter((database) => available.includes(database));
-  selectedDatabases.value = retained.length ? retained : active ? [active] : [];
+  const next = retained.length ? retained : active ? [active] : [];
+  removeMentionsOfDatabases(selectedDatabases.value.filter((database) => !next.includes(database)));
+  selectedDatabases.value = next;
 }
 
 function toggleDatabase(database: string) {
   if (selectedDatabaseValues.value.has(database)) {
     if (selectedDatabases.value.length === 1) return;
     selectedDatabases.value = selectedDatabases.value.filter((item) => item !== database);
+    removeMentionsOfDatabases([database]);
   } else {
     selectedDatabases.value = [...selectedDatabases.value, database];
   }
@@ -1889,7 +2498,14 @@ const selectedNamespace = computed(() => (boundConnection.value ? resolveAiNames
 watch(
   () => `${boundConnectionId.value}\u0000${boundDatabase.value}\u0000${boundSchema.value ?? ""}\u0000${conversationId.value}`,
   () => {
-    selectedDatabases.value = selectedNamespace.value ? [selectedNamespace.value] : [];
+    const next = selectedNamespace.value ? [selectedNamespace.value] : [];
+    // A chip naming a database this namespace change just dropped out of the
+    // selection would be quoted in the message while the run refuses to read it
+    // (#11660) — the same rule the deselect handler applies, at the other place
+    // the selection changes. An unresolved namespace prunes nothing: the chip is
+    // inert and the request-time scope guard still refuses it.
+    if (next.length) removeMentionsOfDatabases(selectedDatabases.value.filter((database) => !next.includes(database)));
+    selectedDatabases.value = next;
   },
 );
 watch([dbSelectOptions, selectedNamespace], syncSelectedDatabases, { immediate: true });
@@ -2206,6 +2822,13 @@ function extractExplainData(result: unknown): unknown | undefined {
 
 /** Parse explain_data (a serialized QueryResult) into ParsedExplainPlan */
 function parseExplainFromData(explainData: unknown, dbType: string): ParsedExplainPlan | undefined {
+  if (dbType === "db2" && typeof explainData === "string") {
+    try {
+      return parseDb2ExplainText(explainData);
+    } catch {
+      return undefined;
+    }
+  }
   if (dbType === "oracle" && typeof explainData === "string") {
     return parseOracleExplainText(explainData);
   }
@@ -2433,8 +3056,11 @@ watch(
   { flush: "post" },
 );
 
-function mentionCacheKey(connectionId: string, database: string, query: string) {
-  return `${connectionId}:${database}:${savedSqlStore.version}:${query.toLowerCase()}`;
+function mentionCacheKey(connectionId: string, databases: readonly string[], query: string) {
+  // The whole database set is part of the key: adding, removing or reordering a
+  // selected database must reload the candidates instead of serving a list that
+  // describes another selection (#11660).
+  return `${connectionId}:${databases.join("|")}:${savedSqlStore.version}:${query.toLowerCase()}`;
 }
 
 function mentionSchemaOrder(schemas: string[]): string[] {
@@ -2457,26 +3083,87 @@ function activeMentionAtCursor(): { start: number; query: string } | null {
   return { start: beforeCursor.length - match[2].length - 1, query: match[2] };
 }
 
-function normalizeMentionQuery(query: string): { schemaPrefix: string; tableFilter: string } {
-  const clean = query.replace(/^["`]+|["`]+$/g, "");
-  const dot = clean.lastIndexOf(".");
-  if (dot < 0) return { schemaPrefix: "", tableFilter: clean };
-  return {
-    schemaPrefix: clean.slice(0, dot).replace(/^["`]+|["`]+$/g, ""),
-    tableFilter: clean.slice(dot + 1).replace(/^["`]+|["`]+$/g, ""),
-  };
+function mentionTargetDatabases(): string[] {
+  return boundConnection.value ? resolveAiMentionDatabases({ database: boundDatabase.value, schema: boundSchema.value }, boundConnection.value, selectedDatabases.value) : [];
 }
 
-function mentionTargetDatabase(): string {
-  return boundConnection.value ? resolveAiMentionDatabase({ database: boundDatabase.value, schema: boundSchema.value }, boundConnection.value, selectedDatabases.value) : "";
+/** Database an unqualified mention resolves against (the head of the list). */
+function mentionPrimaryDatabase(): string {
+  return mentionTargetDatabases()[0] ?? "";
+}
+
+/**
+ * Candidate tables of one database.
+ *
+ * Every candidate records the database it came from (#11660): that is what the
+ * chip is later resolved against and cleaned up by. Whether the database is also
+ * *displayed* is a separate rule (`aiTableMentionQualifier`), so a single
+ * database list still looks exactly as it did before. Whether a candidate is
+ * written as `db.table` or `db.schema.table` follows from the same
+ * `isSchemaAware` gate the rest of the loading path uses.
+ */
+async function loadTableMentionCandidates(connectionId: string, connection: ConnectionConfig, database: string, options: { schemaPrefix: string; tableFilter: string; limit: number }): Promise<AiTableMentionCandidate[]> {
+  const { schemaPrefix, tableFilter, limit } = options;
+  if (isSchemaAware(connection.db_type)) {
+    const schemas = mentionSchemaOrder(await listSchemas(connectionId, database));
+    const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
+    const results = await Promise.all(
+      filteredSchemas.slice(0, AI_TABLE_MENTION_SCHEMA_LIMIT).map(async (schema) => {
+        const tables = await listTables(connectionId, database, schema, tableFilter || undefined, limit);
+        return filterAiTableMentionCandidates(
+          tables.map((table) => mentionCandidateFromTable(table, schema, database)),
+          tableFilter,
+          limit,
+        );
+      }),
+    );
+    return filterAiTableMentionCandidates(results.flat(), "", limit);
+  }
+  const namespace = connection.db_type === "sqlite" ? normalizeSqliteNamespace(database || connection.database, connection) : database;
+  const schema = namespace || connection.database || "main";
+  const tables = await listTables(connectionId, namespace, schema, tableFilter || undefined, limit);
+  return filterAiTableMentionCandidates(
+    tables.map((table) => mentionCandidateFromTable(table, undefined, database)),
+    tableFilter,
+    limit,
+  );
+}
+
+/**
+ * Candidate tables of several databases, loaded in parallel.
+ *
+ * One unreachable database (permission, timeout, dropped connection) must not
+ * empty the others' candidates, so each database reports its own failure and the
+ * list only fails when every database failed — the pre-existing single-database
+ * outcome.
+ */
+async function loadMentionCandidatesForDatabases(connectionId: string, connection: ConnectionConfig, databases: readonly string[], options: { schemaPrefix: string; tableFilter: string; limit: number }): Promise<AiTableMentionCandidate[]> {
+  let firstError: unknown;
+  const loaded = await Promise.all(
+    databases.map(async (database) => {
+      try {
+        return await loadTableMentionCandidates(connectionId, connection, database, options);
+      } catch (error: unknown) {
+        if (firstError === undefined) firstError = error;
+        return null;
+      }
+    }),
+  );
+  if (loaded.every((candidates) => candidates === null)) throw firstError ?? new Error("mention candidates unavailable");
+  return filterAiTableMentionCandidates(
+    loaded.flatMap((candidates) => candidates ?? []),
+    "",
+    AI_TABLE_MENTION_CANDIDATE_LIMIT,
+  );
 }
 
 async function loadMentionCandidates(query: string) {
   const connection = boundConnection.value;
-  const mentionDatabase = mentionTargetDatabase();
-  if (pluginContext.value || !connection || !supportsAiAssistantContext(connection.db_type) || !boundConnectionId.value || !mentionDatabase) return;
+  const connectionId = boundConnectionId.value;
+  const mentionDatabases = mentionTargetDatabases();
+  if (pluginContext.value || !connection || !supportsAiAssistantContext(connection.db_type) || !connectionId || !mentionDatabases.length) return;
 
-  const key = mentionCacheKey(boundConnectionId.value, mentionDatabase, query);
+  const key = mentionCacheKey(connectionId, mentionDatabases, query);
   if (mentionCache.value[key]) {
     mentionCandidates.value = mentionCache.value[key];
     return;
@@ -2485,37 +3172,18 @@ async function loadMentionCandidates(query: string) {
   const requestId = ++mentionRequestId;
   mentionLoading.value = true;
   mentionError.value = "";
-  const { schemaPrefix, tableFilter } = normalizeMentionQuery(query);
+  const { databasePrefix, schemaPrefix, tableFilter } = normalizeAiTableMentionQuery(query, mentionDatabases);
+  const { databases: scopedDatabases, perDatabaseLimit } = aiTableMentionDatabasePlan(mentionDatabases, databasePrefix);
   let sqlFileCandidates: AiSqlFileMentionCandidate[] = [];
 
   try {
     sqlFileCandidates = await loadSqlFileMentionCandidates(query);
-    await connectionStore.ensureConnected(boundConnectionId.value);
-    let tableCandidates: AiMentionCandidate[] = [];
-    if (isSchemaAware(connection.db_type)) {
-      const schemas = mentionSchemaOrder(await listSchemas(boundConnectionId.value, mentionDatabase));
-      const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
-      const results = await Promise.all(
-        filteredSchemas.slice(0, AI_TABLE_MENTION_SCHEMA_LIMIT).map(async (schema) => {
-          const tables = await listTables(boundConnectionId.value, mentionDatabase, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
-          return filterAiTableMentionCandidates(
-            tables.map((table) => mentionCandidateFromTable(table, schema)),
-            tableFilter,
-            AI_TABLE_MENTION_CANDIDATE_LIMIT,
-          );
-        }),
-      );
-      tableCandidates = filterAiTableMentionCandidates(results.flat(), "", AI_TABLE_MENTION_CANDIDATE_LIMIT);
-    } else {
-      const database = connection.db_type === "sqlite" ? normalizeSqliteNamespace(mentionDatabase || connection.database, connection) : mentionDatabase;
-      const schema = database || connection.database || "main";
-      const tables = await listTables(boundConnectionId.value, database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
-      tableCandidates = filterAiTableMentionCandidates(
-        tables.map((table) => mentionCandidateFromTable(table)),
-        tableFilter,
-        AI_TABLE_MENTION_CANDIDATE_LIMIT,
-      );
-    }
+    await connectionStore.ensureConnected(connectionId);
+    const tableCandidates = await loadMentionCandidatesForDatabases(connectionId, connection, scopedDatabases, {
+      schemaPrefix,
+      tableFilter,
+      limit: perDatabaseLimit,
+    });
 
     if (requestId !== mentionRequestId) return;
     mentionCache.value[key] = [...tableCandidates, ...sqlFileCandidates];
@@ -2577,25 +3245,30 @@ function savedSqlFolderPath(file: SavedSqlFile): string | undefined {
   return names.length ? names.join(" / ") : undefined;
 }
 
-function mentionCandidateFromTable(table: TableInfo, schema?: string): AiTableMentionCandidate {
-  return { kind: "table", schema, name: table.name, tableType: table.table_type };
+function mentionCandidateFromTable(table: TableInfo, schema: string | undefined, database: string): AiTableMentionCandidate {
+  return { kind: "table", database, schema, name: table.name, tableType: table.table_type };
 }
 
 function mentionCandidateName(candidate: AiMentionCandidate) {
   if (candidate.kind === "sqlFile") return candidate.name;
-  return [candidate.schema, candidate.name].filter(Boolean).join(".");
+  return formatAiTableMentionLabel(candidate.schema, candidate.name, mentionQualifier(candidate.database));
 }
 
 function mentionDisplayName(mention: AiPromptMentionChip) {
   if (mention.kind === "sqlFile") return mention.name;
-  return [mention.schema, mention.table].filter(Boolean).join(".");
+  return formatAiTableMentionLabel(mention.schema, mention.table, mentionQualifier(mention.database));
+}
+
+/** Whether a mention names its database in the label/raw text, not just owns it. */
+function mentionQualifier(database: string | undefined): string | undefined {
+  return aiTableMentionQualifier(database, mentionPrimaryDatabase(), mentionTargetDatabases().length > 1);
 }
 
 function promptMentionChipsFromMessage(message: ChatMessage): AiPromptMentionChip[] {
   const chips: AiPromptMentionChip[] = [];
   for (const mention of message.mentions || []) {
     if (mention.kind === "sqlFile") chips.push({ kind: "sqlFile", raw: mention.raw, id: mention.id, name: mention.name });
-    if (mention.kind === "table") chips.push({ kind: "table", raw: mention.raw, schema: mention.schema, table: mention.table });
+    if (mention.kind === "table") chips.push({ kind: "table", raw: mention.raw, database: mention.database, schema: mention.schema, table: mention.table });
   }
   return chips;
 }
@@ -2697,10 +3370,28 @@ function addSelectedMention(candidate: AiMentionCandidate) {
     selectedSqlFileMentions.value.push({ kind: "sqlFile", raw, id: candidate.id, name: candidate.name });
     return;
   }
-  const raw = formatAiTableMention(candidate.schema, candidate.name);
-  const key = `${candidate.schema || ""}.${candidate.name}`.toLowerCase();
-  if (selectedMentions.value.some((mention) => `${mention.schema || ""}.${mention.table}`.toLowerCase() === key)) return;
-  selectedMentions.value.push({ raw, schema: candidate.schema, table: candidate.name });
+  // The owning database is recorded only from the caller (#11660) — a candidate
+  // carries the database it was listed from, and the external entrypoints pass
+  // the namespace their table came from. Guessing it from the binding here would
+  // capture whatever the binding was mid-retarget, so a caller that names none
+  // leaves the mention unqualified and resolved at request time, as before.
+  const ownDatabase = candidate.database;
+  const raw = formatAiTableMention(candidate.schema, candidate.name, mentionQualifier(ownDatabase));
+  // Both sides key an unqualified mention by the primary database, so a caller
+  // that names no database cannot add a second chip for a table already listed.
+  const primaryDatabase = mentionPrimaryDatabase();
+  const key = aiTableMentionKey(candidate.schema, candidate.name, ownDatabase ?? primaryDatabase);
+  if (selectedMentions.value.some((mention) => aiTableMentionKey(mention.schema, mention.table, mention.database ?? primaryDatabase) === key)) return;
+  selectedMentions.value.push(ownDatabase ? { raw, database: ownDatabase, schema: candidate.schema, table: candidate.name } : { raw, schema: candidate.schema, table: candidate.name });
+}
+
+/**
+ * Drops the mentions of databases the composer no longer selects (#11660).
+ * Keeping the chip would send a reference the run has to discard, so the user
+ * would see the table quoted in their message and missing from the request.
+ */
+function removeMentionsOfDatabases(databases: Iterable<string>) {
+  selectedMentions.value = withoutAiTableMentionsOfDatabases(selectedMentions.value, databases);
 }
 
 function formatMentionCandidateType(candidate: AiMentionCandidate) {
@@ -2732,7 +3423,10 @@ function imageAttachmentDetail(attachment: AiImageAttachment): string {
 }
 
 function activeImageAttachmentSupportError(attachments: readonly AiImageAttachment[]) {
-  return imageAttachmentSupportError(activeFullConfig.value?.provider, attachments.map((attachment) => attachment.mediaType));
+  return imageAttachmentSupportError(
+    activeFullConfig.value?.provider,
+    attachments.map((attachment) => attachment.mediaType),
+  );
 }
 
 function imageAttachmentSupportErrorMessage(error: "provider" | "format"): string {
@@ -2743,13 +3437,15 @@ function selectedMessageMentions(tableMentions: AiTableMention[], sqlFileMention
   // Only ever reached for the visible conversation: every caller passes empty
   // arrays for a background/auto send (see the `auto ? [] : …` locals in send()).
   const connectionId = boundConnectionId.value;
-  const database = mentionTargetDatabase() || boundConnection.value?.database || "";
+  const database = mentionPrimaryDatabase() || boundConnection.value?.database || "";
   return [
     ...tableMentions.map((mention) => ({
       kind: "table" as const,
       raw: mention.raw,
       connectionId,
-      database,
+      // A mention of another selected database keeps its own database, so the
+      // chip reopens the table it actually names (#11660).
+      database: mention.database || database,
       schema: mention.schema,
       table: mention.table,
     })),
@@ -2844,7 +3540,7 @@ function refreshMentionState() {
   commandOpen.value = false;
 
   const mention = activeMentionAtCursor();
-  if (!mention || !boundConnection.value || !mentionTargetDatabase()) {
+  if (!mention || !boundConnection.value || !mentionTargetDatabases().length) {
     mentionOpen.value = false;
     return;
   }
@@ -2872,11 +3568,19 @@ function selectCommand(command: AiSlashEntry) {
   commandOpen.value = false;
   if (command.type === "skills") {
     skillFailures.value = [];
-    showSkillSelector.value = true;
-    nextTick(() => promptTextareaRef.value?.focus());
+    // Routed through the gated open state, so the palette entry cannot open the
+    // selector when the provider has no skill capability (Req 15a).
+    skillSelectorOpen.value = true;
+    // No `nextTick(() => textarea.focus())` on this branch, unlike the action
+    // branch below. The just-opened popover autofocuses its own content, so
+    // pulling focus back to the textarea fires a `focusin` outside the layer and
+    // reka's DismissableLayer reads it as a focus-outside and dismisses the
+    // popover on the next tick — the `/skill` entry then looks like it does
+    // nothing at all. The entry fires on `mousedown` with `prevent`, so the
+    // textarea already keeps focus; nothing needs to be restored.
     return;
   }
-  activeAction.value = command.button.action;
+  picker.selectAction(command.button.action);
   nextTick(() => {
     const textarea = promptTextareaRef.value;
     if (textarea) {
@@ -3294,7 +3998,10 @@ function onTableReferenceDropEvent(event: Event) {
       // contract, which existed only because the panel's connection was whatever
       // tab was active and there was nothing to retarget — #9902.)
       void bindConversation({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema });
-      addSelectedMention({ kind: "table", schema: mention.schema, name: mention.table, tableType: "table" });
+      // The dropped table's own database rides along (#11660): the drop retargets
+      // the conversation, but with several databases selected the chip still has
+      // to name the database the table came from.
+      addSelectedMention({ kind: "table", database: payload.database, schema: mention.schema, name: mention.table, tableType: "table" });
       clearActiveTableReferencePayload(payload);
       nextTick(() => promptTextareaRef.value?.focus());
     },
@@ -3396,7 +4103,20 @@ async function send() {
     startStatusTimer();
   }
   const myGeneration = aiGenerationGuard.begin();
-  if (!auto && !conversationId.value) conversationId.value = uuid();
+  const mintedConversationId = !auto && !conversationId.value;
+  if (mintedConversationId) conversationId.value = uuid();
+  // The id was minted a line ago and the watcher has not flushed yet: this send
+  // must already read the skill state of the conversation it is now running for.
+  // Only on a mint — a send on an id that already has a record must not pull the
+  // (now discarded) draft slot into it.
+  if (mintedConversationId) {
+    migrateUnsavedSkillState(conversationId.value);
+    // Same tick, same reason: this send is already running for the id minted a
+    // line above, so its picker selection has to follow now (the id watcher flushes
+    // later). Without this the first snapshot of a picker-touched new chat would
+    // persist no selection at all (#12075 R4).
+    migrateUnsavedPickerSelection(conversationId.value);
+  }
   const runConversationId = auto ? auto.conversationId : conversationId.value;
   const runMessages = auto ? auto.messages : messages.value;
   const runCreatedAt = new Date().toISOString();
@@ -3457,17 +4177,50 @@ async function send() {
   }
   const generationCanContinue = () => (detachedRun ? !detachedRun.cancelRequested : aiGenerationGuard.isCurrent(myGeneration));
   const runIsVisible = () => !detachedRun || (assistantViewMounted && conversationId.value === runConversationId);
-  // Selected skills are read and validated through the backend registry right
-  // before the request pipeline starts (after the generation guard: no awaits
-  // above this point). On any failure no AI request is sent: the failure banner
-  // appears above the composer while the draft and selection stay untouched
-  // (prd send-time loading contract).
-  let sendSkillSnapshot: ReadUserSkill[] | undefined;
-  if (selectedSkillIds.value.length > 0) {
+  // Selected skills are no longer read at send time: their bodies never enter the
+  // prompt (they load on demand through the use_skill tool, which only the
+  // built-in AI has — a CLI run receives no skill content at all). Only the
+  // catalog is consulted, to tell the user that a checked skill has disappeared
+  // before the request goes out. On any failure no AI request is sent: the
+  // failure banner appears above the composer while the draft and selection stay
+  // untouched.
+  //
+  // Skill capability is built-in-AI only (Req 12): a CLI provider gets neither
+  // the listing nor the two tools, so the whole block is skipped for it. The
+  // selector is disabled there too (Req 15a), but a selection made under an API
+  // provider survives a model switch, and nothing of it may reach the CLI run.
+  let sendSkillListing: string[] | undefined;
+  let sendSelectedSkillMetas: UserSkillMeta[] | undefined;
+  const skillsAvailable = !isCliProvider(activeConfig.provider);
+  // Req 5: the listing rides along when the user ticked something OR the
+  // "allow the AI to use skills automatically" Settings toggle (default off) is
+  // on. `allowSkills` below then follows from the listing itself, so the two
+  // skill tools ship exactly when the prompt points at them (ADR Decision 10).
+  const autoSkillsEnabled = settings.desktopSettings?.custom_ai_skill_auto_enabled === true;
+  if (skillsAvailable && (selectedSkillIds.value.length > 0 || autoSkillsEnabled)) {
     skillFailures.value = [];
-    const skillRead = await readUserSkills([...selectedSkillIds.value], skillRootSettings());
-    if (skillRead.failures.length > 0) {
-      skillFailures.value = skillRead.failures;
+    let catalog: UserSkillsListResult;
+    try {
+      catalog = await listUserSkills(skillRootSettings());
+    } catch {
+      // The catalog gates nothing on its own: with nothing selected the request
+      // just goes out skill-free, and a checked skill is reported as
+      // unavailable. An unhandled rejection here would take the whole send down.
+      catalog = { defaultRoot: { status: "invalid", skills: [] }, customRoot: null };
+    }
+    const catalogSkills = [...catalog.defaultRoot.skills, ...(catalog.customRoot?.skills ?? [])];
+    const known = new Set(catalogSkills.map((skill) => skill.id));
+    const failures: ReadUserSkillFailure[] = [];
+    for (const id of selectedSkillIds.value) {
+      if (known.has(id)) continue;
+      // Distinguish "this skill is gone" from "its whole root is unavailable" —
+      // the frozen reason vocabulary has one word for each, and the banner copy
+      // differs.
+      const rootUnavailable = userSkillSourceOfId(id) === "custom" ? !catalog.customRoot || catalog.customRoot.status !== "ok" : catalog.defaultRoot.status !== "ok";
+      failures.push({ id, reason: rootUnavailable ? "root_unavailable" : "not_found" });
+    }
+    if (failures.length > 0) {
+      skillFailures.value = failures;
       clearPendingWriteGrant();
       if (generationCanContinue()) {
         if (detachedRun) finishDesktopAiRun(detachedRun, "failed");
@@ -3480,14 +4233,10 @@ async function send() {
       resolveDetachedRunSettled();
       return;
     }
-    // Skill bodies are only known here, so the combined budget is enforced on
-    // the read snapshots: overflowing skills are skipped for this send while
-    // the selection itself stays untouched.
-    const cappedSkills = capSkillsToCharLimit(skillRead.skills, ACTIVE_SKILLS_TOTAL_MAX);
-    if (cappedSkills.length < skillRead.skills.length) {
-      toast(t("ai.skillsTotalTrimmed", { max: ACTIVE_SKILLS_TOTAL_MAX }), 4000);
-    }
-    sendSkillSnapshot = cappedSkills;
+    // Only the metadata survives the send: the listing is rendered here (it is
+    // what the prompt carries) and the metas feed the transcript's agent step.
+    sendSelectedSkillMetas = selectedSkillIds.value.flatMap((id) => catalogSkills.filter((skill) => skill.id === id));
+    sendSkillListing = buildSkillListingLines(buildSkillListing({ skills: catalogSkills, selectedIds: selectedSkillIds.value }), locale.value.startsWith("zh"));
   }
   if (!(await promptTemplateStore.ensureLoaded())) {
     clearPendingWriteGrant();
@@ -3527,8 +4276,25 @@ async function send() {
   const customPromptContext: CustomPromptContext = {
     globalInstructions: promptTemplateStore.globalInstructions,
     activeTemplates: runPluginContext ? [] : [...activeTemplates.value],
-    ...(sendSkillSnapshot?.length ? { selectedSkills: sendSkillSnapshot } : {}),
+    ...(sendSkillListing?.length ? { skillListing: sendSkillListing } : {}),
   };
+  // The skill tools ship with the listing and nothing else gates them (ADR
+  // Decision 10), so this is the same condition that just put lines in the
+  // prompt rather than a second decision that could drift away from it.
+  const allowSkills = Boolean(sendSkillListing?.length);
+  // The bodies this request should replay: the ones loaded in this session, plus
+  // the ones this conversation had loaded before a restart and never kept on disk
+  // (Req 13). Only when the request declares the skill tools — a send with no
+  // listing carries no `use_skill`, and Gemini and Anthropic reject a replayed
+  // call to a function they were not given.
+  const skillBodies = allowSkills ? await rehydrateLoadedSkillBodies(runConversationId) : [];
+  // Superseded while the bodies were being re-read: this generation no longer owns
+  // the conversation, and `skillBodies` describes a state it may have left.
+  if (!generationCanContinue()) {
+    clearPendingWriteGrant();
+    resolveDetachedRunSettled();
+    return;
+  }
   // Remember what was actually sent for this db_type so panels opened later can
   // restore it when no explicit per-db_type defaults are configured. This runs
   // for empty selections too: the store clears the remembered entry so a
@@ -3544,7 +4310,7 @@ async function send() {
   // A selection describes the namespace the user picked it in, so it is dropped
   // exactly like the other composer context when the run targets another one.
   const selectionContexts = auto || confirmationRetargets ? [] : [...selectedEditorSelections.value];
-  const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text)];
+  const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text, runDatabases)];
   const modelInstruction = buildAiModelInstruction({
     tableMentionRaws: selectedTableMentions.map((mention) => mention.raw),
     sqlFileMentionRaws: selectedSqlFiles.map((mention) => mention.raw),
@@ -3705,8 +4471,8 @@ async function send() {
   }
   runMessages.push({ role: "assistant", content: "", sourceConnectionName: runSourceName, sourceBinding: runBinding });
   const assistantIdx = runMessages.length - 1;
-  if (requestedMode === "agent" && sendSkillSnapshot?.length) {
-    runMessages[assistantIdx].agentSteps = [selectedSkillsAgentStep(sendSkillSnapshot)];
+  if (requestedMode === "agent" && sendSelectedSkillMetas?.length) {
+    runMessages[assistantIdx].agentSteps = [selectedSkillsListedStep(sendSelectedSkillMetas)];
   }
   const sessionId = uuid();
   if (runIsVisible()) {
@@ -3742,7 +4508,10 @@ async function send() {
     void persistConversationSnapshot(runConversationId, runMessages, runSourceName, tab?.database || "", runCreatedAt);
   }
   try {
-    const history: AiMessage[] = messagesForAgentHistory(runMessages.slice(0, -2));
+    // The skill round is appended after the transcript's own turns: it reaches the
+    // model as the most recent context before the new user prompt, and it is built
+    // per request so the body never enters the transcript or any stored record.
+    const history: AiMessage[] = [...messagesForAgentHistory(runMessages.slice(0, -2)), ...skillRoundMessages(skillBodies)];
     const onEvent = (event: AgentEvent) => {
       // Superseded by a clear/switch/new-chat (or a newer send()) — the backend
       // stream may still be running, but this generation no longer owns any
@@ -3800,6 +4569,14 @@ async function send() {
         if (detachedDeltaBuffer) detachedDeltaBuffer.appendReasoning(assistantIdx, event.delta);
         else appendAssistantReasoning(assistantIdx, event.delta);
       }
+      if (event.type === "output_truncated") {
+        // The provider cut the answer off at its output limit; without this the card
+        // would look like a finished reply. Appended in the user's own locale, like
+        // every other string the panel writes.
+        const notice = `\n\n[${t("ai.outputTruncated")}]`;
+        if (detachedDeltaBuffer) detachedDeltaBuffer.appendText(assistantIdx, notice);
+        else appendAssistantDelta(assistantIdx, notice);
+      }
       if (event.type === "agent_end") {
         // End the card's "思考过程" spinner at the terminal event rather than
         // waiting for send()'s finally (which can lag behind CLI teardown).
@@ -3822,6 +4599,19 @@ async function send() {
       }
       // Real-time agent step rendering
       if (event.type === "tool_call_start" || event.type === "tool_call_end") {
+        // Req 13's "the model actually used it" signal. The tool round itself
+        // lives inside the backend run and is never persisted back into the
+        // transcript, so the event stream is where this is observed — recorded
+        // under the run's own conversation, which a background send may not be
+        // showing.
+        //
+        // Only a *completed, successful* call proves a load: `tool_call_start`
+        // fires before the tool runs, and an ambiguous or missing name ends as an
+        // error having loaded nothing.
+        if (event.type === "tool_call_end" && event.tool_name === USE_SKILL_TOOL_NAME && !event.is_error) {
+          const loadedSkillId = loadedSkillIdFromToolResult(event.result);
+          if (loadedSkillId && runConversationId) recordConversationSkillLoad(runConversationId, loadedSkillId);
+        }
         const msg = runMessages[assistantIdx];
         if (msg) {
           if (!msg.agentSteps) msg.agentSteps = [];
@@ -3877,6 +4667,7 @@ async function send() {
           taskContractUserRequest: text,
           context,
           inlineImages: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })),
+          allowSkills,
         },
         history,
         onEvent,
@@ -3908,10 +4699,12 @@ async function send() {
         },
         connection,
         {
+          databases: runDatabases,
           mentionedTables,
           sqlFiles,
           csvFiles: csvAttachments,
           selections: selectionContexts,
+          includeQueryResult: settings.includeQueryResult,
         },
       );
       context.selectedDatabases = runDatabases;
@@ -3942,6 +4735,7 @@ async function send() {
           confirmedConnectionId: confirmedTargetConnId,
           confirmedDatabase: confirmedTargetDb,
           confirmedSchema: confirmedTargetSchema,
+          allowSkills,
         },
         history,
         onEvent,
@@ -4024,6 +4818,8 @@ async function send() {
       if (compaction) {
         const { summary, compactedMessages } = compaction;
         if (!detachedRun) pendingCompaction.value = null;
+        // The backend counted the messages it received; the transcript is what it
+        // counted (skill rounds never enter it — see `skillRoundMessages`).
         const insertAt = Math.min(1 + compactedMessages, runMessages.length - 1);
         if (summary) {
           runMessages.splice(insertAt, 0, {
@@ -4345,6 +5141,7 @@ function resetPendingRequestState() {
   // unmount must drop it synchronously, or "识别中" stays on screen in the next
   // conversation until that bounded call settles.
   routingInFlight.value = false;
+  clearSqlActionBlockStatuses();
 }
 
 // `alreadyCancelledSessionId`: the session id a caller (cancelStream()) has
@@ -4377,28 +5174,126 @@ function abandonInFlightRequest(alreadyCancelledSessionId?: string) {
   }
 }
 
-function applySql(code: string) {
+function applySql(code: string, key: string) {
   if (isRedisConnection.value) {
     emit("insertRedisCommand", code, conversationBinding.value);
     return;
   }
-  emit("appendSql", code, conversationBinding.value);
+  // Start the block's status before the request leaves: the target tab may not
+  // be on screen, so this block is the only place the user can see it happen.
+  const requestId = beginSqlAction(key);
+  emit("appendSql", code, conversationBinding.value, requestId);
 }
 
-function executeSql(code: string) {
+function executeSql(code: string, key: string) {
   if (isRedisConnection.value) {
     emit("executeRedisCommand", code, conversationBinding.value);
     return;
   }
-  emit("executeSql", code, conversationBinding.value);
+  const requestId = beginSqlAction(key);
+  emit("executeSql", code, conversationBinding.value, requestId);
 }
 
-function tempRunSql(code: string) {
+function tempRunSql(code: string, key: string) {
   if (isRedisConnection.value) {
     emit("executeRedisCommand", code, conversationBinding.value);
     return;
   }
-  emit("tempRunSql", code, conversationBinding.value);
+  const requestId = beginSqlAction(key);
+  emit("tempRunSql", code, conversationBinding.value, requestId);
+}
+
+/**
+ * Per-SQL-block action status (#11962). The panel is the only surface that can
+ * report an AI action's outcome when its editor tab is not on screen, so each
+ * block tracks the request it started and renders running/succeeded/failed
+ * inline.
+ */
+type AiSqlBlockStatus =
+  /** `requestId` is the click this block currently waits for (see beginSqlAction). */
+  | { phase: "running"; requestId: number }
+  | { phase: "succeeded"; rows?: number; affectedRows?: number }
+  /** `apply` appended the SQL to the editor: there is no execution to summarise. */
+  | { phase: "applied" }
+  | { phase: "failed"; message: string }
+  | { phase: "unavailable"; message: string };
+
+const aiSqlBlockStatuses = ref<Map<string, AiSqlBlockStatus>>(new Map());
+const pendingSqlActionRequests = new Map<number, string>();
+let nextSqlActionRequestId = 0;
+
+function beginSqlAction(key: string): number {
+  const requestId = ++nextSqlActionRequestId;
+  pendingSqlActionRequests.set(requestId, key);
+  const next = new Map(aiSqlBlockStatuses.value);
+  // A second click on the same block supersedes the first: the block tracks the
+  // request it is waiting for, so the earlier response cannot overwrite it.
+  next.set(key, { phase: "running", requestId });
+  aiSqlBlockStatuses.value = next;
+  return requestId;
+}
+
+/**
+ * Block keys are positional (`code:${messageIndex}:${segment}`), so a status only
+ * means anything while the transcript that produced it is still on screen.
+ * Every path that replaces or truncates the transcript must drop them, or a
+ * stale "failed" line renders on whatever block now sits at that index — in this
+ * chat after an edit-resend, or in another conversation entirely. The call sites
+ * are `selectConversation`, `clearMessages`, the edit-resend truncation, and
+ * `resetPendingRequestState`.
+ */
+function clearSqlActionBlockStatuses() {
+  if (aiSqlBlockStatuses.value.size) aiSqlBlockStatuses.value = new Map();
+  pendingSqlActionRequests.clear();
+}
+
+/** Host callback: settles the block that started request `requestId`. */
+function reportAiSqlAction(report: AiSqlActionReport) {
+  const key = pendingSqlActionRequests.get(report.requestId);
+  if (key === undefined) return;
+  pendingSqlActionRequests.delete(report.requestId);
+  const pending = aiSqlBlockStatuses.value.get(key);
+  if (pending?.phase === "running" && pending.requestId !== report.requestId) {
+    // The block was clicked again while this request was in flight; that later
+    // click owns the block's status, so this stale answer is dropped.
+    return;
+  }
+  const next = new Map(aiSqlBlockStatuses.value);
+  if (report.status === "dismissed") {
+    // The user answered a dialog (danger/production/parameters/read-only) or the
+    // request was cancelled: there is no outcome to report, so drop the state
+    // instead of leaving the block spinning forever.
+    next.delete(key);
+  } else if (report.status === "succeeded") {
+    next.set(key, { phase: "succeeded", rows: report.rows, affectedRows: report.affectedRows });
+  } else if (report.status === "applied") {
+    next.set(key, { phase: "applied" });
+  } else if (report.status === "failed") {
+    next.set(key, { phase: "failed", message: report.message ?? "" });
+  } else {
+    next.set(key, { phase: "unavailable", message: report.message ?? "" });
+  }
+  aiSqlBlockStatuses.value = next;
+}
+
+const sqlBlockKey = (messageIndex: number, segmentIndex: number) => `code:${messageIndex}:${segmentIndex}`;
+
+/** Status of one SQL block's action, or `undefined` when nothing ran from it. */
+function sqlBlockStatus(messageIndex: number, segmentIndex: number): AiSqlBlockStatus | undefined {
+  return aiSqlBlockStatuses.value.get(sqlBlockKey(messageIndex, segmentIndex));
+}
+
+function sqlBlockStatusText(messageIndex: number, segmentIndex: number): string {
+  const status = sqlBlockStatus(messageIndex, segmentIndex);
+  if (!status) return "";
+  if (status.phase === "running") return t("ai.sqlActionRunning");
+  if (status.phase === "applied") return t("ai.sqlActionApplied");
+  if (status.phase === "succeeded") {
+    if (status.affectedRows) return t("ai.sqlActionSucceededAffected", { count: status.affectedRows });
+    if (status.rows) return t("ai.sqlActionSucceededRows", { count: status.rows });
+    return t("ai.sqlActionSucceeded");
+  }
+  return status.message;
 }
 
 const copiedContentKey = ref("");
@@ -4571,6 +5466,8 @@ function clearMessages() {
   // the transcript, so returning to this conversation shows what changed.
   if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
   messages.value = [];
+  // Positional SQL-block statuses belong to the transcript just wiped.
+  clearSqlActionBlockStatuses();
   draftPluginContext.value = undefined;
   clearContextReferences();
   clearPendingWriteGrant();
@@ -4588,6 +5485,10 @@ function clearMessages() {
   historyIndex.value = -1;
   draftBeforeHistory.value = "";
   recoveredDraftActive.value = false;
+  // A new chat is a new conversation, so it gets its own hint identity and a
+  // first hint of its own (Req 14). Its predecessor's state is dropped with it —
+  // that chat's id can never come back.
+  discardUnsavedDraftState();
   messageRenderer.value.clear();
 }
 
@@ -4616,6 +5517,14 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
   const first = targetMessages.find((m) => m.role === "user" && m.kind !== "contextSummary");
   const existingConversation = conversations.value.find((conversation) => conversation.id === targetConversationId);
   const binding = snapshotBinding(targetConversationId, fallbackBinding);
+  let lastAssistantIndex = -1;
+  for (let i = targetMessages.length - 1; i >= 0; i--) {
+    if (targetMessages[i].role === "assistant") {
+      lastAssistantIndex = i;
+      break;
+    }
+  }
+  const loadedSkillIdsForSnapshot = conversationLoadedSkillIds.get(targetConversationId) ?? [];
   return {
     id: targetConversationId,
     title: first?.pluginContext?.title || renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
@@ -4628,7 +5537,7 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     connectionId: binding.connectionId,
     database: existingConversation ? binding.database : database,
     schema: binding.schema,
-    messages: targetMessages.map((m) => ({
+    messages: targetMessages.map((m, index) => ({
       role: m.role,
       content: m.content,
       ...(m.mentions?.length ? { mentions: m.mentions } : {}),
@@ -4644,10 +5553,20 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
       // Preserve it on every subsequent snapshot or the second restart silently
       // loses the omission warning again.
       ...(m.selections?.length || m.selectionsOmitted ? { selectionsOmitted: true } : {}),
+      // Skills this conversation has loaded (Req 13), carried on the newest
+      // assistant turn so a reload reads back one authoritative list. Only the
+      // ids: see `ChatMessage.loadedSkillIds` for why the bodies stay out of the
+      // record.
+      ...(index === lastAssistantIndex && loadedSkillIdsForSnapshot.length ? { loadedSkillIds: [...loadedSkillIdsForSnapshot] } : {}),
     })),
     // The conversation's single queued "send later" input, persisted so it
     // survives a restart (parent PRD §5).
     queuedInput: queuedInputs.get(targetConversationId)?.text,
+    // The conversation's own mode + action selection (#12075). `pickerSnapshotFor`
+    // returns the RECORDED values only — never the constrained `effective` pair —
+    // so a vector-DB or disconnected-plugin chat cannot have its degraded
+    // combination written back over the user's own choice (R9).
+    ...pickerSnapshotFor(targetConversationId),
     createdAt,
     updatedAt: new Date().toISOString(),
   };
@@ -4770,8 +5689,20 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
       ...(m.kind ? { kind: m.kind } : {}),
       ...(m.failed ? { failed: true } : {}),
       ...(m.sourceBinding ? { sourceBinding: m.sourceBinding } : {}),
+      // This is a second snapshot-writing path beside
+      // `buildConversationSnapshot`, and it replaces the whole message array.
+      // Every footprint a message carries must be re-projected here or the
+      // restart that recovers a queued run silently drops it: the selection
+      // omission warning (#10058) and the loaded-skill fact (Req 13) both only
+      // survive as long as each rewrite carries them forward.
+      ...(m.selections?.length || m.selectionsOmitted ? { selectionsOmitted: true } : {}),
+      ...(m.loadedSkillIds?.length ? { loadedSkillIds: [...m.loadedSkillIds] } : {}),
     })),
     queuedInput: conversation.queuedInput,
+    // Recovery must not drop the conversation's own picker selection either
+    // (#12075): this path rewrites the whole record, so the values come from the
+    // same raw source as `buildConversationSnapshot` (never `effective`).
+    ...pickerSnapshotFor(conversation.id),
     createdAt: conversation.createdAt,
     updatedAt,
   };
@@ -4847,6 +5778,11 @@ function chatMessagesFromConversation(conv: AiConversation): ChatMessage[] {
     failed: m.failed === true ? true : undefined,
     // Only the footprint is loaded back; the selection text itself is gone.
     selectionsOmitted: m.selectionsOmitted === true ? true : undefined,
+    // Which skills this conversation had loaded — the fact only, and only on the
+    // turn that carried it. `seedLoadedSkillsFromTranscript` reads it back into
+    // the panel's per-conversation state, and the body is re-read from disk when
+    // a request needs it.
+    loadedSkillIds: m.loadedSkillIds?.length ? m.loadedSkillIds : undefined,
     // Old transcripts have no per-turn target. Capture the conversation's
     // current binding on load so a later rebind cannot retarget a pending card.
     sourceBinding: m.sourceBinding ?? (m.role === "assistant" && conv.connectionId ? { connectionId: conv.connectionId, database: conv.database, schema: conv.schema } : undefined),
@@ -4864,6 +5800,11 @@ function selectConversation(conv: AiConversation) {
   // user is leaving behind (parent PRD §8). Uses the VISIBLE count (context
   // summaries are filtered out of rendering) so the anchor matches row indices.
   if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
+  // Leaving a draft abandons it — a draft can never be reopened, so its state
+  // must not stay filed under a key a later conversation could read. Dropping it
+  // here keeps an abandoned draft's picker selection and loaded skill ids out of
+  // the conversation being opened (#12075 review).
+  if (!conversationId.value) discardUnsavedDraftState();
   conversationId.value = conv.id;
   // The chosen conversation owns its connection from here on (#9902); any
   // binding staged for the unsaved chat we are leaving is now irrelevant.
@@ -4875,12 +5816,23 @@ function selectConversation(conv: AiConversation) {
   clearAttachmentDraftState();
   // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
   messageRenderer.value.clear();
+  // The arriving conversation owns its own one-time skill hint; the watcher below
+  // latches it again only if that conversation has not shown one yet (Req 14).
+  skillHintLatch.value = null;
   const activeRun = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conv.id) : undefined;
   messages.value = activeRun?.messages ?? chatMessagesFromConversation(conv);
-  if (pluginContext.value) {
-    assistantMode.value = pluginContext.value.mode === "agent" && !boundConnection.value ? "ask" : (pluginContext.value.mode ?? "ask");
-    activeAction.value = "general";
-  }
+  // Block keys are positional, so the arriving transcript must not inherit the
+  // departing conversation's statuses (#11962).
+  clearSqlActionBlockStatuses();
+  // Req 13 after a restart: the transcript keeps the fact that skills were
+  // loaded, so the chips can light up before anything is read again. The bodies
+  // come back when a request actually needs them (`rehydrateLoadedSkillBodies`).
+  seedLoadedSkillsFromTranscript(conv.id, messages.value);
+  // The arriving conversation owns its own mode + action selection (#12075):
+  // restore it here rather than leaving the previous chat's picker on screen.
+  // This replaced a plugin-only branch that always forced `general`; the plugin
+  // case is one of the rules `resolveConversationPicker` replays (R9/R10).
+  restoreConversationPicker(conv);
   unreadConversations.delete(conv.id);
   isGenerating.value = activeRun?.status === "preparing" || activeRun?.status === "queued" || activeRun?.status === "running";
   currentSessionId.value = activeRun?.currentSessionId ?? "";
@@ -4988,6 +5940,12 @@ async function performDeleteConversation(id: string) {
     removeDesktopAiRun(id);
   }
   queuedInputs.delete(id);
+  // The conversation's skill state goes with it; the ids can never come back.
+  conversationLoadedSkillIds.delete(id);
+  conversationLoadedSkillBodies.delete(id);
+  conversationSkillHintSeen.delete(id);
+  // Its picker selection goes with it too (#12075): the id can never come back.
+  conversationPickerSelections.delete(id);
   await deleteConversationWithCancellation({
     id,
     currentConversationId: () => conversationId.value,
@@ -5020,10 +5978,10 @@ function startNewChat() {
   clearMessages();
   showConversationList.value = false;
   // A fresh conversation starts from the configured default mode and, when the
-  // Settings > AI toggle says so, from the `auto` picker entry (#9118).
-  const mode = settings.defaultAiMode;
-  assistantMode.value = mode;
-  activeAction.value = resolveDefaultActionSelection(mode);
+  // Settings > AI toggle says so, from the `auto` picker entry (#9118). This is
+  // unchanged by #12075: the picker takes over once the user picks, or once the
+  // conversation is reopened with its own recorded selection.
+  picker.restoreDefault();
 }
 
 /** Send-button dispatcher: with an active run on the visible conversation the
@@ -5040,7 +5998,14 @@ function onSendClick() {
 function queueInput() {
   const text = prompt.value.trim();
   if (!text) return;
-  if (!conversationId.value) conversationId.value = uuid();
+  if (!conversationId.value) {
+    conversationId.value = uuid();
+    // Minted a line above and the id watcher has not flushed yet, so the draft's
+    // selection has to follow now or this snapshot would persist none (same
+    // reason as `send()`, #12075 R4). Only on a mint: moving it for an id that
+    // already has a record is exactly what must not happen.
+    migrateUnsavedPickerSelection(conversationId.value);
+  }
   queuedInputs.set(conversationId.value, { text, mode: assistantMode.value, action: activeAction.value });
   prompt.value = "";
   selectedMentions.value = [];
@@ -5107,7 +6072,11 @@ function retryConversationRun(convId: string) {
     run.cancelRequested = true;
     finishDesktopAiRun(run, "cancelled");
   }
-  scheduleAutoSend(convId, { text, mode: assistantMode.value, action: activeAction.value }, history.slice(0, lastUserIdx), pluginContextFromMessages(history));
+  // The retry belongs to `convId`, not to whatever chat is on screen, so it runs
+  // on THAT conversation's own mode/action (#12075 R7). It is a continuation of
+  // the same request, not a fresh picker operation, so nothing is recorded.
+  const retrySelection = conversationPickerSelectionFor(convId);
+  scheduleAutoSend(convId, { text, mode: retrySelection.mode, action: retrySelection.action }, history.slice(0, lastUserIdx), pluginContextFromMessages(history));
 }
 
 /** Dismisses the "updates while you were away" separator and jumps to the end. */
@@ -5147,9 +6116,13 @@ onMounted(async () => {
   conversations.value = await loadAiConversations().catch(() => []);
   // Restore per-conversation queued "send later" inputs (parent PRD §5) — they
   // are persisted with the conversation and must surface again after a restart.
+  // The queued mode/action belong to the conversation that queued them, not to
+  // whichever chat the panel restores into (#12075 R7); the queued payload is
+  // resolved exactly like a retry would be.
   for (const conversation of conversations.value) {
     if (conversation.queuedInput) {
-      queuedInputs.set(conversation.id, { text: conversation.queuedInput, mode: assistantMode.value, action: activeAction.value });
+      const queuedSelection = conversationPickerSelectionFor(conversation.id);
+      queuedInputs.set(conversation.id, { text: conversation.queuedInput, mode: queuedSelection.mode, action: queuedSelection.action });
     }
   }
   if (backgroundAiRunsEnabled) {
@@ -5483,14 +6456,9 @@ function triggerAction(action: AiAction, instruction?: string) {
   if (pluginContext.value) startNewChat();
   // External Ask-style entry points (Fix with AI, Explain history) produce/analyze SQL text.
   // If the assistant is currently in Agent mode where those actions aren't offered, switch to
-  // Ask mode so the action is valid and the menu reflects what actually runs.
-  if (!isValidActionForMode(action, assistantMode.value)) {
-    // Suppress the mode-switch watch so it doesn't overwrite `action` (set below) with the
-    // Ask default — the menu must reflect the action actually being run.
-    suppressModeActionReset = true;
-    assistantMode.value = "ask";
-  }
-  activeAction.value = action;
+  // Ask mode so the action is valid and the menu reflects what actually runs. The picker moves
+  // both values at once, so the mode no longer resets the action we are about to set.
+  picker.select({ mode: isValidActionForMode(action, assistantMode.value) ? assistantMode.value : "ask", action });
   if (instruction) prompt.value = instruction;
   send();
 }
@@ -5503,8 +6471,12 @@ function openPluginConversation(request: AiPluginConversationRequest) {
   const pluginConnectionId = pluginContextConnectionId(request.context);
   const pluginConnection = pluginConnectionId ? connectionStore.getConfig(pluginConnectionId) : undefined;
   draftBinding.value = pluginConnection ? { connectionId: pluginConnection.id, connectionName: pluginConnection.name, database: "", schema: undefined } : null;
-  assistantMode.value = request.mode === "agent" && !pluginConnection ? "ask" : (request.mode ?? request.context.mode ?? "ask");
-  activeAction.value = "general";
+  // The plugin request names a mode explicitly, so this is a user-level choice
+  // and is recorded as this conversation's own selection. The recorded value is
+  // what the plugin ASKED for, not the constrained one: a plugin chat with no
+  // connection degrades to `ask` / `general` in `effective` only, so connecting
+  // later brings the requested Agent mode back (R9/AC6).
+  picker.select({ mode: request.mode ?? request.context.mode ?? "ask", action: "general" });
   setPrompt(request.prompt, true);
   if (request.send) void send();
 }
@@ -5568,7 +6540,10 @@ function openExternalContext(request: AiExternalContextRequest) {
     selectedEditorSelections.value.push(createSelectionContext(selection, uuid()));
   }
   for (const mention of request.tableMentions ?? []) {
-    addSelectedMention({ kind: "table", schema: mention.schema, name: mention.table, tableType: "TABLE" });
+    // The table's own namespace is the one the request targets: the binding has
+    // this very moment been retargeted to it, while a mention recorded without it
+    // would be resolved against whatever database the run ends up with (#11660).
+    addSelectedMention({ kind: "table", database: mention.database ?? plan.binding.database, schema: mention.schema, name: mention.table, tableType: "TABLE" });
   }
   nextTick(() => promptTextareaRef.value?.focus());
   if (request.action) triggerAction(request.action, request.instruction);
@@ -5624,7 +6599,7 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch });
+defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch, reportAiSqlAction });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
@@ -6096,7 +7071,7 @@ async function openExternalUrl(url: string) {
                           v-if="!pluginContext && !seg.pending && seg.isSql && !isRedisConnection"
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                           :title="t('ai.tempRunSql')"
-                          @click="tempRunSql(seg.content)"
+                          @click="tempRunSql(seg.content, sqlBlockKey(i, j))"
                         >
                           <FlaskConical class="h-3.5 w-3.5" />
                         </button>
@@ -6104,7 +7079,7 @@ async function openExternalUrl(url: string) {
                           v-if="!pluginContext && !seg.pending && (seg.isSql || isRedisConnection)"
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                           :title="t('ai.executeSql')"
-                          @click="executeSql(seg.content)"
+                          @click="executeSql(seg.content, sqlBlockKey(i, j))"
                         >
                           <Play class="h-3.5 w-3.5" />
                         </button>
@@ -6112,7 +7087,7 @@ async function openExternalUrl(url: string) {
                           v-if="!pluginContext && !seg.pending && (seg.isSql || isRedisConnection)"
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                           :title="t('ai.apply')"
-                          @click="applySql(seg.content)"
+                          @click="applySql(seg.content, sqlBlockKey(i, j))"
                         >
                           <ArrowDownToLine class="h-3.5 w-3.5" />
                         </button>
@@ -6130,6 +7105,25 @@ async function openExternalUrl(url: string) {
                       </div>
                     </div>
                     <pre class="ai-code-block whitespace-pre-wrap break-words [overflow-wrap:anywhere] p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
+                    <!-- #11962: the outcome of an action started from THIS block, so the
+                         user sees it without hunting for the target editor tab. The row
+                         stays mounted while the action runs, so its running → terminal
+                         text change is announced; `role="status"` matches the other
+                         block-level notices in this file. -->
+                    <div
+                      v-if="sqlBlockStatus(i, j)"
+                      data-ai-sql-action-status
+                      role="status"
+                      class="border-t border-zinc-200 px-3 py-1.5 text-[10px] dark:border-zinc-700/50"
+                      :class="sqlBlockStatus(i, j)?.phase === 'failed' || sqlBlockStatus(i, j)?.phase === 'unavailable' ? 'text-red-600 dark:text-red-400' : 'text-zinc-500 dark:text-zinc-400'"
+                    >
+                      <span class="flex items-start gap-1.5">
+                        <Loader2 v-if="sqlBlockStatus(i, j)?.phase === 'running'" class="mt-px h-3 w-3 shrink-0 animate-spin" />
+                        <Check v-else-if="sqlBlockStatus(i, j)?.phase === 'succeeded' || sqlBlockStatus(i, j)?.phase === 'applied'" class="mt-px h-3 w-3 shrink-0 text-emerald-500" />
+                        <CircleSlash v-else class="mt-px h-3 w-3 shrink-0" />
+                        <span class="min-w-0 whitespace-pre-wrap break-words">{{ sqlBlockStatusText(i, j) }}</span>
+                      </span>
+                    </div>
                   </div>
                 </template>
                 <div v-if="msg === proposalConfirmMessage" class="mt-2 flex gap-2" :title="t('ai.proposalConfirmTitle')">
@@ -6365,9 +7359,15 @@ async function openExternalUrl(url: string) {
               </PopoverContent>
             </Popover>
             <!-- Skill selector (read-only user SKILL.md library) -->
-            <Popover v-model:open="showSkillSelector">
+            <Popover v-model:open="skillSelectorOpen">
               <PopoverTrigger as-child>
-                <button type="button" class="ai-skills-selector-trigger flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('ai.skillsEntry')" :title="t('ai.skillsEntry')">
+                <button
+                  type="button"
+                  class="ai-skills-selector-trigger flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                  :disabled="skillCapabilityUnavailable"
+                  :aria-label="skillSelectorTriggerLabel"
+                  :title="skillSelectorTriggerLabel"
+                >
                   <Layers class="h-3 w-3" />
                   <span class="ai-skills-selector-label truncate">{{ t("ai.skillsEntry") }}</span>
                   <span v-if="selectedSkillIds.length" class="ai-skills-selector-count rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ selectedSkillIds.length }}</span>
@@ -6392,13 +7392,25 @@ async function openExternalUrl(url: string) {
                       <div class="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                         {{ t(group.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}
                       </div>
+                      <!-- Same-root name collision: the model addresses skills by name + source,
+                           so it cannot pick between these two, and only changing one of the two
+                           frontmatter `name` values fixes it (the folder name is irrelevant). -->
+                      <div v-if="duplicateNamesBySource.get(group.source)?.size" class="ai-skill-duplicate-note mx-2 mb-1 rounded-sm bg-amber-500/10 px-2 py-1 text-[10px] leading-snug text-amber-600">
+                        {{ t("ai.skillsDuplicateNameNote") }}
+                      </div>
                       <template v-for="skill in group.skills" :key="skill.id">
                         <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" :aria-pressed="selectedSkillIds.includes(skill.id)" @click="toggleSkillSelected(skill.id)">
                           <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="selectedSkillIds.includes(skill.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
                             <Check v-if="selectedSkillIds.includes(skill.id)" class="h-3 w-3" />
                           </div>
                           <div class="min-w-0 flex-1 text-left">
-                            <div class="truncate font-medium">{{ skill.name }}</div>
+                            <div class="flex items-center gap-1">
+                              <span class="truncate font-medium">{{ skill.name }}</span>
+                              <span v-if="duplicateNamesBySource.get(group.source)?.has(skill.name)" class="ai-skill-duplicate-name inline-flex shrink-0 items-center gap-0.5 rounded-sm bg-amber-500/15 px-1 text-[10px] font-normal text-amber-600" :title="t('ai.skillsDuplicateName')">
+                                <AlertTriangle class="h-2.5 w-2.5" />
+                                {{ t("ai.skillsDuplicateName") }}
+                              </span>
+                            </div>
                             <div class="truncate text-[10px] text-muted-foreground">{{ skill.description }}</div>
                           </div>
                         </button>
@@ -6439,7 +7451,7 @@ async function openExternalUrl(url: string) {
             <div v-else ref="mentionListRef" class="max-h-56 overflow-auto p-1">
               <button
                 v-for="(candidate, index) in mentionCandidates"
-                :key="candidate.kind === 'sqlFile' ? `sql-file:${candidate.id}` : `table:${candidate.schema || ''}.${candidate.name}`"
+                :key="candidate.kind === 'sqlFile' ? `sql-file:${candidate.id}` : `table:${candidate.database || ''}.${candidate.schema || ''}.${candidate.name}`"
                 type="button"
                 :data-mention-index="index"
                 class="flex w-full min-w-0 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
@@ -6507,21 +7519,68 @@ async function openExternalUrl(url: string) {
               <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
             </button>
           </div>
-          <div v-if="selectedSkillChips.length" class="mb-1.5 flex flex-wrap gap-1">
-            <button
-              v-for="chip in selectedSkillChips"
-              :key="chip.id"
-              type="button"
-              class="group inline-flex max-w-full items-center gap-1 rounded border bg-muted/60 px-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-muted"
-              :class="chip.unavailable ? 'border-destructive/50 text-destructive' : 'border-border/80'"
-              :title="chip.description || chip.name"
-              @click="removeSelectedSkill(chip.id)"
-            >
-              <AlertTriangle v-if="chip.unavailable" class="h-3 w-3 shrink-0" />
-              <Layers v-else class="h-3 w-3 shrink-0 text-primary" />
-              <span class="truncate">{{ chip.name }}</span>
-              <span class="shrink-0 text-[9px] text-muted-foreground">{{ t(chip.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}</span>
-              <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
+          <!-- Req 13: a chip has two states (idle / loaded in this conversation)
+               and clicking its body force-loads the skill. Removal therefore needs
+               its own control — one button cannot both load and remove. -->
+          <div v-if="selectedSkillChips.length" class="mb-1.5 flex flex-wrap items-center gap-1">
+            <template v-if="selectedSkillsCollapsed">
+              <button
+                type="button"
+                class="ai-skills-expand-toggle inline-flex max-w-full items-center gap-1.5 rounded border border-border/80 bg-muted/60 px-2 py-0.5 text-[11px] text-foreground/90 hover:bg-muted"
+                :title="t('ai.skillsExpand')"
+                :aria-label="t('ai.skillsExpand')"
+                @click="selectedSkillsCollapsed = false"
+              >
+                <Layers class="h-3 w-3 shrink-0 text-primary" />
+                <span class="truncate font-medium">{{ t("ai.skillsSelectedCount", { count: selectedSkillChips.length }) }}</span>
+                <span v-if="loadedSelectedSkillsCount > 0" class="shrink-0 text-[9px] font-medium text-emerald-600 dark:text-emerald-400"> ({{ loadedSelectedSkillsCount }}/{{ selectedSkillChips.length }} {{ t("ai.skillsLoadedState") }}) </span>
+                <ChevronDown class="h-3 w-3 shrink-0 text-muted-foreground" />
+              </button>
+            </template>
+            <template v-else>
+              <span
+                v-for="chip in selectedSkillChips"
+                :key="chip.id"
+                class="inline-flex max-w-full items-center rounded border bg-muted/60 text-[11px] text-foreground/90"
+                :class="chip.unavailable ? 'border-destructive/50 text-destructive' : chip.loaded ? 'border-emerald-500/60' : 'border-border/80'"
+              >
+                <button
+                  type="button"
+                  class="ai-skill-chip flex min-w-0 items-center gap-1 py-0.5 pl-1.5 pr-1 hover:bg-muted disabled:cursor-not-allowed"
+                  :disabled="skillCapabilityUnavailable || chip.loaded"
+                  :title="chip.loaded ? t('ai.skillsLoadedState') : skillCapabilityUnavailable ? t('ai.skillsUnsupportedForCliProvider') : t('ai.skillsPreload')"
+                  @click="preloadSkill(chip.id)"
+                >
+                  <Loader2 v-if="skillPreloadPending.includes(chip.id)" class="h-3 w-3 shrink-0 animate-spin" />
+                  <Check v-else-if="chip.loaded" class="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  <AlertTriangle v-else-if="chip.unavailable" class="h-3 w-3 shrink-0" />
+                  <Layers v-else class="h-3 w-3 shrink-0 text-primary" />
+                  <span class="truncate" :title="chip.description || chip.name">{{ chip.name }}</span>
+                  <span class="shrink-0 text-[9px] text-muted-foreground">{{ t(chip.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}</span>
+                  <span v-if="chip.loaded" class="shrink-0 text-[9px] font-medium text-emerald-600 dark:text-emerald-400">{{ t("ai.skillsLoadedState") }}</span>
+                </button>
+                <button type="button" class="ai-skill-chip-remove shrink-0 py-0.5 pl-0.5 pr-1.5 hover:text-destructive" :aria-label="t('common.remove')" :title="t('common.remove')" @click="removeSelectedSkill(chip.id)">
+                  <X class="h-3 w-3 shrink-0" />
+                </button>
+              </span>
+              <button
+                type="button"
+                class="ai-skills-collapse-toggle inline-flex items-center gap-1 rounded border border-border/80 bg-muted/60 px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                :title="t('ai.skillsCollapse')"
+                :aria-label="t('ai.skillsCollapse')"
+                @click="selectedSkillsCollapsed = true"
+              >
+                <ChevronUp class="h-3 w-3 shrink-0" />
+                <span>{{ t("ai.skillsCollapse") }}</span>
+              </button>
+            </template>
+          </div>
+          <!-- Req 14: one one-time hint per conversation while nothing selected has
+               been loaded yet. Clicking it is the same force-load as the chip. -->
+          <div v-if="showSkillHint && !selectedSkillsCollapsed" class="mb-1.5">
+            <button type="button" class="ai-skill-hint inline-flex max-w-full items-center gap-1 rounded border border-primary/40 bg-primary/5 px-1.5 py-0.5 text-left text-[11px] text-primary hover:bg-primary/10" :title="t('ai.skillsPreload')" @click="preloadHintedSkill">
+              <Sparkles class="h-3 w-3 shrink-0" />
+              <span class="truncate">{{ skillHintText }}</span>
             </button>
           </div>
           <div v-if="selectedCsvAttachments.length || selectedImageAttachments.length" class="mb-1.5 flex max-h-28 flex-wrap gap-1.5 overflow-y-auto pr-0.5">
@@ -6738,20 +7797,31 @@ async function openExternalUrl(url: string) {
                           {{ modelSearchQuery.trim() ? t("ai.noModelMatch") : t("ai.noModels") }}
                         </div>
                         <template v-if="getConfigModelOptions(config).length">
-                          <button
+                          <div
                             v-for="model in getConfigModelOptions(config)"
                             :key="model.id"
-                            type="button"
-                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                            class="group/model flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
                             :class="model.id === settings.activeModel?.modelId && config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : ''"
-                            @click="handleModelSelect(config.id, model.id)"
                           >
-                            <span class="min-w-0 flex-1 truncate">
-                              {{ model.displayName || model.id }}
-                              <span v-if="model.displayName && model.displayName !== model.id" class="ml-1 text-[10px] text-muted-foreground">{{ model.id }}</span>
-                            </span>
-                            <Check v-if="model.id === settings.activeModel?.modelId && config.id === settings.activeModel?.configId" class="h-3.5 w-3.5 shrink-0 text-primary" />
-                          </button>
+                            <button type="button" class="flex min-w-0 flex-1 items-center gap-2 py-0.5 text-left" :data-model-id="model.id" @click="handleModelSelect(config.id, model.id)">
+                              <span class="min-w-0 flex-1 truncate">
+                                {{ model.displayName || model.id }}
+                                <span v-if="model.displayName && model.displayName !== model.id" class="ml-1 text-[10px] text-muted-foreground">{{ model.id }}</span>
+                              </span>
+                              <Check v-if="model.id === settings.activeModel?.modelId && config.id === settings.activeModel?.configId" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                            </button>
+                            <button
+                              v-if="canRemoveModel(config, model.id)"
+                              type="button"
+                              class="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover/model:opacity-100"
+                              :title="t('common.delete')"
+                              :aria-label="t('common.delete')"
+                              :data-remove-model="model.id"
+                              @click.stop="handleRemoveModel(config.id, model.id)"
+                            >
+                              <X class="h-3 w-3 shrink-0" />
+                            </button>
+                          </div>
                         </template>
                         <div v-if="getModelCatalog(config.id).status === 'error' && getModelsForConfig(config.id).length" class="flex items-center justify-between gap-2 px-2 py-1 text-[10px] text-muted-foreground">
                           <span class="truncate" :title="getModelCatalog(config.id).error">{{ t("ai.modelLoadFailed") }}</span>

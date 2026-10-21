@@ -1,9 +1,11 @@
 import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
+import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
+import type { DatabaseType } from "@/types/database";
 
 export type CellDetailTab = "details" | "hexViewer" | "valueEditor";
 export type ValueEditorAction = "formatJson" | "compactJson" | "setNull" | "restoreOriginal";
 
-export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 50_000;
+export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 500_000;
 
 export interface CellDetailPresentationOptions {
   isEditable: boolean;
@@ -35,6 +37,11 @@ export function visibleCellDetailTabs(options: CellDetailPresentationOptions): C
     tabs.push("valueEditor");
   }
   return tabs;
+}
+
+/** Preview text for the detail surfaces. Boolean columns use the same label as the grid (TRUE/FALSE or 1/0), while rawValue stays untouched for length/copy/edit semantics. */
+export function cellDetailPreviewText(detail: Pick<{ type: string; rawValuePreview: string; displayValuePreview: string }, "type" | "rawValuePreview" | "displayValuePreview">, databaseType?: DatabaseType): string {
+  return isBooleanColumnType(detail.type, databaseType) ? detail.displayValuePreview : detail.rawValuePreview;
 }
 
 export function cellDetailEditorText(value: unknown, _columnType?: string): string {
@@ -93,6 +100,19 @@ export function formatJsonText(text: string): string | undefined {
   if (!trimmed) return undefined;
   if (trimmed.length > CELL_DETAIL_JSON_FORMAT_MAX_LENGTH) return undefined;
   try {
+    if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (typeof parsed === "string") {
+          const inner = parsed.trim();
+          if (inner.startsWith("{") || inner.startsWith("[")) {
+            return safeJsonFormat(inner, 2);
+          }
+        }
+      } catch {
+        // fallback to normal format
+      }
+    }
     return safeJsonFormat(trimmed, 2);
   } catch {
     return undefined;
@@ -112,5 +132,17 @@ export function compactJsonText(text: string): string | undefined {
 
 export function looksLikeJsonContainerText(text: string): boolean {
   const trimmed = text.trim();
-  return trimmed.startsWith("{") || trimmed.startsWith("[");
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) return true;
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed === "string") {
+        const inner = parsed.trim();
+        return inner.startsWith("{") || inner.startsWith("[");
+      }
+    } catch {
+      // not valid JSON string
+    }
+  }
+  return false;
 }

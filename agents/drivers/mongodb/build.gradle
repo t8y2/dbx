@@ -1,7 +1,7 @@
 dependencies {
     implementation project(':common')
     implementation 'org.mongodb:mongodb-driver-sync:3.12.14'
-    implementation 'com.google.code.gson:gson:2.11.0'
+    implementation 'com.google.code.gson:gson:2.14.0'
 }
 
 tasks.named('shadowJar') {

@@ -43,6 +43,22 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
 }
 
 describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
+  it("tracks the result-tab click setting in the draft without changing saved settings", () => {
+    const settings = makeSettings({ pinResultTabOnClick: true });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.pinResultTabOnClick = false;
+    expect(settings.pinResultTabOnClick).toBe(true);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toMatchObject({ pinResultTabOnClick: false });
+  });
+
+  it("captures and saves the column comment placement preference", () => {
+    const base = editorSettingsDraftFromSettings(makeSettings({ dataGridColumnCommentsInInfoArea: false, dataGridTransposeMetadataInInfoColumn: false }));
+    const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridColumnCommentsInInfoArea: true, dataGridTransposeMetadataInInfoColumn: true }));
+    expect(draft.dataGridColumnCommentsInInfoArea).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ dataGridColumnCommentsInInfoArea: true, dataGridTransposeMetadataInInfoColumn: true });
+  });
   it("keeps connection and query timeout ownership outside editor settings", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalConnectTimeoutSecs");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalQueryTimeoutSecs");
@@ -54,6 +70,24 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the DDL open mode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("ddlOpenMode");
+  });
+
+  it("includes caretBrowsingEnabled (#11827)", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("caretBrowsingEnabled");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ caretBrowsingEnabled: true } as Partial<EditorSettings>));
+    expect(draft.caretBrowsingEnabled).toBe(true);
+  });
+
+  it("includes queryResultExportFileNameSource (#12092)", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("queryResultExportFileNameSource");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ queryResultExportFileNameSource: "tab-title" } as Partial<EditorSettings>));
+    expect(draft.queryResultExportFileNameSource).toBe("tab-title");
+  });
+
+  it("includes colorizeConnectionTabsScope (#12955)", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeConnectionTabsScope");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ colorizeConnectionTabsScope: "active" } as Partial<EditorSettings>));
+    expect(draft.colorizeConnectionTabsScope).toBe("active");
   });
 
   it("includes continueOnErrorOnBatch", () => {
@@ -69,6 +103,12 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the saved SQL open target mode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("savedSqlOpenTargetMode");
+  });
+
+  it("includes aiSqlApplyTargetMode (#12438)", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("aiSqlApplyTargetMode");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ aiSqlApplyTargetMode: "new" } as Partial<EditorSettings>));
+    expect(draft.aiSqlApplyTargetMode).toBe("new");
   });
 
   it("includes the privacy-safe welcome page mode", () => {
@@ -140,12 +180,21 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("multiStatementDefaultView");
   });
 
+  it("includes the default explain view", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("defaultExplainView");
+  });
+
   it("includes the cell detail button visibility", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailButtonVisible");
   });
 
   it("includes zebra row background in draft keys", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridZebraRowBg");
+  });
+
+  it("includes crosshair row and column backgrounds in draft keys", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCrosshairRowBg");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCrosshairColBg");
   });
 
   it("includes dataGridCellDetailDialogDefault", () => {
@@ -166,6 +215,15 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the SQL variable substitution master switch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("sqlVariableSubstitutionEnabled");
+  });
+
+  it("includes functionCompletionIncludeParams in draft keys, draft conversion, and patch", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("functionCompletionIncludeParams");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ functionCompletionIncludeParams: false }));
+    const base = editorSettingsDraftFromSettings(makeSettings({ functionCompletionIncludeParams: true }));
+    expect(draft.functionCompletionIncludeParams).toBe(false);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ functionCompletionIncludeParams: false });
   });
 });
 
@@ -234,6 +292,10 @@ describe("editorSettingsDraftFromSettings", () => {
 
   it("maps the multi-statement default view from settings", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ multiStatementDefaultView: "summary" })).multiStatementDefaultView).toBe("summary");
+  });
+
+  it("maps the default explain view from settings", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ defaultExplainView: "table" })).defaultExplainView).toBe("table");
   });
 
   it("preserves the table-open default for legacy settings", () => {
@@ -382,6 +444,13 @@ describe("editorSettingsPatchFromDraft", () => {
     const summary = editorSettingsDraftFromSettings(makeSettings({ multiStatementDefaultView: "summary" }));
 
     expect(editorSettingsPatchFromDraft(summary, result)).toEqual({ multiStatementDefaultView: "summary" });
+  });
+
+  it("includes the default explain view when changed", () => {
+    const canvas = editorSettingsDraftFromSettings(makeSettings({ defaultExplainView: "canvas" }));
+    const table = editorSettingsDraftFromSettings(makeSettings({ defaultExplainView: "table" }));
+
+    expect(editorSettingsPatchFromDraft(table, canvas)).toEqual({ defaultExplainView: "table" });
   });
 
   it("includes continueOnErrorOnBatch in patch when changed", () => {

@@ -89,6 +89,7 @@ function objectBrowserRowObjectInfo(row: ObjectBrowserRow, schema?: string): Obj
     name: row.name,
     object_type: row.type,
     schema,
+    valid: row.valid,
     signature: row.signature || undefined,
     parent_schema: row.partitionParentSchema,
     parent_name: row.partitionParentName,
@@ -337,7 +338,14 @@ export function filterObjectBrowserRows(rows: ObjectBrowserRow[], query: string)
     // matches names and comments only.
     return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
   }
-  return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
+  return rows.filter((row) => {
+    // Let omitted underscores match object names without changing comment or explicit underscore searches.
+    const matchesName = [row.displayName, row.name].filter(Boolean).some((value) => {
+      const name = String(value).toLowerCase();
+      return name.includes(q) || name.replace(/_/g, "").includes(q);
+    });
+    return matchesName || !!row.comment?.toLowerCase().includes(q);
+  });
 }
 
 export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): ObjectBrowserFilterCounts {

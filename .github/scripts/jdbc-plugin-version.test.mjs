@@ -17,14 +17,8 @@ test("reads the JDBC plugin version from Gradle", () => {
 });
 
 test("checks Gradle and manifest versions together", () => {
-  assert.deepEqual(
-    evaluateJdbcPluginVersionChange({ headGradleVersion: "0.1.26", headManifestVersion: "0.1.26" }),
-    [],
-  );
-  assert.match(
-    evaluateJdbcPluginVersionChange({ headGradleVersion: "0.1.27", headManifestVersion: "0.1.26" })[0],
-    /build\.gradle is 0\.1\.27/,
-  );
+  assert.deepEqual(evaluateJdbcPluginVersionChange({ headGradleVersion: "0.1.26", headManifestVersion: "0.1.26" }), []);
+  assert.match(evaluateJdbcPluginVersionChange({ headGradleVersion: "0.1.27", headManifestVersion: "0.1.26" })[0], /build\.gradle is 0\.1\.27/);
 });
 
 test("bumps Gradle and manifest versions for JDBC source changes", () => {

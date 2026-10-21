@@ -8,6 +8,7 @@ import {
   isCancelSearchShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isCloseWindowShortcut,
   isCopySidebarSelectionShortcut,
   isDisconnectSidebarConnectionShortcut,
   isExecuteSqlShortcut,
@@ -27,6 +28,7 @@ import {
   isSwitchToPreviousTabShortcut,
   isCopyCurrentRowShortcut,
   isDeleteCurrentRowShortcut,
+  isEditCellShortcut,
   isToggleResultsPaneShortcut,
   isToggleTransposeShortcut,
   isZoomInShortcut,
@@ -294,6 +296,14 @@ test("matches the platform modifier for closing query tabs", () => {
   assert.equal(isCloseTabShortcut({ key: "w", ctrlKey: true }, { closeTab: "Meta+W" } as any), true);
 });
 
+test("matches the shortcut for closing window", () => {
+  assert.equal(isCloseWindowShortcut({ key: "W", metaKey: true, shiftKey: true }), true);
+  assert.equal(isCloseWindowShortcut({ key: "W", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(isCloseWindowShortcut({ key: "w", metaKey: true, shiftKey: true }), true);
+  assert.equal(isCloseWindowShortcut({ key: "w", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(isCloseWindowShortcut({ key: "q", ctrlKey: true }, { closeWindow: "Mod+Q" }), true);
+});
+
 test("matches platform shortcuts for closing other tabs", () => {
   // macOS 默认 ⌥⌘W：Option 会把 event.key 变形（⌥W → "∑"），按 code 回退匹配。
   // 平台默认集合内的值会被 normalize 按本机平台还原（云同步自愈），因此
@@ -425,6 +435,13 @@ test("matches Cmd+S for saving", () => {
 test("matches copy current row Mod+D by default while honoring custom shortcuts", () => {
   assert.equal(isCopyCurrentRowShortcut({ key: "d", metaKey: true }), true);
   assert.equal(isCopyCurrentRowShortcut({ key: "d", altKey: true }, { copyCurrentRow: "Alt+D" }), true);
+});
+
+test("matches edit cell F2 by default while honoring custom shortcuts", () => {
+  assert.equal(isEditCellShortcut({ key: "F2" }), true);
+  assert.equal(isEditCellShortcut({ key: "e", ctrlKey: true }, { editCell: "Mod+E" } as any), true);
+  assert.equal(isEditCellShortcut({ key: "F2" }, { editCell: "Mod+E" } as any), false);
+  assert.equal(isEditCellShortcut({ key: "F2", ctrlKey: true }), false);
 });
 
 test("matches Delete for deleting current row", () => {

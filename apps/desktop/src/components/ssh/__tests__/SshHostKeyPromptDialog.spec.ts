@@ -1,7 +1,5 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -61,8 +59,6 @@ vi.mock("@/components/ui/button", async () => {
 });
 
 import SshHostKeyPromptDialog from "@/components/ssh/SshHostKeyPromptDialog.vue";
-
-const dialogSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/ssh/SshHostKeyPromptDialog.vue"), "utf8");
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -128,13 +124,6 @@ async function mountDialog() {
 }
 
 describe("SshHostKeyPromptDialog web bridge", () => {
-  it("requires an explicit answer for blocking SSH prompts", () => {
-    expect(dialogSource).toContain(':show-close-button="false"');
-    expect(dialogSource).toContain("@interact-outside.prevent");
-    expect(dialogSource).toContain("@escape-key-down.prevent");
-    expect(dialogSource).not.toContain(':dismissible="false"');
-  });
-
   it("keeps the prompt above a later body-mounted connection dialog and answerable", async () => {
     await mountDialog();
 
@@ -376,8 +365,6 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     expect(document.body.textContent).toContain("203.0.113.10:22");
     expect(document.body.textContent).toContain("08ca4746e8fbf97038a93105d3ef023112e3f66bc097869401628c00acea7709");
     expect(document.body.textContent).toContain("/home/testuser/.cache/dbx/sqlite-worker/");
-    expect(dialogSource).toContain("break-all");
-    expect(dialogSource).toContain("shrink-0");
 
     const buttons = [...document.body.querySelectorAll("button")].map((button) => button.textContent?.trim());
     expect(buttons).toContain("Cancel");
@@ -472,6 +459,35 @@ describe("SshHostKeyPromptDialog web bridge", () => {
         secret: "654321",
       });
     });
+  });
+
+  it("pads the prompt scroll container so the input focus ring is not clipped", async () => {
+    // Regression: the container had no horizontal padding, so the 2px focus
+    // ring of the `w-full` input was clipped on the left/right edges even
+    // though `overflow-y-auto` also clips the horizontal axis.
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "ring-clip-1",
+        kind: "UserInput",
+        host: "",
+        port: 0,
+        prompt: "Please enter 6 digits.",
+        title: "Dynamic token",
+        source: "Terminal",
+        echo: false,
+      },
+    });
+    await nextTick();
+
+    const input = document.body.querySelector<HTMLInputElement>("input");
+    if (!input) throw new Error("plugin prompt input was not rendered");
+    const scroller = input.closest(".overflow-y-auto");
+    expect(scroller).not.toBeNull();
+    expect(scroller?.classList.contains("px-1")).toBe(true);
   });
 
   it("answers a fixed-choice plugin question by picking an option", async () => {

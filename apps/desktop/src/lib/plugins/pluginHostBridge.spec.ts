@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { reactive, readonly } from "vue";
 import { MAX_CONCURRENT_PLUGIN_DATA_QUERIES, PLUGIN_CLIPBOARD_AUDIT_CAPACITY, PluginHostBridge, clipboardReadGateAllows, createClipboardReadGate, pluginSandboxDocument, pluginSdkSource, recordClipboardRead } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginResultViewContribution, PluginWorkbenchContribution } from "@/types/database";
+import type { PluginConnectionSummary } from "@/types/pluginConnection";
 
 function plugin(permissions: string[] = [], contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
@@ -17,7 +18,7 @@ describe("PluginHostBridge", () => {
   it("host.listConnections returns a read-only secret-free list scoped to the calling plugin", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
-    const listConnections = vi.fn(() => [{ id: "conn-1", name: "Prod", providerId: "sample.connection", connectionType: "sample", readOnly: true }]);
+    const listConnections = vi.fn((_pluginId?: string, _options?: { all?: boolean }): PluginConnectionSummary[] => [{ id: "conn-1", name: "Prod", dbType: "sample", dialect: "sample", connected: true, isConnected: true, providerId: "sample.connection", connectionType: "sample", readOnly: true }]);
     const contributions = [
       { type: "connection-provider", id: "sample.connection", label: "Sample", database_type: "sample", fields: [] },
       { type: "workbench", id: "sample.main", label: "Sample" },
@@ -36,6 +37,96 @@ describe("PluginHostBridge", () => {
     } as MessageEvent);
     await vi.waitFor(() => expect(listConnections).toHaveBeenCalledWith("sample"));
     expect(messages[0]).toMatchObject({ source: "dbx-host", type: "response", id: "9", result: [{ id: "conn-1", name: "Prod", providerId: "sample.connection", readOnly: true }] });
+  });
+
+  it("host.getConnections and host.listConnections require host.connections:read for all connections", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const listAllConnections = vi.fn(() => [
+      { id: "conn-1", name: "MySQL Main", dbType: "mysql", dialect: "mysql", connected: true, isConnected: true, readOnly: false },
+      { id: "conn-2", name: "PG Replica", dbType: "postgres", dialect: "postgres", connected: false, isConnected: false, readOnly: true },
+    ]);
+    const bridge = new PluginHostBridge(plugin(["host.connections:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      listAllConnections,
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "10", method: "host.getConnections", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(listAllConnections).toHaveBeenCalled());
+    expect(messages[0]).toMatchObject({
+      source: "dbx-host",
+      type: "response",
+      id: "10",
+      result: [
+        { id: "conn-1", name: "MySQL Main", dbType: "mysql", dialect: "mysql", connected: true, isConnected: true },
+        { id: "conn-2", name: "PG Replica", dbType: "postgres", dialect: "postgres", connected: false, isConnected: false },
+      ],
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "11", method: "host.listConnections", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages.length).toBe(2));
+    expect(messages[1]).toMatchObject({
+      source: "dbx-host",
+      type: "response",
+      id: "11",
+      result: [
+        { id: "conn-1", name: "MySQL Main" },
+        { id: "conn-2", name: "PG Replica" },
+      ],
+    });
+  });
+
+  it("host.getConnections accepts host.connections::read alias", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const listAllConnections = vi.fn(() => [{ id: "c1", name: "Test", dbType: "sqlite", dialect: "sqlite", connected: true, isConnected: true, readOnly: false }]);
+    const bridge = new PluginHostBridge(plugin(["host.connections::read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      listAllConnections,
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "alias-1", method: "host.getConnections", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(listAllConnections).toHaveBeenCalled());
+    expect(messages[0]).toMatchObject({ source: "dbx-host", type: "response", id: "alias-1", result: [{ id: "c1", name: "Test" }] });
+  });
+
+  it("rejects host.getConnections when host.connections:read is not declared", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(["host.workbench"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      listAllConnections: vi.fn(),
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "err-1", method: "host.getConnections", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages.length).toBe(1));
+    expect(messages[0]).toMatchObject({
+      source: "dbx-host",
+      type: "response",
+      id: "err-1",
+      error: expect.stringContaining("host.connections:read"),
+    });
   });
 
   it("streams downloads under the owning plugin, scopes cancellation and reports native capability", async () => {
@@ -435,6 +526,72 @@ describe("PluginHostBridge", () => {
     request("default", { contributionId: "sample.other" });
     await vi.waitFor(() => expect(messages).toHaveLength(2));
     expect(openWorkbench).toHaveBeenNthCalledWith(2, "sample", "sample.other", undefined, { forceNew: false });
+  });
+
+  it("rejects host.setTitle and host.getTitle without host.workbench permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      setTitle: vi.fn(),
+      getTitle: vi.fn(),
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "t1", method: "host.setTitle", params: { title: "Custom Title" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "t1", error: "Plugin has not declared permission 'host.workbench'" });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "t2", method: "host.getTitle" },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(messages[1]).toMatchObject({ id: "t2", error: "Plugin has not declared permission 'host.workbench'" });
+  });
+
+  it("handles host.setTitle and host.getTitle with host.workbench permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const setTitle = vi.fn();
+    const getTitle = vi.fn(() => "Current Title");
+    const bridge = new PluginHostBridge(plugin(["host.workbench"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      setTitle,
+      getTitle,
+    });
+
+    const request = (id: string, method: string, params?: unknown) =>
+      bridge.handleWindowMessage({
+        source: target,
+        data: { source: "dbx-plugin", version: 1, type: "request", id, method, params },
+      } as MessageEvent);
+
+    request("set-1", "host.setTitle", { title: "  My Tab  " });
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(setTitle).toHaveBeenLastCalledWith("My Tab");
+    expect(messages[0]).toMatchObject({ id: "set-1", result: null });
+
+    request("set-2", "host.setTitle", { title: null });
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(setTitle).toHaveBeenLastCalledWith(null);
+
+    request("set-3", "host.setTitle", { title: "   " });
+    await vi.waitFor(() => expect(messages).toHaveLength(3));
+    expect(setTitle).toHaveBeenLastCalledWith(null);
+
+    request("get-1", "host.getTitle");
+    await vi.waitFor(() => expect(messages).toHaveLength(4));
+    expect(getTitle).toHaveBeenCalled();
+    expect(messages[3]).toMatchObject({ id: "get-1", result: "Current Title" });
   });
 
   it("routes host.executeCommand to the surface handler scoped to the calling plugin", async () => {
@@ -1032,18 +1189,24 @@ describe("PluginHostBridge", () => {
   });
 
   it("injects a <base> and widens resource CSP sources for the plugin asset origin", () => {
-    const document = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, { baseUrl: "dbx-plugin://localhost/io.github.t8y2.s3/assets/" });
+    const document = pluginSandboxDocument('<html><head></head><body><script type="module" src="dbx-plugin://localhost/io.github.t8y2.s3/entry/app.mjs"></script><script type="module" src="https://cdn.example.test/app.mjs"></script></body></html>', [], undefined, {
+      baseUrl: "dbx-plugin://localhost/io.github.t8y2.s3/assets/",
+    });
     expect(document).toContain('<base href="dbx-plugin://localhost/io.github.t8y2.s3/assets/">');
     expect(document).toContain("script-src 'unsafe-inline' blob: dbx-plugin:;");
     expect(document).toContain("font-src data: blob: dbx-plugin:;");
+    expect(document).toContain('src="dbx-plugin://localhost/io.github.t8y2.s3/entry/app.mjs"');
+    const scriptPolicy = document.match(/script-src[^;]+;/)?.[0] ?? "";
+    expect(scriptPolicy).not.toContain("https://cdn.example.test");
     // <base> leads the head injection so inlined CSS url() resolves against it.
     expect(document.indexOf("<base ")).toBeLessThan(document.indexOf("<style>"));
   });
 
   it("allows the WebView2-mapped asset origin exactly", () => {
-    const document = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, { baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/" });
+    const document = pluginSandboxDocument('<html><head></head><body><script type="module" src="http://dbx-plugin.localhost/io.github.t8y2.s3/entry/app.mjs"></script></body></html>', [], undefined, { baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/" });
     expect(document).toContain("script-src 'unsafe-inline' blob: http://dbx-plugin.localhost;");
     expect(document).toContain('<base href="http://dbx-plugin.localhost/io.github.t8y2.s3/assets/">');
+    expect(document).toContain('src="http://dbx-plugin.localhost/io.github.t8y2.s3/entry/app.mjs"');
   });
 
   it("rejects malformed asset base URLs without touching the CSP", () => {
@@ -1057,6 +1220,22 @@ describe("PluginHostBridge", () => {
     expect(document).toContain("script-src 'unsafe-inline' blob:;");
     expect(document).toContain("font-src data: blob:;");
     expect(document).not.toContain("<base ");
+  });
+
+  it("adds unsafe-eval to script-src only for the granted plugin", () => {
+    const granted = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, {
+      baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/",
+      allowUnsafeEval: true,
+    });
+    expect(granted).toContain("script-src 'unsafe-inline' 'unsafe-eval' blob: http://dbx-plugin.localhost;");
+    // The grant is scoped to script-src; no other directive picks it up.
+    expect(granted).toContain("style-src 'unsafe-inline' blob:;");
+    expect(granted).not.toContain("img-src data: blob: http://dbx-plugin.localhost 'unsafe-eval'");
+
+    const withheld = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, {
+      baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/",
+    });
+    expect(withheld).not.toContain("unsafe-eval");
   });
 
   it("pre-seeds the current theme as the sandbox first paint", () => {
@@ -1645,11 +1824,22 @@ describe("PluginHostBridge", () => {
 describe("plugin SDK source", () => {
   interface SdkWindow {
     dbxPlugin?: {
+      ready: Promise<unknown>;
+      contributionId?: string;
+      context?: Record<string, unknown>;
+      onInit: (listener: (context: unknown) => void) => () => void;
       invoke: (method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
       getPlanCapabilities: (connectionId: string) => Promise<unknown>;
       explainPlan: (request: unknown) => Promise<unknown>;
       getTableMetadata: (context: unknown) => Promise<unknown>;
+      setTitle: (title: string | null) => Promise<unknown>;
+      getTitle: () => Promise<unknown>;
+      workbench: {
+        setTitle: (title: string | null) => Promise<unknown>;
+        getTitle: () => Promise<unknown>;
+      };
     };
+    receiveHostMessage: (message: unknown) => void;
   }
 
   function loadSdk(posted: unknown[], initialTheme?: { appearance: "dark" | "light"; tokens: Record<string, string> }): SdkWindow {
@@ -1661,10 +1851,19 @@ describe("plugin SDK source", () => {
       },
       dispatchEvent: vi.fn(),
     } as unknown as Document;
+    let onMessage: ((event: MessageEvent) => void) | undefined;
+    const parent = { postMessage: (message: unknown) => posted.push(message) };
+    const addEventListener = (type: string, listener: (event: MessageEvent) => void) => {
+      if (type === "message") onMessage = listener;
+    };
     // The SDK IIFE only touches window and the bare-global addEventListener at
     // boot; parent.postMessage is captured for later request() calls, so a
     // stub window/parent is enough here.
-    new Function("window", "parent", "addEventListener", "document", pluginSdkSource(initialTheme))(sandbox, { postMessage: (message: unknown) => posted.push(message) }, () => {}, document);
+    new Function("window", "parent", "addEventListener", "document", pluginSdkSource(initialTheme))(sandbox, parent, addEventListener, document);
+    sandbox.receiveHostMessage = (message) => {
+      if (!onMessage) throw new Error("SDK did not register its host-message listener");
+      onMessage({ source: parent, data: message } as unknown as MessageEvent);
+    };
     return sandbox;
   }
 
@@ -1702,6 +1901,51 @@ describe("plugin SDK source", () => {
 
     expect(dbxPlugin).toBeDefined();
     expect(posted[0]).toMatchObject({ source: "dbx-plugin", type: "ready" });
+  });
+
+  it("exposes the opened contribution after ready when init was already delivered and context is empty", async () => {
+    const sdkMessages: unknown[] = [];
+    const hostMessages: unknown[] = [];
+    const sdk = loadSdk(sdkMessages);
+    const probe: PluginWorkbenchContribution = { type: "workbench", id: "sample.probe", label: "Probe" };
+    const generation: PluginWorkbenchContribution = { type: "workbench", id: "sample.generation", label: "Generation" };
+    const target = { postMessage: (message: unknown) => hostMessages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin([], [probe, generation]), generation, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+
+    bridge.sendInit();
+    const init = hostMessages[0] as Record<string, unknown>;
+    expect(init).toMatchObject({ type: "init", contributionId: "sample.generation", context: {} });
+    sdk.receiveHostMessage(init);
+
+    await sdk.dbxPlugin!.ready;
+
+    expect(sdk.dbxPlugin!.contributionId).toBe("sample.generation");
+    expect(sdk.dbxPlugin!.contributionId).not.toBe(probe.id);
+    expect(sdk.dbxPlugin!.context).toEqual({});
+    const lateInit = vi.fn();
+    sdk.dbxPlugin!.onInit(lateInit);
+    expect(lateInit).toHaveBeenCalledWith({});
+  });
+
+  it("sets contribution identity independently of table context before ready and onInit", async () => {
+    const sdk = loadSdk([]);
+    const hostMessages: unknown[] = [];
+    const tableContext = { connectionId: "connection-1", database: "app", schema: "public", table: "orders" };
+    const generation: PluginWorkbenchContribution = { type: "workbench", id: "sample.generation", label: "Generation" };
+    const target = { postMessage: (message: unknown) => hostMessages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin([], [generation]), generation, tableContext, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    let observed: { context: unknown; contributionId?: string } | undefined;
+    sdk.dbxPlugin!.onInit((context) => {
+      observed = { context, contributionId: sdk.dbxPlugin!.contributionId };
+    });
+
+    bridge.sendInit();
+    sdk.receiveHostMessage(hostMessages[0]);
+    await sdk.dbxPlugin!.ready;
+
+    expect(observed).toEqual({ context: tableContext, contributionId: "sample.generation" });
+    expect(sdk.dbxPlugin!.context).toEqual(tableContext);
+    expect(sdk.dbxPlugin!.contributionId).toBe("sample.generation");
   });
 
   it("keeps cloneable values intact and plain scalars by reference", () => {
@@ -1745,6 +1989,29 @@ describe("plugin SDK source", () => {
     const request = firstRequest(posted);
     expect(request.method).toBe("host.getTableMetadata");
     expect(request.params).toEqual({ connectionId: "c1", database: "app", table: "users" });
+  });
+
+  it("exposes setTitle and getTitle on window.dbxPlugin and window.dbxPlugin.workbench", () => {
+    const posted: unknown[] = [];
+    const { dbxPlugin } = loadSdk(posted);
+
+    void dbxPlugin!.setTitle("New Tab Name");
+    void dbxPlugin!.getTitle();
+    void dbxPlugin!.workbench.setTitle(null);
+    void dbxPlugin!.workbench.getTitle();
+
+    const requests = posted.filter((message) => (message as { type: string }).type === "request") as {
+      method: string;
+      params: Record<string, unknown>;
+    }[];
+
+    expect(requests).toHaveLength(4);
+    expect(requests[0].method).toBe("host.setTitle");
+    expect(requests[0].params).toEqual({ title: "New Tab Name" });
+    expect(requests[1].method).toBe("host.getTitle");
+    expect(requests[2].method).toBe("host.setTitle");
+    expect(requests[2].params).toEqual({ title: null });
+    expect(requests[3].method).toBe("host.getTitle");
   });
 
   it("forwards fileTransfer requests to the host api", async () => {
@@ -2028,5 +2295,24 @@ describe("AI completion bridge", () => {
     await vi.waitFor(() => expect(cancelAiGeneration.mock.calls.length).toBeGreaterThanOrEqual(0));
     bridge.dispose();
     expect(cancelAiGeneration).toHaveBeenCalledWith("gen-1");
+  });
+
+  it("exposes connection enumeration in the sandbox SDK and advertises connectionsApi capability", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("getConnections: () => request('host.getConnections', {})");
+    expect(source).toContain("listConnections: (options) => request('host.listConnections', options || {})");
+    expect(source).toContain("connections: Object.freeze({");
+
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(["host.connections:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      listAllConnections: vi.fn(() => []),
+    });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } } as MessageEvent);
+    expect(messages.some((m) => m.type === "init" && m.capabilities?.connectionsApi === true)).toBe(true);
   });
 });

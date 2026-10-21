@@ -164,13 +164,12 @@ async fn build_adapter_with_connect_timeout(
     mqc: MqAdminConfig,
     agent_launch: Option<AgentLaunchSpec>,
 ) -> Result<Arc<dyn MessageQueueAdmin>, String> {
-    let budget = mqc.connect_timeout();
-    // RocketMQ: TCP-probe NameServer outside the connect wall so cold JVM spawn
-    // retains the full connect_timeout (probe used to steal up to half of it).
+    let budget = mqc.adapter_connect_timeout();
+    // Probe the messaging target outside the agent connect wall: NameServer in
+    // remoting mode, Proxy in gRPC mode. Optional management cannot block messaging.
     if mqc.system_kind == MqSystemKindInternal::RocketMq {
-        // Probe runs outside the connect wall; scale with Advanced connect_timeout (no hard 5s cap).
-        let probe_budget = (budget / 2).max(std::time::Duration::from_millis(500));
-        crate::mq::adapters::rocketmq::probe_namesrv_before_connect(&mqc, probe_budget).await?;
+        let probe_budget = (mqc.connect_timeout() / 2).max(std::time::Duration::from_millis(500));
+        crate::mq::adapters::rocketmq::probe_before_connect(&mqc, probe_budget).await?;
     }
     match tokio::time::timeout(budget, build_adapter(mqc, agent_launch)).await {
         Ok(result) => result,
@@ -223,5 +222,34 @@ async fn build_adapter(
             let adapter = RabbitMqAdmin::new(mqc, launch).await?;
             Ok(Arc::new(adapter))
         }
+    }
+}
+
+#[cfg(test)]
+mod proxy_config_tests {
+    use super::*;
+
+    #[test]
+    fn rocketmq_transport_changes_invalidate_adapter_fingerprint() {
+        let base: MqAdminConfig = serde_json::from_value(serde_json::json!({
+            "systemKind": "rocketmq", "adminUrl": "",
+            "extra": { "namesrvAddr": "ns.internal:9876" }
+        }))
+        .unwrap();
+        let original = adapter_fingerprint(&base, None);
+        for (key, value) in [
+            ("connectionMode", serde_json::json!("proxy")),
+            ("proxyEndpoint", serde_json::json!("proxy.internal:8081")),
+            ("proxyTls", serde_json::json!(false)),
+            ("managementEnabled", serde_json::json!(true)),
+        ] {
+            let mut changed = base.clone();
+            changed.extra[key] = value;
+            assert_ne!(adapter_fingerprint(&changed, None), original, "{key}");
+        }
+        let changed = base.clone().with_connect_override("127.0.0.1", 32000);
+        assert_ne!(adapter_fingerprint(&changed, None), original);
+        let changed = base.with_socks_proxy("127.0.0.1", 1080, "", "");
+        assert_ne!(adapter_fingerprint(&changed, None), original);
     }
 }

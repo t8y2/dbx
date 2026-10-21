@@ -242,7 +242,7 @@ fn referenced_databases(
     include_read_references: bool,
 ) -> ReferencedDatabaseAssessment {
     let mut assessment = ReferencedDatabaseAssessment::default();
-    let cleaned = sql_target_safety_text(sql);
+    let cleaned = sql_target_safety_text(sql, db_type);
     let mut use_database = String::new();
     let normalized_active_database = normalize_database_name(active_database);
 
@@ -518,6 +518,7 @@ fn schema_first_qualifier_type(db_type: &DatabaseType) -> bool {
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
             | DatabaseType::Vastbase
+            | DatabaseType::Gbase8c
             | DatabaseType::Yashandb
             | DatabaseType::Oracle
             | DatabaseType::OceanbaseOracle
@@ -533,6 +534,7 @@ fn schema_first_qualifier_type(db_type: &DatabaseType) -> bool {
             | DatabaseType::Xugu
             | DatabaseType::Oscar
             | DatabaseType::Gbase
+            | DatabaseType::Gbase8s
             | DatabaseType::SapHana
             | DatabaseType::SqlServer
             | DatabaseType::Snowflake
@@ -567,14 +569,127 @@ fn is_transaction_keyword(keyword: &str) -> bool {
     matches!(keyword, "begin" | "start" | "commit" | "rollback" | "abort" | "savepoint" | "release" | "end" | "declare")
 }
 
-fn sql_target_safety_text(sql: &str) -> SqlTargetSafetyText {
+fn sql_target_safety_text(sql: &str, db_type: &DatabaseType) -> SqlTargetSafetyText {
     let chars: Vec<char> = sql.chars().collect();
     let mut result = SqlTargetSafetyText { text: String::with_capacity(sql.len()), quoted_identifiers: HashMap::new() };
-    append_sql_target_safety_text(&chars, &mut result);
+    append_sql_target_safety_text(&chars, SqlScanLexerRules::for_database_type(db_type), &mut result);
     result
 }
 
-fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyText) {
+/// Lexer rules this scan reads. Everything the scan removes is text no target can
+/// be found in, so claiming a feature the connection does not have hides writes
+/// from the production gate: `SELECT * FROM #tmp; DELETE FROM prod_db.dbo.users;`
+/// and `SELECT 'dir\'; DELETE FROM prod_db.dbo.users;` on SQL Server both lose the
+/// `DELETE` when `#` and backslashes are read as MySQL constructs. Only features
+/// the engine really has are assumed here, which can only make the gate stricter.
+#[derive(Clone, Copy)]
+struct SqlScanLexerRules {
+    /// `#` starts a line comment: a MySQL family feature. On SQL Server `#tmp` is
+    /// a temporary table, so the rest of the line is still SQL.
+    hash_line_comments: bool,
+    /// A backslash escapes the next character inside an ordinary `'...'` string.
+    backslash_escaped_quotes: bool,
+    /// `E'...'` literals escape with a backslash (PostgreSQL family).
+    postgres_escape_strings: bool,
+    /// `q'...'` / `nq'...'` alternative-quoted literals (Oracle family).
+    oracle_alternative_quotes: bool,
+}
+
+impl SqlScanLexerRules {
+    fn for_database_type(db_type: &DatabaseType) -> Self {
+        let mysql_family = matches!(
+            db_type,
+            DatabaseType::Mysql
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::ManticoreSearch
+                | DatabaseType::Goldendb
+        );
+        let postgres_family = matches!(
+            db_type,
+            DatabaseType::Postgres
+                | DatabaseType::OpenGauss
+                | DatabaseType::Gaussdb
+                | DatabaseType::Vastbase
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Gbase8c
+                | DatabaseType::Kwdb
+        );
+        let oracle_family = matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle);
+        Self {
+            hash_line_comments: mysql_family,
+            // Only claim the escape where the engine has it: MySQL, and
+            // PostgreSQL inside `E'...'`. Everywhere else a literal backslash can
+            // only make this scan see more text, which asks for confirmation
+            // sooner instead of hiding a write. (`ClickHouse` and Hive do escape,
+            // so they may ask once too often — the safe direction here.)
+            backslash_escaped_quotes: mysql_family,
+            postgres_escape_strings: postgres_family,
+            oracle_alternative_quotes: oracle_family,
+        }
+    }
+}
+
+/// True when `prefix` ends with a PostgreSQL `E'`/`e'` introducer that starts its
+/// own token, so `DATE'2020-01-01'` and `x$e'...'` are ordinary strings.
+fn ends_with_escape_string_prefix(prefix: &[char]) -> bool {
+    let mut chars = prefix.iter().rev();
+    if !matches!(chars.next(), Some('E' | 'e')) {
+        return false;
+    }
+    !chars.next().is_some_and(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '$')
+}
+
+/// Oracle alternative quoting: `q'...'` / `nq'...'` literals delimited by
+/// `[`/`]`, `{`/`}`, `(`/`)`, `<`/`>` or a self-delimiting character, where the
+/// quote character may appear inside the literal unchanged. The literal ends at
+/// the first `closer + '` — Oracle has no escape or nesting inside these
+/// literals. Mirrors `readOracleAlternativeQuoteEnd` in
+/// `apps/desktop/src/lib/sql/sqlRisk.ts`.
+fn read_oracle_alternative_quote_end(chars: &[char], index: usize) -> Option<usize> {
+    let mut quote_index = index;
+    match chars.get(index)? {
+        'n' | 'N' => {
+            if !matches!(chars.get(index + 1), Some('q' | 'Q')) {
+                return None;
+            }
+            quote_index += 1;
+        }
+        'q' | 'Q' => {}
+        _ => return None,
+    }
+    if chars.get(quote_index + 1) != Some(&'\'') {
+        return None;
+    }
+    // The introducer must start its own token, so `aq'...'` and `q '...'` stay
+    // ordinary strings. Oracle identifiers may contain `$` and `#`.
+    if chars[..index].last().is_some_and(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '$' || *ch == '#') {
+        return None;
+    }
+    let opener = *chars.get(quote_index + 2)?;
+    if opener.is_whitespace() {
+        return None;
+    }
+    let closer = match opener {
+        '[' => ']',
+        '{' => '}',
+        '(' => ')',
+        '<' => '>',
+        other => other,
+    };
+    let mut scan = quote_index + 3;
+    while scan + 1 < chars.len() {
+        if chars[scan] == closer && chars[scan + 1] == '\'' {
+            return Some(scan + 2);
+        }
+        scan += 1;
+    }
+    Some(chars.len())
+}
+
+fn append_sql_target_safety_text(chars: &[char], rules: SqlScanLexerRules, result: &mut SqlTargetSafetyText) {
     let mut index = 0usize;
 
     while index < chars.len() {
@@ -589,7 +704,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             result.text.push(' ');
             continue;
         }
-        if ch == '#' {
+        if ch == '#' && rules.hash_line_comments {
             index += 1;
             while index < chars.len() && chars[index] != '\n' && chars[index] != '\r' {
                 index += 1;
@@ -601,7 +716,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             if let Some((body, close_index)) = mysql_executable_comment_body(chars, index) {
                 result.text.push(' ');
                 let body_chars: Vec<char> = body.chars().collect();
-                append_sql_target_safety_text(&body_chars, result);
+                append_sql_target_safety_text(&body_chars, rules, result);
                 result.text.push(' ');
                 index = close_index;
             } else {
@@ -623,8 +738,15 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             result.text.push(' ');
             continue;
         }
+        if rules.oracle_alternative_quotes && matches!(ch, 'q' | 'Q' | 'n' | 'N') {
+            if let Some(end) = read_oracle_alternative_quote_end(chars, index) {
+                index = end;
+                result.text.push(' ');
+                continue;
+            }
+        }
         if ch == '\'' {
-            index = skip_string_literal(chars, index, '\'', '\'');
+            index = skip_string_literal(chars, index, '\'', '\'', rules);
             result.text.push(' ');
             continue;
         }
@@ -684,10 +806,13 @@ fn dollar_quote_tag_at(chars: &[char], start: usize) -> Option<(String, usize)> 
     Some((tag, index - start + 1))
 }
 
-fn skip_string_literal(chars: &[char], start: usize, open: char, close: char) -> usize {
+fn skip_string_literal(chars: &[char], start: usize, open: char, close: char, rules: SqlScanLexerRules) -> usize {
+    let backslash_escapes = matches!(open, '\'' | '"')
+        && (rules.backslash_escaped_quotes
+            || (rules.postgres_escape_strings && open == '\'' && ends_with_escape_string_prefix(&chars[..start])));
     let mut index = start + 1;
     while index < chars.len() {
-        if chars[index] == '\\' && matches!(open, '\'' | '"') {
+        if backslash_escapes && chars[index] == '\\' {
             index += 2;
             continue;
         }
@@ -740,7 +865,7 @@ fn append_quoted_identifier_token(
 mod tests {
     use super::{
         is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
-        targets_production_database,
+        sql_target_safety_text, targets_production_database,
     };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use serde::Deserialize;
@@ -780,6 +905,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: vec![],
             init_script: None,
             color: None,
@@ -787,6 +913,8 @@ mod tests {
             connect_timeout_secs: 10,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: 30,
             ssl: false,
             ca_cert_path: String::new(),
@@ -808,6 +936,7 @@ mod tests {
             redis_scan_page_size: Some(1000),
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -822,6 +951,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec!["prod_app".to_string()],
+            production_badge_scope: None,
             database_info: None,
         }
     }
@@ -860,6 +990,74 @@ mod tests {
             "SELECT * FROM prod_app.users; DELETE FROM staging.users WHERE id = 1"
         ));
         assert!(targets_production_database(&config(), "staging", "USE prod_app"));
+    }
+
+    #[test]
+    fn reads_sqlserver_temp_tables_as_sql_instead_of_a_comment() {
+        let config = ConnectionConfig { db_type: DatabaseType::SqlServer, ..config() };
+
+        assert!(targets_production_database(&config, "staging", "SELECT * FROM #tmp; DELETE FROM prod_app.dbo.users;"));
+    }
+
+    #[test]
+    fn reads_sqlserver_backslash_strings_as_literal_data() {
+        let config = ConnectionConfig { db_type: DatabaseType::SqlServer, ..config() };
+
+        // T-SQL escapes a quote by doubling it, so `'dir\'` ends at the second quote
+        // and the DELETE behind it still targets production.
+        assert!(targets_production_database(&config, "staging", r#"SELECT 'dir\'; DELETE FROM prod_app.dbo.users;"#));
+    }
+
+    #[test]
+    fn keeps_mysql_hash_comments_and_backslash_escapes() {
+        let mysql = config();
+
+        assert!(!targets_production_database(&mysql, "staging", "SELECT 1; # DELETE FROM prod_app.users"));
+        assert!(!targets_production_database(&mysql, "staging", r#"SELECT 'it\'s; DELETE FROM prod_app.users;'"#));
+    }
+
+    #[test]
+    fn scans_postgres_strings_by_the_dialect_lexer_rules() {
+        let plain = sql_target_safety_text(r#"SELECT 'dir\'; DELETE FROM users;"#, &DatabaseType::Postgres);
+        assert!(plain.text.contains("DELETE FROM users"), "{}", plain.text);
+
+        let escape_string = sql_target_safety_text(r#"SELECT E'it\'s; DELETE FROM users;'"#, &DatabaseType::Postgres);
+        assert!(!escape_string.text.contains("DELETE FROM users"), "{}", escape_string.text);
+    }
+
+    #[test]
+    fn scans_oracle_alternative_quoted_strings_by_the_dialect_lexer_rules() {
+        for literal in ["q'[O'Reilly]'", "nq'{O'Reilly}'", "Q'<O'Reilly>'", "q'!O'Reilly!'"] {
+            let sql = format!("SELECT {literal} FROM dual; DELETE FROM users;");
+            // The quote inside q'...' is literal, so the DELETE after the
+            // literal is real code and must stay visible to the gate.
+            let scanned = sql_target_safety_text(&sql, &DatabaseType::Oracle);
+            assert!(scanned.text.contains("DELETE FROM users"), "{literal}: {}", scanned.text);
+            let scanned = sql_target_safety_text(&sql, &DatabaseType::OceanbaseOracle);
+            assert!(scanned.text.contains("DELETE FROM users"), "{literal}: {}", scanned.text);
+        }
+
+        // SQL-looking text inside the literal stays literal data.
+        let inside =
+            sql_target_safety_text(r#"SELECT q'[it's; DELETE FROM users;]' FROM dual;"#, &DatabaseType::Oracle);
+        assert!(!inside.text.contains("DELETE FROM users"), "{}", inside.text);
+    }
+
+    #[test]
+    fn keeps_alternative_quoting_specific_to_the_oracle_family() {
+        // Oracle reads the whole `q'[O' AS label FROM dual;` as an unterminated
+        // alternative-quoted literal; PostgreSQL has no `q'...'` introducer.
+        let oracle = sql_target_safety_text("SELECT q'[O' AS label FROM dual;", &DatabaseType::Oracle);
+        assert!(!oracle.text.contains("AS label"), "{}", oracle.text);
+        let postgres = sql_target_safety_text("SELECT q'[O' AS label FROM dual;", &DatabaseType::Postgres);
+        assert!(postgres.text.contains("AS label"), "{}", postgres.text);
+    }
+
+    #[test]
+    fn keeps_an_identifier_character_before_q_out_of_the_alternative_quote_rules() {
+        // `aq` is one identifier, so the following literal is ordinary.
+        let scanned = sql_target_safety_text(r#"SELECT aq'[x]' FROM dual; DELETE FROM users;"#, &DatabaseType::Oracle);
+        assert!(scanned.text.contains("DELETE FROM users"), "{}", scanned.text);
     }
 
     #[test]

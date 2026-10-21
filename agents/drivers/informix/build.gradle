@@ -1,6 +1,6 @@
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'com.ibm.informix:jdbc:4.50.10'
+    implementation 'com.ibm.informix:jdbc:4.50.14'
 }
 
 tasks.named('shadowJar') {

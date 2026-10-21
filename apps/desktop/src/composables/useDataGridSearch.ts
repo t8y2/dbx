@@ -34,6 +34,9 @@ export type UseDataGridSearchOptions<Row> = {
 const SEARCH_TOKEN_SEPARATOR = /[\s,()><=!&|]+/;
 const SEARCH_TOKEN_SUFFIX = /([^\s,()><=!&|]+)$/;
 const SEARCH_PAIRS: Record<string, string> = { "'": "'", '"': '"', "(": ")" };
+// limitDataGridCellDisplay appends this marker when it caps a cell's display
+// text; a search miss on such a cell can hide a match past the cut (#11956).
+const TRUNCATED_CELL_SUFFIX = "...";
 
 export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   const searchText = ref("");
@@ -77,7 +80,17 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
       columns.forEach((_, col) => {
         if (options.isCellSearchable && !options.isCellSearchable(row, col)) return;
         const text = (pattern || sensitive) && options.getCellRawSearchText ? options.getCellRawSearchText(row, col) : options.getCellSearchText(row, col);
-        if (includes(text)) addMatch(displayRow, col);
+        if (includes(text)) {
+          addMatch(displayRow, col);
+          return;
+        }
+        // The cached display text may be truncated (hosts cap cell display
+        // length), so a plain miss can hide a match that sits past the cut.
+        // Re-check the full raw value of truncated cells — but not in replace
+        // mode, whose raw provider and scope stay display-driven.
+        if (!pattern && text.endsWith(TRUNCATED_CELL_SUFFIX) && options.getCellRawSearchText && includes(options.getCellRawSearchText(row, col))) {
+          addMatch(displayRow, col);
+        }
       });
     });
     return { keys, matchSet };

@@ -343,16 +343,43 @@ export async function renderCodeSnapshotHtml(source: CodeSnapshotSource, options
 export async function snapshotElementToPng(element: HTMLElement): Promise<string> {
   const domtoimage = (await import("dom-to-image-more")).default;
   // 预览区允许滚动，因此导出尺寸必须覆盖完整内容，而不是只取当前可见宽度。
-  const width = Math.max(element.offsetWidth, element.scrollWidth);
-  const height = Math.max(element.offsetHeight, element.scrollHeight);
-  const basePixels = width * height;
-  if (width > MAX_EXPORT_CANVAS_EDGE || height > MAX_EXPORT_CANVAS_EDGE || basePixels > MAX_EXPORT_CANVAS_PIXELS) {
-    throw new Error(`Snapshot is too large to export safely (${width} × ${height}px). Reduce the code size and try again.`);
+  const rect = typeof element.getBoundingClientRect === "function" ? element.getBoundingClientRect() : null;
+  let borderTop = 0;
+  let borderBottom = 0;
+  if (typeof window !== "undefined" && typeof window.getComputedStyle === "function" && element instanceof (window.Element || Object)) {
+    try {
+      const computedStyle = window.getComputedStyle(element);
+      borderTop = parseFloat(computedStyle.borderTopWidth) || 0;
+      borderBottom = parseFloat(computedStyle.borderBottomWidth) || 0;
+    } catch {
+      // Ignored for non-DOM elements in test runners
+    }
   }
 
+  let width = Math.max(element.offsetWidth || 0, element.scrollWidth || 0, rect ? Math.ceil(rect.width) : 0);
+  let height = Math.max(element.offsetHeight || 0, element.scrollHeight || 0, (element.scrollHeight || 0) + Math.ceil(borderTop + borderBottom), rect ? Math.ceil(rect.height) : 0);
+
+  if (rect && typeof element.querySelector === "function") {
+    // If element contains table rows, ensure height fully encloses the bottom edge of the last row
+    const lastRow = element.querySelector("tr:last-child");
+    if (lastRow && typeof lastRow.getBoundingClientRect === "function") {
+      const rowRect = lastRow.getBoundingClientRect();
+      const requiredHeight = Math.ceil(rowRect.bottom - rect.top) + Math.ceil(borderBottom);
+      if (requiredHeight > height) {
+        height = requiredHeight;
+      }
+    }
+  }
+
+  const basePixels = width * height;
   const targetScale = Math.min(MAX_EXPORT_PIXEL_RATIO, Math.max(1, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1));
+  // Keep the output canvas within browser limits without rejecting a larger
+  // source layout. Wide grids can still be captured safely by rasterizing the
+  // full DOM at a reduced scale.
   const scale = Math.min(targetScale, MAX_EXPORT_CANVAS_EDGE / width, MAX_EXPORT_CANVAS_EDGE / height, Math.sqrt(MAX_EXPORT_CANVAS_PIXELS / basePixels));
   const useLegacyLineNumberFallback = legacyWebViewExportFallbackEnabled();
+  const isGridSnapshot = typeof element.classList?.contains === "function" && element.classList.contains("dbx-grid-snapshot");
+  const hasOnclone = useLegacyLineNumberFallback || isGridSnapshot;
   return domtoimage.toPng(element, {
     quality: 1,
     width,
@@ -367,10 +394,15 @@ export async function snapshotElementToPng(element: HTMLElement): Promise<string
           return undefined;
         }
       : undefined,
-    onclone: useLegacyLineNumberFallback
+    onclone: hasOnclone
       ? (clone: Node) => {
-          if (typeof (clone as ParentNode).querySelectorAll === "function") {
+          if (useLegacyLineNumberFallback && typeof (clone as ParentNode).querySelectorAll === "function") {
             materializeSnapshotCloneLineNumbers(clone as ParentNode);
+          }
+          if (isGridSnapshot && clone && (clone as HTMLElement).style) {
+            // Prevent rigid fixed height from clipping table rows inside overflow:hidden
+            (clone as HTMLElement).style.height = "auto";
+            (clone as HTMLElement).style.minHeight = `${height}px`;
           }
         }
       : undefined,

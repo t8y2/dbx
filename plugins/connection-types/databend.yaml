@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 320
 dbType: databend
+compareModes: [schema, data]
 rustVariant: Databend
 label: Databend
 dialect: Databend

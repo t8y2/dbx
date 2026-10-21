@@ -135,6 +135,7 @@ async fn run_database_export_of_partition_tree_has_no_duplicates_and_replays() {
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),

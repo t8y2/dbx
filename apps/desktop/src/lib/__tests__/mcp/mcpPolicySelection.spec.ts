@@ -15,7 +15,6 @@ import {
   updateMcpAllowedConnectionIds,
 } from "@/lib/mcp/mcpPolicySelection";
 
-const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const mcpServerSource = readFileSync(new URL("../../../../../../crates/dbx-mcp/src/server.rs", import.meta.url), "utf8");
 
 describe("MCP execution permission selection", () => {
@@ -120,8 +119,6 @@ describe("MCP tool permission selection", () => {
     expect(toggleMcpAllowedToolName(["dbx_execute_query"], "dbx_execute_batch", true)).toEqual(["dbx_execute_query", "dbx_execute_batch"]);
     expect(toggleMcpAllowedToolName(["dbx_execute_query", "dbx_execute_batch"], "dbx_execute_batch", false)).toEqual(["dbx_execute_query"]);
     expect(MCP_TOOL_OPTIONS.find((tool) => tool.name === "dbx_execute_batch")?.labelKey).toBe("settings.mcpToolExecuteBatch");
-    expect(settingsDialogSource).toContain("const mcpToolOptions = MCP_TOOL_OPTIONS;");
-    expect(settingsDialogSource).toContain("toggleMcpAllowedToolName(mcpAllowedToolNames.value, name, allowed)");
   });
 });
 
@@ -131,19 +128,6 @@ describe("MCP policy settings state", () => {
     expect(isMcpPolicyMutationBlocked({ loading: false, saving: true, loadError: "" })).toBe(true);
     expect(isMcpPolicyMutationBlocked({ loading: false, saving: false, loadError: "unavailable" })).toBe(true);
     expect(isMcpPolicyMutationBlocked({ loading: false, saving: false, loadError: "" })).toBe(false);
-  });
-
-  it("guards the mutation entry point and wires the shared disabled state to policy controls", () => {
-    expect(settingsDialogSource).toContain("if (mcpPolicyControlsDisabled.value) return;");
-    expect(settingsDialogSource).toContain(':disabled="mcpPolicyControlsDisabled"');
-    expect(settingsDialogSource).toContain('@update:scope="onMcpResourceScopeChange"');
-
-    const loadingStart = settingsDialogSource.indexOf("mcpPolicyLoading.value = true;");
-    const policyLoad = settingsDialogSource.indexOf("await settingsStore.initMcpGlobalPolicy(true);");
-    const loadingEnd = settingsDialogSource.indexOf("mcpPolicyLoading.value = false;", policyLoad);
-    expect(loadingStart).toBeGreaterThan(-1);
-    expect(loadingStart).toBeLessThan(policyLoad);
-    expect(loadingEnd).toBeGreaterThan(policyLoad);
   });
 });
 

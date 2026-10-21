@@ -19,6 +19,8 @@ export const DEFAULT_SQL_LAYOUT_OPTIONS: SqlLayoutOptions = {
   linesBetweenQueries: 1,
   useTabs: false,
   fromClauseSourceOnSameLine: true,
+  commaPosition: "after",
+  newlineBeforeSemicolon: false,
 };
 
 export interface SqlLayoutRequest {
@@ -58,6 +60,7 @@ export async function formatSqlLayout(request: SqlLayoutRequest): Promise<string
   const options: SqlLayoutOptions = {
     ...DEFAULT_SQL_LAYOUT_OPTIONS,
     keywordCase: (request.cfg.keywordCase as SqlLayoutOptions["keywordCase"]) ?? "preserve",
+    newlineBeforeSemicolon: Boolean(request.options?.newlineBeforeSemicolon ?? request.cfg.newlineBeforeSemicolon),
     ...request.options,
   };
   // `indentStyle` selects sql-formatter's tabular layouts, which pad every clause

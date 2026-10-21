@@ -1631,9 +1631,26 @@ jobs:
       - name: Verify managed JDBC assets in all offline ZIPs
         run: node agents/scripts/verify_offline_jdbc_release.mjs release
 
+      - name: Fetch previous agent registry for delta patches
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        run: |
+          mkdir -p prev-release
+          if gh release download agents-latest --repo "$GITHUB_REPOSITORY" \
+              --pattern agent-registry.json --dir prev-release --clobber; then
+            echo "previous agent-registry.json fetched for delta generation"
+          else
+            echo "no previous agents-latest registry found; delta patches are skipped"
+            rm -rf prev-release
+          fi
+
       - name: Build single-driver packages
         run: |
-          python3 agents/scripts/build_driver_zips.py release --cleanup-sources
+          PREV_ARGS=()
+          if [ -f prev-release/agent-registry.json ]; then
+            PREV_ARGS+=(--previous-registry prev-release/agent-registry.json)
+          fi
+          python3 agents/scripts/build_driver_zips.py release --cleanup-sources "${PREV_ARGS[@]}"
           python3 -m json.tool release/agent-registry.json > /dev/null
           echo "=== final agent-registry.json ==="
           cat release/agent-registry.json
@@ -1776,12 +1793,48 @@ jobs:
           cat RELEASE_NOTES.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ steps.release-token.outputs.token }}
-          files: release/*
-          body_path: RELEASE_NOTES.md
-          make_latest: false
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Idempotent release publish: create the release only when missing and
+          # upload only assets it does not have yet, in small spaced batches.
+          # Re-uploading the full set on every retry trips GitHub secondary
+          # rate limits and dropped connections strand the whole job.
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # --draft=false: a tag deleted mid-recovery leaves the release as a
+            # draft, which /releases/tags then 404s for reuse jobs and users.
+            gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+              --notes-file RELEASE_NOTES.md --draft=false --latest=false >/dev/null
+          else
+            gh release create "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --title "$TAG_NAME" \
+              --notes-file RELEASE_NOTES.md --latest=false
+          fi
+
+          mapfile -t existing < <(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name')
+          declare -A have=()
+          for name in "${existing[@]:-}"; do
+            [ -n "$name" ] && have["$name"]=1
+          done
+
+          missing=()
+          for f in release/*; do
+            [ -f "$f" ] || continue
+            [ -n "${have["$(basename "$f")"]:-}" ] || missing+=("$f")
+          done
+          echo "release already has ${#existing[@]} assets; uploading ${#missing[@]} missing"
+
+          batch_size=5
+          i=0
+          while [ "$i" -lt "${#missing[@]}" ]; do
+            gh release upload "$TAG_NAME" "${missing[@]:$i:$batch_size}" --repo "$GITHUB_REPOSITORY"
+            i=$((i + batch_size))
+            if [ "$i" -lt "${#missing[@]}" ]; then sleep 20; fi
+          done
+          echo "uploaded ${#missing[@]} assets in batches of $batch_size"
 
       - name: Update agents-latest GitHub release
         env:
@@ -1830,6 +1883,7 @@ jobs:
             --recursive \
             --exclude "*" \
             --include "dbx-agent-*.tar.zst" \
+            --include "dbx-agent-*.tar.zst.delta" \
             --endpoint-url "$R2_ENDPOINT"
           echo "Uploaded single-driver packages"
 

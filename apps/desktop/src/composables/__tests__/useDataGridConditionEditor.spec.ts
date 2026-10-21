@@ -1,7 +1,8 @@
 import { effectScope, nextTick, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { completeDataGridConditionQuote, useDataGridConditionEditor } from "@/composables/useDataGridConditionEditor";
+import { completeDataGridConditionQuote, isConditionKeywordSupported, supportsConditionIlike, supportsConditionRegexp, useDataGridConditionEditor } from "@/composables/useDataGridConditionEditor";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
+import type { DatabaseType } from "@/types/database";
 
 const storage = new Map<string, string>();
 vi.stubGlobal("localStorage", {
@@ -33,9 +34,6 @@ describe("useDataGridConditionEditor", () => {
     value.value = "status = 1 AND cust";
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["customer_id", "customer_name"]));
-    // 不再默认高亮第一条建议：必须显式导航/接受，避免回车应用筛选时改写输入（issue #10595）
-    expect(editor.highlightedIndex.value).toBe(-1);
-    expect(editor.navigate(1)).toBe(true);
     expect(editor.highlightedIndex.value).toBe(0);
     expect(editor.navigate(1)).toBe(true);
     expect(editor.highlightedIndex.value).toBe(1);
@@ -43,6 +41,65 @@ describe("useDataGridConditionEditor", () => {
     expect(editor.highlightedIndex.value).toBe(1);
     expect(editor.accept()).toBe(true);
     expect(value.value).toBe("status = 1 AND customer_name");
+  });
+
+  it.each(["cus", "status = 1 AND cus", "NOT cus", "status = 1 AND NOT cus", "(cus", "status = 1 OR (cus", "id BETWEEN 0 AND 1 AND cus", "id NOT BETWEEN 0 AND 1 OR cus", "name = 'BETWEEN' AND cus", "`BETWEEN` = 1 AND cus", "id BETWEEN abs(0) AND 1 AND cus"])(
+    "accepts the first WHERE field suggestion directly with Enter: %s",
+    async (condition) => {
+      const value = ref("");
+      const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["customer_id", "customer_name"], historyScope: {} });
+      value.value = condition;
+      await nextTick();
+      await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(2));
+
+      expect(editor.highlightedIndex.value).toBe(0);
+      expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("accept");
+      expect(value.value).toBe(condition.replace(/cus$/, "customer_id"));
+    },
+  );
+
+  it.each(["status = 1 ", "status is", "status IS nu", "status NOT betw"])("applies WHERE conditions without automatically accepting keyword suggestions: %s", async (condition) => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["status"], historyScope: {} });
+    value.value = condition;
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.length).toBeGreaterThan(0));
+
+    expect(editor.suggestions.value[0].kind).toBe("keyword");
+    expect(editor.highlightedIndex.value).toBe(-1);
+    expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("apply");
+    expect(value.value).toBe(condition);
+  });
+
+  it.each([
+    "id = 1 + 1",
+    "id = - 1",
+    "id = + 1",
+    "id = 2 * 1",
+    "id = 2 / 1",
+    "id = (1",
+    "id = abs(1",
+    "id = coalesce(0, 1",
+    "id BETWEEN 0 AND 1",
+    "id NOT BETWEEN 0 AND 1",
+    "id between 0 and 1",
+    "id BETWEEN abs(0) AND 1",
+    "id BETWEEN 'AND' AND 1",
+    "(id BETWEEN 0 AND 1",
+    "id = 2 AND other_id BETWEEN 0 AND 1",
+    "id BETWEEN CASE WHEN enabled = 1 AND flag = 1 THEN 0 ELSE 0 END AND 1",
+    "id BETWEEN CASE WHEN enabled = 1 OR flag = 1 THEN 0 ELSE 0 END AND 1",
+    "id BETWEEN CASE WHEN a = 1 THEN CASE WHEN b = 1 AND c = 1 THEN 0 ELSE 0 END ELSE 0 END AND 1",
+  ])("does not rewrite value expressions on Enter: %s", async (condition) => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["id", "version1"], historyScope: {} });
+    value.value = condition;
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "version1", kind: "column" }]));
+
+    expect(editor.highlightedIndex.value).toBe(-1);
+    expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("apply");
+    expect(value.value).toBe(condition);
   });
 
   it("does not suggest column names while typing a value after a comparison operator", async () => {
@@ -153,7 +210,9 @@ describe("useDataGridConditionEditor", () => {
     selectionEnd.value = 2;
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(2));
-    editor.navigate(1);
+    // The first ORDER BY suggestion is already selected; moving up keeps the
+    // first item selected while still exercising keyboard navigation.
+    editor.navigate(-1);
     expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("accept");
     expect(value.value).toBe("name");
     expect(editor.suggestions.value).toEqual([]);
@@ -512,31 +571,32 @@ describe("useDataGridConditionEditor", () => {
     expect(aborted).toHaveBeenCalledOnce();
   });
 
-  it("maps Enter, Tab, arrows, and Escape without applying stale selections", async () => {
+  it("preselects the first ORDER BY column while preserving keyboard navigation", async () => {
     const value = ref("");
     const editor = useDataGridConditionEditor({ kind: "orderBy", value, columns: ["name", "namespace"], historyScope: {} });
     value.value = "na";
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(2));
-    expect(editor.highlightedIndex.value).toBe(-1);
+    expect(editor.highlightedIndex.value).toBe(0);
 
     const initialEnter = keyboardEvent("Enter");
-    expect(editor.handleKeydown(initialEnter)).toBe("apply");
+    expect(editor.handleKeydown(initialEnter)).toBe("accept");
     expect(initialEnter.preventDefault).toHaveBeenCalledOnce();
-    expect(value.value).toBe("na");
+    expect(value.value).toBe("name");
     expect(editor.suggestions.value).toEqual([]);
 
     value.value = "nam";
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(2));
+    expect(editor.highlightedIndex.value).toBe(0);
 
     const down = keyboardEvent("ArrowDown");
     expect(editor.handleKeydown(down)).toBe("navigate");
     expect(down.preventDefault).toHaveBeenCalledOnce();
-    expect(editor.highlightedIndex.value).toBe(0);
+    expect(editor.highlightedIndex.value).toBe(1);
     const navigatedEnter = keyboardEvent("Enter");
     expect(editor.handleKeydown(navigatedEnter)).toBe("accept");
-    expect(value.value).toBe("name");
+    expect(value.value).toBe("namespace");
 
     const tabValue = ref("");
     const tabEditor = useDataGridConditionEditor({ kind: "orderBy", value: tabValue, columns: ["name"], historyScope: {} });
@@ -570,5 +630,386 @@ describe("useDataGridConditionEditor", () => {
     const processEnter = keyboardEvent("Process");
     expect(editor.handleKeydown(processEnter)).toBeUndefined();
     expect(processEnter.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("suggests SQL syntax operators including BETWEEN, LIKE, and IS NULL in WHERE condition (#7989)", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: ["score", "status", "deleted_at"],
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    // 1. 根据 betw 提示 BETWEEN 选项，并展示 BETWEEN ... AND ... 注释
+    value.value = "score betw";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "BETWEEN", kind: "keyword", comment: "BETWEEN ... AND ..." }]));
+    expect(editor.accept()).toBe(true);
+    expect(value.value).toBe("score BETWEEN");
+
+    // 2. 根据 li 提示 LIKE
+    value.value = "score li";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "LIKE", kind: "keyword" }]));
+
+    // 3. 根据 is 提示 IS NULL, IS NOT NULL, IS
+    value.value = "score is";
+    await nextTick();
+    await vi.waitFor(() =>
+      expect(editor.suggestions.value).toEqual([
+        { value: "IS NULL", kind: "keyword" },
+        { value: "IS NOT NULL", kind: "keyword" },
+      ]),
+    );
+
+    // 4. NOT 之后支持提示 BETWEEN 操作符
+    value.value = "score not betw";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "BETWEEN", kind: "keyword", comment: "BETWEEN ... AND ..." }]));
+
+    // 5. IS 之后提示 NULL
+    value.value = "deleted_at IS nu";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "NULL", kind: "keyword" }]));
+
+    // 6. IS NOT 之后提示 NULL
+    value.value = "deleted_at IS NOT nu";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "NULL", kind: "keyword" }]));
+
+    // 7. BETWEEN 第一个操作数之后提示 AND 连接符
+    value.value = "score BETWEEN 1 a";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "AND", kind: "keyword" }]));
+  });
+
+  it("checks dialect support for ILIKE and REGEXP operators", () => {
+    expect(supportsConditionIlike(undefined)).toBe(true);
+    expect(supportsConditionIlike("postgres")).toBe(true);
+    expect(supportsConditionIlike("duckdb")).toBe(true);
+    expect(supportsConditionIlike("clickhouse")).toBe(true);
+    expect(supportsConditionIlike("mysql")).toBe(false);
+    expect(supportsConditionIlike("sqlserver")).toBe(false);
+    expect(supportsConditionIlike("oracle")).toBe(false);
+    expect(supportsConditionIlike("sqlite")).toBe(false);
+
+    expect(supportsConditionRegexp(undefined)).toBe(true);
+    expect(supportsConditionRegexp("mysql")).toBe(true);
+    expect(supportsConditionRegexp("doris")).toBe(true);
+    // SQLite parses REGEXP but needs a driver-registered regexp() function DBX does not provide
+    expect(supportsConditionRegexp("sqlite")).toBe(false);
+    expect(supportsConditionRegexp("turso")).toBe(false);
+    expect(supportsConditionRegexp("hive")).toBe(true);
+    expect(supportsConditionRegexp("impala")).toBe(true);
+    expect(supportsConditionRegexp("postgres")).toBe(false);
+    expect(supportsConditionRegexp("sqlserver")).toBe(false);
+    expect(supportsConditionRegexp("oracle")).toBe(false);
+    expect(supportsConditionRegexp("duckdb")).toBe(false);
+
+    expect(isConditionKeywordSupported("BETWEEN", "mysql")).toBe(true);
+    expect(isConditionKeywordSupported("ILIKE", "mysql")).toBe(false);
+    expect(isConditionKeywordSupported("ILIKE", "postgres")).toBe(true);
+    expect(isConditionKeywordSupported("REGEXP", "mysql")).toBe(true);
+    expect(isConditionKeywordSupported("REGEXP", "postgres")).toBe(false);
+  });
+
+  it("filters WHERE syntax keywords per dialect and does not suggest EXISTS in operator positions", async () => {
+    // 1. MySQL: REGEXP supported, ILIKE not supported, EXISTS not suggested in operator position
+    const mysqlValue = ref("");
+    const mysqlEditor = useDataGridConditionEditor({
+      kind: "where",
+      value: mysqlValue,
+      columns: ["score", "name"],
+      databaseType: "mysql",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    mysqlValue.value = "score re";
+    await nextTick();
+    await vi.waitFor(() => expect(mysqlEditor.suggestions.value).toEqual([{ value: "REGEXP", kind: "keyword" }]));
+
+    mysqlValue.value = "score il";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(mysqlEditor.suggestions.value).toEqual([]);
+
+    mysqlValue.value = "score ex";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(mysqlEditor.suggestions.value).toEqual([]);
+
+    mysqlValue.value = "score not il";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(mysqlEditor.suggestions.value).toEqual([]);
+
+    mysqlValue.value = "score not ex";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(mysqlEditor.suggestions.value).toEqual([]);
+
+    // 2. SQL Server: neither REGEXP nor ILIKE supported, EXISTS not suggested
+    const sqlserverValue = ref("");
+    const sqlserverEditor = useDataGridConditionEditor({
+      kind: "where",
+      value: sqlserverValue,
+      columns: ["score", "name"],
+      databaseType: "sqlserver",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    sqlserverValue.value = "score re";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(sqlserverEditor.suggestions.value).toEqual([]);
+
+    sqlserverValue.value = "score il";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(sqlserverEditor.suggestions.value).toEqual([]);
+
+    sqlserverValue.value = "score ex";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(sqlserverEditor.suggestions.value).toEqual([]);
+
+    // 3. PostgreSQL: ILIKE and NOT ILIKE supported, REGEXP not supported as binary keyword
+    const pgValue = ref("");
+    const pgEditor = useDataGridConditionEditor({
+      kind: "where",
+      value: pgValue,
+      columns: ["score", "name"],
+      databaseType: "postgres",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    pgValue.value = "score re";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(pgEditor.suggestions.value).toEqual([]);
+
+    pgValue.value = "score il";
+    await nextTick();
+    await vi.waitFor(() => expect(pgEditor.suggestions.value).toEqual([{ value: "ILIKE", kind: "keyword" }]));
+
+    // NOT ILIKE is offered after NOT on PostgreSQL
+    pgValue.value = "score not il";
+    await nextTick();
+    await vi.waitFor(() => expect(pgEditor.suggestions.value).toEqual([{ value: "ILIKE", kind: "keyword" }]));
+
+    pgValue.value = "score ex";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(pgEditor.suggestions.value).toEqual([]);
+
+    // 4. Dialect-agnostic (undefined): keeps both ILIKE and REGEXP for fallback compatibility
+    const genericValue = ref("");
+    const genericEditor = useDataGridConditionEditor({
+      kind: "where",
+      value: genericValue,
+      columns: ["score", "name"],
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    genericValue.value = "score re";
+    await nextTick();
+    await vi.waitFor(() => expect(genericEditor.suggestions.value).toEqual([{ value: "REGEXP", kind: "keyword" }]));
+
+    genericValue.value = "score il";
+    await nextTick();
+    await vi.waitFor(() => expect(genericEditor.suggestions.value).toEqual([{ value: "ILIKE", kind: "keyword" }]));
+
+    genericValue.value = "score ex";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(genericEditor.suggestions.value).toEqual([]);
+  });
+
+  it("reactively updates keyword suggestions when databaseType changes", async () => {
+    const dbType = ref<DatabaseType | undefined>("mysql");
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: ["score"],
+      databaseType: dbType,
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    // MySQL: no ILIKE
+    value.value = "score il";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(editor.suggestions.value).toEqual([]);
+
+    // Switch to PostgreSQL: ILIKE becomes available
+    dbType.value = "postgres";
+    value.value = "score ili";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "ILIKE", kind: "keyword" }]));
+  });
+
+  it("suggests comparison operators after a complete column and inserts the trailing space", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["status"], historyScope: {}, suggestionDebounceMs: 1 });
+
+    value.value = "status ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["=", "<>", ">", ">=", "<", "<=", "LIKE", "NOT LIKE", "IN", "BETWEEN", "IS NULL", "IS NOT NULL"]));
+    // 运算符不预选：回车仍然是执行查询，不会悄悄改写条件
+    expect(editor.highlightedIndex.value).toBe(-1);
+
+    expect(editor.accept(1)).toBe(true);
+    expect(value.value).toBe("status <> ");
+
+    // 关键字运算符仍然可用，且不会和符号运算符重复
+    value.value = "status li";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["LIKE"]));
+  });
+
+  it("suggests dialect-aware value expressions after an operator for temporal columns", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [
+        { name: "CREATE_TIME", dataType: "TIMESTAMP(6)" },
+        { name: "AMOUNT", dataType: "NUMBER" },
+      ],
+      databaseType: "oracle",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    value.value = "CREATE_TIME > ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["SYSTIMESTAMP", "TRUNC(SYSDATE)", "TRUNC(SYSDATE) - 1", "SYSTIMESTAMP - INTERVAL '7' DAY", "SYSTIMESTAMP - INTERVAL '30' DAY"]));
+
+    expect(editor.accept(3)).toBe(true);
+    expect(value.value).toBe("CREATE_TIME > SYSTIMESTAMP - INTERVAL '7' DAY");
+
+    // 非时间列仍然是空建议：绝不在这里提示列名（issue #10595）
+    value.value = "AMOUNT <> ";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(editor.suggestions.value).toEqual([]);
+  });
+
+  it("keeps offering the next layer after accepting a column and an operator", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "CREATE_TIME", dataType: "DATE" }],
+      databaseType: "oracle",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    value.value = "CREA";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["CREATE_TIME"]));
+    expect(editor.handleKeydown(keyboardEvent("Enter"))).toBe("accept");
+    expect(value.value).toBe("CREATE_TIME");
+
+    value.value = "CREATE_TIME ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toContain(">="));
+    expect(editor.accept(3)).toBe(true);
+    expect(value.value).toBe("CREATE_TIME >= ");
+
+    // 接受带尾随空格的运算符后光标已经在值位置，候选要立刻接上，不用再敲一个字
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["SYSTIMESTAMP", "TRUNC(SYSDATE)", "TRUNC(SYSDATE) - 1", "SYSTIMESTAMP - INTERVAL '7' DAY", "SYSTIMESTAMP - INTERVAL '30' DAY"]));
+  });
+
+  it.each([
+    ["mysql", "DATETIME", "NOW()"],
+    ["postgres", "timestamptz", "now()"],
+    ["sqlite", "TEXT DATE", "datetime('now')"],
+    ["sqlserver", "datetime2", "GETDATE()"],
+    ["hive", "TIMESTAMP", "CURRENT_TIMESTAMP"],
+  ] as const)("uses %s value snippets for %s columns", async (databaseType, dataType, firstSnippet) => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "created_at", dataType }],
+      databaseType,
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    value.value = "created_at >= ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value[0]?.value).toBe(firstSnippet));
+  });
+
+  it("suggests numeric literals for SQL Server bit columns", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "enabled", dataType: "bit" }],
+      databaseType: "sqlserver",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+    value.value = "enabled = ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["1", "0"]));
+    expect(editor.accept(0)).toBe(true);
+    expect(value.value).toBe("enabled = 1");
+  });
+
+  it("does not suggest boolean literals for PostgreSQL bit strings", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "mask", dataType: "bit(8)" }],
+      databaseType: "postgres",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+    value.value = "mask = ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestionsLoading.value).toBe(false));
+    expect(editor.suggestions.value).toEqual([]);
+  });
+
+  it("suggests TRUE/FALSE for boolean columns and opens an IN list without value snippets", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ name: "enabled", dataType: "boolean" }],
+      databaseType: "postgres",
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    value.value = "enabled = ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["TRUE", "FALSE"]));
+
+    value.value = "enabled ";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toContain("IN"));
+    expect(editor.accept(8)).toBe(true);
+    expect(value.value).toBe("enabled IN (");
+
+    // IN 列表里只写值，不再给单个表达式建议
+    value.value = "enabled IN (";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(editor.suggestions.value).toEqual([]);
   });
 });

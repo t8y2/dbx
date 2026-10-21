@@ -39,6 +39,13 @@ pub struct ColumnExtra {
     pub on_update_current_timestamp: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<ColumnIdentity>,
+    /// MySQL generated column. Tri-state: `None` inherits the original
+    /// definition (legacy payloads), `Some` with an empty `expression`
+    /// removes the generated-column attribute, otherwise the clause is
+    /// rendered from these values. MariaDB `PERSISTENT` is reported by
+    /// introspection as `STORED`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<ColumnGenerated>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manticore_indexed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,6 +54,18 @@ pub struct ColumnExtra {
     pub manticore_attribute: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manticore_secondary_index: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnGenerated {
+    /// Generation expression without the surrounding parentheses. An empty
+    /// (or whitespace-only) value means the column is not generated.
+    #[serde(default)]
+    pub expression: String,
+    /// `VIRTUAL` or `STORED`; `None` renders as the MySQL default `VIRTUAL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +125,9 @@ pub struct EditableStructureIndex {
     pub concurrently: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<IndexInfo>,
+    /// Oracle-family partial-rebuild recovery: preserve `original` as key metadata but skip its already-committed DROP.
+    #[serde(default)]
+    pub oracle_original_missing: bool,
     #[serde(default)]
     pub marked_for_drop: bool,
 }
@@ -131,6 +153,15 @@ pub struct IndexInfo {
     /// (e.g. sourced from `pg_get_indexdef`), not a plain column name.
     #[serde(default)]
     pub key_is_expression: Vec<bool>,
+    /// Parallel to `columns`: Oracle-family key order (`ASC` or `DESC`).
+    #[serde(default)]
+    pub key_directions: Vec<String>,
+    /// Oracle-family index visibility (`VISIBLE` or `INVISIBLE`).
+    #[serde(default)]
+    pub visibility: Option<String>,
+    /// True only when expression, direction and visibility metadata are aligned and complete.
+    #[serde(default)]
+    pub key_metadata_complete: bool,
     /// Parallel to `columns`: operator class name for each key column, if non-default.
     #[serde(default)]
     pub column_opclasses: Vec<Option<String>>,
@@ -192,6 +223,8 @@ pub struct EditableStructureTrigger {
     #[serde(default)]
     pub statement: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<TriggerInfo>,
     #[serde(default)]
     pub marked_for_drop: bool,
@@ -204,6 +237,11 @@ pub struct TriggerInfo {
     pub timing: String,
     #[serde(default)]
     pub statement: Option<String>,
+    /// Catalog-reported `WHEN` clause (Dameng `ALL_TRIGGERS.WHEN_CLAUSE`). A non-empty
+    /// condition means the timing/event/body form cannot rebuild the trigger without
+    /// dropping it.
+    #[serde(default)]
+    pub condition: Option<String>,
     /// Carries the catalog-reported enabled state so SQL Server edits can
     /// restore it after the DROP + CREATE rebuild (`DISABLE TRIGGER`).
     #[serde(default)]
@@ -238,6 +276,8 @@ pub struct TableStructureSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mysql_engine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql_auto_increment_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transwarp_create: Option<TranswarpCreateTableOptions>,
     /// MySQL only: the table's current default collation
     /// (`information_schema.TABLES.TABLE_COLLATION`). A column whose collation
@@ -254,11 +294,148 @@ pub struct TableStructureSqlOptions {
     /// will reject or downgrading to a blocking `CREATE INDEX`.
     #[serde(default)]
     pub partitioned: bool,
+    /// Whether the target table is a PostgreSQL foreign table (`relkind = 'f'`).
+    /// PostgreSQL rejects `COMMENT ON TABLE` for foreign tables
+    /// (`"<name>" is not a table`), so the table-comment statement must use
+    /// `COMMENT ON FOREIGN TABLE` when this is set.
+    #[serde(default)]
+    pub foreign_table: bool,
     /// When true, the connection is GaussDB M-mode which uses MySQL-compatible
     /// SQL dialect with backtick quoting. The structure editor maps this to
     /// `StructureDialect::Mysql` so that DDL is generated with MySQL syntax.
     #[serde(default)]
     pub is_gaussdb_m_mode: bool,
+    /// Optional constraint name for a **newly created** primary key. Empty or
+    /// `None` keeps the anonymous `PRIMARY KEY (...)` form and lets the server
+    /// auto-name the constraint. Only applied when the draft adds a primary key
+    /// that did not exist before; replacing an existing key never renames it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_name: Option<String>,
+    /// An ordered change to an existing Oracle-family primary key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_change: Option<ExistingPrimaryKeyChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_foreign_key_changes: Option<Vec<OracleForeignKeyChange>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_constraint_changes: Option<Vec<OracleConstraintChange>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintChange {
+    pub original: Option<OracleConstraintDefinition>,
+    pub target: Option<OracleConstraintDefinition>,
+    #[serde(default)]
+    pub index_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "definition")]
+#[allow(clippy::large_enum_variant)]
+pub enum OracleConstraintDefinition {
+    Check(OracleCheckConstraint),
+    Unique(OracleUniqueConstraint),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleCheckConstraint {
+    pub name: String,
+    pub expression: String,
+    pub state: OraclePrimaryKeyState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleUniqueConstraint {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub state: OraclePrimaryKeyState,
+    #[serde(default)]
+    pub rely_raw: String,
+    pub index: OracleConstraintIndex,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintIndex {
+    pub owner: String,
+    pub name: String,
+    pub table_owner: String,
+    pub table_name: String,
+    pub sharing: String,
+    pub metadata_complete: bool,
+    pub index_type: String,
+    pub uniqueness: String,
+    pub status: String,
+    pub partitioned: bool,
+    pub visibility: String,
+    /// `None` is a catalog NULL only when `metadata_complete` is true.
+    pub secondary: Option<String>,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub directions: Vec<String>,
+    #[serde(default)]
+    pub key_is_expression: Vec<bool>,
+    #[serde(default)]
+    pub included_columns: Vec<String>,
+    #[serde(default)]
+    pub new_name_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleForeignKeyChange {
+    pub original: Option<OracleForeignKeyDefinition>,
+    pub target: Option<OracleForeignKeyDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleForeignKeyDefinition {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub ref_schema: String,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    pub on_delete: String,
+    pub state: OraclePrimaryKeyState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingPrimaryKeyChange {
+    pub name: String,
+    pub original_columns: Vec<String>,
+    /// Empty means remove the existing key.
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_index: Option<OraclePrimaryKeyIndex>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_state: Option<OraclePrimaryKeyState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OraclePrimaryKeyState {
+    pub enabled: bool,
+    pub validated: bool,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
+    pub rely: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OraclePrimaryKeyIndex {
+    pub policy: String,
+    pub owner: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

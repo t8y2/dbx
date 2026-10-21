@@ -83,8 +83,16 @@ pub async fn redis_get_value(
     connection_id: String,
     db: u32,
     key_raw: String,
+    preview_limit_bytes: Option<usize>,
 ) -> Result<RedisValue, String> {
-    dbx_core::redis_ops::redis_get_value_in_db_core(&state, &connection_id, db, &key_raw).await
+    dbx_core::redis_ops::redis_get_value_in_db_with_preview_limit_core(
+        &state,
+        &connection_id,
+        db,
+        &key_raw,
+        preview_limit_bytes,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -288,9 +296,11 @@ pub async fn redis_list_push(
     key_raw: String,
     value: String,
     ttl: Option<i64>,
+    side: Option<String>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "LPUSH").await?;
-    dbx_core::redis_ops::redis_list_push_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl).await
+    let side = dbx_core::redis_ops::ListPushSide::from_str_lossy(side.as_deref());
+    dbx_core::redis_ops::redis_list_push_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl, side).await
 }
 
 #[tauri::command]

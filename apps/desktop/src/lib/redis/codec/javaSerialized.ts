@@ -527,7 +527,7 @@ function readInt32FromBytes(bytes: Uint8Array, offset: number): number {
 
 function decodeModifiedUtf8(bytes: Uint8Array): string {
   let output = "";
-  for (let index = 0; index < bytes.length; ) {
+  for (let index = 0; index < bytes.length;) {
     const byte = bytes[index];
     if ((byte & 0x80) === 0) {
       output += String.fromCharCode(byte);

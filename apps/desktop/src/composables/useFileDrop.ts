@@ -24,7 +24,7 @@ export function useFileDrop() {
   const { toast } = useToast();
   const { openInStreamingExecutorOnTooLarge } = useLargeSqlFileStreamingFallback();
 
-  async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion) {
+  async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion, encoding?: import("@/types/database").QueryTab["externalSqlEncoding"]) {
     const options = { allowMongoScripts: !isSqlFilePath(name) };
     const target = path
       ? resolveExternalSqlFileTargetForActiveTab(path, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId), options)
@@ -33,7 +33,7 @@ export function useFileDrop() {
     // never bind to a relational SQL tab.
     if (!isSqlFilePath(name) && connectionStore.getConfig(target.connectionId)?.db_type !== "mongodb") return;
     if (path) {
-      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog, target.schema);
+      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog, target.schema, undefined, encoding);
     } else {
       const tabId = queryStore.createTab(target.connectionId, target.database, name, "query", target.schema, undefined, target.catalog);
       queryStore.updateSql(tabId, content);
@@ -89,7 +89,7 @@ export function useFileDrop() {
           if (isScriptFilePath(path)) {
             try {
               const snapshot = await api.readExternalSqlFileSnapshot(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
-              await openDroppedSqlFile(name, snapshot.content, path, snapshot.version);
+              await openDroppedSqlFile(name, snapshot.content, path, snapshot.version, snapshot.encoding);
             } catch (e: any) {
               if (!openInStreamingExecutorOnTooLarge(path, e)) {
                 toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);

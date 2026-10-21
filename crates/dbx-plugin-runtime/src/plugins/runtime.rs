@@ -19,6 +19,14 @@ use super::{
 };
 use dbx_platform::ssh_prompt;
 
+/// A request failed this way without the host observing the end of the
+/// handler, so the plugin may still be executing it. Lifecycle callers treat
+/// the outcome as unconfirmed instead of assuming the request died with the
+/// abandoned caller.
+pub(super) fn request_may_still_execute(error: &str) -> bool {
+    error.contains("timed out after") || error.contains("was waiting for user input")
+}
+
 pub const PLUGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Host API method a plugin backend calls to ask the user for input
 /// (`user_input.rs` semantics). Plugin-initiated requests use string ids, which
@@ -171,6 +179,37 @@ pub struct PluginSidecarSession {
     /// request deadlines of this session so a user typing an MFA code cannot
     /// fail a plugin `connection/test` or `connection/connect` call.
     prompts: PromptActivity,
+    owner_runtime: tokio::runtime::Handle,
+    // Kept until the session (including its child/image handle) is completely dropped.
+    _runtime_lease: Option<std::fs::File>,
+}
+
+/// Cancelled discovery/initialization must not leave the stdout task and child owning each other.
+pub(super) struct ShutdownOnDrop(Option<Arc<PluginSidecarSession>>);
+
+impl ShutdownOnDrop {
+    pub(super) fn new(session: Arc<PluginSidecarSession>) -> Self {
+        Self(Some(session))
+    }
+    pub(super) fn disarm(mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for ShutdownOnDrop {
+    fn drop(&mut self) {
+        let Some(session) = self.0.take() else { return };
+        if session.status().state == PluginSessionState::Stopped {
+            return;
+        }
+        // Pool/session owners can also be dropped from a blocking thread.
+        let runtime = session.owner_runtime.clone();
+        runtime.spawn(async move {
+            if let Err(error) = session.shutdown().await {
+                log::warn!("{error}");
+            }
+        });
+    }
 }
 
 /// Tracks whether this plugin session has a user prompt open, and wakes the
@@ -214,6 +253,15 @@ impl PluginSidecarSession {
         app_version: impl Into<String>,
         env: PluginRuntimeEnv,
     ) -> Result<Arc<Self>, String> {
+        Self::start_with_runtime_lease(plugin, app_version, env, None).await
+    }
+
+    pub(super) async fn start_with_runtime_lease(
+        plugin: InstalledPlugin,
+        app_version: impl Into<String>,
+        env: PluginRuntimeEnv,
+        runtime_lease: Option<std::fs::File>,
+    ) -> Result<Arc<Self>, String> {
         ensure_plugin_backend(&plugin)?;
         let transport = plugin.manifest.backend_entrypoint().map(|backend| backend.transport).unwrap_or_default();
         let app_version = app_version.into();
@@ -240,8 +288,11 @@ impl PluginSidecarSession {
             status,
             handshake: RwLock::new(None),
             prompts: PromptActivity::default(),
+            owner_runtime: tokio::runtime::Handle::current(),
+            _runtime_lease: runtime_lease,
         });
 
+        let startup = ShutdownOnDrop::new(session.clone());
         session.spawn_stdout_reader(stdout);
         if let Some(stderr) = stderr {
             session.spawn_stderr_reader(stderr);
@@ -278,6 +329,7 @@ impl PluginSidecarSession {
                 session.plugin.manifest.id
             ));
         }
+        startup.disarm();
         Ok(session)
     }
 

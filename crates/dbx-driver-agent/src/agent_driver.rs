@@ -852,6 +852,15 @@ const AGENT_STARTUP_RETRY_DELAY_MS: u64 = 100;
 const SHARED_RUNTIME_IDLE_GRACE_SECS: u64 = 30;
 const AGENT_JAVA_OPTS_ENV: &str = "DBX_AGENT_JAVA_OPTS";
 
+fn agent_json_rpc_response_id(response: &Value) -> Option<u64> {
+    if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || (response.get("result").is_none() && response.get("error").is_none())
+    {
+        return None;
+    }
+    response.get("id").and_then(Value::as_u64)
+}
+
 pub struct AgentDriverClient {
     child: Option<Child>,
     stdin: Option<BufWriter<ChildStdin>>,
@@ -865,6 +874,7 @@ pub struct AgentDriverClient {
     /// Driver-reported identifier quoting, captured once after connect.
     /// Keeping this on the client avoids a connection-info RPC on every query.
     identifier_quote: Option<String>,
+    dedicated_transaction_query_cancel: bool,
 }
 
 /// Keeps serialized session RPC access separate from the process-level fail-stop handle.
@@ -875,6 +885,7 @@ pub struct PooledAgentClient {
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
     identifier_quote: Option<String>,
+    compatibility_mode: Option<String>,
 }
 
 impl PooledAgentClient {
@@ -882,7 +893,22 @@ impl PooledAgentClient {
         let shared_runtime = client.shared_runtime.clone();
         let agent_session_id = client.agent_session_id.clone();
         let identifier_quote = client.identifier_quote.clone();
-        Self { client: tokio::sync::Mutex::new(client), shared_runtime, agent_session_id, identifier_quote }
+        Self {
+            client: tokio::sync::Mutex::new(client),
+            shared_runtime,
+            agent_session_id,
+            identifier_quote,
+            compatibility_mode: None,
+        }
+    }
+
+    pub fn with_compatibility_mode(mut self, mode: Option<String>) -> Self {
+        self.compatibility_mode = mode.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    pub fn compatibility_mode(&self) -> Option<&str> {
+        self.compatibility_mode.as_deref()
     }
 
     pub fn identifier_quote(&self) -> Option<&str> {
@@ -1012,6 +1038,7 @@ impl AgentHandshake {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentCapability {
+    BlobBindStatementsV1,
     Connect,
     TestConnection,
     Metadata,
@@ -1120,7 +1147,7 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1149,10 +1176,12 @@ impl AgentCapability {
         Self::MongoFindCursor,
         Self::MultiSession,
         Self::StructuredErrorV1,
+        Self::BlobBindStatementsV1,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::BlobBindStatementsV1 => "blob_bind_statements_v1",
             Self::Connect => "connect",
             Self::TestConnection => "test_connection",
             Self::Metadata => "metadata",
@@ -1219,6 +1248,8 @@ pub enum AgentMethod {
     ExecuteQueryPage,
     FetchQueryPage,
     CloseQuerySession,
+    ReadLargeValueChunk,
+    ReleaseLargeValue,
     StartTableRead,
     FetchTableReadPage,
     CloseTableReadSession,
@@ -1233,7 +1264,7 @@ pub enum AgentMethod {
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 43] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -1264,6 +1295,8 @@ impl AgentMethod {
         Self::ExecuteQueryPage,
         Self::FetchQueryPage,
         Self::CloseQuerySession,
+        Self::ReadLargeValueChunk,
+        Self::ReleaseLargeValue,
         Self::StartTableRead,
         Self::FetchTableReadPage,
         Self::CloseTableReadSession,
@@ -1314,6 +1347,8 @@ impl AgentMethod {
             Self::StartTableRead => "start_table_read",
             Self::FetchTableReadPage => "fetch_table_read_page",
             Self::CloseTableReadSession => "close_table_read_session",
+            Self::ReadLargeValueChunk => "read_large_value_chunk",
+            Self::ReleaseLargeValue => "release_large_value",
             Self::GetExplainInfo => "get_explain_info",
             Self::ExecuteBatch => "execute_batch",
             Self::ExecuteTransaction => "execute_transaction",
@@ -1680,6 +1715,10 @@ fn is_retryable_agent_startup_error(error: &str) -> bool {
         && !error.contains(AGENT_JAVA_TOO_OLD_MESSAGE)
 }
 
+/// Outcome of one blocking agent RPC read: the restored stdout reader, the
+/// deserialized result (or error) and the JSON-RPC id the reply carried.
+type AgentResponseOutcome<T> = (BufReader<ChildStdout>, Result<T, String>, Option<u64>);
+
 impl AgentDriverClient {
     /// Spawn an agent process and wait for it to signal readiness.
     ///
@@ -1700,6 +1739,7 @@ impl AgentDriverClient {
             agent_session_id: None,
             cached_query: None,
             identifier_quote: None,
+            dedicated_transaction_query_cancel: false,
         })
     }
 
@@ -1715,6 +1755,7 @@ impl AgentDriverClient {
             agent_session_id: Some(agent_session_id),
             cached_query: None,
             identifier_quote: None,
+            dedicated_transaction_query_cancel: false,
         }
     }
 
@@ -1814,8 +1855,65 @@ impl AgentDriverClient {
         let request_line =
             serde_json::to_string(&request).map_err(|e| format!("Failed to serialize JSON-RPC request: {e}"))?;
 
-        // Write request to stdin
-        let write_result = {
+        // A dedicated SQL Server query must remain cancellable even before
+        // the Agent consumes its JSON request. Keep other clients unchanged.
+        let mut timeout_duration = timeout_duration;
+        let write_result = if self.dedicated_transaction_query_cancel && method == AgentMethod::ExecuteQuery.as_str() {
+            if cancel_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                self.kill();
+                return Err(AgentCallError::Canceled {
+                    stage: agent_error_stage(method),
+                    operation_outcome: agent_operation_outcome(method),
+                });
+            }
+            let started = Instant::now();
+            let mut writer = self.stdin.take().ok_or("Agent stdin not available")?;
+            let mut write_task = tokio::task::spawn_blocking(move || {
+                let result = writer
+                    .write_all(request_line.as_bytes())
+                    .and_then(|_| writer.write_all(b"\n"))
+                    .and_then(|_| writer.flush())
+                    .map_err(|e| format!("Failed to write to agent stdin: {e}"));
+                (writer, result)
+            });
+            let result = tokio::select! {
+                // If the entire request is known to have been sent, restore the
+                // writer so cancellation can use JDBC cancel_session below.
+                biased;
+                result = &mut write_task => result,
+                _ = async {
+                    if let Some(token) = &cancel_token { token.cancelled().await; }
+                    else { std::future::pending::<()>().await; }
+                } => {
+                    // A partial JSON frame cannot be followed by another RPC.
+                    self.kill();
+                    return Err(AgentCallError::Canceled {
+                        stage: agent_error_stage(method), operation_outcome: agent_operation_outcome(method),
+                    });
+                },
+                _ = async {
+                    if let Some(duration) = timeout_duration { tokio::time::sleep(duration).await; }
+                    else { std::future::pending::<()>().await; }
+                } => {
+                    self.kill();
+                    return Err(AgentCallError::Timeout {
+                        stage: agent_error_stage(method), operation_outcome: agent_operation_outcome(method),
+                    });
+                },
+            };
+            let (writer, result) = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    self.kill();
+                    return Err(AgentCallError::Transport { message: format!("Agent write task failed: {error}") });
+                }
+            };
+            self.stdin = Some(writer);
+            // Sending and receiving share one deadline, without granting a
+            // second timeout after a slow but successful write.
+            timeout_duration = timeout_duration.map(|duration| duration.saturating_sub(started.elapsed()));
+            result
+        } else {
             let writer = self.stdin.as_mut().ok_or("Agent stdin not available")?;
             writer
                 .write_all(request_line.as_bytes())
@@ -1832,12 +1930,13 @@ impl AgentDriverClient {
         // Read response from stdout (blocking, with timeout)
         let mut reader = self.stdout.take().ok_or("Agent stdout not available")?;
 
-        let response_task = tokio::task::spawn_blocking(move || {
+        let mut response_task = tokio::task::spawn_blocking(move || {
             let (line, resp) = match read_agent_json_response(&mut reader) {
                 Ok(response) => response,
-                Err(e) => return (reader, Err(e)),
+                Err(e) => return (reader, Err(e), None),
             };
 
+            let response_id = agent_json_rpc_response_id(&resp);
             let result = if let Some(err) = resp.get("error") {
                 Err(format_agent_rpc_error(err))
             } else if let Some(result_val) = resp.get("result") {
@@ -1847,23 +1946,23 @@ impl AgentDriverClient {
                 Err(format!("Agent response missing both 'result' and 'error': {line}"))
             };
 
-            (reader, result)
+            (reader, result, response_id)
         });
-        let (returned_reader, result) = match (timeout_duration, cancel_token) {
+        let (returned_reader, result, _) = match (timeout_duration, cancel_token) {
             (Some(duration), Some(token)) => {
                 tokio::select! {
                     biased;
                     _ = token.cancelled() => {
-                        self.kill();
+                        self.kill_after_dedicated_transaction_query_cancel(method, id, &mut response_task).await;
                         return Err(AgentCallError::Canceled {
                             stage: agent_error_stage(method),
                             operation_outcome: agent_operation_outcome(method),
                         });
                     }
-                    result = tokio::time::timeout(duration, response_task) => match result {
+                    result = tokio::time::timeout(duration, &mut response_task) => match result {
                         Ok(result) => result,
                         Err(_) => {
-                            self.kill();
+                            self.kill_after_dedicated_transaction_query_cancel(method, id, &mut response_task).await;
                             return Err(AgentCallError::Timeout {
                                 stage: agent_error_stage(method),
                                 operation_outcome: agent_operation_outcome(method),
@@ -1872,10 +1971,10 @@ impl AgentDriverClient {
                     },
                 }
             }
-            (Some(duration), None) => match tokio::time::timeout(duration, response_task).await {
+            (Some(duration), None) => match tokio::time::timeout(duration, &mut response_task).await {
                 Ok(result) => result,
                 Err(_) => {
-                    self.kill();
+                    self.kill_after_dedicated_transaction_query_cancel(method, id, &mut response_task).await;
                     return Err(AgentCallError::Timeout {
                         stage: agent_error_stage(method),
                         operation_outcome: agent_operation_outcome(method),
@@ -1886,13 +1985,13 @@ impl AgentDriverClient {
                 tokio::select! {
                     biased;
                     _ = token.cancelled() => {
-                        self.kill();
+                        self.kill_after_dedicated_transaction_query_cancel(method, id, &mut response_task).await;
                         return Err(AgentCallError::Canceled {
                             stage: agent_error_stage(method),
                             operation_outcome: agent_operation_outcome(method),
                         });
                     }
-                    result = response_task => result,
+                    result = &mut response_task => result,
                 }
             }
             (None, None) => response_task.await,
@@ -1911,6 +2010,73 @@ impl AgentDriverClient {
                 },
             )
             .map_err(|error| legacy_agent_call_error(error, self.agent_session_id.as_deref()))
+    }
+
+    /// Opt in only for isolated transaction clients using the v2 JDBC server.
+    /// Ordinary clients keep their existing immediate fail-stop behavior.
+    pub fn enable_dedicated_transaction_query_cancellation(&mut self) {
+        self.dedicated_transaction_query_cancel = true;
+    }
+
+    async fn kill_after_dedicated_transaction_query_cancel<T: Send + 'static>(
+        &mut self,
+        method: &str,
+        query_id: u64,
+        response_task: &mut tokio::task::JoinHandle<AgentResponseOutcome<T>>,
+    ) {
+        if self.dedicated_transaction_query_cancel
+            && method == AgentMethod::ExecuteQuery.as_str()
+            && self.handshake.as_ref().is_some_and(|handshake| {
+                handshake.protocol_version >= 2 && handshake.supports(AgentCapability::MultiSession)
+            })
+        {
+            self.next_id += 1;
+            let cancel_id = self.next_id;
+            // MultiSessionJsonRpcServer routes connect() clients to this singleton
+            // session. Its cancellation path does not acquire the executing RPC lock.
+            let request = serde_json::json!({
+                "jsonrpc": "2.0", "id": cancel_id, "method": "cancel_session",
+                "params": { "agentSessionId": "__legacy__" },
+            });
+            if let Some(mut writer) = self.stdin.take() {
+                // Moving the writer lets the independent child handle force kill
+                // even if a full stdin pipe blocks the write. Never restore stdin.
+                let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                    let writer = tokio::task::spawn_blocking(move || {
+                        writeln!(writer, "{request}").and_then(|_| writer.flush())?;
+                        Ok::<_, std::io::Error>(writer)
+                    })
+                    .await
+                    .map_err(|_| ())?
+                    .map_err(|_| ())?;
+                    // Keep stdin open until the replies arrive: EOF can make the
+                    // Agent exit before JDBC cancellation reaches the server.
+                    let (mut reader, _, first_id) = (&mut *response_task).await.map_err(|_| ())?;
+                    tokio::task::spawn_blocking(move || {
+                        let mut query_seen = first_id == Some(query_id);
+                        let mut cancel_seen = first_id == Some(cancel_id);
+                        while !query_seen || !cancel_seen {
+                            let (_, response) = read_agent_json_response(&mut reader)?;
+                            match agent_json_rpc_response_id(&response) {
+                                Some(id) if id == query_id => query_seen = true,
+                                Some(id) if id == cancel_id => cancel_seen = true,
+                                _ => {} // JSON logs and duplicate/unrelated ACKs cannot end the grace.
+                            }
+                        }
+                        Ok::<(), String>(())
+                    })
+                    .await
+                    .map_err(|_| ())?
+                    .map_err(|_| ())?;
+                    drop(writer);
+                    Ok::<(), ()>(())
+                })
+                .await;
+            }
+        }
+        // Cancellation always discards this connection, even after both replies.
+        // On an unresponsive Agent, killing also unblocks the stdio worker tasks.
+        self.kill();
     }
 
     pub async fn call_method<T: DeserializeOwned + Send + 'static>(
@@ -2232,12 +2398,22 @@ impl AgentDriverClient {
         table: &str,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method_with_timeout(
-            AgentMethod::GetColumns,
-            agent_schema_table_params(database, schema, table),
-            timeout_duration,
-        )
-        .await
+        self.get_columns_in_context(database, schema, table, None, timeout_duration).await
+    }
+
+    pub async fn get_columns_in_context<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        current_schema: Option<&str>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let mut params = agent_schema_table_params(database, schema, table);
+        if let Some(current_schema) = current_schema {
+            params["current_schema"] = serde_json::json!(current_schema);
+        }
+        self.call_method_with_timeout(AgentMethod::GetColumns, params, timeout_duration).await
     }
 
     pub async fn get_custom_type_details<T: DeserializeOwned + Send + 'static>(
@@ -2571,6 +2747,17 @@ impl AgentDriverClient {
         self.call_method(AgentMethod::GetExplainInfo, params).await
     }
 
+    /// Estimated-plan RPC with the same session cancellation contract as queries.
+    pub async fn get_explain_info_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout_and_cancel(AgentMethod::GetExplainInfo, params, timeout_duration, cancel_token)
+            .await
+    }
+
     pub async fn close_query_session<T: DeserializeOwned + Send + 'static>(
         &mut self,
         session_id: &str,
@@ -2654,7 +2841,7 @@ impl AgentDriverClient {
         self.invalidate_cached_query();
         self.call_method_with_timeout(
             AgentMethod::ExecuteTransaction,
-            agent_transaction_params(database, statements, schema),
+            agent_statements_with_timeout_params(database, statements, schema, timeout_duration),
             timeout_duration,
         )
         .await
@@ -2670,7 +2857,7 @@ impl AgentDriverClient {
         self.invalidate_cached_query();
         self.call_method_typed_with_timeout(
             AgentMethod::ExecuteTransaction,
-            agent_transaction_params(database, statements, schema),
+            agent_statements_with_timeout_params(database, statements, schema, timeout_duration),
             timeout_duration,
         )
         .await
@@ -2704,7 +2891,7 @@ impl AgentDriverClient {
         self.invalidate_cached_query();
         self.call_method_with_timeout(
             AgentMethod::ExecuteBatch,
-            agent_transaction_params(database, statements, schema),
+            agent_statements_with_timeout_params(database, statements, schema, timeout_duration),
             timeout_duration,
         )
         .await
@@ -2720,7 +2907,33 @@ impl AgentDriverClient {
         self.invalidate_cached_query();
         self.call_method_typed_with_timeout(
             AgentMethod::ExecuteBatch,
-            agent_transaction_params(database, statements, schema),
+            agent_statements_with_timeout_params(database, statements, schema, timeout_duration),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn execute_blob_bound_typed<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: Option<&str>,
+        previews: &[String],
+        bound: &[dbx_types::types::BlobBoundStatement],
+        schema: Option<&str>,
+        use_transaction: bool,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, AgentCallError> {
+        dbx_types::types::validate_blob_bound_statements(previews, bound)?;
+        if !self.handshake.as_ref().is_some_and(|handshake| handshake.supports(AgentCapability::BlobBindStatementsV1)) {
+            return Err("This Agent does not support bound BLOB saves; update the Agent before saving.".into());
+        }
+        self.invalidate_cached_query();
+        let mut params = agent_transaction_params(database, previews, schema);
+        params["boundStatements"] = serde_json::to_value(bound).map_err(|error| error.to_string())?;
+        params["queryTimeoutSecs"] =
+            serde_json::json!(timeout_duration.map(|duration| duration.as_secs().max(1)).unwrap_or(30));
+        self.call_method_typed_with_timeout(
+            if use_transaction { AgentMethod::ExecuteTransaction } else { AgentMethod::ExecuteBatch },
+            params,
             timeout_duration,
         )
         .await
@@ -3073,7 +3286,8 @@ pub fn is_unsupported_handshake_error(error: &str) -> bool {
 pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability: AgentCapability) -> bool {
     if matches!(
         capability,
-        AgentCapability::Kv
+        AgentCapability::BlobBindStatementsV1
+            | AgentCapability::Kv
             | AgentCapability::KvTtl
             | AgentCapability::KvCas
             | AgentCapability::KvListValues
@@ -3140,6 +3354,18 @@ pub fn agent_transaction_params(database: Option<&str>, statements: &[String], s
         "statements": statements,
         "schema": schema,
     })
+}
+
+fn agent_statements_with_timeout_params(
+    database: Option<&str>,
+    statements: &[String],
+    schema: Option<&str>,
+    timeout: Option<Duration>,
+) -> Value {
+    let mut params = agent_transaction_params(database, statements, schema);
+    params["timeoutSecs"] =
+        serde_json::json!(timeout.map(|value| value.as_secs().clamp(1, i32::MAX as u64)).unwrap_or(0));
+    params
 }
 
 pub fn agent_manual_transaction_params(schema: Option<&str>) -> Value {
@@ -3573,6 +3799,7 @@ impl AgentDriverClient {
             agent_session_id: None,
             cached_query: None,
             identifier_quote: None,
+            dedicated_transaction_query_cancel: false,
         }
     }
 
@@ -3623,6 +3850,32 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn kingbase_connection_info_and_pool_preserve_reported_mode() {
+        let info: super::AgentConnectionInfo = serde_json::from_value(serde_json::json!({
+            "identifierQuote": "\"", "compatibilityMode": "oracle",
+            "databaseInfo": {"productName": "KingbaseES", "compatibilityMode": "oracle"}
+        }))
+        .unwrap();
+        assert_eq!(info.database_info.unwrap().compatibility_mode.as_deref(), Some("oracle"));
+        let client = AgentDriverClient {
+            child: None,
+            stdin: None,
+            stdout: None,
+            stderr_tail: Arc::new(Mutex::new(StderrTail::default())),
+            handshake: None,
+            next_id: 0,
+            shared_runtime: None,
+            agent_session_id: None,
+            cached_query: None,
+            identifier_quote: None,
+            dedicated_transaction_query_cancel: false,
+        };
+        let pool = super::PooledAgentClient::new(client).with_compatibility_mode(info.compatibility_mode);
+        assert_eq!(pool.compatibility_mode(), Some("oracle"));
+        assert!(pool.with_compatibility_mode(Some(" ".into())).compatibility_mode().is_none());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -4401,6 +4654,7 @@ for line in sys.stdin:
             agent_session_id: None,
             cached_query: None,
             identifier_quote: None,
+            dedicated_transaction_query_cancel: false,
         };
 
         let started_at = std::time::Instant::now();
@@ -4462,6 +4716,11 @@ def respond(req):
             value = cancel_count
         write_response(req, value)
         return
+    if method == 'blocked_count':
+        with state_lock:
+            value = len(blocked)
+        write_response(req, value)
+        return
     if method == 'cancel_session':
         session_id = params['agentSessionId']
         with state_lock:
@@ -4474,7 +4733,10 @@ def respond(req):
 
     session_id = params.get('agentSessionId', '__legacy__')
     with session_lock(session_id):
-        if method in ('execute_query', 'start_table_read'):
+        if method == 'get_columns':
+            write_response(req, params)
+            return
+        if method in ('execute_query', 'start_table_read', 'get_explain_info'):
             sql = params.get('sql', '')
             with state_lock:
                 query_count += 1
@@ -4519,6 +4781,43 @@ for line in sys.stdin:
 
     async fn runtime_counter(runtime: &Arc<AgentRuntimeClient>, method: &str) -> u64 {
         runtime.call(method, serde_json::json!({}), Some(Duration::from_secs(2)), None).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn columns_rpc_preserves_explicit_schema_and_optional_current_schema() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("columns-context-test").await;
+        let mut client = AgentDriverClient::shared_session(runtime.clone(), "columns-session".to_string());
+
+        let contextual: serde_json::Value = client
+            .get_columns_in_context("APP", "", "ORDERS_ALIAS", Some("SelectedOwner"), Some(Duration::from_secs(2)))
+            .await
+            .unwrap();
+        assert_eq!(contextual["schema"], "");
+        assert_eq!(contextual["current_schema"], "SelectedOwner");
+        assert_eq!(contextual["table"], "ORDERS_ALIAS");
+        assert_eq!(contextual["agentSessionId"], "columns-session");
+
+        let qualified: serde_json::Value = client
+            .get_columns_in_context(
+                "APP",
+                "ActualOwner",
+                "ORDERS_ALIAS",
+                Some("SelectedOwner"),
+                Some(Duration::from_secs(2)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(qualified["schema"], "ActualOwner");
+        assert_eq!(qualified["current_schema"], "SelectedOwner");
+
+        let legacy: serde_json::Value =
+            client.get_columns("APP", "OWNER", "ORDERS_ALIAS", Some(Duration::from_secs(2))).await.unwrap();
+        assert_eq!(legacy["schema"], "OWNER");
+        assert!(legacy.get("current_schema").is_none());
+
+        runtime.kill();
+        wait_for_runtime_reap(&runtime).await;
+        let _ = std::fs::remove_file(script_path);
     }
 
     async fn wait_for_runtime_reap(runtime: &AgentRuntimeClient) {
@@ -4620,6 +4919,60 @@ for line in sys.stdin:
         let _ = std::fs::remove_file(script_path);
     }
 
+    #[tokio::test]
+    async fn native_explain_timeout_and_cancel_preserve_sibling_session() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("native-explain-cancel-test").await;
+        let mut client = AgentDriverClient::shared_session(runtime.clone(), "explain-session".to_string());
+        let mut sibling = AgentDriverClient::shared_session(runtime.clone(), "editor-session".to_string());
+        let error = client
+            .get_explain_info_with_timeout_and_cancel::<serde_json::Value>(
+                serde_json::json!({"sql": "slow-timeout-plan"}),
+                Some(Duration::from_millis(75)),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("Agent RPC call timed out"));
+        // The cancel acknowledgement can precede the old worker's exit.
+        // Drain its session lock before watching the next blocked request.
+        client
+            .call_with_timeout::<serde_json::Value>("probe", serde_json::json!({}), Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+        let token = CancellationToken::new();
+        let task_token = token.clone();
+        let task = tokio::spawn(async move {
+            let result = client
+                .get_explain_info_with_timeout_and_cancel::<serde_json::Value>(
+                    serde_json::json!({"sql": "slow-unlimited-plan"}),
+                    None,
+                    Some(task_token),
+                )
+                .await;
+            (result, client)
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime_counter(&runtime, "blocked_count").await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        let (result, mut client) = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+        let error = result.unwrap_err();
+        assert!(error.contains("Query canceled"), "{error}");
+        assert_eq!(runtime_counter(&runtime, "cancel_count").await, 2);
+        client
+            .call_with_timeout::<serde_json::Value>("probe", serde_json::json!({}), Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+        let response: serde_json::Value = sibling.call("probe", serde_json::json!({})).await.unwrap();
+        assert_eq!(response, serde_json::json!({"ok": true}));
+        assert!(!runtime.is_failed());
+        runtime.kill_and_wait().await;
+        let _ = std::fs::remove_file(script_path);
+    }
     #[tokio::test]
     async fn table_read_uses_the_supplied_rpc_timeout() {
         let (runtime, script_path) = spawn_stateful_test_runtime("table-read-timeout-test").await;
@@ -4841,6 +5194,231 @@ for line in sys.stdin:
         let _ = std::fs::remove_file(script_path);
     }
 
+    async fn dedicated_transaction_cancel_probe(order: &str, enabled: bool, timeout: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("agent.py");
+        let started = dir.path().join("started");
+        let marker = dir.path().join("cancel");
+        std::fs::write(&script, r#"import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); order = sys.argv[2]
+print(json.dumps({'ready': True}), flush=True)
+pending = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req['method']
+    if method == 'handshake':
+        print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':{'protocolVersion':2,'agentProtocolVersion':2,'capabilities':['multi_session']}}),flush=True)
+    elif method == 'execute_query':
+        pending = req['id']; (root/'started').write_text('executing')
+    elif method == 'cancel_session':
+        assert req['params']['agentSessionId'] == '__legacy__'
+        assert req['id'] != pending
+        (root/'cancel').write_text('cancel_session:__legacy__')
+        query = {'jsonrpc':'2.0','id':pending,'error':{'code':-1,'message':'Query was cancelled'}}
+        ack = {'jsonrpc':'2.0','id':req['id'],'result':{'ok':True}}
+        frames = [query,ack] if order == 'query_first' else [ack,query]
+        if order == 'ack_only': frames = [ack]
+        if order == 'duplicate_ack': frames = [ack,ack]
+        if order == 'json_log': frames = [ack,{'id':pending,'message':'not a query response'}]
+        for frame in frames: print(json.dumps(frame),flush=True)
+"#).unwrap();
+        let mut client = AgentDriverClient::spawn(AgentLaunchSpec::new(test_python()).with_args([
+            script.to_string_lossy().to_string(),
+            dir.path().to_string_lossy().to_string(),
+            order.to_owned(),
+        ]))
+        .await
+        .unwrap();
+        client.try_optional_handshake("test").await.unwrap();
+        if enabled {
+            client.enable_dedicated_transaction_query_cancellation();
+        }
+        let token = CancellationToken::new();
+        let cancel_task = if timeout {
+            None
+        } else {
+            let cancellation = token.clone();
+            Some(tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !started.exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                cancellation.cancel();
+            }))
+        };
+        let began = Instant::now();
+        let error = client
+            .call_typed_with_timeout_and_cancel::<serde_json::Value>(
+                "execute_query",
+                serde_json::json!({"sql":"WAITFOR"}),
+                Some(if timeout { Duration::from_millis(100) } else { Duration::from_secs(3) }),
+                if timeout { None } else { Some(token) },
+            )
+            .await
+            .unwrap_err();
+        if timeout {
+            assert!(matches!(error, AgentCallError::Timeout { .. }));
+            assert!(began.elapsed() >= Duration::from_secs(5), "cancel ACK alone incorrectly confirmed completion");
+        } else {
+            assert!(matches!(error, AgentCallError::Canceled { .. }));
+        }
+        assert!(began.elapsed() < Duration::from_secs(7), "cancel grace did not remain bounded");
+        if enabled {
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "cancel_session:__legacy__");
+        } else {
+            assert!(!marker.exists(), "ordinary clients changed cancellation behavior");
+        }
+        assert!(
+            client.call::<serde_json::Value>("execute_query", serde_json::json!({})).await.is_err(),
+            "disposed transaction was reused"
+        );
+        if let Some(task) = cancel_task {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn dedicated_transaction_query_cancel_accepts_ack_before_query_response() {
+        dedicated_transaction_cancel_probe("ack_first", true, false).await;
+    }
+
+    #[tokio::test]
+    async fn dedicated_transaction_query_cancel_accepts_query_response_before_ack() {
+        dedicated_transaction_cancel_probe("query_first", true, false).await;
+    }
+
+    #[tokio::test]
+    async fn dedicated_transaction_query_cancel_timeout_does_not_treat_ack_as_completion() {
+        dedicated_transaction_cancel_probe("ack_only", true, true).await;
+    }
+
+    #[tokio::test]
+    async fn dedicated_transaction_query_cancel_timeout_ignores_duplicate_ack() {
+        dedicated_transaction_cancel_probe("duplicate_ack", true, true).await;
+    }
+
+    #[tokio::test]
+    async fn dedicated_transaction_query_cancel_timeout_ignores_json_logs() {
+        dedicated_transaction_cancel_probe("json_log", true, true).await;
+    }
+
+    async fn dedicated_transaction_initial_write_probe(timeout: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("unresponsive-agent.py");
+        std::fs::write(&script, r#"import json, sys, time
+print(json.dumps({'ready':True}),flush=True)
+req=json.loads(sys.stdin.readline())
+assert req['method']=='handshake'
+print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':{'protocolVersion':2,'agentProtocolVersion':2,'capabilities':['multi_session']}}),flush=True)
+time.sleep(60)
+"#).unwrap();
+        let mut client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script.to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+        client.try_optional_handshake("test").await.unwrap();
+        client.enable_dedicated_transaction_query_cancellation();
+        let token = CancellationToken::new();
+        let cancel_task = if timeout {
+            None
+        } else {
+            let cancellation = token.clone();
+            Some(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                cancellation.cancel();
+            }))
+        };
+        let began = Instant::now();
+        let error = client
+            .call_typed_with_timeout_and_cancel::<serde_json::Value>(
+                "execute_query",
+                serde_json::json!({"sql":" ".repeat(2 * 1024 * 1024)}),
+                Some(if timeout { Duration::from_millis(100) } else { Duration::from_secs(3) }),
+                if timeout { None } else { Some(token) },
+            )
+            .await
+            .unwrap_err();
+        if timeout {
+            assert!(matches!(error, AgentCallError::Timeout { operation_outcome: AgentOperationOutcome::Unknown, .. }));
+        } else {
+            assert!(matches!(
+                error,
+                AgentCallError::Canceled { operation_outcome: AgentOperationOutcome::Unknown, .. }
+            ));
+        }
+        assert!(began.elapsed() < Duration::from_secs(2), "initial request write blocked cancellation/deadline");
+        assert!(client.child.as_mut().unwrap().try_wait().unwrap().is_some());
+        assert!(client.stdin.is_none());
+        assert!(client.call::<serde_json::Value>("execute_query", serde_json::json!({})).await.is_err());
+        if let Some(task) = cancel_task {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn dedicated_transaction_query_cancel_interrupts_blocked_initial_write() {
+        dedicated_transaction_initial_write_probe(false).await;
+    }
+
+    #[tokio::test]
+    async fn dedicated_transaction_query_cancel_timeout_interrupts_blocked_initial_write() {
+        dedicated_transaction_initial_write_probe(true).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dedicated_transaction_query_cancel_bounds_a_blocked_stdin_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("blocked-agent.py");
+        std::fs::write(&script, r#"import json, sys, time
+print(json.dumps({'ready':True}),flush=True)
+req=json.loads(sys.stdin.readline())
+assert req['method']=='handshake'
+print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':{'protocolVersion':2,'agentProtocolVersion':2,'capabilities':['multi_session']}}),flush=True)
+# Never consume the next request. Windows' default anonymous pipe holds 4096 bytes.
+time.sleep(60)
+"#).unwrap();
+        let mut client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script.to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+        client.try_optional_handshake("test").await.unwrap();
+        client.enable_dedicated_transaction_query_cancellation();
+        let empty_request = serde_json::json!({
+            "jsonrpc":"2.0", "id":client.next_id + 1,
+            "method":"execute_query", "params":{"sql":""},
+        });
+        let sql = " ".repeat(4096 - empty_request.to_string().len() - 1);
+        let began = Instant::now();
+        let error = client
+            .call_typed_with_timeout_and_cancel::<serde_json::Value>(
+                "execute_query",
+                serde_json::json!({"sql":sql}),
+                Some(Duration::from_millis(100)),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentCallError::Timeout { .. }));
+        assert!(began.elapsed() >= Duration::from_secs(5));
+        assert!(began.elapsed() < Duration::from_secs(7), "blocked cancel write prevented force kill");
+        assert!(
+            client.child.as_mut().unwrap().try_wait().unwrap().is_some(),
+            "unresponsive dedicated Agent was retained"
+        );
+        assert!(client.stdin.is_none());
+    }
+
+    #[tokio::test]
+    async fn dedicated_transaction_query_cancel_remains_opt_in() {
+        dedicated_transaction_cancel_probe("ack_first", false, false).await;
+    }
+
     #[tokio::test]
     async fn shared_runtime_tolerates_post_startup_driver_stdout_noise() {
         let script_path =
@@ -4945,6 +5523,42 @@ for line in sys.stdin:
 
         runtime.kill();
         let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn batch_and_transaction_send_statement_timeout_to_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("echo.py");
+        std::fs::write(
+            &script,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': req['params']}), flush=True)
+"#,
+        )
+        .unwrap();
+        let mut client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script.to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+        let statements = ["UPDATE t SET a = 1".to_string()];
+        for timeout in [Some(Duration::from_secs(7)), None] {
+            let expected = if timeout.is_some() { 7 } else { 0 };
+            let results: [serde_json::Value; 4] = [
+                client.execute_batch(Some("db"), &statements, Some("schema"), timeout).await.unwrap(),
+                client.execute_batch_typed(Some("db"), &statements, Some("schema"), timeout).await.unwrap(),
+                client.execute_transaction(Some("db"), &statements, Some("schema"), timeout).await.unwrap(),
+                client.execute_transaction_typed(Some("db"), &statements, Some("schema"), timeout).await.unwrap(),
+            ];
+            for result in results {
+                assert_eq!(result["timeoutSecs"], expected);
+                assert_eq!(result["statements"], serde_json::json!(statements));
+            }
+        }
+        client.kill();
     }
 
     #[tokio::test]
@@ -5237,8 +5851,53 @@ for line in sys.stdin:
         assert_eq!(handshake.capabilities, vec!["connect", "query", "metadata"]);
     }
 
+    #[tokio::test]
+    async fn bound_blob_execution_rejects_unsupported_agents_and_edited_previews_before_rpc() {
+        let mut client = AgentDriverClient::test_stub();
+        let previews = vec!["reviewed BLOB save".to_string()];
+        let bound = vec![dbx_types::types::BlobBoundStatement {
+            preview_sql: previews[0].clone(),
+            sql: "UPDATE t SET b=?".into(),
+            blob_parameters: vec!["00ff80".into()],
+        }];
+        let error = client
+            .execute_blob_bound_typed::<serde_json::Value>(None, &previews, &bound, None, false, None)
+            .await
+            .unwrap_err();
+        assert!(error.into_legacy_string().contains("does not support bound BLOB"));
+        assert_eq!(client.next_id, 0);
+        client.handshake = Some(AgentHandshake {
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            agent_protocol_version: AGENT_PROTOCOL_VERSION,
+            capabilities: vec!["blob_bind_statements_v1".into()],
+        });
+        let error = client
+            .execute_blob_bound_typed::<serde_json::Value>(None, &["edited SQL".into()], &bound, None, true, None)
+            .await
+            .unwrap_err();
+        assert!(error.into_legacy_string().contains("changed"));
+        assert_eq!(client.next_id, 0);
+    }
+
     #[test]
     fn defines_agent_protocol_capabilities() {
+        assert!(!agent_supports_capability(None, AgentCapability::BlobBindStatementsV1));
+        assert!(!agent_supports_capability(
+            Some(&AgentHandshake {
+                protocol_version: AGENT_PROTOCOL_VERSION,
+                agent_protocol_version: AGENT_PROTOCOL_VERSION,
+                capabilities: vec!["query".into()]
+            }),
+            AgentCapability::BlobBindStatementsV1
+        ));
+        assert!(agent_supports_capability(
+            Some(&AgentHandshake {
+                protocol_version: AGENT_PROTOCOL_VERSION,
+                agent_protocol_version: AGENT_PROTOCOL_VERSION,
+                capabilities: vec!["blob_bind_statements_v1".into()]
+            }),
+            AgentCapability::BlobBindStatementsV1
+        ));
         assert_eq!(AgentCapability::Connect.as_str(), "connect");
         assert_eq!(AgentCapability::TestConnection.as_str(), "test_connection");
         assert_eq!(AgentCapability::Metadata.as_str(), "metadata");
@@ -5267,7 +5926,8 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::MongoFindCursor.as_str(), "mongo_find_cursor");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
         assert_eq!(AgentCapability::StructuredErrorV1.as_str(), "structured_error_v1");
-        assert_eq!(AgentCapability::ALL.len(), 28);
+        assert_eq!(AgentCapability::BlobBindStatementsV1.as_str(), "blob_bind_statements_v1");
+        assert_eq!(AgentCapability::ALL.len(), 29);
     }
 
     #[test]

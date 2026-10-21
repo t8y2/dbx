@@ -62,6 +62,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   easysearch: { type: "easysearch", profile: "easysearch", label: "Easysearch", defaultPort: 9200 },
   meilisearch: { type: "meilisearch", profile: "meilisearch", label: "Meilisearch", defaultPort: 7700 },
   solr: { type: "solr", profile: "solr", label: "Apache Solr", defaultPort: 8983 },
+  couchdb: { type: "couchdb", profile: "couchdb", label: "Apache CouchDB", defaultPort: 5984 },
   qdrant: { type: "qdrant", profile: "qdrant", label: "Qdrant", defaultPort: 6333 },
   milvus: { type: "milvus", profile: "milvus", label: "Milvus", defaultPort: 19530 },
   weaviate: { type: "weaviate", profile: "weaviate", label: "Weaviate", defaultPort: 8080 },
@@ -73,7 +74,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   gaussdb: { type: "gaussdb", profile: "gaussdb", label: "GaussDB", defaultPort: 5432 },
   kwdb: { type: "kwdb", profile: "kwdb", label: "KWDB", defaultPort: 26257 },
   gbase: { type: "gbase", profile: "gbase", label: "南大通用 GBase", defaultPort: 5258 },
-  "gbasedbt-sqli": { type: "gbase", profile: "gbase8s", label: "南大通用 GBase 8s", defaultPort: 9088 },
+  "gbasedbt-sqli": { type: "gbase8s", profile: "gbase8s", label: "南大通用 GBase 8s", defaultPort: 9088 },
   "informix-sqli": { type: "informix", profile: "informix", label: "Informix", defaultPort: 9088 },
   yashandb: { type: "yashandb", profile: "yashandb", label: "YashanDB", defaultPort: 1688 },
   opengauss: { type: "gaussdb", profile: "opengauss", label: "openGauss", defaultPort: 5432 },
@@ -102,6 +103,7 @@ const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   easysearch: SCHEME_PROFILES.easysearch,
   meilisearch: SCHEME_PROFILES.meilisearch,
   solr: SCHEME_PROFILES.solr,
+  couchdb: SCHEME_PROFILES.couchdb,
   qdrant: SCHEME_PROFILES.qdrant,
   milvus: SCHEME_PROFILES.milvus,
   weaviate: SCHEME_PROFILES.weaviate,
@@ -597,7 +599,7 @@ function parseJdbcGbase8sUrl(source: string): ParsedConnectionUrl | null {
   const host = match.groups.host.replace(/^\[/, "").replace(/\]$/, "");
 
   return {
-    dbType: "gbase",
+    dbType: "gbase8s",
     driverProfile: "gbase8s",
     driverLabel: "南大通用 GBase 8s",
     host,

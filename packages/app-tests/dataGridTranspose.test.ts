@@ -13,6 +13,7 @@ import {
   transposeEndAlignmentSpacerWidth,
   transposeFieldWidth,
   transposeScrollLeftForRecord,
+  transposeScrollTopForField,
   visibleTransposeRecordWindow,
 } from "../../apps/desktop/src/lib/dataGrid/dataGridTranspose.ts";
 
@@ -339,5 +340,98 @@ test("start alignment uses trailing space to place the final variable-width reco
       endSpacerWidth,
     }),
     596,
+  );
+});
+
+test("nearest alignment keeps an already visible transpose field in place", () => {
+  assert.equal(
+    transposeScrollTopForField({
+      fieldIndex: 4,
+      totalFields: 20,
+      rowHeight: 30,
+      viewportHeight: 300,
+      currentScrollTop: 90,
+      alignment: "nearest",
+    }),
+    90,
+  );
+});
+
+test("nearest alignment scrolls a field above the viewport back to its start", () => {
+  assert.equal(
+    transposeScrollTopForField({
+      fieldIndex: 1,
+      totalFields: 20,
+      rowHeight: 30,
+      viewportHeight: 300,
+      currentScrollTop: 900,
+      alignment: "nearest",
+    }),
+    30,
+  );
+});
+
+test("nearest alignment scrolls a field below the viewport just into view", () => {
+  assert.equal(
+    transposeScrollTopForField({
+      fieldIndex: 15,
+      totalFields: 20,
+      rowHeight: 30,
+      viewportHeight: 300,
+      currentScrollTop: 90,
+      alignment: "nearest",
+    }),
+    180,
+  );
+});
+
+test("start alignment places the transpose field at the top of the viewport", () => {
+  assert.equal(
+    transposeScrollTopForField({
+      fieldIndex: 7,
+      totalFields: 20,
+      rowHeight: 30,
+      viewportHeight: 300,
+      currentScrollTop: 0,
+      alignment: "start",
+    }),
+    210,
+  );
+});
+
+test("clamps the transpose field scroll to the end of the field list", () => {
+  assert.equal(
+    transposeScrollTopForField({
+      fieldIndex: 19,
+      totalFields: 20,
+      rowHeight: 30,
+      viewportHeight: 300,
+      currentScrollTop: 0,
+      alignment: "start",
+    }),
+    300,
+  );
+});
+
+test("ignores transpose field scrolling when there is nothing to scroll", () => {
+  assert.equal(
+    transposeScrollTopForField({
+      fieldIndex: 0,
+      totalFields: 0,
+      rowHeight: 30,
+      viewportHeight: 300,
+      currentScrollTop: 0,
+    }),
+    0,
+  );
+  assert.equal(
+    transposeScrollTopForField({
+      fieldIndex: 0,
+      totalFields: 20,
+      rowHeight: 0,
+      viewportHeight: 300,
+      currentScrollTop: 0,
+    }),
+    0,
   );
 });

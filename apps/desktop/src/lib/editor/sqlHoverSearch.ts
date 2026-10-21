@@ -118,6 +118,12 @@ export interface HoverSearchController {
   status: HTMLElement;
   /** Focus the search input. */
   focus(): void;
+  /**
+   * Keep the hover tooltip open while the search input has focus. CodeMirror
+   * closes hover tooltips on `mouseleave`, which Windows IME candidate windows
+   * trigger when they pop up over the pointer mid-composition.
+   */
+  pinTooltip(host: HTMLElement): void;
   /** Remove listeners; safe to call once when the tooltip is destroyed. */
   destroy(): void;
 }
@@ -131,6 +137,8 @@ export interface HoverSearchOptions {
   placeholder: string;
   /** Message shown when a non-empty query has no matches. */
   noResultLabel: string;
+  /** Optional debounce delay in milliseconds for typing. Defaults to 0. */
+  debounceMs?: number;
 }
 
 /**
@@ -143,7 +151,7 @@ export interface HoverSearchOptions {
  *   Enter/composition never fire or dismiss the tooltip while typing.
  */
 export function createHoverSearch(options: HoverSearchOptions): HoverSearchController {
-  const { target, originalHtml, placeholder, noResultLabel } = options;
+  const { target, originalHtml, placeholder, noResultLabel, debounceMs = 0 } = options;
 
   const element = document.createElement("div");
   element.dataset.sqlHoverSearch = "true";
@@ -177,6 +185,25 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
   let matchGroups: HTMLElement[][] = [];
   let activeMatchIndex = -1;
   let isComposing = false;
+  let isTargetPristine = true;
+  let lastSearchQuery: string | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Cache pristine text content once from target/originalHtml to avoid
+  // querying target.textContent on every keystroke.
+  let pristineText = target.textContent ?? "";
+  if (!pristineText && originalHtml) {
+    const temp = document.createElement("div");
+    temp.innerHTML = originalHtml;
+    pristineText = temp.textContent ?? "";
+  }
+
+  const cancelPending = () => {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+  };
 
   const activateMatch = (index: number) => {
     for (const mark of matchGroups[activeMatchIndex] ?? []) mark.removeAttribute(ACTIVE_ATTRIBUTE);
@@ -186,28 +213,65 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
     matchGroups[index][0]?.scrollIntoView({ block: "nearest" });
   };
 
-  const runSearch = () => {
-    // Restore the pristine highlighted DDL, then re-apply match highlights.
-    target.innerHTML = originalHtml;
-    matchGroups = [];
-    activeMatchIndex = -1;
+  const executeSearch = () => {
+    if (isComposing) return;
     const query = input.value;
-    // Search the rendered text, not the raw DDL string: the highlighter emits
-    // `<br>` for line breaks, so `textContent` differs from the raw DDL by the
-    // dropped newline characters — and the walker's offsets live in the
-    // `textContent` domain. Using any other corpus shifts every match after
-    // the first line.
-    const matches = findHoverSearchMatches(target.textContent ?? "", query);
-    const hasQuery = query.trim().length > 0;
-    matchCount.hidden = !hasQuery;
-    matchCount.textContent = hasQuery ? "0 / 0" : "";
-    status.hidden = !hasQuery || matches.length > 0;
-    if (matches.length === 0) return;
+    if (query === lastSearchQuery) return;
+    lastSearchQuery = query;
 
+    const hasQuery = query.trim().length > 0;
+    if (!hasQuery) {
+      if (!isTargetPristine) {
+        target.innerHTML = originalHtml;
+        isTargetPristine = true;
+      }
+      matchGroups = [];
+      activeMatchIndex = -1;
+      matchCount.hidden = true;
+      matchCount.textContent = "";
+      status.hidden = true;
+      return;
+    }
+
+    const matches = findHoverSearchMatches(pristineText, query);
+    matchCount.hidden = false;
+    matchCount.textContent = matches.length > 0 ? "" : "0 / 0";
+    status.hidden = matches.length > 0;
+
+    if (matches.length === 0) {
+      if (!isTargetPristine) {
+        target.innerHTML = originalHtml;
+        isTargetPristine = true;
+      }
+      matchGroups = [];
+      activeMatchIndex = -1;
+      return;
+    }
+
+    target.innerHTML = originalHtml;
     const marks = applyHoverSearchHighlights(target, matches);
+    isTargetPristine = false;
     matchGroups = Array.from({ length: matches.length }, () => []);
     for (const mark of marks) matchGroups[Number(mark.getAttribute(MATCH_INDEX_ATTRIBUTE))].push(mark);
     activateMatch(0);
+  };
+
+  const scheduleSearch = () => {
+    if (isComposing) return;
+    cancelPending();
+    if (debounceMs <= 0) {
+      executeSearch();
+    } else {
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        executeSearch();
+      }, debounceMs);
+    }
+  };
+
+  const flushSearch = () => {
+    cancelPending();
+    executeSearch();
   };
 
   const stopKeyboard = (event: KeyboardEvent) => {
@@ -217,12 +281,19 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
     if (event.type !== "keydown" || isComposing || event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault();
-      if (matchGroups.length > 0) activateMatch((activeMatchIndex + (event.shiftKey ? -1 : 1) + matchGroups.length) % matchGroups.length);
+      const hadPending = debounceTimer !== null || input.value !== lastSearchQuery;
+      flushSearch();
+      if (matchGroups.length > 0) {
+        if (!hadPending) {
+          activateMatch((activeMatchIndex + (event.shiftKey ? -1 : 1) + matchGroups.length) % matchGroups.length);
+        }
+      }
     }
     if (event.key === "Escape" && input.value) {
       event.preventDefault();
+      cancelPending();
       input.value = "";
-      runSearch();
+      executeSearch();
     }
   };
   const stopPointer = (event: Event) => {
@@ -230,12 +301,14 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
   };
   const startComposition = () => {
     isComposing = true;
+    cancelPending();
   };
   const endComposition = () => {
     isComposing = false;
+    scheduleSearch();
   };
 
-  input.addEventListener("input", runSearch);
+  input.addEventListener("input", scheduleSearch);
   input.addEventListener("keydown", stopKeyboard);
   input.addEventListener("keyup", stopKeyboard);
   input.addEventListener("compositionstart", startComposition);
@@ -243,14 +316,33 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
   input.addEventListener("pointerdown", stopPointer);
   input.addEventListener("mousedown", stopPointer);
 
+  let pinnedHost: HTMLElement | null = null;
+  const keepPinnedTooltipOpen = (event: Event) => {
+    if (event.target === pinnedHost && document.activeElement === input) event.stopImmediatePropagation();
+  };
+  const releasePinnedTooltip = () => {
+    // Hand the leave CodeMirror missed back to it once typing is over.
+    if (pinnedHost && !pinnedHost.matches(":hover")) pinnedHost.dispatchEvent(new MouseEvent("mouseleave"));
+  };
+
   return {
     element,
     status,
     focus() {
       input.focus();
     },
+    pinTooltip(host) {
+      pinnedHost = host;
+      // Capture on the document runs before CodeMirror's listener on the host.
+      document.addEventListener("mouseleave", keepPinnedTooltipOpen, true);
+      input.addEventListener("blur", releasePinnedTooltip);
+    },
     destroy() {
-      input.removeEventListener("input", runSearch);
+      cancelPending();
+      document.removeEventListener("mouseleave", keepPinnedTooltipOpen, true);
+      input.removeEventListener("blur", releasePinnedTooltip);
+      pinnedHost = null;
+      input.removeEventListener("input", scheduleSearch);
       input.removeEventListener("keydown", stopKeyboard);
       input.removeEventListener("keyup", stopKeyboard);
       input.removeEventListener("compositionstart", startComposition);

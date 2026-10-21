@@ -85,7 +85,7 @@ describe("EditorToolbar commit/rollback visibility", () => {
     });
   });
 
-  async function mountToolbar(props: { dbType: string; stickyProvenReadOnlyState: boolean; txnPossiblyDirty?: boolean; txnSessionId?: string }) {
+  async function mountToolbar(props: { dbType: string; stickyProvenReadOnlyState: boolean; txnPossiblyDirty?: boolean; txnSessionId?: string; txnStatus?: string; isExecuting?: boolean }) {
     const connectionStore = useConnectionStore();
     connectionStore.connections = [
       {
@@ -105,7 +105,8 @@ describe("EditorToolbar commit/rollback visibility", () => {
         database: "db",
         sql: "SELECT 1",
         mode: "query",
-        isExecuting: false,
+        isExecuting: props.isExecuting ?? false,
+        txnStatus: props.txnStatus,
         isCancelling: false,
         isExplaining: false,
       },
@@ -155,11 +156,40 @@ describe("EditorToolbar commit/rollback visibility", () => {
     host.remove();
   });
 
+  it("hides Commit/Rollback for a clean GaussDB sticky manual session", async () => {
+    const host = await mountToolbar({ dbType: "gaussdb", stickyProvenReadOnlyState: true, txnPossiblyDirty: false, txnSessionId: "txn-1" });
+
+    expect(host.querySelector(commitSelector)).toBeNull();
+    expect(host.querySelector(rollbackSelector)).toBeNull();
+    host.remove();
+  });
+
+  it("shows Commit/Rollback once the GaussDB sticky session is dirty", async () => {
+    const host = await mountToolbar({ dbType: "gaussdb", stickyProvenReadOnlyState: true, txnPossiblyDirty: true, txnSessionId: "txn-1" });
+
+    expect(host.querySelector(commitSelector)).not.toBeNull();
+    expect(host.querySelector(rollbackSelector)).not.toBeNull();
+    host.remove();
+  });
+
   it("keeps the legacy always-visible rule for non-sticky dialects with a session", async () => {
     const host = await mountToolbar({ dbType: "jdbc", stickyProvenReadOnlyState: false, txnPossiblyDirty: false, txnSessionId: "txn-1" });
 
     expect(host.querySelector(commitSelector)).not.toBeNull();
     expect(host.querySelector(rollbackSelector)).not.toBeNull();
+    host.remove();
+  });
+  it.each(["opening", "ending"])("SQL Server disables transaction actions while %s", async (txnStatus) => {
+    const host = await mountToolbar({ dbType: "sqlserver", stickyProvenReadOnlyState: false, txnSessionId: "sqlserver-txn-1", txnStatus });
+    expect(host.querySelector<HTMLButtonElement>(commitSelector)?.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>(rollbackSelector)?.disabled).toBe(true);
+    host.remove();
+  });
+
+  it("SQL Server exposes Commit/Rollback for its dedicated active transaction", async () => {
+    const host = await mountToolbar({ dbType: "sqlserver", stickyProvenReadOnlyState: false, txnSessionId: "sqlserver-txn-1", txnStatus: "active" });
+    expect(host.querySelector<HTMLButtonElement>(commitSelector)?.disabled).toBe(false);
+    expect(host.querySelector<HTMLButtonElement>(rollbackSelector)?.disabled).toBe(false);
     host.remove();
   });
 });

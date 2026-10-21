@@ -66,6 +66,26 @@ describe("production SQL safety", () => {
     }
   });
 
+  it("keeps production DDL visible after PostgreSQL E'...' escape strings", () => {
+    const pg = connection({ db_type: "postgres" });
+    expect(assessProductionSql("SELECT E'a\\''; DROP DATABASE prod_app;", pg, "staging")).toMatchObject({ active: true, reason: "sql_target", isMutation: true, databases: ["prod_app"] });
+  });
+
+  it("keeps production DDL visible after Oracle alternative-quoted strings", () => {
+    const oracle = connection({ db_type: "oracle" });
+
+    // The quote inside q'...' is literal, so the DDL after the literal is real.
+    expect(assessProductionSql("SELECT q'[it's]' FROM dual; DROP DATABASE prod_app;", oracle, "staging")).toMatchObject({
+      active: true,
+      reason: "sql_target",
+      isMutation: true,
+      databases: ["prod_app"],
+    });
+
+    // ...and DDL-looking text inside the literal stays literal data.
+    expect(assessProductionSql("SELECT q'[it's; DROP DATABASE prod_app;]' FROM dual;", oracle, "staging")).toMatchObject({ active: false });
+  });
+
   it("matches the shared SQL target safety corpus", () => {
     for (const corpusCase of productionSafetyCorpus) {
       const assessment = assessProductionSql(

@@ -20,6 +20,7 @@ import {
 } from "../../apps/desktop/src/lib/sql/sqlCompletion.ts";
 import { sqlCompletionContextFromSemantic } from "../../apps/desktop/src/lib/sql/semantic/completion.ts";
 import { buildSqlSemanticModel } from "../../apps/desktop/src/lib/sql/semantic/model.ts";
+import { sqlSnippetDatabaseTypeForConnection } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 import type { DatabaseType } from "../../apps/desktop/src/types/database.ts";
 
 const tables: SqlCompletionTable[] = [
@@ -316,6 +317,41 @@ test("suggests MySQL VERSION and REVERSE without broadening other dialects", () 
     false,
   );
   assert.equal(buildFunctionItems("reve").find((item) => item.label === "REVERSE")?.apply, "REVERSE(${string})");
+});
+
+test("suggests MySQL AES functions with required arguments, including through JDBC MySQL", () => {
+  const jdbcMysqlType = sqlSnippetDatabaseTypeForConnection({ db_type: "jdbc", connection_string: "jdbc:mysql://localhost:3306/app" });
+  assert.equal(jdbcMysqlType, "mysql");
+
+  for (const databaseType of ["mysql", jdbcMysqlType] as const) {
+    for (const [name, parameters] of [
+      ["AES_ENCRYPT", ["str", "key_str"]],
+      ["AES_DECRYPT", ["crypt_str", "key_str"]],
+    ] as const) {
+      const sql = `SELECT ${name.slice(0, -3)}`;
+      const items = buildSqlCompletionItems(sql, sql.length, {
+        tables: [],
+        columnsByTable: new Map(),
+        databaseType,
+      });
+      assert.equal(items.find((item) => item.type === "function" && item.label === name)?.apply, `${name}(${parameters.map((parameter) => `\${${parameter}}`).join(", ")})`);
+      const call = `SELECT ${name}(`;
+      assert.deepEqual(getSqlFunctionSignatureHelp(call, call.length, databaseType)?.parameters, parameters);
+    }
+  }
+
+  for (const databaseType of ["postgres", "sqlserver"] as const) {
+    const sql = "SELECT AES_";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType,
+    });
+    assert.equal(
+      items.some((item) => item.type === "function" && (item.label === "AES_ENCRYPT" || item.label === "AES_DECRYPT")),
+      false,
+    );
+  }
 });
 
 test("suggests the reported MySQL 5.7 built-in functions with dialect-specific signatures", () => {
@@ -2055,11 +2091,80 @@ test("suggests SQL Server data types in CREATE TABLE column definitions", () => 
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables,
     columnsByTable,
+    databaseType: "sqlserver",
   });
 
   assert.ok(items.some((item) => item.type === "keyword" && item.label === "INT"));
   assert.ok(items.some((item) => item.type === "keyword" && item.label === "BIGINT"));
   assert.ok(items.some((item) => item.type === "keyword" && item.label === "NVARCHAR"));
+  assert.ok(items.some((item) => item.type === "keyword" && item.label === "UNIQUEIDENTIFIER"));
+  const intItem = items.find((item) => item.label === "INT");
+  assert.equal(intItem?.detail, "data type");
+  assert.equal(items[0]?.detail, "data type");
+});
+
+test("prioritizes UNIQUEIDENTIFIER above UNION and UPDATE and suppresses external columns in SQL Server temp table (#8300)", () => {
+  const customColumns = new Map<string, SqlCompletionColumn[]>([
+    [
+      "dbo.Bills",
+      [
+        { name: "UpdateDate", table: "Bills", schema: "dbo", dataType: "datetime" },
+        { name: "UserId", table: "Bills", schema: "dbo", dataType: "int" },
+      ],
+    ],
+  ]);
+  const sql = "SELECT * FROM dbo.Bills\nCREATE TABLE #Tables (\n  Id U";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "Bills", schema: "dbo", type: "table" }],
+    columnsByTable: customColumns,
+    databaseType: "sqlserver",
+  });
+
+  // Should NOT suggest columns from other tables when defining column types
+  assert.equal(items.some((item) => item.label === "UpdateDate"), false);
+
+  // UNIQUEIDENTIFIER must rank above UNION and UPDATE
+  const uniqueIdIdx = items.findIndex((item) => item.label === "UNIQUEIDENTIFIER");
+  const unionIdx = items.findIndex((item) => item.label === "UNION");
+  const updateIdx = items.findIndex((item) => item.label === "UPDATE");
+
+  assert.ok(uniqueIdIdx >= 0, "UNIQUEIDENTIFIER should be suggested");
+  assert.equal(items[uniqueIdIdx]?.detail, "data type");
+  if (unionIdx >= 0) {
+    assert.ok(uniqueIdIdx < unionIdx, "UNIQUEIDENTIFIER should rank before UNION");
+  }
+  if (updateIdx >= 0) {
+    assert.ok(uniqueIdIdx < updateIdx, "UNIQUEIDENTIFIER should rank before UPDATE");
+  }
+});
+
+test("suggests data types in ALTER TABLE ADD and ALTER COLUMN definitions", () => {
+  const addSql = "ALTER TABLE dbo.jobs ADD col ";
+  const addItems = buildSqlCompletionItems(addSql, addSql.length, {
+    databaseType: "sqlserver",
+    tables,
+    columnsByTable,
+  });
+  assert.ok(addItems.some((item) => item.label === "INT" && item.detail === "data type"));
+
+  const alterSql = "ALTER TABLE dbo.jobs ALTER COLUMN col ";
+  const alterItems = buildSqlCompletionItems(alterSql, alterSql.length, {
+    databaseType: "sqlserver",
+    tables,
+    columnsByTable,
+  });
+  assert.ok(alterItems.some((item) => item.label === "NVARCHAR" && item.detail === "data type"));
+});
+
+test("auto-opens completion on space after column name in CREATE TABLE", () => {
+  const sql = "CREATE TABLE #Tables (\n  Id ";
+  assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length, { databaseType: "sqlserver" }), true);
+
+  const regularTableSql = "CREATE TABLE jobs (\n  Id ";
+  assert.equal(shouldAutoOpenSqlCompletion(regularTableSql, regularTableSql.length), true);
+
+  const afterTypeSql = "CREATE TABLE #Tables (\n  Id INT ";
+  assert.equal(shouldAutoOpenSqlCompletion(afterTypeSql, afterTypeSql.length, { databaseType: "sqlserver" }), false);
 });
 
 test("does not auto-open completion after structural punctuation", () => {
@@ -3216,6 +3321,22 @@ test("adds CTE tables to referenced tables in context", () => {
   assert.ok(cteRef.columns!.includes("name"));
 });
 
+test("expands nested CTE columns referencing earlier CTE (#11479)", () => {
+  const sql = `with test_a as (
+    select '1' as 字段
+)
+, test_b as (
+    select ta.*
+        , '2' as 追加字段
+    from test_a ta
+)
+select * from test_b`;
+  const ctes = extractCteDefinitions(sql);
+  assert.equal(ctes.length, 2);
+  assert.deepEqual(ctes[0]?.columns, ["字段"]);
+  assert.deepEqual(ctes[1]?.columns, ["字段", "追加字段"]);
+});
+
 // --- INSERT column list detection ---
 
 test("detects INSERT INTO column list context", () => {
@@ -3444,6 +3565,36 @@ test("referenced-table columns rank above keywords (#801)", () => {
   const keywordIdx = items.findIndex((item) => item.type === "keyword");
   if (keywordIdx >= 0) {
     assert.ok(columnIdx < keywordIdx, "columns should appear before keywords in a referenced-table context");
+  }
+});
+
+test("referenced-table columns rank above sequences in WHERE clause (#12927)", () => {
+  for (const databaseType of ["dameng", "oracle"] as const) {
+    const sql = "select * from xx where col";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "xx", type: "table" }],
+      columnsByTable: new Map([["xx", [{ name: "col_value", table: "xx" }]]]),
+      objects: [{ name: "col_seq", type: "sequence" }],
+      databaseType,
+    });
+
+    const columnIdx = items.findIndex((item) => item.type === "column" && item.label === "col_value");
+    const sequenceIdx = items.findIndex((item) => item.type === "sequence" && item.label === "col_seq");
+
+    assert.ok(columnIdx >= 0, `column col_value should be suggested for ${databaseType}`);
+    assert.ok(sequenceIdx >= 0, `sequence col_seq should be suggested for ${databaseType}`);
+    assert.ok(columnIdx < sequenceIdx, `column col_value (index ${columnIdx}) should sort before sequence col_seq (index ${sequenceIdx}) for ${databaseType}`);
+
+    // In contexts where columns are not expected, sequence still appears and retains priority
+    const noTableSql = "select col";
+    const noTableItems = buildSqlCompletionItems(noTableSql, noTableSql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      objects: [{ name: "col_seq", type: "sequence" }],
+      databaseType,
+    });
+    const noTableSeqIdx = noTableItems.findIndex((item) => item.type === "sequence" && item.label === "col_seq");
+    assert.equal(noTableSeqIdx, 0, `sequence col_seq should rank first when columns are not expected for ${databaseType}`);
   }
 });
 
@@ -4588,3 +4739,281 @@ test("recordCompletionSelection boosts future ranking", () => {
   // user_profiles should now rank higher than users due to history boost
   assert.equal(tableItems[0]?.label, "user_profiles");
 });
+
+// --- Table completion identifierCase (#11400) ---
+
+test("table completions follow identifierCase lower (#11400)", () => {
+  const oracleTables = [
+    { name: "USERS", schema: "SCOTT", type: "table" as const },
+    { name: "DEPARTMENT", schema: "SCOTT", type: "table" as const },
+  ];
+  const items = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: oracleTables,
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    currentSchema: "SCOTT",
+    identifierCase: "lower",
+    autoAliasTables: true,
+  });
+  const userItem = items.find((item) => item.label === "users");
+  assert.ok(userItem, "should provide lowercase table label");
+  assert.equal(userItem?.apply, "users us", "should apply bare lowercase table name and alias in Oracle");
+});
+
+test("table completions follow identifierCase upper (#11400)", () => {
+  const pgTables = [{ name: "users", schema: "public", type: "table" as const }];
+  const items = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: pgTables,
+    columnsByTable: new Map(),
+    databaseType: "postgres",
+    currentSchema: "public",
+    identifierCase: "upper",
+    autoAliasTables: true,
+  });
+  const userItem = items.find((item) => item.label === "USERS");
+  assert.ok(userItem, "should provide uppercase table label");
+  assert.equal(userItem?.apply, "USERS us", "should apply bare uppercase table name and alias");
+});
+
+test("table completions preserve identifier case by default (#11400)", () => {
+  const oracleTables = [{ name: "USERS", schema: "SCOTT", type: "table" as const }];
+  const items = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: oracleTables,
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    currentSchema: "SCOTT",
+    identifierCase: "preserve",
+    autoAliasTables: false,
+  });
+  const userItem = items.find((item) => item.label === "USERS");
+  assert.ok(userItem, "should keep original uppercase label");
+  assert.equal(userItem?.apply, "USERS", "should apply original table name");
+});
+
+test("MySQL table completions preserve catalog case under identifierCase lower (#12938)", () => {
+  const mysqlTables = [{ name: "SETTLE_MZ", schema: "tmp_fj", type: "table" as const }];
+  const items = buildSqlCompletionItems("select * from s", "select * from s".length, {
+    tables: mysqlTables,
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+    currentSchema: "tmp_fj",
+    identifierCase: "lower",
+    autoAliasTables: false,
+  });
+  const tableItem = items.find((item) => item.label === "SETTLE_MZ");
+  assert.ok(tableItem, "should provide table item with original uppercase label");
+  assert.equal(tableItem?.apply, "SETTLE_MZ", "should preserve original table casing in MySQL");
+});
+
+test("MySQL schema-qualified table completions preserve catalog case (#12938)", () => {
+  const mysqlTables = [
+    { name: "SETTLE_MZ", schema: "tmp_fj", type: "table" as const },
+    { name: "SETTLE_MZ", schema: "other_schema", type: "table" as const },
+  ];
+  const items = buildSqlCompletionItems("select * from s", "select * from s".length, {
+    tables: mysqlTables,
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+    currentSchema: "other_schema",
+    identifierCase: "lower",
+    autoAliasTables: false,
+  });
+  const settleItem = items.find((item) => item.apply === "tmp_fj.SETTLE_MZ");
+  assert.ok(settleItem, "should qualify tmp_fj.SETTLE_MZ preserving original table case");
+});
+
+test("PostgreSQL mixed-case table completions preserve case and quotes under identifierCase (#12938)", () => {
+  const pgTables = [{ name: "Users", schema: "public", type: "table" as const }];
+  const itemsLower = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: pgTables,
+    columnsByTable: new Map(),
+    databaseType: "postgres",
+    currentSchema: "public",
+    identifierCase: "lower",
+    autoAliasTables: false,
+  });
+  const userItemLower = itemsLower.find((item) => item.label === "Users");
+  assert.ok(userItemLower, "should keep original mixed-case label");
+  assert.equal(userItemLower?.apply, '"Users"', "should keep double quotes and original case for mixed-case Postgres table");
+
+  const itemsUpper = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: pgTables,
+    columnsByTable: new Map(),
+    databaseType: "postgres",
+    currentSchema: "public",
+    identifierCase: "upper",
+    autoAliasTables: false,
+  });
+  const userItemUpper = itemsUpper.find((item) => item.label === "Users");
+  assert.ok(userItemUpper, "should keep original mixed-case label");
+  assert.equal(userItemUpper?.apply, '"Users"', "should not emit unquoted users or quoted USERS for mixed-case Postgres table");
+});
+
+test("SQL Server table completions preserve catalog case under identifierCase (#12938)", () => {
+  const sqlserverTables = [{ name: "SETTLE_MZ", schema: "dbo", type: "table" as const }];
+  const items = buildSqlCompletionItems("select * from s", "select * from s".length, {
+    tables: sqlserverTables,
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+    currentSchema: "dbo",
+    identifierCase: "lower",
+    autoAliasTables: false,
+  });
+  const tableItem = items.find((item) => item.label === "SETTLE_MZ");
+  assert.ok(tableItem, "should keep original table label in SQL Server");
+  assert.equal(tableItem?.apply, "SETTLE_MZ", "should preserve original table casing in SQL Server");
+});
+
+test("Oracle mixed-case table completions preserve case and quotes under identifierCase (#12938)", () => {
+  const oracleTables = [{ name: "Users", schema: "SCOTT", type: "table" as const }];
+  const items = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: oracleTables,
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    currentSchema: "SCOTT",
+    identifierCase: "lower",
+    autoAliasTables: false,
+  });
+  const userItem = items.find((item) => item.label === "Users");
+  assert.ok(userItem, "should keep original mixed-case label in Oracle");
+  assert.equal(userItem?.apply, '"Users"', "should keep double quotes and original case for mixed-case Oracle table");
+});
+
+test("schema-qualified table completions follow identifierCase (#11400)", () => {
+  const collidingTables = [
+    { name: "ORDERS", schema: "SCOTT", type: "table" as const },
+    { name: "ORDERS", schema: "STAGING", type: "table" as const },
+  ];
+  const items = buildSqlCompletionItems("select * from o", "select * from o".length, {
+    tables: collidingTables,
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    currentSchema: "OTHER",
+    identifierCase: "lower",
+    autoAliasTables: false,
+  });
+  const scottOrder = items.find((item) => item.apply === "scott.orders");
+  const stagingOrder = items.find((item) => item.apply === "staging.orders");
+  assert.ok(scottOrder, "should qualify scott.orders in lowercase");
+  assert.ok(stagingOrder, "should qualify staging.orders in lowercase");
+});
+
+test("table completions with applyName follow identifierCase (#11400)", () => {
+  const tablesWithApplyName = [
+    { name: "DEPT_DICT", schema: "COMM", applyName: "COMM.DEPT_DICT", type: "table" as const },
+  ];
+  const items = buildSqlCompletionItems("select * from d", "select * from d".length, {
+    tables: tablesWithApplyName,
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    identifierCase: "lower",
+  });
+  const deptItem = items.find((item) => item.label === "dept_dict");
+  assert.ok(deptItem, "should provide lowercase table label");
+  assert.equal(deptItem?.apply, "comm.dept_dict", "should lowercase supplied applyName");
+});
+
+test("CTE table completions follow identifierCase (#11400)", () => {
+  const sql = "with MY_CTE as (select 1 from dual) select * from m";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    identifierCase: "lower",
+  });
+  const cteItem = items.find((item) => item.label === "my_cte");
+  assert.ok(cteItem, "should provide lowercase CTE table label");
+  assert.equal(cteItem?.apply, "my_cte", "should apply lowercase CTE name");
+});
+
+test("table and column completions can be searched by comments (#12033)", () => {
+  const tables = [
+    { name: "t_user", type: "table" as const, comment: "用户基础信息表" },
+    { name: "t_order", type: "table" as const, comment: "订单表" },
+    { name: "t_account", type: "table" as const, detail: "→ 账户中心" },
+    { name: "customer_summary", type: "table" as const, comment: "customer billing summary" },
+  ];
+  const columnsByTable = new Map([
+    [
+      "t_user",
+      [
+        { name: "user_id", table: "t_user", comment: "用户主键ID" },
+        { name: "nickname", table: "t_user", comment: "用户昵称" },
+        { name: "created_at", table: "t_user", comment: "创建时间" },
+        { name: "email_address", table: "t_user", comment: "user electronic mail" },
+      ],
+    ],
+  ]);
+
+  // Table matching by Chinese comment substring
+  const hanTableItems = buildSqlCompletionItems("select * from 用", "select * from 用".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(hanTableItems.some((item) => item.label === "t_user"));
+  assert.equal(hanTableItems.some((item) => item.label === "t_order"), false);
+
+  // Table matching by pinyin initials of comment
+  const pinyinTableItems = buildSqlCompletionItems("select * from ddb", "select * from ddb".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(pinyinTableItems.some((item) => item.label === "t_order"));
+
+  // Table matching from detail
+  const detailTableItems = buildSqlCompletionItems("select * from 账户", "select * from 账户".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(detailTableItems.some((item) => item.label === "t_account"));
+
+  // Table matching by English comment
+  const enCommentTableItems = buildSqlCompletionItems("select * from billing", "select * from billing".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(enCommentTableItems.some((item) => item.label === "customer_summary"));
+
+  // Column matching by Chinese comment
+  const hanColItems = buildSqlCompletionItems("select cj from t_user", "select cj".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(hanColItems.some((item) => item.label === "created_at"));
+
+  const hanColSubstringItems = buildSqlCompletionItems("select 昵称 from t_user", "select 昵称".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(hanColSubstringItems.some((item) => item.label === "nickname"));
+
+  // Column matching by English comment
+  const enColItems = buildSqlCompletionItems("select mail from t_user", "select mail".length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+  assert.ok(enColItems.some((item) => item.label === "email_address"));
+
+  // Name match takes priority over comment match when query matches both
+  const nameVsCommentTables = [
+    { name: "user_log", type: "table" as const, comment: "系统操作日志" },
+    { name: "t_history", type: "table" as const, comment: "user login history" },
+  ];
+  const priorityItems = buildSqlCompletionItems("select * from user", "select * from user".length, {
+    tables: nameVsCommentTables,
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const userLogIndex = priorityItems.findIndex((item) => item.label === "user_log");
+  const historyIndex = priorityItems.findIndex((item) => item.label === "t_history");
+  assert.ok(userLogIndex >= 0 && historyIndex >= 0);
+  assert.ok(userLogIndex < historyIndex, "Name match should rank ahead of comment match");
+});
+

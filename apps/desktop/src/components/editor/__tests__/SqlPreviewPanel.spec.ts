@@ -5,15 +5,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   highlight: vi.fn<(content: string) => string>(() => ""),
+  copyToClipboard: vi.fn<(_text: string) => Promise<void>>(async () => {}),
+  toast: vi.fn(),
+  formatterSettings: {} as Record<string, unknown>,
 }));
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false } }) }));
-vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { sqlFormatter: {} } }) }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { sqlFormatter: mocks.formatterSettings } }) }));
 vi.mock("@/lib/sql/sqlHighlighter", () => ({
   createShikiSqlHighlighter: async () => (content: string) => mocks.highlight(content),
 }));
+
+vi.mock("@/lib/common/clipboard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/common/clipboard")>();
+  return { ...actual, copyToClipboard: mocks.copyToClipboard };
+});
 
 vi.mock("@/components/ui/button", async () => {
   const { defineComponent, h } = await import("vue");
@@ -40,6 +48,8 @@ vi.mock("@/components/ui/tooltip", async () => {
 });
 
 import SqlPreviewPanel from "@/components/editor/SqlPreviewPanel.vue";
+import { formatSqlText } from "@/lib/sql/sqlFormatter";
+import { DEFAULT_SQL_FORMATTER_SETTINGS } from "@/lib/sql/sqlFormatterConfig";
 
 const SQL = "UPDATE users SET name = 'Ada' WHERE id = 1;";
 
@@ -53,10 +63,10 @@ async function flushUi() {
   }
 }
 
-async function mountPanel(sql = SQL) {
+async function mountPanel(sql = SQL, sqlFormatDialect = "generic") {
   host = document.createElement("div");
   document.body.append(host);
-  app = createApp(SqlPreviewPanel, { sql });
+  app = createApp(SqlPreviewPanel, { sql, sqlFormatDialect });
   app.mount(host);
   await flushUi();
   return host;
@@ -74,8 +84,31 @@ function dispatchSelectAll(target: HTMLElement, modifiers: KeyboardEventInit = {
   return event;
 }
 
+function dispatchCopy(target: HTMLElement, modifiers: KeyboardEventInit = { ctrlKey: true }) {
+  const event = new KeyboardEvent("keydown", { key: "c", bubbles: true, cancelable: true, ...modifiers });
+  target.dispatchEvent(event);
+  return event;
+}
+
+/** Builds a selection the way a mouse drag would: a sub-range of the preview text. */
+function dragSelect(pre: HTMLElement, start: number, end: number) {
+  const textNode = pre.firstChild;
+  if (!textNode) throw new Error("preview text node not found");
+  const range = document.createRange();
+  range.setStart(textNode, start);
+  range.setEnd(textNode, end);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+  return selection;
+}
+
 beforeEach(() => {
   mocks.highlight.mockImplementation(() => "");
+  mocks.copyToClipboard.mockClear();
+  mocks.copyToClipboard.mockImplementation(async () => {});
+  mocks.toast.mockClear();
+  mocks.formatterSettings = {};
 });
 
 afterEach(() => {
@@ -85,6 +118,8 @@ afterEach(() => {
   host?.remove();
   host = null;
   mocks.highlight.mockClear();
+  mocks.copyToClipboard.mockClear();
+  mocks.toast.mockClear();
 });
 
 describe("SqlPreviewPanel select all", () => {
@@ -127,9 +162,6 @@ describe("SqlPreviewPanel select all", () => {
     expect(dispatchSelectAll(pre, { ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(false);
     expect(dispatchSelectAll(pre, { ctrlKey: true, altKey: true }).defaultPrevented).toBe(false);
     expect(dispatchSelectAll(pre, { ctrlKey: false }).defaultPrevented).toBe(false);
-    const other = new KeyboardEvent("keydown", { key: "c", bubbles: true, cancelable: true, ctrlKey: true });
-    pre.dispatchEvent(other);
-    expect(other.defaultPrevented).toBe(false);
     expect(window.getSelection()?.rangeCount ?? 0).toBe(0);
   });
 
@@ -142,5 +174,156 @@ describe("SqlPreviewPanel select all", () => {
     dispatchSelectAll(pre);
 
     expect(bubbled).toHaveBeenCalledOnce();
+  });
+});
+
+describe("SqlPreviewPanel formatter fallback", () => {
+  it("shows a fallback toast while retaining the production formatter's base output", async () => {
+    const sql =
+      "create or replace function department_label(p_id number) return varchar2 is\n  v_id number;\n  v_name varchar2(100);\nbegin\n  select deptno,dname into v_id,v_name from dept where deptno=p_id and loc='Boston';\n  v_name := trim(v_name);\n  return v_name;\nexception when no_data_found then return 'unknown';\nend;";
+    const baseSettings = { ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "classic" as const };
+    const base = await formatSqlText(sql, "oracle", baseSettings);
+    mocks.formatterSettings = { ...baseSettings, customRulesEnabled: true };
+    const mounted = await mountPanel(sql, "oracle");
+
+    mounted.querySelector<HTMLButtonElement>('[aria-label="toolbar.formatSql"]')!.click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("settings.sqlFormatterFallbackNotice", 4000), { timeout: 5000 });
+    await flushUi();
+
+    expect(previewText(mounted).textContent).toBe(base);
+  });
+});
+
+describe("SqlPreviewPanel copy", () => {
+  it("copies a Ctrl+A selection through the app clipboard instead of the unreliable native path", async () => {
+    const mounted = await mountPanel();
+    const pre = previewText(mounted);
+
+    pre.focus();
+    expect(dispatchSelectAll(pre).defaultPrevented).toBe(true);
+
+    const copied = dispatchCopy(pre);
+    await flushUi();
+
+    // The webview never lands a programmatically built selection on the system
+    // clipboard, which is why Ctrl+A followed by Ctrl+C used to toast success and
+    // copy nothing (#12167).
+    expect(copied.defaultPrevented).toBe(true);
+    expect(mocks.copyToClipboard).toHaveBeenCalledTimes(1);
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith(SQL);
+    expect(mocks.toast).toHaveBeenCalledWith("grid.copied");
+  });
+
+  it("copies the whole preview when Ctrl+C arrives without a selection", async () => {
+    const mounted = await mountPanel();
+    const pre = previewText(mounted);
+
+    const copied = dispatchCopy(pre);
+    await flushUi();
+
+    expect(copied.defaultPrevented).toBe(true);
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith(SQL);
+    expect(mocks.toast).toHaveBeenCalledWith("grid.copied");
+  });
+
+  it("copies only the text the user actually highlighted", async () => {
+    const mounted = await mountPanel();
+    const pre = previewText(mounted);
+
+    dragSelect(pre, 0, 7);
+    const copied = dispatchCopy(pre);
+    await flushUi();
+
+    expect(copied.defaultPrevented).toBe(true);
+    expect(mocks.copyToClipboard).toHaveBeenCalledTimes(1);
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith(SQL.slice(0, 7));
+  });
+
+  it("copies only the highlighted SQL when the formatted view is active", async () => {
+    mocks.highlight.mockImplementation((content) => `<span class="tok">${content}</span>`);
+    const mounted = await mountPanel();
+    const pre = previewText(mounted);
+    expect(pre.innerHTML).toContain('class="tok"');
+
+    dragSelect(pre.querySelector("span") ?? pre, 0, 7);
+    const copied = dispatchCopy(pre);
+    await flushUi();
+
+    expect(copied.defaultPrevented).toBe(true);
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith(SQL.slice(0, 7));
+  });
+
+  it("supports Cmd+C on macOS", async () => {
+    const mounted = await mountPanel();
+    const pre = previewText(mounted);
+
+    const copied = dispatchCopy(pre, { metaKey: true });
+    await flushUi();
+
+    expect(copied.defaultPrevented).toBe(true);
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith(SQL);
+  });
+
+  it("falls back to the whole preview when the selection leaked outside it", async () => {
+    const mounted = await mountPanel();
+    const pre = previewText(mounted);
+    const outside = document.createElement("div");
+    outside.textContent = "grid cell";
+    mounted.append(outside);
+    const outsideNode = outside.firstChild;
+    const previewNode = pre.firstChild;
+    if (!outsideNode || !previewNode) throw new Error("selection anchors not found");
+
+    const range = document.createRange();
+    range.setStart(previewNode, 0);
+    range.setEnd(outsideNode, 5);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const copied = dispatchCopy(pre);
+    await flushUi();
+    outside.remove();
+
+    expect(copied.defaultPrevented).toBe(true);
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith(SQL);
+  });
+
+  it("keeps the shortcut untouched for other modifiers", async () => {
+    const mounted = await mountPanel();
+    const pre = previewText(mounted);
+
+    expect(dispatchCopy(pre, { ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(false);
+    expect(dispatchCopy(pre, { ctrlKey: true, altKey: true }).defaultPrevented).toBe(false);
+    expect(dispatchCopy(pre, { ctrlKey: false }).defaultPrevented).toBe(false);
+    expect(mocks.copyToClipboard).not.toHaveBeenCalled();
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("stops the copy shortcut from reaching the surrounding data grid", async () => {
+    const mounted = await mountPanel();
+    const pre = previewText(mounted);
+    const bubbled = vi.fn();
+    mounted.addEventListener("keydown", bubbled);
+
+    const copied = dispatchCopy(pre);
+    await flushUi();
+
+    expect(copied.defaultPrevented).toBe(true);
+    expect(bubbled).not.toHaveBeenCalled();
+    expect(mocks.copyToClipboard).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a failure toast when the app clipboard rejects", async () => {
+    mocks.copyToClipboard.mockImplementationOnce(async () => {
+      throw new Error("clipboard unavailable");
+    });
+    const mounted = await mountPanel();
+    const pre = previewText(mounted);
+
+    dispatchCopy(pre);
+    await flushUi();
+
+    expect(mocks.toast.mock.calls[0]?.[0]).toBe("grid.copyFailed");
   });
 });

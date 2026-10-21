@@ -9,10 +9,7 @@ import { AlertTriangle, Check, Loader2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
-const owners = [
-  { name: "user authorization", path: "admin/DatabaseUserAdmin.vue", marker: '<Dialog v-model:open="sqlDialogOpen">', previewHeight: "50vh" },
-  { name: "database authorization", path: "sidebar/SidebarTreeItemDialogs.vue", marker: '<Dialog :open="showCreateDatabasePreviewDialog"', previewHeight: "48vh" },
-];
+const owners = [{ name: "database authorization", path: "sidebar/SidebarTreeItemDialogs.vue", marker: '<Dialog :open="showCreateDatabasePreviewDialog"', previewHeight: "48vh" }];
 const mountedApps: Vue.App[] = [];
 
 afterEach(() => {

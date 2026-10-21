@@ -13,6 +13,7 @@ import {
   isBinaryCellColumnType,
   binaryCellUtf8Text,
   isBlobCellColumnType,
+  isBlobTextPreviewDatabase,
   MAX_BINARY_CELL_IMPORT_BYTES,
   parseBinaryCellBytes,
   parseBinaryCellHexValue,
@@ -234,8 +235,20 @@ test("binaryCellClipboardText decodes textual MySQL varbinary and preserves arbi
   assert.equal(binaryCellClipboardText(null, "VARBINARY(128)", "mysql"), null);
 
   // Case 7: 非目标类型 / 非 MySQL 一律不改写，回归保护。
-  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "mysql"), null); // MySQL BLOB 不跟随
-  assert.equal(binaryCellClipboardText("0x616263", "LONGBLOB", "mysql"), null);
+  // MySQL BLOB 跟随（#12413）：网格对文本型 BLOB 显示文本预览，复制必须与显示一致；
+  // BLOB 与显示/编辑路径一样只解严格 UTF-8，不做 GBK 回退。
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "mysql"), "abc");
+  assert.equal(binaryCellClipboardText("0x616263", "LONGBLOB", "mysql"), "abc");
+  assert.equal(binaryCellClipboardText("0xd6d0cec4", "LONGBLOB", "mysql"), null); // BLOB 不回退 GBK（与显示一致）
+  // Oracle 家族 BLOB 与内联显示预览共用同一闸门：文本型 BLOB 显示为文本，复制也必须
+  // 还原成同一份文本；只解严格 UTF-8（不回退 GBK），不可解码的 bytes 仍为 hex，
+  // 没有文本预览的库（如 sqlite）与 Oracle RAW 不受影响。
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "oracle"), "abc");
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "oceanbase-oracle"), "abc");
+  assert.equal(binaryCellClipboardText("0xd6d0cec4", "BLOB", "oracle"), null);
+  assert.equal(binaryCellClipboardText("0x00fffe", "BLOB", "oracle"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "sqlite"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "RAW", "oracle"), null);
   assert.equal(binaryCellClipboardText("0x616263", "BINARY(8)", "mysql"), null); // MySQL BINARY 不跟随
   assert.equal(binaryCellClipboardText("0x616263", "VARBINARY(128)", "sqlserver"), null); // SQL Server varbinary 不改
   assert.equal(binaryCellClipboardText("0x616263", "bytea", "postgres"), null); // Postgres bytea 不改
@@ -246,7 +259,14 @@ test("binaryCellClipboardText decodes textual MySQL varbinary and preserves arbi
 
 // 回归：SQLite/DuckDB 等库同样有 `blob` 列，文本预览必须与编辑写回路径一样仅对 mysql 开启，
 // 否则出现“单元格/详情显示文本、编辑器却是十六进制”的不一致。
-test("BLOB text preview stays limited to MySQL connections", () => {
+test("BLOB text preview stays limited to MySQL and Oracle family connections", () => {
+  assert.equal(isBlobTextPreviewDatabase("mysql"), true);
+  assert.equal(isBlobTextPreviewDatabase("oracle"), true);
+  assert.equal(isBlobTextPreviewDatabase("oceanbase-oracle"), true);
+  assert.equal(isBlobTextPreviewDatabase("sqlite"), false);
+  assert.equal(isBlobTextPreviewDatabase("duckdb"), false);
+  assert.equal(isBlobTextPreviewDatabase(undefined), false);
+
   assert.equal(binaryCellUtf8Text("0x2332303035383035", "LONGBLOB", "sqlite"), null);
   assert.equal(binaryCellUtf8Text("0x2332303035383035", "BLOB", "duckdb"), null);
   assert.equal(binaryCellUtf8Text("0x2332303035383035", "LONGBLOB", undefined), null);
@@ -254,6 +274,14 @@ test("BLOB text preview stays limited to MySQL connections", () => {
   assert.equal(binaryCellDisplayText("0x2332303035383035", "BLOB", undefined, "duckdb"), "BLOB [8 bytes]");
   assert.equal(binaryCellDisplayText("0x2332303035383035", "LONGBLOB", undefined), "BLOB [8 bytes]");
   assert.equal(binaryCellDisplayText("0x2332303035383035", "LONGBLOB", undefined, "mysql"), "#2005805");
+
+  // Oracle 及 OceanBase-Oracle 的 BLOB 文本预览
+  assert.equal(binaryCellUtf8Text("0x48656c6c6f", "BLOB", "oracle"), "Hello");
+  assert.equal(binaryCellUtf8Text("0x48656c6c6f", "BLOB", "oceanbase-oracle"), "Hello");
+  assert.equal(binaryCellDisplayText("0x48656c6c6f", "BLOB", undefined, "oracle"), "Hello");
+  assert.equal(binaryCellDisplayText("0x48656c6c6f", "BLOB", undefined, "oceanbase-oracle"), "Hello");
+  assert.equal(binaryCellDisplayText("0x89504e47", "BLOB", undefined, "oracle"), "BLOB [4 bytes]");
+
   // binary/varbinary 的文本预览是既有行为（如 TDengine BINARY 文本），不受 mysql 闸门影响。
   assert.equal(binaryCellDisplayText("0x534e2d4130303031", "VARBINARY(8)", undefined, "sqlite"), "SN-A0001");
 });

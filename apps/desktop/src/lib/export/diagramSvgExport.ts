@@ -3,6 +3,7 @@ import { isDroppedColumn, type DiagramPosition, type DiagramRelationship, type D
 import { pickHandles } from "@/lib/diagram/vue-flow-adapter";
 import { pointAlongPolyline, pointsToSvgPath, type Point } from "@/lib/diagram/edge-obstacle-router";
 import { CARD_WIDTH, COMMENT_LINE_HEIGHT, MARGIN, diagramTableCardHeight, tableCardHeight, type DiagramCardMetrics } from "@/lib/diagram/diagram-constants";
+import { escapeXml, svgNumber, svgText } from "./svgPrimitives";
 
 const SOURCE_CARDINALITY_T = 0.18;
 const TARGET_CARDINALITY_T = 0.82;
@@ -66,40 +67,12 @@ export interface TableDiagramSvgOptions {
   layers?: DiagramSvgLayer[];
 }
 
-function escapeXml(value: string | number): string {
-  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
-}
-
-function svgNumber(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
-}
-
 function svgHeader(canvas: DiagramCanvas): string {
   // Always viewBox 0 0 — callers that use non-zero canvas.origin must translate content (see buildTableDiagramSvg).
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${svgNumber(canvas.width)}" height="${svgNumber(canvas.height)}" viewBox="0 0 ${svgNumber(canvas.width)} ${svgNumber(canvas.height)}">`,
     `<rect x="0" y="0" width="${svgNumber(canvas.width)}" height="${svgNumber(canvas.height)}" fill="#fafafa"/>`,
   ].join("");
-}
-
-function svgText(
-  label: string,
-  x: number,
-  y: number,
-  options: {
-    size?: number;
-    fill?: string;
-    weight?: string;
-    anchor?: "start" | "middle" | "end";
-    family?: string;
-    decoration?: string;
-  } = {},
-): string {
-  const attrs = [`x="${svgNumber(x)}"`, `y="${svgNumber(y)}"`, `fill="${options.fill ?? "#18181b"}"`, `font-size="${options.size ?? 12}"`, `font-family="${options.family ?? "Arial, Helvetica, sans-serif"}"`, 'dominant-baseline="middle"'];
-  if (options.weight) attrs.push(`font-weight="${options.weight}"`);
-  if (options.anchor) attrs.push(`text-anchor="${options.anchor}"`);
-  if (options.decoration) attrs.push(`text-decoration="${options.decoration}"`);
-  return `<text ${attrs.join(" ")}>${escapeXml(label)}</text>`;
 }
 
 function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {

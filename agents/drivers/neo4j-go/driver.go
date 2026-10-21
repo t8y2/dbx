@@ -60,19 +60,16 @@ func openVerifiedRuntime(params connectParams) (*connectionRuntime, error) {
 		_ = driver.Close(context.Background())
 		return nil, err
 	}
-	return &connectionRuntime{driver: driver, params: params, legacySingleDatabase: usesLegacySingleDatabase(ctx, driver)}, nil
-}
-
-// usesLegacySingleDatabase reports whether the server negotiated Bolt 3 or
-// older. Those servers only expose the default database, and the driver refuses
-// to select a database name for them, so sessions must not send one. Probe
-// failures keep the modern behavior.
-func usesLegacySingleDatabase(ctx context.Context, driver neo4j.Driver) bool {
-	info, err := driver.GetServerInfo(ctx)
-	if err != nil {
-		return false
+	runtime := &connectionRuntime{driver: driver, params: params}
+	if info, err := driver.GetServerInfo(ctx); err == nil {
+		// Older Bolt versions supply numeric IDs in the element-ID fields.
+		runtime.legacySingleDatabase = info.ProtocolVersion().Major < 4
+		runtime.legacyGraphIDs = info.ProtocolVersion().Major < 5
+		// Memgraph reports itself as a Neo4j-compatible server, so the product
+		// name is the only way to tell them apart.
+		runtime.memgraph = strings.Contains(strings.ToLower(info.Agent()), "memgraph")
 	}
-	return info.ProtocolVersion().Major < 4
+	return runtime, nil
 }
 
 func openDriver(params connectParams) (neo4j.Driver, error) {
@@ -240,6 +237,12 @@ func directConnectionParams(params connectParams) (connectParams, bool) {
 // server reports that cluster routing is unavailable.
 const routingUnsupportedMessage = "does not support: routing"
 
+// memgraphRoutingUnsupportedMessage is how Memgraph refuses the routing-table
+// procedure. Memgraph speaks Bolt and accepts `neo4j://`, so it is reachable
+// through the Neo4j connection type, but a single instance is not a cluster and
+// answers with this instead of the Neo4j wording (#11947).
+const memgraphRoutingUnsupportedMessage = "cannot fetch routing table"
+
 // isRoutingUnsupported reports whether err is the driver's "routing requires a
 // cluster" failure. The driver flattens its typed feature error into a usage
 // error, so the message is inspected as well as the type.
@@ -251,7 +254,8 @@ func isRoutingUnsupported(err error) bool {
 	if errors.As(err, &featureErr) && strings.EqualFold(featureErr.Feature, "routing") {
 		return true
 	}
-	return strings.Contains(strings.ToLower(err.Error()), routingUnsupportedMessage)
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, routingUnsupportedMessage) || strings.Contains(message, memgraphRoutingUnsupportedMessage)
 }
 
 func isNeo4jScheme(value string) bool {
@@ -341,7 +345,28 @@ func (s *server) databaseName(override string) string {
 	if value := strings.TrimSpace(override); value != "" {
 		return value
 	}
+	// Memgraph exposes exactly one database named `memgraph`, and sending the
+	// Neo4j default `neo4j` fails with "Tried to retrieve an unknown database".
+	// Omit the name unless the user configured one, so the server picks its own
+	// default (#11947).
+	if s.runtime != nil && s.runtime.memgraph && !hasConfiguredDatabase(s.params) {
+		return ""
+	}
 	return configuredDatabase(s.params)
+}
+
+// hasConfiguredDatabase reports whether a database name came from the user
+// (the form field or the connection string) rather than the Neo4j default.
+func hasConfiguredDatabase(params connectParams) bool {
+	if strings.TrimSpace(params.Database) != "" {
+		return true
+	}
+	value := strings.TrimPrefix(strings.TrimSpace(params.ConnectionString), "jdbc:")
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(parsed.Query().Get("database")) != "" || strings.Trim(strings.TrimSpace(parsed.Path), "/") != ""
 }
 
 func configuredDatabase(params connectParams) string {

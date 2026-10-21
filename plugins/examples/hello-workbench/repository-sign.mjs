@@ -8,9 +8,7 @@ import { fileURLToPath } from "node:url";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const target = process.env.DBX_PLUGIN_TARGET || platformTarget();
 const candidate = path.resolve(process.argv[2] || path.join(root, "dist", `dbx.example.hello-1.0.0-${target}.dbxp`));
-const signed = path.resolve(
-  process.argv[3] || path.join(root, "dist", `dbx.example.hello-1.0.0-${target}.signed.dbxp`),
-);
+const signed = path.resolve(process.argv[3] || path.join(root, "dist", `dbx.example.hello-1.0.0-${target}.signed.dbxp`));
 const metadata = signed.replace(/\.dbxp$/, ".artifact.json");
 const keyId = process.env.DBX_PLUGIN_SIGNING_KEY_ID;
 const buildRoot = await mkdtemp(path.join(os.tmpdir(), "dbx-repository-sign-"));
@@ -22,25 +20,7 @@ if (!process.env.DBX_PLUGIN_SIGNING_KEY || !keyId) {
 try {
   run(
     "cargo",
-    [
-      "run",
-      "--locked",
-      "--release",
-      "--manifest-path",
-      path.join(root, "..", "..", "sdk", "packager", "Cargo.toml"),
-      "--",
-      "sign",
-      candidate,
-      signed,
-      "--key-id",
-      keyId,
-      "--artifact-metadata",
-      metadata,
-      "--target",
-      target,
-      "--artifact-url",
-      `../hello-workbench/dist/${path.basename(signed)}`,
-    ],
+    ["run", "--locked", "--release", "--manifest-path", path.join(root, "..", "..", "sdk", "packager", "Cargo.toml"), "--", "sign", candidate, signed, "--key-id", keyId, "--artifact-metadata", metadata, "--target", target, "--artifact-url", `../hello-workbench/dist/${path.basename(signed)}`],
     { CARGO_TARGET_DIR: path.join(buildRoot, "cargo-target") },
   );
 

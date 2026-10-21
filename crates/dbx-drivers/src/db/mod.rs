@@ -3,6 +3,7 @@ pub mod clickhouse_driver;
 pub mod cloudberry;
 pub mod cloudflare_d1;
 pub use cloudflare_d1 as cloudflare_d1_driver;
+pub mod couchdb_driver;
 pub use dbx_driver_mysql::{dolt, doris};
 pub use dbx_driver_support::{ddl_scan, document_result};
 pub mod duckdb_sql;

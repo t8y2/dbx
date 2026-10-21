@@ -24,6 +24,7 @@ import {
   addDriverInstallQueue,
   driverInstallProgressChannel,
   driverInstallProgressPercent,
+  formatDriverInstallProgressText,
   isDriverInstallCanceledError,
   isDriverInstallCancellationTarget,
   isDriverInstallProgressForOperation,
@@ -244,15 +245,7 @@ const installedJres = computed(() => {
 });
 
 function formatProgressText(p: DriverInstallProgress | null | undefined): string {
-  if (!p) return "";
-  if (p.step === "jre-extract") return t("driverStore.progressJreExtract");
-  if (p.step === "jdbc-plugin-extract") return t("driverStore.progressJdbcPluginExtract");
-  const label = p.step === "jre" ? t("driverStore.progressDownloadJre") : p.step === "jdbc-plugin" ? t("driverStore.progressDownloadJdbcPlugin") : t("driverStore.progressDownloadDriver");
-  if (!p.total) return `${label}...`;
-  const pct = Math.round(((p.downloaded ?? 0) / p.total) * 100);
-  const dl = formatSize(p.downloaded ?? 0);
-  const total = formatSize(p.total);
-  return `${label}  ${dl} / ${total}  (${pct}%)`;
+  return formatDriverInstallProgressText(p, t);
 }
 
 function getAgentProgressText(dbType: string): string {
@@ -274,12 +267,10 @@ function getAgentProgressPercent(dbType: string): number | null {
   return next ?? lastAgentProgressPercent[dbType] ?? null;
 }
 
-const jdbcPluginProgressNumber = computed(() => {
-  const next = driverInstallProgressPercent(jdbcPluginProgress.value);
-  if (next !== null) {
-    lastJdbcPluginProgressPercent.value = next;
-  }
-  return next ?? lastJdbcPluginProgressPercent.value;
+const jdbcPluginProgressNumber = computed(() => driverInstallProgressPercent(jdbcPluginProgress.value) ?? lastJdbcPluginProgressPercent.value);
+watch(jdbcPluginProgress, (progress) => {
+  const next = driverInstallProgressPercent(progress);
+  if (next !== null) lastJdbcPluginProgressPercent.value = next;
 });
 
 function resetAgentInstallProgress() {

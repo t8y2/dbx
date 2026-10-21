@@ -83,6 +83,8 @@ export function tableVGroupKindOfContainerNode(node: Pick<TreeNode, "type" | "ta
     case "group-procedures":
       return "procedures";
     case "group-functions":
+    case "group-internal-functions":
+    case "group-udf-functions":
       return "functions";
     case "group-triggers":
       // 双栖 type：库级触发器列表与表结构子组共用；表子级带 tableName。
@@ -295,7 +297,7 @@ export function createTableVGroup(layout: TableVGroupLayout, name: string, paren
   return {
     groupId,
     layout: {
-      enabled: layout.enabled,
+      enabled: true,
       version: layout.version,
       groups: [...layout.groups, group].map((current) => (parentFound && current.id === parentGroupId ? { ...current, collapsed: false } : current)),
       order,
@@ -338,9 +340,30 @@ export function deleteTableVGroups(layout: TableVGroupLayout, groupIds: Iterable
 }
 
 export function toggleTableVGroupCollapsed(layout: TableVGroupLayout, groupId: string): TableVGroupLayout {
+  const targetGroup = layout.groups.find((group) => group.id === groupId);
+  const willCollapse = targetGroup ? !targetGroup.collapsed : false;
+  if (!willCollapse) {
+    return {
+      ...layout,
+      groups: layout.groups.map((group) => (group.id === groupId ? { ...group, collapsed: false } : group)),
+    };
+  }
+
+  const groupEntry = findGroupEntry(layout.order, groupId);
+  const descendantGroupIds = new Set<string>();
+  const collectDescendants = (entry: TableVGroupEntry) => {
+    for (const child of entryChildren(entry)) {
+      if (child.type === "group") {
+        descendantGroupIds.add(child.id);
+        collectDescendants(child);
+      }
+    }
+  };
+  if (groupEntry && groupEntry.type === "group") collectDescendants(groupEntry);
+
   return {
     ...layout,
-    groups: layout.groups.map((group) => (group.id === groupId ? { ...group, collapsed: !group.collapsed } : group)),
+    groups: layout.groups.map((group) => (group.id === groupId || descendantGroupIds.has(group.id) ? { ...group, collapsed: true } : group)),
   };
 }
 
@@ -482,7 +505,7 @@ function buildVGroupRootNodes(entries: TableVGroupOrderEntry[], layout: TableVGr
  * simply stay absent (sidebar pagination); stale names are skipped.
  */
 export function applyTableVGroupsToChildren(children: TreeNode[], layout: TableVGroupLayout | null | undefined, scope: TableVGroupScope): TreeNode[] {
-  if (!children.length || !layout || !tableVGroupsEnabled(layout)) return children;
+  if (!layout || !tableVGroupsEnabled(layout) || (!children.length && !layout.groups.length)) return children;
   // Idempotence: merge/refresh flows re-feed already-projected children back
   // into setChildren, so always strip existing group containers first —
   // otherwise stale group copies survive alongside the freshly built ones.
@@ -501,7 +524,7 @@ export function applyTableVGroupsToChildren(children: TreeNode[], layout: TableV
       if (!rows.byLabel.has(node.label)) rows.byLabel.set(node.label, { node, flatIndex: i });
     } else passthrough.push({ node, sortIndex: i });
   }
-  if (!rows.byKey.size) return flatChildren;
+  if (!rows.byKey.size && !activeLayout.groups.length) return flatChildren;
 
   const rootBuilt = buildVGroupRootNodes(activeLayout.order, activeLayout, rows, scope);
   // Rows the layout does not reference stay ungrouped at their original slot.
@@ -717,7 +740,7 @@ export function resolveTableVGroupScopeFromNode(nodes: TreeNode[], node: TreeNod
   const row = node as Partial<TreeNode> & TableVGroupScope;
   const containerKind = isTableVGroupContainerNode(row as TreeNode) ? tableVGroupKindOfContainerNode(row as TreeNode) : null;
   if (containerKind) return { ...tableVGroupScopeFieldsOf(tableVGroupScopeHostOf(nodes, row as TreeNode)), objectType: containerKind };
-  if (row.type === "table-vgroup" || row.type?.startsWith("group-")) {
+  if (row.type === "table-vgroup") {
     const host = tableVGroupScopeHostOf(nodes, row as TreeNode);
     const holder = findTableVGroupHolderContainer(nodes, row as TreeNode);
     return { ...tableVGroupScopeFieldsOf(host), objectType: (holder && tableVGroupKindOfContainerNode(holder)) || "tables" };
@@ -733,8 +756,11 @@ export function resolveTableVGroupScopeFromNode(nodes: TreeNode[], node: TreeNod
     const host = tableVGroupScopeHostOf(nodes, holder);
     return { ...tableVGroupScopeFieldsOf(host), objectType: tableVGroupKindOfContainerNode(holder) ?? "tables" };
   }
-  const container = findTableVGroupContainerNode(nodes, row as TreeNode);
-  return tableVGroupScopeFieldsOf(container ? tableVGroupScopeHostOf(nodes, container) : (row as TreeNode));
+  if (!row.type) {
+    const container = findTableVGroupContainerNode(nodes, row as TableVGroupScope);
+    return tableVGroupScopeFieldsOf(container ? tableVGroupScopeHostOf(nodes, container) : (row as TreeNode));
+  }
+  return {};
 }
 
 /**

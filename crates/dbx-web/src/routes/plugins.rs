@@ -424,7 +424,8 @@ pub async fn invoke_plugin_connection_action(
     State(state): State<Arc<WebState>>,
     Json(body): Json<PluginConnectionActionRequest>,
 ) -> Result<Json<PluginConnectionActionResult>, AppError> {
-    state.app.invoke_plugin_connection_action(body.config, &body.action_id).await.map(Json).map_err(AppError::from)
+    let config = state.resolve_connection_credentials(body.config).await?;
+    state.app.invoke_plugin_connection_action(config, &body.action_id).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn notify_plugin(

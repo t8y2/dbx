@@ -6,6 +6,7 @@ export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
 
 export interface SavedQueryResultRun {
   id: string;
+  connectionId?: string;
   title: string;
   sequence: number;
   sql: string;
@@ -27,6 +28,8 @@ export interface SavedOpenTab {
   createdAt?: number;
   title: string;
   customTitle?: boolean;
+  /** 用户自定义的标签后缀，取代自动编号 */
+  titleSuffix?: string;
   connectionId: string;
   database: string;
   /** 原连接已被删除但页签被保留时记录的原连接名，用于新建同名连接后重新绑定。 */
@@ -38,6 +41,7 @@ export interface SavedOpenTab {
   editorSelection?: QueryTab["editorSelection"];
   originalSql?: string;
   savedSqlId?: string;
+  isDefaultQuery?: boolean;
   externalSqlPath?: string;
   externalSqlFileVersion?: QueryTab["externalSqlFileVersion"];
   externalSqlIgnoredFileVersion?: QueryTab["externalSqlIgnoredFileVersion"];
@@ -68,6 +72,7 @@ export interface SavedOpenTab {
   databaseSearchState?: QueryTab["databaseSearchState"];
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
+  objectDetails?: QueryTab["objectDetails"];
   sourceView?: boolean;
   ddlViewer?: QueryTab["ddlViewer"];
   tableComment?: QueryTab["tableComment"];
@@ -151,7 +156,7 @@ function restoredEditorViewport(tab: SavedOpenTab): QueryTab["editorViewport"] {
   };
 }
 
-const TAB_OUTPUT_VIEWS = new Set<TabOutputView>(["result", "summary", "explain", "chart", "messages", "profile"]);
+const TAB_OUTPUT_VIEWS = new Set<TabOutputView>(["result", "graph", "summary", "explain", "chart", "messages", "profile"]);
 
 function restoredTabUiState(tab: SavedOpenTab): QueryTab["uiState"] {
   const activeOutputView = tab.uiState?.activeOutputView;
@@ -174,6 +179,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(typeof tab.createdAt === "number" ? { createdAt: tab.createdAt } : {}),
     title: tab.title,
     ...(tab.customTitle ? { customTitle: true } : {}),
+    ...(tab.titleSuffix?.trim() ? { titleSuffix: tab.titleSuffix.trim() } : {}),
     connectionId: tab.connectionId,
     database: tab.database,
     ...(tab.detachedConnectionName ? { detachedConnectionName: tab.detachedConnectionName } : {}),
@@ -186,6 +192,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     // Clean file-backed tabs omit it so startup can hydrate the current file content.
     ...(tab.originalSql !== undefined && ((!tab.savedSqlId && !tab.externalSqlPath) || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
     savedSqlId: tab.savedSqlId,
+    ...(tab.isDefaultQuery ? { isDefaultQuery: true } : {}),
     externalSqlPath: tab.externalSqlPath,
     ...(tab.externalSqlFileVersion ? { externalSqlFileVersion: tab.externalSqlFileVersion } : {}),
     ...(tab.externalSqlIgnoredFileVersion ? { externalSqlIgnoredFileVersion: tab.externalSqlIgnoredFileVersion } : {}),
@@ -216,6 +223,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.databaseSearchState ? { databaseSearchState: tab.databaseSearchState } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
+    ...(tab.objectDetails ? { objectDetails: { ...tab.objectDetails } } : {}),
     ...(tab.sourceView ? { sourceView: true } : {}),
     ...(tab.ddlViewer ? { ddlViewer: { ...tab.ddlViewer } } : {}),
     ...(tab.tableComment !== undefined ? { tableComment: tab.tableComment } : {}),
@@ -227,6 +235,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
       ? {
           resultRuns: tab.resultRuns.map((run) => ({
             id: run.id,
+            ...(run.multiDbExecution?.kind === "multi-db" ? { connectionId: run.multiDbExecution.target.connectionId } : run.connectionId !== undefined ? { connectionId: run.connectionId } : {}),
             title: run.title,
             sequence: run.sequence,
             sql: run.sql,

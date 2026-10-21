@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -45,6 +45,9 @@ pub struct SqlReferenceAnalysis {
     pub tables: Vec<SqlTableReference>,
     pub columns: Vec<SqlColumnReference>,
     pub scopes: Vec<SqlReferenceScope>,
+    /// SELECT projection columns that are neither aggregated nor listed in GROUP BY.
+    #[serde(default)]
+    pub group_by_violations: Vec<SqlGroupByViolation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,11 +68,22 @@ pub struct SqlColumnReference {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlGroupByViolation {
+    pub span: SqlTextSpan,
+    pub column: String,
+    pub qualifier: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlReferenceScope {
     pub id: usize,
     pub parent_id: Option<usize>,
 }
 
+/// 1-based line and column range in SQL text.
+/// Both `start_column` and `end_column` are 1-based and inclusive.
+/// For example, a 1-character token at line 1, column 5 has
+/// `start_line: 1, start_column: 5, end_line: 1, end_column: 5`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlTextSpan {
     pub start_line: usize,
@@ -80,13 +94,52 @@ pub struct SqlTextSpan {
 
 impl From<Span> for SqlTextSpan {
     fn from(span: Span) -> Self {
-        Self {
-            start_line: span.start.line as usize,
-            start_column: span.start.column as usize,
-            end_line: span.end.line as usize,
-            end_column: span.end.column as usize,
-        }
+        let start_line = span.start.line as usize;
+        let start_column = span.start.column as usize;
+        let end_line = span.end.line as usize;
+        // sqlparser's `Span.end.column` is 1-based exclusive. Convert to 1-based
+        // inclusive so that downstream consumers (both in Rust and TypeScript)
+        // receive precise token bounds that do not overshoot into trailing
+        // delimiters (e.g. commas or semicolons).
+        let end_column = if span.end.column > 0 {
+            if end_line == start_line && start_column > 0 {
+                (span.end.column as usize).saturating_sub(1).max(start_column)
+            } else {
+                (span.end.column as usize).saturating_sub(1)
+            }
+        } else {
+            0
+        };
+        Self { start_line, start_column, end_line, end_column }
     }
+}
+
+/// One SELECT projection item: the columns it references plus its output alias.
+/// Columns are flagged `aggregated` when they sit inside an aggregate call or a
+/// window function, which exempts them from the GROUP BY membership check.
+#[derive(Default)]
+struct ProjectionItemAcc {
+    alias: Option<String>,
+    columns: Vec<ProjectionColumnRef>,
+}
+
+#[derive(Clone)]
+struct ProjectionColumnRef {
+    name: String,
+    qualifier: Option<String>,
+    span: SqlTextSpan,
+    aggregated: bool,
+}
+
+/// GROUP BY context of the SELECT currently being analyzed. Plain identifier
+/// groups are recorded for membership matching; any other shape (ordinals,
+/// computed expressions, `GROUP BY ALL`, rollups) marks the whole statement
+/// unresolved so the conservative check skips it entirely.
+#[derive(Default)]
+struct GroupByContext {
+    bare: HashSet<String>,
+    qualified: HashSet<String>,
+    unresolved: bool,
 }
 
 #[derive(Default)]
@@ -99,15 +152,31 @@ struct Analyzer {
     next_scope_id: usize,
     is_sqlserver: bool,
     is_spark: bool,
+    group_by_violations: Vec<SqlGroupByViolation>,
+    projection_items: Vec<ProjectionItemAcc>,
+    current_projection_item: Option<ProjectionItemAcc>,
+    aggregate_depth: usize,
+    window_depth: usize,
+    group_by: Option<GroupByContext>,
 }
 
 pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlReferenceAnalysis, String> {
     let normalized_dialect = normalize_dialect(dialect);
     if normalized_dialect == "duckdb" && starts_with_duckdb_parser_gap_sql(sql) {
-        return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![], scopes: vec![] });
+        return Ok(SqlReferenceAnalysis {
+            tables: vec![],
+            columns: vec![],
+            scopes: vec![],
+            group_by_violations: vec![],
+        });
     }
     if normalized_dialect == "postgres" && starts_with_postgres_parser_gap_sql(sql) {
-        return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![], scopes: vec![] });
+        return Ok(SqlReferenceAnalysis {
+            tables: vec![],
+            columns: vec![],
+            scopes: vec![],
+            group_by_violations: vec![],
+        });
     }
     let parser_sql = if normalized_dialect == "clickhouse" {
         normalize_clickhouse_join_order_for_parser(sql)
@@ -135,7 +204,12 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         Err(error)
             if normalized_dialect == "postgres" && is_postgres_create_procedure_parser_gap(&parser_sql, &error) =>
         {
-            return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![], scopes: vec![] });
+            return Ok(SqlReferenceAnalysis {
+                tables: vec![],
+                columns: vec![],
+                scopes: vec![],
+                group_by_violations: vec![],
+            });
         }
         Err(error) => match oracle_admin_ddl_gap_statements(dialect, &parser_sql) {
             Some(statements) => statements,
@@ -152,7 +226,21 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         analyzer.visit_statement(&statement);
     }
 
-    Ok(SqlReferenceAnalysis { tables: analyzer.tables, columns: analyzer.columns, scopes: analyzer.scopes })
+    let mut analysis = SqlReferenceAnalysis {
+        tables: analyzer.tables,
+        columns: analyzer.columns,
+        scopes: analyzer.scopes,
+        group_by_violations: analyzer.group_by_violations,
+    };
+    // Engines that do not enforce strict GROUP BY semantics (MySQL, SQLite,
+    // DuckDB, ClickHouse, Spark) accept ungrouped projection columns — MySQL
+    // enforces ONLY_FULL_GROUP_BY by default since 5.7 but the frontend has no
+    // access to the connection's sql_mode, so skipping is the conservative
+    // choice — flagging them there would be noise.
+    if matches!(normalized_dialect.as_str(), "mysql" | "sqlite" | "duckdb" | "clickhouse" | "spark") {
+        analysis.group_by_violations.clear();
+    }
+    Ok(analysis)
 }
 
 fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
@@ -1183,15 +1271,24 @@ impl Analyzer {
     }
 
     fn visit_select(&mut self, select: &Select) {
+        // Nested selects (subqueries, derived tables, CTE bodies) run their own
+        // projection/group-by collection; save the outer context so their columns
+        // and violations never mix with this statement's.
+        let outer_projection_items = std::mem::take(&mut self.projection_items);
+        let outer_projection_item = self.current_projection_item.take();
+        let outer_group_by = self.group_by.take();
+
         for table in &select.from {
             self.visit_table_with_joins(table);
         }
 
         for item in &select.projection {
             match item {
-                SelectItem::UnnamedExpr(expr)
-                | SelectItem::ExprWithAlias { expr, .. }
-                | SelectItem::ExprWithAliases { expr, .. } => self.visit_expr(expr),
+                SelectItem::UnnamedExpr(expr) => self.visit_projection_item(expr, None),
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    self.visit_projection_item(expr, Some(alias.value.clone()))
+                }
+                SelectItem::ExprWithAliases { expr, .. } => self.visit_projection_item(expr, None),
                 _ => {}
             }
         }
@@ -1202,11 +1299,31 @@ impl Analyzer {
         if let Some(expr) = &select.selection {
             self.visit_expr(expr);
         }
+        let mut group_by_context = GroupByContext::default();
         if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
             for expr in exprs {
+                match plain_identifier_parts(expr) {
+                    Some((qualifier, name)) => {
+                        if let Some(qualifier) = qualifier {
+                            group_by_context.qualified.insert(format!(
+                                "{}.{}",
+                                qualifier.to_ascii_lowercase(),
+                                name.to_ascii_lowercase()
+                            ));
+                        } else {
+                            group_by_context.bare.insert(name.to_ascii_lowercase());
+                        }
+                    }
+                    None => group_by_context.unresolved = true,
+                }
                 self.visit_expr(expr);
             }
+        } else if matches!(select.group_by, GroupByExpr::All(_)) {
+            // GROUP BY ALL / rollup-style grouping has no explicit membership to match.
+            group_by_context.unresolved = true;
         }
+        self.group_by = Some(group_by_context);
+
         for expr in &select.cluster_by {
             self.visit_expr(expr);
         }
@@ -1222,6 +1339,97 @@ impl Analyzer {
         if let Some(expr) = &select.qualify {
             self.visit_expr(expr);
         }
+
+        self.finish_group_by_check();
+        self.projection_items = outer_projection_items;
+        self.current_projection_item = outer_projection_item;
+        self.group_by = outer_group_by;
+    }
+
+    fn visit_projection_item(&mut self, expr: &Expr, alias: Option<String>) {
+        self.current_projection_item = Some(ProjectionItemAcc { alias, ..ProjectionItemAcc::default() });
+        self.visit_expr(expr);
+        if let Some(item) = self.current_projection_item.take() {
+            self.projection_items.push(item);
+        }
+    }
+
+    /// Flag SELECT projection columns that are neither aggregated nor part of the
+    /// statement's GROUP BY. Conservative by design: unresolved GROUP BY shapes
+    /// skip the check entirely, alias-based coverage covers `GROUP BY <alias>`.
+    fn finish_group_by_check(&mut self) {
+        let Some(context) = self.group_by.as_ref() else {
+            return;
+        };
+        if context.unresolved || (context.bare.is_empty() && context.qualified.is_empty()) {
+            return;
+        }
+        // Columns of projection items whose alias is what GROUP BY references
+        // (`SELECT a AS x ... GROUP BY x`) count as grouped for identical column
+        // names elsewhere in the projection.
+        let mut alias_grouped_columns: HashSet<String> = HashSet::new();
+        for item in &self.projection_items {
+            let Some(alias) = item.alias.as_ref() else { continue };
+            if !context.bare.contains(&alias.to_ascii_lowercase()) {
+                continue;
+            }
+            for column in &item.columns {
+                alias_grouped_columns.insert(column.name.to_ascii_lowercase());
+            }
+        }
+        // Qualifier asymmetry: `u.name` in the projection and `users.name` in
+        // GROUP BY refer to the same table when one side is the other's alias,
+        // so normalize every qualifier to the underlying table name before
+        // comparing.
+        let qualifier_table_names: HashMap<String, String> = self
+            .tables
+            .iter()
+            .filter_map(|table| {
+                table.alias.as_ref().map(|alias| (alias.to_ascii_lowercase(), table.name.to_ascii_lowercase()))
+            })
+            .collect();
+        let normalize_qualifier = |qualifier: &str| -> String {
+            qualifier_table_names
+                .get(&qualifier.to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_else(|| qualifier.to_ascii_lowercase())
+        };
+        let grouped_qualified: HashSet<String> = context
+            .qualified
+            .iter()
+            .map(|entry| match entry.split_once('.') {
+                Some((qualifier, name)) => format!("{}.{}", normalize_qualifier(qualifier), name),
+                None => entry.clone(),
+            })
+            .collect();
+        let mut violations: Vec<SqlGroupByViolation> = Vec::new();
+        for item in &self.projection_items {
+            let item_alias_grouped =
+                item.alias.as_ref().map(|alias| context.bare.contains(&alias.to_ascii_lowercase())).unwrap_or(false);
+            for column in &item.columns {
+                if column.aggregated || item_alias_grouped {
+                    continue;
+                }
+                let name = column.name.to_ascii_lowercase();
+                if context.bare.contains(&name) {
+                    continue;
+                }
+                if let Some(qualifier) = &column.qualifier {
+                    if grouped_qualified.contains(&format!("{}.{}", normalize_qualifier(qualifier), name)) {
+                        continue;
+                    }
+                }
+                if alias_grouped_columns.contains(&name) {
+                    continue;
+                }
+                violations.push(SqlGroupByViolation {
+                    span: column.span,
+                    column: column.name.clone(),
+                    qualifier: column.qualifier.clone(),
+                });
+            }
+        }
+        self.group_by_violations.extend(violations);
     }
 
     fn visit_table_with_joins(&mut self, table: &TableWithJoins) {
@@ -1370,6 +1578,18 @@ impl Analyzer {
                 self.visit_expr(r#in);
             }
             Expr::Function(function) => {
+                // Columns wrapped in an aggregate call or a window function are
+                // exempt from the GROUP BY membership check.
+                let function_name =
+                    object_name_last_ident(&function.name).map(|ident| ident.value.to_ascii_lowercase());
+                let is_aggregate = function_name.as_deref().map(is_aggregate_function_name).unwrap_or(false);
+                let has_window = function.over.is_some();
+                if is_aggregate {
+                    self.aggregate_depth += 1;
+                }
+                if has_window {
+                    self.window_depth += 1;
+                }
                 self.visit_function_args(&function.parameters);
                 self.visit_function_call_args(&function.name, &function.args);
                 if let Some(filter) = &function.filter {
@@ -1377,6 +1597,12 @@ impl Analyzer {
                 }
                 for order in &function.within_group {
                     self.visit_expr(&order.expr);
+                }
+                if is_aggregate {
+                    self.aggregate_depth -= 1;
+                }
+                if has_window {
+                    self.window_depth -= 1;
                 }
             }
             Expr::Case { operand, conditions, else_result, .. } => {
@@ -1445,15 +1671,83 @@ impl Analyzer {
     }
 
     fn push_column(&mut self, qualifier: Option<String>, ident: &Ident) {
+        let span: SqlTextSpan = ident.span.into();
         if let Some(scope_id) = self.current_scope_id() {
             self.columns.push(SqlColumnReference {
                 name: ident.value.clone(),
-                qualifier,
-                span: ident.span.into(),
+                qualifier: qualifier.clone(),
+                span,
                 scope_id,
             });
         }
+        // Projection collection: the accumulator is Some exclusively while a
+        // SELECT projection expression is being visited (nested selects swap it
+        // in visit_select), so subquery columns never leak into outer items.
+        if let Some(item) = self.current_projection_item.as_mut() {
+            item.columns.push(ProjectionColumnRef {
+                name: ident.value.clone(),
+                qualifier,
+                span,
+                aggregated: self.aggregate_depth > 0 || self.window_depth > 0,
+            });
+        }
     }
+}
+
+/// Split a GROUP BY expression into its `(qualifier, name)` parts when it is a
+/// plain (possibly qualified) identifier — the only shape the conservative
+/// membership check can match against.
+fn plain_identifier_parts(expr: &Expr) -> Option<(Option<String>, String)> {
+    match expr {
+        Expr::Identifier(ident) => Some((None, ident.value.clone())),
+        Expr::CompoundIdentifier(idents) => {
+            let column = idents.last()?;
+            let qualifier =
+                if idents.len() >= 2 { idents.get(idents.len() - 2).map(|ident| ident.value.clone()) } else { None };
+            Some((qualifier, column.value.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn is_aggregate_function_name(name: &str) -> bool {
+    const AGGREGATE_FUNCTION_NAMES: &[&str] = &[
+        "sum",
+        "count",
+        "count_big",
+        "avg",
+        "min",
+        "max",
+        "total",
+        "group_concat",
+        "string_agg",
+        "array_agg",
+        "listagg",
+        "bit_and",
+        "bit_or",
+        "bit_xor",
+        "bool_and",
+        "bool_or",
+        "every",
+        "median",
+        "stddev",
+        "stddev_pop",
+        "stddev_samp",
+        "stdev",
+        "stdevp",
+        "variance",
+        "var_pop",
+        "var_samp",
+        "varp",
+        "json_agg",
+        "jsonb_agg",
+        "json_group_array",
+        "xmlagg",
+        "wm_concat",
+        "approx_count_distinct",
+        "checksum_agg",
+    ];
+    AGGREGATE_FUNCTION_NAMES.contains(&name)
 }
 
 fn table_reference_from_name(
@@ -1544,4 +1838,175 @@ fn is_sqlserver_datepart_argument(function_name: &str, arg: &FunctionArg) -> boo
 
 fn is_datepart(value: &str, valid_dateparts: &[&str]) -> bool {
     valid_dateparts.iter().any(|datepart| value.eq_ignore_ascii_case(datepart))
+}
+
+#[cfg(test)]
+mod group_by_violation_tests {
+    use super::*;
+
+    fn violations(sql: &str, dialect: Option<&str>) -> Vec<SqlGroupByViolation> {
+        analyze_sql_references(sql, dialect)
+            .unwrap_or_else(|error| panic!("parse failed for {sql:?}: {error}"))
+            .group_by_violations
+    }
+
+    #[test]
+    fn flags_ungrouped_projection_column() {
+        let result = violations("SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_NAME", None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].column, "USER_ID");
+        assert_eq!(result[0].qualifier, None);
+    }
+
+    #[test]
+    fn grouped_column_passes() {
+        assert!(violations("SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_ID", None).is_empty());
+        assert!(violations("SELECT dept_name, COUNT(*) FROM emp GROUP BY dept_name", None).is_empty());
+    }
+
+    #[test]
+    fn aggregate_wrapped_columns_pass() {
+        assert!(violations("SELECT COUNT(a) FROM t GROUP BY b", None).is_empty());
+        assert!(violations("SELECT a, SUM(b) FROM t GROUP BY a", None).is_empty());
+    }
+
+    #[test]
+    fn alias_grouped_query_passes() {
+        assert!(violations("SELECT a AS x FROM t GROUP BY x", None).is_empty());
+        // `SELECT a, a AS b ... GROUP BY b` groups the same source column twice.
+        assert!(violations("SELECT a, a AS b FROM t GROUP BY b", None).is_empty());
+    }
+
+    #[test]
+    fn unresolved_group_by_shapes_skip_the_check() {
+        assert!(violations("SELECT a FROM t GROUP BY 1", None).is_empty());
+        assert!(violations("SELECT a + b FROM t GROUP BY a + b", None).is_empty());
+    }
+
+    #[test]
+    fn computed_projection_flags_ungrouped_member() {
+        let result = violations("SELECT a + b FROM t GROUP BY a", None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].column, "b");
+    }
+
+    #[test]
+    fn window_function_columns_pass() {
+        assert!(violations("SELECT dept, SUM(sal) OVER (PARTITION BY dept) FROM emp GROUP BY dept", None).is_empty());
+    }
+
+    #[test]
+    fn subquery_columns_do_not_leak() {
+        assert!(violations("SELECT (SELECT max(v) FROM t2) AS m, uid FROM t1 GROUP BY uid", None).is_empty());
+    }
+
+    #[test]
+    fn qualified_references_match_by_qualifier() {
+        let result = violations("SELECT u.id, u.name FROM users u GROUP BY u.id", None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].column, "name");
+        assert_eq!(result[0].qualifier.as_deref(), Some("u"));
+        assert!(violations("SELECT u.id, u.name FROM users u GROUP BY u.id, u.name", None).is_empty());
+    }
+
+    #[test]
+    fn qualifier_asymmetry_resolves_alias_and_table_name() {
+        // Projection qualifier (alias) vs GROUP BY qualifier (table name) refers
+        // to the same table, so the grouped column itself must pass...
+        assert!(violations("SELECT u.id FROM users u GROUP BY users.id", None).is_empty());
+        // ...and the reverse direction.
+        assert!(violations("SELECT users.id FROM users u GROUP BY u.id", None).is_empty());
+        // Columns that are genuinely ungrouped stay flagged under either spelling.
+        let result = violations("SELECT u.id, u.name FROM users u GROUP BY users.id", None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].column, "name");
+    }
+
+    #[test]
+    fn missing_group_by_passes() {
+        assert!(violations("SELECT a, SUM(b) FROM t", None).is_empty());
+    }
+
+    #[test]
+    fn lenient_engines_skip_the_check() {
+        for dialect in ["mysql", "sqlite", "duckdb", "clickhouse", "spark"] {
+            assert!(
+                violations("SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_NAME", Some(dialect)).is_empty(),
+                "dialect {dialect}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sql_text_span_tests {
+    use super::*;
+    use sqlparser::tokenizer::Location;
+
+    #[test]
+    fn span_conversion_produces_inclusive_end_column() {
+        // sqlparser's exclusive column 15 for 7-char token starting at 8 maps to inclusive 14.
+        let span = Span { start: Location { line: 1, column: 8 }, end: Location { line: 1, column: 15 } };
+        let text_span: SqlTextSpan = span.into();
+        assert_eq!(text_span, SqlTextSpan { start_line: 1, start_column: 8, end_line: 1, end_column: 14 });
+
+        // 1-character token at column 5: start 5, exclusive end 6 maps to inclusive 5.
+        let single_char = Span { start: Location { line: 1, column: 5 }, end: Location { line: 1, column: 6 } };
+        let single_span: SqlTextSpan = single_char.into();
+        assert_eq!(single_span, SqlTextSpan { start_line: 1, start_column: 5, end_line: 1, end_column: 5 });
+
+        // Multi-line span: end column 10 maps to inclusive 9 on line 2.
+        let multiline = Span { start: Location { line: 1, column: 1 }, end: Location { line: 2, column: 10 } };
+        let multiline_span: SqlTextSpan = multiline.into();
+        assert_eq!(multiline_span, SqlTextSpan { start_line: 1, start_column: 1, end_line: 2, end_column: 9 });
+
+        // Empty span stays zeroed.
+        let empty_span: SqlTextSpan = Span::empty().into();
+        assert_eq!(empty_span, SqlTextSpan { start_line: 0, start_column: 0, end_line: 0, end_column: 0 });
+    }
+
+    #[test]
+    fn reference_analysis_emits_inclusive_spans_before_semicolon() {
+        let sql = "SELECT id, name AS user_name FROM users GROUP BY user_name;";
+        let analysis = analyze_sql_references(sql, Some("generic")).expect("query should analyze");
+
+        // "users" starts at 1-based column 35, length 5 ("users" -> 35..=39).
+        assert_eq!(analysis.tables[0].name, "users");
+        assert_eq!(analysis.tables[0].span.start_line, 1);
+        assert_eq!(analysis.tables[0].span.start_column, 35);
+        assert_eq!(analysis.tables[0].span.end_line, 1);
+        assert_eq!(analysis.tables[0].span.end_column, 39);
+
+        // "id" at col 8..=9 (length 2).
+        let id_col = analysis.columns.iter().find(|col| col.name == "id").unwrap();
+        assert_eq!(id_col.span.start_column, 8);
+        assert_eq!(id_col.span.end_column, 9);
+
+        // "name" at col 12..=15 (length 4).
+        let name_col = analysis.columns.iter().find(|col| col.name == "name").unwrap();
+        assert_eq!(name_col.span.start_column, 12);
+        assert_eq!(name_col.span.end_column, 15);
+
+        // The GROUP BY column reference "user_name" directly before ';' at column 60:
+        // "user_name" starts at column 50, length 9 (50..=58).
+        // It must NOT overshoot to column 59 (which is ';').
+        let group_col = analysis.columns.iter().rfind(|col| col.name == "user_name").unwrap();
+        assert_eq!(group_col.span.start_column, 50);
+        assert_eq!(group_col.span.end_column, 58);
+    }
+
+    #[test]
+    fn group_by_violations_emit_inclusive_spans() {
+        let sql = "SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_NAME;";
+        let analysis = analyze_sql_references(sql, Some("postgres")).expect("query should analyze");
+        assert_eq!(analysis.group_by_violations.len(), 1);
+        let violation = &analysis.group_by_violations[0];
+        assert_eq!(violation.column, "USER_ID");
+        // "USER_ID" starts at column 8, length 7 (8..=14).
+        // Must NOT overshoot to column 15 (which is the comma ',').
+        assert_eq!(violation.span.start_line, 1);
+        assert_eq!(violation.span.start_column, 8);
+        assert_eq!(violation.span.end_line, 1);
+        assert_eq!(violation.span.end_column, 14);
+    }
 }

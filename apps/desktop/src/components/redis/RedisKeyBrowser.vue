@@ -18,6 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import DateTimePicker from "@/components/ui/date-time-picker/DateTimePicker.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { redisValuePreviewLimitBytes } from "@/lib/redis/redisValuePreviewLimit";
 import RedisValueViewer from "./RedisValueViewer.vue";
 import RedisPubSubPanel from "./RedisPubSubPanel.vue";
 import RedisSlowlogPanel from "./RedisSlowlogPanel.vue";
@@ -159,6 +160,9 @@ let redisKeyScrollRevision = 0;
 let latestRedisKeyScrollAnchor: RedisKeyViewportAnchor | null = null;
 const valueViewerRef = ref<{ focusSearch: () => boolean } | null>(null);
 const commandTerminalRef = ref<HTMLElement>();
+// Snapshot the default for this tab. Editing the connection must not replace a
+// user's active search or silently change its matching/display semantics.
+const defaultKeyFilter = ref(restoredRedisKeyBrowserState?.defaultKeyFilter ?? connectionStore.getConfig(props.connectionId)?.redis_key_filter?.trim() ?? "");
 const searchPattern = ref(restoredRedisKeyBrowserState?.searchPattern ?? "");
 const searchMode = ref<RedisSearchMode>(restoredRedisKeyBrowserState?.searchMode ?? "key");
 const fuzzyKeySearch = ref(restoredRedisKeyBrowserState?.fuzzyKeySearch ?? false);
@@ -182,6 +186,10 @@ const keyMetadataEpoch = ref(0);
 /** Bumped only when a TTL refresh changes membership in the no-expiry projection. */
 const noExpiryProjectionEpoch = ref(0);
 const selectionAnchorRowId = ref<string | null>(null);
+const dragSelection = ref<{ startRaw: string; baseChecked: Set<string>; active: boolean; lastEndRaw?: string; startX: number; startY: number } | null>(null);
+// A click fires after pointerup on the same gesture; an active rubber-band drag
+// must not fall through to opening the row it started (or ended) on.
+const suppressNextRowClick = ref(false);
 const selectedGroupLeafCounts = shallowRef<Map<string, number>>(new Map());
 const deletingKeys = ref(false);
 const showBatchExpiryDialog = ref(false);
@@ -238,6 +246,10 @@ let loadMoreOperationId = 0;
 // backend calls, without changing its return type.
 interface ScanIterationBudget {
   remaining: number;
+  // Current chain allowance. A fuzzy key search raises both fields together
+  // once DBSIZE is known (see `fetchScanPage`), so later pages observe an
+  // already-expanded budget instead of re-inflating it from scratch (#12412).
+  total: number;
 }
 // Automatic continuation (see `maybeAutoLoadMoreRedisKeys`) has no natural stop
 // condition when a search is sparse: unique visible keys barely grow, so the
@@ -254,9 +266,12 @@ interface ScanIterationBudget {
 // same retained operation. An explicit "Load more" click or a real scroll
 // event is a single user-triggered request and keeps its own uncapped
 // per-call budget (see `fetchScanPage`); only the automatic follow-up check
-// they hand off to afterward is constrained by this shared budget.
+// they hand off to afterward is constrained by this shared budget. A fuzzy
+// key search raises this allowance to its keyspace-aware budget once DBSIZE
+// is observed (see `fetchScanPage`); ordinary loads keep the conservative
+// default below.
 const AUTO_LOAD_TOTAL_SCAN_ITERATIONS = 50;
-let autoLoadBudget: ScanIterationBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
+let autoLoadBudget: ScanIterationBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS, total: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
 let redisBrowserIsActive = true;
 let reloadKeysOnActivation = false;
 let redisDbFlushedListenerRegistered = false;
@@ -285,6 +300,14 @@ const subtreePendingGroupCursors = new Map<string, number>();
 // 旧 generation 的 catch/finally 清掉或覆盖同 id 的新补扫。
 const subtreeFillOperations = new Map<string, number>();
 let subtreeFillOperationId = 0;
+const refreshingGroupId = ref<string | null>(null);
+const groupRefresh = shallowRef<{
+  groupId: string;
+  pattern: string;
+  cursor: number;
+  keys: Map<string, { key: RedisKeyInfo; observedAt: number }>;
+  totalKeys: number;
+} | null>(null);
 // 刷新前已展开分组的快照（#7173）：刷新首屏重建树时，本轮尚未扫到的分组会被
 // rebuildTree 从 expandedGroupIds 中裁掉；后续 load-more 页面让这些分组重新
 // 出现时，用该快照恢复展开状态。SCAN 游标归零（本轮已扫尽，仍未出现的分组
@@ -301,14 +324,32 @@ const effectivePattern = computed(() => (searchMode.value === "key" ? redisKeySe
 const isSearchMode = computed(() => (searchMode.value === "key" ? effectivePattern.value !== "*" : valueQuery.value !== ""));
 const localKeySearchActive = computed(() => fetchAllSnapshotComplete.value && searchMode.value === "key" && isSearchMode.value);
 const localKeyPatternMatcher = computed(() => createRedisKeyPatternMatcher(effectivePattern.value));
-// Keep regular glob search on the low-cost flat path. The explicit fuzzy mode
-// opts into the namespace hierarchy that users need for group selection.
-const isFuzzyKeySearch = computed(() => searchMode.value === "key" && isSearchMode.value && fuzzyKeySearch.value);
-const fuzzyTreeLimitReached = computed(() => isFuzzyKeySearch.value && !canBuildRedisFuzzyTree(flatKeys.value.length));
-const useFlatKeySearchRows = computed(() => showCustomGrouping.value || (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || fuzzyTreeLimitReached.value);
-const isFuzzyHierarchyView = computed(() => isFuzzyKeySearch.value && !fuzzyTreeLimitReached.value);
-/** True while a key-list mutation (delete or batch expiry) owns the visible result set. */
-const mutatingKeys = computed(() => deletingKeys.value || savingBatchExpiry.value);
+// The connection scope is independent of user input. Redis MATCH accepts one
+// pattern, so key searches scan the user's pattern and intersect it locally
+// with the scope using the same byte-safe matcher as cached key searches.
+const defaultScopePattern = computed(() => defaultKeyFilter.value || "*");
+const hasDefaultKeyScope = computed(() => defaultScopePattern.value !== "*");
+const defaultScopeMatcher = computed(() => createRedisKeyPatternMatcher(defaultScopePattern.value));
+const scanKeyPattern = computed(() => (effectivePattern.value !== "*" ? effectivePattern.value : defaultScopePattern.value));
+const hasFilteredKeyRange = computed(() => hasDefaultKeyScope.value || isSearchMode.value);
+const isKeyHierarchySearch = computed(() => (searchMode.value === "key" && isSearchMode.value ? fuzzyKeySearch.value : hasDefaultKeyScope.value));
+const searchTreeLimitReached = computed(() => isKeyHierarchySearch.value && !canBuildRedisFuzzyTree(flatKeys.value.length));
+function useFlatSearchResults(keyCount: number): boolean {
+  return (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || (isKeyHierarchySearch.value && !canBuildRedisFuzzyTree(keyCount));
+}
+const useFlatKeySearchRows = computed(() => showCustomGrouping.value || useFlatSearchResults(flatKeys.value.length));
+const isFilteredHierarchyView = computed(() => isKeyHierarchySearch.value && !searchTreeLimitReached.value);
+const canDeleteWholeGroup = computed(() => !hasDefaultKeyScope.value && !isFilteredHierarchyView.value);
+
+function matchesDefaultKeyScope(key: Pick<RedisKeyInfo, "key_display" | "key_raw">): boolean {
+  return !hasDefaultKeyScope.value || defaultScopeMatcher.value(key.key_display, key.key_raw);
+}
+
+function filterScanResultToScope(result: RedisScanResult): RedisScanResult {
+  return hasDefaultKeyScope.value ? { ...result, keys: result.keys.filter(matchesDefaultKeyScope) } : result;
+}
+/** True while a key-list mutation owns the visible result set. */
+const mutatingKeys = computed(() => deletingKeys.value || savingBatchExpiry.value || refreshingGroupId.value !== null);
 const selectionBusy = computed(() => mutatingKeys.value || loading.value || loadingMore.value || isFetchingAll.value || searchPending.value);
 // checkedKeys is always a subset of loaded keys, so size equality is enough.
 const allLoadedKeysSelected = computed(() => flatKeys.value.length > 0 && checkedKeys.value.size === flatKeys.value.length);
@@ -349,7 +390,7 @@ watch(redisKeySeparator, () => {
     expandedGroupIds.value = new Set();
     return;
   }
-  rebuildTree(false);
+  rebuildTree();
 });
 const lastTotalKeys = ref(0);
 // “仅看无过期”过滤开关：开启后只保留 TTL 为 -1（永不过期）的已加载 key。
@@ -359,6 +400,7 @@ const noExpiryOnly = ref(restoredRedisKeyBrowserState?.noExpiryOnly ?? false);
 function persistRedisKeyBrowserState() {
   if (!props.stateKey) return;
   saveRedisKeyBrowserState(props.stateKey, {
+    defaultKeyFilter: defaultKeyFilter.value,
     searchPattern: searchPattern.value,
     searchMode: searchMode.value,
     fuzzyKeySearch: fuzzyKeySearch.value,
@@ -366,7 +408,7 @@ function persistRedisKeyBrowserState() {
   });
 }
 
-watch([searchPattern, searchMode, fuzzyKeySearch, noExpiryOnly], persistRedisKeyBrowserState);
+watch([searchPattern, searchMode, fuzzyKeySearch, noExpiryOnly, defaultKeyFilter], persistRedisKeyBrowserState, { immediate: true });
 const fetchAllFilteredKeyCount = ref<number | null>(null);
 // 过滤后的平铺 key 列表：未开启过滤时与 flatKeys 完全一致，避免额外开销
 const filteredFlatKeys = computed(() => {
@@ -382,14 +424,22 @@ const filteredTreeKeys = computed(() => {
   if (!noExpiryOnly.value && !localKeySearchActive.value) return treeKeys.value;
   return buildRedisKeyTree(filteredFlatKeys.value, props.db, redisKeySeparator.value);
 });
-watch(effectivePattern, () => {
-  if (!fetchAllSnapshotComplete.value || searchMode.value !== "key") return;
-  if (localKeySearchActive.value && isFuzzyHierarchyView.value) expandedGroupIds.value = collectExpandedGroupIds(filteredTreeKeys.value);
-  void nextTick(() => {
-    redisKeyScroller()?.scrollToItem(0, { align: "start" });
-    refreshRedisKeyScroller();
-  });
-});
+watch(
+  [effectivePattern, searchMode],
+  () => {
+    // A new search starts collapsed. Refreshing the same search preserves manual
+    // expansion through the existing refresh snapshot, including later pages.
+    legacyExpandedBeforeGrouping = new Set();
+    expandedGroupIds.value = new Set();
+    refreshExpandedGroupIds.clear();
+    if (!fetchAllSnapshotComplete.value || searchMode.value !== "key") return;
+    void nextTick(() => {
+      redisKeyScroller()?.scrollToItem(0, { align: "start" });
+      refreshRedisKeyScroller();
+    });
+  },
+  { flush: "sync" },
+);
 const displayedKeyCount = computed(() => {
   if (isFetchingAll.value) return fetchAllLoadedCount.value;
   if (localKeySearchActive.value) return filteredFlatKeys.value.length;
@@ -399,17 +449,17 @@ const displayedKeyCount = computed(() => {
 });
 const fetchAllProgressText = computed(() => {
   if (!isFetchingAll.value) return "";
-  if (lastTotalKeys.value > 0) {
+  if (!hasFilteredKeyRange.value && lastTotalKeys.value > 0) {
     return t("redis.fetchAllProgress", { loaded: displayedKeyCount.value, total: lastTotalKeys.value });
   }
   return t("redis.fetchAllProgressUnknown", { loaded: displayedKeyCount.value });
 });
 const keyCountText = computed(() => {
   if (loading.value && flatKeys.value.length === 0) return loadingEmptyText.value;
-  if (!isSearchMode.value && lastTotalKeys.value > 0) {
+  if (!hasFilteredKeyRange.value && lastTotalKeys.value > 0) {
     return t("redis.loadedKeys", { loaded: displayedKeyCount.value, total: lastTotalKeys.value });
   }
-  const count = isSearchMode.value && hasMore.value && !isFetchingAll.value ? `${displayedKeyCount.value}+` : displayedKeyCount.value;
+  const count = hasFilteredKeyRange.value && hasMore.value ? `${displayedKeyCount.value}+` : displayedKeyCount.value;
   return t("redis.keys", { count });
 });
 const selectedKey = computed(() => {
@@ -746,6 +796,66 @@ function setKeysChecked(keyRaws: Iterable<string>, checked: boolean) {
   selectionEpoch.value++;
 }
 
+function dragSelectionRows(startRaw: string, endRaw: string, baseChecked: ReadonlySet<string>) {
+  const groupedDisplayKeys = customGrouping.value.enabled ? groupedKeyListRef.value?.getKeyRawsInDisplayOrder?.() : undefined;
+  const keys = groupedDisplayKeys?.length ? groupedDisplayKeys : visibleRows.value.flatMap((row) => (row.node.kind === "leaf" ? [row.node.keyRaw] : []));
+  const start = keys.indexOf(startRaw);
+  const end = keys.indexOf(endRaw);
+  if (start < 0 || end < 0) return;
+  const range = new Set(keys.slice(Math.min(start, end), Math.max(start, end) + 1));
+  // Keep earlier batches selected, while letting the current drag range shrink
+  // or expand as the pointer moves back and forth. Each row is toggled against
+  // the selection snapshot, so mixed ranges add unselected rows and remove
+  // selected rows in the same gesture.
+  const next = new Set(baseChecked);
+  for (const keyRaw of range) {
+    if (baseChecked.has(keyRaw)) next.delete(keyRaw);
+    else next.add(keyRaw);
+  }
+  checkedKeys.value = next;
+  selectedGroupLeafCounts.value = groupLeafCountsFromChecked(next);
+  selectionEpoch.value++;
+}
+
+function onKeyPointerDown(node: RedisKeyTreeNode, event: PointerEvent) {
+  if (event.button !== 0 || selectionBusy.value || node.kind !== "leaf" || (event.target as HTMLElement | null)?.closest("input,button")) return;
+  suppressNextRowClick.value = false;
+  dragSelection.value = { startRaw: node.keyRaw, baseChecked: new Set(checkedKeys.value), active: false, startX: event.clientX, startY: event.clientY };
+}
+
+function onKeyPointerMove(event: PointerEvent) {
+  const drag = dragSelection.value;
+  if (!drag || selectionBusy.value) return;
+  // A missed pointerup (or a touch/pen takeover) leaves the drag armed; hover
+  // moves with no button pressed must not keep toggling rows.
+  if ((event.buttons & 1) === 0) {
+    if (drag.active) suppressNextRowClick.value = true;
+    dragSelection.value = null;
+    return;
+  }
+  if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
+  const row = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-redis-key-raw]");
+  const endRaw = row?.dataset.redisKeyRaw;
+  if (!endRaw) return;
+  drag.active = true;
+  event.preventDefault();
+  // Recomputing the range walks the full display order; skip while the pointer
+  // stays on the same row (visibleRows can hold 100k+ keys after Fetch All).
+  if (drag.lastEndRaw === endRaw) return;
+  drag.lastEndRaw = endRaw;
+  dragSelectionRows(drag.startRaw, endRaw, drag.baseChecked);
+}
+
+function onKeyPointerUp() {
+  if (dragSelection.value?.active) suppressNextRowClick.value = true;
+  dragSelection.value = null;
+}
+
+function onKeyPointerCancel() {
+  if (dragSelection.value?.active) suppressNextRowClick.value = true;
+  dragSelection.value = null;
+}
+
 function nodeKeyRaws(node: RedisKeyTreeNode): string[] {
   return node.kind === "leaf" ? [node.keyRaw] : collectRedisGroupKeyRaws(node);
 }
@@ -845,7 +955,7 @@ function onKeyPaneKeydown(event: KeyboardEvent) {
   else void selectAllKeys();
 }
 
-function rebuildTree(expandAll = false) {
+function rebuildTree() {
   deactivateFetchAllVisibleRows();
   if (useFlatKeySearchRows.value) {
     treeKeys.value = [];
@@ -860,12 +970,8 @@ function rebuildTree(expandAll = false) {
 
   const nextExpanded = new Set<string>();
   const availableExpanded = collectExpandedGroupIds(nextTree);
-  if (expandAll) {
-    for (const id of availableExpanded) nextExpanded.add(id);
-  } else {
-    for (const id of expandedGroupIds.value) {
-      if (availableExpanded.has(id)) nextExpanded.add(id);
-    }
+  for (const id of expandedGroupIds.value) {
+    if (availableExpanded.has(id)) nextExpanded.add(id);
   }
   expandedGroupIds.value = nextExpanded;
   refreshSelectedGroupLeafCounts();
@@ -879,10 +985,10 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
   if (newKeys.length === 0) return;
   deactivateFetchAllVisibleRows();
   if (!treeIndex) {
-    rebuildTree(isSearchMode.value);
+    rebuildTree();
     return;
   }
-  const { addedGroupIds } = appendRedisKeysToTreeIndex(treeIndex, newKeys, props.db, redisKeySeparator.value);
+  appendRedisKeysToTreeIndex(treeIndex, newKeys, props.db, redisKeySeparator.value);
   // Trigger the shallow ref without proxying the whole namespace hierarchy.
   treeKeys.value = [...treeIndex.root];
 
@@ -893,9 +999,6 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
   // 刷新快照恢复（#7173）：首屏重建时被裁掉、后续页面重新出现的分组保持展开
   for (const id of refreshExpandedGroupIds) {
     if (treeIndex.groupById.has(id)) nextExpanded.add(id);
-  }
-  if (isFuzzyHierarchyView.value) {
-    for (const id of addedGroupIds) nextExpanded.add(id);
   }
   expandedGroupIds.value = nextExpanded;
   // loadedLeafCount changed — re-evaluate parent checked/partial state in the UI.
@@ -914,13 +1017,15 @@ function invalidateScanRequests(resetAutoLoadBudget = true): number {
   loadMoreOperationId++;
   loadingMore.value = false;
   subtreeFillOperations.clear();
-  if (resetAutoLoadBudget) autoLoadBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
+  groupRefresh.value = null;
+  refreshingGroupId.value = null;
+  if (resetAutoLoadBudget) autoLoadBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS, total: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
   return searchRequestId;
 }
 
 function invalidateFetchAllForStructuralMutation() {
   fetchAllSnapshotComplete.value = false;
-  if (isFetchingAll.value || fetchAllPublicationRollback) invalidateScanRequests();
+  if (isFetchingAll.value || fetchAllPublicationRollback || groupRefresh.value) invalidateScanRequests();
 }
 
 function isCurrentScanOperation(requestId: number, operationId?: number): boolean {
@@ -929,8 +1034,8 @@ function isCurrentScanOperation(requestId: number, operationId?: number): boolea
 
 async function fetchScanPage(requestId = searchRequestId, operationId?: number, iterationBudget?: ScanIterationBudget): Promise<RedisScanResult> {
   const pageSize = redisScanPageSize.value;
-  if (isValueSearchMode.value) {
-    return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
+  if (isValueSearchMode.value && valueQuery.value) {
+    return filterScanResultToScope(await api.redisScanValues(props.connectionId, props.db, scanCursor.value, defaultScopePattern.value, valueQuery.value, pageSize, searchMode.value === "all"));
   }
 
   // Keep each backend call small so a changed search can cancel between calls.
@@ -939,7 +1044,11 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
   // preserve the returned cursor, and let the existing "Load more" action
   // continue sparse searches without turning one request into a full scan.
   const isFuzzyKeySearch = searchMode.value === "key" && fuzzyKeySearch.value;
-  let scanCountBudget = redisFuzzySearchScanBudget(0);
+  // DBSIZE only travels with the cursor==0 batch; carry the last observed
+  // keyspace across continuation pages so their COUNT budget stays
+  // keyspace-aware instead of collapsing back to the 50k floor (#12412).
+  let totalKeys = isFuzzyKeySearch ? lastTotalKeys.value : 0;
+  let scanCountBudget = redisFuzzySearchScanBudget(totalKeys);
   const iterationsPerCall = 8;
   const perCallMaxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
   // When part of the automatic-fill chain, also cap this call to whatever is
@@ -949,18 +1058,29 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
   let maxIterations = iterationBudget ? Math.max(0, Math.min(perCallMaxIterations, iterationBudget.remaining)) : perCallMaxIterations;
   let completedIterations = 0;
   let cursor = scanCursor.value;
-  let totalKeys = 0;
 
   while (completedIterations < maxIterations) {
     if (!isCurrentScanOperation(requestId, operationId)) break;
     const iterations = Math.min(iterationsPerCall, maxIterations - completedIterations);
     if (iterationBudget) iterationBudget.remaining -= iterations;
-    const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, true);
+    const result = filterScanResultToScope(await api.redisScanKeysBatch(props.connectionId, props.db, cursor, scanKeyPattern.value, pageSize, iterations, true));
     completedIterations += iterations;
     if (totalKeys === 0) totalKeys = result.total_keys;
     if (isFuzzyKeySearch && totalKeys > 0) {
       scanCountBudget = redisFuzzySearchScanBudget(totalKeys);
       const fuzzyMaxIterations = Math.ceil(scanCountBudget / Math.max(1, pageSize));
+      if (iterationBudget) {
+        // The shared automatic-fill budget starts at the conservative
+        // AUTO_LOAD_TOTAL_SCAN_ITERATIONS default, which suits ordinary loads
+        // but clamps a fuzzy search to a handful of SCAN pages no matter how
+        // large the keyspace is (#12412). Raise the chain allowance to the
+        // keyspace-aware total (never shrink it) so the `availableIterations`
+        // below can hand the grown budget to this page; iterations already
+        // spent still count against the raised total.
+        const expandedTotal = Math.max(iterationBudget.total, fuzzyMaxIterations);
+        iterationBudget.remaining += expandedTotal - iterationBudget.total;
+        iterationBudget.total = expandedTotal;
+      }
       const availableIterations = iterationBudget ? completedIterations + iterationBudget.remaining : fuzzyMaxIterations;
       maxIterations = Math.min(fuzzyMaxIterations, Math.max(maxIterations, availableIterations));
     }
@@ -978,11 +1098,11 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
 async function fetchScanBatchPage(maxIterations: number, options: { count?: number; includeTypes?: boolean } = {}): Promise<RedisScanResult> {
   // Value search cannot be batched because each key requires a GET.
   // Keep its configured COUNT independent of the key-only bulk override.
-  if (isValueSearchMode.value) {
-    return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, redisScanPageSize.value, searchMode.value === "all");
+  if (isValueSearchMode.value && valueQuery.value) {
+    return filterScanResultToScope(await api.redisScanValues(props.connectionId, props.db, scanCursor.value, defaultScopePattern.value, valueQuery.value, redisScanPageSize.value, searchMode.value === "all"));
   }
   const pageSize = options.count ?? redisScanPageSize.value;
-  return api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, maxIterations, options.includeTypes ?? false);
+  return filterScanResultToScope(await api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, scanKeyPattern.value, pageSize, maxIterations, options.includeTypes ?? false));
 }
 
 function appendScanResult(result: RedisScanResult, options: { updateTree?: boolean; buffer?: RedisKeyInfo[] } = {}): number {
@@ -1001,7 +1121,7 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
   // pages return total_keys=0. Preserve the previously-fetched total when
   // we get a zero from a continuation. A truly empty DB returns cursor==0
   // and keys==[] along with total_keys==0, which we do record.
-  if (result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0)) {
+  if (result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0 && !hasFilteredKeyRange.value)) {
     lastTotalKeys.value = result.total_keys;
   }
 
@@ -1011,7 +1131,7 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
       treeIndex = null;
       expandedGroupIds.value = new Set();
     } else if (treeKeys.value.length === 0) {
-      rebuildTree(isSearchMode.value);
+      rebuildTree();
     } else {
       mergeTree(newKeys);
     }
@@ -1021,8 +1141,8 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
   if (!hasMore.value) refreshExpandedGroupIds.clear();
 
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
-    loaded: isSearchMode.value ? undefined : loadedCount,
-    total: result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0) ? result.total_keys : undefined,
+    loaded: hasFilteredKeyRange.value ? undefined : loadedCount,
+    total: result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0 && !hasFilteredKeyRange.value) ? result.total_keys : undefined,
   });
 
   return newKeys.length;
@@ -1039,10 +1159,10 @@ function bufferFetchAllScanResult(result: RedisScanResult, buffer: RedisKeyInfo[
   }
   scanCursor.value = result.cursor;
   hasMore.value = result.cursor !== 0;
-  if (result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0)) lastTotalKeys.value = result.total_keys;
+  if (result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0 && !hasFilteredKeyRange.value)) lastTotalKeys.value = result.total_keys;
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
-    loaded: isSearchMode.value ? undefined : flatKeys.value.length + buffer.length,
-    total: result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0) ? result.total_keys : undefined,
+    loaded: hasFilteredKeyRange.value ? undefined : flatKeys.value.length + buffer.length,
+    total: result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0 && !hasFilteredKeyRange.value) ? result.total_keys : undefined,
   });
   return added;
 }
@@ -1093,11 +1213,11 @@ async function loadKeys() {
   // separately and checked once we're clear of it.
   let succeeded = false;
   try {
-    if (isValueSearchMode.value && !valueQuery.value) {
+    if (isValueSearchMode.value && !valueQuery.value && !hasDefaultKeyScope.value) {
       hasMore.value = false;
       return;
     }
-    const initialScanBudget = isFuzzyKeySearch.value ? autoLoadBudget : undefined;
+    const initialScanBudget = isKeyHierarchySearch.value ? autoLoadBudget : undefined;
     const applied = await scanNextPage(requestId, undefined, initialScanBudget);
     succeeded = applied;
   } finally {
@@ -1171,7 +1291,7 @@ async function maybeAutoLoadMoreRedisKeys() {
   const shouldLoad = shouldLoadMoreRedisKeys({
     enabled: redisInfiniteScrollEnabled.value,
     hasMore: hasMore.value,
-    busy: loading.value || loadingMore.value || searchPending.value || deletingKeys.value || isFetchingAll.value,
+    busy: loading.value || loadingMore.value || searchPending.value || mutatingKeys.value || isFetchingAll.value,
     loadedKeys: flatKeys.value.length,
     maxKeys: redisInfiniteScrollMaxKeys.value,
     scrollTop: scroller.scrollTop,
@@ -1328,7 +1448,7 @@ async function publishFetchAllVisibleRows(rows: readonly RedisKeyTreeRow[], requ
 async function fetchAll(): Promise<boolean> {
   if (!hasMore.value || isFetchingAll.value) return false;
   const requestId = searchRequestId;
-  const fetchAllIsFullKeyspace = searchMode.value === "key" && !isSearchMode.value;
+  const fetchAllCoversScope = searchMode.value === "key" && !isSearchMode.value;
   const bufferedKeys: RedisKeyInfo[] = [];
   const bufferedKeyRaws = new Set<string>();
   const initialFlatKeys = flatKeys.value;
@@ -1344,7 +1464,7 @@ async function fetchAll(): Promise<boolean> {
     db: props.db,
     separator: redisKeySeparator.value,
     flatRows: useFlatKeySearchRows.value,
-    expandAll: isSearchMode.value,
+    expandAll: false,
     expandedGroupIds: expandedGroupIds.value,
     noExpiryOnly: noExpiryOnly.value,
   };
@@ -1383,8 +1503,8 @@ async function fetchAll(): Promise<boolean> {
       let published = !changed && !fetchAllStopRequested.value;
       try {
         if (changed) {
-          snapshotConfig.flatRows = customGrouping.value.enabled || (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || (isFuzzyKeySearch.value && !canBuildRedisFuzzyTree(initialFlatKeys.length + bufferedKeys.length));
-          snapshotConfig.expandAll = isSearchMode.value;
+          snapshotConfig.flatRows = customGrouping.value.enabled || useFlatSearchResults(initialFlatKeys.length + bufferedKeys.length);
+          snapshotConfig.expandAll = false;
           snapshotConfig.expandedGroupIds = expandedGroupIds.value;
           snapshotConfig.noExpiryOnly = noExpiryOnly.value;
           activateFetchAllVisibleRows();
@@ -1406,7 +1526,7 @@ async function fetchAll(): Promise<boolean> {
       } finally {
         publicationSucceeded = published;
         if (published) {
-          fetchAllSnapshotComplete.value = fetchAllIsFullKeyspace;
+          fetchAllSnapshotComplete.value = completed && fetchAllCoversScope;
           fetchAllPublicationRollback = null;
           if (!hasMore.value) refreshExpandedGroupIds.clear();
         }
@@ -1422,7 +1542,7 @@ async function fetchAll(): Promise<boolean> {
               positiveTtlKeyRaws.delete(keyRaw);
             }
             connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
-              loaded: isSearchMode.value ? undefined : initialFlatKeys.length,
+              loaded: hasFilteredKeyRange.value ? undefined : initialFlatKeys.length,
               total: initialLastTotalKeys,
             });
           }
@@ -1455,8 +1575,88 @@ const SUBTREE_SCAN_ITERATIONS_PER_CALL = 8;
 const SUBTREE_FILL_MAX_NEW_KEYS = 500;
 const SUBTREE_FILL_MAX_SCAN_ITERATIONS = 50;
 
+function groupRefreshLabel(groupId: string): string {
+  return groupRefresh.value?.groupId === groupId ? t("redis.loadMoreKeys") : t("common.refresh");
+}
+
+async function refreshGroupSubtree(group: RedisKeyTreeGroupNode) {
+  if (!redisBrowserIsActive || selectionBusy.value) return;
+  const pending = groupRefresh.value?.groupId === group.id ? groupRefresh.value : null;
+  // Cancel older main/subtree pages without resetting the main cursor. A late
+  // append must not resurrect keys removed by this prefix refresh.
+  const requestId = invalidateScanRequests(false);
+  const session = pending ?? {
+    groupId: group.id,
+    pattern: redisGroupSubtreePattern(group.pathSegments, redisKeySeparator.value),
+    cursor: 0,
+    keys: new Map<string, { key: RedisKeyInfo; observedAt: number }>(),
+    totalKeys: lastTotalKeys.value,
+  };
+  groupRefresh.value = session;
+  refreshingGroupId.value = group.id;
+  const current = () => requestId === searchRequestId && redisBrowserIsActive && groupRefresh.value === session;
+  let iterationsLeft = SUBTREE_FILL_MAX_SCAN_ITERATIONS;
+  const initialKeyCount = session.keys.size;
+  try {
+    while (current() && iterationsLeft > 0 && session.keys.size - initialKeyCount < SUBTREE_FILL_MAX_NEW_KEYS) {
+      const iterations = Math.min(SUBTREE_SCAN_ITERATIONS_PER_CALL, iterationsLeft);
+      const result = filterScanResultToScope(
+        isValueSearchMode.value && valueQuery.value
+          ? await api.redisScanValues(props.connectionId, props.db, session.cursor, session.pattern, valueQuery.value, redisScanPageSize.value, searchMode.value === "all")
+          : await api.redisScanKeysBatch(props.connectionId, props.db, session.cursor, session.pattern, redisScanPageSize.value, iterations, true),
+      );
+      if (!current()) return;
+      iterationsLeft -= iterations;
+      const observedAt = Date.now();
+      for (const key of result.keys) {
+        if (searchMode.value === "key" && !fetchAllSnapshotComplete.value && !localKeyPatternMatcher.value(key.key_display, key.key_raw)) continue;
+        session.keys.set(key.key_raw, { key, observedAt });
+      }
+      if (session.cursor === 0) session.totalKeys = result.total_keys;
+      session.cursor = result.cursor;
+      if (session.cursor !== 0) continue;
+
+      // SCAN is not a snapshot: only a completed traversal can establish which
+      // previously loaded keys disappeared. Keep old rows intact between passes.
+      const matches = createRedisKeyPatternMatcher(session.pattern);
+      const retained = flatKeys.value.filter((key) => !matches(key.key_display, key.key_raw));
+      for (const key of flatKeys.value) {
+        if (matches(key.key_display, key.key_raw)) {
+          ttlObservedAtByRaw.delete(key.key_raw);
+          positiveTtlKeyRaws.delete(key.key_raw);
+        }
+      }
+      for (const { key, observedAt } of session.keys.values()) {
+        retained.push(key);
+        recordKeyTtlObservedAt(key);
+        if ((key.ttl ?? -2) > 0) ttlObservedAtByRaw.set(key.key_raw, observedAt);
+      }
+      loadedKeyRaws = new Set(retained.map((key) => key.key_raw));
+      replaceFlatKeyRecords(retained);
+      for (const candidate of treeIndex?.groupById.values() ?? []) {
+        if (candidate.pathSegments.length < group.pathSegments.length || !group.pathSegments.every((segment, index) => candidate.pathSegments[index] === segment)) continue;
+        subtreeFilledGroupIds.delete(candidate.id);
+        subtreePendingGroupCursors.delete(candidate.id);
+      }
+      rebuildTree();
+      keyMetadataEpoch.value++;
+      lastTotalKeys.value = session.totalKeys;
+      connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
+        loaded: hasFilteredKeyRange.value ? undefined : retained.length,
+        total: session.totalKeys,
+      });
+      groupRefresh.value = null;
+      return;
+    }
+  } catch (error) {
+    if (current()) toast(errorMessage(error), 5000);
+  } finally {
+    if (requestId === searchRequestId) refreshingGroupId.value = null;
+  }
+}
+
 function shouldFillGroupSubtree(): boolean {
-  return hasMore.value && !useFlatKeySearchRows.value && !isSearchMode.value && !isFetchingAll.value;
+  return hasMore.value && !useFlatKeySearchRows.value && !hasFilteredKeyRange.value && !isFetchingAll.value && !refreshingGroupId.value;
 }
 
 function mergeScannedKeys(newKeys: RedisKeyInfo[]) {
@@ -1465,11 +1665,12 @@ function mergeScannedKeys(newKeys: RedisKeyInfo[]) {
   appendFlatKeyRecords(newKeys);
   mergeTree(newKeys);
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
-    loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+    loaded: hasFilteredKeyRange.value ? undefined : flatKeys.value.length,
   });
 }
 
 async function fillGroupSubtree(group: RedisKeyTreeGroupNode, requestId = searchRequestId) {
+  if (hasDefaultKeyScope.value) return;
   if (subtreeFilledGroupIds.has(group.id)) return;
   if (subtreeFillOperations.has(group.id)) return;
   const operationId = ++subtreeFillOperationId;
@@ -1558,6 +1759,10 @@ function toggleGroup(groupId: string) {
 }
 
 function onRowClick(node: RedisKeyTreeNode, event?: MouseEvent) {
+  if (suppressNextRowClick.value) {
+    suppressNextRowClick.value = false;
+    return;
+  }
   if (event && !selectionBusy.value && (event.shiftKey || event.ctrlKey || event.metaKey)) {
     toggleNodeCheck(node, event);
     if (node.kind === "leaf") {
@@ -1578,6 +1783,7 @@ function onRowClick(node: RedisKeyTreeNode, event?: MouseEvent) {
 
 function removeKnownKey(keyRaw: string) {
   if (!flatKeyByRaw.has(keyRaw)) return;
+  const reloadSearch = localKeySearchActive.value;
   invalidateFetchAllForStructuralMutation();
   loadedKeyRaws.delete(keyRaw);
   ttlObservedAtByRaw.delete(keyRaw);
@@ -1589,12 +1795,18 @@ function removeKnownKey(keyRaw: string) {
     treeIndex = null;
     refreshSelectedGroupLeafCounts();
   } else {
-    rebuildTree(false);
+    rebuildTree();
   }
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
-    loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+    loaded: hasFilteredKeyRange.value ? undefined : flatKeys.value.length,
     totalDelta: -1,
   });
+  // The remaining records still cover the old complete scope. Once that cache
+  // is invalidated, reload the active query instead of displaying every record.
+  if (reloadSearch) {
+    if (redisBrowserIsActive) void loadKeys();
+    else reloadKeysOnActivation = true;
+  }
 }
 
 function onKeyDeleted(keyRaw: string) {
@@ -1603,15 +1815,17 @@ function onKeyDeleted(keyRaw: string) {
 
 function onKeyRenamed(oldKeyRaw: string, newKeyRaw: string, newKeyDisplay: string) {
   connectionStore.invalidateCompletionCache(props.connectionId, String(props.db));
-  if (isSearchMode.value) {
-    void loadKeys();
+  if (hasFilteredKeyRange.value) {
+    if (redisBrowserIsActive) void loadKeys();
+    else reloadKeysOnActivation = true;
     return;
   }
 
   invalidateFetchAllForStructuralMutation();
   const previous = flatKeyByRaw.get(oldKeyRaw);
   if (!previous) {
-    void loadKeys();
+    if (redisBrowserIsActive) void loadKeys();
+    else reloadKeysOnActivation = true;
     return;
   }
 
@@ -1635,7 +1849,7 @@ function onKeyRenamed(oldKeyRaw: string, newKeyRaw: string, newKeyDisplay: strin
     treeIndex = null;
     refreshSelectedGroupLeafCounts();
   } else {
-    rebuildTree(false);
+    rebuildTree();
   }
 }
 
@@ -1659,6 +1873,7 @@ function onKeyLoaded(value: RedisValue) {
   const previousTtl = flatKeyByRaw.get(keyInfo.key_raw)?.ttl ?? -2;
   const noExpiryMembershipChanged = (previousTtl === -1) !== (keyInfo.ttl === -1);
   if (!updateRedisKeyInfoMetadataByRaw(flatKeyByRaw, keyInfo)) return;
+  if (groupRefresh.value) invalidateScanRequests(false);
   // 详情面板回写了最新的 TTL，同步刷新观测时刻，保证两侧倒计时一致
   recordKeyTtlObservedAt(keyInfo);
   loadedKeyRaws.add(keyInfo.key_raw);
@@ -1680,14 +1895,14 @@ function requestBatchDelete() {
     kind: "delete-keys",
     title: t("redis.selectedKeys"),
     keyRaws: [...checkedKeys.value],
-    loadedSearchResults: isFuzzyKeySearch.value,
+    loadedSearchResults: hasFilteredKeyRange.value,
   };
   showDangerConfirm.value = true;
 }
 
 function requestGroupDelete(node: RedisKeyTreeNode, event?: Event) {
   event?.stopPropagation();
-  if (node.kind !== "group" || selectionBusy.value) return;
+  if (node.kind !== "group" || selectionBusy.value || !canDeleteWholeGroup.value) return;
   // 一个分组是键名前缀：树里只持有已扫描到的那部分子键，按已加载行删除会
   // 留下一部分键（#10164）。这里改为删除该前缀下的全部键。
   const pattern = redisGroupSubtreePattern(node.pathSegments, redisKeySeparator.value);
@@ -1727,6 +1942,12 @@ function redisKeyContextMenuItems(node: RedisKeyTreeNode): ContextMenuItem[] {
     const groupPath = node.pathSegments.join(redisKeySeparator.value);
     const items: ContextMenuItem[] = [
       {
+        label: groupRefreshLabel(node.id),
+        icon: RefreshCw,
+        action: () => refreshGroupSubtree(node),
+        disabled: () => selectionBusy.value,
+      },
+      {
         label: t("redis.createKey"),
         icon: Plus,
         action: () => openCreateKeyDialog(`${groupPath}${redisKeySeparator.value}`),
@@ -1737,9 +1958,9 @@ function redisKeyContextMenuItems(node: RedisKeyTreeNode): ContextMenuItem[] {
         action: () => copyRedisKeyName(groupPath),
       },
     ];
-    // Fuzzy hierarchy represents only the loaded matching subset. Keep its
+    // A filtered hierarchy represents only the loaded matching subset. Keep its
     // destructive actions hidden, matching the inline group-delete button.
-    if (!isFuzzyHierarchyView.value) {
+    if (canDeleteWholeGroup.value) {
       items.push({
         label: t("redis.deleteGroupKeys"),
         icon: Trash2,
@@ -1768,6 +1989,7 @@ function onRedisRowContextMenu(event: MouseEvent, node: RedisKeyTreeNode, openCo
 }
 
 function resetLoadedKeys() {
+  legacyExpandedBeforeGrouping = new Set();
   invalidateScanRequests();
   fetchAllSnapshotComplete.value = false;
   isFetchingAll.value = false;
@@ -1788,7 +2010,7 @@ function resetLoadedKeys() {
 }
 
 async function deleteGroupSubtree(pattern: string, groupId: string) {
-  if (deletingKeys.value) return;
+  if (deletingKeys.value || !canDeleteWholeGroup.value) return;
 
   // Ignore a late SCAN page while an explicit mutation changes this result set.
   invalidateScanRequests();
@@ -1813,9 +2035,9 @@ async function deleteGroupSubtree(pattern: string, groupId: string) {
     // 该子树已被整段删除，旧的补扫游标/已扫尽标记对新键不再成立
     subtreePendingGroupCursors.delete(groupId);
     subtreeFilledGroupIds.delete(groupId);
-    rebuildTree(false);
+    rebuildTree();
     connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
-      loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+      loaded: hasFilteredKeyRange.value ? undefined : flatKeys.value.length,
       totalDelta: -deletedCount,
     });
     toast(t("redis.deleteGroupSubtreeSuccess", { count: deletedCount }), 3000);
@@ -1859,10 +2081,10 @@ async function deleteKeyRaws(keys: string[]) {
       treeKeys.value = [];
       treeIndex = null;
     } else {
-      rebuildTree(false);
+      rebuildTree();
     }
     connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
-      loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+      loaded: hasFilteredKeyRange.value ? undefined : flatKeys.value.length,
       totalDelta: -deletedCount,
     });
   } catch (error) {
@@ -1913,6 +2135,7 @@ function applyKeyTtlMetadata(keyRaw: string, ttl: number): boolean {
   const previousTtl = keyInfo.ttl ?? -2;
   const nextKeyInfo: RedisKeyInfo = { ...keyInfo, ttl };
   if (!updateRedisKeyInfoMetadataByRaw(flatKeyByRaw, nextKeyInfo)) return false;
+  if (groupRefresh.value) invalidateScanRequests(false);
   recordKeyTtlObservedAt(nextKeyInfo);
   if (treeIndex) updateRedisKeyTreeLeafMetadata(treeIndex, nextKeyInfo);
   return (previousTtl === -1) !== (ttl === -1);
@@ -2185,8 +2408,21 @@ function upsertCreatedKey(value: RedisValue) {
     size: redisValueSize(value),
     value_preview: redisValuePreview(value),
   };
-  invalidateFetchAllForStructuralMutation();
   const existing = flatKeyByRaw.get(keyInfo.key_raw);
+  if (!matchesDefaultKeyScope(keyInfo)) {
+    connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, { totalDelta: existing ? 0 : 1 });
+    return;
+  }
+  // 范围外的写入不影响已加载的范围快照及其本地搜索。
+  invalidateFetchAllForStructuralMutation();
+  // A created/updated key may not match the active key or value query. Use the
+  // normal scoped search path rather than inserting it into filtered results.
+  if (isSearchMode.value) {
+    connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, { totalDelta: existing ? 0 : 1 });
+    if (redisBrowserIsActive) void loadKeys();
+    else reloadKeysOnActivation = true;
+    return;
+  }
   // 新建 key 携带的 TTL 以当前时刻为观测起点
   recordKeyTtlObservedAt(keyInfo);
   if (existing) {
@@ -2196,9 +2432,9 @@ function upsertCreatedKey(value: RedisValue) {
   }
   loadedKeyRaws.add(keyInfo.key_raw);
   selectedKeyRaw.value = keyInfo.key_raw;
-  rebuildTree(isSearchMode.value);
+  rebuildTree();
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
-    loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+    loaded: hasFilteredKeyRange.value ? undefined : flatKeys.value.length,
     totalDelta: existing ? 0 : 1,
   });
 }
@@ -2212,7 +2448,7 @@ function isRedisMissingKeyError(error: unknown): boolean {
 }
 
 async function syncWrittenKey(keyRaw: string): Promise<boolean> {
-  const created = await api.redisGetValue(props.connectionId, props.db, keyRaw);
+  const created = await api.redisGetValue(props.connectionId, props.db, keyRaw, redisValuePreviewLimitBytes(settingsStore.editorSettings.redisValuePreviewLimitKiB));
   if (created.redis_type === "none") {
     removeKnownKey(keyRaw);
     return false;
@@ -3059,10 +3295,13 @@ function onCommandInputKeydown(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  window.addEventListener("pointermove", onKeyPointerMove);
+  window.addEventListener("pointerup", onKeyPointerUp);
+  window.addEventListener("pointercancel", onKeyPointerCancel);
   resumeRedisBrowserBackgroundWork();
   void autofocusSearchOnce();
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
@@ -3076,7 +3315,7 @@ onActivated(async () => {
   // Ensure the connection is still alive after reactivation (e.g. tab switch).
   // Retry an empty failed/interrupted load, but retain successful sparse pages.
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
@@ -3092,6 +3331,9 @@ onActivated(async () => {
 onDeactivated(pauseRedisBrowserBackgroundWork);
 
 onUnmounted(() => {
+  window.removeEventListener("pointermove", onKeyPointerMove);
+  window.removeEventListener("pointerup", onKeyPointerUp);
+  window.removeEventListener("pointercancel", onKeyPointerCancel);
   pauseRedisBrowserBackgroundWork();
   if (redisInfiniteScrollFrame) cancelAnimationFrame(redisInfiniteScrollFrame);
   redisInfiniteScrollFrame = 0;
@@ -3099,14 +3341,21 @@ onUnmounted(() => {
 
 watch(
   () => [props.connectionId, props.db] as const,
-  async ([connectionId, db]) => {
+  async ([connectionId, db], [previousConnectionId]) => {
+    if (connectionId !== previousConnectionId) {
+      defaultKeyFilter.value = connectionStore.getConfig(connectionId)?.redis_key_filter?.trim() ?? "";
+      searchPattern.value = "";
+      searchMode.value = "key";
+      fuzzyKeySearch.value = false;
+      noExpiryOnly.value = false;
+    }
     // ContentArea remounts this browser for scope changes; keep embedded uses
     // in sync as well so an old scan cannot populate the new scope.
     commandDb.value = db;
     resetCommandDocumentation();
     resetLoadedKeys();
     try {
-      await connectionStore.ensureConnected(connectionId);
+      await connectionStore.ensureConnected(connectionId, { skipIfClosedByUser: true });
     } catch (error) {
       console.warn("[DBX] ensureConnected failed for", connectionId, error);
     }
@@ -3152,7 +3401,7 @@ async function prepareLegacyGroupingView() {
     {
       db,
       separator: redisKeySeparator.value,
-      flatRows: (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || fuzzyTreeLimitReached.value,
+      flatRows: useFlatSearchResults(keys.length),
       expandAll: false,
       expandedGroupIds: legacyExpandedBeforeGrouping,
       noExpiryOnly: noExpiryOnly.value,
@@ -3163,7 +3412,7 @@ async function prepareLegacyGroupingView() {
   let anchor = groupedKeyListRef.value?.getViewportAnchor();
   let rowIndex = Math.min(anchor?.rowIndex ?? 0, Math.max(0, snapshot.visibleRows.length - 1));
   if (anchor?.keyRaw) {
-    for (let offset = 0; offset < snapshot.visibleRows.length; ) {
+    for (let offset = 0; offset < snapshot.visibleRows.length;) {
       if (!current()) return;
       const end = Math.min(offset + 512, snapshot.visibleRows.length);
       let found = false;
@@ -3221,7 +3470,7 @@ watch(
       legacyGroupingPublishing = false;
       if (!legacyGroupingPreparing.value) legacyExpandedBeforeGrouping = expandedGroupIds.value;
       legacyGroupingPreparing.value = false;
-      rebuildTree(false);
+      rebuildTree();
     } else if (previous) {
       void prepareLegacyGroupingView();
     }
@@ -3424,11 +3673,12 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             :checked="checkedKeys"
             :busy="selectionBusy"
             :metadata-epoch="keyMetadataEpoch"
-            :tree-allowed="!fuzzyTreeLimitReached"
+            :tree-allowed="!searchTreeLimitReached"
             @request-list="saveGrouping({ ...customGrouping, inner_view: 'list' })"
             @scroll="onRedisKeyScroll"
             @resize="maybeAutoLoadMoreRedisKeys"
             @select="(key) => onRowClick(redisKeyToFlatTreeRow(key, db).node)"
+            @pointerdown="(key, event) => onKeyPointerDown(redisKeyToFlatTreeRow(key, db).node, event)"
             @check="(key, event) => toggleNodeCheck(redisKeyToFlatTreeRow(key, db).node, event)"
             @copy="(key) => copyRedisKeyName(key.key_display)"
             @delete="(key, event) => requestKeyDelete(redisKeyToFlatTreeRow(key, db).node, event)"
@@ -3457,6 +3707,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <template #default="{ item: row }">
               <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
                 <div
+                  :data-redis-key-raw="row.node.kind === 'leaf' ? row.node.keyRaw : undefined"
                   class="flex items-center gap-2 border-b px-1.5 text-[13px] cursor-pointer select-none group"
                   :class="[
                     isOpen || (row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40',
@@ -3464,6 +3715,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   ]"
                   :style="{ height: '30px' }"
                   @click="onRowClick(row.node, $event)"
+                  @pointerdown="onKeyPointerDown(row.node, $event)"
                   @contextmenu="(event) => onRedisRowContextMenu(event, row.node, onContextMenu)"
                 >
                   <div class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden" :style="{ paddingLeft: `${4 + row.depth * 10}px` }">
@@ -3481,8 +3733,8 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                       <component :is="expandedGroupIds.has(row.node.id) ? ChevronDown : ChevronRight" class="w-3 h-3 shrink-0 text-muted-foreground" />
                       <component :is="expandedGroupIds.has(row.node.id) ? FolderOpen : FolderClosed" class="h-3.5 w-3.5 shrink-0 text-amber-500" />
                       <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
-                      <span class="text-muted-foreground ml-1" :title="isFuzzyHierarchyView ? t('redis.loadedMatchingKeys', { count: row.node.loadedLeafCount }) : hasMore ? t('redis.loadedGroupKeysPartial', { count: row.node.loadedLeafCount }) : undefined"
-                        >({{ row.node.loadedLeafCount }}{{ !isFuzzyHierarchyView && hasMore ? "+" : "" }})</span
+                      <span class="text-muted-foreground ml-1" :title="isFilteredHierarchyView ? t('redis.loadedMatchingKeys', { count: row.node.loadedLeafCount }) : hasMore ? t('redis.loadedGroupKeysPartial', { count: row.node.loadedLeafCount }) : undefined"
+                        >({{ row.node.loadedLeafCount }}{{ !isFilteredHierarchyView && hasMore ? "+" : "" }})</span
                       >
                     </template>
                     <template v-else>
@@ -3502,6 +3754,23 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                     </template>
                   </div>
                   <div class="flex shrink-0 items-center justify-end gap-1">
+                    <Button
+                      v-if="row.node.kind === 'group'"
+                      variant="ghost"
+                      size="icon"
+                      class="h-5 w-5 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                      :class="{ 'opacity-100': groupRefresh?.groupId === row.node.id }"
+                      :title="groupRefreshLabel(row.node.id)"
+                      :aria-label="groupRefreshLabel(row.node.id)"
+                      :aria-busy="refreshingGroupId === row.node.id"
+                      :disabled="selectionBusy"
+                      :data-redis-refresh-group="row.node.id"
+                      @click.stop="refreshGroupSubtree(row.node)"
+                    >
+                      <Loader2 v-if="refreshingGroupId === row.node.id" class="h-3 w-3 animate-spin" />
+                      <ChevronDown v-else-if="groupRefresh?.groupId === row.node.id" class="h-3 w-3" />
+                      <RefreshCw v-else class="h-3 w-3" />
+                    </Button>
                     <Badge v-if="row.node.kind === 'leaf' && redisRowKeyType(row.node)" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(redisRowKeyType(row.node))">{{ redisRowKeyType(row.node) }}</Badge>
                     <!-- TTL 徽标：与类型徽标保持一致的胶囊样式，永不过期为琥珀色、临近过期/已过期为红色警示 -->
                     <span
@@ -3511,7 +3780,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                       :title="redisRowTtl(row.node) === -1 ? t('redis.noExpiry') : t('redis.ttlCountdownTitle')"
                       >{{ redisTtlBadgeText(redisRowTtl(row.node), redisRowDisplayTtl(redisRowTtl(row.node), row.node.keyRaw)) }}</span
                     >
-                    <Button v-if="row.node.kind === 'group' && !isFuzzyHierarchyView" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" :disabled="selectionBusy" @click="requestGroupDelete(row.node, $event)">
+                    <Button v-if="row.node.kind === 'group' && canDeleteWholeGroup" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" :disabled="selectionBusy" @click="requestGroupDelete(row.node, $event)">
                       <Trash2 class="h-3 w-3" />
                     </Button>
                     <Button
@@ -3531,7 +3800,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
               </CustomContextMenu>
             </template>
           </RecycleScroller>
-          <div v-if="fuzzyTreeLimitReached && !showCustomGrouping" class="shrink-0 border-t px-3 py-2 text-center text-xs text-muted-foreground">
+          <div v-if="searchTreeLimitReached && !showCustomGrouping" class="shrink-0 border-t px-3 py-2 text-center text-xs text-muted-foreground">
             {{ t("redis.fuzzyTreeLimit", { count: flatKeys.length }) }}
           </div>
           <div v-if="hasMore && !isFetchingAll" class="shrink-0 border-t px-2 py-1.5 flex items-center gap-1.5">
@@ -3606,6 +3875,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                 :key-display="selectedKey.key_display"
                 :key-raw="selectedKey.key_raw"
                 :metadata="selectedKey"
+                :preview-limit-ki-b="settingsStore.editorSettings.redisValuePreviewLimitKiB"
                 @deleted="onKeyDeleted"
                 @renamed="onKeyRenamed"
                 @loaded="onKeyLoaded"

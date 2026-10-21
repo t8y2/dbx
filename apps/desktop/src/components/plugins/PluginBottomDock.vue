@@ -330,6 +330,15 @@ function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributi
   activatePluginDockEntry(id);
 }
 
+function onSetEntryTitle(entry: PluginDockEntry, title: string | null) {
+  if (title && title.trim()) {
+    renamePluginDockEntry(entry.id, title.trim());
+  } else {
+    const contribution = workbenchContributionFor(entry);
+    renamePluginDockEntry(entry.id, contribution?.label || entry.workbenchContributionId);
+  }
+}
+
 // §8.3/§7.4 two-phase close: removing an entry first asks its panel webview to
 // release the workbench scope (PTY sessions, subscriptions) and waits for the
 // bridge-bounded handshake before the iframe is unmounted.
@@ -638,6 +647,8 @@ onScopeDispose(() => window.removeEventListener("blur", onPlusMenuWindowBlur));
           :plugin="definitionFor(entry.pluginId)!"
           :contribution="workbenchContributionFor(entry)!"
           :context="entry.context"
+          :set-title="(title) => onSetEntryTitle(entry, title)"
+          :get-title="() => entry.title"
           @close-tab="closeEntry(entry.id)"
           @open-workbench="(_pluginId, contributionId, context, options) => onPanelOpenWorkbench(entry, contributionId, context, options)"
         />

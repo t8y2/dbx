@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
@@ -20,11 +20,13 @@ import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import {
   DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN,
   DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN,
+  databaseBackupFileNamePatternHasRunId,
   databaseBackupFileNamePatternIsValid,
   databaseBackupFilePath,
   databaseBackupRunDirectory,
   databaseBackupRunDirectoryPatternIsValid,
   nextDatabaseBackupRunAt,
+  normalizeDatabaseBackupRetention,
   normalizeDatabaseBackupTablePatterns,
   supportsScheduledDatabaseBackup,
   type DatabaseBackupExecutionConfig,
@@ -33,13 +35,16 @@ import {
   type DatabaseBackupSchedule,
 } from "@/lib/backup/scheduledDatabaseBackup";
 import { databaseBackupTableSelectionScopeKey, normalizeDatabaseBackupTableTargets, type DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
+import { getLastBackupDirectory, setLastBackupDirectory } from "@/lib/export/exportPath";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
-const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
+const settingsStore = useSettingsStore();
+const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, runOneShotBatch, cancelRun } = useScheduledDatabaseBackups();
 const desktop = isTauriRuntime();
 const backgroundEnabled = ref(false);
 const backgroundBusy = ref(false);
@@ -151,9 +156,54 @@ const weekdays = computed(() => [
   { value: 6, label: t("databaseBackup.weekdays.saturday") },
 ]);
 
+function handleHistoryScrollOutside(event: Event) {
+  if (!historyConnectionPickerOpen.value) return;
+  const target = event.target;
+  if (target instanceof HTMLElement && target.closest?.('[data-slot="popover-content"]')) return;
+  historyConnectionPickerOpen.value = false;
+}
+
 watch(historyConnectionPickerOpen, (open) => {
-  if (!open) historyConnectionSearch.value = "";
+  if (!open) {
+    window.removeEventListener("scroll", handleHistoryScrollOutside, { capture: true });
+    historyConnectionSearch.value = "";
+    return;
+  }
+  window.addEventListener("scroll", handleHistoryScrollOutside, { capture: true, passive: true });
 });
+
+onBeforeUnmount(() => {
+  window.removeEventListener("scroll", handleHistoryScrollOutside, { capture: true });
+});
+
+watch(scheduleDialogOpen, async (open) => {
+  if (open) {
+    await nextTick();
+    const dialogs = document.querySelectorAll<HTMLElement>(".dbx-backup-dialog");
+    for (const dialog of dialogs) dialog.scrollTop = 0;
+  }
+});
+
+watch(oneShotDialogOpen, async (open) => {
+  if (open) {
+    await nextTick();
+    const dialogs = document.querySelectorAll<HTMLElement>(".dbx-backup-dialog");
+    for (const dialog of dialogs) dialog.scrollTop = 0;
+  }
+});
+
+/**
+ * 解析新建备份时的默认「备份目录」。
+ * 优先级：服务端根目录（Web 端） > 上次备份目录 > 设置中的「首选导出路径」。
+ * Desktop 端后端 root 恒为 null（见 src-tauri/background_backup.rs），
+ * 此前默认值恒为空串，导致每次新建备份都要重新选择目录（issue #11317）。
+ */
+function defaultBackupDestinationDirectory(): string {
+  if (destinationRoot.value) return destinationRoot.value;
+  const remembered = getLastBackupDirectory();
+  if (remembered) return remembered;
+  return settingsStore.editorSettings.preferredExportPath?.trim() || "";
+}
 
 function newBackupConfig(connectionId = sqlConnections.value[0]?.id ?? ""): DatabaseBackupExecutionConfig {
   return {
@@ -161,7 +211,7 @@ function newBackupConfig(connectionId = sqlConnections.value[0]?.id ?? ""): Data
     databases: [],
     tableFilterMode: "all",
     tablePatterns: [],
-    destinationDirectory: destinationRoot.value || "",
+    destinationDirectory: defaultBackupDestinationDirectory(),
     includeStructure: true,
     includeData: true,
     includeObjects: true,
@@ -194,9 +244,29 @@ function newScheduleDraft(connectionId = sqlConnections.value[0]?.id ?? ""): Dat
 }
 
 const draft = ref<DatabaseBackupSchedule>(newScheduleDraft());
+const previousPositiveRetention = ref(10);
+
+function togglePermanentRetention(forever: boolean) {
+  if (forever) {
+    if (draft.value.retentionCount > 0) {
+      previousPositiveRetention.value = draft.value.retentionCount;
+    }
+    draft.value.retentionCount = 0;
+  } else {
+    draft.value.retentionCount = previousPositiveRetention.value > 0 ? previousPositiveRetention.value : 10;
+  }
+}
 const oneShotDraft = ref<DatabaseBackupExecutionConfig>(newBackupConfig());
 const activeDraft = computed<DatabaseBackupExecutionConfig>(() => (oneShotDialogOpen.value ? oneShotDraft.value : draft.value));
 const activeOneShotRun = computed(() => activeRuns.value.find((run) => run.source === "one-shot"));
+// A one-shot backup may target several connections; each one is queued as its own run, which the backend executes in turn.
+const oneShotConnectionIds = ref<string[]>([]);
+const oneShotBatchRunning = ref(false);
+const oneShotBatchRunIds = reactive(new Set<string>());
+let oneShotBatchCancelRequested = false;
+const multipleOneShotConnections = computed(() => oneShotConnectionIds.value.length > 1);
+// Cancel acts on the runs this dialog started: every queued run of a batch, or the active one-shot run otherwise.
+const cancellableOneShotRuns = computed(() => (oneShotBatchRunning.value ? activeRuns.value.filter((run) => oneShotBatchRunIds.has(run.id)) : activeOneShotRun.value ? [activeOneShotRun.value] : []));
 type BackupDialogKind = "schedule" | "one-shot";
 let databaseLoadGeneration = 0;
 
@@ -256,10 +326,16 @@ const oneShotOutputPathPreview = computed(() => {
   return databaseBackupFilePath(oneShotDraft.value.destinationDirectory, t("databaseBackup.oneShotName"), "database", new Date(), "preview01", oneShotDraft.value.outputCompression, oneShotDraft.value.fileNamePattern);
 });
 const canStartOneShot = computed(() => {
+  const multiple = multipleOneShotConnections.value;
   const hasContent = oneShotDraft.value.includeStructure || oneShotDraft.value.includeData || oneShotDraft.value.includeObjects;
-  const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
+  // Database names and exact table lists are per connection, so several connections always back up all databases.
+  const hasDatabaseScope = multiple || allDatabases.value || selectedDatabases.value.length > 0;
   const hasTableScope = tableScopeReady(oneShotDraft.value, oneShotTableSelectionState.value);
-  return !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && !oneShotStarting.value && !loadingDatabases.value;
+  // Runs started together share a timestamp, so only {runId} keeps their files apart.
+  const hasUniqueFileNames = !multiple || databaseBackupFileNamePatternHasRunId(oneShotDraft.value.fileNamePattern);
+  return (
+    !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && hasUniqueFileNames && !oneShotStarting.value && !loadingDatabases.value
+  );
 });
 
 function connectionName(connectionId: string): string {
@@ -328,7 +404,8 @@ function scheduleCancellationRequested(scheduleId: string): boolean {
 }
 
 function oneShotCancellationRequested(): boolean {
-  return !!activeOneShotRun.value && cancellingRunIds.has(activeOneShotRun.value.id);
+  const runs = cancellableOneShotRuns.value;
+  return runs.length > 0 && runs.every((run) => cancellingRunIds.has(run.id));
 }
 
 async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBackupExecutionConfig, preserveSelection: boolean) {
@@ -397,6 +474,7 @@ async function openCreateSchedule() {
   editingScheduleId.value = "";
   const nextDraft = newScheduleDraft();
   draft.value = nextDraft;
+  previousPositiveRetention.value = nextDraft.retentionCount > 0 ? nextDraft.retentionCount : 10;
   resetDatabaseScope(nextDraft);
   scheduleDialogOpen.value = true;
 }
@@ -406,6 +484,7 @@ async function openEditSchedule(schedule: DatabaseBackupSchedule) {
   oneShotDialogOpen.value = false;
   editingScheduleId.value = schedule.id;
   draft.value = { ...schedule, databases: [...schedule.databases], tablePatterns: [...schedule.tablePatterns] };
+  previousPositiveRetention.value = schedule.retentionCount > 0 ? schedule.retentionCount : 10;
   allDatabases.value = schedule.databases.length === 0;
   selectedDatabases.value = [...schedule.databases];
   tablePatternsInput.value = schedule.tablePatterns.join(", ");
@@ -434,6 +513,31 @@ async function changeConnection(connectionId: string) {
   await loadDatabases(dialog, targetDraft, true);
 }
 
+function toggleOneShotConnection(connectionId: string) {
+  const current = oneShotConnectionIds.value;
+  const selected = new Set(current);
+  if (selected.has(connectionId)) selected.delete(connectionId);
+  else selected.add(connectionId);
+  // Keep the picker order stable and never leave the form without a connection.
+  const next = sqlConnections.value.map((connection) => connection.id).filter((id) => selected.has(id));
+  if (next.length === 0) return;
+  const targetDraft = oneShotDraft.value;
+  if (next.length > 1 && current.length <= 1) {
+    // Invalidate any in-flight database list load and drop the per-connection scope.
+    databaseLoadGeneration++;
+    loadingDatabases.value = false;
+    databaseOptions.value = [];
+    databaseLoadError.value = "";
+    allDatabases.value = true;
+    selectedDatabases.value = [];
+    if (targetDraft.tableFilterMode === "selected") targetDraft.tableFilterMode = "all";
+    targetDraft.selectedTables = [];
+    oneShotTableSelectionState.value = { scopeKey: "", ready: false };
+  }
+  oneShotConnectionIds.value = next;
+  targetDraft.connectionId = next[0]!;
+}
+
 async function setAllDatabases(value: boolean) {
   allDatabases.value = value;
   databaseLoadError.value = "";
@@ -455,8 +559,13 @@ function toggleDatabase(database: string) {
 
 async function chooseDestination() {
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const selected = await open({ directory: true, multiple: false, title: t("databaseBackup.selectDestination") });
-  if (typeof selected === "string") activeDraft.value.destinationDirectory = selected;
+  // 传入当前目录，让系统选择框直接定位到上次使用的位置（issue #11317）
+  const selected = await open({ directory: true, multiple: false, defaultPath: activeDraft.value.destinationDirectory || undefined, title: t("databaseBackup.selectDestination") });
+  if (typeof selected === "string") {
+    activeDraft.value.destinationDirectory = selected;
+    // 记住本次选择，作为下次新建备份的默认目录
+    setLastBackupDirectory(selected);
+  }
 }
 
 async function submitSchedule() {
@@ -464,8 +573,10 @@ async function submitSchedule() {
   saving.value = true;
   try {
     if (desktop) await api.recordDatabaseExportDestination(draft.value.destinationDirectory);
+    if (desktop) setLastBackupDirectory(draft.value.destinationDirectory);
     await saveSchedule({
       ...draft.value,
+      retentionCount: normalizeDatabaseBackupRetention(draft.value.retentionCount),
       databases: allDatabases.value ? [] : [...selectedDatabases.value],
       ...backupTablePayload(draft.value),
     });
@@ -483,8 +594,15 @@ async function openOneShotBackup() {
   scheduleDialogOpen.value = false;
   const nextDraft = newBackupConfig();
   oneShotDraft.value = nextDraft;
+  oneShotConnectionIds.value = nextDraft.connectionId ? [nextDraft.connectionId] : [];
   resetDatabaseScope(nextDraft);
   oneShotDialogOpen.value = true;
+}
+
+function toastRunResult(run: DatabaseBackupRun) {
+  if (run.status === "success") toast(t("databaseBackup.runSuccess", { count: run.files.length }), 3000);
+  else if (run.status === "cancelled") toast(t("databaseBackup.runCancelled"), 3000);
+  else toast(t("databaseBackup.runFailed", { error: run.error ? translateBackendError(t, run.error) : t("databaseBackup.unknownError") }), 5000);
 }
 
 async function startOneShotBackup() {
@@ -492,6 +610,11 @@ async function startOneShotBackup() {
   oneShotStarting.value = true;
   try {
     if (desktop) await api.recordDatabaseExportDestination(oneShotDraft.value.destinationDirectory);
+    if (desktop) setLastBackupDirectory(oneShotDraft.value.destinationDirectory);
+    if (multipleOneShotConnections.value) {
+      await startOneShotBatch();
+      return;
+    }
     const run = await runOneShot(
       {
         ...oneShotDraft.value,
@@ -502,9 +625,7 @@ async function startOneShotBackup() {
     );
     if (!run) return;
     oneShotDialogOpen.value = false;
-    if (run.status === "success") toast(t("databaseBackup.runSuccess", { count: run.files.length }), 3000);
-    else if (run.status === "cancelled") toast(t("databaseBackup.runCancelled"), 3000);
-    else toast(t("databaseBackup.runFailed", { error: run.error ? translateBackendError(t, run.error) : t("databaseBackup.unknownError") }), 5000);
+    toastRunResult(run);
   } catch (error: any) {
     toast(translateBackendError(t, error), 5000);
   } finally {
@@ -512,9 +633,39 @@ async function startOneShotBackup() {
   }
 }
 
+async function startOneShotBatch() {
+  oneShotBatchRunning.value = true;
+  oneShotBatchCancelRequested = false;
+  try {
+    const configs = oneShotConnectionIds.value.map((connectionId) => ({
+      ...oneShotDraft.value,
+      connectionId,
+      databases: [],
+      ...backupTablePayload(oneShotDraft.value),
+    }));
+    const { runs: finished, enqueueErrors } = await runOneShotBatch(configs, t("databaseBackup.oneShotName"), (run) => {
+      oneShotBatchRunIds.add(run.id);
+      // Cancel was requested while later connections were still being queued.
+      if (oneShotBatchCancelRequested) void cancelRun(run.id).catch(() => {});
+    });
+    if (finished.length === 0 && enqueueErrors.length > 0) {
+      toast(translateBackendError(t, enqueueErrors[0]!.error), 5000);
+      return;
+    }
+    oneShotDialogOpen.value = false;
+    const count = (status: DatabaseBackupRun["status"]) => finished.filter((run) => run.status === status).length;
+    toast(t("databaseBackup.batchRunSummary", { success: count("success"), failed: count("failed") + enqueueErrors.length, cancelled: count("cancelled") }), 5000);
+  } finally {
+    oneShotBatchRunning.value = false;
+    oneShotBatchRunIds.clear();
+  }
+}
+
 async function cancelActiveOneShotBackup() {
-  const run = activeOneShotRun.value;
-  if (run && (await cancelRun(run.id))) toast(t("databaseBackup.cancelRequested"), 2500);
+  oneShotBatchCancelRequested = true;
+  const runs = cancellableOneShotRuns.value.filter((run) => !cancellingRunIds.has(run.id));
+  const results = await Promise.all(runs.map((run) => cancelRun(run.id)));
+  if (results.some(Boolean)) toast(t("databaseBackup.cancelRequested"), 2500);
 }
 
 async function requestCancelRun(runId: string) {
@@ -718,7 +869,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
             <span>{{ databaseScopeLabel(schedule) }}</span>
             <span v-if="schedule.tableFilterMode !== 'all'">{{ tableScopeLabel(schedule) }}</span>
             <span>{{ t("databaseBackup.nextRun", { time: formatDate(schedule.nextRunAt) }) }}</span>
-            <span>{{ t("databaseBackup.keepRuns", { count: schedule.retentionCount }) }}</span>
+            <span>{{ schedule.retentionCount === 0 ? t("databaseBackup.keepForever") : t("databaseBackup.keepRuns", { count: schedule.retentionCount }) }}</span>
           </div>
         </div>
         <div class="flex items-center justify-end gap-1">
@@ -759,7 +910,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
                 <ChevronDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="end" class="w-[var(--reka-popover-trigger-width)] p-1">
+            <PopoverContent align="end" :hide-when-detached="true" class="w-[var(--reka-popover-trigger-width)] p-1">
               <div class="relative">
                 <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input v-model="historyConnectionSearch" data-backup-history-connection-search class="h-9 pl-8" :aria-label="t('databaseBackup.searchHistoryConnections')" :placeholder="t('databaseBackup.searchHistoryConnections')" />
@@ -961,8 +1112,15 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
             </Select>
           </div>
           <div class="space-y-2">
-            <Label>{{ t("databaseBackup.retention") }}</Label>
-            <Input v-model.number="draft.retentionCount" type="number" min="1" max="100" />
+            <div class="flex items-center justify-between">
+              <Label>{{ t("databaseBackup.retention") }}</Label>
+              <label class="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                <input data-backup-retention-forever type="checkbox" class="h-3.5 w-3.5 rounded border-border accent-primary" :checked="draft.retentionCount === 0" @change="togglePermanentRetention(($event.target as HTMLInputElement).checked)" />
+                {{ t("databaseBackup.keepForever") }}
+              </label>
+            </div>
+            <Input v-if="draft.retentionCount !== 0" v-model.number="draft.retentionCount" type="number" min="1" max="1000" />
+            <Input v-else disabled :model-value="t('databaseBackup.keepForever')" class="cursor-not-allowed bg-muted text-muted-foreground" />
           </div>
         </div>
         <div class="space-y-2">
@@ -1001,6 +1159,8 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
       <DatabaseBackupConfigFields
         :draft="oneShotDraft"
         :connections="sqlConnections"
+        multi-select-connections
+        :selected-connection-ids="oneShotConnectionIds"
         :all-databases="allDatabases"
         :selected-databases="selectedDatabases"
         :database-options="databaseOptions"
@@ -1008,7 +1168,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         :loading-databases="loadingDatabases"
         :database-load-error="databaseLoadError"
         :output-path-preview="oneShotOutputPathPreview"
-        @change-connection="changeConnection"
+        @toggle-connection="toggleOneShotConnection"
         @choose-destination="chooseDestination"
         @toggle-database="toggleDatabase"
         @update:all-databases="setAllDatabases"
@@ -1018,7 +1178,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
 
       <DialogFooter>
         <Button variant="outline" @click="oneShotDialogOpen = false">{{ oneShotStarting ? t("common.close") : t("common.cancel") }}</Button>
-        <Button v-if="oneShotStarting" variant="destructive" :disabled="!activeOneShotRun || oneShotCancellationRequested()" :title="oneShotCancellationRequested() ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')" @click="cancelActiveOneShotBackup">
+        <Button v-if="oneShotStarting" variant="destructive" :disabled="cancellableOneShotRuns.length === 0 || oneShotCancellationRequested()" :title="oneShotCancellationRequested() ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')" @click="cancelActiveOneShotBackup">
           <Loader2 v-if="oneShotCancellationRequested()" class="mr-2 h-4 w-4 animate-spin" />
           <Square v-else class="mr-2 h-4 w-4" />
           {{ oneShotCancellationRequested() ? t("databaseBackup.cancelling") : t("databaseBackup.cancel") }}

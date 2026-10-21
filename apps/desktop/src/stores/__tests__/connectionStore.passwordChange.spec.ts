@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig } from "@/types/database";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 
 const api = vi.hoisted(() => ({
   connectDb: vi.fn(),
@@ -8,6 +9,7 @@ const api = vi.hoisted(() => ({
   saveConnections: vi.fn(),
   sessionCredentialStatus: vi.fn(),
   forgetSessionCredential: vi.fn(),
+  loadSchemaCache: vi.fn(),
   checkConnectionHealth: vi.fn(),
   connectionIdentifierQuote: vi.fn(),
 }));
@@ -18,7 +20,6 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 vi.mock("@/lib/backend/api", () => ({
   ...api,
   deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
-  loadSchemaCache: vi.fn().mockResolvedValue(null),
   saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
   connectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
   listInstalledAgents: vi.fn().mockResolvedValue([]),
@@ -68,6 +69,7 @@ describe("connectionStore password retirement", () => {
     for (const mock of Object.values(api)) mock.mockReset().mockResolvedValue(undefined);
     api.connectDb.mockResolvedValue(config.id);
     api.sessionCredentialStatus.mockResolvedValue(true);
+    api.loadSchemaCache.mockResolvedValue(null);
     retainedTabRefresh.mockReset();
     requestPassword.mockReset().mockResolvedValue({ password: "fixture-new", rememberPassword: false });
   });
@@ -104,7 +106,7 @@ describe("connectionStore password retirement", () => {
     });
     await vi.waitFor(() => expect(retainedTabRefresh).toHaveBeenCalled());
     finishDisconnect();
-    await retirement;
+    await expect(retirement).resolves.toEqual({ status: "retired", fingerprint: connectionConfigFingerprint({ ...config, password: "", save_password: false }) });
     expect(retainedTabError).toBeInstanceOf(Error);
     expect(api.connectDb).not.toHaveBeenCalled();
     expect(api.checkConnectionHealth).not.toHaveBeenCalled();
@@ -268,5 +270,60 @@ describe("connectionStore password retirement", () => {
     await store.retirePasswordAfterChange(config.id);
     expect(api.forgetSessionCredential).not.toHaveBeenCalled();
     expect(store.connectedIds.has(config.id)).toBe(false);
+  });
+
+  it("skips retirement when the acknowledgement belongs to an edited same-id connection", async () => {
+    const store = await storeWithConnection();
+    const expectedFingerprint = connectionConfigFingerprint(config);
+    store.connections[0] = { ...config, host: "edited-host" };
+
+    await expect(store.retirePasswordAfterChange(config.id, expectedFingerprint)).resolves.toEqual({ status: "skipped" });
+
+    expect(store.getConfig(config.id)).toMatchObject({ host: "edited-host", password: config.password, save_password: true });
+    expect(api.disconnectDb).not.toHaveBeenCalled();
+    expect(api.saveConnections).not.toHaveBeenCalled();
+    expect(api.sessionCredentialStatus).not.toHaveBeenCalled();
+    expect(api.forgetSessionCredential).not.toHaveBeenCalled();
+  });
+
+  it("does not forget credentials or write retirement state after config changes during cleanup", async () => {
+    const store = await storeWithConnection();
+    const expectedFingerprint = connectionConfigFingerprint(config);
+    const credentialStatus = deferred<boolean>();
+    const statusEntered = deferred<void>();
+    api.sessionCredentialStatus.mockImplementationOnce(() => {
+      statusEntered.resolve();
+      return credentialStatus.promise;
+    });
+
+    const retirement = store.retirePasswordAfterChange(config.id, expectedFingerprint);
+    await statusEntered.promise;
+    store.connections[0] = { ...store.getConfig(config.id)!, host: "edited-host" };
+    credentialStatus.resolve(true);
+
+    await expect(retirement).resolves.toEqual({ status: "skipped" });
+    expect(api.forgetSessionCredential).not.toHaveBeenCalled();
+    expect(store.getConfig(config.id)).toMatchObject({ host: "edited-host", password: "", save_password: false });
+    expect(store.connectionErrors[config.id]).toBeUndefined();
+  });
+
+  it("does not apply old disconnect tab handling after config changes during metadata cleanup", async () => {
+    const store = await storeWithConnection();
+    const expectedFingerprint = connectionConfigFingerprint(config);
+    const metadataRead = deferred<null>();
+    const metadataEntered = deferred<void>();
+    api.loadSchemaCache.mockImplementationOnce(() => {
+      metadataEntered.resolve();
+      return metadataRead.promise;
+    });
+
+    const retirement = store.retirePasswordAfterChange(config.id, expectedFingerprint);
+    await metadataEntered.promise;
+    store.connections[0] = { ...store.getConfig(config.id)!, host: "edited-host" };
+    metadataRead.resolve(null);
+
+    await expect(retirement).resolves.toEqual({ status: "skipped" });
+    expect(retainedTabRefresh).not.toHaveBeenCalled();
+    expect(store.getConfig(config.id)).toMatchObject({ host: "edited-host", password: "", save_password: false });
   });
 });

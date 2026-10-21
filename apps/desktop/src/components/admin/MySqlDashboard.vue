@@ -133,7 +133,7 @@ async function fetchStatus(options: { silent?: boolean } = {}) {
   if (!options.silent) loading.value = true;
   error.value = "";
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
     const result = await api.executeQuery(props.connectionId, "", GLOBAL_STATUS_SQL, undefined, undefined, { maxRows: 2000, clientSessionId: props.clientSessionId });
     const sample: StatusSample = { at: Date.now(), status: parseStatusResult(result) };
     const next = [...samples.value, sample];

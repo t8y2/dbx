@@ -154,29 +154,27 @@ describe("jdbcxBuiltinDriver", () => {
   it("rejects ambiguous installed JDBCX runtimes until the connection selects one", async () => {
     const config = jdbcxConfig();
     config.jdbc_driver_paths = ["/drivers/mysql-connector-j-9.2.0.jar"];
-    const bundles = ["0.8.0", "0.9.0"].map(
-      (version): JdbcMavenBundleInfo => ({
-        id: `jdbcx-${version}`,
-        coordinate: `io.github.jdbcx:jdbcx-driver:${version}`,
-        scope: "runtime",
-        repositories: [],
-        installed_at: "2026-07-15T00:00:00Z",
-        path: `/drivers/jdbcx-${version}`,
-        artifacts: [
-          {
-            group_id: "io.github.jdbcx",
-            artifact_id: "jdbcx-driver",
-            version,
-            classifier: "",
-            extension: "jar",
-            file_name: `jdbcx-driver-${version}.jar`,
-            path: `/drivers/jdbcx-${version}/jdbcx-driver-${version}.jar`,
-            size: 1,
-            sha256: version,
-          },
-        ],
-      }),
-    );
+    const bundles = ["0.8.0", "0.9.0"].map((version): JdbcMavenBundleInfo => ({
+      id: `jdbcx-${version}`,
+      coordinate: `io.github.jdbcx:jdbcx-driver:${version}`,
+      scope: "runtime",
+      repositories: [],
+      installed_at: "2026-07-15T00:00:00Z",
+      path: `/drivers/jdbcx-${version}`,
+      artifacts: [
+        {
+          group_id: "io.github.jdbcx",
+          artifact_id: "jdbcx-driver",
+          version,
+          classifier: "",
+          extension: "jar",
+          file_name: `jdbcx-driver-${version}.jar`,
+          path: `/drivers/jdbcx-${version}/jdbcx-driver-${version}.jar`,
+          size: 1,
+          sha256: version,
+        },
+      ],
+    }));
 
     await expect(ensureJdbcxRuntimeDrivers(config, runtimeApi([], bundles))).rejects.toThrow("Select exactly one JDBCX bundle/runtime");
   });

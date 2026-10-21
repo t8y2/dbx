@@ -72,4 +72,100 @@ describe("sqlFormatterConfig shortcut storage", () => {
     expect(optIn).toEqual(expect.objectContaining({ ok: true }));
     if (optIn.ok) expect(optIn.settings.preserveEmptyLines).toBe(true);
   });
+
+  it("defaults commaPosition to after and accepts before", () => {
+    const defaultConfig = JSON.parse(serializeSqlFormatterConfig({}));
+    expect(defaultConfig.options.commaPosition).toBe("after");
+
+    const beforeResult = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { commaPosition: "before" } }));
+    expect(beforeResult).toEqual(expect.objectContaining({ ok: true }));
+    if (beforeResult.ok) expect(beforeResult.settings.commaPosition).toBe("before");
+    expect(JSON.parse(serializeSqlFormatterConfig({ commaPosition: "before" })).options.commaPosition).toBe("before");
+
+    const invalidResult = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { commaPosition: "invalid" } }));
+    expect(invalidResult).toEqual(expect.objectContaining({ ok: false }));
+
+    // sqlFormatterOptions must not include commaPosition so third-party sql-formatter does not throw
+    expect("commaPosition" in sqlFormatterOptions({ commaPosition: "before" })).toBe(false);
+  });
+});
+
+describe("sqlFormatterConfig layout style", () => {
+  it("defaults to the DBX layout and keeps the style out of sql-formatter options", () => {
+    const config = JSON.parse(serializeSqlFormatterConfig({}));
+
+    expect(config.options.layoutStyle).toBe("dbx");
+    // layoutStyle is DBX-private: handing it to sql-formatter would throw.
+    expect("layoutStyle" in sqlFormatterOptions({ layoutStyle: "dbx" })).toBe(false);
+  });
+
+  it("round-trips the classic layout style", () => {
+    const serialized = JSON.parse(serializeSqlFormatterConfig({ layoutStyle: "classic" }));
+    expect(serialized.options.layoutStyle).toBe("classic");
+
+    const parsed = parseSqlFormatterConfig(serializeSqlFormatterConfig({ layoutStyle: "classic" }));
+    expect(parsed).toEqual(expect.objectContaining({ ok: true }));
+    if (parsed.ok) expect(parsed.settings.layoutStyle).toBe("classic");
+  });
+
+  it("rejects a layout style outside the accepted values", () => {
+    const result = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { layoutStyle: "upstream" } }));
+
+    expect(result).toEqual({ ok: false, message: "Invalid formatter option value: layoutStyle." });
+  });
+
+  it("accepts both config versions and rejects anything else", () => {
+    // Version 1 predates layoutStyle; absence normalizes to the current default.
+    const version1 = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { keywordCase: "lower" } }));
+    expect(version1).toEqual(expect.objectContaining({ ok: true }));
+    if (version1.ok) {
+      expect(version1.settings.layoutStyle).toBe("dbx");
+      expect(version1.settings.keywordCase).toBe("lower");
+    }
+
+    expect(parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { layoutStyle: "classic" } }))).toEqual(expect.objectContaining({ ok: true }));
+    expect(parseSqlFormatterConfig(JSON.stringify({ version: 3, formatter: "sql-formatter", options: {} }))).toEqual({ ok: false, message: "Unsupported config version." });
+  });
+});
+
+describe("SQL formatter custom rule configuration", () => {
+  it.each([20, 50, 76, 80, 120, 500])("accepts a width of %i columns", (expressionWidth) => {
+    const result = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { expressionWidth } }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.settings.expressionWidth).toBe(expressionWidth);
+  });
+
+  it.each([19, 501, 76.5, "76", null])("rejects an invalid width %s", (expressionWidth) => {
+    expect(parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { expressionWidth } }))).toEqual({ ok: false, message: "Invalid formatter option value: expressionWidth." });
+  });
+
+  it.each([
+    { listLayout: "unknown" },
+    { selectListLayout: "unknown" },
+    { insertListLayout: false },
+    { updateListLayout: 3 },
+    { customRulesEnabled: "true" },
+    { alignSelectAliases: 1 },
+    { alignUpdateAssignments: null },
+    { selectCommaPosition: "middle" },
+    { insertCommaPosition: true },
+    { updateCommaPosition: "middle" },
+    { whereLogicalOperatorNewline: "unknown" },
+    { onLogicalOperatorNewline: 1 },
+    { expressionLogicalOperatorNewline: false },
+    { listItemAlignment: "left" },
+    { newlineBeforeJoinOn: 1 },
+    { collapseShortStatements: null },
+    { emptyLineMode: "unknown" },
+  ])("rejects invalid explicit custom options %j", (options) => {
+    const result = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options }));
+    expect(result.ok).toBe(false);
+  });
+
+  it("keeps custom rule settings out of third-party formatter options", () => {
+    const options = sqlFormatterOptions({ customRulesEnabled: true, selectListLayout: "singleLine", expressionWidth: 76 });
+    expect(options.expressionWidth).toBe(76);
+    expect(options).not.toHaveProperty("customRulesEnabled");
+    expect(options).not.toHaveProperty("selectListLayout");
+  });
 });

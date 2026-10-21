@@ -19,7 +19,14 @@ import {
 import i18n, { setLocale } from "../../apps/desktop/src/i18n/index.ts";
 import { restoreOpenTabsState } from "../../apps/desktop/src/lib/app/openTabsPersistence.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
+import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 import type { ConnectionConfig, QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
+
+function activateTestPinia() {
+  setActivePinia(createPinia());
+  // Keep legacy title assertions explicit now that compact titles are the default.
+  useSettingsStore().editorSettings.compactTabTitle = false;
+}
 
 function installMemoryStorage() {
   const values = new Map<string, string>();
@@ -76,7 +83,7 @@ function result(columns: string[], overrides: Partial<QueryResult> = {}): QueryR
 
 test("query tab display title uses custom title when present", () => {
   const restoreStorage = installMemoryStorage();
-  setActivePinia(createPinia());
+  activateTestPinia();
   useConnectionStore().addEphemeralConnection(conn("conn-1"));
   const t = (key: string) => key;
 
@@ -90,7 +97,7 @@ test("query tab display title uses custom title when present", () => {
 
 test("restored MQTT tab titles ignore legacy persisted text and follow the current locale", async () => {
   const restoreStorage = installMemoryStorage();
-  setActivePinia(createPinia());
+  activateTestPinia();
   useConnectionStore().addEphemeralConnection({
     ...conn("conn-1"),
     name: "test-mqtt",
@@ -125,7 +132,7 @@ test("restored MQTT tab titles ignore legacy persisted text and follow the curre
 
 test("jdbc tabs use the connection target when database is empty", () => {
   const restoreStorage = installMemoryStorage();
-  setActivePinia(createPinia());
+  activateTestPinia();
   useConnectionStore().addEphemeralConnection({
     ...conn("conn-1"),
     db_type: "jdbc",
@@ -158,7 +165,7 @@ test("jdbc tabs use the connection target when database is empty", () => {
 
 test("zookeeper tabs use key browser labels", () => {
   const restoreStorage = installMemoryStorage();
-  setActivePinia(createPinia());
+  activateTestPinia();
   useConnectionStore().addEphemeralConnection({
     ...conn("conn-1"),
     name: "ZK Prod",
@@ -178,7 +185,7 @@ test("zookeeper tabs use key browser labels", () => {
 
 test("HBase tabs identify the table and namespace", () => {
   const restoreStorage = installMemoryStorage();
-  setActivePinia(createPinia());
+  activateTestPinia();
   useConnectionStore().addEphemeralConnection({
     ...conn("conn-1"),
     name: "HBase Dev",
@@ -198,7 +205,7 @@ test("HBase tabs identify the table and namespace", () => {
 
 test("GridFS tabs use dedicated titles and labels", () => {
   const restoreStorage = installMemoryStorage();
-  setActivePinia(createPinia());
+  activateTestPinia();
   useConnectionStore().addEphemeralConnection({
     ...conn("conn-1"),
     name: "uat-mongo",

@@ -113,14 +113,16 @@ impl BackupService {
         if success {
             let snapshot = self.store.snapshot().await?;
             if let Some(schedule) = snapshot.schedules.iter().find(|s| Some(&s.id) == fallback.schedule_id.as_ref()) {
-                let ids = snapshot
-                    .runs
-                    .iter()
-                    .filter(|r| r.schedule_id.as_ref() == Some(&schedule.id) && r.status == "success")
-                    .skip(schedule.retention_count)
-                    .map(|r| r.id.clone())
-                    .collect();
-                self.delete_runs(ids).await?;
+                if schedule.retention_count > 0 {
+                    let ids = snapshot
+                        .runs
+                        .iter()
+                        .filter(|r| r.schedule_id.as_ref() == Some(&schedule.id) && r.status == "success")
+                        .skip(schedule.retention_count)
+                        .map(|r| r.id.clone())
+                        .collect();
+                    self.delete_runs(ids).await?;
+                }
             }
         }
         Ok(())
@@ -361,6 +363,7 @@ impl BackupService {
                         include_create_database: false,
                         drop_table_if_exists: job.config.drop_table_if_exists,
                         omit_auto_increment: false,
+                        preserve_original_language: false,
                         fail_on_error: true,
                         prevent_overwrite: true,
                         output_compression: if job.config.output_compression == "gzip" {

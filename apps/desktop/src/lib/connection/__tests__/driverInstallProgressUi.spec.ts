@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { driverInstallProgressChannel, isDriverInstallProgressForOperation, isDriverInstallProgressTarget, updateDriverInstallProgress, updatePerDriverProgress, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { formatDriverInstallProgressText, driverInstallProgressChannel, isDriverInstallProgressForOperation, isDriverInstallProgressTarget, updateDriverInstallProgress, updatePerDriverProgress, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 
 describe("driver install progress channels", () => {
   it("classifies agent and JDBC plugin progress independently", () => {
@@ -73,5 +73,40 @@ describe("driver install progress channels", () => {
 
     expect(progressByDbType.mysql).toBeNull();
     expect(progressByDbType.oracle).toBeNull();
+  });
+
+  it("formats progress text with byte sizes, percentage, and localized labels", () => {
+    const t = (key: string) => {
+      const dict: Record<string, string> = {
+        "driverStore.progressDownloadDriver": "Downloading driver",
+        "driverStore.progressDownloadJre": "Downloading JRE",
+        "driverStore.progressJreExtract": "Extracting JRE...",
+      };
+      return dict[key] ?? key;
+    };
+
+    expect(formatDriverInstallProgressText(null, t)).toBe("");
+    expect(formatDriverInstallProgressText({ step: "jre-extract" }, t)).toBe("Extracting JRE...");
+    expect(formatDriverInstallProgressText({ step: "driver" }, t)).toBe("Downloading driver...");
+    expect(
+      formatDriverInstallProgressText(
+        {
+          step: "driver",
+          downloaded: 10 * 1024 * 1024,
+          total: 20 * 1024 * 1024,
+        },
+        t,
+      ),
+    ).toBe("Downloading driver  10.0 MB / 20.0 MB  (50%)");
+    expect(
+      formatDriverInstallProgressText(
+        {
+          step: "driver",
+          downloaded: 512 * 1024,
+          total: 2 * 1024 * 1024,
+        },
+        t,
+      ),
+    ).toBe("Downloading driver  512 KB / 2.0 MB  (25%)");
   });
 });

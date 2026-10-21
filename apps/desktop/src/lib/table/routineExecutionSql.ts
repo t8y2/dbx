@@ -17,6 +17,7 @@ export interface RoutineParameter {
   ordinal: number;
   hasDefault?: boolean;
   defaultValue?: string | null;
+  nullable?: boolean | null;
 }
 
 export interface RoutineParameterValue extends RoutineParameter {
@@ -50,9 +51,12 @@ export function buildProcedureExecutionSqlFromValues(options: BuildRoutineExecut
   if (options.databaseType === "xugu") {
     return buildXuguProcedureExecutionSql(routine, sortedParameters);
   }
+  if (options.databaseType === "oracle" || options.databaseType === "oceanbase-oracle") {
+    return buildOracleProcedureExecutionSql(options.databaseType, routine, sortedParameters);
+  }
   const values = sortedParameters.filter((parameter) => shouldIncludeParameter(parameter));
   const useNamedArguments = shouldUseNamedArguments(options.databaseType, sortedParameters);
-  if (options.databaseType === "oracle" || options.databaseType === "dameng" || options.databaseType === "oceanbase-oracle") {
+  if (options.databaseType === "dameng") {
     return `BEGIN\n  ${routine}(${values.map((parameter) => routineArgumentSql(options.databaseType, parameter, useNamedArguments)).join(", ")});\nEND;`;
   }
   if (options.databaseType === "databend") {
@@ -168,6 +172,85 @@ function buildSqlServerProcedureExecutionSql(routine: string, sortedParameters: 
     statements.push(`SELECT ${[...outputBindings.values()].map(({ variableName, alias }) => `${variableName} AS ${alias}`).join(", ")};`);
   }
   return statements.join("\n");
+}
+
+function buildOracleProcedureExecutionSql(databaseType: "oracle" | "oceanbase-oracle", routine: string, sortedParameters: RoutineParameterValue[]): string {
+  const outputBindings = new Map<RoutineParameterValue, string>();
+  const declarations: string[] = [];
+  const printStatements: string[] = [];
+
+  sortedParameters.forEach((parameter, index) => {
+    if (!returnsRoutineOutput(parameter)) return;
+    const variableName = `dbx_output_${index + 1}`;
+    const initialValue = parameter.mode === "INOUT" ? ` := ${routineParameterSqlValue(databaseType, parameter)}` : "";
+    declarations.push(`  ${variableName} ${oracleVariableType(parameter.dataType)}${initialValue};`);
+    outputBindings.set(parameter, variableName);
+    const printable = oraclePrintableValue(parameter.dataType, variableName);
+    if (printable) {
+      printStatements.push(`  DBMS_OUTPUT.PUT_LINE(${quoteSqlString(`${parameter.name || `output_${index + 1}`} = `)} || ${printable});`);
+    }
+  });
+
+  const useNamedArguments = shouldUseOracleNamedArguments(sortedParameters, outputBindings);
+  const args = sortedParameters.flatMap((parameter) => {
+    const variableName = outputBindings.get(parameter);
+    if (variableName) {
+      return [useNamedArguments ? `${quoteTableIdentifier(databaseType, parameter.name)} => ${variableName}` : variableName];
+    }
+    if (!shouldIncludeParameter(parameter)) return [];
+    return [routineArgumentSql(databaseType, parameter, useNamedArguments)];
+  });
+  const call = `  ${routine}(${args.join(", ")});`;
+  if (outputBindings.size === 0) return `BEGIN\n${call}\nEND;`;
+  return ["DECLARE", ...declarations, "BEGIN", call, ...printStatements, "END;"].join("\n");
+}
+
+function shouldUseOracleNamedArguments(sortedParameters: RoutineParameterValue[], outputBindings: Map<RoutineParameterValue, string>): boolean {
+  let omittedDefault = false;
+  for (const parameter of sortedParameters) {
+    if (!outputBindings.has(parameter) && parameter.useDefault && parameter.hasDefault && acceptsRoutineInput(parameter)) {
+      omittedDefault = true;
+      continue;
+    }
+    if (omittedDefault && (outputBindings.has(parameter) || shouldIncludeParameter(parameter))) return sortedParameters.every((item) => !!item.name);
+  }
+  return false;
+}
+
+// `ALL_ARGUMENTS.DATA_TYPE` carries no length, and PL/SQL rejects unconstrained string variables (PLS-00215).
+// A CHAR formal parameter is blank-padded to the length of the variable passed in, so CHAR and NCHAR use the
+// SQL column limits instead of the PL/SQL maximum. NVARCHAR2 is sized for the 3-byte UTF8 national character set.
+function oracleVariableType(dataType: string): string {
+  const type = dataType.trim().toUpperCase();
+  if (type.includes("(")) return dataType.trim();
+  switch (type) {
+    case "VARCHAR2":
+    case "VARCHAR":
+    case "RAW":
+      return `${type}(32767)`;
+    case "NVARCHAR2":
+      return "NVARCHAR2(10922)";
+    case "CHAR":
+      return "CHAR(2000)";
+    case "NCHAR":
+      return "NCHAR(1000)";
+    case "REF CURSOR":
+      return "SYS_REFCURSOR";
+    case "PL/SQL BOOLEAN":
+      return "BOOLEAN";
+    default:
+      return dataType.trim();
+  }
+}
+
+// `DBMS_OUTPUT.PUT_LINE` raises ORU-10028 above 32767 bytes, which would fail the whole block after the
+// procedure has run, so string values are truncated and LOB, RAW, BOOLEAN, and cursor values are not printed.
+function oraclePrintableValue(dataType: string, variableName: string): string | null {
+  const type = dataType.trim().toUpperCase().replace(/\(.*$/, "").trim();
+  if (["VARCHAR2", "VARCHAR", "NVARCHAR2", "CHAR", "NCHAR"].includes(type)) return `SUBSTR(${variableName}, 1, 4000)`;
+  if (/^(NUMBER|FLOAT|INTEGER|BINARY_INTEGER|PLS_INTEGER|BINARY_FLOAT|BINARY_DOUBLE|DATE|ROWID|UROWID)$/.test(type)) return variableName;
+  if (/^(TIMESTAMP|INTERVAL)\b/.test(type)) return variableName;
+  return null;
 }
 
 function returnsRoutineOutput(parameter: Pick<RoutineParameterValue, "mode">): boolean {

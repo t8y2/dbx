@@ -1,4 +1,5 @@
 mod auth;
+mod credentials;
 mod demo;
 mod error;
 mod routes;
@@ -144,6 +145,10 @@ fn web_compression_predicate() -> impl Predicate {
     DefaultPredicate::new().and(NotForContentType::const_new(XLSX_CONTENT_TYPE))
 }
 
+fn password_viewer_enabled_from_env(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
 fn web_body_limit_bytes() -> usize {
     let value = std::env::var("DBX_MAX_UPLOAD_MB").ok();
     web_body_limit_bytes_from_value(value.as_deref())
@@ -220,6 +225,35 @@ fn normalize_public_base_path(value: Option<String>) -> String {
     } else {
         format!("/{trimmed}")
     }
+}
+
+/// Only directory-backed frontend responses pass through this middleware.
+/// ServeDir's not-found service returns index.html with 404 for SPA routes;
+/// revalidate that HTML too, without changing its existing status code. Other
+/// paths follow serve_embedded_asset's existing assets/ cache policy.
+async fn directory_static_cache_policy(request: Request<axum::body::Body>, next: middleware::Next) -> Response {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+
+    let path = request.uri().path().to_owned();
+    let mut response = next.run(request).await;
+    let is_html = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
+    let cache_control = if is_html
+        && (path.ends_with('/') || path.ends_with("/index.html") || response.status() == StatusCode::NOT_FOUND)
+    {
+        Some("no-cache")
+    } else if response.status().is_success() && path.starts_with("/assets/") {
+        Some("public, max-age=31536000, immutable")
+    } else {
+        None
+    };
+    if let Some(value) = cache_control {
+        response.headers_mut().insert(CACHE_CONTROL, value.parse().expect("valid static cache policy"));
+    }
+    response
 }
 
 fn add_public_base_path_redirect<S>(app: Router<S>, public_base_path: &str) -> Router<S>
@@ -331,7 +365,9 @@ fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<S
             use tower_http::services::{ServeDir, ServeFile};
             let index_path = static_dir.join("index.html");
             let serve_dir = ServeDir::new(static_dir).not_found_service(ServeFile::new(index_path));
-            app = app.fallback_service(serve_dir);
+            let static_router =
+                Router::new().fallback_service(serve_dir).layer(middleware::from_fn(directory_static_cache_policy));
+            app = app.fallback_service(static_router);
         }
         #[cfg(feature = "embed-static")]
         Some(StaticSource::Embedded) => {
@@ -349,7 +385,9 @@ fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<S
     match source {
         Some(StaticSource::Dir(static_dir)) => {
             use tower_http::services::ServeFile;
-            app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(static_dir.join("index.html")));
+            let index_service = axum::routing::get_service(ServeFile::new(static_dir.join("index.html")))
+                .layer(middleware::from_fn(directory_static_cache_policy));
+            app = app.route(&format!("{public_base_path}/"), index_service);
         }
         #[cfg(feature = "embed-static")]
         Some(StaticSource::Embedded) => {
@@ -535,6 +573,8 @@ async fn serve() -> Result<(), String> {
     let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
+    let password_viewer_enabled =
+        password_viewer_enabled_from_env(std::env::var("DBX_DISABLE_PASSWORD_VIEWER").ok().as_deref());
 
     let password_hash = if password_disabled {
         None
@@ -564,12 +604,14 @@ async fn serve() -> Result<(), String> {
         public_base_path: public_base_path.clone(),
         demo_mode,
         password_disabled,
+        password_viewer_enabled,
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
         sse_channels: RwLock::new(HashMap::new()),
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
+        sql_file_failure_logs: Default::default(),
         managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
@@ -581,6 +623,7 @@ async fn serve() -> Result<(), String> {
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
     routes::sql_file::start_sql_file_cleanup(&web_state);
+    routes::connection::start_connection_idle_sweeper(&web_state);
 
     let backup_root = std::env::var_os("DBX_BACKUP_ROOT")
         .map(std::path::PathBuf::from)
@@ -623,6 +666,7 @@ async fn serve() -> Result<(), String> {
         .route("/connection/check-health", post(routes::connection::check_connection_health))
         .route("/connection/is-open", post(routes::connection::connection_is_open))
         .route("/connection/liveness-events", get(routes::connection::connection_liveness_events))
+        .route("/connection/idle-closed-events", get(routes::connection::connection_idle_closed_events))
         .route("/connection/prewarm", post(routes::connection::prewarm_connection))
         .route("/connection/session-credential-status", post(routes::connection::session_credential_status))
         .route("/connection/forget-session-credential", post(routes::connection::forget_session_credential))
@@ -760,6 +804,7 @@ async fn serve() -> Result<(), String> {
         .route("/schema/reference-key-columns", get(routes::schema::list_reference_key_columns))
         .route("/schema/reference-keys", get(routes::schema::list_reference_keys))
         .route("/schema/foreign-keys", get(routes::schema::list_foreign_keys))
+        .route("/schema/foreign-keys-for-database", get(routes::schema::list_foreign_keys_for_database))
         .route("/schema/triggers", get(routes::schema::list_triggers))
         .route("/schema/constraints", get(routes::schema::list_constraints))
         .route("/schema/partitions", get(routes::schema::list_partitions))
@@ -822,6 +867,10 @@ async fn serve() -> Result<(), String> {
         .route("/query/build-create-user-sql", post(routes::query::build_create_user_sql))
         .route("/query/build-table-select-sql", post(routes::query::build_table_select_sql))
         .route("/query/build-database-search-sql", post(routes::query::build_database_search_sql))
+        .route("/query/build-database-search-columns-sql", post(routes::query::build_database_search_columns_sql))
+        .route("/query/build-database-search-probe-sql", post(routes::query::build_database_search_probe_sql))
+        .route("/query/build-database-structure-search-sql", post(routes::query::build_database_structure_search_sql))
+        .route("/query/supports-database-structure-search", post(routes::query::supports_database_structure_search))
         .route("/query/build-search-result-where", post(routes::query::build_search_result_where))
         .route("/query/build-rename-object-sql", post(routes::query::build_rename_object_sql))
         .route("/query/build-rename-database-sql", post(routes::query::build_rename_database_sql))
@@ -845,13 +894,26 @@ async fn serve() -> Result<(), String> {
             "/query/build-executable-object-source-statements",
             post(routes::query::build_executable_object_source_statements),
         )
+        .route(
+            "/query/validate-oracle-executable-object-source",
+            post(routes::query::validate_oracle_executable_object_source),
+        )
+        .route(
+            "/query/fingerprint-oracle-routine-object-source",
+            post(routes::query::fingerprint_oracle_routine_object_source),
+        )
         .route("/query/build-executable-object-source-sql", post(routes::query::build_executable_object_source_sql))
         .route("/query/build-editable-object-source", post(routes::query::build_editable_object_source))
         .route(
             "/query/build-routine-rename-object-source-statements",
             post(routes::query::build_routine_rename_object_source_statements),
         )
+        .route("/query/rewrite-oracle-routine-references", post(routes::query::rewrite_oracle_routine_references))
+        .route("/query/rewrite-oracle-table-references", post(routes::query::rewrite_oracle_table_references))
         .route("/query/build-view-ddl-sql", post(routes::query::build_view_ddl_sql))
+        .route("/query/parse-oracle-object-name", post(routes::query::parse_oracle_object_name))
+        .route("/query/build-oracle-view-rename-source", post(routes::query::build_oracle_view_rename_source))
+        .route("/query/review-oracle-view-rename-source", post(routes::query::review_oracle_view_rename_source))
         .route("/query/build-table-structure-change-sql", post(routes::query::build_table_structure_change_sql))
         .route("/query/build-table-owner-change-sql", post(routes::query::build_table_owner_change_sql))
         .route("/query/build-table-partition-operation-sql", post(routes::query::build_table_partition_operation_sql))
@@ -912,6 +974,11 @@ async fn serve() -> Result<(), String> {
         .route("/query/cancel", post(routes::query::cancel_query))
         .route("/query/cancel-conditional-update", post(routes::query::cancel_conditional_update))
         .route("/query/close-session", post(routes::query::close_query_session))
+        .route("/query/large-value/chunk", post(routes::query::read_large_value_chunk))
+        .route("/query/large-value/release", post(routes::query::release_large_value))
+        .route("/query/large-value/download", post(routes::query::prepare_large_value_download))
+        .route("/query/large-value/export", post(routes::query::prepare_snapshot_export))
+        .route("/query/large-value/download/{id}", get(routes::query::download_large_value))
         .route("/query/close-client-session", post(routes::query::close_client_connection_session))
         .route("/export/query-result-json", post(routes::text_export::export_query_result_json))
         .route("/export/query-result-markdown", post(routes::text_export::export_query_result_markdown))
@@ -1281,6 +1348,7 @@ async fn serve() -> Result<(), String> {
             "/saved-sql/{id}",
             get(routes::saved_sql::load_saved_sql_file).delete(routes::saved_sql::delete_saved_sql_file),
         )
+        .route("/saved-sql/{id}/default-content", post(routes::saved_sql::save_default_query_content))
         .route("/saved-sql/folders", post(routes::saved_sql::save_saved_sql_folder))
         .route("/saved-sql/folders/{id}", delete(routes::saved_sql::delete_saved_sql_folder))
         // AI
@@ -1321,6 +1389,9 @@ async fn serve() -> Result<(), String> {
         // Transfer
         .route("/transfer/start", post(routes::transfer::start_transfer))
         .route("/transfer/ownership-preview", post(routes::transfer::preview_transfer_ownership))
+        .route("/task-runs", get(routes::task_history::list_task_runs))
+        .route("/task-runs/{run_id}", get(routes::task_history::get_task_run))
+        .route("/task-runs/{run_id}/items", get(routes::task_history::list_task_run_items))
         .route("/transfer/progress/{transferId}", get(routes::transfer::transfer_progress))
         .route("/transfer/cancel", post(routes::transfer::cancel_transfer))
         .route("/transfer/sort-tables-by-fk", post(routes::transfer::sort_tables_by_fk_dependency))
@@ -1354,10 +1425,14 @@ async fn serve() -> Result<(), String> {
                 .layer(DefaultBodyLimit::max(routes::sql_file::sql_file_upload_hard_cap_bytes())),
         )
         .route("/sql-file/execute", post(routes::sql_file::execute_sql_file))
+        .route("/sql-file/preview/refresh", post(routes::sql_file::refresh_sql_file_preview))
         .route("/sql-file/preview/release", post(routes::sql_file::release_sql_file_preview))
         .route("/sql-file/tables", post(routes::sql_file::inspect_sql_file_tables))
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
         .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))
+        .route("/sql-file/failure-log/text", post(routes::sql_file::sql_file_failure_log_text))
+        .route("/sql-file/failure-log/{executionId}", get(routes::sql_file::sql_file_failure_log_download))
+        .route("/sql-file/failure-log/{executionId}/info", get(routes::sql_file::sql_file_failure_log_info))
         // Table import
         .route(
             "/import/preview",
@@ -1396,6 +1471,7 @@ async fn serve() -> Result<(), String> {
         .route("/app-settings/mcp-http-status", get(routes::app_settings::load_web_mcp_http_status))
         .route("/app-settings/mcp-http", put(routes::app_settings::save_web_mcp_http_settings))
         .route("/app-settings/mcp-http/rotate-token", post(routes::app_settings::rotate_web_mcp_token))
+        .route("/app-settings/web-capabilities", get(routes::app_settings::load_web_capabilities))
         .route(
             "/app-settings/max-agent-turns",
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
@@ -1443,6 +1519,9 @@ async fn serve() -> Result<(), String> {
         .route("/cloud-sync/snippet/token-status", post(routes::cloud_sync::snippet_token_status))
         .route("/cloud-sync/snippet/save-token", post(routes::cloud_sync::save_snippet_saved_token))
         .route("/cloud-sync/snippet/forget-token", post(routes::cloud_sync::forget_snippet_saved_token))
+        .route("/cloud-sync/snippet/passphrase-status", post(routes::cloud_sync::snippet_passphrase_status))
+        .route("/cloud-sync/snippet/save-passphrase", post(routes::cloud_sync::save_snippet_saved_passphrase))
+        .route("/cloud-sync/snippet/forget-passphrase", post(routes::cloud_sync::forget_snippet_saved_passphrase))
         .route("/cloud-sync/snippet/settings", post(routes::cloud_sync::snippet_sync_settings))
         .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
         .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))
@@ -1519,6 +1598,9 @@ async fn serve() -> Result<(), String> {
         tracing::info!("Password protection is disabled");
     } else if std::env::var("DBX_PASSWORD").is_ok() {
         tracing::info!("Password protection is enabled");
+    }
+    if !password_viewer_enabled {
+        tracing::info!("Saved connection password viewing is disabled");
     }
     if demo_mode {
         tracing::info!("Demo mode is enabled: connection/plugin/AI mutations are blocked");
@@ -1605,13 +1687,13 @@ async fn serve() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        mount_static_assets, normalize_public_base_path, web_agent_dir_from_env, web_body_limit_bytes_from_value,
-        web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
+        mount_static_assets, normalize_public_base_path, password_viewer_enabled_from_env, web_agent_dir_from_env,
+        web_body_limit_bytes_from_value, web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
     };
     use crate::routes::table_import;
     use axum::body::Body;
     use axum::extract::{DefaultBodyLimit, Multipart};
-    use axum::http::header::CONTENT_TYPE;
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
     use axum::http::{Response, StatusCode};
     use axum::routing::{get, post};
     use axum::Router;
@@ -1675,6 +1757,15 @@ mod tests {
         assert_eq!(normalize_public_base_path(None), "/");
         assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
         assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
+    }
+
+    #[test]
+    fn password_viewer_enabled_defaults_to_true_and_accepts_truthy_disable_values() {
+        assert!(password_viewer_enabled_from_env(None));
+        assert!(password_viewer_enabled_from_env(Some("false")));
+        for value in ["1", "true", "yes", "on", " TRUE "] {
+            assert!(!password_viewer_enabled_from_env(Some(value)), "{value}");
+        }
     }
 
     #[test]
@@ -1777,6 +1868,9 @@ mod tests {
         std::fs::create_dir_all(&static_dir).expect("create static directory");
         std::fs::write(static_dir.join("index.html"), "subpath index").expect("write index");
         std::fs::write(static_dir.join("app.js"), "subpath asset").expect("write asset");
+        std::fs::create_dir_all(static_dir.join("assets")).expect("create assets directory");
+        std::fs::write(static_dir.join("assets/app-12136abc.js"), "hashed asset").expect("write hashed asset");
+        std::fs::write(static_dir.join("assets/plain.js"), "unversioned asset").expect("write plain asset");
 
         for public_base_path in ["/dbx", "/xxxx/rsu"] {
             let router = mount_static_assets(
@@ -1818,7 +1912,50 @@ mod tests {
                 .await
                 .expect("GET trailing slash base path");
             assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
             assert_eq!(response.text().await.expect("read index response"), "subpath index");
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/index.html"))
+                .send()
+                .await
+                .expect("GET explicit index");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read explicit index"), "subpath index");
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/route/within/app"))
+                .send()
+                .await
+                .expect("GET SPA fallback");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read fallback response"), "subpath index");
+
+            for asset in ["app-12136abc.js", "plain.js"] {
+                let response = client
+                    .get(format!("http://{address}{public_base_path}/assets/{asset}"))
+                    .send()
+                    .await
+                    .expect("GET asset");
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(
+                    response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+                    Some("public, max-age=31536000, immutable")
+                );
+            }
+
+            let response = client
+                .get(format!("http://{address}{public_base_path}/assets/missing.js"))
+                .send()
+                .await
+                .expect("GET missing asset");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+            assert_ne!(
+                response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+                Some("public, max-age=31536000, immutable")
+            );
 
             let response = client
                 .get(format!("http://{address}{public_base_path}/app.js"))
@@ -1826,11 +1963,13 @@ mod tests {
                 .await
                 .expect("GET static asset");
             assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert!(response.headers().get(CACHE_CONTROL).is_none());
             assert_eq!(response.text().await.expect("read asset response"), "subpath asset");
 
             let response =
                 client.get(format!("http://{address}{public_base_path}/api/ping")).send().await.expect("GET API route");
             assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert!(response.headers().get(CACHE_CONTROL).is_none());
             assert_eq!(response.text().await.expect("read API response"), "pong");
 
             server.abort();
@@ -1845,6 +1984,8 @@ mod tests {
         std::fs::create_dir_all(&static_dir).expect("create static directory");
         std::fs::write(static_dir.join("index.html"), "root index").expect("write index");
         std::fs::write(static_dir.join("app.js"), "root asset").expect("write asset");
+        std::fs::create_dir_all(static_dir.join("assets")).expect("create assets directory");
+        std::fs::write(static_dir.join("assets/app-12136abc.js"), "hashed asset").expect("write hashed asset");
         let router = mount_static_assets(
             Router::new().route("/api/ping", get(|| async { "pong" })),
             "/",
@@ -1860,8 +2001,33 @@ mod tests {
         for (request_path, expected_body) in [("/", "root index"), ("/app.js", "root asset"), ("/api/ping", "pong")] {
             let response = client.get(format!("http://{address}{request_path}")).send().await.expect("GET root route");
             assert_eq!(response.status(), reqwest::StatusCode::OK);
+            if request_path == "/" {
+                assert_eq!(
+                    response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+                    Some("no-cache")
+                );
+            } else {
+                assert!(response.headers().get(CACHE_CONTROL).is_none());
+            }
             assert_eq!(response.text().await.expect("read root response"), expected_body);
         }
+
+        for request_path in ["/index.html", "/route/within/app"] {
+            let response = client.get(format!("http://{address}{request_path}")).send().await.expect("GET index");
+            assert_eq!(
+                response.status(),
+                if request_path == "/index.html" { reqwest::StatusCode::OK } else { reqwest::StatusCode::NOT_FOUND }
+            );
+            assert_eq!(response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-cache"));
+            assert_eq!(response.text().await.expect("read index response"), "root index");
+        }
+
+        let response = client.get(format!("http://{address}/assets/app-12136abc.js")).send().await.expect("GET asset");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()),
+            Some("public, max-age=31536000, immutable")
+        );
 
         server.abort();
         std::fs::remove_dir_all(static_dir).expect("remove static directory");

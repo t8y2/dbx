@@ -175,12 +175,6 @@
   flex: 0 0 0;
 }
 
-.horizontal-fixed-tabs-scroll .tab-section--horizontal > .tab-tail-overflow-spacer[data-tauri-drag-region] {
-  width: 1px;
-  min-width: 1px;
-  flex-basis: 1px;
-}
-
 /* Keep the overflow affordance out of the measurement box. Otherwise its own
  * width reduces the scroll viewport and can create a false overflow state. */
 .tab-overflow-control {
@@ -192,12 +186,21 @@
   justify-content: flex-end;
 }
 
-.has-tab-overflow-control .app-tab-strip {
-  padding-inline-end: 2.125rem;
+/* The single-row layouts reserve the overflow affordance's width at all times.
+ * Deriving it from showOverflowControl tied the scroll viewport to its own
+ * measurement: a single near-full-width tab showed the arrow, the arrow
+ * narrowed the strip, the narrower strip re-measured as "fits", the arrow hid,
+ * the strip re-widened — an endless per-frame flicker. A constant reservation
+ * keeps hasTabOverflow stable, so the arrow becomes a pure overlay that never
+ * alters the layout it is measured from. Keep the value in step with the
+ * arrow's own offset (`.tab-overflow-control`'s `right-[…]` classes), which is
+ * what clears the last tab. */
+.app-tab-bar:not(.horizontal-fixed-tabs):not(.vertical-tab-layout):not(.tab-wrap-mode) .app-tab-strip {
+  padding-inline-end: 2.5rem;
 }
 
 .has-tab-overflow-control .app-tab-scrollbar {
-  inset-inline-end: 2.125rem;
+  inset-inline-end: 2.5rem;
 }
 
 /* The top-row overflow control overlays a small reserved area. Blend that
@@ -817,6 +820,30 @@
   opacity: 1;
 }
 
+/* With several groups in view, the neutral rail segment above is not enough
+ * to spot the active tab at a glance (issue #12485): every tab already owns a
+ * colored group rail, so the bottom edge cannot carry a unique signal. Mark
+ * the active grouped tab with a primary-colored edge accent on the opposite
+ * edge instead — the same vocabulary as the vertical tab's inset --ring edge.
+ * The var fallback keeps legacy WebViews (no color-mix()) painted. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab[data-active-tab="true"]::before {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  top: -0.5px;
+  right: 0;
+  left: 0;
+  height: 3px;
+  border-radius: 9999px;
+  background: var(--app-tab-active-accent, var(--ring));
+  pointer-events: none;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-tab[data-active-tab="true"]::before {
+  top: auto;
+  bottom: -0.5px;
+}
+
 .app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-tab::after {
   top: -0.5px;
   bottom: auto;
@@ -924,6 +951,69 @@
   transition: none !important;
 }
 
+/* ------------------------------------------------------------------ */
+/* Master-detail two-row group rail (issue #10034)                     */
+/* ------------------------------------------------------------------ */
+
+/* The rail reuses the semantic group header pill on its own scroll row, so a
+ * group can overflow horizontally exactly like the tab strip beneath it. */
+.tab-group-rail {
+  scrollbar-width: none;
+}
+
+/* The scroller is .tab-group-rail-scroll, not .tab-group-rail itself. */
+.tab-group-rail-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Same reveal contract as .app-tab-strip: the rail's drag scrollbar stays
+ * hidden until the row is hovered/focused; --dragging is already global. */
+.tab-group-rail:hover .app-tab-scrollbar,
+.tab-group-rail:focus-within .app-tab-scrollbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Long connection names must not eat the whole rail. Respect the user's tab
+ * width cap when one is configured; otherwise keep a sane 16rem default. */
+.tab-group-rail .tab-group-header-content {
+  max-width: var(--tab-max-width, 16rem);
+}
+
+/* The base ::after pushes the accent 0.2rem past the pill's right edge so a
+ * header's underline visually joins its tabs in the single-row strip. Rail
+ * pills stand alone, so the overlap reads as a stray overhang there. The
+ * :not() prefix keeps specificity above the base header rule. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-rail .tab-group-header::after {
+  right: 0;
+}
+
+/* Group headers carry an asymmetric 0.15rem/0.05rem inline margin tuned for
+ * the single-row strip, while .app-tab-pill pages carry none — mixing them in
+ * the rail produced uneven gaps. Zero the margin here so the container's gap
+ * spaces every pill identically. Same :not() specificity trick as ::after. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-rail .tab-group-header {
+  margin-inline: 0;
+}
+
+/* The rail hides its scrollbar, so clipped pills need another affordance:
+ * fade the overflowing edge(s). Driven by the rail's own useTabScroll state.
+ * -webkit- prefix keeps the fade on older WKWebView (macOS 12). */
+.tab-group-rail-scroll--overflow-start {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 1.25rem);
+  mask-image: linear-gradient(to right, transparent, #000 1.25rem);
+}
+
+.tab-group-rail-scroll--overflow-end {
+  -webkit-mask-image: linear-gradient(to left, transparent, #000 1.25rem);
+  mask-image: linear-gradient(to left, transparent, #000 1.25rem);
+}
+
+.tab-group-rail-scroll--overflow-start.tab-group-rail-scroll--overflow-end {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 1.25rem, #000 calc(100% - 1.25rem), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 1.25rem, #000 calc(100% - 1.25rem), transparent);
+}
+
 .tab-group-color-option,
 .tab-group-custom-color {
   position: relative;
@@ -1027,10 +1117,10 @@
 /* Without semantic grouping there is no group color to distinguish the
  * active item, so give the selected vertical tab a stronger neutral state. */
 .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[data-active-tab="true"] {
-  background-color: color-mix(in srgb, var(--foreground) 16%, var(--background));
-  border-color: color-mix(in srgb, var(--foreground) 32%, var(--border));
+  background-color: var(--app-tab-background, color-mix(in srgb, var(--foreground) 16%, var(--background)));
+  border-color: var(--app-tab-active-border, color-mix(in srgb, var(--foreground) 32%, var(--border)));
   box-shadow:
-    inset 3px 0 0 var(--ring),
+    inset 3px 0 0 var(--app-tab-active-accent, var(--ring)),
     inset 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent),
     0 1px 2px rgb(0 0 0 / 0.08);
 }
@@ -1044,8 +1134,8 @@
  * background and border over the same tokens. The composite box-shadow stays
  * out — losing it is cosmetic, and a partial shadow list is all-or-nothing. */
 html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[data-active-tab="true"] {
-  background-color: rgba(var(--dbx-foreground-rgb), 0.16) !important;
-  border-color: rgba(var(--dbx-foreground-rgb), 0.32) !important;
+  background-color: var(--app-tab-background, rgba(var(--dbx-foreground-rgb), 0.16)) !important;
+  border-color: var(--app-tab-active-border, rgba(var(--dbx-foreground-rgb), 0.32)) !important;
 }
 
 .vertical-tab-layout .app-tab-scroll > * {
@@ -1108,6 +1198,33 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
   border-radius: 9999px;
   background: var(--destructive);
   box-shadow: 0 0 0 1px var(--background);
+}
+
+/* Icon-only rail: the close affordance overlays the pill on hover/focus so the
+ * rail stays 2.5rem wide (#12942). Bottom-right keeps it clear of the dirty dot. */
+.vertical-tab-layout--collapsed .compact-close-tab-button {
+  position: absolute;
+  right: 0.1rem;
+  bottom: 0.1rem;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 0.95rem;
+  height: 0.95rem;
+  padding: 0;
+  border-radius: 9999px;
+  background: var(--background);
+  color: var(--muted-foreground);
+}
+
+.vertical-tab-layout--collapsed .app-tab-pill:hover .compact-close-tab-button,
+.vertical-tab-layout--collapsed .app-tab-pill:focus-within .compact-close-tab-button {
+  display: inline-flex;
+}
+
+.vertical-tab-layout--collapsed .compact-close-tab-button:hover {
+  background: var(--muted);
+  color: var(--foreground);
 }
 
 /* Both portal hosts size from the badges actually rendered, including search

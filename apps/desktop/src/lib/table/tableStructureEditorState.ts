@@ -1,5 +1,6 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
+import { getStarRocksCapabilities, STARROCKS_DATA_TYPES } from "@/lib/table/starrocksCapabilities";
 
 export interface CopySourceColumnDetails {
   /** Column default as shown in the copy-fields dialog, or null when there is none. */
@@ -165,6 +166,8 @@ function withPostgresArrayTypes(types: readonly string[]): string[] {
 }
 
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
+  // Use complete nested declarations so selecting a complex type produces valid SQL.
+  starrocks: STARROCKS_DATA_TYPES,
   mysql: [
     "tinyint",
     "tinyint unsigned",
@@ -347,6 +350,31 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "boolean",
     "json",
     "vector",
+    "rowid",
+    "urowid",
+    "xmltype",
+    "sdo_geometry",
+  ],
+  "oceanbase-oracle": [
+    "number",
+    "integer",
+    "float",
+    "binary_float",
+    "binary_double",
+    "char",
+    "nchar",
+    "varchar2",
+    "nvarchar2",
+    "clob",
+    "date",
+    "timestamp",
+    "timestamp with time zone",
+    "timestamp with local time zone",
+    "interval year to month",
+    "interval day to second",
+    "raw",
+    "blob",
+    "json",
     "rowid",
     "urowid",
     "xmltype",
@@ -551,7 +579,6 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
 
 const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   doris: "mysql",
-  starrocks: "mysql",
   goldendb: "mysql",
   sundb: "mysql",
   oscar: "oracle",
@@ -567,7 +594,6 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   vastbase: "postgres",
   kingbase: "postgres",
   firebird: "postgres",
-  "oceanbase-oracle": "oracle",
   iris: "oracle",
   yashandb: "oracle",
   rqlite: "sqlite",
@@ -576,9 +602,22 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   access: "h2",
 };
 
-export function getDataTypeOptions(dbType: DatabaseType | undefined): string[] {
+export function getDataTypeOptions(dbType: DatabaseType | undefined, dynamicOptions: readonly string[] = [], productVersion?: string): string[] {
   const key = dbType ? (DATA_TYPE_OPTION_ALIASES[dbType] ?? dbType) : "";
-  return DATA_TYPE_OPTIONS[key] ?? [];
+  const fallback = DATA_TYPE_OPTIONS[key] ?? [];
+  // MySQL-protocol/JDBC metadata may advertise MySQL types for StarRocks.
+  // Keep its editor choices native instead of reintroducing UNSIGNED/TIMESTAMP.
+  if (dbType === "starrocks") return getStarRocksCapabilities(productVersion).dataTypes;
+  if (dynamicOptions.length === 0) return fallback;
+  const seen = new Set<string>();
+  return [...dynamicOptions, ...fallback]
+    .map((type) => type.trim())
+    .filter((type) => {
+      const normalized = type.toLowerCase();
+      if (!type || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
 }
 
 export function isMysqlEnumDataType(dbType: DatabaseType | undefined, dataType: string): boolean {
@@ -815,6 +854,32 @@ export function supportsTableStructureExtendedProperties(databaseType?: Database
   );
 }
 
+/**
+ * Extracts a MySQL generated-column definition from a raw `extra` string such
+ * as `GENERATED ALWAYS AS (`price` * `quantity`) STORED`. Returns undefined
+ * for plain columns and identity columns (`GENERATED ... AS IDENTITY`, no
+ * parenthesized expression). MariaDB `PERSISTENT` is normalized to `STORED`,
+ * matching the MySQL driver's introspection output.
+ */
+export function parseMysqlGeneratedColumnExtra(extra: string): { expression: string; storage: "VIRTUAL" | "STORED" } | undefined {
+  const marker = "generated always as";
+  const lower = extra.toLowerCase();
+  const index = lower.indexOf(marker);
+  if (index < 0) return undefined;
+  const rest = extra.slice(index + marker.length).trimStart();
+  if (!rest.startsWith("(")) return undefined;
+  const close = rest.lastIndexOf(")");
+  if (close <= 0) return undefined;
+  const expression = rest.slice(1, close).trim();
+  if (!expression) return undefined;
+  const tail = rest
+    .slice(close + 1)
+    .trim()
+    .toUpperCase();
+  const storage = tail.startsWith("STORED") || tail.startsWith("PERSISTENT") ? "STORED" : "VIRTUAL";
+  return { expression, storage };
+}
+
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};
   if (!extra) return result;
@@ -827,6 +892,10 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
     }
     if (databaseType === "mysql" && lower.includes("on update current_timestamp")) {
       result.onUpdateCurrentTimestamp = true;
+    }
+    if (databaseType === "mysql") {
+      const generated = parseMysqlGeneratedColumnExtra(extra);
+      if (generated) result.generated = generated;
     }
   } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "uxdb" || databaseType === "vastbase" || databaseType === "kingbase") {
     const identityMatch = lower.match(/generated\s+(by\s+default|always)\s+as\s+identity/i);
@@ -1019,6 +1088,15 @@ function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType
 
   const baseType = parsed.baseType.trim().replace(/\s+/g, " ");
   const normalized = baseType.toLowerCase();
+  if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
+    const precision = Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0 ? String(column.numeric_precision) : undefined;
+    if (normalized === "float" && precision) return combineDataTypeForDatabase(databaseType, baseType, precision);
+    if (normalized === "number") {
+      const scale = Number.isInteger(column.numeric_scale) ? String(column.numeric_scale) : undefined;
+      if (scale !== undefined && (precision || column.numeric_precision == null)) return combineDataTypeForDatabase(databaseType, baseType, `${precision ?? "*"},${scale}`);
+      if (precision) return combineDataTypeForDatabase(databaseType, baseType, precision);
+    }
+  }
   if (CHARACTER_LENGTH_METADATA_TYPES.has(normalized) && Number.isInteger(column.character_maximum_length) && Number(column.character_maximum_length) > 0) {
     return combineDataTypeForDatabase(databaseType, baseType, String(column.character_maximum_length));
   }
@@ -1026,6 +1104,13 @@ function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType
     const precision = Number(column.numeric_precision);
     const minimum = normalized === "bit" || normalized === "varbit" ? 1 : 0;
     if (precision >= minimum) return combineDataTypeForDatabase(databaseType, baseType, String(precision));
+  }
+  // Dameng reports TIMESTAMP(6)/TIME(6) precision in DATA_SCALE while keeping
+  // DATA_PRECISION null. Without this the structure editor opens a column
+  // declared as TIMESTAMP(6) as a bare TIMESTAMP and a later save loses the
+  // fractional-second precision (#12444).
+  if (databaseType === "dameng" && (normalized === "timestamp" || normalized === "time") && Number.isInteger(column.numeric_scale)) {
+    return combineDataTypeForDatabase(databaseType, baseType, String(column.numeric_scale));
   }
   if (NUMERIC_PRECISION_METADATA_TYPES.has(normalized) && Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0) {
     const scale = Number.isInteger(column.numeric_scale) && Number(column.numeric_scale) >= 0 ? `,${column.numeric_scale}` : "";
@@ -1187,6 +1272,29 @@ export function filterStructureIndexColumnOptions(availableColumns: readonly str
   return query ? options.filter((column) => column.toLowerCase().includes(query)) : options;
 }
 
+const indexColumnNameCollator = typeof Intl !== "undefined" && typeof Intl.Collator === "function" ? new Intl.Collator(undefined, { sensitivity: "base", numeric: true }) : null;
+
+/**
+ * Order index-column picker rows: picked columns first in their index order,
+ * then unpicked columns alphabetically (case-insensitive, numeric-aware) so a
+ * long field list is scannable (#11747).
+ */
+export function sortStructureIndexColumnOptions<T extends { name: string }>(options: readonly T[], selectedPositions: ReadonlyMap<string, number>): T[] {
+  if (options.length <= 1) return [...options];
+  const picked: T[] = [];
+  const unpicked: T[] = [];
+  for (const option of options) {
+    if (selectedPositions.has(option.name)) {
+      picked.push(option);
+    } else {
+      unpicked.push(option);
+    }
+  }
+  picked.sort((left, right) => (selectedPositions.get(left.name) ?? 0) - (selectedPositions.get(right.name) ?? 0));
+  unpicked.sort((left, right) => (indexColumnNameCollator ? indexColumnNameCollator.compare(left.name, right.name) : left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true })));
+  return [...picked, ...unpicked];
+}
+
 export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[] {
   return indexes.map((index) => ({
     id: `existing:${index.name}`,
@@ -1206,7 +1314,18 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
   }));
 }
 
-export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableStructureForeignKey[] {
+export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[], databaseType?: DatabaseType): EditableStructureForeignKey[] {
+  const oracle = databaseType === "oracle" || databaseType === "oceanbase-oracle";
+  if (oracle) {
+    const definitions = new Map<string, ForeignKeyInfo>();
+    for (const row of foreignKeys) {
+      const previous = definitions.get(row.name);
+      if (previous && (previous.ref_schema !== row.ref_schema || previous.ref_table !== row.ref_table || previous.on_delete !== row.on_delete || previous.on_update !== row.on_update)) {
+        throw new Error("Inconsistent foreign key metadata. Refresh the table definition.");
+      }
+      definitions.set(row.name, row);
+    }
+  }
   const groups = new Map<string, ForeignKeyInfo[]>();
   for (const foreignKey of foreignKeys) {
     const key = [foreignKey.name, foreignKey.ref_schema ?? "", foreignKey.ref_table, foreignKey.on_update ?? "", foreignKey.on_delete ?? ""].join("\u0000");
@@ -1227,6 +1346,7 @@ export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableS
       refSchema: first.ref_schema ?? "",
       refTable: first.ref_table,
       refColumn: original.ref_column,
+      ...(oracle ? { columns: group.map((row) => row.column), refColumns: group.map((row) => row.ref_column) } : {}),
       onUpdate: first.on_update ?? "",
       onDelete: first.on_delete ?? "",
       original,
@@ -1242,13 +1362,26 @@ export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureT
     timing: trigger.timing,
     event: trigger.event,
     statement: trigger.statement ?? "",
+    enabled: trigger.enabled ?? undefined,
     original: trigger,
     markedForDrop: false,
   }));
 }
 
 export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undefined, trigger: EditableStructureTrigger): boolean {
-  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle");
+  if (!trigger.original) return true;
+  if (databaseType === undefined) return false;
+  // The Oracle driver keeps the `TRIGGER ...` declaration when the source has clauses (WHEN,
+  // REFERENCING, FOLLOWS, ...) that the timing/event/body form would drop on CREATE OR REPLACE.
+  // Dameng reports a plain body plus a separate `WHEN` clause, so the same guard applies: the
+  // structured form can only rebuild triggers that have neither of those extra clauses.
+  if (databaseType !== "oracle" && databaseType !== "dameng") return true;
+  return isStructuredOracleTriggerSource(trigger.original.statement) && !trigger.original.condition?.trim();
+}
+
+function isStructuredOracleTriggerSource(statement: string | null | undefined): boolean {
+  const source = statement?.trim() ?? "";
+  return source !== "" && !/^(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?TRIGGER\b/i.test(source);
 }
 
 export function toColumnNames(columns: string[]): string {
@@ -1268,6 +1401,12 @@ export function structureIndexKind(index: IndexNamingOptions): StructureIndexKin
 }
 
 export type SpecialIndexColumnIssue = "specialIndexUnique" | "fulltextIndexColumns" | "spatialIndexColumn" | "spatialIndexNullable";
+
+export function canIndexTypeHaveSpecialIssue(dialect: string, indexType?: string | null): boolean {
+  if (!indexType) return false;
+  const type = indexType.trim().toUpperCase();
+  return (dialect === "mysql" && type === "FULLTEXT") || ((dialect === "mysql" || dialect === "sqlserver") && type === "SPATIAL");
+}
 
 export function specialIndexColumnIssue(dialect: string, indexType: string, columns: readonly Pick<EditableStructureColumn, "dataType" | "isNullable">[], isUnique = false): SpecialIndexColumnIssue | null {
   const type = indexType.trim().toUpperCase();
@@ -1407,6 +1546,10 @@ function splitPostgresTemporalDataType(raw: string): { baseType: string; params:
 }
 
 function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
+  // Parentheses inside nested types belong to the element/field, not the column.
+  if (dbType === "starrocks" && /^(array|map|struct)\s*</i.test(raw.trim())) {
+    return { baseType: raw.trim(), params: "" };
+  }
   if (dbType === "duckdb") {
     const parsed = splitDuckdbScalarDataType(raw);
     if (parsed) return parsed;
@@ -1441,7 +1584,7 @@ function normalizedDataTypeName(rawDataType: string): string {
 }
 
 export function getDataTypeLengthUnitOptions(dbType: DatabaseType | undefined, rawDataType: string): readonly DataTypeLengthUnit[] {
-  if (dbType !== "dameng" && dbType !== "oracle") return [];
+  if (dbType !== "dameng" && dbType !== "oracle" && dbType !== "oceanbase-oracle") return [];
   return CHARACTER_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? CHARACTER_LENGTH_UNITS : [];
 }
 
@@ -1670,6 +1813,8 @@ export interface DataTypeDefaultOptions {
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string, options: DataTypeDefaultOptions = {}): string {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "starrocks" && isDataTypeLengthDisabled(_dbType, baseType)) return "";
+  if ((_dbType === "oracle" || _dbType === "oceanbase-oracle") && key === "float") return "";
   if (_dbType === "duckdb" && (key === "float" || isDataTypeLengthDisabled(_dbType, baseType))) return "";
   if (_dbType === "mysql" && options.omitMysqlDeprecatedDefaults && isMysqlDeprecatedDefaultParameterType(key)) return "";
   if (_dbType === "sqlite" || _dbType === "rqlite" || _dbType === "turso") {
@@ -1748,6 +1893,9 @@ function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
 
 export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "starrocks") {
+    return !["tinyint", "smallint", "int", "integer", "bigint", "largeint", "char", "varchar", "binary", "varbinary", "decimal", "decimal32", "decimal64", "decimal128", "decimal256"].includes(key);
+  }
   if (_dbType === "duckdb") {
     return DUCKDB_TYPE_LENGTH_DISABLES.has(key.replace(/\s+/g, " "));
   } else if (_dbType === "questdb") {
@@ -1761,6 +1909,7 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
     // placement; a generic TYPE(length) editor would emit invalid DDL for them.
     return key.endsWith("[]") || key.startsWith("interval ") || XUGU_TYPE_LENGTH_DISABLES.has(key);
   } else if (isOracleLikeStructureType(_dbType)) {
+    if ((_dbType === "oracle" || _dbType === "oceanbase-oracle") && key === "float") return false;
     // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
     return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);
   } else if (_dbType === "sqlserver") {

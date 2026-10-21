@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use mysql_async::prelude::*;
 
 use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectInfo, TableInfo, TriggerInfo};
@@ -102,8 +104,11 @@ fn list_objects_sql(schema: &str) -> String {
          FROM ALL_PROCEDURES \
          WHERE OWNER = {s} AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') AND PROCEDURE_NAME IS NULL \
          UNION ALL \
+         SELECT SEQUENCE_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, SEQUENCE_OWNER AS OBJECT_SCHEMA, 4 AS SORT_ORDER \
+         FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER = {s} \
+         UNION ALL \
          SELECT OBJECT_NAME, CASE OBJECT_TYPE WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE OBJECT_TYPE END AS OBJECT_TYPE, \
-                OWNER AS OBJECT_SCHEMA, CASE WHEN OBJECT_TYPE = 'PACKAGE' THEN 4 ELSE 5 END AS SORT_ORDER \
+                OWNER AS OBJECT_SCHEMA, CASE WHEN OBJECT_TYPE = 'PACKAGE' THEN 5 ELSE 6 END AS SORT_ORDER \
          FROM ALL_OBJECTS \
          WHERE OWNER = {s} AND OBJECT_TYPE IN ('PACKAGE', 'PACKAGE BODY') \
          ORDER BY SORT_ORDER, OBJECT_NAME",
@@ -208,16 +213,18 @@ fn format_oracle_type(data_type: &str, precision: Option<i32>, scale: Option<i32
 
 fn list_indexes_sql(schema: &str, table: &str) -> String {
     format!(
-        "SELECT ai.INDEX_NAME, \
-         LISTAGG(aic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY aic.COLUMN_POSITION) AS COLUMNS, \
-         ai.UNIQUENESS, \
-         CASE WHEN ac.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PRIMARY \
+        "SELECT ai.INDEX_NAME, aic.COLUMN_NAME, ai.UNIQUENESS, \
+         CASE WHEN ac.CONSTRAINT_NAME IS NULL THEN 0 ELSE 1 END AS IS_PRIMARY, ai.INDEX_TYPE, ai.PARTITIONED, \
+         ai.VISIBILITY, aic.DESCEND, aie.COLUMN_EXPRESSION, aic.COLUMN_POSITION \
          FROM ALL_INDEXES ai \
-         JOIN ALL_IND_COLUMNS aic ON ai.INDEX_NAME = aic.INDEX_NAME AND ai.TABLE_OWNER = aic.TABLE_OWNER \
-         LEFT JOIN ALL_CONSTRAINTS ac ON ac.INDEX_NAME = ai.INDEX_NAME AND ac.OWNER = ai.TABLE_OWNER AND ac.CONSTRAINT_TYPE = 'P' \
+         JOIN ALL_IND_COLUMNS aic ON ai.INDEX_NAME = aic.INDEX_NAME AND ai.OWNER = aic.INDEX_OWNER \
+           AND ai.TABLE_OWNER = aic.TABLE_OWNER AND ai.TABLE_NAME = aic.TABLE_NAME \
+         LEFT JOIN ALL_IND_EXPRESSIONS aie ON aie.INDEX_OWNER = aic.INDEX_OWNER AND aie.INDEX_NAME = aic.INDEX_NAME \
+           AND aie.TABLE_OWNER = aic.TABLE_OWNER AND aie.TABLE_NAME = aic.TABLE_NAME AND aie.COLUMN_POSITION = aic.COLUMN_POSITION \
+         LEFT JOIN ALL_CONSTRAINTS ac ON ac.INDEX_NAME = ai.INDEX_NAME AND ac.OWNER = ai.TABLE_OWNER \
+           AND ac.TABLE_NAME = ai.TABLE_NAME AND ac.CONSTRAINT_TYPE = 'P' \
          WHERE ai.TABLE_OWNER = {s} AND ai.TABLE_NAME = {t} \
-         GROUP BY ai.INDEX_NAME, ai.UNIQUENESS, ac.CONSTRAINT_TYPE \
-         ORDER BY ai.INDEX_NAME",
+         ORDER BY ai.INDEX_NAME, aic.COLUMN_POSITION",
         s = metadata_owner_sql(schema),
         t = quote_value(table),
     )
@@ -229,26 +236,47 @@ pub async fn list_indexes(pool: &mysql_async::Pool, schema: &str, table: &str) -
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let cols_str = get_str(row, 1);
-            IndexInfo {
-                name: get_str(row, 0),
-                columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
-                is_unique: get_str(row, 2) == "UNIQUE",
-                is_primary: row_get::<i32, _>(row, 3).unwrap_or(0) == 1,
-                filter: None,
-                index_type: None,
-                included_columns: None,
-                comment: None,
-                key_is_expression: Vec::new(),
-                column_opclasses: vec![],
-                key_options: Vec::new(),
-                constraint_backed: false,
-            }
-        })
-        .collect())
+    let mut indexes = BTreeMap::<String, IndexInfo>::new();
+    for row in &rows {
+        let name = get_str(row, 0);
+        let visibility = get_str(row, 6);
+        let partitioned = get_str(row, 5);
+        let direction = get_str(row, 7);
+        let expression = get_opt_str(row, 8).filter(|value| !value.trim().is_empty());
+        let column = get_str(row, 1);
+        let position = row_get::<u64, _>(row, 9).unwrap_or(0) as usize;
+        let index = indexes.entry(name.clone()).or_insert_with(|| IndexInfo {
+            key_directions: Vec::new(),
+            visibility: Some(visibility.clone()),
+            key_metadata_complete: true,
+            name,
+            columns: Vec::new(),
+            is_unique: get_str(row, 2) == "UNIQUE",
+            is_primary: row_get::<i32, _>(row, 3).unwrap_or(0) == 1,
+            filter: None,
+            index_type: get_opt_str(row, 4),
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: Vec::new(),
+            key_options: Vec::new(),
+            constraint_backed: false,
+        });
+        if position != index.columns.len() + 1
+            || !matches!(direction.as_str(), "ASC" | "DESC")
+            || !matches!(visibility.as_str(), "VISIBLE" | "INVISIBLE")
+            || index.visibility.as_deref() != Some(visibility.as_str())
+            || partitioned != "NO"
+            || !matches!(get_str(row, 4).as_str(), "NORMAL" | "FUNCTION-BASED NORMAL")
+            || (expression.is_none() && column.starts_with("SYS_NC") && column.ends_with('$'))
+        {
+            index.key_metadata_complete = false;
+        }
+        index.columns.push(expression.clone().unwrap_or(column));
+        index.key_is_expression.push(expression.is_some());
+        index.key_directions.push(direction);
+    }
+    Ok(indexes.into_values().collect())
 }
 
 pub async fn list_foreign_keys(
@@ -349,6 +377,8 @@ mod tests {
         assert!(sql.contains("ALL_PROCEDURES"));
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
+        assert!(sql.contains("ALL_SEQUENCES"));
+        assert!(sql.contains("'SEQUENCE'"));
         assert!(sql.contains("ALL_OBJECTS"));
         assert!(sql.contains("'PACKAGE'"));
         assert!(sql.contains("'PACKAGE BODY'"));

@@ -101,7 +101,7 @@ export function invertedHiddenColumnIndexes(availableIndexes: number[], hiddenIn
   return next;
 }
 
-export function allNullColumnIndexes(rows: ReadonlyArray<ReadonlyArray<unknown>>, availableIndexes: number[]): number[] {
+export function allNullColumnIndexes(rows: ReadonlyArray<ReadonlyArray<unknown>>, availableIndexes: number[], includeEmptyStrings = false): number[] {
   if (rows.length === 0) return [];
   // 单遍行扫描 + 候选原地压缩：列一旦见到非 null 即永久剔除，候选清空提前
   // 返回。最坏复杂度同为 O(列×行)（全 null 时无法避免），改进在于常数项：
@@ -112,7 +112,8 @@ export function allNullColumnIndexes(rows: ReadonlyArray<ReadonlyArray<unknown>>
   for (const row of rows) {
     let write = 0;
     for (let read = 0; read < count; read++) {
-      if (row[candidates[read]!] === null) candidates[write++] = candidates[read]!;
+      const value = row[candidates[read]!];
+      if (value === null || (includeEmptyStrings && value === "")) candidates[write++] = candidates[read]!;
     }
     count = write;
     if (count === 0) return [];
@@ -148,4 +149,50 @@ export function removeAutoHiddenColumnIndexes(hiddenIndexes: ReadonlySet<number>
     next.delete(index);
   }
   return next;
+}
+
+export function areCellValuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a === "number" && typeof b === "number" && Number.isNaN(a) && Number.isNaN(b)) return true;
+  if (a === null || b === null || a === undefined || b === undefined) return false;
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (a instanceof Uint8Array && b instanceof Uint8Array) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
+export function identicalValueColumnIndexes(rows: ReadonlyArray<ReadonlyArray<unknown>>, candidateIndexes: readonly number[]): number[] {
+  if (rows.length < 2) return [];
+  const candidates = [...candidateIndexes];
+  let count = candidates.length;
+  if (count === 0) return [];
+
+  const firstRow = rows[0];
+  if (!firstRow) return [];
+
+  for (let rowIndex = 1; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex];
+    if (!row) continue;
+    let write = 0;
+    for (let read = 0; read < count; read++) {
+      const col = candidates[read]!;
+      if (areCellValuesEqual(row[col], firstRow[col])) {
+        candidates[write++] = col;
+      }
+    }
+    count = write;
+    if (count === 0) return [];
+  }
+  candidates.length = count;
+  return candidates;
 }

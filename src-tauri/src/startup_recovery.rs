@@ -14,6 +14,8 @@ const STARTUP_LOG_DIR_ENV: &str = "DBX_STARTUP_LOG_DIR";
 const KEEP_STARTUP_LOG_ENV: &str = "DBX_KEEP_STARTUP_LOG";
 #[cfg(target_os = "windows")]
 const NO_SANDBOX_ENV: &str = "DBX_WEBVIEW2_NO_SANDBOX";
+#[cfg(target_os = "windows")]
+const DISABLE_WIN7_CSS_COLOR4_ENV: &str = "DBX_DISABLE_WIN7_CSS_COLOR4";
 const RECOVERY_ATTEMPT_ENV: &str = "DBX_STARTUP_COMPAT_RECOVERY";
 const RECOVERY_PARENT_PID_ENV: &str = "DBX_STARTUP_COMPAT_PARENT_PID";
 const DISABLE_ENTERPRISE_COMPAT_ENV: &str = "DBX_DISABLE_ENTERPRISE_COMPAT";
@@ -346,12 +348,20 @@ fn configure_webview2_compatibility(enterprise_compat: bool) {
             None => record("enterprise compatibility profile unavailable: LOCALAPPDATA and APPDATA are missing"),
         }
     }
+    let existing_args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+    let win7_css_disabled = env_flag(DISABLE_WIN7_CSS_COLOR4_ENV);
+    let args = crate::webview2_legacy_css::configure(&existing_args, cfg!(target_vendor = "win7"), win7_css_disabled);
+    let args = webview2_compatibility_arguments(args, enterprise_compat, manual_no_sandbox);
+    if args != existing_args {
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &args);
+    }
+    if cfg!(target_vendor = "win7") {
+        record(format!(
+            "Win7 WebView2 CSSColor4 requested={} opt_out={win7_css_disabled}",
+            crate::webview2_legacy_css::requested(&args)
+        ));
+    }
     if enterprise_compat || manual_no_sandbox {
-        let args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-        std::env::set_var(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            webview2_compatibility_arguments(args, enterprise_compat, manual_no_sandbox),
-        );
         record(format!("WebView2 no-sandbox enabled enterprise_compat={enterprise_compat} manual={manual_no_sandbox}"));
     }
     if enterprise_compat {

@@ -11,6 +11,7 @@
 // (delivery is same-tick), never a pending undelivered one.
 let lastHandledFormatRequestId = 0;
 let lastHandledCompressRequestId = 0;
+let lastHandledKeywordCaseRequestId = 0;
 let vimMappingsApplied = false;
 let vimClipboardConfigured = false;
 </script>
@@ -66,15 +67,17 @@ import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/
 import { resolveExecutableSql, type SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import { supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
+import { statementNavigationTarget, type StatementNavigationDirection } from "@/lib/sql/statementNavigation";
 
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 
-import { canFormatSqlForDatabaseType, formatSqlForEditing, compressSqlText } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, formatSqlText, compressSqlText, type SqlFormatterDiagnostic } from "@/lib/sql/sqlFormatter";
+import { applySqlKeywordCase, loadSqlKeywordSpans } from "@/lib/sql/sqlKeywordCase";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { restoreSqlFromSourcePaste } from "@/lib/sql/sqlSourcePaste";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 
-import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "@/lib/editor/queryEditorExecutionViewport";
+import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible, locateCursorForGutterExecution } from "@/lib/editor/queryEditorExecutionViewport";
 import { mapQueryEditorFormatSelection } from "@/lib/editor/queryEditorFormatSelection";
 import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
 
@@ -114,6 +117,7 @@ import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { applyVimConfig, isVimMappingCommand, loadVimConfig } from "@/lib/editor/vimConfig";
+import { createVimImeGuard } from "@/lib/editor/vimImeGuard";
 import { configureVimSystemClipboard } from "@/lib/editor/vimSystemClipboard";
 
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
@@ -131,24 +135,35 @@ import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCare
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import { addNextQueryEditorSelectionOccurrence, selectAllQueryEditorSelectionOccurrences } from "@/lib/editor/queryEditorOccurrenceSelection";
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
+import { scrollEditorLine } from "@/lib/editor/scrollEditorLine";
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
+import { handleQueryEditorCompletionNavigation } from "@/lib/editor/queryEditorCompletionNavigation";
 import { createQueryEditorSelectionCaseShortcutBindings } from "@/lib/editor/queryEditorSelectionCaseShortcut";
-import { createQueryEditorExecutionShortcutBindings, createQueryEditorPostCompositionKeyGuard } from "@/lib/editor/queryEditorExecutionShortcut";
+import { createQueryEditorExecutionShortcutBindings, createQueryEditorExecutionShortcutHandler, createQueryEditorPostCompositionKeyGuard } from "@/lib/editor/queryEditorExecutionShortcut";
 import { supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isMacOS } from "@/lib/backend/platform";
 import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
+import { kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
 import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
 
 const props = defineProps<QueryEditorProps>();
 
 function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
+  const mode = kingbaseSqlType.value;
+  if (props.databaseType === "kingbase") return mode === "oracle" ? undefined : (mode ?? "postgres");
   // clickhouse and soql ride the SQL editor but have no matching behavior dialect;
   // fall back to the connection's dialect (undefined for Salesforce).
+  if (props.syntaxDialect === "oracle") return undefined;
   return props.syntaxDialect === "clickhouse" || props.syntaxDialect === "soql" ? props.dialect : (props.syntaxDialect ?? props.dialect);
+}
+
+function sqlSyntaxDialect() {
+  if (props.databaseType === "kingbase") return kingbaseSqlType.value ?? "postgres";
+  return props.syntaxDialect ?? props.dialect;
 }
 
 function queryEditorSelectionLanguage(): "sql" | "text" {
@@ -241,12 +256,15 @@ let contextMenuDoc: Text | null = null;
 let contextMenuDocText = "";
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
+const kingbaseConfig = computed(() => (props.databaseType === "kingbase" && props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined));
+const kingbaseSqlType = computed(() => kingbaseSqlDatabaseType(kingbaseConfig.value));
 
 function sqlStatementParameterOptions() {
-  const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, props.databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
+  const compatibilityMode = props.databaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(props.connectionId, props.database) : kingbaseConfig.value?.database_info?.compatibilityMode;
+  const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, props.databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled, compatibilityMode);
   return {
-    databaseType: props.databaseType,
-    compatibilityMode: props.databaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(props.connectionId, props.database) : undefined,
+    databaseType: kingbaseSqlType.value ?? props.databaseType,
+    compatibilityMode,
     enabledSyntaxes: enabledSqlParameterSyntaxes(toggles),
   };
 }
@@ -349,6 +367,7 @@ async function loadStructurePeekColumns(panelId: string, requestId: number, targ
   try {
     const objectMetadataRequest = {
       connectionId: props.connectionId,
+      queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
       database,
       schema,
       tableName: target.name,
@@ -504,6 +523,7 @@ const statementBoundaries = useQueryEditorStatementBoundaries({
   props,
   view,
   sqlStatementParameterOptions,
+  syntaxDialect: sqlSyntaxDialect,
   runtime: codeMirrorRuntime,
   driverProfile: () => sqlDriverProfile.value,
   cache: {
@@ -527,6 +547,7 @@ const completionMetadata = useQueryEditorCompletionMetadata({
   view,
   connectionStore,
   sqlBehaviorDialect,
+  syntaxDialect: sqlSyntaxDialect,
   remoteLatencyBudgetMs: COMPLETION_REMOTE_LATENCY_BUDGET_MS,
   maxCompletionTables: MAX_COMPLETION_TABLES,
   onDemandMinPrefix: PRESTO_ON_DEMAND_TABLE_COMPLETION_MIN_PREFIX,
@@ -951,7 +972,8 @@ function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEv
   // Right-click must stay instant: resolve from completion/tree caches and keep the legacy table fallback when metadata is unavailable.
   const candidate = resolveQueryContextCandidateDatabase(parsedCandidate, connectionStore.lookupLocalCompletionDatabases(parsedCandidate.connectionId, parsedCandidate.database, MAX_COMPLETION_TABLES));
   const tables = connectionStore.lookupLocalCompletionTables(candidate.connectionId, candidate.database, candidate.tableName, MAX_COMPLETION_TABLES, candidate.schema, props.catalog);
-  contextObjectTarget.value = resolveQueryContextObjectTarget(candidate, tables);
+  const preferredSchema = props.schema ?? connectionStore.getConfig(props.connectionId)?.default_schema;
+  contextObjectTarget.value = resolveQueryContextObjectTarget(candidate, tables, preferredSchema);
 }
 
 function focusEditor() {
@@ -1177,13 +1199,9 @@ function executeSqlStatementFromGutter(currentView: EditorViewType, line: { from
   // selection overlapping that statement is more specific, so preserve it; a
   // selection elsewhere in the document must not hijack the click.
   const editorViewportRequestId = executionViewportOwnership.beginRequest();
-  const selection = currentView.state.selection.main;
-  const hasSelectedSql = !selection.empty && currentView.state.sliceDoc(selection.from, selection.to).trim().length > 0;
-  const selectionOverlapsStatement = hasSelectedSql && selection.from < statementRange.to && statementRange.from < selection.to;
+  const { selectionOverlapsStatement } = locateCursorForGutterExecution(currentView, statementRange, settingsStore.editorSettings.locateCursorOnGutterExecute);
   const executionSnapshot = selectionOverlapsStatement ? sqlExecutionSnapshotFromView(currentView) : sqlExecutionSnapshotForRange(currentView, statementRange);
   emitExecutionRequest({ ...executionSnapshot, editorViewportRequestId });
-  // 不主动聚焦编辑器，否则 CodeMirror 会把屏幕滚回之前的光标位置。
-  // currentView.focus();
   return true;
 }
 
@@ -1194,6 +1212,46 @@ function selectSqlLineFromGutter(currentView: EditorViewType, line: { from: numb
     selection: { anchor: line.from, head: line.to },
     scrollIntoView: true,
     userEvent: "select.pointer",
+  });
+  currentView.focus();
+  return true;
+}
+
+/**
+ * 选中光标所在的当前可执行语句（与「执行当前语句」共用同一套范围计算，
+ * 边界行为保持一致）；属于纯选区操作，不改文档，因此只读编辑器同样可用。
+ */
+function selectCurrentStatementFromView(currentView: EditorViewType): boolean {
+  const range = executableStatementRangeAtPosition(currentView, currentView.state.selection.main.head);
+  if (!range || range.from === range.to) return false;
+  currentView.dispatch({
+    selection: { anchor: range.from, head: range.to },
+    scrollIntoView: true,
+    userEvent: "select.keyboard",
+  });
+  currentView.focus();
+  return true;
+}
+
+function selectCurrentStatementFromContextMenu(): void {
+  const currentView = view.value;
+  if (!currentView) return;
+  selectCurrentStatementFromView(currentView);
+}
+
+/**
+ * Move the caret between executable statements without changing the document.
+ * Reuses the same statement ranges as 「执行当前语句」/「选中当前语句」 so the
+ * navigation boundaries always match what execution would run.
+ */
+function navigateStatementFromView(currentView: EditorViewType, direction: StatementNavigationDirection): boolean {
+  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
+  const target = statementNavigationTarget(executableStatementRangeCache.ranges, currentView.state.selection.main.head, direction);
+  if (target === null) return false;
+  currentView.dispatch({
+    selection: { anchor: target },
+    scrollIntoView: true,
+    userEvent: "select.keyboard",
   });
   currentView.focus();
   return true;
@@ -1221,6 +1279,7 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   selectAllSelectionOccurrencesFromContextMenu,
   openFindReplaceFromContextMenu,
   deleteEmptyLines,
+  selectCurrentStatementFromContextMenu,
   selectAllSqlFromContextMenu,
   emitContextObjectAction,
   openCodeSnapshot,
@@ -1287,8 +1346,16 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         shortcuts.executeSql,
         () => requestExecute({ bypassPicker: true }),
         (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
+        () => !props.isExecuting,
       );
-  const executeInNewResultTabBindings = props.hideExecutionControls ? [] : createQueryEditorExecutionShortcutBindings(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab, (currentView) => shouldBlockExecutionShortcut(undefined, currentView));
+  const executeInNewResultTabBindings = props.hideExecutionControls
+    ? []
+    : createQueryEditorExecutionShortcutBindings(
+        shortcuts.executeSqlInNewResultTab,
+        requestExecuteInNewResultTab,
+        (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
+        () => !props.isExecuting,
+      );
   const explainBindings = props.enableExplainShortcut
     ? createQueryEditorExecutionShortcutBindings(
         shortcuts.explainSql,
@@ -1305,6 +1372,11 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
     shortcut: shortcuts.replace,
     openReplace,
     isReadOnly: () => !!props.readOnly,
+  });
+  const executionShortcutHandler = createQueryEditorExecutionShortcutHandler({
+    getShortcuts: () => shortcuts,
+    isExecuting: () => !!props.isExecuting,
+    enableExplainShortcut: () => !!props.enableExplainShortcut,
   });
   const sqlShortcutActions = enabledSqlShortcutActions(settingsStore.editorSettings.sqlShortcuts);
   const sqlShortcutKeymapBindings = uniqueSqlShortcutBindings(sqlShortcutActions).filter((shortcut) => !isCharacterProducingShortcut(shortcut));
@@ -1330,6 +1402,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
     () => props.databaseType,
   );
   const combinedDomKeydownHandler = (event: KeyboardEvent, view: EditorViewType) => {
+    if (executionShortcutHandler(event)) return true;
     if (replaceShortcutHandler(event)) return true;
     return sqlShortcutDomHandler(event, view);
   };
@@ -1388,11 +1461,17 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.deleteLine, (view) => codeMirrorRuntime.codeMirrorDeleteLine?.(view) ?? false),
         ...binding(shortcuts.moveLineUp, (view) => codeMirrorRuntime.codeMirrorMoveLineUp?.(view) ?? false),
         ...binding(shortcuts.moveLineDown, (view) => codeMirrorRuntime.codeMirrorMoveLineDown?.(view) ?? false),
+        ...binding(shortcuts.scrollLineUp, (view) => scrollEditorLine(view, "up")),
+        ...binding(shortcuts.scrollLineDown, (view) => scrollEditorLine(view, "down")),
         ...binding(shortcuts.copyLineUp, (view) => codeMirrorRuntime.codeMirrorCopyLineUp?.(view) ?? false),
         ...binding(shortcuts.copyLineDown, (view) => codeMirrorRuntime.codeMirrorCopyLineDown?.(view) ?? false),
         ...binding(shortcuts.undo, (view) => codeMirrorRuntime.codeMirrorUndo?.(view) ?? false),
         ...binding(shortcuts.redo, (view) => codeMirrorRuntime.codeMirrorRedo?.(view) ?? false),
         ...binding(shortcuts.selectAll, (view) => codeMirrorRuntime.codeMirrorSelectAll?.(view) ?? false),
+        ...binding(shortcuts.selectCurrentStatement, selectCurrentStatementFromView),
+        ...binding(shortcuts.previousStatement, (currentView) => navigateStatementFromView(currentView, "previous")),
+        ...binding(shortcuts.nextStatement, (currentView) => navigateStatementFromView(currentView, "next")),
+        ...binding(shortcuts.statementStart, (currentView) => navigateStatementFromView(currentView, "start")),
         ...binding(shortcuts.extendSelection, extendQueryEditorSelectionForView),
         ...binding(shortcuts.addNextSelectionOccurrence, addNextQueryEditorSelectionOccurrence),
         ...binding(shortcuts.selectAllSelectionOccurrences, selectAllQueryEditorSelectionOccurrences),
@@ -1510,6 +1589,7 @@ function vimModeExtension(enabled = settingsStore.editorSettings.vimModeEnabled)
       },
     ]),
     vimExtension,
+    createVimImeGuard(codeMirrorRuntime.editorViewModule, codeMirrorRuntime.codeMirrorGetVimCm),
   ]);
 }
 
@@ -1629,6 +1709,7 @@ const { sqlErrorDecorationRange, sqlSemanticDecorationRanges, reconfigureDiagnos
     sqlDriverProfile,
     sqlStatementParameterOptions,
     sqlBehaviorDialect,
+    sqlSyntaxDialect,
     queryEditorSelectionLanguage,
     semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED,
     maxCompletionTables: MAX_COMPLETION_TABLES,
@@ -1689,6 +1770,7 @@ async function formatCurrentSql() {
   try {
     let formatted: string;
     let formattedAsSql = false;
+    let formatDiagnostic: SqlFormatterDiagnostic | undefined;
     if (props.databaseType === "mongodb") {
       formatted = formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter);
     } else {
@@ -1712,13 +1794,21 @@ async function formatCurrentSql() {
           return;
         } else {
           formattedAsSql = true;
-          formatted = await formatSqlForEditing(source, formatDialect, settingsStore.editorSettings.sqlFormatter);
+          // The explicit Format command has to say why it did nothing:
+          // `formatSqlForEditing` returns unparseable input unchanged (the right
+          // contract for format-on-save, which must never fail), which turned
+          // this command into a silent no-op. A thrown error reaches the
+          // `formatError` toast below.
+          formatted = await formatSqlText(source, formatDialect, settingsStore.editorSettings.sqlFormatter, (diagnostic) => {
+            formatDiagnostic = diagnostic;
+          });
         }
       }
     }
     if (view.value !== currentView || currentView.state !== originalState || currentView.state.sliceDoc(from, to) !== source) {
       return;
     }
+    if (formatDiagnostic === "custom-rules-fallback") toast(t("settings.sqlFormatterFallbackNotice"), 4000);
     if (formatted === source) return;
     // The semantic mapper's contract is SQL-only. Mongo shell, Elasticsearch,
     // JSON, and XML keep the replacement selection behavior used before the
@@ -1754,6 +1844,50 @@ function compressCurrentSql() {
   currentView.dispatch({
     changes: { from, to, insert: compressed },
     selection: compressesSelection ? { anchor: from, head: from + compressed.length } : { anchor: from + compressed.length },
+  });
+}
+
+/**
+ * Toolbar `a`/`A`: re-case only the keywords of the selection, or of the whole
+ * document when there is none (issue #11828).
+ *
+ * The toolbar flips `keywordCase` at the same time, so this must agree with
+ * what a later 格式化 would produce for keywords — hence the keyword spans come
+ * from sql-formatter's own lexer ({@link loadSqlKeywordSpans}) rather than a
+ * word list. When the input cannot be classified the document is left as-is:
+ * `convertSqlSelectionCase` remains the explicit "convert everything" command
+ * in the context menu.
+ */
+async function convertCurrentSqlKeywordCase(mode: "upper" | "lower") {
+  if (props.readOnly) return;
+  // Mongo/Elasticsearch/Redis documents are not SQL. Their text can still look
+  // enough like a statement for the lexer to accept it — an ES request line
+  // `GET /_search` lexes as `GET` + path — so gate on the tab's real language
+  // rather than on whether tokenizing happens to succeed.
+  if (queryEditorSelectionLanguage() !== "sql") return;
+  const currentView = view.value;
+  if (!currentView) return;
+
+  const originalState = currentView.state;
+  const selection = originalState.selection.main;
+  const convertsSelection = !selection.empty;
+  const from = convertsSelection ? selection.from : 0;
+  const to = convertsSelection ? selection.to : originalState.doc.length;
+  const source = originalState.sliceDoc(from, to);
+  if (!source.trim()) return;
+
+  const formatDialect = props.formatDialect ?? props.dialect ?? "generic";
+  const spans = await loadSqlKeywordSpans(source, formatDialect);
+  // Edit races the await: the user may have typed, or switched tabs, since the
+  // request arrived. Re-check everything before dispatching.
+  if (!spans || currentView !== view.value || currentView.state !== originalState || originalState.sliceDoc(from, to) !== source) return;
+
+  const converted = applySqlKeywordCase(source, { from: 0, to: source.length }, mode, spans);
+  if (converted === source) return;
+
+  currentView.dispatch({
+    changes: { from, to, insert: converted },
+    selection: convertsSelection ? { anchor: from, head: from + converted.length } : { anchor: from + converted.length },
   });
 }
 
@@ -1911,6 +2045,8 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       t,
       sqlBehaviorDialect,
       sqlDriverProfile,
+      sqlFunctionDatabaseType: () => kingbaseSqlType.value ?? props.databaseType,
+      sqlSyntaxDialect,
       sqlStatementParameterOptions,
       queryEditorSelectionLanguage,
       cache: {
@@ -2080,6 +2216,11 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           EditorView.domEventHandlers({
             keydown(event, currentView) {
               const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+              // The configured Quick Open shortcut (Ctrl-P on Windows/Linux)
+              // must keep working even while a completion list is open; yield
+              // before completion navigation can consume and preventDefault it.
+              if (matchesShortcut(event, shortcuts.quickOpen)) return false;
+              if (handleQueryEditorCompletionNavigation(currentView, event, initializedRuntime.codeMirrorMoveCompletionSelection)) return true;
               if (matchesShortcut(event, shortcuts.selectLineEnds)) {
                 event.preventDefault();
                 return selectLineEnds(currentView);
@@ -2389,11 +2530,21 @@ watch(
 );
 
 watch(
-  () => props.executionError,
-  () => {
-    reconfigureDiagnostics();
+  () => props.keywordCaseRequestId,
+  (val) => {
+    if (!val || val <= lastHandledKeywordCaseRequestId) return;
+    lastHandledKeywordCaseRequestId = val;
+    // The direction travels with the request: the id alone says "a click
+    // happened", but the mode is what the toggle switched to, and reading it
+    // back from settings could race a second click.
+    const mode = props.keywordCaseRequestMode;
+    if (mode) void convertCurrentSqlKeywordCase(mode);
   },
 );
+
+watch([() => props.executionError, () => props.executionErrorSql, () => props.executionErrorResult], () => {
+  reconfigureDiagnostics();
+});
 
 watch(
   () => props.statementExecutionMarkers ?? [],
@@ -2460,8 +2611,11 @@ watch([() => props.clientSessionId, () => props.completionContextVersion], () =>
 });
 
 watch(
-  [() => props.tabId, () => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlDriverProfile],
+  [() => props.tabId, () => props.databaseType, () => props.dialect, sqlSyntaxDialect, sqlDriverProfile, () => kingbaseConfig.value?.database_info?.compatibilityMode],
   () => {
+    completion.invalidateRequests();
+    refreshCompletionCache();
+    setSemanticDiagnostics([]);
     executableStatementRangeCache = null;
     statementBoundaries.invalidate();
     if (!view.value || !codeMirrorRuntime.sqlLanguageComp || !codeMirrorRuntime.buildSqlLanguageExtension || !codeMirrorRuntime.sqlSemanticHighlightComp || !codeMirrorRuntime.buildSqlSemanticHighlightExtension || !codeMirrorRuntime.sqlSignatureComp || !codeMirrorRuntime.buildSqlSignatureExtension)
@@ -2475,6 +2629,7 @@ watch(
       ],
     });
     applyEditorCompletionExtension();
+    scheduleSemanticDiagnostics(0);
   },
   { flush: "post" },
 );
@@ -2681,7 +2836,9 @@ function resumeQueryEditorBackgroundWork() {
   // the first Run does not pay pool creation or external-driver startup.
   warmActiveTabConnection();
   if (view.value) schedulePreviewContextRefresh(view.value);
-  restoreEditorSelection(undefined, !props.initialViewport);
+  if (props.initialSelection !== undefined) {
+    restoreEditorSelection(props.initialSelection, !props.initialViewport);
+  }
   restoreEditorFocus();
   restoreEditorViewport();
 }
@@ -2754,7 +2911,12 @@ function scrollCursorIntoView() {
 }
 
 function beginExecutionViewportTracking() {
-  executionViewportOwnership.beginExecution();
+  // Snapshot visibility while the viewport still has its pre-execution size:
+  // once the results pane opens it shrinks the editor, and a cursor that was
+  // visible before execution must not be scrolled away by the shrink (#10480).
+  const currentView = view.value;
+  const cursorVisible = currentView ? isQueryEditorPositionVisible(currentView.state.selection.main.head, currentView.visibleRanges, currentView.viewport) : false;
+  executionViewportOwnership.beginExecution(cursorVisible);
 }
 
 function recordExecutionViewportInteraction() {
@@ -2802,6 +2964,8 @@ function unfoldAll(): boolean {
 }
 
 function shouldBlockExecutionShortcut(event?: KeyboardEvent, currentView: EditorViewType | null = view.value): boolean {
+  if (props.isExecuting) return true;
+  if (event?.repeat) return true;
   return (currentView ? isEditorComposing(currentView) : false) || (event ? postCompositionKeyGuard.blocks(event) : false);
 }
 

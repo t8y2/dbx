@@ -10,12 +10,14 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -48,10 +50,12 @@ class StandardJdbcMetadataTest {
     @Test
     void scopesSchemasToTheConnectionCatalog() {
         AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        AtomicInteger schemaCalls = new AtomicInteger();
         DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
             @Override
             public Object handle(Method method, Object[] args) {
                 if ("getSchemas".equals(method.getName())) {
+                    schemaCalls.incrementAndGet();
                     capturedArgs.set(args);
                     return rows(row("TABLE_SCHEM", "APP"));
                 }
@@ -74,6 +78,57 @@ class StandardJdbcMetadataTest {
         assertEquals(List.of("APP"), StandardJdbcMetadata.INSTANCE.listSchemas(conn, profile, "initial_catalog"));
         assertEquals("regular_catalog", capturedArgs.get()[0]);
         assertEquals(null, capturedArgs.get()[1]);
+        assertEquals(1, schemaCalls.get());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false, false, true", "true, false, true", "false, true, true", "false, false, false"})
+    void retriesEmptyCatalogSchemasBeforeAddingCurrentSchema(boolean fallbackFails, boolean currentCatalog, boolean fallbackEnabled) {
+        List<String> catalogs = new ArrayList<>();
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getSchemas".equals(method.getName())) {
+                    String catalog = (String) args[0];
+                    catalogs.add(catalog);
+                    if (catalog != null) {
+                        return rows();
+                    }
+                    if (fallbackFails) {
+                        throw new UnsupportedOperationException("Unscoped schemas unavailable");
+                    }
+                    return rows(row("TABLE_SCHEM", "DBX_USER"), row("TABLE_SCHEM", "DBX_DEMO"), row("TABLE_SCHEM", "SYS"));
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                if ("getCatalog".equals(method.getName())) {
+                    return currentCatalog ? "HXE" : null;
+                }
+                if ("getSchema".equals(method.getName())) {
+                    return "DBX_USER";
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+
+        JdbcAgentProfile effectiveProfile = fallbackEnabled ? profile : new JdbcAgentProfile("example.Driver", "jdbc:example:") {
+            @Override
+            public boolean getCatalogFallbackEnabled() {
+                return false;
+            }
+        };
+        assertEquals(
+            fallbackFails || !fallbackEnabled ? List.of("DBX_USER") : List.of("DBX_DEMO", "DBX_USER"),
+            StandardJdbcMetadata.INSTANCE.listSchemas(conn, effectiveProfile, currentCatalog ? "initial_catalog" : "HXE")
+        );
+        assertEquals(fallbackEnabled ? Arrays.asList("HXE", null) : List.of("HXE"), catalogs);
     }
 
     @Test
@@ -412,6 +467,80 @@ class StandardJdbcMetadataTest {
         assertFalse(columns.get(0).getIs_nullable());
         assertEquals("NAME", columns.get(1).getName());
         assertEquals(Integer.valueOf(64), columns.get(1).getCharacter_maximum_length());
+    }
+
+    @Test
+    void retriesCaseInsensitiveTableMetadataWithTheCanonicalTableName() {
+        JdbcAgentProfile caseInsensitiveProfile = new JdbcAgentProfile(
+            "example.Driver",
+            "jdbc:example://{host}:{port}/{database}",
+            0,
+            false,
+            Collections.emptySet(),
+            Collections.singletonList("TABLE")
+        ) {
+            @Override
+            public boolean getCaseInsensitiveTableMetadata() {
+                return true;
+            }
+        };
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("getTables".equals(name)) {
+                    return rows(row("TABLE_NAME", "ORDERS"));
+                }
+                if ("getPrimaryKeys".equals(name)) {
+                    return "ORDERS".equals(args[2]) ? rows(row("COLUMN_NAME", "ID")) : rows();
+                }
+                if ("getColumns".equals(name)) {
+                    return "ORDERS".equals(args[2]) ? rows(row(
+                        "COLUMN_NAME", "ID",
+                        "TYPE_NAME", "INTEGER",
+                        "NULLABLE", DatabaseMetaData.columnNoNulls,
+                        "COLUMN_SIZE", 10,
+                        "DECIMAL_DIGITS", 0
+                    )) : rows();
+                }
+                if ("getIndexInfo".equals(name)) {
+                    return "ORDERS".equals(args[2]) ? rows(row(
+                        "INDEX_NAME", "PK_ORDERS",
+                        "COLUMN_NAME", "ID",
+                        "ORDINAL_POSITION", (short) 1,
+                        "NON_UNIQUE", false
+                    )) : rows();
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                return "getMetaData".equals(method.getName()) ? meta : defaultValue(method.getReturnType());
+            }
+        });
+
+        List<ColumnInfo> columns = StandardJdbcMetadata.INSTANCE.getColumns(
+            conn,
+            caseInsensitiveProfile,
+            null,
+            "APP",
+            "orders"
+        );
+        List<IndexInfo> indexes = StandardJdbcMetadata.INSTANCE.listIndexes(
+            conn,
+            caseInsensitiveProfile,
+            null,
+            "APP",
+            "orders"
+        );
+
+        assertEquals(1, columns.size());
+        assertEquals("ID", columns.get(0).getName());
+        assertTrue(columns.get(0).getIs_primary_key());
+        assertEquals(1, indexes.size());
+        assertEquals(Collections.singletonList("ID"), indexes.get(0).getColumns());
     }
 
     @Test

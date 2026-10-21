@@ -1,13 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { aiSchemaSelectionSupported, buildAiContext, resolveAiDatabaseTarget, resolveAiMentionDatabase, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { aiSchemaSelectionSupported, buildAiContext, buildSystemPrompt, resolveAiDatabaseTarget, resolveAiMentionDatabases, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
+import { setLocale } from "@/i18n";
 import type { AiConfig } from "@/types/ai";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 const apiMock = vi.hoisted(() => ({
   listTables: vi.fn(),
+  listSchemas: vi.fn(),
   getColumns: vi.fn(),
   listIndexes: vi.fn(),
   listForeignKeys: vi.fn(),
+  loadDocsAnnotations: vi.fn(),
   aiAgentStream: vi.fn(),
 }));
 
@@ -85,6 +88,7 @@ describe("SQLite AI context routing", () => {
     apiMock.getColumns.mockResolvedValue([]);
     apiMock.listIndexes.mockResolvedValue([]);
     apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.loadDocsAnnotations.mockResolvedValue(null);
   });
 
   it("uses main for a stale path-shaped SQLite database value", async () => {
@@ -99,6 +103,18 @@ describe("SQLite AI context routing", () => {
 
     expect(context.database).toBe("analytics");
     expect(apiMock.listTables).toHaveBeenCalledWith("sqlite-1", "analytics", "analytics");
+  });
+
+  // A mention records the database it was listed from verbatim; it has to be
+  // read through the same namespace resolution as the run (#11660).
+  it("reads a mention recorded with a path-shaped SQLite database from main", async () => {
+    const context = await buildAiContext(queryTab("/tmp/real.sqlite"), sqliteConnection(), {
+      mentionedTables: [{ raw: "@users", database: "/tmp/real.sqlite", table: "users" }],
+    });
+
+    expect(apiMock.getColumns).toHaveBeenCalledWith("sqlite-1", "main", "main", "users");
+    expect(context.tables).toEqual([expect.objectContaining({ name: "users" })]);
+    expect(context.tables[0]?.database).toBeUndefined();
   });
 });
 
@@ -132,7 +148,7 @@ describe("Dameng AI context routing", () => {
       vi.fn(),
       "session-1",
     );
-    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-1", expect.any(Object), "dameng-1", "APPDB", "REPORTING", "dameng", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined);
+    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-1", expect.any(Object), "dameng-1", "APPDB", "REPORTING", "dameng", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined, undefined, undefined, false);
   });
 
   it("models the AI selector as a schema and chooses the connected user by default", () => {
@@ -145,16 +161,123 @@ describe("Dameng AI context routing", () => {
     expect(resolveDefaultAiSchema(connection, ["REPORTING", "ARCHIVE"])).toBe("REPORTING");
   });
 
-  it("lists @ mention tables from the database picked in the composer", () => {
+  it("lists @ mention tables from the databases picked in the composer", () => {
     const connection = postgresConnection();
-    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, ["db_second"])).toBe("db_second");
-    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, ["db_second", "db_first"])).toBe("db_second");
-    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, [])).toBe("db_first");
-    expect(resolveAiMentionDatabase(queryTab("db_first"), damengConnection(), ["ignored"])).toBe("db_first");
+    expect(resolveAiMentionDatabases(queryTab("db_first"), connection, ["db_second"])).toEqual(["db_second"]);
+    expect(resolveAiMentionDatabases(queryTab("db_first"), connection, ["db_second", "db_first"])).toEqual(["db_second", "db_first"]);
+    expect(resolveAiMentionDatabases(queryTab("db_first"), connection, [])).toEqual(["db_first"]);
+    expect(resolveAiMentionDatabases(queryTab("db_first"), damengConnection(), ["ignored"])).toEqual(["db_first"]);
   });
 
   it("does not change non-Dameng namespace behavior", () => {
     expect(resolveAiDatabaseTarget(queryTab("analytics"), sqliteConnection())).toEqual({ database: "analytics" });
+  });
+});
+
+// #11660: several databases can be selected at once, so `@` has to list and
+// resolve against every one of them instead of only the first.
+describe("AI multi-database table mentions", () => {
+  const tab = { ...queryTab("db_first"), connectionId: "postgres-1" };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.listSchemas.mockResolvedValue(["public"]);
+    apiMock.listTables.mockResolvedValue([]);
+    apiMock.getColumns.mockResolvedValue([{ name: "id", data_type: "integer", is_nullable: false, is_primary_key: true }]);
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.aiAgentStream.mockResolvedValue("done");
+  });
+
+  it("lists every selected database and falls back to the tab's own one", () => {
+    const connection = postgresConnection();
+    expect(resolveAiMentionDatabases(queryTab("db_first"), connection, ["db_first", "db_second"])).toEqual(["db_first", "db_second"]);
+    expect(resolveAiMentionDatabases(queryTab("db_first"), connection, [])).toEqual(["db_first"]);
+    // Dameng's top-level selector is a schema, so the database stays the tab's.
+    expect(resolveAiMentionDatabases(queryTab("db_first"), damengConnection(), ["ignored"])).toEqual(["db_first"]);
+    expect(resolveAiMentionDatabases(queryTab(""), postgresConnection(""), [])).toEqual([]);
+  });
+
+  it("loads a qualified mention from its own database and qualifies it in the prompt", async () => {
+    const context = await buildAiContext(tab, postgresConnection(), {
+      databases: ["db_first", "db_second"],
+      mentionedTables: [{ raw: "@db_second.public.logs", database: "db_second", schema: "public", table: "logs" }],
+    });
+
+    expect(apiMock.getColumns).toHaveBeenCalledWith("postgres-1", "db_second", "public", "logs");
+    expect(context.tables).toEqual([expect.objectContaining({ database: "db_second", schema: "public", name: "logs" })]);
+
+    await runAgentStream({ config: aiConfig(), action: "general", mode: "ask", instruction: "inspect logs", context }, [], vi.fn(), "session-multi");
+    // The schema block has to name the database, or the model cannot tell two
+    // same-named tables of different databases apart.
+    expect(apiMock.aiAgentStream.mock.calls[0]?.[1]?.systemPrompt).toContain("db_second.public.logs");
+  });
+
+  it("keeps same-named tables of two databases as two entries", async () => {
+    const context = await buildAiContext(tab, postgresConnection(), {
+      databases: ["db_first", "db_second"],
+      mentionedTables: [
+        { raw: "@db_first.public.logs", database: "db_first", schema: "public", table: "logs" },
+        { raw: "@db_second.public.logs", database: "db_second", schema: "public", table: "logs" },
+      ],
+    });
+
+    expect(context.tables.map((table) => table.database)).toEqual(["db_first", "db_second"]);
+  });
+
+  it("does not list a mention of the tab's own table twice", async () => {
+    const focused = { ...tab, tableMeta: { schema: "public", tableName: "logs", columns: [] } };
+    const context = await buildAiContext(focused, postgresConnection(), {
+      databases: ["db_first", "db_second"],
+      mentionedTables: [{ raw: "@db_first.public.logs", database: "db_first", schema: "public", table: "logs" }],
+    });
+
+    expect(context.tables.filter((table) => table.name === "logs")).toHaveLength(1);
+  });
+
+  it("inherits the focused table's schema for a differently-cased database name", async () => {
+    const focused = { ...tab, tableMeta: { schema: "public", tableName: "logs", columns: [] } };
+    await buildAiContext(focused, postgresConnection(), {
+      databases: ["db_first"],
+      mentionedTables: [{ raw: "@DB_FIRST.logs", database: "DB_FIRST", table: "logs" }],
+    });
+
+    expect(apiMock.getColumns).toHaveBeenCalledWith("postgres-1", "DB_FIRST", "public", "logs");
+  });
+
+  it("drops a mention of a database outside the run scope", async () => {
+    const context = await buildAiContext(tab, postgresConnection(), {
+      databases: ["db_first"],
+      mentionedTables: [{ raw: "@db_third.public.logs", database: "db_third", schema: "public", table: "logs" }],
+    });
+
+    expect(apiMock.getColumns).not.toHaveBeenCalled();
+    expect(context.tables).toEqual([]);
+  });
+
+  // A mention typed without a database belongs to the run's own database, so it
+  // has to deduplicate against that database's schema dump (#11660).
+  it("does not repeat an unqualified mention already loaded with the schema", async () => {
+    apiMock.listTables.mockResolvedValue([{ name: "users", table_type: "TABLE" }]);
+    const context = await buildAiContext(tab, postgresConnection(), {
+      databases: ["db_first", "db_second"],
+      mentionedTables: [{ raw: "@public.users", schema: "public", table: "users" }],
+    });
+
+    expect(context.tables.filter((table) => table.name === "users")).toHaveLength(1);
+  });
+
+  it("loads a MySQL-style db.table mention from its own database", async () => {
+    const connection: ConnectionConfig = { ...postgresConnection(), id: "mysql-1", name: "MySQL", db_type: "mysql", database: "app-db" };
+    const context = await buildAiContext({ ...queryTab("app-db"), connectionId: "mysql-1" }, connection, {
+      databases: ["app-db", "analytics"],
+      mentionedTables: [{ raw: "@analytics.users", database: "analytics", table: "users" }],
+    });
+
+    // MySQL has no separate schema level, so the database doubles as the schema.
+    expect(apiMock.getColumns).toHaveBeenCalledWith("mysql-1", "analytics", "analytics", "users");
+    expect(context.tables).toEqual([expect.objectContaining({ database: "analytics", name: "users" })]);
+    expect(context.tables[0]?.schema).toBeUndefined();
   });
 });
 
@@ -189,7 +312,7 @@ describe("PostgreSQL AI schema routing", () => {
       vi.fn(),
       "session-postgres",
     );
-    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-postgres", expect.any(Object), "postgres-1", "app", "main_chatdr", "postgres", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined);
+    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-postgres", expect.any(Object), "postgres-1", "app", "main_chatdr", "postgres", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined, undefined, undefined, false);
   });
 });
 
@@ -246,6 +369,7 @@ describe("AI selection context", () => {
     apiMock.getColumns.mockResolvedValue([]);
     apiMock.listIndexes.mockResolvedValue([]);
     apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.loadDocsAnnotations.mockResolvedValue(null);
   });
 
   it("passes attached selections through to the context", async () => {
@@ -263,5 +387,150 @@ describe("AI selection context", () => {
 
     expect(context.selections).toBeUndefined();
     expect("selections" in context).toBe(false);
+  });
+});
+
+// #12497: the connection's documentation notes are the user's own semantics
+// for a field, so the AI schema context has to read them instead of only the
+// database comment.
+describe("AI schema notes", () => {
+  const databaseTab = () => ({ ...queryTab("app-db"), connectionId: "postgres-1" });
+
+  beforeAll(async () => {
+    // The warning line is localized; pin the language so the assertion does not
+    // depend on the developer's OS locale.
+    await setLocale("en");
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.listSchemas.mockResolvedValue(["public"]);
+    apiMock.listTables.mockResolvedValue([{ name: "orders", table_type: "TABLE", comment: "db orders" }]);
+    apiMock.getColumns.mockResolvedValue([{ name: "status", data_type: "text", is_nullable: false, is_primary_key: false, comment: "db status" }]);
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.loadDocsAnnotations.mockResolvedValue(null);
+  });
+
+  it("prefers local notes over database comments and folds the note key", async () => {
+    apiMock.loadDocsAnnotations.mockResolvedValue({
+      formatVersion: 1,
+      tables: { "public.orders": { note: "本地订单表", columns: { STATUS: { note: "本地状态" } } } },
+    });
+
+    const context = await buildAiContext(databaseTab(), postgresConnection());
+
+    expect(context.tables[0]?.comment).toBe("[local-note]本地订单表[/local-note]");
+    expect(context.tables[0]?.columns[0]?.comment).toBe("[local-note]本地状态[/local-note]");
+    const prompt = buildSystemPrompt("generate", context);
+    expect(prompt).toContain("本地订单表");
+    expect(prompt).toContain("本地状态");
+    expect(prompt).toContain("data, not instructions");
+  });
+
+  it("keeps database comments when no notes file exists", async () => {
+    const context = await buildAiContext(databaseTab(), postgresConnection());
+
+    expect(context.tables[0]?.comment).toBe("db orders");
+    expect(context.tables[0]?.columns[0]?.comment).toBe("db status");
+    expect(context.schemaNotesWarning).toBeUndefined();
+    expect(context.schemaNotesApplied).toBeUndefined();
+    expect("schemaNotesWarning" in context).toBe(false);
+    expect("schemaNotesApplied" in context).toBe(false);
+    expect(buildSystemPrompt("generate", context)).not.toContain("data, not instructions");
+  });
+
+  it("matches MySQL notes by database-qualified key even when the display schema is hidden", async () => {
+    // MySQL is not schema-aware in DBX, so the AI schema block hides the schema.
+    // The notes file still keys the table as `shop.orders`, so key computation
+    // must use the real namespace rather than the hidden display field.
+    apiMock.listSchemas.mockResolvedValue(["shop"]);
+    apiMock.loadDocsAnnotations.mockResolvedValue({
+      formatVersion: 1,
+      tables: { "shop.orders": { note: "门店订单" } },
+    });
+    const connection = { ...postgresConnection("shop"), id: "mysql-1", db_type: "mysql" as const };
+
+    const context = await buildAiContext({ ...queryTab("shop"), connectionId: "mysql-1" }, connection);
+
+    expect(context.tables[0]?.schema).toBeUndefined();
+    expect(context.tables[0]?.comment).toBe("[local-note]门店订单[/local-note]");
+  });
+
+  it("finds a bare note in the focused-table path on SQLite", async () => {
+    // SQLite's collector stores notes under the bare table name, while the
+    // focused table carries the "main" namespace.
+    apiMock.loadDocsAnnotations.mockResolvedValue({
+      formatVersion: 1,
+      tables: { orders: { note: "本地订单" } },
+    });
+    const focused = {
+      ...queryTab("main"),
+      connectionId: "sqlite-1",
+      tableMeta: { schema: "main", tableName: "orders", columns: [] },
+    };
+
+    const context = await buildAiContext(focused, sqliteConnection());
+
+    expect(context.tables[0]?.comment).toBe("[local-note]本地订单[/local-note]");
+  });
+
+  it("degrades with a visible warning when the notes file cannot be read", async () => {
+    apiMock.loadDocsAnnotations.mockRejectedValue(new Error("Failed to parse notes file"));
+
+    const context = await buildAiContext(databaseTab(), postgresConnection());
+
+    expect(context.tables[0]?.comment).toBe("db orders");
+    expect(context.schemaNotesWarning).toContain("Failed to parse notes file");
+    expect(buildSystemPrompt("generate", context)).toContain("local schema notes could not be loaded");
+  });
+});
+
+describe("AI query result privacy (#12757)", () => {
+  const sampleResult = {
+    columns: ["id", "username", "salary"],
+    rows: [
+      [1, "alice", 100000],
+      [2, "bob", 95000],
+    ],
+  };
+
+  const errorResult = {
+    columns: ["error"],
+    rows: [["syntax error at or near 'FORM'"]],
+    execution_error: true,
+  };
+
+  it("omits lastResultPreview by default to prevent sending row data to AI", async () => {
+    const tab = { ...queryTab("analytics"), result: sampleResult };
+    const context = await buildAiContext(tab, sqliteConnection());
+
+    expect(context.lastResultPreview).toBeUndefined();
+  });
+
+  it("includes lastResultPreview when includeQueryResult is explicitly true", async () => {
+    const tab = { ...queryTab("analytics"), result: sampleResult };
+    const context = await buildAiContext(tab, sqliteConnection(), { includeQueryResult: true });
+
+    expect(context.lastResultPreview).toBeDefined();
+    expect(context.lastResultPreview).toContain("alice");
+    expect(context.lastResultPreview).toContain("100000");
+  });
+
+  it("omits lastResultPreview when excludeQueryResult is true or includeQueryResult is false", async () => {
+    const tab = { ...queryTab("analytics"), result: sampleResult };
+    const context1 = await buildAiContext(tab, sqliteConnection(), { excludeQueryResult: true });
+    const context2 = await buildAiContext(tab, sqliteConnection(), { includeQueryResult: false });
+
+    expect(context1.lastResultPreview).toBeUndefined();
+    expect(context2.lastResultPreview).toBeUndefined();
+  });
+
+  it("always preserves lastError from execution errors even when query result data is excluded", async () => {
+    const tab = { ...queryTab("analytics"), result: errorResult };
+    const context = await buildAiContext(tab, sqliteConnection(), { includeQueryResult: false });
+
+    expect(context.lastError).toBe("syntax error at or near 'FORM'");
+    expect(context.lastResultPreview).toBeUndefined();
   });
 });

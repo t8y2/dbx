@@ -2,10 +2,13 @@
 
 pub use dbx_types::{database_manifest, models, types};
 
+mod cypher_read_only;
+
 pub mod dml_preview_sql;
 pub mod mysql_ddl_normalize;
 pub mod mysql_event_sql;
 pub mod object_source_sql;
+pub mod oracle_view_rename;
 pub mod query_execution_sql;
 pub mod sql;
 pub mod sql_analysis;

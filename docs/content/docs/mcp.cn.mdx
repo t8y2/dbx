@@ -122,7 +122,7 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 
 | 工具 | 说明 |
 | --- | --- |
-| `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
+| `dbx_list_connections` | 列出当前 MCP 会话可见的连接，包括已保存的备注 |
 | `dbx_list_databases` | 列出连接中可通过 MCP 访问的数据库，并遵守该连接的数据库范围 |
 | `dbx_add_connection` | 添加连接到 DBX 存储 |
 | `dbx_duplicate_connection` | 复制一个连接及其完整配置 |
@@ -147,6 +147,8 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 | `dbx_send_message` | 向支持的消息队列 Topic 或队列发送消息 |
 | `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
+
+`dbx_list_connections` 和 `dbx://connections` 会返回已保存的连接备注，不受侧边栏显示开关影响。可访问该连接的 MCP 客户端也能看到备注，请勿在备注中保存密码或其他敏感信息。
 
 `dbx_execute_query` 返回行数：
 
@@ -233,7 +235,7 @@ Resource 的发现和读取会复用对应 Tool 的白名单，以及连接、�
 
 该 opt-in 模式仅支持本地原生 MySQL 连接。DBX Web/`DBX_WEB_URL`、外部驱动 profile、兼容引擎及其他数据库类型会返回 `TRANSACTION_UNSUPPORTED`，不会静默退化为自动提交。事务会话每次操作只接受一条经过解析的 `SELECT`（含锁定读）、`INSERT`、`UPDATE`、`DELETE` 或 `REPLACE`；原始事务控制、DDL/临时 DDL、`CALL`、`LOAD`、表锁、`SET`、`USE`、XA、文件/输出子句、可执行注释、优化器 hint 及多语句均会被拒绝。完整批次持有同一个操作槽位，并为每条语句返回执行后的事务状态。
 
-响应包含 `transaction_state`（`idle`、`active` 或 `unknown`），并在适用时包含 `transaction_outcome`（`committed`、`rolled_back` 或 `unknown`）。普通 MySQL 语句错误可能仍让事务保持 active；DBX 会在同一连接上重新探测服务器状态后再返回。超时、取消、传输故障或丢失 `COMMIT` 确认会把结果永久标为 `unknown`，禁止该会话继续执行 SQL，并在不重放语句或 `COMMIT` 的前提下销毁连接。显式正值的连接查询超时同样用于事务操作；当连接配置为“无限制”（`0`）时，事务 owner 仍使用默认 300 秒操作上限，确保 busy 操作保持有界。关闭、过期、协议会话删除和服务退出会对状态已知的 active 事务执行有界回滚，然后销毁连接。
+响应包含 `transaction_state`（`idle`、`active` 或 `unknown`），并在适用时包含 `transaction_outcome`（`committed`、`rolled_back` 或 `unknown`）。普通 MySQL 语句错误可能仍让事务保持 active；DBX 会在同一连接上重新探测服务器状态后再返回。超时、取消、传输故障或丢失 `COMMIT` 确认会把结果永久标为 `unknown`，禁止该会话继续执行 SQL，并在不重放语句或 `COMMIT` 的前提下销毁连接。显式正值的连接查询超时同样用于事务操作；当连接配置为“无限制”（`0`）时，事务 owner 仍使用默认 300 秒操作上限，确保 busy 操作保持有界。关闭、过期和服务退出会对状态已知的 active 事务执行有界回滚，然后销毁连接。会话的回收途径是 `dbx_close_session`、空闲超时或 MCP 服务退出。HTTP 传输层不持有任何会话，因此没有传输会话可供 `DELETE` 结束、也不会因空闲而丢失；承载状态的只有 `session_id` 句柄本身。
 
 <Callout type="warn">回滚保证依赖 InnoDB 等事务型存储。触发器、存储函数、非事务表及外部副作用可能产生 MySQL 无法回滚的效果。DBX 会在排队完成后重新检查当前连接/数据库范围、工具 allowlist、只读与生产保护以及已确认 SQL。即使写权限被撤销，仍允许原会话执行回滚和关闭以完成清理。</Callout>
 
@@ -287,6 +289,17 @@ Desktop 可以选择直接托管 Streamable HTTP MCP 服务。该服务**默认�
 ```
 
 本机客户端建议保留默认回环监听。绑定到局域网地址时，必须开启 **允许远程访问**，并填写精确的允许 `Host`；浏览器客户端还必须填写精确的 `Origin`。客户端通过非默认端口访问时，允许的 Host 应写成 `host:port`。轮换 Token 会立即使旧凭证失效。
+
+同一个端点同时响应两代 MCP 协议，任何版本的 Agent 都无需特殊配置即可连接：
+
+| Agent | 握手方式 | 传输状态 |
+| --- | --- | --- |
+| 旧版客户端 | `initialize`（协议 `2025-11-25` 及更早） | 无状态：响应不返回 `Mcp-Session-Id`，每个请求独立处理 |
+| 新版客户端 | `server/discover`（协议 `2026-07-28`） | 无状态：每个请求在 `_meta` 中自带协议版本与能力 |
+
+两代客户端都以无状态方式服务，因此端点只接受 `POST`：`GET` 与 `DELETE` 返回 `405 Method Not Allowed`。DBX 不依赖任何 HTTP 层会话，所以客户端无论空闲多久再连接都能正常工作，不会撞上已被服务端回收的会话。
+
+DBX 的有状态会话在两种情况下都可用，因为它是**显式句柄**：`dbx_open_session` 返回的 `session_id` 由 Agent 在后续调用中作为普通工具参数回传。该句柄独立于传输层、有自己的空闲 TTL，负责让固定连接、`USE`/`SET` 状态、临时表或已开启的事务跨请求保持。
 
 ### 本地连接
 
@@ -403,7 +416,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 "$HOME/.dbx/bin/dbx-mcp" --authorize-keychain
 ```
 
-Homebrew 或 npm 安装需要替换为对应的二进制路径。该命令先验证运行程序的官方签名和稳定 designated requirement，再读取已有 DBX 钥匙串条目；不会打开数据库、启动 MCP 传输、创建或替换密钥、导出密钥，也不会自行改写 ACL。macOS 首次迁移时可能要求确认一次，对已验证的 DBX 程序选择 **始终允许**，然后重启 MCP 客户端。已获授权的程序应直接成功。稳定签名使普通正式升级继续沿用授权，但不能绕过签名团队变更或用户撤销权限。
+Homebrew 或 npm 安装需要替换为对应的二进制路径。该命令先验证运行程序的官方签名和稳定 designated requirement，再读取已有 DBX 钥匙串条目；不会打开数据库、启动 MCP 传输、创建或替换密钥、导出密钥，也不会自行改写 ACL。macOS 首次迁移时可能要求确认一次，对已验证的 DBX 程序选择 **始终允许**（不要选 **允许**）。随后命令会用一个全新的非交互进程再读取一次密钥；若授权未被保留，会以 `KEYRING_ACCESS_FAILED` 报错，因此看到成功提示即表示后台启动可用。最后重启 MCP 客户端。已获授权的程序应直接成功。稳定签名使普通正式升级继续沿用授权，但不能绕过签名团队变更或用户撤销权限。
 
 不要将 `--authorize-keychain` 添加到 MCP 客户端的启动参数，它是执行后立即退出的一次性恢复命令。缺失的密钥仍需通过 Desktop 数据安全设置处理，该命令不能恢复丢失的密钥。Windows 和 Linux 不使用此 macOS 命令；应恢复同一系统用户的凭据库访问（或配置的无界面密钥文件），再重启 MCP。凭据库拒绝访问或密钥损坏时，不应自动生成替代加密密钥。
 

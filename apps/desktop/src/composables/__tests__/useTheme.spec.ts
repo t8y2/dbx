@@ -51,7 +51,7 @@ async function flushDynamicImport() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-describe("useTheme on Linux", () => {
+describe("useTheme in Tauri", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
@@ -69,6 +69,7 @@ describe("useTheme on Linux", () => {
 
   afterEach(() => {
     vi.doUnmock("@/lib/backend/tauriRuntime");
+    vi.doUnmock("@tauri-apps/api/core");
     vi.doUnmock("@tauri-apps/api/window");
     vi.unstubAllGlobals();
   });
@@ -106,6 +107,21 @@ describe("useTheme on Linux", () => {
     theme.setThemeMode("light");
     await flushDynamicImport();
     expect(setTheme).toHaveBeenLastCalledWith("light");
+  });
+
+  it("does not let macOS appearance changes override the selected app icon", async () => {
+    const invoke = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const theme = await loadTheme("light");
+
+    theme.applyTheme();
+    await flushDynamicImport();
+    theme.setThemeMode("dark");
+    theme.setThemeMode("light");
+    await flushDynamicImport();
+
+    expect(invoke).not.toHaveBeenCalledWith("set_macos_app_icon_appearance", expect.anything());
   });
 
   it("previews a palette without persisting it and restores the saved palette when cancelled", async () => {

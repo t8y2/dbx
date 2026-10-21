@@ -3,6 +3,7 @@ import * as api from "@/lib/backend/api";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import { uuid } from "@/lib/common/utils";
 import { formatQueryDuration } from "@/lib/format/duration";
+import { autoRevealExportedPathIfConfigured } from "@/lib/export/exportPath";
 
 export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
@@ -361,6 +362,9 @@ function finishDataTransferTask(task: ExportTask) {
 
 function finishExportTask(task: ExportTask) {
   task.finishedAt ??= Date.now();
+  if (task.status === "Done" && (task.kind === "table-export" || task.kind === "database-export" || task.kind === "data-dictionary") && task.databaseExportSource !== "scheduled" && task.filePath) {
+    void autoRevealExportedPathIfConfigured(task.filePath);
+  }
 }
 
 // Implementation lives in @/lib/format/duration (shared with the DataGrid

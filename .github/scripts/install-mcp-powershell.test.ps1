@@ -73,11 +73,16 @@ try {
             Assert-True ($output.Contains((ConvertTo-Json -InputObject $binary -Compress))) 'Config is not the escaped absolute path'
             Assert-True ($configuredPath -eq (Split-Path $binary)) 'PATH target differs'
             Assert-True (!(Get-ChildItem -LiteralPath (Split-Path $binary) -Directory -Force)) 'Temporary install directory leaked'
+            $stale = Join-Path (Split-Path $binary) 'dbx-mcp.exe~RF8c73e4f.TMP'
+            [IO.File]::WriteAllText($stale, 'old executable')
             $rerun = Install-DbxMcp | Out-String
             Assert-True ($rerun.Contains('dbx-mcp 0.4.96 already up to date')) 'Rerun not idempotent'
+            Assert-True (!(Test-Path -LiteralPath $stale)) 'Up-to-date install left replacement temp file'
+            [IO.File]::WriteAllText($stale, 'old executable')
             '0.4.95' | Set-Content -LiteralPath $marker
             $updated = Install-DbxMcp | Out-String
             Assert-True ($updated.Contains('Installed dbx-mcp 0.4.96')) 'Marker-based upgrade failed'
+            Assert-True (!(Test-Path -LiteralPath $stale)) 'Upgrade left replacement temp file'
             Remove-Item -LiteralPath $binary
             $repaired = Install-DbxMcp | Out-String
             Assert-True ($repaired.Contains('Installed dbx-mcp 0.4.96')) 'Orphan marker prevented installation'
@@ -107,6 +112,61 @@ try {
     Assert-True ((Get-Content -LiteralPath $marker -Raw).Trim() -eq '0.4.97') 'Downgrade changed marker'
     $script:count++
     Write-Output 'PASS older mirror cannot downgrade installation'
+    $installDir = Split-Path $binary
+    $preservedNames = @('dbx-mcp.exe', '.dbx-mcp-version', 'other.tmp', 'dbx-mcp.exe~RFxyz.TMP', 'dbx-mcp.exe~RF.TMP')
+    foreach ($name in $preservedNames | Select-Object -Skip 2) {
+        [IO.File]::WriteAllText((Join-Path $installDir $name), 'preserve')
+    }
+    $nested = Join-Path $installDir 'dbx-mcp.exe~RF123.TMP'
+    [IO.Directory]::CreateDirectory($nested) | Out-Null
+    $nestedFile = Join-Path $nested 'dbx-mcp.exe~RFabc.TMP'
+    [IO.File]::WriteAllText($nestedFile, 'nested')
+    $stale = Join-Path $installDir 'DBX-MCP.EXE~rfABC123.tmp'
+    [IO.File]::WriteAllText($stale, 'old executable')
+    Remove-McpReplacementTempFiles $installDir
+    Assert-True (!(Test-Path -LiteralPath $stale)) 'Case-insensitive replacement cleanup failed'
+    foreach ($name in $preservedNames) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $installDir $name) -PathType Leaf) "Cleanup removed $name"
+    }
+    Assert-True ((Get-Content -LiteralPath $binary -Raw) -eq 'fixture binary') 'Cleanup changed active binary'
+    Assert-True ((Get-Content -LiteralPath $marker -Raw).Trim() -eq '0.4.97') 'Cleanup changed version marker'
+    Assert-True ((Get-Content -LiteralPath $nestedFile -Raw) -eq 'nested') 'Cleanup recursed into a directory'
+    Remove-McpReplacementTempFiles (Join-Path $testRoot 'missing')
+    $script:count++
+    Write-Output 'PASS cleanup preserves active binary, marker, unrelated files and directories'
+    $linkTarget = Join-Path $testRoot 'linked-target'
+    [IO.Directory]::CreateDirectory($linkTarget) | Out-Null
+    $targetFile = Join-Path $linkTarget 'dbx-mcp.exe~RF789.TMP'
+    [IO.File]::WriteAllText($targetFile, 'preserve link target')
+    $directoryLink = Join-Path $installDir 'dbx-mcp.exe~RF789.TMP'
+    $linkType = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'Junction' } else { 'SymbolicLink' }
+    New-Item -ItemType $linkType -Path $directoryLink -Target $linkTarget | Out-Null
+    Remove-McpReplacementTempFiles $installDir
+    Remove-McpReplacementTempFiles $directoryLink
+    Assert-True ((Get-Content -LiteralPath $targetFile -Raw) -eq 'preserve link target') 'Cleanup followed directory link'
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        $fileLink = Join-Path $installDir 'dbx-mcp.exe~RFabc.TMP'
+        New-Item -ItemType SymbolicLink -Path $fileLink -Target $targetFile | Out-Null
+        Remove-McpReplacementTempFiles $installDir
+        Assert-True ((Get-Item -LiteralPath $fileLink).Attributes -band [IO.FileAttributes]::ReparsePoint) 'Cleanup removed file link'
+    }
+    $script:count++
+    Write-Output 'PASS cleanup skips links'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $lockedPath = Join-Path $installDir 'dbx-mcp.exe~RF456.TMP'
+        [IO.File]::WriteAllText($lockedPath, 'locked')
+        $locked = [IO.File]::Open($lockedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        try {
+            [IO.File]::WriteAllText($stale, 'old executable')
+            Remove-McpReplacementTempFiles $installDir
+            Assert-True (Test-Path -LiteralPath $lockedPath) 'Cleanup removed locked file'
+            Assert-True (!(Test-Path -LiteralPath $stale)) 'Locked file prevented cleanup of other files'
+        } finally { $locked.Dispose() }
+        Remove-McpReplacementTempFiles $installDir
+        Assert-True (!(Test-Path -LiteralPath $lockedPath)) 'Cleanup did not retry released file'
+        $script:count++
+        Write-Output 'PASS cleanup skips locked files and retries after release'
+    }
     Write-Output "PowerShell installer scenarios passed: $script:count"
 } finally {
     Set-Variable HOME -Scope Global -Force -Value $originalHome

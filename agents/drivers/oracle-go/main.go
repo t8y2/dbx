@@ -235,6 +235,9 @@ SELECT t.TRIGGER_NAME,
        t.TRIGGERING_EVENT,
        t.TRIGGER_TYPE,
        t.DESCRIPTION,
+       t.STATUS,
+       t.WHEN_CLAUSE,
+       t.REFERENCING_NAMES,
        s.LINE,
        s.TEXT
 FROM ALL_TRIGGERS t
@@ -482,19 +485,24 @@ type columnInfo struct {
 	Comment                *string `json:"comment"`
 	NumericPrecision       *int    `json:"numeric_precision"`
 	NumericScale           *int    `json:"numeric_scale"`
+	DataLength             *int    `json:"-"`
 	CharacterMaximumLength *int    `json:"character_maximum_length"`
 	CharacterLengthUnit    *string `json:"-"`
 }
 
 type indexInfo struct {
-	Name            string   `json:"name"`
-	Columns         []string `json:"columns"`
-	IsUnique        bool     `json:"is_unique"`
-	IsPrimary       bool     `json:"is_primary"`
-	Filter          *string  `json:"filter"`
-	IndexType       *string  `json:"index_type"`
-	IncludedColumns []string `json:"included_columns"`
-	Comment         *string  `json:"comment"`
+	Name                string   `json:"name"`
+	Columns             []string `json:"columns"`
+	IsUnique            bool     `json:"is_unique"`
+	IsPrimary           bool     `json:"is_primary"`
+	Filter              *string  `json:"filter"`
+	IndexType           *string  `json:"index_type"`
+	IncludedColumns     []string `json:"included_columns"`
+	Comment             *string  `json:"comment"`
+	KeyIsExpression     []bool   `json:"key_is_expression"`
+	KeyDirections       []string `json:"key_directions"`
+	Visibility          *string  `json:"visibility"`
+	KeyMetadataComplete bool     `json:"key_metadata_complete"`
 }
 
 func (i indexInfo) MarshalJSON() ([]byte, error) {
@@ -505,6 +513,12 @@ func (i indexInfo) MarshalJSON() ([]byte, error) {
 	}
 	if value.IncludedColumns == nil {
 		value.IncludedColumns = []string{}
+	}
+	if value.KeyIsExpression == nil {
+		value.KeyIsExpression = []bool{}
+	}
+	if value.KeyDirections == nil {
+		value.KeyDirections = []string{}
 	}
 	return json.Marshal(value)
 }
@@ -523,26 +537,60 @@ type triggerInfo struct {
 	Event     string  `json:"event"`
 	Timing    string  `json:"timing"`
 	Statement *string `json:"statement,omitempty"`
+	Enabled   *bool   `json:"enabled,omitempty"`
 }
 
 // constraintInfo represents primary key, unique, and check constraints for a
 // table. Foreign keys are served separately by listForeignKeys, so this only
 // covers constraint types 'P', 'U', and 'C'.
 type constraintInfo struct {
-	Name              string   `json:"name"`
-	ConstraintType    string   `json:"constraint_type"`
-	Definition        string   `json:"definition"`
-	Columns           []string `json:"columns"`
-	RefSchema         *string  `json:"ref_schema,omitempty"`
-	RefTable          *string  `json:"ref_table,omitempty"`
-	RefColumns        []string `json:"ref_columns"`
-	MatchType         *string  `json:"match_type,omitempty"`
-	OnUpdate          *string  `json:"on_update,omitempty"`
-	OnDelete          *string  `json:"on_delete,omitempty"`
-	Deferrable        bool     `json:"deferrable"`
-	InitiallyDeferred bool     `json:"initially_deferred"`
-	Enabled           bool     `json:"enabled"`
-	Valid             bool     `json:"valid"`
+	Name              string                    `json:"name"`
+	ConstraintType    string                    `json:"constraint_type"`
+	Definition        string                    `json:"definition"`
+	Columns           []string                  `json:"columns"`
+	RefSchema         *string                   `json:"ref_schema,omitempty"`
+	RefTable          *string                   `json:"ref_table,omitempty"`
+	RefColumns        []string                  `json:"ref_columns"`
+	MatchType         *string                   `json:"match_type,omitempty"`
+	OnUpdate          *string                   `json:"on_update,omitempty"`
+	OnDelete          *string                   `json:"on_delete,omitempty"`
+	Deferrable        bool                      `json:"deferrable"`
+	InitiallyDeferred bool                      `json:"initially_deferred"`
+	Enabled           bool                      `json:"enabled"`
+	Valid             bool                      `json:"valid"`
+	OracleMetadata    *oracleConstraintMetadata `json:"oracle_metadata,omitempty"`
+}
+
+type oracleConstraintMetadata struct {
+	MetadataComplete bool                           `json:"metadataComplete"`
+	Owner            string                         `json:"owner"`
+	ConstraintType   *string                        `json:"constraintType"`
+	Status           *string                        `json:"status"`
+	Validated        *string                        `json:"validated"`
+	Deferrable       *string                        `json:"deferrable"`
+	Deferred         *string                        `json:"deferred"`
+	Rely             *string                        `json:"rely"`
+	IndexOwner       *string                        `json:"indexOwner"`
+	IndexName        *string                        `json:"indexName"`
+	IndexSharing     *string                        `json:"indexSharing"`
+	Index            *oracleConstraintIndexMetadata `json:"index"`
+}
+
+type oracleConstraintIndexMetadata struct {
+	MetadataComplete bool     `json:"metadataComplete"`
+	Owner            string   `json:"owner"`
+	TableOwner       string   `json:"tableOwner"`
+	TableName        string   `json:"tableName"`
+	IndexType        string   `json:"indexType"`
+	Uniqueness       string   `json:"uniqueness"`
+	Status           string   `json:"status"`
+	Partitioned      bool     `json:"partitioned"`
+	Visibility       string   `json:"visibility"`
+	Secondary        *string  `json:"secondary"`
+	Columns          []string `json:"columns"`
+	Directions       []string `json:"directions"`
+	KeyIsExpression  []bool   `json:"keyIsExpression"`
+	IncludedColumns  []string `json:"includedColumns"`
 }
 
 func (c constraintInfo) MarshalJSON() ([]byte, error) {
@@ -1075,6 +1123,9 @@ func oracleServerMajorVersionFromDBConn(ctx context.Context, db *sql.DB) (int, b
 }
 
 func oracleServerMajorVersionFromDriverConn(driverConn any) (int, bool) {
+	if guarded, ok := driverConn.(*oracleQueryConnection); ok {
+		driverConn = guarded.oracleThinConnection
+	}
 	conn, ok := driverConn.(*go_ora.Connection)
 	if !ok {
 		return 0, false
@@ -1276,7 +1327,7 @@ func openDBWithStringConverter(params connectParams, stringConverter converters.
 	if stringConverter != nil {
 		go_ora.SetStringConverter(connector, stringConverter, nil)
 	}
-	db := sql.OpenDB(connector)
+	db := sql.OpenDB(oracleQueryConnector{connector})
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)
@@ -1695,12 +1746,23 @@ func oracleListSQLWithVisibleSchemas(baseSQL string, visibleSchemas []string) (s
 }
 
 func (s *server) currentSchema() (string, error) {
+	const sqlText = "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL"
+	var schema string
+	// CURRENT_SCHEMA is per Oracle session. A manual transaction sets it only on
+	// its pinned connection and skips per-statement setSchema, so a pooled
+	// session would report the login user's schema and resolve unqualified
+	// tables against the wrong owner (#11258).
+	if s.manualTx != nil {
+		if err := s.manualTx.QueryRow(sqlText).Scan(&schema); err != nil {
+			return "", err
+		}
+		return strings.ToUpper(schema), nil
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
 	}
-	var schema string
-	if err := db.QueryRow("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL").Scan(&schema); err != nil {
+	if err := db.QueryRow(sqlText).Scan(&schema); err != nil {
 		return "", err
 	}
 	return strings.ToUpper(schema), nil
@@ -1990,7 +2052,7 @@ func completionRequestHasTableLikeKind(kinds []string) bool {
 func completionRequestHasRoutineKind(kinds []string) bool {
 	for _, kind := range kinds {
 		switch strings.ToLower(strings.TrimSpace(kind)) {
-		case "routine", "procedure", "function":
+		case "routine", "procedure", "function", "sequence":
 			return true
 		}
 	}
@@ -2436,13 +2498,54 @@ func oracleCompletionSynonymTargetsQuery(targets []oracleCompletionSynonymTarget
 	}
 }
 
+func oracleCompletionRoutineObjectTypes(kinds []string) []string {
+	if len(kinds) == 0 {
+		return []string{"'FUNCTION'", "'PROCEDURE'", "'PACKAGE'", "'SEQUENCE'"}
+	}
+	hasRoutine := false
+	hasProc := false
+	hasFunc := false
+	hasSeq := false
+	for _, kind := range kinds {
+		switch strings.ToLower(strings.TrimSpace(kind)) {
+		case "routine":
+			hasRoutine = true
+		case "procedure":
+			hasProc = true
+		case "function":
+			hasFunc = true
+		case "sequence":
+			hasSeq = true
+		}
+	}
+	types := make([]string, 0, 4)
+	if hasRoutine {
+		types = append(types, "'FUNCTION'", "'PROCEDURE'", "'PACKAGE'")
+	} else {
+		if hasProc {
+			types = append(types, "'PROCEDURE'")
+		}
+		if hasFunc {
+			types = append(types, "'FUNCTION'")
+		}
+	}
+	if hasSeq {
+		types = append(types, "'SEQUENCE'")
+	}
+	if len(types) == 0 {
+		return []string{"'FUNCTION'", "'PROCEDURE'", "'PACKAGE'"}
+	}
+	return types
+}
+
 func oracleCompletionRoutinesQuery(request completionAssistantRequest, preferredSchema string, limit int) oracleMetadataListQuery {
 	pattern := oracleCompletionLikePattern(request.Mask, request.MatchMode)
 	args := make([]any, 0, 5)
-	baseSQL := `
+	objectTypes := oracleCompletionRoutineObjectTypes(request.ObjectKinds)
+	baseSQL := fmt.Sprintf(`
 SELECT o.OWNER, o.OBJECT_NAME, o.OBJECT_TYPE, CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_OBJECTS o
-WHERE o.OBJECT_TYPE IN ('FUNCTION', 'PROCEDURE', 'PACKAGE')`
+WHERE o.OBJECT_TYPE IN (%s)`, strings.Join(objectTypes, ", "))
 	args = append(args, pattern)
 	nameParam := len(args)
 
@@ -2577,6 +2680,7 @@ SELECT c.COLUMN_NAME,
        cc.COMMENTS,
        c.DATA_PRECISION,
        c.DATA_SCALE,
+	       c.DATA_LENGTH,
        c.CHAR_LENGTH,
        c.CHAR_USED
 FROM ALL_TAB_COLUMNS c
@@ -2607,6 +2711,7 @@ ORDER BY c.COLUMN_ID`, []any{schema, table})
 			&item.Comment,
 			&item.NumericPrecision,
 			&item.NumericScale,
+			&item.DataLength,
 			&item.CharacterMaximumLength,
 			&item.CharacterLengthUnit,
 		); err != nil {
@@ -2707,9 +2812,16 @@ SELECT i.INDEX_NAME,
        i.UNIQUENESS,
        CASE WHEN pk.CONSTRAINT_NAME IS NULL THEN 0 ELSE 1 END AS IS_PRIMARY,
        i.INDEX_TYPE,
+	       i.PARTITIONED,
+       i.VISIBILITY,
+       ic.DESCEND,
+       ie.COLUMN_EXPRESSION,
        ic.COLUMN_POSITION
 FROM ALL_INDEXES i
 JOIN ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME
+  AND ic.TABLE_OWNER = i.TABLE_OWNER AND ic.TABLE_NAME = i.TABLE_NAME
+LEFT JOIN ALL_IND_EXPRESSIONS ie ON ie.INDEX_OWNER = ic.INDEX_OWNER AND ie.INDEX_NAME = ic.INDEX_NAME
+  AND ie.TABLE_OWNER = ic.TABLE_OWNER AND ie.TABLE_NAME = ic.TABLE_NAME AND ie.COLUMN_POSITION = ic.COLUMN_POSITION
 LEFT JOIN ALL_CONSTRAINTS pk ON pk.OWNER = i.TABLE_OWNER
   AND pk.TABLE_NAME = i.TABLE_NAME
   AND pk.CONSTRAINT_TYPE = 'P'
@@ -2724,26 +2836,44 @@ ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION`, []any{schema, table})
 	byName := map[string]*indexInfo{}
 	order := []string{}
 	for rows.Next() {
-		var name, column, uniqueness, indexType string
+		var name, column, uniqueness, indexType, partitioned, visibility, direction string
+		var expression sql.NullString
 		var primary int
 		var position int
-		if err := rows.Scan(&name, &column, &uniqueness, &primary, &indexType, &position); err != nil {
+		if err := rows.Scan(&name, &column, &uniqueness, &primary, &indexType, &partitioned, &visibility, &direction, &expression, &position); err != nil {
 			return nil, err
 		}
 		item := byName[name]
 		if item == nil {
+			visible := visibility
 			item = &indexInfo{
-				Name:            name,
-				Columns:         []string{},
-				IsUnique:        uniqueness == "UNIQUE",
-				IsPrimary:       primary != 0,
-				IndexType:       &indexType,
-				IncludedColumns: []string{},
+				Name:                name,
+				Columns:             []string{},
+				IsUnique:            uniqueness == "UNIQUE",
+				IsPrimary:           primary != 0,
+				IndexType:           &indexType,
+				IncludedColumns:     []string{},
+				KeyIsExpression:     []bool{},
+				KeyDirections:       []string{},
+				Visibility:          &visible,
+				KeyMetadataComplete: true,
 			}
 			byName[name] = item
 			order = append(order, name)
 		}
-		item.Columns = append(item.Columns, column)
+		if position != len(item.Columns)+1 || (direction != "ASC" && direction != "DESC") || (visibility != "VISIBLE" && visibility != "INVISIBLE") || item.Visibility == nil || *item.Visibility != visibility || partitioned != "NO" || (indexType != "NORMAL" && indexType != "FUNCTION-BASED NORMAL") {
+			item.KeyMetadataComplete = false
+		}
+		key := column
+		isExpression := expression.Valid && strings.TrimSpace(expression.String) != ""
+		if isExpression {
+			key = expression.String
+		} else if strings.HasPrefix(column, "SYS_NC") && strings.HasSuffix(column, "$") {
+			item.KeyMetadataComplete = false
+		}
+		item.Columns = append(item.Columns, key)
+		item.KeyIsExpression = append(item.KeyIsExpression, isExpression)
+		item.KeyDirections = append(item.KeyDirections, direction)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -2842,6 +2972,9 @@ SELECT ac.CONSTRAINT_NAME,
        ac.DEFERRABLE,
        ac.DEFERRED,
        ac.VALIDATED,
+	       ac.RELY,
+	       ac.INDEX_OWNER,
+	       ac.INDEX_NAME,
        acc.COLUMN_NAME,
        acc.POSITION,
        atc.NULLABLE
@@ -2862,9 +2995,9 @@ ORDER BY ac.CONSTRAINT_NAME, acc.POSITION`, []any{schema, table})
 	order := []string{}
 	for rows.Next() {
 		var name, kind string
-		var condition, generated, status, deferrable, deferred, validated, column, nullable sql.NullString
+		var condition, generated, status, deferrable, deferred, validated, rely, indexOwner, indexName, column, nullable sql.NullString
 		var position sql.NullInt64
-		if err := rows.Scan(&name, &kind, &condition, &generated, &status, &deferrable, &deferred, &validated, &column, &position, &nullable); err != nil {
+		if err := rows.Scan(&name, &kind, &condition, &generated, &status, &deferrable, &deferred, &validated, &rely, &indexOwner, &indexName, &column, &position, &nullable); err != nil {
 			return nil, err
 		}
 		if skipped[name] {
@@ -2890,12 +3023,44 @@ ORDER BY ac.CONSTRAINT_NAME, acc.POSITION`, []any{schema, table})
 				InitiallyDeferred: deferred.Valid && deferred.String == "DEFERRED",
 				Enabled:           status.Valid && status.String == "ENABLED",
 				Valid:             validated.Valid && validated.String == "VALIDATED",
+				OracleMetadata: &oracleConstraintMetadata{
+					MetadataComplete: kind != "" && status.Valid && validated.Valid && deferrable.Valid && deferred.Valid &&
+						(kind != "C" || condition.Valid),
+					Owner:          schema,
+					ConstraintType: stringPointer(kind),
+					Status:         nullableStringPointer(status),
+					Validated:      nullableStringPointer(validated),
+					Deferrable:     nullableStringPointer(deferrable),
+					Deferred:       nullableStringPointer(deferred),
+					Rely:           nullableStringPointer(rely),
+					IndexOwner:     nullableStringPointer(indexOwner),
+					IndexName:      nullableStringPointer(indexName),
+				},
+			}
+			if kind == "U" {
+				if status.Valid && status.String == "DISABLED" && !indexOwner.Valid && !indexName.Valid {
+					item.OracleMetadata.Index = nil
+					item.OracleMetadata.IndexSharing = nil
+				} else {
+					item.OracleMetadata.Index, item.OracleMetadata.IndexSharing = s.oracleUniqueIndexMetadata(schema, table, indexOwner, indexName)
+					if item.OracleMetadata.Index == nil || !item.OracleMetadata.Index.MetadataComplete || item.OracleMetadata.IndexSharing == nil {
+						item.OracleMetadata.MetadataComplete = false
+					}
+				}
 			}
 			byName[name] = item
 			order = append(order, name)
 		}
 		if column.Valid && column.String != "" {
+			if !position.Valid || position.Int64 != int64(len(item.Columns)+1) {
+				item.OracleMetadata.MetadataComplete = false
+			}
 			item.Columns = append(item.Columns, column.String)
+		} else if position.Valid {
+			item.OracleMetadata.MetadataComplete = false
+		}
+		if item.OracleMetadata.IndexOwner == nil != (item.OracleMetadata.IndexName == nil) {
+			item.OracleMetadata.MetadataComplete = false
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -2906,6 +3071,80 @@ ORDER BY ac.CONSTRAINT_NAME, acc.POSITION`, []any{schema, table})
 		result = append(result, *byName[name])
 	}
 	return emptyIfNil(result), nil
+}
+
+func nullableStringPointer(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	result := value.String
+	return &result
+}
+
+func (s *server) oracleUniqueIndexMetadata(tableOwner, tableName string, indexOwner, indexName sql.NullString) (*oracleConstraintIndexMetadata, *string) {
+	if !indexOwner.Valid || !indexName.Valid || indexOwner.String == "" || indexName.String == "" {
+		return nil, nil
+	}
+	rows, err := s.queryRows(`
+SELECT i.OWNER, i.TABLE_OWNER, i.TABLE_NAME, i.INDEX_TYPE, i.UNIQUENESS,
+	   i.STATUS, i.PARTITIONED, i.VISIBILITY, i.SECONDARY,
+	   ic.COLUMN_NAME, ic.DESCEND, ie.COLUMN_EXPRESSION, ic.COLUMN_POSITION
+FROM ALL_INDEXES i
+JOIN ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME
+LEFT JOIN ALL_IND_EXPRESSIONS ie ON ie.INDEX_OWNER = ic.INDEX_OWNER AND ie.INDEX_NAME = ic.INDEX_NAME
+	AND ie.TABLE_OWNER = ic.TABLE_OWNER AND ie.TABLE_NAME = ic.TABLE_NAME AND ie.COLUMN_POSITION = ic.COLUMN_POSITION
+WHERE i.OWNER = :1 AND i.INDEX_NAME = :2 AND i.TABLE_OWNER = :3 AND i.TABLE_NAME = :4
+ORDER BY ic.COLUMN_POSITION`, []any{indexOwner.String, indexName.String, tableOwner, tableName})
+	if err != nil {
+		return &oracleConstraintIndexMetadata{}, nil
+	}
+	defer s.closeRows(rows)
+	metadata := &oracleConstraintIndexMetadata{
+		Owner: indexOwner.String, TableOwner: tableOwner, TableName: tableName,
+		Columns: []string{}, Directions: []string{}, KeyIsExpression: []bool{}, IncludedColumns: []string{},
+	}
+	var sharing *string
+	for rows.Next() {
+		var owner, actualTableOwner, actualTable, indexType, uniqueness, status, partitioned, visibility sql.NullString
+		var secondary, column, descend, expression sql.NullString
+		var position sql.NullInt64
+		if err := rows.Scan(&owner, &actualTableOwner, &actualTable, &indexType, &uniqueness, &status, &partitioned, &visibility, &secondary, &column, &descend, &expression, &position); err != nil {
+			return metadata, nil
+		}
+		if !owner.Valid || !actualTableOwner.Valid || !actualTable.Valid || !indexType.Valid || !uniqueness.Valid || !status.Valid || !partitioned.Valid || (partitioned.String != "YES" && partitioned.String != "NO") || !visibility.Valid || !position.Valid || position.Int64 != int64(len(metadata.Columns)+1) || !descend.Valid || (descend.String != "ASC" && descend.String != "DESC") || (!column.Valid && !expression.Valid) {
+			return metadata, nil
+		}
+		metadata.Owner, metadata.TableOwner, metadata.TableName = owner.String, actualTableOwner.String, actualTable.String
+		metadata.IndexType, metadata.Uniqueness, metadata.Status = indexType.String, uniqueness.String, status.String
+		metadata.Visibility, metadata.Secondary = visibility.String, nullableStringPointer(secondary)
+		metadata.Partitioned = partitioned.String == "YES"
+		metadata.Columns = append(metadata.Columns, column.String)
+		metadata.Directions = append(metadata.Directions, descend.String)
+		metadata.KeyIsExpression = append(metadata.KeyIsExpression, expression.Valid && strings.TrimSpace(expression.String) != "")
+	}
+	if err := rows.Err(); err != nil || len(metadata.Columns) == 0 || len(metadata.Directions) != len(metadata.Columns) {
+		return metadata, nil
+	}
+	metadata.MetadataComplete = true
+	sharingRows, err := s.queryRows(`
+SELECT COUNT(*) FROM ALL_CONSTRAINTS
+WHERE OWNER = :1 AND TABLE_NAME = :2 AND INDEX_OWNER = :3 AND INDEX_NAME = :4
+	AND CONSTRAINT_TYPE IN ('P', 'U')`, []any{tableOwner, tableName, indexOwner.String, indexName.String})
+	if err != nil {
+		return metadata, nil
+	}
+	defer s.closeRows(sharingRows)
+	if sharingRows.Next() {
+		var count int64
+		if err := sharingRows.Scan(&count); err == nil && count == 1 {
+			value := "exclusive"
+			sharing = &value
+		} else if err == nil && count > 1 {
+			value := "shared"
+			sharing = &value
+		}
+	}
+	return metadata, sharing
 }
 
 func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
@@ -2922,9 +3161,18 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	var result []triggerInfo
 	var currentName string
 	var currentDescription string
+	var currentStructured bool
 	var source strings.Builder
 	flush := func() {
 		if len(result) == 0 || currentName == "" {
+			return
+		}
+		if !currentStructured {
+			// Keep the declaration so callers can tell the source carries clauses the
+			// timing/event/body form cannot round-trip.
+			if body := strings.TrimSpace(strings.ReplaceAll(source.String(), "\r\n", "\n")); body != "" {
+				result[len(result)-1].Statement = &body
+			}
 			return
 		}
 		if body, ok := oracleTriggerBody(source.String(), currentDescription); ok {
@@ -2933,17 +3181,18 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	}
 	for rows.Next() {
 		var name, event, timing string
-		var description, lineText sql.NullString
+		var description, status, whenClause, referencingNames, lineText sql.NullString
 		var line sql.NullInt64
-		if err := rows.Scan(&name, &event, &timing, &description, &line, &lineText); err != nil {
+		if err := rows.Scan(&name, &event, &timing, &description, &status, &whenClause, &referencingNames, &line, &lineText); err != nil {
 			return nil, err
 		}
 		if name != currentName {
 			flush()
 			currentName = name
 			currentDescription = description.String
+			currentStructured = oracleTriggerIsStructured(description.String, whenClause.String, referencingNames.String)
 			source.Reset()
-			result = append(result, triggerInfo{Name: name, Event: event, Timing: timing})
+			result = append(result, triggerInfo{Name: name, Event: event, Timing: timing, Enabled: oracleTriggerEnabled(status)})
 		}
 		if line.Valid && lineText.Valid {
 			source.WriteString(lineText.String)
@@ -2951,6 +3200,33 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	}
 	flush()
 	return emptyIfNil(result), rows.Err()
+}
+
+var oracleTriggerUnstructuredClauseRegexp = regexp.MustCompile(`(?i)\b(?:FOLLOWS|PRECEDES|COMPOUND|CROSSEDITION)\b`)
+
+// oracleTriggerIsStructured reports whether a trigger is fully described by its timing, event and
+// PL/SQL body, so it can be rebuilt with CREATE OR REPLACE without dropping a WHEN condition,
+// custom REFERENCING names or FOLLOWS/PRECEDES ordering.
+func oracleTriggerIsStructured(description, whenClause, referencingNames string) bool {
+	if strings.TrimSpace(whenClause) != "" {
+		return false
+	}
+	if referencing := strings.Join(strings.Fields(strings.ToUpper(referencingNames)), " "); referencing != "" && referencing != "REFERENCING NEW AS NEW OLD AS OLD" {
+		return false
+	}
+	return !oracleTriggerUnstructuredClauseRegexp.MatchString(description)
+}
+
+func oracleTriggerEnabled(status sql.NullString) *bool {
+	switch strings.ToUpper(strings.TrimSpace(status.String)) {
+	case "ENABLED":
+		enabled := true
+		return &enabled
+	case "DISABLED":
+		enabled := false
+		return &enabled
+	}
+	return nil
 }
 
 func oracleTriggerBody(source, description string) (string, bool) {
@@ -3582,6 +3858,12 @@ func oracleColumnTypeDDL(column columnInfo) string {
 	if strings.Contains(dataType, "(") {
 		return dataType
 	}
+	if dataType == "RAW" {
+		if column.DataLength != nil && *column.DataLength > 0 {
+			return fmt.Sprintf("RAW(%d)", *column.DataLength)
+		}
+		return dataType
+	}
 	if isOracleCharacterType(dataType) && column.CharacterMaximumLength != nil && *column.CharacterMaximumLength > 0 {
 		if unit := oracleCharacterLengthUnit(dataType, column.CharacterLengthUnit); unit != "" {
 			return fmt.Sprintf("%s(%d %s)", dataType, *column.CharacterMaximumLength, unit)
@@ -3589,6 +3871,9 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
 	}
 	if dataType == "NUMBER" {
+		if column.NumericPrecision == nil && column.NumericScale != nil {
+			return fmt.Sprintf("NUMBER(*,%d)", *column.NumericScale)
+		}
 		if column.NumericPrecision != nil && *column.NumericPrecision > 0 {
 			if column.NumericScale != nil && *column.NumericScale != 0 {
 				return fmt.Sprintf("NUMBER(%d,%d)", *column.NumericPrecision, *column.NumericScale)
@@ -3597,7 +3882,7 @@ func oracleColumnTypeDDL(column columnInfo) string {
 		}
 		return "NUMBER"
 	}
-	if (dataType == "FLOAT" || dataType == "BINARY_FLOAT" || dataType == "BINARY_DOUBLE") &&
+	if dataType == "FLOAT" &&
 		column.NumericPrecision != nil && *column.NumericPrecision > 0 {
 		return fmt.Sprintf("%s(%d)", dataType, *column.NumericPrecision)
 	}
@@ -3671,7 +3956,13 @@ func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs in
 	}
 
 	statementID := "DBX_" + strings.ToUpper(strconv.FormatInt(time.Now().UnixNano(), 36))
-	defer cleanupOracleExplainPlan(conn, statementID)
+	// EXPLAIN PLAN resolves its plan table in the session user's schema, while a bare
+	// PLAN_TABLE inside DBMS_XPLAN.DISPLAY resolves through CURRENT_SCHEMA - and the
+	// schema switch above changes CURRENT_SCHEMA. Name the table explicitly so the read
+	// and the cleanup hit the same object EXPLAIN PLAN wrote to, otherwise DISPLAY answers
+	// "cannot fetch plan for statement_id '...'".
+	planTable := oracleExplainPlanTableName(ctx, conn)
+	defer cleanupOracleExplainPlan(conn, statementID, planTable)
 	statementSQL := trimStatementSQL(sqlText)
 	explainArgs := oracleExplainPlanBindArgs(statementSQL)
 	if _, err := conn.ExecContext(ctx, "EXPLAIN PLAN SET STATEMENT_ID = '"+statementID+"' FOR "+statementSQL, explainArgs...); err != nil {
@@ -3679,7 +3970,7 @@ func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs in
 	}
 	planRows, err := conn.QueryContext(
 		ctx,
-		"SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', :1, 'TYPICAL +PREDICATE'))",
+		"SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('"+planTable+"', :1, 'TYPICAL +PREDICATE'))",
 		statementID,
 	)
 	if err != nil {
@@ -3709,10 +4000,40 @@ func oracleExplainTargetSchema(database, schema, configuredDatabase string) stri
 	return database
 }
 
-func cleanupOracleExplainPlan(conn *sql.Conn, statementID string) {
+// oracleExplainPlanTableName returns the explicitly qualified name of the plan table that
+// EXPLAIN PLAN resolves for this session: the session user's own object named PLAN_TABLE when
+// it exists, otherwise the table behind the PUBLIC synonym (usually SYS.PLAN_TABLE$). Falls
+// back to the bare name when neither can be resolved.
+func oracleExplainPlanTableName(ctx context.Context, conn *sql.Conn) string {
+	const probe = `SELECT
+		(SELECT OWNER FROM ALL_OBJECTS WHERE OWNER = USER AND OBJECT_NAME = 'PLAN_TABLE' AND ROWNUM = 1),
+		(SELECT OBJECT_NAME FROM ALL_OBJECTS WHERE OWNER = USER AND OBJECT_NAME = 'PLAN_TABLE' AND ROWNUM = 1),
+		(SELECT TABLE_OWNER FROM ALL_SYNONYMS WHERE OWNER = 'PUBLIC' AND SYNONYM_NAME = 'PLAN_TABLE' AND ROWNUM = 1),
+		(SELECT TABLE_NAME FROM ALL_SYNONYMS WHERE OWNER = 'PUBLIC' AND SYNONYM_NAME = 'PLAN_TABLE' AND ROWNUM = 1)
+	FROM DUAL`
+	var sessionOwner, sessionName, publicOwner, publicName sql.NullString
+	if err := conn.QueryRowContext(ctx, probe).Scan(&sessionOwner, &sessionName, &publicOwner, &publicName); err != nil {
+		return "PLAN_TABLE"
+	}
+	return oraclePlanTableName(sessionOwner.String, sessionName.String, publicOwner.String, publicName.String)
+}
+
+// oraclePlanTableName picks the qualified plan table name from the probe results, preferring
+// the session user's own PLAN_TABLE because that is what EXPLAIN PLAN writes to.
+func oraclePlanTableName(sessionOwner, sessionName, publicOwner, publicName string) string {
+	if strings.TrimSpace(sessionOwner) != "" && strings.TrimSpace(sessionName) != "" {
+		return quoteIdentifier(strings.TrimSpace(sessionOwner)) + "." + quoteIdentifier(strings.TrimSpace(sessionName))
+	}
+	if strings.TrimSpace(publicOwner) != "" && strings.TrimSpace(publicName) != "" {
+		return quoteIdentifier(strings.TrimSpace(publicOwner)) + "." + quoteIdentifier(strings.TrimSpace(publicName))
+	}
+	return "PLAN_TABLE"
+}
+
+func cleanupOracleExplainPlan(conn *sql.Conn, statementID, planTable string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = conn.ExecContext(ctx, "DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = :1", statementID)
+	_, _ = conn.ExecContext(ctx, "DELETE FROM "+planTable+" WHERE STATEMENT_ID = :1", statementID)
 }
 
 type oracleBindParam struct {
@@ -3892,11 +4213,16 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 // projection so the remaining columns stay readable; panics on later pages
 // surface as errors instead.
 func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSize int, start time.Time) (queryPageResult, *querySession, error) {
+	// Until a cursor is handed to the caller, this function owns its rows,
+	// including panics while reading Columns/ColumnTypes before the first page.
+	var ownedRows *sql.Rows
+	defer func() { s.closeRows(ownedRows) }()
 	for attempt := 0; ; attempt++ {
 		rows, err := s.queryRowsWithOracleValueRewriteIfNeeded(sqlText, opts.TimeoutSecs, opts.DeferLOBs)
 		if err != nil {
 			return queryPageResult{}, nil, err
 		}
+		ownedRows = rows
 		columns, err := rows.Columns()
 		if err != nil {
 			s.closeRows(rows)
@@ -3913,7 +4239,7 @@ func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSiz
 		if err != nil {
 			s.closeRows(rows)
 			var panicErr oracleDriverPanicError
-			if attempt == 0 && !oracleSQLLocksRows(sqlText) && errors.As(err, &panicErr) {
+			if attempt == 0 && !s.hasManualTransaction() && !oracleSQLLocksRows(sqlText) && errors.As(err, &panicErr) {
 				if placeholder, ok := oraclePlaceholderRetrySQL(sqlText, s.loadOracleColumnMeta); ok {
 					sqlText = placeholder
 					continue
@@ -3922,6 +4248,7 @@ func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSiz
 			return queryPageResult{}, nil, err
 		}
 		if result.HasMore {
+			ownedRows = nil
 			return result, session, nil
 		}
 		s.closeRows(rows)
@@ -4257,7 +4584,7 @@ func columnTypeNames(rows *sql.Rows) []string {
 	return result
 }
 
-func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeoutSecs int, deferLOBs bool) (*sql.Rows, error) {
+func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeoutSecs int, deferLOBs bool) (resultRows *sql.Rows, queryErr error) {
 	// A statement that keeps row locks while it runs is rewritten before the
 	// first attempt: when such a statement panics after the rows were locked,
 	// the locks stay behind and the retry below blocks on them until the query
@@ -4281,7 +4608,7 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 			// worth retrying through the value-rewrite fallback below; other
 			// failures keep their own error.
 			var panicErr oracleDriverPanicError
-			if !errors.As(rewrittenErr, &panicErr) {
+			if s.hasManualTransaction() || !errors.As(rewrittenErr, &panicErr) {
 				return nil, rewrittenErr
 			}
 		}
@@ -4289,7 +4616,7 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 	rows, err := s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	if err != nil {
 		var panicErr oracleDriverPanicError
-		if errors.As(err, &panicErr) {
+		if !s.hasManualTransaction() && errors.As(err, &panicErr) {
 			rewritten, rewriteErr := rewriteOracleSelectSQL(sqlText, s.loadOracleColumnMeta, false)
 			if rewriteErr == nil && rewritten != sqlText {
 				rewrittenRows, rewrittenErr := s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
@@ -4310,6 +4637,13 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 		}
 		return nil, err
 	}
+	// Metadata access can panic too. Retain ownership until rows are actually
+	// returned; the caller cannot clean up rows it has not received.
+	defer func() {
+		if rows != resultRows {
+			s.closeRows(rows)
+		}
+	}()
 	typeNames := columnTypeNames(rows)
 	if !oracleColumnTypeNamesContainXMLType(typeNames) {
 		return rows, nil

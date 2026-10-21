@@ -1,6 +1,7 @@
 // This function is serialized into the sandbox. It must not capture module state.
 function installBridge(channel) {
   let sequence = 0,
+    contributionId,
     context = {},
     locale = "zh-CN",
     theme;
@@ -102,6 +103,9 @@ function installBridge(channel) {
   }
   window.dbxPlugin = Object.freeze({
     ready,
+    get contributionId() {
+      return contributionId;
+    },
     get context() {
       return context;
     },
@@ -127,8 +131,20 @@ function installBridge(channel) {
       return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
     },
     openWorkbench: (contributionId, context, options) => request("host.openWorkbench", { contributionId, context, forceNew: !!(options && options.forceNew) }),
+    setTitle: (title) => request("host.setTitle", { title }),
+    getTitle: () => request("host.getTitle"),
+    workbench: Object.freeze({
+      setTitle: (title) => request("host.setTitle", { title }),
+      getTitle: () => request("host.getTitle"),
+    }),
     openFilesystem: (providerId, context) => request("host.openFilesystem", { providerId, context }),
     reopenConnection: (connectionId) => request("host.reopenConnection", { connectionId }),
+    getConnections: () => request("host.getConnections", {}),
+    listConnections: (options) => request("host.listConnections", options || {}),
+    connections: Object.freeze({
+      list: (options) => request("host.listConnections", options || {}),
+      getAll: () => request("host.getConnections", {}),
+    }),
     copy: (text) => request("host.copy", { text }),
     storage: {
       get: (key) => request("host.storageGet", { key }),
@@ -150,6 +166,7 @@ function installBridge(channel) {
     const m = event.data;
     if (event.source !== parent || m?.source !== "dbx-host" || m.channel !== channel || m.version !== 1) return;
     if (m.type === "init") {
+      contributionId = m.contributionId;
       initialized = true;
       clearInterval(readyTimer);
       context = m.context || {};

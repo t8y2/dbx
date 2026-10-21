@@ -9,11 +9,16 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, resolveObjectSourceEditDraft } from "@/lib/table/objectSourceEditor";
 import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
-import { xuguRoutineMetadataFromDefinition, type XuguRoutineMetadata } from "@/lib/table/routineParameters";
+import { assertSourceIdentity, beginSourceSave, captureSourceIdentity, renewSourceIdentity, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
+import { jdbcRoutineMetadata, xuguRoutineMetadataFromDefinition, type RoutineMetadata } from "@/lib/table/routineParameters";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import RoutineMetadataPanel from "@/components/objects/RoutineMetadataPanel.vue";
+import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
+import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
+import { useQueryStore } from "@/stores/queryStore";
+import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
@@ -24,6 +29,7 @@ const props = withDefaults(
     connectionId: string;
     database: string;
     schema?: string;
+    catalog?: string;
     name: string;
     relationName?: string;
     signature?: string;
@@ -32,6 +38,7 @@ const props = withDefaults(
     dialect: "mysql" | "postgres" | "sqlserver";
     formatDialect?: SqlFormatDialect;
     initialEditing?: boolean;
+    initialSection?: ObjectDetailsSection;
   }>(),
   {
     initialEditing: false,
@@ -41,12 +48,25 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:open": [value: boolean];
   saved: [];
+  "open-object": [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
 }>();
 
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
+const queryStore = useQueryStore();
+const section = ref<ObjectDetailsSection>(props.initialSection || "source");
+const dependencyTarget = computed(() => objectDependencyTarget({ connectionId: props.connectionId, database: props.database, schema: props.schema || props.database, catalog: props.catalog, name: props.name, objectType: resolvedObjectType.value, section: section.value }, props.databaseType));
+function viewDependencySql(context: ObjectDependencyTarget, sql: string) {
+  queryStore.createTab(context.connectionId, context.database, t("objectDependencies.viewSql"), "query", context.schema, sql, context.catalog, { forceNew: true });
+}
+function openDependencyObject(context: ObjectDependencyTarget, target: SqlObjectNavigationTarget) {
+  const dirty = editing.value && draft.value !== resolveObjectSourceEditDraft(props.databaseType, resolvedObjectType.value, content.value, editableText.value);
+  if (dirty && !window.confirm(t("objectDependencies.navigateDiscardConfirm"))) return;
+  emit("update:open", false);
+  emit("open-object", context, target);
+}
 
 const content = ref("");
 const editableText = ref("");
@@ -57,23 +77,28 @@ const editing = ref(false);
 const sourceEditable = ref(true);
 const error = ref("");
 const saveError = ref("");
-const routineMetadata = ref<XuguRoutineMetadata | null>(null);
+const routineMetadata = ref<RoutineMetadata | null>(null);
 /** May differ from props.objectType after PROCEDURE/FUNCTION/PACKAGE fallback resolution. */
 const resolvedObjectType = ref<ObjectSourceKind>(props.objectType);
 let loadSerial = 0;
+let sourceIdentity: SourceIdentitySnapshot | undefined;
 onBeforeUnmount(() => {
   ++loadSerial;
 });
 
 const canEdit = computed(() => sourceEditable.value && (props.objectType !== "SEQUENCE" || props.databaseType === "oceanbase-oracle"));
-const title = computed(() => `${editing.value ? t("contextMenu.editView") : t("contextMenu.viewSource")} - ${props.name}`);
+const isViewLike = computed(() => props.objectType === "VIEW" || props.objectType === "MATERIALIZED_VIEW");
+const editLabel = computed(() => (isViewLike.value ? t("contextMenu.editView") : t("contextMenu.editObject")));
+const title = computed(() => `${editing.value ? editLabel.value : t("contextMenu.viewSource")} - ${props.name}`);
 const hasRoutineMetadata = computed(() => !!routineMetadata.value && (routineMetadata.value.parameters.length > 0 || !!routineMetadata.value.returnType));
 
 watch(
-  () => [props.open, props.connectionId, props.database, props.schema, props.name, props.relationName, props.signature, props.objectType, props.databaseType, props.initialEditing] as const,
+  () => [props.open, props.connectionId, props.database, props.schema, props.catalog, props.name, props.relationName, props.signature, props.objectType, props.databaseType, props.initialEditing, props.initialSection] as const,
   () => {
-    if (props.open) void loadSource();
-    else ++loadSerial;
+    if (props.open) {
+      section.value = props.initialSection || "source";
+      void loadSource();
+    } else ++loadSerial;
   },
   { immediate: true, flush: "sync" },
 );
@@ -81,6 +106,9 @@ watch(
 async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
   const serial = ++loadSerial;
   const target = { ...props };
+  resolvedObjectType.value = target.objectType;
+  const identity = captureSourceIdentity({ ...target, schema: target.schema || target.database });
+  sourceIdentity = undefined;
   saving.value = false;
   content.value = "";
   editableText.value = "";
@@ -111,11 +139,15 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
     });
     if (serial !== loadSerial) return;
     resolvedObjectType.value = resolvedType;
-    routineMetadata.value = props.databaseType === "xugu" && (resolvedType === "PROCEDURE" || resolvedType === "FUNCTION") ? xuguRoutineMetadataFromDefinition(result.source) : null;
+    const isRoutine = resolvedType === "PROCEDURE" || resolvedType === "FUNCTION";
+    routineMetadata.value = !isRoutine ? null : result.routine_parameters !== undefined ? jdbcRoutineMetadata(result.routine_parameters) : target.databaseType === "xugu" ? xuguRoutineMetadataFromDefinition(result.source) : null;
     sourceEditable.value = editableAllowed;
     const displaySource = resolvedType === "SEQUENCE" ? result.source : editable;
     const formatted = await formatSqlForDisplay(displaySource, target.formatDialect ?? target.dialect, settingsStore.editorSettings.sqlFormatter);
     if (serial !== loadSerial) return;
+    const renewed = renewSourceIdentity(identity);
+    sourceIdentity = resolvedType === target.objectType ? renewed : captureSourceIdentity({ ...identity, objectType: resolvedType });
+    assertSourceIdentity(sourceIdentity);
     editableText.value = editable;
     content.value = formatted;
     draft.value = nextEditing && canEdit.value ? resolveObjectSourceEditDraft(props.databaseType, resolvedType, formatted, editable) : "";
@@ -179,6 +211,9 @@ async function saveSource() {
   saving.value = true;
   saveError.value = "";
   try {
+    if (!sourceIdentity) return;
+    const identity = sourceIdentity;
+    assertSourceIdentity(identity);
     const statements = await buildExecutableObjectSourceStatements({
       databaseType,
       objectType,
@@ -188,21 +223,27 @@ async function saveSource() {
     });
     if (serial !== loadSerial) return;
     const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
+    const execute = async () => {
+      if (serial !== loadSerial || !props.open) return false;
+      const release = beginSourceSave(identity);
+      try {
+        await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
+        return true;
+      } finally {
+        release();
+      }
+    };
     if (executableSql.trim()) {
       const saved = await executeWithProductionSqlGuard({
         connection: connectionStore.getConfig(connectionId),
         database,
         sql: executableSql,
         source: t("production.sourceObjectSource"),
-        execute: async () => {
-          if (serial !== loadSerial || !props.open) return false;
-          await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
-          return true;
-        },
+        execute,
       });
       if (!saved) return;
     } else {
-      await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
+      if (!(await execute())) return;
     }
     if (serial !== loadSerial) return;
     toast(t("objects.sourceSaved"));
@@ -227,72 +268,75 @@ function closeDialog() {
         <DialogTitle>{{ title }}</DialogTitle>
       </DialogHeader>
 
-      <div v-if="loading" class="flex min-h-0 items-center justify-center gap-2 text-sm text-muted-foreground">
-        <Loader2 class="h-4 w-4 animate-spin" />
-        <span>{{ t("common.loading") }}</span>
-      </div>
-      <div v-else-if="error" class="flex min-h-0 flex-col items-center justify-center gap-3 text-sm">
-        <p class="text-destructive">{{ error }}</p>
-        <Button variant="outline" size="sm" @click="loadSource()">
-          <RefreshCw class="h-4 w-4" />
-          {{ t("common.retry") }}
-        </Button>
-      </div>
-      <div v-else-if="editing" class="object-source-dialog-editor flex min-h-0 flex-col overflow-hidden rounded border" data-object-source-editor>
-        <QueryEditor
-          v-model="draft"
-          class="min-h-0 flex-1"
-          :connection-id="props.connectionId"
-          :database="props.database"
-          :schema="props.schema || props.database"
-          :database-type="props.databaseType"
-          :dialect="props.dialect"
-          :format-dialect="props.formatDialect"
-          force-word-wrap
-          hide-execution-controls
-          @save="saveSource"
-        />
-        <div v-if="saveError" class="shrink-0 whitespace-pre-wrap break-words border-t px-3 py-2 text-xs text-destructive">
-          {{ saveError }}
+      <ObjectDependenciesPanel :target="dependencyTarget" v-model:section="section" :open="props.open" @view-sql="viewDependencySql" @open-object="openDependencyObject">
+        <div v-if="loading" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Loader2 class="h-4 w-4 animate-spin" />
+          <span>{{ t("common.loading") }}</span>
         </div>
-      </div>
-      <div v-else class="flex min-h-0 flex-col gap-3 overflow-hidden">
-        <RoutineMetadataPanel v-if="hasRoutineMetadata && routineMetadata" :parameters="routineMetadata.parameters" :return-type="routineMetadata.returnType" />
-        <QueryEditor
-          :key="`${props.connectionId}:${props.database}:${props.schema || ''}:${props.name}:${props.objectType}`"
-          :model-value="content"
-          class="object-source-dialog-editor min-h-0 flex-1 overflow-hidden rounded border"
-          :connection-id="props.connectionId"
-          :database="props.database"
-          :schema="props.schema || props.database"
-          :database-type="props.databaseType"
-          :dialect="props.dialect"
-          :format-dialect="props.formatDialect"
-          force-word-wrap
-          read-only
-          hide-execution-controls
-          data-object-source-preview
-        />
-      </div>
+        <div v-else-if="error" class="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 text-sm">
+          <p class="text-destructive">{{ error }}</p>
+          <Button variant="outline" size="sm" @click="loadSource()">
+            <RefreshCw class="h-4 w-4" />
+            {{ t("common.retry") }}
+          </Button>
+        </div>
+        <div v-else-if="editing" class="object-source-dialog-editor flex min-h-0 flex-1 flex-col overflow-hidden rounded border" data-object-source-editor>
+          <QueryEditor
+            v-model="draft"
+            class="min-h-0 flex-1"
+            :connection-id="props.connectionId"
+            :database="props.database"
+            :schema="props.schema || props.database"
+            :database-type="props.databaseType"
+            :dialect="props.dialect"
+            :format-dialect="props.formatDialect"
+            force-word-wrap
+            hide-execution-controls
+            @save="section === 'source' && saveSource()"
+          />
+          <div v-if="saveError" class="shrink-0 whitespace-pre-wrap break-words border-t px-3 py-2 text-xs text-destructive">
+            {{ saveError }}
+          </div>
+        </div>
+        <div v-else class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
+          <RoutineMetadataPanel v-if="hasRoutineMetadata && routineMetadata" :parameters="routineMetadata.parameters" :return-type="routineMetadata.returnType" />
+          <QueryEditor
+            v-if="content || !hasRoutineMetadata"
+            :key="`${props.connectionId}:${props.database}:${props.schema || ''}:${props.name}:${props.objectType}`"
+            :model-value="content"
+            class="object-source-dialog-editor min-h-0 flex-1 overflow-hidden rounded border"
+            :connection-id="props.connectionId"
+            :database="props.database"
+            :schema="props.schema || props.database"
+            :database-type="props.databaseType"
+            :dialect="props.dialect"
+            :format-dialect="props.formatDialect"
+            force-word-wrap
+            read-only
+            hide-execution-controls
+            data-object-source-preview
+          />
+        </div>
+      </ObjectDependenciesPanel>
 
       <DialogFooter>
         <Button variant="outline" @click="closeDialog">{{ t("common.close") }}</Button>
-        <Button variant="outline" :disabled="loading || saving" :title="t('structureEditor.refresh')" @click="refreshSource">
+        <Button v-show="section === 'source'" variant="outline" :disabled="loading || saving" :title="t('structureEditor.refresh')" @click="refreshSource">
           <RefreshCw class="h-4 w-4" />
           {{ t("structureEditor.refresh") }}
         </Button>
-        <Button v-if="!editing" variant="outline" :disabled="!content" @click="copySource">
+        <Button v-if="!editing && section === 'source'" variant="outline" :disabled="!content" @click="copySource">
           <Clipboard class="h-4 w-4" />
           {{ t("grid.copy") }}
         </Button>
-        <Button v-if="!editing && canEdit" variant="outline" :disabled="!editableText" @click="editSource">
+        <Button v-if="!editing && canEdit && section === 'source'" variant="outline" :disabled="!editableText" @click="editSource">
           <PencilLine class="h-4 w-4" />
-          {{ t("contextMenu.editView") }}
+          {{ editLabel }}
         </Button>
-        <Button v-if="editing" variant="outline" :disabled="saving" @click="cancelEditSource">
+        <Button v-if="editing && section === 'source'" variant="outline" :disabled="saving" @click="cancelEditSource">
           {{ t("objects.cancelEdit") }}
         </Button>
-        <Button v-if="editing" :disabled="saving || !draft.trim()" @click="saveSource">
+        <Button v-if="editing && section === 'source'" :disabled="saving || !draft.trim()" @click="saveSource">
           <Loader2 v-if="saving" class="h-4 w-4 animate-spin" />
           {{ t("objects.saveSource") }}
         </Button>

@@ -1,6 +1,7 @@
 use dbx_core::models::connection::{
-    default_connect_timeout_secs, default_idle_timeout_secs, default_keepalive_interval_secs,
-    default_query_timeout_secs, default_redis_key_separator, ConnectionConfig, DatabaseType,
+    default_connect_timeout_secs, default_idle_disconnect_secs, default_idle_timeout_secs,
+    default_keepalive_interval_secs, default_manual_transaction_timeout_secs, default_query_timeout_secs,
+    default_redis_key_separator, ConnectionConfig, DatabaseType,
 };
 use std::str::FromStr;
 
@@ -28,6 +29,7 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         visible_schemas: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         attached_databases: Vec::new(),
         init_script: None,
         color: None,
@@ -35,6 +37,8 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         connect_timeout_secs: default_connect_timeout_secs(),
         query_timeout_secs: default_query_timeout_secs(),
         idle_timeout_secs: default_idle_timeout_secs(),
+        manual_transaction_timeout_secs: default_manual_transaction_timeout_secs(),
+        idle_disconnect_secs: default_idle_disconnect_secs(),
         keepalive_interval_secs: default_keepalive_interval_secs(),
         ssl: false,
         ca_cert_path: String::new(),
@@ -54,6 +58,7 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
         redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
@@ -70,6 +75,7 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         database_info: None,
     }
 }

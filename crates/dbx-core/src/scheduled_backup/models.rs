@@ -195,7 +195,7 @@ impl BackupSchedule {
         if !matches!(self.frequency.as_str(), "hourly" | "daily" | "weekly")
             || !(1..=168).contains(&self.interval_hours)
             || self.weekday > 6
-            || !(1..=100).contains(&self.retention_count)
+            || !(0..=1000).contains(&self.retention_count)
         {
             return Err("Invalid backup schedule".into());
         }

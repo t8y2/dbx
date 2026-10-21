@@ -125,7 +125,7 @@ describe("Object browser locate event through ContentArea and the workspace", ()
       isExecuting: false,
       tableMeta: { ...mocks.target, columns: [], primaryKeys: [] },
     });
-    expect(activeTabSidebarTarget(onLocateTab.mock.calls[0]![0])).toEqual({ type: "table", connectionId: "browser-connection", database: "browser_database", schema: "row_schema", tableName: "orders.with.dots" });
+    expect(activeTabSidebarTarget(onLocateTab.mock.calls[0]![0])).toEqual({ type: "table", connectionId: "browser-connection", database: "browser_database", catalog: "external_catalog", schema: "row_schema", tableName: "orders.with.dots" });
     expect(onOpenObjectTable).not.toHaveBeenCalled();
     expect(queryStore.tabs).toEqual([tab]);
     expect(queryStore.activeTabId).toBe(tab.id);

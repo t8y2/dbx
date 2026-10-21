@@ -38,7 +38,11 @@ test("returns persisted table metadata for a data tab", () => {
   const restored = tab({ title: "public.users", schema: undefined, sql: 'SELECT * FROM "public"."users"', tableMeta });
 
   assert.equal(repairRestoredDataTabTableIdentity(restored, "postgres"), false);
-  assert.equal(tableMetaForDataTab(restored), tableMeta);
+  assert.deepEqual(tableMetaForDataTab(restored), {
+    ...tableMeta,
+    database: "app",
+    schema: undefined,
+  });
 });
 
 test("builds fallback metadata from a data tab when column metadata is unavailable", () => {
@@ -54,6 +58,7 @@ test("builds fallback metadata from a data tab when column metadata is unavailab
   );
 
   assert.deepEqual(meta, {
+    database: "app",
     schema: "public",
     tableName: "users",
     columns: [
@@ -100,6 +105,7 @@ test("uses result columns when persisted table metadata has no columns", () => {
     ),
     {
       schema: "public",
+      database: "app",
       tableName: "users",
       columns: [
         {

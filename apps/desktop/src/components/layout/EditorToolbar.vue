@@ -59,6 +59,7 @@ import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
+import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 
 const props = defineProps<{
   activeTab: QueryTab;
@@ -70,6 +71,8 @@ const props = defineProps<{
   blockDangerousRedisCommands?: boolean;
   sqlKeywordCase: "preserve" | "upper" | "lower";
   databaseRequiredSignal?: number;
+  /** When non-zero, highlights and opens the connection picker so the user selects a connection. */
+  connectionRequiredSignal?: number;
   autoCommit?: boolean;
   txnSessionId?: string;
   txnAutoRolledBack?: boolean;
@@ -105,6 +108,7 @@ const emit = defineEmits<{
   unfoldAll: [];
   toggleSqlKeywordCase: [];
   saveSql: [tabId: string];
+  "change-encoding": [value: NonNullable<QueryTab["externalSqlEncoding"]>];
   openSql: [];
   importResultArchive: [];
   pasteSqlInCondition: [];
@@ -289,6 +293,7 @@ const supportsExplain = computed(() => {
     dbType !== "easysearch" &&
     dbType !== "meilisearch" &&
     dbType !== "solr" &&
+    dbType !== "couchdb" &&
     dbType !== "qdrant" &&
     dbType !== "milvus" &&
     dbType !== "weaviate" &&
@@ -387,6 +392,10 @@ const showTxnActions = computed(() => {
 });
 const transactionTooltip = computed(() => {
   if (hasOpenAutoCommitTransaction.value) return t("settings.keepExplicitTransactionInAutoCommitDescription");
+  if (props.activeConnection?.db_type === "sqlserver" && isManualTransactionMode.value) {
+    const status = props.activeTab.txnStatus;
+    return status ? t(`toolbar.sqlserverTxnStatus.${status}`) : t("toolbar.sqlserverIndependentTransaction");
+  }
   const isAgent = (props.activeConnection?.db_type as string) === "agent";
   const isManual = isManualTransactionMode.value;
   if (isAgent && isManual) return t("toolbar.manualTransactionAgent");
@@ -429,26 +438,52 @@ watch(
   },
 );
 
+const connectionRequiredVisible = ref(false);
+
+watch(
+  () => props.connectionRequiredSignal,
+  (signal) => {
+    if (!signal) return;
+    connectionRequiredVisible.value = false;
+    requestAnimationFrame(() => {
+      connectionRequiredVisible.value = true;
+      connectionPickerRef.value?.openDropdown();
+    });
+  },
+);
+
 watch(activeDatabaseValue, (database) => {
   if (database) databaseRequiredVisible.value = false;
 });
 
+watch(activeConnectionValue, (connectionId) => {
+  if (connectionId) connectionRequiredVisible.value = false;
+});
+
+/**
+ * 用户在侧栏显式关闭过、且还没重新连上的连接。
+ *
+ * 下面三个 watchEffect 是自动预取（挂载工具栏、切页签/切库时拉下拉选项），不代表用户
+ * 想连接；对显式关闭的连接必须跳过，否则残留页签一被激活就把连接连回来。它同时是这些
+ * 效果的响应式依赖：用户重连后标记消失，预取会自然补上。
+ */
+const activeConnectionClosedByUser = computed(() => (props.activeConnection ? connectionStore.isConnectionClosedByUser(props.activeConnection.id) : false));
+
 watchEffect(() => {
   const connection = props.activeConnection;
-  if (connection && showSchemaSelector.value) {
-    loadSchemaOptions(connection.id, schemaDatabaseKey.value).catch(() => {});
-  }
+  if (!connection || activeConnectionClosedByUser.value || !showSchemaSelector.value) return;
+  loadSchemaOptions(connection.id, schemaDatabaseKey.value).catch(() => {});
 });
 watchEffect(() => {
   const connection = props.activeConnection;
-  if (!connection || !connectionIsDorisFamilyCatalogCapable(connection)) return;
+  if (!connection || activeConnectionClosedByUser.value || !connectionIsDorisFamilyCatalogCapable(connection)) return;
   void loadCatalogOptions(connection.id).catch(() => {});
 });
 
 watchEffect(() => {
   const connection = props.activeConnection;
   const catalog = props.activeTab.catalog;
-  if (!connection || !catalog) return;
+  if (!connection || activeConnectionClosedByUser.value || !catalog) return;
   void loadCatalogDatabaseOptions(connection.id, catalog).catch(() => {});
 });
 
@@ -520,6 +555,14 @@ function onExecuteInNewResultTabClick(event: MouseEvent) {
   emit("toolbarExecuteInNewResultTab", event.detail > 0 ? "pointer" : "keyboard");
 }
 
+function changeEncoding(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  const encoding = select.value as NonNullable<QueryTab["externalSqlEncoding"]>;
+  // Keep the visible selection committed until the asynchronous reload succeeds.
+  select.value = props.activeTab.externalSqlEncoding ?? "auto";
+  emit("change-encoding", encoding);
+}
+
 async function changeCatalog(selectedCatalog: string) {
   const connection = props.activeConnection;
   if (!connection) return;
@@ -532,10 +575,20 @@ async function changeCatalog(selectedCatalog: string) {
     switchingCatalog.value = false;
   }
 }
+
+const connectionPickerRef = ref<InstanceType<typeof ConnectionTreeSelect> | null>(null);
+const databasePickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
+const schemaPickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
+
+defineExpose({
+  openConnectionPicker: () => connectionPickerRef.value?.openDropdown() ?? false,
+  openDatabasePicker: () => databasePickerRef.value?.openDropdown() ?? false,
+  openSchemaPicker: () => schemaPickerRef.value?.openDropdown() ?? false,
+});
 </script>
 
 <template>
-  <div ref="toolbarRootRef" class="app-editor-toolbar h-9 min-w-0 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground relative z-10 overflow-hidden" :style="toolbarStyle">
+  <div v-show="!isObjectDependencySection(activeTab)" ref="toolbarRootRef" class="app-editor-toolbar h-9 min-w-0 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground relative z-10 overflow-hidden" :style="toolbarStyle">
     <div ref="toolbarActionsRef" class="min-w-0 flex flex-1 items-center gap-0.5 overflow-hidden">
       <Tooltip>
         <TooltipTrigger as-child>
@@ -866,7 +919,7 @@ async function changeCatalog(selectedCatalog: string) {
               size="icon"
               class="h-6 w-8 px-1"
               :class="isManualTransactionMode ? 'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-300' : 'text-orange-600/70 hover:bg-orange-500/10 hover:text-orange-700 dark:text-orange-300/70 dark:hover:text-orange-200'"
-              :disabled="activeTab.isExecuting || activeTab.isExplaining"
+              :disabled="activeTab.isExecuting || activeTab.isExplaining || activeTab.txnStatus === 'opening' || activeTab.txnStatus === 'ending'"
               :aria-label="transactionTooltip"
               :aria-pressed="isManualTransactionMode || hasOpenAutoCommitTransaction"
               @click="emit('update:autoCommit', autoCommit === false)"
@@ -885,7 +938,14 @@ async function changeCatalog(selectedCatalog: string) {
         <!-- Commit button (only when a transaction action is warranted) -->
         <Tooltip v-if="showTxnActions">
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200" :disabled="activeTab.isExecuting" :aria-label="t('toolbar.commit')" @click="emit('commit')">
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200"
+              :disabled="activeTab.isExecuting || activeTab.txnStatus === 'ending' || activeTab.txnStatus === 'opening'"
+              :aria-label="t('toolbar.commit')"
+              @click="emit('commit')"
+            >
               <Check class="h-3.5 w-3.5" />
             </Button>
           </TooltipTrigger>
@@ -895,7 +955,14 @@ async function changeCatalog(selectedCatalog: string) {
         <!-- Rollback button (only when a transaction action is warranted) -->
         <Tooltip v-if="showTxnActions">
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-6 w-6 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-300 dark:hover:text-red-200" :disabled="activeTab.isExecuting" :aria-label="t('toolbar.rollback')" @click="emit('rollback')">
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-6 w-6 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-300 dark:hover:text-red-200"
+              :disabled="activeTab.isExecuting || activeTab.txnStatus === 'ending' || activeTab.txnStatus === 'opening'"
+              :aria-label="t('toolbar.rollback')"
+              @click="emit('rollback')"
+            >
               <RotateCcw class="h-3.5 w-3.5" />
             </Button>
           </TooltipTrigger>
@@ -904,9 +971,10 @@ async function changeCatalog(selectedCatalog: string) {
       </div>
     </div>
     <div class="flex shrink-0 items-center gap-2">
-      <div class="flex shrink-0 items-center gap-1">
+      <div class="flex shrink-0 items-center gap-1" :class="{ 'connection-required-prompt': connectionRequiredVisible }">
         <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
         <ConnectionTreeSelect
+          ref="connectionPickerRef"
           :model-value="activeConnectionValue"
           :connections="connectionStore.connections"
           :layout="connectionStore.sidebarLayout"
@@ -959,6 +1027,7 @@ async function changeCatalog(selectedCatalog: string) {
           activeConnection?.db_type !== 'easysearch' &&
           activeConnection?.db_type !== 'meilisearch' &&
           activeConnection?.db_type !== 'solr' &&
+          activeConnection?.db_type !== 'couchdb' &&
           activeConnection?.db_type !== 'qdrant' &&
           activeConnection?.db_type !== 'milvus' &&
           activeConnection?.db_type !== 'weaviate' &&
@@ -971,6 +1040,7 @@ async function changeCatalog(selectedCatalog: string) {
         :class="{ 'database-required-prompt': databaseRequiredVisible }"
       >
         <SearchableSelect
+          ref="databasePickerRef"
           :model-value="activeDatabaseValue"
           :options="activeDatabaseOptions.length ? activeDatabaseOptions : activeDatabaseValue ? [activeDatabaseValue] : []"
           :placeholder="t('editor.selectDatabase')"
@@ -1018,6 +1088,7 @@ async function changeCatalog(selectedCatalog: string) {
       </div>
       <div v-if="showSchemaSelector" class="flex shrink-0 items-center gap-1">
         <SearchableSelect
+          ref="schemaPickerRef"
           :model-value="activeSchemaValue"
           :options="activeSchemaOptions.length ? activeSchemaOptions : activeSchemaValue ? [activeSchemaValue] : []"
           :placeholder="t('editor.selectSchema')"
@@ -1046,6 +1117,14 @@ async function changeCatalog(selectedCatalog: string) {
         </SearchableSelect>
       </div>
     </div>
+    <select v-if="activeTab.externalSqlPath" class="ml-1 h-6 rounded border border-border bg-background px-1 text-[11px]" :value="activeTab.externalSqlEncoding ?? 'auto'" :aria-label="t('toolbar.fileEncoding')" @change="changeEncoding">
+      <option value="auto">{{ t("toolbar.encodingAuto") }}</option>
+      <option value="utf8">UTF-8</option>
+      <option value="utf8Bom">UTF-8 BOM</option>
+      <option value="utf16le">UTF-16 LE</option>
+      <option value="utf16be">UTF-16 BE</option>
+      <option value="gbk">GBK / GB18030</option>
+    </select>
     <div v-if="activeTab.mode === 'data' && activeTab.tableMeta" class="ml-2 inline-flex shrink-0 items-center gap-1 rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums">
       <Table2 class="h-3.5 w-3.5 shrink-0" />
       <span class="truncate">{{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }}</span>
@@ -1069,6 +1148,10 @@ async function changeCatalog(selectedCatalog: string) {
     <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="emit('dismissAutoCommitSessionTxnRolledBack')">
       <X class="h-3 w-3" />
     </Button>
+  </div>
+  <div v-if="activeTab.txnNotice" data-sqlserver-transaction-notice class="flex items-center gap-2 px-3 py-1 text-xs bg-amber-500/10 text-amber-700 dark:text-amber-300 border-b border-amber-500/20">
+    <span>{{ activeTab.txnNotice }}</span>
+    <Button variant="ghost" size="icon" class="ml-auto h-5 w-5 shrink-0" :aria-label="t('common.close')" @click="activeTab.txnNotice = undefined"><X class="h-3 w-3" /></Button>
   </div>
   <div v-if="txnAutoRolledBack" class="flex items-center gap-2 px-3 py-1 text-xs bg-amber-500/10 text-amber-700 dark:text-amber-300 border-b border-amber-500/20">
     <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
@@ -1106,5 +1189,16 @@ async function changeCatalog(selectedCatalog: string) {
   72% {
     transform: translateX(3px);
   }
+}
+
+.connection-required-prompt {
+  color: var(--destructive);
+  animation: database-required-shake 420ms ease;
+}
+
+.connection-required-prompt :deep(button) {
+  color: var(--destructive);
+  border-color: color-mix(in oklch, var(--destructive) 55%, transparent);
+  background: color-mix(in oklch, var(--destructive) 10%, transparent);
 }
 </style>

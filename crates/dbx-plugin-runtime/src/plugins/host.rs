@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use crate::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseType};
@@ -45,6 +45,8 @@ pub struct PluginConnectionHandle {
     session: Option<Arc<PluginSidecarSession>>,
     disconnect: bool,
     params: serde_json::Value,
+    lifecycle: Arc<Mutex<u64>>,
+    generation: u64,
     _activity: super::lifecycle::PluginUsageGuard,
 }
 
@@ -63,28 +65,66 @@ impl PluginConnectionHandle {
     }
 
     pub async fn disconnect(&self) -> Result<(), String> {
+        // Fast-path filter: an already-retired handle never reaches the plugin.
+        // The detached worker re-checks under the lifecycle lock.
+        if *self.lifecycle.lock().await != self.generation {
+            return Ok(());
+        }
         let Some(session) = &self.session else {
             return Ok(());
         };
         if !self.disconnect || session.status().state != PluginSessionState::Running {
             return Ok(());
         }
-        let result: serde_json::Value = session
-            .invoke_with_timeout(
-                PLUGIN_CONNECTION_DISCONNECT_METHOD,
-                self.params.clone(),
-                None,
-                Some(super::PLUGIN_REQUEST_TIMEOUT),
-            )
-            .await?;
-        ensure_plugin_operation_succeeded(result)
+        // The RPC wait and the generation update run in a detached task that
+        // holds the lifecycle lock: a caller abandoned by a pool-close timeout
+        // must still retire this generation, and a later connect must wait for
+        // the in-flight disconnect to settle before re-registering.
+        let worker = tokio::spawn(disconnect_under_lifecycle(
+            self.lifecycle.clone(),
+            self.generation,
+            session.clone(),
+            self.params.clone(),
+            super::PLUGIN_REQUEST_TIMEOUT,
+        ));
+        worker.await.map_err(|error| format!("Plugin connection/disconnect worker failed: {error}"))?
     }
 }
+
+async fn disconnect_under_lifecycle(
+    lifecycle: Arc<Mutex<u64>>,
+    generation: u64,
+    session: Arc<PluginSidecarSession>,
+    params: serde_json::Value,
+    deadline: Duration,
+) -> Result<(), String> {
+    let mut current = lifecycle.lock().await;
+    if *current != generation {
+        return Ok(());
+    }
+    let result: Result<serde_json::Value, String> =
+        session.invoke_with_timeout(PLUGIN_CONNECTION_DISCONNECT_METHOD, params, None, Some(deadline)).await;
+    // A request that never got its answer may still be executing inside the
+    // plugin. Stop the sidecar so a reconnect starts from a fresh process
+    // instead of one whose registration the stale disconnect can clobber.
+    if result.as_ref().is_err_and(|error| super::runtime::request_may_still_execute(error)) {
+        log::warn!("connection/disconnect ended without confirmation; stopping the sidecar");
+        let _ = session.shutdown().await;
+    }
+    // A handle may have clones in the pool registry. Only one may send
+    // connection/disconnect, including when the caller is cancelled.
+    *current = current.wrapping_add(1);
+    drop(current);
+    result.and_then(ensure_plugin_operation_succeeded)
+}
+
+type ConnectionLifecycleTable = HashMap<(String, String), Weak<Mutex<u64>>>;
 
 struct PluginHostInner {
     registry: PluginRegistry,
     sessions: RwLock<HashMap<String, Arc<PluginSidecarSession>>>,
     activation_lock: Mutex<()>,
+    connection_lifecycles: StdMutex<ConnectionLifecycleTable>,
     events: broadcast::Sender<PluginEvent>,
     binary_messages: broadcast::Sender<PluginBinaryMessage>,
 }
@@ -98,10 +138,23 @@ impl PluginHost {
                 registry,
                 sessions: RwLock::new(HashMap::new()),
                 activation_lock: Mutex::new(()),
+                connection_lifecycles: StdMutex::new(HashMap::new()),
                 events,
                 binary_messages,
             }),
         }
+    }
+
+    fn connection_lifecycle(&self, plugin_id: &str, connection_id: &str) -> Arc<Mutex<u64>> {
+        let mut lifecycles = self.inner.connection_lifecycles.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        lifecycles.retain(|_, lifecycle| lifecycle.strong_count() > 0);
+        let key = (plugin_id.to_string(), connection_id.to_string());
+        if let Some(lifecycle) = lifecycles.get(&key).and_then(Weak::upgrade) {
+            return lifecycle;
+        }
+        let lifecycle = Arc::new(Mutex::new(0));
+        lifecycles.insert(key, Arc::downgrade(&lifecycle));
+        lifecycle
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<PluginEvent> {
@@ -126,15 +179,16 @@ impl PluginHost {
         env: PluginRuntimeEnv,
     ) -> Result<Arc<PluginSidecarSession>, String> {
         let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
-        if let Some(session) = self.running_session(plugin_id).await {
-            return Ok(session);
-        }
-
         let _activation = self.inner.activation_lock.lock().await;
         if let Some(session) = self.running_session(plugin_id).await {
             return Ok(session);
         }
-        self.inner.sessions.write().await.remove(plugin_id);
+        // Failed/stopping sessions still own process handles. Do not silently replace one.
+        let previous = self.inner.sessions.read().await.get(plugin_id).cloned();
+        if let Some(previous) = previous {
+            previous.shutdown().await?;
+            self.inner.sessions.write().await.remove(plugin_id);
+        }
 
         let plugin = self
             .inner
@@ -145,10 +199,104 @@ impl PluginHost {
             return Err(format!("Plugin '{plugin_id}' is incompatible: {}", plugin.compatibility.errors.join("; ")));
         }
         let env = env.with_plugin_data_dir(&self.inner.registry.plugin_data_dir(&plugin.manifest.id));
-        let session = PluginSidecarSession::start(plugin, self.inner.registry.app_version().to_string(), env).await?;
+        let runtime_lease = self.inner.registry.lifecycle.runtime_lease(plugin_id)?;
+        let probe = self.inner.registry.lifecycle.update_probe(plugin_id)?;
+        let session = PluginSidecarSession::start_with_runtime_lease(
+            plugin,
+            self.inner.registry.app_version().to_string(),
+            env,
+            runtime_lease,
+        )
+        .await?;
+        // Registration can wait for the session map; cancellation there must still stop the child.
+        let startup = super::runtime::ShutdownOnDrop::new(session.clone());
         self.forward_session_events(&session);
         self.inner.sessions.write().await.insert(plugin_id.to_string(), session.clone());
+        self.watch_session(&session, probe);
+        startup.disarm();
         Ok(session)
+    }
+
+    /// Discovery must not leave one idle process per installed plugin in every MCP client.
+    /// Reuse a live session, but keep a session started only for probing short-lived.
+    pub async fn probe<T>(
+        &self,
+        plugin_id: &str,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Option<Duration>,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
+        if let Some(session) = self.running_session(plugin_id).await {
+            return session.invoke_with_timeout(method, params, None, timeout).await;
+        }
+        let plugin = self
+            .inner
+            .registry
+            .find_plugin(plugin_id)?
+            .ok_or_else(|| format!("Plugin '{plugin_id}' is not installed"))?;
+        if !plugin.compatibility.compatible {
+            return Err(format!("Plugin '{plugin_id}' is incompatible: {}", plugin.compatibility.errors.join("; ")));
+        }
+        let env = PluginRuntimeEnv::default().with_plugin_data_dir(&self.inner.registry.plugin_data_dir(plugin_id));
+        let session = PluginSidecarSession::start_with_runtime_lease(
+            plugin,
+            self.inner.registry.app_version().to_string(),
+            env,
+            self.inner.registry.lifecycle.runtime_lease(plugin_id)?,
+        )
+        .await?;
+        let _cleanup = super::runtime::ShutdownOnDrop::new(session.clone());
+        let result = session.invoke_with_timeout(method, params, None, timeout).await;
+        let shutdown = session.shutdown().await;
+        match (result, shutdown) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(shutdown)) => Err(format!("{error}; additionally failed to stop plugin: {shutdown}")),
+        }
+    }
+
+    fn watch_session(&self, session: &Arc<PluginSidecarSession>, probe: super::lifecycle::PluginUpdateProbe) {
+        let owner = Arc::downgrade(&self.inner);
+        let runtime = Arc::downgrade(session);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let Some(session) = runtime.upgrade() else { break };
+                let Some(inner) = owner.upgrade() else {
+                    // The stdout task owns an Arc to the session; dropping the host alone cannot
+                    // break that cycle while the sidecar is waiting for its next request.
+                    match session.shutdown().await {
+                        Ok(()) => break,
+                        Err(error) => log::warn!("{error}"),
+                    }
+                    continue;
+                };
+                let plugin_id = &session.plugin().manifest.id;
+                let stop = match probe.requested() {
+                    Ok(requested) => {
+                        requested
+                            || matches!(
+                                session.status().state,
+                                PluginSessionState::Stopping | PluginSessionState::Stopped | PluginSessionState::Exited
+                            )
+                    }
+                    Err(error) => {
+                        log::warn!("{error}");
+                        false
+                    }
+                };
+                if stop {
+                    match stop_host_session(&inner, plugin_id, Some(&session)).await {
+                        Ok(()) => break,
+                        Err(error) => log::warn!("{error}"),
+                    }
+                }
+            }
+        });
     }
 
     pub async fn invoke<T>(
@@ -258,6 +406,10 @@ impl PluginHost {
             .begin_connection(config.plugin_id.as_deref().unwrap_or_default(), &config.name)?;
         let (_, provider) = self.resolve_connection_provider(config)?;
         validate_plugin_connection_values(config, &provider)?;
+        let lifecycle = self.connection_lifecycle(config.plugin_id.as_deref().unwrap_or_default(), &config.id);
+        // Keep connect and disconnect ordered even when a detached pool close
+        // races a reconnect. A new generation makes older handles inert.
+        let mut generation = lifecycle.lock().await;
         let params = plugin_connection_params(config, &provider, runtime_host, runtime_port, runtime_proxy.as_ref())?;
         let needs_session = provider.has_capability(PluginConnectionCapability::Connect)
             || provider.has_capability(PluginConnectionCapability::Disconnect);
@@ -280,6 +432,9 @@ impl PluginHost {
             }
         }
         let disconnect = provider.has_capability(PluginConnectionCapability::Disconnect);
+        *generation = generation.wrapping_add(1);
+        let handle_generation = *generation;
+        drop(generation);
         Ok(PluginConnectionHandle {
             plugin_id: config.plugin_id.clone().unwrap_or_default(),
             provider_id: provider.id,
@@ -287,6 +442,8 @@ impl PluginHost {
             session,
             disconnect,
             params,
+            lifecycle,
+            generation: handle_generation,
             _activity: activity,
         })
     }
@@ -340,17 +497,14 @@ impl PluginHost {
     }
 
     pub async fn stop(&self, plugin_id: &str) -> Result<(), String> {
-        if let Some(session) = self.inner.sessions.write().await.remove(plugin_id) {
-            session.shutdown().await?;
-        }
-        Ok(())
+        stop_host_session(&self.inner, plugin_id, None).await
     }
 
     pub async fn stop_all(&self) -> Result<(), String> {
-        let sessions = std::mem::take(&mut *self.inner.sessions.write().await);
+        let plugins = self.inner.sessions.read().await.keys().cloned().collect::<Vec<_>>();
         let mut errors = Vec::new();
-        for (plugin_id, session) in sessions {
-            if let Err(error) = session.shutdown().await {
+        for plugin_id in plugins {
+            if let Err(error) = self.stop(&plugin_id).await {
                 errors.push(format!("{plugin_id}: {error}"));
             }
         }
@@ -370,14 +524,19 @@ impl PluginHost {
     /// Callers drain the plugin's connection pools and external driver pools first: the lease is
     /// refused while the plugin still has an active connection or operation.
     pub async fn uninstall_plugin(&self, plugin_id: &str) -> Result<(), String> {
-        let _update = self.inner.registry.lifecycle.begin_update(plugin_id)?;
+        let update = self.inner.registry.lifecycle.begin_update(plugin_id)?;
         self.stop(plugin_id).await?;
         let root_dir = self.inner.registry.root_dir().to_path_buf();
         let app_version = self.inner.registry.app_version().to_string();
         // Uninstall never validates a package signature, so it must not load the user trust store.
         let installer = PluginPackageInstaller::with_trust_store(root_dir, app_version, PluginTrustStore::default());
         let plugin_id = plugin_id.to_string();
-        tokio::task::spawn_blocking(move || installer.uninstall(&plugin_id)).await.map_err(|error| error.to_string())?
+        tokio::task::spawn_blocking(move || {
+            update.drain_runtimes()?;
+            installer.uninstall(&plugin_id)
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     async fn running_session(&self, plugin_id: &str) -> Option<Arc<PluginSidecarSession>> {
@@ -449,6 +608,24 @@ impl PluginHost {
             }
         });
     }
+}
+
+async fn stop_host_session(
+    inner: &PluginHostInner,
+    plugin_id: &str,
+    expected: Option<&Arc<PluginSidecarSession>>,
+) -> Result<(), String> {
+    let _activation = inner.activation_lock.lock().await;
+    let session = inner.sessions.read().await.get(plugin_id).cloned();
+    if let Some(session) = session {
+        if expected.is_some_and(|expected| !Arc::ptr_eq(expected, &session)) {
+            return Ok(());
+        }
+        session.shutdown().await?;
+        // Keep a session tracked on failure, so a retry can still terminate its process tree.
+        inner.sessions.write().await.remove(plugin_id);
+    }
+    Ok(())
 }
 
 fn required_plugin_binding<'a>(value: &'a Option<String>, field: &str) -> Result<&'a str, String> {
@@ -1641,5 +1818,85 @@ mod tests {
             &provider
         )
         .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unconfirmed_disconnect_stops_the_sidecar_before_releasing_the_lifecycle() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+
+        use super::{disconnect_under_lifecycle, PluginHost, PluginSessionState};
+        use crate::plugins::PluginRegistry;
+
+        let temp = tempfile::tempdir().unwrap();
+        let plugin_dir = temp.path().join("plugins/sample.quarantine");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.quarantine",
+                "name": "Quarantine test",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                } },
+                "contributions": [{
+                    "type": "connection-provider",
+                    "id": "sample.connection",
+                    "database_type": "sample",
+                    "capabilities": ["connect", "disconnect"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let script = plugin_dir.join("plugin.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":["connections"],"plugin":{"id":"sample.quarantine","version":"1.0.0"}}}\n' "$initialize_id"
+# Never answer lifecycle requests: every disconnect stays unconfirmed.
+while IFS= read -r _; do :; done
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let registry = PluginRegistry::new_with_app_version(temp.path().join("plugins"), "0.5.67");
+        let host = PluginHost::new(registry);
+        let session = host.activate("sample.quarantine").await.unwrap();
+
+        // The timeout fires while the plugin is still executing the request;
+        // the sidecar must be quarantined before the lifecycle lock reopens,
+        // or a reconnect would reuse a session the stale disconnect clobbers.
+        let lifecycle = Arc::new(tokio::sync::Mutex::new(0u64));
+        let error = disconnect_under_lifecycle(
+            lifecycle.clone(),
+            0,
+            session.clone(),
+            serde_json::json!({}),
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("timed out after"), "{error}");
+        assert_ne!(
+            session.status().state,
+            PluginSessionState::Running,
+            "an unconfirmed disconnect must stop the sidecar"
+        );
+        // A follow-up activate starts a fresh process with a clean state.
+        host.activate("sample.quarantine").await.unwrap();
+        host.stop("sample.quarantine").await.unwrap();
     }
 }

@@ -57,6 +57,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -64,6 +65,8 @@ public final class DbxJdbcPlugin {
     private static final ObjectMapper MAPPER =
         new ObjectMapper().configure(SerializationFeature.WRITE_BIGDECIMAL_AS_PLAIN, true);
     private static final int MAX_ROWS = 10_000;
+    static final String CANCEL_STATEMENT_METHOD = "cancelStatement";
+    static final String CANCEL_TOKEN_PARAM = "cancelToken";
     private static final String JDBCX_URL_PREFIX = "jdbcx:";
     private static final String JDBCX_EXTENSION_WHITELIST_PROPERTY = "jdbcx.extension.whitelist";
     private static final String JDBCX_HIGH_PRIVILEGE_EXTENSIONS_OPT_IN = "-Ddbx.jdbcx.allowHighPrivilegeExtensions=";
@@ -72,6 +75,18 @@ public final class DbxJdbcPlugin {
     private static final String PHOENIX_VARBINARY_ENCODED_TYPE_NAME = "VARBINARY_ENCODED";
     private static final Pattern PHOENIX_SYSTEM_CATALOG_WILDCARD = Pattern.compile(
         "^SELECT\\s+\\*\\s+FROM\\s+(?:SYSTEM|\\\"SYSTEM\\\")\\s*\\.\\s*(?:CATALOG|\\\"CATALOG\\\")$",
+        Pattern.CASE_INSENSITIVE
+    );
+    // Mirrors `trimStatementSQL` in the native oracle-go agent: a PL/SQL unit must keep the
+    // `;` after its final END, while a plain Oracle SQL statement must not end with one.
+    private static final Pattern ORACLE_PLSQL_BLOCK_START = Pattern.compile(
+        "^\\s*(?:DECLARE|BEGIN|CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\\s+)?"
+            + "(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE(?:\\s+BODY)?|TYPE(?:\\s+BODY)?))\\b",
+        Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+    );
+    private static final Pattern ORACLE_PLSQL_BLOCK_END = Pattern.compile("\\bEND\\s*;\\s*$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ORACLE_NAMED_PLSQL_BLOCK_END = Pattern.compile(
+        "\\bEND\\s+([A-Z0-9_$#]+)\\s*;\\s*$",
         Pattern.CASE_INSENSITIVE
     );
     private static final String[] DEFAULT_TABLE_TYPES = new String[] {
@@ -108,18 +123,21 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        false,
         null,
         StatementMaxRowsMode.READ_LOOP_ONLY
     );
     private static final JdbcDriverQuirks USE_CATALOG_QUIRKS = DEFAULT_QUIRKS.withUseCatalogFallbackSql(true);
     private static final JdbcDriverQuirks HIVE_QUIRKS = USE_CATALOG_QUIRKS.withSchemasAsDatabasesFallback(true);
     private static final JdbcDriverQuirks KINGBASE_QUIRKS = DEFAULT_QUIRKS.withIgnoreCatalogForSchemaMetadata(true);
+    private static final JdbcDriverQuirks SQLSERVER_QUIRKS = DEFAULT_QUIRKS.withMergeEmptyCatalogSchemas(true);
     private static final JdbcDriverQuirks TAOS_QUIRKS = DEFAULT_QUIRKS
         .withPreferExecuteQueryForResultSetSql(true)
         .withDatabaseClientInfoProperty("dbname");
     private static final JdbcDriverQuirks YASHAN_QUIRKS = new JdbcDriverQuirks(
         true,
         true,
+        false,
         false,
         false,
         false,
@@ -136,12 +154,14 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        false,
         null,
         StatementMaxRowsMode.READ_LOOP_ONLY
     );
     private static final JdbcDriverQuirks ORACLE_QUIRKS = new JdbcDriverQuirks(
         false,
         true,
+        false,
         false,
         false,
         false,
@@ -157,6 +177,8 @@ public final class DbxJdbcPlugin {
         new JdbcDriverQuirkRule("jdbc:doris:", USE_CATALOG_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:hive2:", HIVE_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:kingbase", KINGBASE_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:sqlserver:", SQLSERVER_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:jtds:sqlserver:", SQLSERVER_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:yasdb:", YASHAN_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:iris:", IRIS_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:oracle:", ORACLE_QUIRKS),
@@ -173,6 +195,7 @@ public final class DbxJdbcPlugin {
     private static final ThreadLocal<JdbcConnectionState> CONNECTION_STATE =
         ThreadLocal.withInitial(() -> DEFAULT_CONNECTION_STATE);
     private static final Map<String, JdbcConnectionState> LOGICAL_SESSIONS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final ThreadLocal<CancellationRequest> CANCELLATION_REQUEST = new ThreadLocal<>();
     private static volatile boolean shuttingDown;
 
     private static final class JdbcConnectionState {
@@ -180,10 +203,23 @@ public final class DbxJdbcPlugin {
         Connection sharedConnection;
         boolean manualTransactionActive;
         final Map<String, QuerySession> querySessions = new HashMap<>();
+        final Map<String, CancellationRequest> cancellationRequests = new HashMap<>();
         volatile Statement activeStatement;
         volatile boolean closing;
         final java.util.concurrent.locks.ReentrantLock operation = new java.util.concurrent.locks.ReentrantLock();
     }
+
+    static final class CancellationRequest {
+        final String token;
+        boolean cancelled;
+        Statement statement;
+
+        CancellationRequest(String token) {
+            this.token = token;
+        }
+    }
+
+    record StatementCancellation(boolean matched, Statement statement) {}
 
     private static JdbcConnectionState connectionState() {
         return CONNECTION_STATE.get();
@@ -197,6 +233,7 @@ public final class DbxJdbcPlugin {
         boolean ignoreCatalogForSchemaMetadata,
         boolean preferExecuteQueryForResultSetSql,
         boolean schemasAsDatabasesFallback,
+        boolean mergeEmptyCatalogSchemas,
         String databaseClientInfoProperty,
         StatementMaxRowsMode statementMaxRowsMode
     ) {
@@ -209,6 +246,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
             );
@@ -223,6 +261,7 @@ public final class DbxJdbcPlugin {
                 value,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
             );
@@ -237,6 +276,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 value,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
             );
@@ -250,6 +290,22 @@ public final class DbxJdbcPlugin {
                 useCatalogFallbackSql,
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
+                value,
+                mergeEmptyCatalogSchemas,
+                databaseClientInfoProperty,
+                statementMaxRowsMode
+            );
+        }
+
+        JdbcDriverQuirks withMergeEmptyCatalogSchemas(boolean value) {
+            return new JdbcDriverQuirks(
+                skipExecutionContext,
+                useOracleMetadata,
+                caseInsensitiveSchemaMetadata,
+                useCatalogFallbackSql,
+                ignoreCatalogForSchemaMetadata,
+                preferExecuteQueryForResultSetSql,
+                schemasAsDatabasesFallback,
                 value,
                 databaseClientInfoProperty,
                 statementMaxRowsMode
@@ -265,6 +321,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                mergeEmptyCatalogSchemas,
                 value,
                 statementMaxRowsMode
             );
@@ -283,17 +340,35 @@ public final class DbxJdbcPlugin {
     }
 
     public static void main(String[] args) throws Exception {
-        java.util.concurrent.ExecutorService requests = java.util.concurrent.Executors.newCachedThreadPool();
         try (
             BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8))
         ) {
+            serve(reader, writer);
+        }
+    }
+
+    static void serve(BufferedReader reader, BufferedWriter writer) throws Exception {
+        // Requests without a logical session run in order on one worker so the reader stays free to
+        // handle `cancelStatement` while a statement is still executing on the shared connection.
+        java.util.concurrent.ExecutorService defaultRequests = java.util.concurrent.Executors.newSingleThreadExecutor();
+        serve(reader, writer, defaultRequests);
+    }
+
+    static void serve(BufferedReader reader, BufferedWriter writer,
+                      java.util.concurrent.ExecutorService defaultRequests) throws Exception {
+        java.util.concurrent.ExecutorService requests = java.util.concurrent.Executors.newCachedThreadPool();
+        try {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) {
                     continue;
                 }
                 JsonNode incoming = MAPPER.readTree(line);
+                if (CANCEL_STATEMENT_METHOD.equals(incoming.path("method").asText())) {
+                    writeResponse(writer, cancelStatement(incoming));
+                    continue;
+                }
                 if (incoming.path("params").hasNonNull("jdbcSessionId")) {
                     JdbcConnectionState retainedState = retainLogicalState(incoming);
                     requests.execute(() -> {
@@ -305,22 +380,151 @@ public final class DbxJdbcPlugin {
                     });
                     continue;
                 }
-                if ("close".equals(incoming.path("method").asText())) shuttingDown = true;
-                ObjectNode response = handleLine(line);
-                writeResponse(writer, response);
-                if (response.path("_dbx_close").asBoolean(false)) {
-                    break;
+                CancellationRequest cancellationRequest = registerCancellationRequest(incoming);
+                if ("close".equals(incoming.path("method").asText())) {
+                    shuttingDown = true;
+                    String closeLine = line;
+                    ObjectNode response = defaultRequests.submit(
+                        () -> handleDefaultRequest(closeLine, incoming, cancellationRequest)
+                    ).get();
+                    writeResponse(writer, response);
+                    if (response.path("_dbx_close").asBoolean(false)) {
+                        break;
+                    }
+                    continue;
                 }
+                String requestLine = line;
+                defaultRequests.execute(() -> {
+                    try {
+                        writeResponse(writer, handleDefaultRequest(requestLine, incoming, cancellationRequest));
+                    } catch (Exception error) {
+                        System.err.println("JDBC response failed: " + error.getClass().getSimpleName());
+                    }
+                });
             }
         } finally {
             shuttingDown = true;
+            defaultRequests.shutdown();
             for (JdbcConnectionState state : LOGICAL_SESSIONS.values()) {
                 closeLogicalSession(state);
             }
             LOGICAL_SESSIONS.clear();
             requests.shutdown();
+            if (!defaultRequests.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                cancelActiveStatement(DEFAULT_CONNECTION_STATE);
+                defaultRequests.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
             closeSharedConnection();
         }
+    }
+
+    private static ObjectNode handleDefaultRequest(String line, JsonNode request,
+                                                   CancellationRequest cancellationRequest) throws Exception {
+        CANCELLATION_REQUEST.set(cancellationRequest);
+        try {
+            if (isCancellationRequested(cancellationRequest)) return cancelledResponse(request);
+            return handleLine(line);
+        } finally {
+            finishCancellationRequest(cancellationRequest);
+            CANCELLATION_REQUEST.remove();
+        }
+    }
+
+    static CancellationRequest registerCancellationRequest(JsonNode request) {
+        String token = optionalText(request.path("params"), CANCEL_TOKEN_PARAM);
+        if (token == null) return null;
+        CancellationRequest cancellationRequest = new CancellationRequest(token);
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            state.cancellationRequests.put(token, cancellationRequest);
+        }
+        return cancellationRequest;
+    }
+
+    private static boolean isCancellationRequested(CancellationRequest cancellationRequest) {
+        if (cancellationRequest == null) return false;
+        synchronized (DEFAULT_CONNECTION_STATE) {
+            return cancellationRequest.cancelled;
+        }
+    }
+
+    private static ObjectNode cancelledResponse(JsonNode request) {
+        JsonNode id = request.path("id");
+        ObjectNode response = MAPPER.createObjectNode();
+        response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
+        response.set("error", MAPPER.createObjectNode().put("message", "JDBC request cancelled"));
+        return response;
+    }
+
+    static void finishCancellationRequest(CancellationRequest cancellationRequest) {
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            Statement statement = cancellationRequest == null ? null : cancellationRequest.statement;
+            if (cancellationRequest != null) {
+                state.cancellationRequests.remove(cancellationRequest.token, cancellationRequest);
+                cancellationRequest.statement = null;
+            }
+            if (cancellationRequest == null || state.activeStatement == statement) {
+                state.activeStatement = null;
+            }
+        }
+    }
+
+    /**
+     * Cancels the statement of the request that carried the same cancel token. The host sends this
+     * when it abandons a request (the user pressed stop); a token that no longer matches belongs to a
+     * request that already finished, so a later request on the same connection is never cancelled.
+     */
+    private static ObjectNode cancelStatement(JsonNode request) {
+        JsonNode id = request.path("id");
+        ObjectNode response = MAPPER.createObjectNode();
+        response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
+        String token = optionalText(request.path("params"), CANCEL_TOKEN_PARAM);
+        StatementCancellation cancellation = markCancellationRequested(token);
+        cancelCapturedStatement(cancellation.statement());
+        ObjectNode result = MAPPER.createObjectNode();
+        result.put("cancelled", cancellation.matched());
+        response.set("result", result);
+        return response;
+    }
+
+    static StatementCancellation markCancellationRequested(String token) {
+        JdbcConnectionState state = DEFAULT_CONNECTION_STATE;
+        synchronized (state) {
+            CancellationRequest cancellationRequest = token == null ? null : state.cancellationRequests.get(token);
+            if (cancellationRequest == null) return new StatementCancellation(false, null);
+            cancellationRequest.cancelled = true;
+            return new StatementCancellation(true, cancellationRequest.statement);
+        }
+    }
+
+    static void cancelCapturedStatement(Statement statement) {
+        if (statement == null) return;
+        try {
+            statement.cancel();
+        } catch (SQLException ignored) {
+            // The statement finished or was closed while the cancel was in flight.
+        }
+    }
+
+    private static void cancelActiveStatement(JdbcConnectionState state) {
+        cancelCapturedStatement(state.activeStatement);
+    }
+
+    private static void trackActiveStatement(Statement statement) {
+        trackActiveStatement(statement, CANCELLATION_REQUEST.get());
+    }
+
+    static void trackActiveStatement(Statement statement, CancellationRequest cancellationRequest) {
+        JdbcConnectionState state = connectionState();
+        boolean cancelRequested;
+        synchronized (state) {
+            state.activeStatement = statement;
+            if (cancellationRequest != null) cancellationRequest.statement = statement;
+            cancelRequested = cancellationRequest != null && cancellationRequest.cancelled;
+        }
+        // A cancel can arrive before the request created its statement.
+        if (cancelRequested) cancelCapturedStatement(statement);
     }
 
     private static void writeResponse(BufferedWriter writer, ObjectNode response) throws IOException {
@@ -744,7 +948,7 @@ public final class DbxJdbcPlugin {
         if (connectionState() != DEFAULT_CONNECTION_STATE) logicalDriverKey = driverKey;
         String driverClass = optionalText(connection, "jdbc_driver_class");
         if (driverKey.equals(registeredDriverKey) && registeredDriver != null) {
-            if (driverClass != null) {
+            if (driverClass != null && LegacyJdbcDriverClass.isLegacyAlias(driverClass)) {
                 LegacyJdbcDriverClass.load(
                     driverClass,
                     optionalText(connection, "connection_string"),
@@ -1219,10 +1423,10 @@ public final class DbxJdbcPlugin {
         boolean bitStringColumns = usesBitStringColumns(connection);
         boolean fullPrecisionIntegers = usesFullPrecisionIntegers(connection);
         try (Statement statement = conn.createStatement()) {
-            connectionState().activeStatement = statement;
+            trackActiveStatement(statement);
             if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
-            String trimmedSql = trimStatementSql(sql);
+            String trimmedSql = trimStatementSql(sql, isOracleUrl(jdbcUrl(connection)));
             String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
             ExecutedStatement executed = executeStatementForResultWithAdhocRetry(connection, statement, effectiveSql, quirks);
             ObjectNode result = MAPPER.createObjectNode();
@@ -1401,7 +1605,7 @@ public final class DbxJdbcPlugin {
         Statement statement;
         try {
             statement = createPagedQueryStatement(conn);
-            connectionState().activeStatement = statement;
+            trackActiveStatement(statement);
         } catch (Exception | LinkageError error) {
             restorePagedQueryTransaction(conn, restoreAutoCommit);
             throw error;
@@ -1409,7 +1613,7 @@ public final class DbxJdbcPlugin {
         try {
             if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
-            String trimmedSql = trimStatementSql(sql);
+            String trimmedSql = trimStatementSql(sql, isOracleUrl(jdbcUrl(connection)));
             String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
             ExecutedStatement executed = executeStatementForResultWithAdhocRetry(connection, statement, effectiveSql, quirks);
             ResultSet rs = executed.resultSet();
@@ -1507,7 +1711,7 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode readQuerySessionPage(QuerySession session, int pageSize) throws SQLException {
-        connectionState().activeStatement = session.statement;
+        trackActiveStatement(session.statement);
         if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
         int effectivePageSize = Math.max(1, pageSize);
         ArrayNode rows = MAPPER.createArrayNode();
@@ -1786,6 +1990,21 @@ public final class DbxJdbcPlugin {
         String statementId = "DBX_" + UUID.randomUUID().toString().replace("-", "").substring(0, 26);
         String statementSql = trimStatementSql(sql);
         StringBuilder plan = new StringBuilder();
+        // EXPLAIN PLAN and DBMS_XPLAN.DISPLAY are two separately autocommitted statements. A
+        // schema that ships its own PLAN_TABLE as GLOBAL TEMPORARY TABLE ... ON COMMIT DELETE
+        // ROWS loses the plan rows at the commit in between, so DISPLAY answers with
+        // "cannot fetch plan for statement_id '...'". Run both inside one transaction to keep
+        // the rows written by EXPLAIN PLAN visible for the read.
+        //
+        // The read must also name the same table Oracle wrote to. EXPLAIN PLAN resolves its plan
+        // table in the session user's schema, while a bare 'PLAN_TABLE' inside DBMS_XPLAN.DISPLAY
+        // resolves in CURRENT_SCHEMA — and DBX switches CURRENT_SCHEMA whenever a connection
+        // browses another schema. Without the explicit name the write and the read can land on
+        // two different objects, which is the other way "cannot fetch plan for statement_id"
+        // shows up.
+        String planTable = oracleExplainPlanTable(connection);
+        String displayTable = planTable == null ? "PLAN_TABLE" : planTable;
+        boolean explainTransaction = beginOracleExplainTransaction(connection);
         try {
             try (PreparedStatement explain = connection.prepareStatement(
                 "EXPLAIN PLAN SET STATEMENT_ID = '" + statementId + "' FOR " + statementSql
@@ -1795,7 +2014,7 @@ public final class DbxJdbcPlugin {
                 explain.execute();
             }
             try (PreparedStatement read = connection.prepareStatement(
-                "SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', ?, 'TYPICAL +PREDICATE'))"
+                "SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('" + displayTable + "', ?, 'TYPICAL +PREDICATE'))"
             )) {
                 applyExplainTimeout(read, timeoutSecs);
                 read.setString(1, statementId);
@@ -1809,12 +2028,85 @@ public final class DbxJdbcPlugin {
             return plan.toString();
         } finally {
             try (PreparedStatement cleanup = connection.prepareStatement(
-                "DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?"
+                "DELETE FROM " + displayTable + " WHERE STATEMENT_ID = ?"
             )) {
                 applyExplainTimeout(cleanup, timeoutSecs);
                 cleanup.setString(1, statementId);
                 cleanup.executeUpdate();
             } catch (SQLException ignored) {}
+            endOracleExplainTransaction(connection, explainTransaction);
+        }
+    }
+
+    /**
+     * Explicitly qualified name of the plan table that EXPLAIN PLAN resolves for this session:
+     * the session user's own object named PLAN_TABLE when it exists, otherwise the table behind the
+     * PUBLIC synonym (usually SYS.PLAN_TABLE$). Passing that name to DBMS_XPLAN.DISPLAY keeps the
+     * read on the table Oracle wrote to even when CURRENT_SCHEMA points at another schema. Returns
+     * null when neither can be resolved, so callers fall back to the unqualified name.
+     */
+    private static String oracleExplainPlanTable(Connection connection) {
+        String sql = "SELECT"
+            + " (SELECT OWNER || '.' || OBJECT_NAME FROM ALL_OBJECTS"
+            + " WHERE OWNER = USER AND OBJECT_NAME = 'PLAN_TABLE' AND ROWNUM = 1),"
+            + " (SELECT TABLE_OWNER || '.' || TABLE_NAME FROM ALL_SYNONYMS"
+            + " WHERE OWNER = 'PUBLIC' AND SYNONYM_NAME = 'PLAN_TABLE' AND ROWNUM = 1)"
+            + " FROM DUAL";
+        try (PreparedStatement probe = connection.prepareStatement(sql);
+             ResultSet rows = probe.executeQuery()) {
+            if (!rows.next()) {
+                return null;
+            }
+            String sessionPlanTable = rows.getString(1);
+            if (sessionPlanTable != null && !sessionPlanTable.isBlank()) {
+                return sessionPlanTable;
+            }
+            String publicPlanTable = rows.getString(2);
+            if (publicPlanTable != null && !publicPlanTable.isBlank()) {
+                return publicPlanTable;
+            }
+            return null;
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Oracle JDBC commits each statement in auto-commit mode, which is exactly what discards
+     * plan rows held by a session plan table created as ON COMMIT DELETE ROWS. Switch the
+     * connection into a short-lived transaction so EXPLAIN PLAN and the DBMS_XPLAN read share
+     * one commit point. Skipped when the shared connection is already inside a manual
+     * transaction or holds an open query session, and when the driver cannot toggle
+     * auto-commit at all.
+     */
+    private static boolean beginOracleExplainTransaction(Connection connection) {
+        try {
+            if (
+                !connection.getAutoCommit()
+                    || connectionState().manualTransactionActive
+                    || hasActiveQuerySession(connection)
+            ) {
+                return false;
+            }
+            connection.setAutoCommit(false);
+            return true;
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return false;
+        }
+    }
+
+    private static void endOracleExplainTransaction(Connection connection, boolean explainTransaction) {
+        if (!explainTransaction) {
+            return;
+        }
+        try {
+            // Commit instead of rollback so the plan-row cleanup above is not undone.
+            connection.commit();
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        }
+        try {
+            connection.setAutoCommit(true);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
     }
 
@@ -2006,6 +2298,44 @@ public final class DbxJdbcPlugin {
         return sql == null ? "" : sql.trim().replaceFirst(";\\s*$", "");
     }
 
+    static String trimStatementSql(String sql, boolean oracle) {
+        if (!oracle) {
+            return trimStatementSql(sql);
+        }
+        String trimmed = stripTrailingOracleSlashDelimiter(sql == null ? "" : sql.trim());
+        return isOraclePlSqlBlock(trimmed) ? trimmed : trimStatementSql(trimmed);
+    }
+
+    private static String stripTrailingOracleSlashDelimiter(String sql) {
+        if (!sql.endsWith("/")) {
+            return sql;
+        }
+        int slash = sql.length() - 1;
+        int lineStart = sql.lastIndexOf('\n', slash - 1) + 1;
+        if (!sql.substring(lineStart, slash).isBlank()) {
+            return sql;
+        }
+        String beforeSlash = sql.substring(0, lineStart).trim();
+        // A standalone `/` line is the SQL*Plus command that runs a PL/SQL unit; the
+        // driver needs only the unit itself.
+        return isOraclePlSqlBlock(beforeSlash) ? beforeSlash : sql;
+    }
+
+    private static boolean isOraclePlSqlBlock(String sql) {
+        if (!ORACLE_PLSQL_BLOCK_START.matcher(stripLeadingSqlComments(sql)).find()) {
+            return false;
+        }
+        if (ORACLE_PLSQL_BLOCK_END.matcher(sql).find()) {
+            return true;
+        }
+        Matcher named = ORACLE_NAMED_PLSQL_BLOCK_END.matcher(sql);
+        if (!named.find()) {
+            return false;
+        }
+        String label = named.group(1).toUpperCase(Locale.ROOT);
+        return !label.equals("IF") && !label.equals("LOOP") && !label.equals("CASE");
+    }
+
     private static boolean isSafeAutotraceSql(String sql) {
         String stripped = stripCommentsAndLiterals(trimStatementSql(sql));
         if (stripped.isBlank()) {
@@ -2183,10 +2513,26 @@ public final class DbxJdbcPlugin {
                 return rule.quirks();
             }
         }
+        if (isSqlServerConnection(connection)) {
+            return SQLSERVER_QUIRKS;
+        }
         if (isKyuubiDriver(connection)) {
             return HIVE_QUIRKS;
         }
         return DEFAULT_QUIRKS;
+    }
+
+    private static boolean isSqlServerConnection(JsonNode connection) {
+        String url = optionalText(connection, "connection_string");
+        if (urlMatchesPrefix(url, "jdbc:sqlserver:") || urlMatchesPrefix(url, "jdbc:jtds:sqlserver:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        if (driverClass == null) {
+            return false;
+        }
+        String normalized = driverClass.toLowerCase(Locale.ROOT);
+        return normalized.contains("sqlserver") || normalized.contains("jtds");
     }
 
     private static boolean isKyuubiDriver(JsonNode connection) {
@@ -2297,27 +2643,40 @@ public final class DbxJdbcPlugin {
         if (quirks.caseInsensitiveSchemaMetadata()) {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, true);
-            } catch (SQLException ignored) {
+            } catch (SQLException | AbstractMethodError ignored) {
+                // Legacy/incomplete JDBC drivers reject the two-arg overload: jTDS against
+                // SQL Server 2000 throws AbstractMethodError (#11127); Informix/GBase 8s
+                // (IfxDatabaseMetaData) throws a plain SQLException("不支持方法") (#12213).
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, true);
+                } catch (SQLException | AbstractMethodError ignored2) {
                 }
             }
             try (ResultSet rs = meta.getSchemas(null, null)) {
                 appendSchemas(result, rs, true);
-            } catch (SQLException ignored) {
+            } catch (SQLException | AbstractMethodError ignored) {
             }
         } else {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, false);
-            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
+            } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
+                // See the SQLException/AbstractMethodError note above: same legacy-driver
+                // fallback (SQLFeatureNotSupportedException is a SQLException subclass).
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, false);
+                } catch (SQLException | AbstractMethodError ignored2) {
+                }
+            }
+            if (quirks.mergeEmptyCatalogSchemas() && catalog != null && !catalog.isEmpty()) {
+                try (ResultSet rs = meta.getSchemas("", null)) {
+                    appendSchemas(result, rs, false);
+                } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
                 }
             }
             if (result.isEmpty() && catalog != null) {
                 try (ResultSet rs = meta.getSchemas(null, null)) {
                     appendSchemas(result, rs, false);
-                } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
+                } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
                 }
             }
         }
@@ -3466,7 +3825,7 @@ public final class DbxJdbcPlugin {
         String effectiveSchema = kingbaseEffectiveSchema(conn, schema);
         Set<String> primaryKeys = kingbasePrimaryKeys(conn, effectiveSchema, table);
         String sql = "SELECT a.attname AS column_name, " +
-            "format_type(a.atttypid, a.atttypmod) AS data_type, " +
+            "CASE WHEN t.typname = 'json' THEN 'json' WHEN t.typname = '_json' THEN 'json[]' ELSE format_type(a.atttypid, a.atttypmod) END AS data_type, " +
             "NOT a.attnotnull AS is_nullable, " +
             "sys_get_expr(ad.adbin, ad.adrelid) AS column_default, " +
             "d.description AS column_comment, " +
@@ -4374,7 +4733,156 @@ public final class DbxJdbcPlugin {
             return genericTableObjectSource(connection, database, schema, name);
         }
 
+        String normalizedType = normalizeObjectType(objectType);
+        if (!isSybaseConnection(connection) && ("PROCEDURE".equals(normalizedType) || "FUNCTION".equals(normalizedType))) {
+            return genericRoutineObjectSource(connection, conn, database, schema, name, normalizedType);
+        }
+
         throw new SQLException("Object source is not supported by this JDBC driver");
+    }
+
+    /**
+     * Generic JDBC does not define a routine DDL API. Return the structured
+     * parameter metadata that it does define and leave source empty/read-only.
+     * Drivers are allowed to omit or reject this optional metadata; that must
+     * not turn opening an already-listed routine into a fatal error.
+     */
+    private static JsonNode genericRoutineObjectSource(
+        JsonNode connection,
+        Connection conn,
+        String database,
+        String schema,
+        String name,
+        String objectType
+    ) {
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", name);
+        item.put("object_type", objectType);
+        putNullable(item, "schema", emptyToNull(schema));
+        item.put("source", "");
+        item.put("editable", false);
+
+        try {
+            DatabaseMetaData meta = conn.getMetaData();
+            JdbcDriverQuirks quirks = driverQuirks(connection);
+            String catalog = metadataCatalog(database, quirks);
+            String schemaPattern = escapeJdbcMetadataPattern(meta, resolveSchemaPattern(meta, database, schema, quirks));
+            String routineName = escapeJdbcMetadataPattern(meta, stripRoutineSignature(name));
+            ResultSet columns = "PROCEDURE".equals(objectType)
+                ? meta.getProcedureColumns(catalog, schemaPattern, routineName, "%")
+                : meta.getFunctionColumns(catalog, schemaPattern, routineName, "%");
+            if (columns == null) {
+                return item;
+            }
+            try (columns) {
+                List<ObjectNode> parameters = new ArrayList<>();
+                while (columns.next()) {
+                    parameters.add(genericRoutineParameter(columns, "PROCEDURE".equals(objectType)));
+                }
+                parameters.sort((left, right) -> {
+                    JsonNode leftOrdinal = left.get("ordinal");
+                    JsonNode rightOrdinal = right.get("ordinal");
+                    int leftValue = leftOrdinal == null ? Integer.MAX_VALUE : leftOrdinal.asInt();
+                    int rightValue = rightOrdinal == null ? Integer.MAX_VALUE : rightOrdinal.asInt();
+                    return Integer.compare(leftValue, rightValue);
+                });
+                ArrayNode result = MAPPER.createArrayNode();
+                result.addAll(parameters);
+                item.set("routine_parameters", result);
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            // Parameter metadata is optional. The empty read-only source still
+            // lets the details dialog open when a driver does not implement it.
+        }
+        return item;
+    }
+
+    private static ObjectNode genericRoutineParameter(ResultSet columns, boolean procedure) {
+        ObjectNode parameter = MAPPER.createObjectNode();
+        Integer columnType = metadataInteger(columns, "COLUMN_TYPE");
+        String mode = routineParameterMode(columnType, procedure);
+        String name = metadataString(columns, "COLUMN_NAME");
+        if ((name == null || name.isBlank()) && "RETURN".equals(mode)) {
+            name = "RETURN";
+        }
+        putNullable(parameter, "name", name);
+        parameter.put("mode", mode);
+        putOptionalInt(parameter, "jdbc_type", metadataInteger(columns, "DATA_TYPE"));
+        putNullable(parameter, "type_name", metadataString(columns, "TYPE_NAME"));
+        putOptionalInt(parameter, "precision", metadataInteger(columns, "PRECISION"));
+        putOptionalInt(parameter, "length", metadataInteger(columns, "LENGTH"));
+        putOptionalInt(parameter, "scale", metadataInteger(columns, "SCALE"));
+        Integer nullable = metadataInteger(columns, "NULLABLE");
+        if (nullable != null && nullable != DatabaseMetaData.procedureNullableUnknown) {
+            parameter.put("nullable", nullable != DatabaseMetaData.procedureNoNulls);
+        }
+        putOptionalInt(parameter, "ordinal", metadataInteger(columns, "ORDINAL_POSITION"));
+        return parameter;
+    }
+
+    private static String routineParameterMode(Integer columnType, boolean procedure) {
+        if (columnType == null) {
+            return "UNKNOWN";
+        }
+        if (procedure) {
+            return switch (columnType) {
+                case DatabaseMetaData.procedureColumnIn -> "IN";
+                case DatabaseMetaData.procedureColumnInOut -> "INOUT";
+                case DatabaseMetaData.procedureColumnOut -> "OUT";
+                case DatabaseMetaData.procedureColumnReturn -> "RETURN";
+                default -> "UNKNOWN";
+            };
+        }
+        return switch (columnType) {
+            case DatabaseMetaData.functionColumnIn -> "IN";
+            case DatabaseMetaData.functionColumnInOut -> "INOUT";
+            case DatabaseMetaData.functionColumnOut -> "OUT";
+            case DatabaseMetaData.functionReturn -> "RETURN";
+            default -> "UNKNOWN";
+        };
+    }
+
+    private static String metadataString(ResultSet result, String column) {
+        try {
+            return result.getString(column);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    private static Integer metadataInteger(ResultSet result, String column) {
+        try {
+            Object value = result.getObject(column);
+            if (value instanceof Number number) {
+                return number.intValue();
+            }
+            if (value instanceof String text && !text.isBlank()) {
+                return Integer.valueOf(text.trim());
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException | NumberFormatException ignored) {
+        }
+        return null;
+    }
+
+    private static String escapeJdbcMetadataPattern(DatabaseMetaData meta, String value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            String escape = meta.getSearchStringEscape();
+            if (escape == null || escape.isEmpty()) {
+                return value;
+            }
+            return value.replace(escape, escape + escape).replace("%", escape + "%").replace("_", escape + "_");
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return value;
+        }
+    }
+
+    private static void putOptionalInt(ObjectNode node, String field, Integer value) {
+        if (value != null) {
+            node.put(field, value);
+        }
     }
 
     private static JsonNode sybaseViewObjectSource(

@@ -5,15 +5,19 @@ import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JdbcExecutor;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.StandardJdbcMetadata;
+import com.dbx.agent.TableInfo;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -37,6 +41,7 @@ public final class CacheAgent extends ConfiguredJdbcAgent {
 
     @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
+        super.afterConnect(params, connection);
         configuredDatabase = params.getDatabase();
     }
 
@@ -72,6 +77,85 @@ public final class CacheAgent extends ConfiguredJdbcAgent {
     @Override
     public List<String> listSchemas() {
         return dedupeCaseInsensitiveSchemas(StandardJdbcMetadata.INSTANCE.listSchemas(requireConnection(), CACHE_PROFILE));
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema) {
+        return listTables(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        List<String> tableTypes = new ArrayList<>();
+        for (String tableType : CACHE_PROFILE.getTableTypes()) {
+            if (normalized.tableTypeAllowed(tableType)) {
+                tableTypes.add(tableType);
+            }
+        }
+        if (tableTypes.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return unchecked(() -> {
+            Connection connection = requireConnection();
+            try {
+                return readTables(connection, schema, normalized, tableTypes);
+            } catch (SQLException error) {
+                if (error.getErrorCode() != -30 && !"42S02".equals(error.getSQLState())) {
+                    throw error;
+                }
+                return StandardJdbcMetadata.INSTANCE.listTables(connection, CACHE_PROFILE, configuredDatabase, schema, normalized);
+            }
+        });
+    }
+
+    private static List<TableInfo> readTables(
+        Connection connection,
+        String schema,
+        MetadataListConstraints constraints,
+        List<String> tableTypes
+    ) throws SQLException {
+        int offset = constraints.hasOffset() ? constraints.getOffset() : 0;
+        int limit = constraints.hasLimit() ? constraints.getLimit() : Integer.MAX_VALUE;
+        long fetchLimit = (long) offset + limit;
+        StringBuilder sql = new StringBuilder("SELECT ");
+        if (constraints.hasLimit() && !constraints.hasFilter() && fetchLimit <= Integer.MAX_VALUE) {
+            sql.append("TOP ").append(fetchLimit).append(' ');
+        }
+        sql.append("TABLE_NAME, TABLE_TYPE, DESCRIPTION FROM INFORMATION_SCHEMA.TABLES WHERE ");
+        if (!isBlank(schema)) {
+            sql.append("TABLE_SCHEMA = ? AND ");
+        }
+        sql.append("TABLE_TYPE IN (").append(String.join(", ", Collections.nCopies(tableTypes.size(), "?")))
+            .append(") ORDER BY TABLE_NAME, TABLE_SCHEMA");
+
+        List<TableInfo> tables = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            int parameter = 1;
+            if (!isBlank(schema)) {
+                statement.setString(parameter++, schema.trim());
+            }
+            for (String tableType : tableTypes) {
+                statement.setString(parameter++, tableType);
+            }
+            try (ResultSet result = statement.executeQuery()) {
+                int skipped = 0;
+                while (tables.size() < limit && result.next()) {
+                    String name = result.getString("TABLE_NAME");
+                    String comment = result.getString("DESCRIPTION");
+                    if (!constraints.nameOrCommentMatches(name, comment)) {
+                        continue;
+                    }
+                    if (skipped < offset) {
+                        skipped++;
+                        continue;
+                    }
+                    String tableType = result.getString("TABLE_TYPE");
+                    tables.add(new TableInfo(name, "BASE TABLE".equalsIgnoreCase(tableType) ? "TABLE" : tableType, comment));
+                }
+            }
+        }
+        return tables;
     }
 
     @Override

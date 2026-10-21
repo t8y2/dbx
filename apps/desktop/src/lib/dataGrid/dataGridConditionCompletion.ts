@@ -57,7 +57,8 @@ export function dataGridConditionColumnOptions(columns: readonly DataGridConditi
     const name = typeof column === "string" ? column : column.name;
     const insertText = quoteSqlIdentifier(name, dialect);
     const comment = typeof column === "string" ? undefined : column.comment;
-    return { name, insertText, ...(comment !== undefined ? { comment } : {}) };
+    const dataType = typeof column === "string" ? undefined : column.dataType;
+    return { name, insertText, ...(comment !== undefined ? { comment } : {}), ...(dataType ? { dataType } : {}) };
   });
 }
 

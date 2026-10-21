@@ -5,6 +5,13 @@ edition = "2021"
 license = "Apache-2.0"
 publish = false
 
+[features]
+# TDS ATTENTION (tiberius Client::send_attention) exists only in the vendored
+# tiberius that the root workspace patches in (vendor/tiberius). Standalone
+# agent driver workspaces resolve tiberius from crates.io and must keep this
+# off; SqlServerClient::send_attention then degrades to a no-op.
+native-attention = []
+
 [dependencies]
 dbx-driver-support = { path = "../dbx-driver-support" }
 dbx-sql-core = { path = "../dbx-sql-core" }

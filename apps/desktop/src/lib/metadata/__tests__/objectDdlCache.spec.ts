@@ -17,9 +17,28 @@ import { clearMetadataRuntimeCache } from "@/lib/metadata/metadataRuntimeCache";
 const request = { connectionId: "c1", database: "app", schema: "public", tableName: "users", catalog: "analytics" } as const;
 
 describe("objectDdlCache", () => {
+  it.each(["remote", "disk"])("settles local waiting when cancellation retires a never-returning %s read", async (phase) => {
+    if (phase === "disk") mocks.loadSchemaCache.mockReturnValueOnce(new Promise(() => undefined));
+    mocks.getTableDisplayDdl.mockReturnValueOnce(new Promise(() => undefined));
+    let settled = false;
+    const result = loadObjectDdl(request).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.waitFor(() => expect(phase === "remote" ? mocks.getTableDisplayDdl.mock.calls.length : getObjectDdlCacheDebugStateForTests().activeReads).toBe(1));
+    cancelObjectDdlLoadsForConnection(request.connectionId);
+    await vi.waitFor(() => expect(settled).toBe(true));
+    await result;
+    expect(getObjectDdlCacheDebugStateForTests().activeReads).toBe(0);
+  });
   beforeEach(() => {
     clearMetadataRuntimeCache();
     vi.clearAllMocks();
+    mocks.getTableDisplayDdl.mockReset();
     mocks.persisted.clear();
     mocks.loadSchemaCache.mockImplementation(async (cacheKey: string) => mocks.persisted.get(cacheKey) ?? null);
     mocks.saveSchemaCache.mockImplementation(async (cacheKey: string, payload: unknown) => {
@@ -257,7 +276,7 @@ describe("objectDdlCache", () => {
     await vi.waitFor(() => expect(mocks.getTableDisplayDdl).toHaveBeenCalledTimes(1));
     cancelObjectDdlLoadsForConnection(request.connectionId);
     releaseOld("old session ddl");
-    await expect(oldLoad).resolves.toMatchObject({ ddl: "old session ddl" });
+    await expect(oldLoad).rejects.toThrow("Metadata waiting cancelled locally.");
 
     mocks.getTableDisplayDdl.mockResolvedValueOnce("new session ddl");
     await expect(loadObjectDdl(request)).resolves.toMatchObject({ ddl: "new session ddl", cacheStatus: "remote" });
@@ -414,6 +433,25 @@ describe("objectDdlCache", () => {
       await invalidateObjectDdlCache({ connectionId: "a:b c%中" });
       expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith("object-ddl:v1:a%3Ab%20c%25%E4%B8%AD:");
       expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith("object-meta:v1:a%3Ab%20c%25%E4%B8%AD:");
+    });
+
+    it("strips NUL bytes from remote and cached DDL", async () => {
+      mocks.getTableDisplayDdl.mockResolvedValue("CREATE TABLE t (id int DEFAULT '2'\0\0);");
+
+      const remoteResult = await loadObjectDdl(request, { force: true });
+      expect(remoteResult.ddl).toBe("CREATE TABLE t (id int DEFAULT '2');");
+      expect(remoteResult.ddl).not.toContain("\0");
+
+      mocks.persisted.set(objectDdlCacheKey(request), {
+        version: 1,
+        cachedAt: new Date().toISOString(),
+        ddl: "CREATE TABLE t (name varchar DEFAULT ''\0\0);",
+      });
+      clearMetadataRuntimeCache();
+
+      const diskResult = await loadObjectDdl(request);
+      expect(diskResult.ddl).toBe("CREATE TABLE t (name varchar DEFAULT '');");
+      expect(diskResult.ddl).not.toContain("\0");
     });
   });
 });

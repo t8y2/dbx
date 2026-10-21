@@ -197,6 +197,7 @@ where
 
     async fn get_login_ack(&mut self) -> crate::Result<ReceivedToken> {
         let ack = TokenLoginAck::decode(self.conn).await?;
+        self.conn.context_mut().set_version(ack.tds_version);
         event!(Level::INFO, "{} version {}", ack.prog_name, ack.version);
         Ok(ReceivedToken::LoginAck(ack))
     }

@@ -171,6 +171,9 @@ pub async fn list_indexes(pool: &Pool, _schema: &str, table: &str) -> Result<Vec
             let column: String = row.get::<_, String>(0);
             let key_cols = vec![column];
             IndexInfo {
+                key_directions: Vec::new(),
+                visibility: None,
+                key_metadata_complete: false,
                 name: row.get::<_, String>(0),
                 columns: key_cols,
                 is_unique: false,

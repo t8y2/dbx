@@ -202,7 +202,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             options.getFetchSize(),
             options.getTimeoutSecs(),
             resultValueReader(),
-            JdbcExecutor.StatementMessageReader.NONE,
+            statementMessageReader(),
             advancePastUpdateCounts()
         );
     }
@@ -221,6 +221,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             this::resetSchemaSQL,
             options,
             resultValueReader(),
+            statementMessageReader(),
             advancePastUpdateCounts()
         );
     }
@@ -421,7 +422,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             releasePooledConnection(true);
             return;
         }
-        if (sessionAffinity || executor.hasOpenSessions() || executor.hasActiveStatements()) {
+        if (sessionAffinity || executor.hasOpenSessions() || executor.hasActiveStatements() || hasRetainedResultResources()) {
             return;
         }
         releasePooledConnection(!preparePooledConnectionForReturn());
@@ -438,7 +439,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         if (sessionAffinity) {
             return;
         }
-        if (executor.hasOpenSessions() || executor.hasActiveStatements()) {
+        if (executor.hasOpenSessions() || executor.hasActiveStatements() || hasRetainedResultResources()) {
             return;
         }
         releasePooledConnection(!preparePooledConnectionForReturn());
@@ -602,6 +603,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
     }
 
+    protected JdbcExecutor.StatementMessageReader statementMessageReader() {
+        return JdbcExecutor.StatementMessageReader.NONE;
+    }
+
     /** Called for each session RPC before its SQL can replace the connection's last trace ID. */
     protected void beforeAgentMethod(String method, String querySessionId) {
     }
@@ -713,7 +718,12 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         );
     }
 
+    protected boolean hasRetainedResultResources() { return false; }
+
+    protected void releaseRetainedResultResources() { }
+
     private void closeCurrentConnection() throws Exception {
+        releaseRetainedResultResources();
         if (pooledLease != null) {
             boolean evict = pooledConnectionPoisoned || sessionAffinity || !preparePooledConnectionForReturn();
             releasePooledConnection(evict);
@@ -732,7 +742,17 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return JdbcSchemaSwitcher.resetBeforeReturn(connection);
     }
 
+    protected final synchronized void discardConnection(Connection failedConnection) throws java.sql.SQLException {
+        if (pooledLease != null && connection == failedConnection) {
+            // Evict the checked-out lease before closing its proxy; close alone returns it to the pool.
+            releasePooledConnection(true);
+        } else {
+            failedConnection.close();
+        }
+    }
+
     private void releasePooledConnection(boolean evict) {
+        releaseRetainedResultResources();
         JdbcConnectionPoolRegistry.Lease lease = pooledLease;
         pooledLease = null;
         connection = null;

@@ -8,7 +8,8 @@
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::transfer::{
-    transfer_table, TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
+    transfer_table, TransferColumnNameCase, TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest,
+    TransferTableNameCase,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,6 +44,8 @@ fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         connect_timeout_secs: 15,
         query_timeout_secs: 30,
         idle_timeout_secs: 60,
+        manual_transaction_timeout_secs: 300,
+        idle_disconnect_secs: 0,
         keepalive_interval_secs: 0,
         ssl: false,
         ca_cert_path: String::new(),
@@ -62,6 +65,7 @@ fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
         redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
@@ -78,8 +82,10 @@ fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         database_info: None,
     }
 }
@@ -154,6 +160,7 @@ async fn live_sqlite_to_sqlserver_keeps_sixty_four_bit_integer_values() {
         state.get_or_create_pool(&sqlserver_connection_id, Some(&target_db)).await.expect("target pool");
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlite-int-{suffix}"),
         source_connection_id: sqlite_connection_id.clone(),
         source_database: "main".to_string(),
@@ -168,9 +175,10 @@ async fn live_sqlite_to_sqlserver_keeps_sixty_four_bit_integer_values() {
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        target_column_name_case: TransferColumnNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,

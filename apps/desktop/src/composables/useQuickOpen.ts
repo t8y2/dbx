@@ -25,7 +25,28 @@ const INITIAL_SQL_FILE_LIMIT = 20;
 const CONTENT_SEARCH_DEBOUNCE_MS = 200;
 const CONTENT_SEARCH_MAX_RESULTS = 500;
 
-const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "victoriametrics", "etcd", "zookeeper", "mq", "nacos", "consul", "salesforce"]);
+const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>([
+  "redis",
+  "mongodb",
+  "elasticsearch",
+  "easysearch",
+  "meilisearch",
+  "solr",
+  "couchdb",
+  "qdrant",
+  "milvus",
+  "weaviate",
+  "chromadb",
+  "neo4j",
+  "influxdb",
+  "victoriametrics",
+  "etcd",
+  "zookeeper",
+  "mq",
+  "nacos",
+  "consul",
+  "salesforce",
+]);
 
 export interface QuickOpenItem {
   id: string;
@@ -255,6 +276,17 @@ export function matchQuickOpenText(query: string, text: string): QuickOpenMatch 
   }
 
   return null;
+}
+
+/** Search concatenated metadata literally so matches cannot stitch unrelated fields together. */
+function matchQuickOpenMetadata(query: string, text: string): QuickOpenMatch | null {
+  const lowerQuery = query.trim().toLowerCase();
+  const lowerText = text.toLowerCase();
+  const index = lowerText.indexOf(lowerQuery);
+  if (index < 0) return null;
+  if (lowerText === lowerQuery) return { kind: "exact", score: 1, indices: [] };
+  if (index === 0) return { kind: "prefix", score: 200 + Math.min(text.length - lowerQuery.length, 99), indices: [] };
+  return { kind: "substring", score: 400 + Math.min(index, 99), indices: [] };
 }
 
 interface MatchedItem extends QuickOpenItem {
@@ -948,7 +980,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
       if (seen.has(key)) continue;
       seen.add(key);
       const labelMatch = matchQuickOpenText(searchQuery.value, item.label);
-      const metadataMatch = labelMatch ? null : matchQuickOpenText(searchQuery.value, item.searchText);
+      const metadataMatch = labelMatch ? null : matchQuickOpenMetadata(searchQuery.value, item.searchText);
       const result = labelMatch ?? metadataMatch;
       if (result) {
         matched.push({

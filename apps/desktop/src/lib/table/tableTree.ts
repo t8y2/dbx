@@ -367,6 +367,19 @@ export function tablePartitionGroups(node: TreeNode): TreeNode[] {
   return partitionGroupChildren(node);
 }
 
+// Saved-SQL decoration and persisted-tree decoding can clone visible children
+// independently of hiddenChildren. Before mutating or releasing a table, retain
+// its visible partition groups as the authoritative loaded state (including the
+// load-more cursor), rather than resurrecting an older hidden snapshot.
+export function syncTablePartitionGroups(node: TreeNode): void {
+  if (node.type !== "table") return;
+  const groups = node.children?.filter((child) => child.type === "group-partitions") ?? [];
+  if (!groups.length) return;
+  const hiddenGroups = node.hiddenChildren?.filter((child) => child.type === "group-partitions") ?? [];
+  if (groups.length === hiddenGroups.length && groups.every((group, index) => group === hiddenGroups[index])) return;
+  node.hiddenChildren = [...(node.hiddenChildren?.filter((child) => child.type !== "group-partitions") ?? []), ...groups];
+}
+
 export function hasTablePartitionGroups(node: TreeNode): boolean {
   return partitionGroupChildren(node).length > 0;
 }
@@ -411,8 +424,9 @@ export function appendTableTreeLoadMoreNode(children: TreeNode[], loadMoreNode: 
   // paginates the whole schema, so nesting its global cursor under whichever
   // partition happens to end the page can hide all remaining schema objects.
   const childGroup = parentNode && isSuperTable(parentNode) ? tablePartitionGroups(parentNode)[0] : undefined;
-  if (!childGroup) return [...children, loadMoreNode];
+  if (!childGroup || !parentNode) return [...children, loadMoreNode];
 
+  syncTablePartitionGroups(parentNode);
   childGroup.children = [...(childGroup.children ?? []), loadMoreNode];
   return children;
 }
@@ -439,6 +453,9 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
   const nodeKey = (node: TreeNode) => exactObjectIdentityKey("TABLE", node.schema, node.label);
   const collect = (nodes: readonly TreeNode[]) => {
     for (const node of nodes) {
+      // Do not let a cloned hidden parent overwrite its visible counterpart in
+      // the index when a later page adds another level of partitions.
+      syncTablePartitionGroups(node);
       if (node.type === "table") {
         nodesByKey.set(nodeKey(node), node);
       }
@@ -498,12 +515,21 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
     return group;
   };
 
+  // Accumulate a page per parent: scanning/copying/sorting the growing group
+  // for every child makes large STABLEs quadratic, especially through Vue proxies.
+  const pendingGroups = new Map<TreeNode, { children: TreeNode[]; keys: Set<string> }>();
   const addToParent = (parent: TreeNode, child: TreeNode) => {
     const group = ensurePartitionGroup(parent);
-    const children = group.children ?? [];
-    if (!children.some((node) => nodeKey(node) === nodeKey(child))) {
-      group.children = sortDatabaseObjectsByName([...children, child], (node) => node.label);
-      group.objectCount = group.children.length;
+    let pending = pendingGroups.get(group);
+    if (!pending) {
+      const children = [...(group.children ?? [])];
+      pending = { children, keys: new Set(children.map(nodeKey)) };
+      pendingGroups.set(group, pending);
+    }
+    const key = nodeKey(child);
+    if (!pending.keys.has(key)) {
+      pending.keys.add(key);
+      pending.children.push(child);
     }
   };
 
@@ -540,6 +566,10 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
 
   for (const node of incomingNodes) {
     addNode(node);
+  }
+  for (const [group, pending] of pendingGroups) {
+    group.children = sortDatabaseObjectsByName(pending.children, (node) => node.label);
+    group.objectCount = group.children.length;
   }
 
   return sortDatabaseObjectsByName(roots, (node) => node.label);
@@ -722,6 +752,8 @@ function simpleObjectNodeType(objectType: DatabaseObjectTreeKind): TreeNodeType 
   if (objectType === "MATERIALIZED_VIEW") return "materialized_view";
   if (objectType === "PROCEDURE") return "procedure";
   if (objectType === "FUNCTION") return "function";
+  if (objectType === "FUNCTION_INTERNAL" || objectType === "FUNCTION_UDF") return "function";
+  if (objectType === "INDEX") return "index";
   if (objectType === "TRIGGER") return "trigger";
   if (objectType === "EVENT") return "event";
   if (objectType === "SEQUENCE") return "sequence";
@@ -770,6 +802,20 @@ const groupDefs: Array<{
     childType: "function",
   },
   {
+    key: "__internal_functions",
+    label: "tree.internalFunctions",
+    objectTypes: ["FUNCTION_INTERNAL"],
+    nodeType: "group-internal-functions",
+    childType: "function",
+  },
+  {
+    key: "__udf_functions",
+    label: "tree.udfFunctions",
+    objectTypes: ["FUNCTION_UDF"],
+    nodeType: "group-udf-functions",
+    childType: "function",
+  },
+  {
     key: "__triggers",
     label: "tree.triggers",
     objectTypes: ["TRIGGER"],
@@ -789,6 +835,13 @@ const groupDefs: Array<{
     objectTypes: ["SEQUENCE"],
     nodeType: "group-sequences",
     childType: "sequence",
+  },
+  {
+    key: "__indexes",
+    label: "tree.indexes",
+    objectTypes: ["INDEX"],
+    nodeType: "group-database-indexes",
+    childType: "index",
   },
   {
     key: "__synonyms",
@@ -820,7 +873,24 @@ const groupDefs: Array<{
   },
 ];
 
-const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-jobs", "group-packages", "group-types"]);
+const objectGroupNodeTypes = new Set<TreeNodeType>([
+  "group-tables",
+  "group-dolt-system-tables",
+  "group-views",
+  "group-materialized-views",
+  "group-procedures",
+  "group-functions",
+  "group-internal-functions",
+  "group-udf-functions",
+  "group-triggers",
+  "group-events",
+  "group-sequences",
+  "group-database-indexes",
+  "group-synonyms",
+  "group-jobs",
+  "group-packages",
+  "group-types",
+]);
 
 export function buildObjectGroupPlaceholderNodes({
   nodeId,
@@ -857,6 +927,7 @@ export function buildObjectGroupPlaceholderNodes({
 }
 
 export function objectGroupRefreshParentId(node: TreeNode): string | null {
+  if (node.tableName) return null;
   if (!objectGroupNodeTypes.has(node.type)) return null;
   const suffixStart = node.id.lastIndexOf(":__");
   if (suffixStart < 0) return null;
@@ -907,7 +978,7 @@ export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, sc
           const objectTypeSuffix = objectType === "PACKAGE" || objectType === "PACKAGE_BODY" || objectType === "TYPE" || objectType === "TYPE_BODY" ? `:${objectType}` : "";
           const signature = obj.signature?.trim() || "";
           const signatureIdPart = signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `:${signature}` : "";
-          const triggerParentName = objectType === "TRIGGER" && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
+          const triggerParentName = (objectType === "TRIGGER" || objectType === "INDEX") && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
           const triggerParentSchema = objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
           return {
             id: `${nodeId}:${def.key}:${childSchema ? `${childSchema}:` : ""}${obj.name}${signatureIdPart}${triggerParentName ? `:${triggerParentName}` : ""}${objectTypeSuffix}`,

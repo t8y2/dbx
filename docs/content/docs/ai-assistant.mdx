@@ -91,6 +91,7 @@ AI context can include:
 - Database type, connection name, database, and schema
 - Current editor SQL and the latest error, once the open editor is on the conversation's own connection and database — plus any editor selection you explicitly sent over
 - Tables, columns, indexes, foreign keys, and limited sample rows
+- Table and column notes from the connection's notes file, which take precedence over database comments
 - A bounded preview of the current result
 - Selected prompt templates
 - Referenced saved SQL file content
@@ -131,11 +132,17 @@ Templates enter model context. Do not put passwords, tokens, or unnecessary busi
 
 ## Skills (SKILL.md)
 
-Desktop can attach read-only [`SKILL.md`](https://developers.openai.com/codex/skills) rule files to a request as supplementary instructions. Skills are always discovered in `~/.agents/skills`; Settings → AI can additionally enable one custom directory. Each directory is validated independently, same names are kept side by side and labeled by source (`Default directory` / `Custom directory`), and custom-directory skills sort first.
+Desktop can use read-only [`SKILL.md`](https://developers.openai.com/codex/skills) rule files as supplementary instructions. Skills are always discovered in `~/.agents/skills`; Settings → AI can additionally enable one custom directory. Each directory is validated independently, same names are kept side by side and labeled by source (`Default directory` / `Custom directory`), and custom-directory skills sort first.
 
-Select skills from the composer `Skills` entry (or type `/skill`) and remove them from the chips above the input. The selection lives for the lifetime of one open AI panel — conversation switches and new conversations keep it; closing the panel or restarting DBX clears it. Nothing is persisted, and DBX never writes to skill files.
+Only each skill's **name and description** reach the model, as a listing. A skill's body is loaded **on demand**: when the model decides it needs one it calls the `use_skill` tool, and only then does DBX read the body from disk and return it. Files a skill ships (references, scripts, templates) are read one by one with `read_skill_file`. DBX never writes to skill files, and reading a file's content is never permission to run it.
 
-Skill bodies are read only when a request is sent, directly from disk, and validated then: file deleted or unreadable, invalid frontmatter, non-UTF-8 content, over the 1 MiB per-file limit, or a symlink escaping its root blocks the send with a banner above the composer naming the failed skill and offering Retry, Refresh, Remove, or Open Settings. With no skills selected, prompts are byte-for-byte identical to the pre-feature behavior. Web ships this feature unsupported.
+Select skills from the composer `Skills` entry (or type `/skill`); selected skills appear as chips above the input and can be removed at any time. **Selecting is not exclusive**: the user-selected entries are marked in the listing and take priority, but the model may also load an unticked skill from that same listing. With **Settings → AI → Allow the AI to use skills automatically** turned on (off by default) the listing is sent with every request even when nothing is selected, so the model can pick a skill on its own.
+
+A chip has two states: its default state, and **loaded in this conversation**. A chip gains the loaded marker once the model has called `use_skill` for that skill, or once you loaded it yourself. **Clicking a chip loads that skill immediately**: DBX reads the body there and then and puts it into the conversation, so the following turns answer with it. The loaded state is per conversation — it survives closing and reopening the AI panel, and a new conversation starts over. What DBX remembers after a restart is that the skill was loaded: the body is read from disk again when the next request needs it, so a skill that was deleted or grew past the read limit in the meantime goes back to its unloaded state and says why. While a selected skill has not been loaded yet, a **one-time** hint above the input offers to load it (each conversation shows that hint once).
+
+Skills are available to DBX's built-in AI only. A CLI provider (Claude Code, Codex, Cursor, OpenCode, Grok, Qoder, CodeBuddy, Pi) receives no listing, no skill body, and no skill tools; its skill selector is disabled with the reason shown, and skills that were already selected stay visible and removable.
+
+Because loading is on demand, nothing is read at send time: a deleted or unreadable file, invalid frontmatter, or a body that is not UTF-8 text now fails when the skill is loaded instead of blocking the send. The one exception is a checked skill that is no longer in the catalog: sending stays blocked, with a banner above the composer naming the failed skill and offering Retry, Refresh, Remove, or Open Settings. Files over the 1 MiB limit, binary files, and paths that leave a skill directory are refused. With no skills selected and the toggle off, prompts are byte-for-byte identical to the pre-feature behavior. Web ships this feature unsupported.
 
 ## Plugin Tools
 
@@ -164,6 +171,20 @@ Connection read-only protection, production protection, and database credentials
 Redis connections use a read-only command tool instead of SQL. The assistant can run commands DBX classifies as read-only (`SCAN`, `GET`, `TYPE`, `TTL`, `HGET`, …) and answer from their results. Commands that write or that are blocked (`SET`, `DEL`, `EXPIRE`, `EVAL`, `KEYS`, `CONFIG`, …) are never executed by the agent: it returns the command as a fenced code block for you to run in the Redis console, which asks for confirmation first. `SELECT` is not available either — the logical database is chosen with the tool's `db` argument.
 
 <Callout type="info">AI Agent never receives “write from now on” permission and cannot bypass MCP policy, connection read-only protection, or database privileges. See [Production Safety](/en/docs/production-safety) for the complete boundary.</Callout>
+
+## SQL Block Actions
+
+Each SQL block in a reply offers **Temp run**, **Execute**, and **Apply to editor**. All three target the query tab that belongs to the conversation's own connection, database, and schema — the connection the conversation is bound to, never whichever editor happens to be in front.
+
+That tab is created in the background when it does not exist yet, and the action never moves your workspace: an AI action does not switch, select, or open tabs on its own.
+
+Because the result therefore does not always land where you are looking, the block reports its own outcome:
+
+* The block shows **Executing…**, then the row count (returned or affected) or the database's error text.
+* When the target tab is not on screen, a notification names that tab and offers **View**; only clicking **View** brings it to the front.
+* Requests that never reached the database say why in the block instead: no available connection, an editor tab still busy with another request, or nothing to execute.
+
+Dangerous-SQL, production, parameter, and read-only confirmations keep their own dialogs; those are not repeated in the block or as a notification.
 
 ## Reasoning Effort and Thinking
 

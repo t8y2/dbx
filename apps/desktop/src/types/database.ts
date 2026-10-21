@@ -1,11 +1,56 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
-import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
+import type { TransferColumnNameCase, TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
+import type { GraphResult } from "@/lib/graph/graphResult";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
+
+export interface OracleViewRenameSourceInput {
+  source: string;
+  owner: string;
+  viewName: string;
+  oldName: string;
+  newName: string;
+  targetViewName?: string;
+}
+
+export interface OracleViewRenameSource {
+  source: string;
+  fingerprint: string;
+  references: OracleViewRenameReference[];
+}
+
+export interface OracleViewRenameReference {
+  owner: string;
+  name: string;
+}
+
+export interface OracleViewRenameIssue {
+  code: string;
+  message: string;
+  viewName?: string;
+  hintText?: string | null;
+  location?: { line: number; column: number; endLine?: number; endColumn?: number } | null;
+  repairable: boolean;
+}
+
+export interface OracleViewRenameSourceReview {
+  source: OracleViewRenameSource | null;
+  references: OracleViewRenameReference[];
+  issues: OracleViewRenameIssue[];
+}
+
+export interface OracleTableReferenceRewriteInput {
+  databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">;
+  objectType: "PROCEDURE" | "FUNCTION" | "TRIGGER";
+  schema: string;
+  oldName: string;
+  newName: string;
+  source: string;
+}
 
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
@@ -17,6 +62,10 @@ export function isMeilisearchDatabaseType(dbType?: DatabaseType): boolean {
 
 export function isSolrDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "solr";
+}
+
+export function isCouchDbDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "couchdb";
 }
 
 export interface SqlSnippet {
@@ -78,6 +127,7 @@ export interface CompletionAssistantCandidate {
   comment?: string | null;
   data_type?: string | null;
   signature?: string | null;
+  routine_id?: string | null;
 }
 
 export interface CompletionAssistantResponse {
@@ -105,6 +155,8 @@ export interface ConnectionConfig {
   visible_database_patterns?: string[];
   visible_schemas?: Record<string, string[]>;
   show_system_schemas?: boolean;
+  /** Whether to show Oracle / OceanBase-Oracle database links node in the sidebar tree. Defaults to true. */
+  show_database_links?: boolean;
   /** Load every page when the sidebar's Tables group is opened for this connection. */
   sidebar_auto_load_all_tables?: boolean;
   attached_databases?: AttachedDatabaseConfig[];
@@ -122,6 +174,16 @@ export interface ConnectionConfig {
   query_timeout_secs?: number;
   query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;
+  /** Seconds a manual transaction may sit idle before DBX rolls it back. */
+  manual_transaction_timeout_secs?: number;
+  /**
+   * 空闲自动断开阈值（秒）：后端在连接池层面实现，连接在此秒数内无任何查询活动时自动关闭其
+   * 连接池；前端据此把连接标记为未连接并保留已打开的页签与结果，供用户下次操作时自动重连。
+   *
+   * 0（默认）表示不启用。与 `idle_timeout_secs` 语义不同：后者只回收连接池内的空闲物理连接，
+   * 不会关闭整个连接池；本字段关闭的是整个连接池。所有方言均适用（与方言无关）。
+   */
+  idle_disconnect_secs?: number;
   keepalive_interval_secs?: number;
   ssl?: boolean;
   ca_cert_path?: string;
@@ -151,6 +213,8 @@ export interface ConnectionConfig {
   redis_database_aliases?: Record<string, string>;
   /** Key-search templates for the Redis browser. Non-empty overrides global settings. */
   redis_key_templates?: string[];
+  /** Default Redis glob pattern applied when opening a new key-browser tab. */
+  redis_key_filter?: string;
   redis_key_grouping?: import("@/lib/redis/redisKeyGrouping").RedisKeyGrouping;
   etcd_endpoints?: string;
   gbase_server?: string;
@@ -172,13 +236,18 @@ export interface ConnectionConfig {
   is_production?: boolean;
   /** Database-level production markers for multi-database connections. */
   production_databases?: string[];
+  /** Sidebar presentation only; absent means database/schema rows plus sticky context. */
+  production_badge_scope?: ProductionBadgeScope;
   /** Metadata captured from the latest successful connection test for the saved config. */
   database_info?: DatabaseConnectionInfo;
 }
 
+export type ProductionBadgeScope = "connection" | "database" | "table";
+
 export type IdentifierCase = "lower" | "upper" | "mixed";
 
 export interface DatabaseConnectionInfo {
+  compatibilityMode?: string;
   productName?: string;
   productVersion?: string;
   currentDatabase?: string;
@@ -216,6 +285,15 @@ export type ConnectionLivenessFailureKind = "probe_failed" | "timed_out";
  * sidebar green indefinitely.
  */
 export type ConnectionLivenessMessage = { kind: "lost"; connectionId: string; failureKind: ConnectionLivenessFailureKind } | { kind: "resync" };
+
+/**
+ * 后端「空闲自动断开」事件（`dbx:connection-idle-closed`）的载荷：某个连接的连接池因空闲
+ * 超过 `idle_disconnect_secs` 被后端自动关闭。前端收到后把该连接标记为未连接并保留页签。
+ *
+ * `closedAtMs` 是后端关闭时的墙钟时间（Unix 毫秒）：事件通道可能有缓冲，若本连接在事件
+ * 到达之前已经重新建立，说明这次断开描述的是上一个会话，前端必须忽略，否则会关掉新会话。
+ */
+export type ConnectionIdleClosedEvent = { connectionId: string; closedAtMs?: number };
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig) | ({ type: "http_tunnel" } & HttpTunnelConfig);
 
@@ -302,6 +380,7 @@ export interface HttpTunnelConfig {
   enabled?: boolean;
   url: string;
   token?: string;
+  protocol?: "dbx_tcp" | "navicat_mysql";
   connect_timeout_secs?: number;
   /** See {@link SshTunnelConfig.profile_id}. */
   profile_id?: string;
@@ -317,6 +396,12 @@ export interface PluginDriverManifest {
   label: string;
   kind: string;
   database_type?: string;
+}
+
+export interface PluginCapabilityManifest {
+  id: string;
+  label: string;
+  kind?: string;
 }
 
 export type PluginFormFieldType = "text" | "password" | "number" | "boolean" | "select" | "radio" | "textarea";
@@ -710,6 +795,7 @@ export interface PluginManifest {
   homepage?: string;
   executable?: string;
   drivers: PluginDriverManifest[];
+  capabilities?: PluginCapabilityManifest[];
   contributions?: PluginContribution[];
   localizations?: Record<string, PluginManifestLocalization>;
 }
@@ -1022,12 +1108,28 @@ export interface ObjectStatistics {
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
+export type RoutineParameterMetadataMode = "IN" | "OUT" | "INOUT" | "RETURN" | "UNKNOWN";
+
+export interface RoutineParameterMetadata {
+  name?: string | null;
+  mode: RoutineParameterMetadataMode;
+  jdbc_type?: number | null;
+  type_name?: string | null;
+  precision?: number | null;
+  length?: number | null;
+  scale?: number | null;
+  nullable?: boolean | null;
+  ordinal?: number | null;
+}
+
 export interface ObjectSource {
   name: string;
   object_type: ObjectSourceKind;
   schema?: string | null;
   source: string;
   editable?: boolean;
+  /** Optional structured metadata exposed by generic JDBC sidecars. */
+  routine_parameters?: RoutineParameterMetadata[];
 }
 
 export interface MysqlEventInfo {
@@ -1111,6 +1213,8 @@ export interface ColumnInfo {
   name: string;
   data_type: string;
   resolved_schema?: string;
+  resolved_table?: string;
+  resolved_object_type?: string;
   is_nullable: boolean;
   column_default: string | null;
   is_primary_key: boolean;
@@ -1143,6 +1247,12 @@ export interface IndexInfo {
   comment?: string | null;
   /** Parallel to `columns`: true at index i means columns[i] is a raw expression, not a plain column name. */
   key_is_expression?: boolean[] | null;
+  /** Parallel to `columns`: Oracle-family key ordering (`ASC` or `DESC`). */
+  key_directions?: string[] | null;
+  /** Oracle-family index visibility (`VISIBLE` or `INVISIBLE`). */
+  visibility?: string | null;
+  /** True only when expression, direction and visibility metadata are aligned and complete. */
+  key_metadata_complete?: boolean;
   /** Parallel to `columns`: operator class name for each key column (PostgreSQL), if non-default. */
   column_opclasses?: (string | null)[] | null;
   /**
@@ -1192,10 +1302,43 @@ export interface ConstraintInfo {
   match_type?: string | null;
   on_update?: string | null;
   on_delete?: string | null;
-  deferrable: boolean;
-  initially_deferred: boolean;
-  enabled: boolean;
-  valid: boolean;
+  deferrable?: boolean | null;
+  initially_deferred?: boolean | null;
+  enabled?: boolean | null;
+  valid?: boolean | null;
+  oracle_metadata?: OracleConstraintMetadata | null;
+}
+
+export interface OracleConstraintMetadata {
+  metadataComplete: boolean;
+  owner: string;
+  constraintType: string | null;
+  status: string | null;
+  validated: string | null;
+  deferrable: string | null;
+  deferred: string | null;
+  rely: string | null;
+  indexOwner: string | null;
+  indexName: string | null;
+  indexSharing: string | null;
+  index: OracleConstraintIndexMetadata | null;
+}
+
+export interface OracleConstraintIndexMetadata {
+  metadataComplete: boolean;
+  owner: string;
+  tableOwner: string;
+  tableName: string;
+  indexType: string;
+  uniqueness: string;
+  status: string;
+  partitioned: boolean;
+  visibility: string;
+  secondary: string | null;
+  columns: string[];
+  directions: string[];
+  keyIsExpression: boolean[];
+  includedColumns: string[];
 }
 
 export interface PartitionInfo {
@@ -1282,6 +1425,7 @@ export interface QueryResult {
   columns: string[];
   /** Typed Neo4j node properties; source columns remain unchanged for paging. */
   neo4j_node_cells?: import("@/lib/neo4j/neo4jNodeResult").Neo4jNodeCell[];
+  graph_data?: GraphResult;
   /** One SRID per geometry/geography column (first non-null observed). */
   spatial_columns?: SpatialColumn[];
   /**
@@ -1363,9 +1507,27 @@ export interface QueryResult {
   total_is_exact?: boolean;
   truncated?: boolean;
   /** Variable-length cells represented by bounded previews in `rows`. */
-  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number }>;
+  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number; value_ref?: string }>;
+  /** Frontend-only original result connection, independent of the currently active tab. */
+  large_value_context?: { connectionId: string; database: string; clientSessionId?: string; txnSessionId?: string; catalog?: string };
+  /** Retained result refs also cover cells already hydrated into complete local values. */
+  large_value_refs?: string[];
   session_id?: string | null;
   has_more?: boolean;
+  /** Frontend-only SQL page lookahead, independent of the driver's cursor has_more. */
+  page_has_more?: boolean;
+  /** Frontend-only page state, owned by the result rather than the active tab. */
+  sqlPage?: {
+    sql: string;
+    executedSql: string;
+    limit: number;
+    offset: number;
+    executedLimit: number;
+    executedOffset: number;
+    probe: boolean;
+    countSql?: string;
+    exactQueryRowBound?: number;
+  };
   /** For Elasticsearch REST search results parsed into a _source table,
    *  this carries the raw HTTP response body so the UI can toggle between
    *  the tabular view and the original JSON. */
@@ -1438,6 +1600,8 @@ export interface QueryResultSourceColumnRef {
 
 export interface QueryResultRun {
   id: string;
+  /** Source connection retained when the editor switches to another connection. */
+  connectionId?: string;
   title: string;
   sequence: number;
   sql: string;
@@ -1502,6 +1666,7 @@ export interface QueryResultRun {
   querySourceColumns?: QueryTab["querySourceColumns"];
   queryWriteTargets?: QueryTab["queryWriteTargets"];
   resultColumnComments?: QueryTab["resultColumnComments"];
+  resultColumnTypeLabels?: QueryTab["resultColumnTypeLabels"];
   queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
@@ -1529,6 +1694,12 @@ export interface TransactionLog {
   error?: string;
 }
 
+/**
+ * 1-based line and column range in SQL text.
+ * Both `start_column` and `end_column` are 1-based and inclusive.
+ * For example, a 1-character token at line 1, column 5 has:
+ * `{ start_line: 1, start_column: 5, end_line: 1, end_column: 5 }`.
+ */
 export interface SqlTextSpan {
   start_line: number;
   start_column: number;
@@ -1552,6 +1723,12 @@ export interface SqlColumnReference {
   scope_id?: number;
 }
 
+export interface SqlGroupByViolation {
+  span: SqlTextSpan;
+  column: string;
+  qualifier?: string | null;
+}
+
 export interface SqlReferenceScope {
   id: number;
   parent_id?: number | null;
@@ -1561,6 +1738,7 @@ export interface SqlReferenceAnalysis {
   tables: SqlTableReference[];
   columns: SqlColumnReference[];
   scopes?: SqlReferenceScope[];
+  group_by_violations?: SqlGroupByViolation[];
 }
 
 export type TreeNodeType =
@@ -1590,6 +1768,7 @@ export type TreeNodeType =
   | "package-body"
   | "group-columns"
   | "group-indexes"
+  | "group-database-indexes"
   | "group-fkeys"
   | "group-triggers"
   | "group-events"
@@ -1603,6 +1782,8 @@ export type TreeNodeType =
   | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
+  | "group-internal-functions"
+  | "group-udf-functions"
   | "group-types"
   | "group-sequences"
   | "group-synonyms"
@@ -1749,6 +1930,9 @@ export interface TreeNode {
     parentId: string;
     offset: number;
     pageSize: number;
+    /** Backend filter and global-search identity for OceanBase metadata pages. */
+    searchFilter?: string;
+    searchQuery?: string;
     /**
      * Identity of the row that was expected to open this page: the peek row the
      * previous page fetched but did not display. Offset paging is not snapshot
@@ -1832,12 +2016,24 @@ export interface TableStructureEditorDraft {
   mysqlTableEngine?: string;
   originalMysqlTableEngine?: string;
   physicalOptions?: import("@/lib/table/tablePhysicalOptions").TablePhysicalOptionsDraft;
+  starrocksLayoutDraft?: import("@/lib/table/starrocksAlterOptions").StarRocksLayoutDraft;
+  starrocksSortColumns?: string[];
+  starrocksPhysicalOptions?: import("@/lib/table/starrocksPhysicalOptions").StarRocksPhysicalOptionsDraft;
   tableOwner?: string;
   originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   constraints?: ConstraintInfo[];
+  existingPrimaryKey?: NonNullable<import("@/lib/table/tableStructureEditorSql").BuildTableStructureChangeSqlOptions["primaryKeyChange"]>;
+  oracleConstraintChange?: import("@/lib/table/tableStructureEditorSql").OracleConstraintChange;
+  oracleForeignKeyCreateRecovery?: {
+    tableName: string;
+    tableExists: boolean;
+    details: string;
+    remaining: import("@/lib/table/tableStructureEditorSql").OracleForeignKeyDefinition[];
+    uncertainSteps: string[];
+  };
   constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
@@ -1860,7 +2056,7 @@ export interface TableStructureEditorViewport {
   scrollLeft: number;
 }
 
-export type ObjectBrowserViewMode = "list" | "grid";
+export type ObjectBrowserViewMode = "list" | "grid" | "compact";
 
 export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "events" | "sequences" | "packages" | "types";
 
@@ -1890,7 +2086,7 @@ export interface QueryPageJumpProgress {
   targetPage: number;
 }
 
-export type TabOutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+export type TabOutputView = "result" | "graph" | "summary" | "explain" | "chart" | "messages" | "profile";
 
 export type RedisResultViewMode = "grid" | "console";
 
@@ -1902,9 +2098,19 @@ export interface TabUiState {
   /** Redis query results default to grid; a per-tab override selects command-line output. */
   redisResultViewMode?: RedisResultViewMode;
   resultPaneOpen?: boolean;
+  /** Tracks whether the active output view was auto-switched to "messages" by live server output during execution. */
+  autoSwitchedToMessagesDuringExecution?: boolean;
+  /**
+   * Execution id whose batch run already auto-switched the output view to the
+   * summary. Keying the switch by run keeps it to once per execution, so a user
+   * who picks another view mid-run stays there.
+   */
+  batchSummaryExecutionId?: string;
   /** Small JSON-compatible snapshots owned by special-page components. */
   page?: Record<string, TabPageUiState>;
 }
+
+export type DatabaseSearchScope = "data" | "structure";
 
 export interface DatabaseSearchResultItem {
   id: string;
@@ -1914,6 +2120,11 @@ export interface DatabaseSearchResultItem {
   matchedColumns: string[];
   preview: string;
   whereInput: string;
+  /** Present for structure-scope hits (column name / comment search). */
+  searchScope?: DatabaseSearchScope;
+  columnName?: string;
+  columnComment?: string;
+  structureMatchIn?: Array<"name" | "comment" | "tableComment">;
 }
 
 export interface DatabaseSearchTableTask {
@@ -1923,6 +2134,7 @@ export interface DatabaseSearchTableTask {
 
 export interface DatabaseSearchTabState {
   keyword: string;
+  searchScope?: DatabaseSearchScope;
   perTableLimit: number;
   progressDone: number;
   progressTotal: number;
@@ -1936,6 +2148,7 @@ export interface DatabaseSearchTabState {
 }
 
 export interface QueryTab {
+  isDefaultQuery?: boolean;
   id: string;
   /** Stable creation time used when tabs are displayed in creation order. */
   createdAt?: number;
@@ -1951,6 +2164,11 @@ export interface QueryTab {
    */
   titleNumber?: number;
   titleNumberKey?: string;
+  /**
+   * User-chosen suffix shown after the tab title (set from the tab context menu).
+   * It replaces the automatic `titleNumber` for this tab and is persisted with it.
+   */
+  titleSuffix?: string;
   /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
   forceWordWrap?: boolean;
   connectionId: string;
@@ -1963,12 +2181,24 @@ export interface QueryTab {
   /** Optional branch context for a driver-profile database workspace. */
   workspaceBranch?: string;
   schema?: string;
+  /**
+   * 该 Schema 是否由用户为当前页签显式选择（工具栏 / 侧栏 Schema 节点）。
+   *
+   * SQL Server 没有会话级 Schema 切换，后端会把未限定的表名按页签 Schema
+   * 改写（#8951）。只有显式选择才能参与改写：连接默认 Schema、恢复的页签、
+   * 保存的 SQL、外部文件带来的 Schema 只用于浏览/补全/预填，否则
+   * `SELECT * FROM t` 会被错误地限定到非默认 Schema。
+   *
+   * 该字段是运行时状态，不随页签持久化，恢复的页签因此回到服务器默认解析。
+   */
+  schemaQualifiesSql?: boolean;
   /** Doris / StarRocks multi-catalog: the external catalog this tab's
    * database belongs to (undefined for internal/default catalog). */
   catalog?: string;
   sql: string;
   savedSqlId?: string;
   externalSqlPath?: string;
+  externalSqlEncoding?: "auto" | "utf8" | "utf8Bom" | "utf16le" | "utf16be" | "gbk";
   externalSqlFileVersion?: ExternalSqlFileVersion;
   externalSqlIgnoredFileVersion?: ExternalSqlFileVersion;
   externalSqlFileMissing?: boolean;
@@ -2063,6 +2293,7 @@ export interface QueryTab {
     columnName: string;
   };
   executionId?: string;
+  liveQueryMessages?: QueryMessage[];
   /** Ephemeral result run targeted by the current execution; null means a new run is being produced. */
   executingResultRunId?: string | null;
   isExplaining?: boolean;
@@ -2117,6 +2348,7 @@ export interface QueryTab {
     commandId?: string;
     pluginId: string;
     contributionId: string;
+    defaultTitle?: string;
     context?: Record<string, unknown>;
   };
   pluginFilesystem?: {
@@ -2161,6 +2393,16 @@ export interface QueryTab {
   };
   /** Opened to view object source, including objects without editable source metadata. */
   sourceView?: boolean;
+  /** Stable object identity and local section, independent of pending source loading. */
+  objectDetails?: {
+    connectionId: string;
+    database: string;
+    schema: string;
+    catalog?: string;
+    name: string;
+    objectType: ObjectSourceKind;
+    section: "source" | "dependencies" | "dependents";
+  };
   ddlViewer?: {
     schema?: string;
     tableName: string;
@@ -2220,6 +2462,8 @@ export interface QueryTab {
     database?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
+    /** User-declared row identifier columns, used only when no automatic stable identifier exists. */
+    virtualPrimaryKeys?: string[];
     /** Physical primary keys used for table-open default sorting; excludes unique and synthetic row identifiers. */
     physicalPrimaryKeys?: string[];
   };
@@ -2293,6 +2537,14 @@ export interface QueryTab {
    */
   resultColumnComments?: Array<string | undefined>;
   /**
+   * Display-only column type labels for multi-source (or otherwise enriched)
+   * query results, indexed by result-column ordinal. Built from resolved base
+   * column metadata so headers can show declared length/precision (e.g.
+   * `varchar(50)`) even when ResultSet `column_types` only carry bare type
+   * names. `undefined` entries fall back to ResultSet / single-table metadata.
+   */
+  resultColumnTypeLabels?: Array<string | undefined>;
+  /**
    * Display-only result-column to source mapping for multi-source results,
    * indexed by result-column ordinal. Each entry carries the source identity
    * (sourceKey + canonical source column name), so comments resolve per source
@@ -2317,6 +2569,10 @@ export interface QueryTab {
   autoCommit?: boolean;
   /** Session ID for an active manual transaction, set after beginManualTransaction */
   txnSessionId?: string;
+  /** Runtime-only SQL Server transaction lifecycle and last terminal notice. */
+  txnStatus?: "opening" | "active" | "executing" | "ending" | "lost" | "unknown";
+  txnNotice?: string;
+  txnIndependentConnectionExplained?: boolean;
   /** Set to true when a manual transaction was auto-rolled back due to inactivity */
   txnAutoRolledBack?: boolean;
   /** Sticky proven-read-only dialects (Oracle/OceanBase-Oracle/MySQL/PostgreSQL),
@@ -2356,6 +2612,8 @@ export interface SavedSqlFolder {
 }
 
 export interface SavedSqlFile {
+  /** The persistent, autosaved query for this connection/catalog/database. */
+  isDefaultQuery?: boolean;
   id: string;
   connectionId: string;
   folderId?: string;
@@ -2394,8 +2652,13 @@ export interface TransferTaskConfig {
   content: TransferContent;
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
+  targetColumnNameCase?: TransferColumnNameCase;
   quoteTargetColumnNames: boolean;
   batchSize: number;
+  /** Per-operation timeout for this task. Undefined inherits each connection; 0 disables the limit. */
+  operationTimeoutSecs?: number;
+  /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
+  tableFilters?: Record<string, string>;
   /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */
   dropTargetBeforeCreate?: boolean;
   /** Legacy field only. Saved confirmation is always ignored and reset to false. */

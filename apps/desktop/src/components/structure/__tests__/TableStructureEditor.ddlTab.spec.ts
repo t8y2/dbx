@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+﻿// @vitest-environment happy-dom
 
 import { createApp, nextTick, type App } from "vue";
 import { EditorView } from "@codemirror/view";
@@ -263,6 +263,8 @@ vi.mock("@/components/editor/EditorSearchPanel.vue", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));
@@ -392,7 +394,7 @@ beforeEach(() => {
   mocks.executeQuery.mockResolvedValue({ columns: [], rows: [] });
   mocks.executeBatch.mockResolvedValue({ rowsAffected: 0 });
   mocks.listDataTypes.mockResolvedValue([]);
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.getTableOwner.mockResolvedValue("");
   mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });

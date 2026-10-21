@@ -20,7 +20,7 @@ vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/composables/useDialogSources", () => ({ openDataCompareSession: openMock }));
 vi.mock("@/composables/useExportTracker", () => ({ useExportTracker: () => trackerMock }));
 
-const { normalizeKeyColumnOverrides, startDataCompareSession } = await import("../useDataCompareSession.ts");
+const { buildDataCompareSyncPlanTables, normalizeKeyColumnOverrides, startDataCompareSession } = await import("../useDataCompareSession.ts");
 
 function column(name: string, isPrimaryKey = false): ColumnInfo {
   return { name, data_type: "TEXT", is_nullable: true, column_default: null, is_primary_key: isPrimaryKey, extra: null };
@@ -45,6 +45,7 @@ function preparationFor(table: string) {
     sourceTruncated: false,
     targetTruncated: false,
     rowBudget: 100_000,
+    syncEligible: true,
   };
 }
 
@@ -228,13 +229,16 @@ test("keeps the configured per-table match columns after cloning the session con
 });
 
 test("carries the row budget and truncation flags from the backend into the table result", async () => {
-  apiMock.prepareDataCompareFromTables.mockImplementation((options: { targetTable: string }) => Promise.resolve({ ...preparationFor(options.targetTable), sourceRowCount: 4_000_000, sourceTruncated: true, targetTruncated: true, rowBudget: 100_000 }));
+  apiMock.prepareDataCompareFromTables.mockImplementation((options: { targetTable: string }) => Promise.resolve({ ...preparationFor(options.targetTable), sourceRowCount: 4_000_000, sourceTruncated: true, targetTruncated: true, rowBudget: 100_000, syncEligible: false }));
 
   const session = await runSession(baseConfig({ selectedSourceTables: ["users"], targetTable: "users" }), [{ sourceTable: "users", targetTable: "users" }]);
 
   assert.equal(session.batchResults[0]?.rowBudget, 100_000);
   assert.equal(session.batchResults[0]?.sourceTruncated, true);
   assert.equal(session.batchResults[0]?.targetTruncated, true);
+  assert.equal(session.batchResults[0]?.syncEligible, false);
+  assert.equal(buildDataCompareSyncPlanTables(session.batchResults, "public").length, 0);
+  assert.equal(session.batchResults[0]?.diff.added[0]?.selected, false);
 });
 
 test("keeps a truncated missing-target table on the same row budget", async () => {
@@ -243,12 +247,14 @@ test("keeps a truncated missing-target table on the same row budget", async () =
     sourceRowCount: 8_000_000,
     sourceTruncated: true,
     rowBudget: 100_000,
+    syncEligible: false,
   });
 
   const session = await runSession(baseConfig({ selectedSourceTables: ["users"], targetTable: "users", targetTables: ["orders"] }), [{ sourceTable: "users", targetTable: "users" }]);
 
   assert.equal(session.batchResults[0]?.rowBudget, 100_000);
   assert.equal(session.batchResults[0]?.sourceTruncated, true);
+  assert.equal(buildDataCompareSyncPlanTables(session.batchResults, "public").length, 0);
 });
 
 test("normalizes a per-table match-column map", () => {

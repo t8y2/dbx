@@ -32,6 +32,30 @@ vi.mock("@/lib/common/shikiJsonHighlighter", () => ({
   createShikiJsonHighlighter: vi.fn().mockResolvedValue(() => ""),
 }));
 
+// Exercise the viewer's draft binding without mounting CodeMirror and its stores.
+vi.mock("@/components/redis/RedisJsonEditor.vue", async () => {
+  const { defineComponent, h, onMounted, ref } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { modelValue: String, readOnly: Boolean, autofocus: Boolean },
+      emits: ["update:modelValue"],
+      setup(props, { emit }) {
+        const input = ref<HTMLTextAreaElement>();
+        onMounted(() => {
+          if (props.autofocus) input.value?.focus();
+        });
+        return () =>
+          h("textarea", {
+            ref: input,
+            value: props.modelValue,
+            readonly: props.readOnly,
+            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLTextAreaElement).value),
+          });
+      },
+    }),
+  };
+});
+
 import RedisValueViewer from "./RedisValueViewer.vue";
 
 const mountedApps: Array<{ unmount: () => void; host: HTMLElement }> = [];
@@ -155,7 +179,7 @@ const testI18nMessages = {
   },
 };
 
-function mountViewer(onDeleted: (keyRaw: string) => void, onLoaded = vi.fn()) {
+function mountViewer(onDeleted: (keyRaw: string) => void, onLoaded = vi.fn(), previewLimitKiB = ref(64)) {
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp(
@@ -169,6 +193,7 @@ function mountViewer(onDeleted: (keyRaw: string) => void, onLoaded = vi.fn()) {
             keyRaw: "key",
             onDeleted,
             onLoaded,
+            previewLimitKiB: previewLimitKiB.value,
           });
       },
     }),
@@ -264,6 +289,31 @@ async function setStringDraft(value: string) {
 }
 
 describe("RedisValueViewer expiry saving", () => {
+  it("loads the configured preview size and refreshes when the limit changes", async () => {
+    const limit = ref(256);
+    mocks.redisGetValue.mockResolvedValue(stringValue());
+    mountViewer(vi.fn(), vi.fn(), limit);
+    await settle();
+    expect(mocks.redisGetValue).toHaveBeenLastCalledWith("connection", 0, "key", 256 * 1024);
+    limit.value = 1024;
+    await settle();
+    expect(mocks.redisGetValue).toHaveBeenLastCalledWith("connection", 0, "key", 1024 * 1024);
+    expect(document.querySelector("textarea")?.readOnly).toBe(false);
+  });
+
+  it("preserves unsaved edits when the preview limit changes", async () => {
+    const limit = ref(64);
+    mocks.redisGetValue.mockResolvedValue(stringValue());
+    mountViewer(vi.fn(), vi.fn(), limit);
+    await settle();
+    await setStringDraft("unsaved draft");
+    const calls = mocks.redisGetValue.mock.calls.length;
+    limit.value = 256;
+    await settle();
+    expect(mocks.redisGetValue).toHaveBeenCalledTimes(calls);
+    expect(document.querySelector("textarea")?.value).toBe("unsaved draft");
+  });
+
   it("renders a large String as a bounded read-only preview", async () => {
     mocks.redisGetValue.mockResolvedValueOnce(largeStringValue());
 

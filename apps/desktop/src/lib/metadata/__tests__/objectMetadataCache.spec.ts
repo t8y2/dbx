@@ -16,6 +16,24 @@ import { clearMetadataRuntimeCache } from "@/lib/metadata/metadataRuntimeCache";
 const request = { connectionId: "c1", database: "app", schema: "public", tableName: "users", catalog: "analytics" } as const;
 
 describe("objectMetadataCache", () => {
+  it.each(["remote", "disk"])("settles local waiting when connection cancellation retires a never-returning %s read", async (phase) => {
+    if (phase === "disk") mocks.loadSchemaCache.mockReturnValueOnce(new Promise(() => undefined));
+    const loader = vi.fn(() => new Promise(() => undefined));
+    let settled = false;
+    const result = loadObjectMetadataFacet(request, "columns", loader).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.waitFor(() => expect(phase === "remote" ? loader.mock.calls.length : getObjectMetadataCacheDebugStateForTests().activeReads).toBe(1));
+    cancelObjectMetadataLoadsForConnection(request.connectionId);
+    await vi.waitFor(() => expect(settled).toBe(true));
+    await result;
+    expect(getObjectMetadataCacheDebugStateForTests().activeReads).toBe(0);
+  });
   beforeEach(() => {
     clearMetadataRuntimeCache();
     vi.clearAllMocks();
@@ -270,7 +288,7 @@ describe("objectMetadataCache", () => {
     await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(1));
     cancelObjectMetadataLoadsForConnection(request.connectionId);
     releaseOld(["old session"]);
-    await expect(oldLoad).resolves.toMatchObject({ value: ["old session"] });
+    await expect(oldLoad).rejects.toThrow("Metadata waiting cancelled locally.");
 
     loader.mockResolvedValueOnce(["new session"]);
     await expect(loadObjectMetadataFacet(request, "columns", loader)).resolves.toMatchObject({ value: ["new session"], cacheStatus: "remote" });

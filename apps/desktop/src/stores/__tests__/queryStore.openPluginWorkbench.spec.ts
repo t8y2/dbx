@@ -275,4 +275,42 @@ describe("queryStore localizePluginTabTitles", () => {
     expect(titles[freeId]).toBe("文件");
     expect(titles[boundId]).toBe("prod-server · SFTP");
   });
+
+  it("allows plugin workbench tabs to set and get custom titles independently and reset with null", () => {
+    const queryStore = useQueryStore();
+
+    const firstId = queryStore.openPluginWorkbench("io.dbx.viewer", "file-view", { title: "File View", forceNew: true });
+    const secondId = queryStore.openPluginWorkbench("io.dbx.viewer", "file-view", { title: "File View", forceNew: true });
+
+    expect(queryStore.getPluginWorkbenchTabTitle(firstId)).toBe("File View");
+    expect(queryStore.getPluginWorkbenchTabTitle(secondId)).toBe("File View (1)");
+
+    // Modify title on the first tab
+    const updatedFirst = queryStore.setPluginWorkbenchTabTitle(firstId, "config.yaml");
+    expect(updatedFirst).toBe(true);
+    expect(queryStore.getPluginWorkbenchTabTitle(firstId)).toBe("config.yaml");
+    // Second tab remains unchanged
+    expect(queryStore.getPluginWorkbenchTabTitle(secondId)).toBe("File View (1)");
+    const firstTab = queryStore.tabs.find((t) => t.id === firstId);
+    expect(firstTab?.customTitle).toBe(true);
+
+    // Modify title on the second tab
+    const updatedSecond = queryStore.setPluginWorkbenchTabTitle(secondId, "schema.json");
+    expect(updatedSecond).toBe(true);
+    expect(queryStore.getPluginWorkbenchTabTitle(secondId)).toBe("schema.json");
+    expect(queryStore.getPluginWorkbenchTabTitle(firstId)).toBe("config.yaml");
+
+    // Reset first tab to default by passing null
+    queryStore.setPluginWorkbenchTabTitle(firstId, null);
+    expect(queryStore.getPluginWorkbenchTabTitle(firstId)).toBe("File View");
+    expect(firstTab?.customTitle).toBe(false);
+
+    // Reset second tab with empty string
+    queryStore.setPluginWorkbenchTabTitle(secondId, "   ");
+    expect(queryStore.getPluginWorkbenchTabTitle(secondId)).toBe("File View (1)");
+
+    // Non-existent or non-workbench tab returns false/undefined
+    expect(queryStore.setPluginWorkbenchTabTitle("non-existent", "title")).toBe(false);
+    expect(queryStore.getPluginWorkbenchTabTitle("non-existent")).toBeUndefined();
+  });
 });

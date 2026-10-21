@@ -12,15 +12,13 @@ const { mqttClearMessagesMock, mqttGetMessagesMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/backend/api", () => ({
-  mqttGetBrokerInfo: vi.fn(
-    async (): Promise<MqttBrokerInfo> => ({
-      brokerUrl: "mqtt://localhost:1883",
-      clientId: "dbx-test",
-      connected: true,
-      protocolVersion: "5.0",
-      subscriptionCount: 1,
-    }),
-  ),
+  mqttGetBrokerInfo: vi.fn(async (): Promise<MqttBrokerInfo> => ({
+    brokerUrl: "mqtt://localhost:1883",
+    clientId: "dbx-test",
+    connected: true,
+    protocolVersion: "5.0",
+    subscriptionCount: 1,
+  })),
   mqttListTopics: vi.fn(async () => [["device/status", "atmostonce"]]),
   mqttListSavedTopicConfigs: vi.fn(async () => [{ topic: "device/status", qos: "atmostonce", enabled: true, noLocal: false }]),
   mqttGetMessages: mqttGetMessagesMock,
@@ -72,6 +70,14 @@ function payloadToggles(container: HTMLElement): HTMLButtonElement[] {
 
 function payloads(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>('[data-testid="mqtt-message-payload"]'));
+}
+
+function collapseAllButton(container: HTMLElement): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>('[data-testid="mqtt-message-payload-collapse-all"]');
+}
+
+function expandAllButton(container: HTMLElement): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>('[data-testid="mqtt-message-payload-expand-all"]');
 }
 
 async function click(element: Element) {
@@ -179,5 +185,91 @@ describe("MQTT message payload collapse (issue #9307)", () => {
 
     expect(payloadToggles(container)[0].getAttribute("aria-expanded")).toBe("true");
     expect(payloads(container)[0].hidden).toBe(false);
+  });
+});
+
+describe("MQTT message payload expand/collapse all (issue #12184)", () => {
+  it("collapses all filtered message payloads from the toolbar", async () => {
+    mqttGetMessagesMock.mockResolvedValueOnce([messageAt("payload-alpha", 1_700_000_000_001), messageAt("payload-beta", 1_700_000_000_002)]);
+
+    const container = await mountConsole();
+    const collapseAll = collapseAllButton(container);
+    const expandAll = expandAllButton(container);
+    expect(collapseAll).not.toBeNull();
+    expect(expandAll).not.toBeNull();
+    expect(collapseAll!.textContent).toContain("Collapse all payloads");
+    expect(expandAll!.textContent).toContain("Expand all payloads");
+
+    await click(collapseAll!);
+    expect(payloadToggles(container).every((toggle) => toggle.getAttribute("aria-expanded") === "false")).toBe(true);
+    expect(payloads(container).every((payload) => payload.hidden)).toBe(true);
+  });
+
+  it("expands all filtered message payloads and clears collapse state for them", async () => {
+    mqttGetMessagesMock.mockResolvedValueOnce([messageAt("payload-alpha", 1_700_000_000_001), messageAt("payload-beta", 1_700_000_000_002)]);
+
+    const container = await mountConsole();
+    await click(collapseAllButton(container)!);
+    expect(payloads(container).every((payload) => payload.hidden)).toBe(true);
+
+    await click(expandAllButton(container)!);
+    expect(payloadToggles(container).every((toggle) => toggle.getAttribute("aria-expanded") === "true")).toBe(true);
+    expect(payloads(container).every((payload) => !payload.hidden)).toBe(true);
+  });
+
+  it("collapse all only affects the currently filtered message list", async () => {
+    mqttGetMessagesMock.mockResolvedValueOnce([messageAt("payload-alpha", 1_700_000_000_001), messageAt("payload-beta", 1_700_000_000_002)]);
+
+    const container = await mountConsole();
+    await setPayloadSearch(container, "beta");
+    expect(payloadToggles(container)).toHaveLength(1);
+
+    await click(collapseAllButton(container)!);
+    expect(payloads(container)[0].hidden).toBe(true);
+
+    await setPayloadSearch(container, "");
+    expect(payloadToggles(container).map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["true", "false"]);
+    expect(payloads(container).map((payload) => payload.hidden)).toEqual([false, true]);
+  });
+
+  it("expand all only expands currently filtered messages and leaves others collapsed", async () => {
+    mqttGetMessagesMock.mockResolvedValueOnce([messageAt("payload-alpha", 1_700_000_000_001), messageAt("payload-beta", 1_700_000_000_002)]);
+
+    const container = await mountConsole();
+    await click(collapseAllButton(container)!);
+    expect(payloads(container).every((payload) => payload.hidden)).toBe(true);
+
+    await setPayloadSearch(container, "alpha");
+    await click(expandAllButton(container)!);
+    expect(payloads(container)[0].hidden).toBe(false);
+
+    await setPayloadSearch(container, "");
+    expect(payloadToggles(container).map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["true", "false"]);
+    expect(payloads(container).map((payload) => payload.hidden)).toEqual([false, true]);
+  });
+
+  it("coexists with per-message toggle after expand/collapse all", async () => {
+    mqttGetMessagesMock.mockResolvedValueOnce([messageAt("payload-alpha", 1_700_000_000_001), messageAt("payload-beta", 1_700_000_000_002)]);
+
+    const container = await mountConsole();
+    await click(collapseAllButton(container)!);
+    expect(payloads(container).map((payload) => payload.hidden)).toEqual([true, true]);
+
+    await click(payloadToggles(container)[0]);
+    expect(payloads(container).map((payload) => payload.hidden)).toEqual([false, true]);
+
+    await click(expandAllButton(container)!);
+    expect(payloads(container).map((payload) => payload.hidden)).toEqual([false, false]);
+
+    await click(payloadToggles(container)[1]);
+    expect(payloads(container).map((payload) => payload.hidden)).toEqual([false, true]);
+  });
+
+  it("disables expand/collapse all when there are no messages", async () => {
+    mqttGetMessagesMock.mockResolvedValueOnce([]);
+
+    const container = await mountConsole();
+    expect(collapseAllButton(container)?.disabled).toBe(true);
+    expect(expandAllButton(container)?.disabled).toBe(true);
   });
 });

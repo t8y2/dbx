@@ -18,6 +18,7 @@ describe("connectionStore table virtual groups during disk reload", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables: vi.fn().mockResolvedValue([]),
+      getColumns: vi.fn().mockResolvedValue([]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
       loadTableVGroups: vi.fn().mockResolvedValue({}),
@@ -137,5 +138,76 @@ describe("connectionStore table virtual groups during disk reload", () => {
     expect(groupViews.children![0]!.type).toBe("table-vgroup");
     expect(groupViews.children![0]!.children?.map((node) => node.label)).toEqual(["v_pay"]);
     expect(labels).toContain("v_other");
+  });
+
+  it("does not mount table virtual groups under table nodes or columns (issue #12960)", async () => {
+    const api = await import("@/lib/backend/api");
+    const { tableVGroupScopeKey } = await import("@/lib/table/tableVGroup");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const config: ConnectionConfig = { id: "mysql-12960", name: "MySQL", db_type: "mysql", host: "127.0.0.1", port: 3306, username: "root", password: "", database: "temporal" };
+    const scope = { connectionId: config.id, database: "temporal" };
+    const layout = {
+      version: 1,
+      enabled: true,
+      groups: [
+        { id: "g1", name: "test1", collapsed: false },
+        { id: "g2", name: "test2", collapsed: false },
+      ],
+      order: [
+        {
+          type: "group" as const,
+          id: "g1",
+          children: [{ type: "table" as const, name: "activity_info_maps" }],
+        },
+        {
+          type: "group" as const,
+          id: "g2",
+          children: [],
+        },
+      ],
+    };
+    vi.mocked(api.loadConnections).mockResolvedValue([config]);
+    vi.mocked(api.loadTableVGroups).mockResolvedValue({ [tableVGroupScopeKey(scope)!]: layout });
+    vi.mocked(api.getColumns).mockResolvedValue([
+      { name: "shard_id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, comment: null },
+      { name: "namespace_id", data_type: "binary(16)", is_nullable: false, column_default: null, is_primary_key: false, comment: null },
+    ]);
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const tableNode: TreeNode = {
+      id: `${config.id}:temporal:activity_info_maps`,
+      label: "activity_info_maps",
+      type: "table",
+      connectionId: config.id,
+      database: "temporal",
+    };
+    const database: TreeNode = {
+      id: `${config.id}:temporal`,
+      label: "temporal",
+      type: "database",
+      connectionId: config.id,
+      database: "temporal",
+      children: [tableNode],
+      isExpanded: true,
+    };
+    store.connectedIds = new Set([config.id]);
+    store.treeNodes[0]!.isExpanded = true;
+    store.treeNodes[0]!.children!.push(database);
+
+    // Expand table: loads table groups (columns, indexes, triggers, etc.)
+    await store.loadTreeNodeChildren(tableNode);
+
+    // 1. Table node children should only contain structure groups, NO table-vgroup nodes
+    expect(tableNode.children?.some((node) => node.type === "table-vgroup")).toBe(false);
+    const columnsGroup = tableNode.children?.find((node) => node.type === "group-columns");
+    expect(columnsGroup).toBeDefined();
+
+    // Expand columns: loads column rows
+    await store.loadTreeNodeChildren(columnsGroup!);
+
+    // 2. Columns group children should only contain column nodes, NO table-vgroup nodes
+    expect(columnsGroup!.children?.some((node) => node.type === "table-vgroup")).toBe(false);
+    expect(columnsGroup!.children?.map((node) => node.type)).toEqual(["column", "column"]);
   });
 });

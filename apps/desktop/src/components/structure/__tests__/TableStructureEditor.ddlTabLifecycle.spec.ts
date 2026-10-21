@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+﻿// @vitest-environment happy-dom
 
 import { createApp, nextTick, reactive, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -172,6 +172,8 @@ vi.mock("@/components/ui/select", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));
@@ -241,7 +243,7 @@ beforeEach(() => {
   mocks.listDataTypes.mockResolvedValue([]);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.getTableOwner.mockResolvedValue("app_user");
   mocks.loadObjectDdl.mockResolvedValue({ ddl: DDL, cacheStatus: "remote" });
   mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
@@ -267,7 +269,7 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     app.mount(root);
     const content = () => root.querySelector(".cm-content")?.textContent ?? "";
     const toggle = () => root.querySelector<HTMLButtonElement>('[role="switch"]')!;
-    await vi.waitFor(() => expect(content()).toContain("PARTITION BY HASH"));
+    await vi.waitFor(() => expect(content()).toMatch(/PARTITION BY\s+HASH/), { timeout: 5000 });
     expect(content()).not.toContain("PCTFREE");
     expect(toggle().getAttribute("aria-checked")).toBe("true");
     toggle().click();
@@ -387,5 +389,116 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     const commentCalls = mocks.loadObjectMetadataFacet.mock.calls.filter((call) => call[1] === "comment");
     expect(commentCalls).toHaveLength(2);
     expect(commentCalls.at(-1)?.[3]).toEqual({ force: true });
+  });
+
+  it("refreshes the open table on F5 after the desktop reload guard", async () => {
+    let tableComment = "Old comment";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
+      value: facet === "columns" ? [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true }] : facet === "comment" ? tableComment : facet === "owner" ? "app_user" : [],
+      cacheStatus: "remote",
+    }));
+    const pendingDdl = deferred<{ ddl: string; cacheStatus: "remote" }>();
+    mocks.loadObjectDdl.mockImplementationOnce(() => pendingDdl.promise);
+
+    const root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      schema: "public",
+      tableName: "users",
+      initialTab: "ddl",
+    });
+    app.mount(root);
+
+    const refreshButton = () => buttonWithText(root, "structureEditor.refresh");
+    await vi.waitFor(() => expect(refreshButton().disabled).toBe(true));
+    // F5 originates inside the editor (bubbles up to the window-level listener).
+    refreshButton().dispatchEvent(new KeyboardEvent("keydown", { key: "F5", bubbles: true, cancelable: true }));
+    expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1);
+    expect(mocks.invalidateObjectDdl).not.toHaveBeenCalled();
+
+    pendingDdl.resolve({ ddl: DDL, cacheStatus: "remote" });
+    const commentInput = () => root.querySelector<HTMLInputElement>('input[placeholder="structureEditor.tableCommentPlaceholder"]');
+    await vi.waitFor(() => expect(refreshButton().disabled).toBe(false));
+    await vi.waitFor(() => expect(commentInput()?.value).toBe("Old comment"));
+    expect(refreshButton().getAttribute("aria-keyshortcuts")).toBe("F5");
+    expect(refreshButton().getAttribute("title")).toBe("structureEditor.refresh (F5)");
+
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const dialogInput = document.createElement("input");
+    dialog.append(dialogInput);
+    document.body.append(dialog);
+    dialogInput.dispatchEvent(new KeyboardEvent("keydown", { key: "F5", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(mocks.invalidateObjectDdl).not.toHaveBeenCalled();
+    dialog.remove();
+
+    const blockBrowserReload = (event: KeyboardEvent) => {
+      if (event.key === "F5") event.preventDefault();
+    };
+    window.addEventListener("keydown", blockBrowserReload, true);
+    try {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "F5", bubbles: true, cancelable: true, ctrlKey: true }));
+      await nextTick();
+      expect(mocks.invalidateObjectDdl).not.toHaveBeenCalled();
+
+      tableComment = "Updated comment";
+      mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint, name text);", cacheStatus: "remote" });
+      refreshButton().dispatchEvent(new KeyboardEvent("keydown", { key: "F5", bubbles: true, cancelable: true }));
+      await vi.waitFor(() => expect(commentInput()?.value).toBe("Updated comment"));
+      expect(mocks.invalidateObjectDdl).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("keydown", blockBrowserReload, true);
+    }
+  });
+
+  it("ignores F5 dispatched from outside the editor root", async () => {
+    // The keydown listener is window-level and shared by every activated structure
+    // editor; an F5 typed in another editor group (e.g. the global refresh-data
+    // shortcut) must not discard this editor's drafts.
+    mocks.loadObjectDdl.mockResolvedValue({ ddl: DDL, cacheStatus: "remote" });
+    const root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      schema: "public",
+      tableName: "users",
+      initialTab: "ddl",
+    });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1));
+    const outside = document.createElement("input");
+    document.body.append(outside);
+    try {
+      outside.dispatchEvent(new KeyboardEvent("keydown", { key: "F5", bubbles: true, cancelable: true }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "F5", bubbles: true, cancelable: true }));
+      await nextTick();
+      expect(mocks.invalidateObjectDdl).not.toHaveBeenCalled();
+      expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1);
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("leaves a create-table draft alone on F5", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      schema: "public",
+      tableName: "",
+    });
+    app.mount(root);
+
+    await nextTick();
+    expect(root.textContent).not.toContain("structureEditor.refresh");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "F5", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(mocks.invalidateObjectDdl).not.toHaveBeenCalled();
   });
 });

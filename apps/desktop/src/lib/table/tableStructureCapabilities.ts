@@ -1,3 +1,4 @@
+import { getStarRocksCapabilities } from "./starrocksCapabilities";
 import type { DatabaseType } from "@/types/database";
 import type { EditableStructureIndex } from "@/lib/table/tableStructureEditorSql";
 
@@ -86,6 +87,18 @@ const mysqlCapabilities = capabilities({
   indexComment: true,
   alterPrimaryKey: true,
   foreignKey: true,
+});
+
+const starrocksCapabilities = capabilities({
+  dialect: "mysql",
+  createTable: true,
+  addColumn: true,
+  dropColumn: true,
+  alterExistingColumn: true,
+  alterType: true,
+  alterNullability: true,
+  alterDefault: false,
+  comment: true,
 });
 
 const gbaseCapabilities = capabilities({
@@ -189,6 +202,7 @@ const sqlserverCapabilities = capabilities({
   // T-SQL: ALTER TABLE ... DROP CONSTRAINT <name> / ADD [CONSTRAINT name] PRIMARY KEY (...);
   // the backend drops the persisted constraint by its index-metadata name (issue #10758).
   alterPrimaryKey: true,
+  foreignKey: true,
 });
 
 const oracleCompatibleCapabilities = capabilities({
@@ -209,6 +223,11 @@ const oracleCompatibleCapabilities = capabilities({
 });
 
 const oracleCapabilities = capabilities({
+  ...oracleCompatibleCapabilities,
+  addPrimaryKey: true,
+});
+
+const oceanbaseOracleCapabilities = capabilities({
   ...oracleCompatibleCapabilities,
   addPrimaryKey: true,
 });
@@ -269,6 +288,18 @@ const informixCapabilities = capabilities({
   createIndex: true,
   dropIndex: true,
   rebuildIndex: true,
+});
+
+const sapHanaCapabilities = capabilities({
+  dialect: "oracle",
+  addColumn: true,
+  dropColumn: true,
+  renameColumn: true,
+  alterExistingColumn: true,
+  alterType: true,
+  alterNullability: true,
+  alterDefault: true,
+  comment: true,
 });
 
 // Inceptor accepts ADD COLUMNS and CHANGE. DROP COLUMN and index/constraint DDL
@@ -343,7 +374,7 @@ const firebirdCapabilities = capabilities({
 const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>> = {
   mysql: mysqlCapabilities,
   doris: mysqlCapabilities,
-  starrocks: mysqlCapabilities,
+  starrocks: starrocksCapabilities,
   goldendb: mysqlCapabilities,
   sundb: mysqlCapabilities,
   oscar: damengCapabilities,
@@ -368,7 +399,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   sqlserver: sqlserverCapabilities,
   oracle: oracleCapabilities,
   dameng: damengCapabilities,
-  "oceanbase-oracle": oracleCompatibleCapabilities,
+  "oceanbase-oracle": oceanbaseOracleCapabilities,
   iris: irisCapabilities,
   yashandb: oracleCompatibleCapabilities,
   xugu: oracleCompatibleCapabilities,
@@ -376,6 +407,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   access: accessCapabilities,
   clickhouse: clickhouseCapabilities,
   informix: informixCapabilities,
+  saphana: sapHanaCapabilities,
   transwarp: transwarpCapabilities,
   influxdb: influxdbCapabilities,
   manticoresearch: manticoreSearchCapabilities,
@@ -390,7 +422,11 @@ function postgresMajorVersion(productVersion?: string): number | undefined {
   return Number.isFinite(majorVersion) ? majorVersion : undefined;
 }
 
-export function getTableStructureCapabilities(dbType?: DatabaseType, connectionDbType?: DatabaseType, productVersion?: string): TableStructureCapabilities {
+export function getTableStructureCapabilities(dbType?: DatabaseType, connectionDbType?: DatabaseType, productVersion?: string, starRocksModel?: string): TableStructureCapabilities {
+  if (dbType === "starrocks") {
+    const product = getStarRocksCapabilities(productVersion);
+    return { ...starrocksCapabilities, renameColumn: product.renameColumn, reorderColumn: product.versionKnown && starRocksModel === "duplicate" };
+  }
   if (dbType === "sqlite" && connectionDbType === "sqlite") return nativeSqliteCapabilities;
   if (dbType === "postgres") {
     const majorVersion = postgresMajorVersion(productVersion);
@@ -414,8 +450,9 @@ export function supportsLocalTableColumnReorder(dbType?: DatabaseType, connectio
   return canEditTableStructure(dbType) && !caps.reorderColumn;
 }
 
-export function isPhysicalTableColumnOrderChange(dbType: DatabaseType | undefined, connectionDbType: DatabaseType | undefined, originalPosition: number | undefined, currentPosition: number): boolean {
-  return getTableStructureCapabilities(dbType, connectionDbType).reorderColumn && originalPosition !== currentPosition;
+export function isPhysicalTableColumnOrderChange(dbType: DatabaseType | undefined, connectionDbType: DatabaseType | undefined, originalPosition: number | undefined, currentPosition: number, starRocksModel?: string): boolean {
+  const reorderColumn = dbType === "starrocks" ? starRocksModel === "duplicate" : getTableStructureCapabilities(dbType, connectionDbType).reorderColumn;
+  return reorderColumn && originalPosition !== currentPosition;
 }
 
 export function hasLocalTableColumnOrderChange(columns: readonly { originalPosition?: number; original?: unknown; markedForDrop?: boolean }[]): boolean {

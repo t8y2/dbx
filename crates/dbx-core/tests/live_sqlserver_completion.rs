@@ -45,6 +45,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         connect_timeout_secs: 10,
         query_timeout_secs: 30,
         idle_timeout_secs: 60,
+        manual_transaction_timeout_secs: 300,
+        idle_disconnect_secs: 0,
         keepalive_interval_secs: 0,
         ssl: false,
         ca_cert_path: String::new(),
@@ -64,6 +66,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
         redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
@@ -80,8 +83,10 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         database_info: None,
     }
 }
@@ -528,6 +533,7 @@ async fn live_sqlserver_bulk_imports_zero_fraction_xlsx_numbers_into_bigint() {
         rows: vec![vec![serde_json::json!(1.0), serde_json::json!("xlsx")]],
         numeric_column_right_align: false,
         auto_filter: None,
+        header_comment_rows: false,
     })
     .expect("build SQL Server XLSX integer fixture");
     let path = dir.join("zero-fraction-integer.xlsx");
@@ -1020,10 +1026,16 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        mysql_auto_increment_value: None,
         transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
+        primary_key_change: None,
+        oracle_foreign_key_changes: None,
+        oracle_constraint_changes: None,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);
@@ -1216,19 +1228,22 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         timeout_secs: Some(10),
         keyset_optimization_enabled: true,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-sqlserver-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
         auto_filter: None,
+        header_comment_rows: false,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
@@ -1311,6 +1326,8 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
+        encoding: Default::default(),
     };
     let done_seen = AtomicBool::new(false);
 
@@ -1390,6 +1407,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         .await
         .expect("connect target transfer pool");
     let request = dbx_core::transfer::TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlserver-rowversion-{suffix}"),
         source_connection_id: "live-sqlserver-rowversion".to_string(),
         source_database: database.clone(),
@@ -1404,9 +1422,10 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         drop_target_before_create: false,
         drop_target_confirmed: false,
         content: dbx_core::transfer::TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: dbx_core::transfer::TransferMode::Append,
         target_table_name_case: dbx_core::transfer::TransferTableNameCase::Upper,
+        target_column_name_case: dbx_core::transfer::TransferColumnNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: dbx_core::transfer::TransferOwnershipPolicy::Preserve,
         batch_size: 100,

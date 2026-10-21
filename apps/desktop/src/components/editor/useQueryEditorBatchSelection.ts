@@ -57,6 +57,7 @@ export function useQueryEditorBatchSelection(options: QueryEditorBatchSelectionO
   interface BatchColumnSelectionCandidate {
     key: string;
     apply: string;
+    comment?: string;
   }
 
   interface BatchColumnSelectionSession {
@@ -269,7 +270,7 @@ export function useQueryEditorBatchSelection(options: QueryEditorBatchSelectionO
     }
 
     const mode = selectableItems[0]!.batchSelectionMode!;
-    const candidates = selectableItems.filter((item) => item.batchSelectionMode === mode).map((item) => ({ key: batchColumnSelectionCandidateKey(item), apply: item.apply! }));
+    const candidates = selectableItems.filter((item) => item.batchSelectionMode === mode).map((item) => ({ key: batchColumnSelectionCandidateKey(item), apply: item.batchSelectionApply ?? item.apply!, comment: item.comment }));
     const key = `${mode}\u0000${from}\u0000${to}\u0000${document}`;
     if (!batchColumnSelectionSession || batchColumnSelectionSession.key !== key) {
       batchColumnSelectionSession = {
@@ -538,11 +539,10 @@ export function useQueryEditorBatchSelection(options: QueryEditorBatchSelectionO
       return;
     }
 
-    const columns = batchColumnSelectionColumnList(
-      selected.map((candidate) => candidate.apply),
-      session.mode,
-      session.qualifier,
-    );
+    const line = view.state.doc.lineAt(from);
+    const lineIndent = line.text.match(/^\s*/)?.[0] ?? "";
+    const indent = lineIndent || "  ";
+
     let replaceTo = batchColumnSelectionReplaceTo({
       from,
       to,
@@ -551,7 +551,34 @@ export function useQueryEditorBatchSelection(options: QueryEditorBatchSelectionO
       replaceClosingQuote: session.replaceClosingQuote,
       replaceSelectWildcard: session.replaceSelectWildcard,
     });
+
+    const hasComments = session.mode === "select" && selected.some((candidate) => !!candidate.comment?.trim());
+    let trailingComma = false;
+    let pushRestToNewLine = false;
+
+    if (hasComments) {
+      const lineAfterTo = view.state.doc.lineAt(replaceTo);
+      const restOfLine = lineAfterTo.text.slice(replaceTo - lineAfterTo.from);
+      const commaMatch = restOfLine.match(/^\s*,/);
+      if (commaMatch) {
+        trailingComma = true;
+        replaceTo += commaMatch[0].length;
+      }
+      const remainingAfterComma = commaMatch ? restOfLine.slice(commaMatch[0].length) : restOfLine;
+      if (remainingAfterComma.trim().length > 0) {
+        pushRestToNewLine = true;
+        const leadingSpaceMatch = remainingAfterComma.match(/^\s+/);
+        if (leadingSpaceMatch) {
+          replaceTo += leadingSpaceMatch[0].length;
+        }
+      }
+    }
+
+    const columns = batchColumnSelectionColumnList(selected, session.mode, session.qualifier, indent, { trailingComma });
     let insert = columns;
+    if (pushRestToNewLine) {
+      insert = `${insert}\n${lineIndent}`;
+    }
     if (session.mode === "insert") {
       const replacement = batchColumnSelectionInsertReplacement({
         document: view.state.doc.toString(),

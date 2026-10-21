@@ -61,6 +61,16 @@ export function resolveTableImportElapsed(liveElapsedMs: number, backendElapsedM
   return Math.max(live, backend ?? 0);
 }
 
+export function formatTableImportPreviewCell(value: unknown): string {
+  if (value === null) return "NULL";
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const marker = value as Record<string, unknown>;
+    if (Object.keys(marker).length === 1 && marker.$dbxSqlImportExpression === "currentTimestamp") return "CURRENT_TIMESTAMP";
+  }
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
 export function tableImportProgressPercent(progress: TableImportProgressLike | null | undefined): number {
   if (!progress) return 0;
   if (progress.status === "done") return 100;
@@ -136,14 +146,22 @@ export function normalizeImportColumnName(name: string): string {
   return name.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
 }
 
-export function autoMapImportColumns(sourceColumns: string[], targetColumns: string[], mode: "name" | "position" = "name"): Record<string, string> {
+export function autoMapImportColumns(sourceColumns: string[], targetColumns: string[], mode: "name" | "position" | "auto" = "auto"): Record<string, string> {
   if (mode === "position") {
     return Object.fromEntries(sourceColumns.map((source, index) => [source, targetColumns[index] ?? IMPORT_SKIP_TARGET]));
   }
   const exactTargets = new Map(targetColumns.map((column) => [column, column]));
   const normalizedTargets = new Map(targetColumns.map((column) => [normalizeImportColumnName(column), column]));
 
-  return Object.fromEntries(sourceColumns.map((source) => [source, exactTargets.get(source) ?? normalizedTargets.get(normalizeImportColumnName(source)) ?? IMPORT_SKIP_TARGET]));
+  const byName = Object.fromEntries(sourceColumns.map((source) => [source, exactTargets.get(source) ?? normalizedTargets.get(normalizeImportColumnName(source)) ?? IMPORT_SKIP_TARGET]));
+  if (mode === "auto") {
+    const hasAnyMatched = Object.values(byName).some((target) => target !== IMPORT_SKIP_TARGET);
+    if (!hasAnyMatched && targetColumns.length > 0) {
+      return Object.fromEntries(sourceColumns.map((source, index) => [source, targetColumns[index] ?? IMPORT_SKIP_TARGET]));
+    }
+  }
+
+  return byName;
 }
 
 export function validateImportMappings(mappings: ImportColumnMappingLike[]): ImportMappingValidationResult {

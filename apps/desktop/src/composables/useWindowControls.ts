@@ -10,6 +10,8 @@ export const MAC_TRAFFIC_LIGHT_X = 16;
 export const MAC_TRAFFIC_LIGHT_BASE_Y = 18;
 const MAC_TRAFFIC_LIGHT_SCALE_DELTA_Y = 20;
 const MAC_TRAFFIC_LIGHT_RESERVED_INSET = 70;
+const APP_SHELL_MIN_WIDTH_PX = 760;
+const APP_SHELL_MIN_HEIGHT_PX = 600;
 
 function normalizeTrafficLightUiScale(scale: number): number {
   return Number.isFinite(scale) ? Math.min(MAX_UI_SCALE, Math.max(MIN_UI_SCALE, scale)) : 1;
@@ -28,6 +30,23 @@ export function macTrafficLightInsetPaddingForScale(scale: number): string {
   return `${Math.ceil(MAC_TRAFFIC_LIGHT_RESERVED_INSET / normalizedScale)}px`;
 }
 
+/**
+ * 应用外壳（data-app-shell）的最小可用尺寸。
+ *
+ * webview 缩放是重排式的（pageZoom / ZoomFactor）：倍率越大 CSS 视口越小，
+ * 因此 760x600 的最小可用尺寸必须以 *视觉* 像素为基准，换算成 CSS 像素时
+ * 除以实际倍率——固定 CSS 下限会在约 窗口高/600 的倍率后超出视口，把应用
+ * 底部（如设置页脚按钮）挤出窗口导致无法点击。100% 缩放时输出与 760x600
+ * 完全一致，保留 fix(desktop): prevent scaled window clipping 的保护。
+ */
+export function appShellMinSizeStyleForScale(scale: number): { minWidth: string; minHeight: string } {
+  const normalizedScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  return {
+    minWidth: `${Math.ceil(APP_SHELL_MIN_WIDTH_PX / normalizedScale)}px`,
+    minHeight: `${Math.ceil(APP_SHELL_MIN_HEIGHT_PX / normalizedScale)}px`,
+  };
+}
+
 export function shouldReserveMacTrafficLightInset(isMac: boolean, isFullscreen: boolean, isDesktop = true): boolean {
   return isDesktop && isMac && !isFullscreen;
 }
@@ -40,6 +59,27 @@ export function shouldDrawDesktopWindowFrame(isMac: boolean, isDesktop = true, i
   // Windows frameless+shadow windows already get a DWM 1px border on all sides.
   // An extra CSS top hairline stacks on that edge and no longer matches left/right/bottom.
   return isDesktop && !isMac && !isWindows;
+}
+
+export interface LinuxFloatingFrameState {
+  isLinux: boolean;
+  isDesktop: boolean;
+  /** Only the main window is created transparent; detached-tab and plugin windows are opaque. */
+  isMainWindow: boolean;
+  /** The main window is only transparent when a compositing manager is running. */
+  compositing: boolean;
+  /** Login/setup pages paint the whole window themselves. */
+  showingAuthPage: boolean;
+  isMaximized: boolean;
+  isFullscreen: boolean;
+}
+
+// Compositors draw neither shadow nor rounded corners for undecorated windows, so on Linux
+// the transparent main window (see create_linux_main_window) paints its own: a transparent
+// margin that carries the shadow, and a rounded shell. Maximized/fullscreen windows must fill
+// the screen, so the floating frame is dropped there.
+export function shouldDrawLinuxFloatingFrame(state: LinuxFloatingFrameState): boolean {
+  return state.isDesktop && state.isLinux && state.isMainWindow && state.compositing && !state.showingAuthPage && !state.isMaximized && !state.isFullscreen;
 }
 
 export function useWindowControls() {

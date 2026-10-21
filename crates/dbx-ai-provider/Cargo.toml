@@ -20,4 +20,5 @@ httpdate = "1"
 tempfile = "3"
 
 [dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["system-proxy"] }
 tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }

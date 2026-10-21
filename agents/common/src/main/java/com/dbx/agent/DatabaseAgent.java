@@ -14,6 +14,21 @@ public interface DatabaseAgent {
     /** Opt in to request-boundary timing, including pooled connection lifecycle. */
     default boolean supportsQueryTiming() { return false; }
 
+    default boolean supportsBlobBindStatements() { return false; }
+
+    default QueryResult executeBlobBoundStatements(List<String> previews, List<BlobBoundStatement> statements,
+        String schema, int timeoutSecs, boolean transaction) {
+        throw new UnsupportedOperationException("BLOB statement binding is not supported by this agent");
+    }
+
+    /** A dedicated manual transaction must never migrate to a replacement connection. */
+    default boolean permitsAutomaticReconnect() { return true; }
+
+    default List<QueryResult> executeQueryResults(String sql, String schema, ExecuteQueryOptions options) {
+        throw new UnsupportedOperationException("Complete manual transaction batches are not supported by this driver");
+    }
+
+
     void connect(ConnectParams params);
 
     boolean testConnection(ConnectParams params);
@@ -77,6 +92,10 @@ public interface DatabaseAgent {
     }
 
     List<ColumnInfo> getColumns(String schema, String table);
+
+    default List<ColumnInfo> getColumnsInContext(String schema, String table, String currentSchema) {
+        return getColumns(schema, table);
+    }
 
     default ObjectSource getObjectSource(String schema, String name, String objectType) {
         throw new UnsupportedOperationException("Object source is not supported");
@@ -148,6 +167,10 @@ public interface DatabaseAgent {
 
     List<ForeignKeyInfo> listForeignKeys(String schema, String table);
 
+    default List<ConstraintInfo> listConstraints(String schema, String table) {
+        throw new UnsupportedOperationException("Constraint metadata is not supported by this driver");
+    }
+
     List<TriggerInfo> listTriggers(String schema, String table);
 
     default List<PartitionInfo> listPartitions(String schema, String table) {
@@ -191,6 +214,14 @@ public interface DatabaseAgent {
     default boolean closeQuerySession(String sessionId) {
         return AgentExecutionContext.jdbcExecutor().closeQuerySession(sessionId);
     }
+
+    default Object readLargeValueChunk(String valueRef, long offset, int limit) {
+        throw new UnsupportedOperationException("LOB snapshot chunks are not supported by this agent");
+    }
+
+    default boolean releaseLargeValue(String valueRef) { return false; }
+
+    default void invalidateLargeValues() { }
 
     default QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
         Connection conn = getConnection();

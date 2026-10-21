@@ -170,6 +170,19 @@ describe("TreeItem trigger status", () => {
     expect(container.querySelector(disabledSelector)).toBeNull();
   });
 
+  it("updates the badge when trigger node meta is replaced with updated enabled status", async () => {
+    const { container, node } = await mountTreeItem(triggerNode(false));
+    expect(container.querySelector(disabledSelector)).not.toBeNull();
+
+    node.value.meta = { ...(node.value.meta as TriggerInfo), enabled: true };
+    await nextTick();
+    expect(container.querySelector(disabledSelector)).toBeNull();
+
+    node.value.meta = { ...(node.value.meta as TriggerInfo), enabled: false };
+    await nextTick();
+    expect(container.querySelector(disabledSelector)).not.toBeNull();
+  });
+
   it("localizes the badge tooltip and accessible name without disabling row activation", async () => {
     const initialNode = triggerNode(false);
     const { container, host } = await mountTreeItem(initialNode);

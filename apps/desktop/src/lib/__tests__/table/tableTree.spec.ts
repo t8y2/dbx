@@ -9,9 +9,11 @@ import {
   mergeTableTreePageChildren,
   tablePageRowAnchorKey,
   tablePartitionGroups,
+  syncTablePartitionGroups,
   withoutTableTreeLoadMoreNodes,
 } from "@/lib/table/tableTree";
 import type { ObjectInfo, TableInfo, TreeNode } from "@/types/database";
+import { decorateDatabaseSavedSqlTreeNodes } from "@/lib/savedSql/savedSqlDatabaseTree";
 
 const context = {
   nodeId: "connection:db",
@@ -20,6 +22,61 @@ const context = {
 };
 
 describe("case-sensitive database objects", () => {
+  it("publishes each changed partition group once per page while retaining exact identities", () => {
+    const current = buildTableTreeNodes({
+      ...context,
+      tables: [
+        { name: "stable", table_type: "STABLE" },
+        { name: "child_0", table_type: "TABLE", parent_name: "stable" },
+      ],
+    });
+    const group = tablePartitionGroups(current[0])[0];
+    let children = group.children;
+    let publications = 0;
+    Object.defineProperty(group, "children", {
+      configurable: true,
+      get: () => children,
+      set: (value: TreeNode[]) => {
+        publications++;
+        children = value;
+      },
+    });
+    const names = [...Array.from({ length: 200 }, (_, i) => `child_${200 - i}`), "Foo", "foo", "child_0"];
+    const page = buildTableTreeNodes({ ...context, tables: names.map((name) => ({ name, table_type: "TABLE", parent_name: "stable" })) });
+    mergeTableTreePageChildren(current, page, context.connectionId, context.database);
+    expect(publications).toBe(1);
+    expect(group.objectCount).toBe(203);
+    expect(new Set(children?.map((child) => child.label))).toEqual(new Set(["child_0", ...names]));
+    expect(children?.slice(0, 3).map((child) => child.label)).toEqual(["child_0", "child_1", "child_2"]);
+    expect(children?.slice(-2).map((child) => child.label)).toEqual(["Foo", "foo"]);
+  });
+
+  it("retains all 12722 child identities across decorated thousand-row TDengine pages", () => {
+    const expected = new Map<string, string[]>();
+    const rows: TableInfo[] = [];
+    for (const [parent, count] of [
+      ["stable_a", 5476],
+      ["stable_b", 7246],
+    ] as const) {
+      const names = Array.from({ length: count }, (_, index) => `${parent}_${String(index).padStart(5, "0")}`);
+      expected.set(parent, names);
+      rows.push({ name: parent, table_type: "STABLE" }, ...names.map((name) => ({ name, table_type: "TABLE", parent_name: parent })));
+    }
+    let current: TreeNode[] = [];
+    for (let offset = 0; offset < rows.length; offset += 1000) {
+      const page = buildTableTreeNodes({ ...context, tables: rows.slice(offset, offset + 1000) });
+      current = mergeTableTreePageChildren(current, page, context.connectionId, context.database);
+      current = decorateDatabaseSavedSqlTreeNodes(current, new Map(), current);
+    }
+    expect(current.map((node) => node.label)).toEqual([...expected.keys()]);
+    for (const node of current) {
+      const group = tablePartitionGroups(node)[0];
+      expect(group.children?.map((child) => child.label)).toEqual(expected.get(node.label));
+      expect(new Set(group.children?.map((child) => child.id)).size).toBe(expected.get(node.label)!.length);
+      expect(group.objectCount).toBe(expected.get(node.label)!.length);
+    }
+  });
+
   const views: ObjectInfo[] = [
     { name: "dbx_issue4529_case_V1", object_type: "VIEW", schema: "dbx_test" },
     { name: "dbx_issue4529_case_v1", object_type: "VIEW", schema: "dbx_test" },
@@ -454,6 +511,72 @@ describe("PostgreSQL table hierarchy", () => {
 });
 
 describe("TDengine table hierarchy", () => {
+  it("synchronizes only partition groups and keeps hidden-only loaded children usable", () => {
+    const nodes = decorateDatabaseSavedSqlTreeNodes(
+      buildTableTreeNodes({
+        ...context,
+        tables: [
+          { name: "meters", table_type: "STABLE" },
+          { name: "meter_0", table_type: "TABLE", parent_name: "meters" },
+        ],
+      }),
+      [],
+    );
+    const table = nodes[0];
+    const columns: TreeNode = { id: "columns", label: "Columns", type: "group-columns", children: [] };
+    table.hiddenChildren!.push(columns);
+    const cursor: TreeNode = { id: "more", label: "More", type: "load-more", loadMore: { parentId: context.nodeId, offset: 2, pageSize: 2 } };
+    appendTableTreeLoadMoreNode(nodes, cursor, { name: "meters" });
+    expect(table.hiddenChildren).toContain(columns);
+    expect(table.hiddenChildren!.find((node) => node.type === "group-partitions")).toBe(table.children![0]);
+    expect(table.children![0].children).toContain(cursor);
+    table.children = [];
+    const hidden = table.hiddenChildren;
+    syncTablePartitionGroups(table);
+    expect(table.hiddenChildren).toBe(hidden);
+    const merged = mergeTableTreePageChildren(withoutTableTreeLoadMoreNodes(nodes), buildTableTreeNodes({ ...context, tables: [{ name: "meter_1", table_type: "TABLE", parent_name: "meters" }] }), context.connectionId, context.database);
+    expect(merged[0].children).toEqual([]);
+    expect(tablePartitionGroups(merged[0])[0].children!.map((node) => node.label)).toEqual(["meter_0", "meter_1"]);
+    expect(tablePartitionGroups(merged[0])[0].objectCount).toBe(2);
+  });
+
+  it("merges into the visible multi-level partition parent after saved-SQL decoration", () => {
+    const first = decorateDatabaseSavedSqlTreeNodes(
+      buildTableTreeNodes({
+        ...context,
+        schema: "public",
+        tables: [
+          { name: "events", table_type: "TABLE" },
+          { name: "events_2026", table_type: "TABLE", parent_name: "events" },
+          { name: "events_jan", table_type: "TABLE", parent_name: "events_2026" },
+        ],
+      }),
+      [],
+    );
+    const page = () =>
+      buildTableTreeNodes({
+        ...context,
+        schema: "public",
+        tables: [
+          { name: "events_feb", table_type: "TABLE", parent_name: "events_2026" },
+          { name: "orphan", table_type: "TABLE", parent_name: "absent" },
+        ],
+      });
+    const merged = mergeTableTreePageChildren(first, page(), context.connectionId, context.database);
+    const parent = merged[0].children![0].children![0];
+    expect(parent.label).toBe("events_2026");
+    expect(parent.partitionParentName).toBe("events");
+    expect(parent.children![0].children!.map((node) => [node.label, node.partitionParentName])).toEqual([
+      ["events_feb", "events_2026"],
+      ["events_jan", "events_2026"],
+    ]);
+    expect(parent.hiddenChildren![0]).toBe(parent.children![0]);
+    expect(merged.map((node) => node.label)).toEqual(["events", "orphan"]);
+    const repeated = mergeTableTreePageChildren(decorateDatabaseSavedSqlTreeNodes(merged, []), page(), context.connectionId, context.database);
+    expect(repeated[0].children![0].children![0].children![0].objectCount).toBe(2);
+    expect(repeated).toHaveLength(2);
+  });
+
   it("groups child tables under their supertable and keeps ordinary tables flat", () => {
     const tables: TableInfo[] = [
       { name: "meters", table_type: "STABLE", comment: null },

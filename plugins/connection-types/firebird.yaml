@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 400
 dbType: firebird
+compareModes: [schema, data]
 rustVariant: Firebird
 label: Firebird
 dialect: Firebird
@@ -20,7 +21,7 @@ capabilities:
   queryExecution: true
   metadataBrowse: true
   objectBrowser: true
-  objectSource: false
+  objectSource: true
   schemaSearch: true
   diagram: true
   tableDataEdit: true

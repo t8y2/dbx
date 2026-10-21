@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isNumericColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
+import { formatMetadataColumnTypeLabel, isNumericColumnType, resolveHeaderColumnType, resolveResultColumnType, shortHeaderTypeName } from "@/lib/dataGrid/dataGridColumnType";
 
 describe("resolveResultColumnType", () => {
   function tableTypes(entries: Record<string, string>): Map<string, string> {
@@ -113,5 +113,58 @@ describe("resolveResultColumnType", () => {
       tableColumnTypesByName: tableTypes({ label: "varchar(50)" }),
     });
     expect(isNumericColumnType(castToInteger)).toBe(true);
+  });
+
+  it("resolves DuckDB computed decimal columns as numeric even when table metadata only has base columns (#12364)", () => {
+    // Query: select (数值列+1.10) as 金额 from tab;
+    // Table tab only has column "数值列", not "金额"
+    const type = resolveResultColumnType({
+      resultColumnType: "DECIMAL(18, 2)",
+      resultColumnName: "金额",
+      sourceColumnName: undefined,
+      tableColumnTypesByName: tableTypes({ 数值列: "integer" }),
+    });
+    expect(type).toBe("DECIMAL(18, 2)");
+    expect(isNumericColumnType(type)).toBe(true);
+  });
+});
+
+describe("resolveHeaderColumnType", () => {
+  it("prefers single-table metadata, then display enrichment, then ResultSet types", () => {
+    expect(
+      resolveHeaderColumnType({
+        tableColumnType: "varchar(32)",
+        displayColumnType: "varchar(64)",
+        resultColumnTypes: ["varchar"],
+        actualColIdx: 0,
+      }),
+    ).toBe("varchar(32)");
+
+    expect(
+      resolveHeaderColumnType({
+        tableColumnType: undefined,
+        displayColumnType: "character varying(50)",
+        resultColumnTypes: ["varchar"],
+        actualColIdx: 0,
+      }),
+    ).toBe("character varying(50)");
+
+    expect(
+      resolveHeaderColumnType({
+        tableColumnType: undefined,
+        displayColumnType: undefined,
+        resultColumnTypes: ["varchar"],
+        actualColIdx: 0,
+      }),
+    ).toBe("varchar");
+  });
+});
+
+describe("shortHeaderTypeName", () => {
+  it("shortens verbose PostgreSQL type names while keeping length suffixes", () => {
+    expect(shortHeaderTypeName("character varying(50)")).toBe("varchar(50)");
+    expect(shortHeaderTypeName("character varying")).toBe("varchar");
+    expect(shortHeaderTypeName("timestamp without time zone")).toBe("timestamp");
+    expect(formatMetadataColumnTypeLabel({ dataType: "varchar", characterMaximumLength: 50 })).toBe("varchar(50)");
   });
 });

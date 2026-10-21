@@ -45,6 +45,29 @@ Column reorder has two meanings:
 
 New-table creation can use preset fields from settings for common primary keys, timestamps, or audit columns.
 
+### Edit an Existing OceanBase Oracle Primary Key
+
+Use the existing primary key's constraint card to edit or drop it in OceanBase Oracle. This operation supports ordinary tables with an enabled, validated, non-deferrable primary key. Its supporting index must be a valid, visible, non-partitioned normal unique index with the same column order and no other constraints sharing it.
+
+<Callout type="warn">Changing a primary key drops the original key and its supporting index before creating the new key. The two DDL statements commit independently, leaving the table without a primary key between them and possibly after a failed add. Dropping a key runs only the drop step.</Callout>
+
+1. Choose **Edit** on the primary key's constraint card, select the target columns, and use **Move up** and **Move down** to set their order. Choose **Delete** to remove the entire key.
+2. Save other structure changes separately, then preview the primary key SQL. DBX checks the latest definition, supporting index, foreign-key references, and null or duplicate target values. References, including disabled foreign keys, incomplete metadata, and unsupported states prevent execution.
+3. Review the table, constraint name, and column order before saving. DBX checks the definition again before execution. If it changed, refresh and preview again.
+4. Review the execution result and reloaded structure. If a statement fails or its outcome is unknown, inspect the database before attempting another change.
+
+When the original key was dropped and a subsequent read confirms that the table has no primary key, the result details include candidate SQL for manual recovery. Recheck the data, names, and indexes before running it. DBX never executes recovery automatically. This SQL restores only the original logical primary key, not physical properties such as tablespace, compression, or storage settings.
+
+### Edit an Existing Native Oracle Primary Key
+
+Native Oracle uses the same constraint card, ordered column selection, preview, and save entry points. Replacement on ordinary tables preserves the original enabled, validated, deferrable, and initially deferred state, including meaningful RELY settings for unvalidated constraints. It does not automatically enable or validate the key. Target columns must still pass null and duplicate checks. External, index-organized, and temporary tables are excluded from this entry point.
+
+Index columns may have a different order from the constraint, but must contain the same set of columns. Valid, visible, non-partitioned normal nonunique indexes are also supported; deferrable keys use nonunique indexes. A disabled key without an associated index is shown explicitly: DBX does not infer or delete a same-named independent index, or create an index for the replacement. Manual recovery candidates retain the original constraint state without automatically enabling a disabled key.
+
+Choose **Keep the original index** or **Drop the original index** before saving. Keeping it is the default and preserves the old uniqueness rules. For example, changing a single-column key to a composite key does not remove the original column's uniqueness when its unique index is retained. Dropping the index loses its physical settings; preview identifies the affected index. A changed column set uses a new index name to avoid colliding with the retained index.
+
+DBX blocks known references, and the database rejects references that are invisible or added concurrently. No cascade is used. The two DDL statements commit independently; after partial failure, inspect the actual key and index states. Manual recovery recommends reusing an old index only when its complete definition still matches. If a same-name index changed or its state is unknown, the candidate remains commented out for manual inspection. Native Oracle live-database acceptance is still pending; OceanBase results do not establish native Oracle acceptance.
+
 ## Indexes, Foreign Keys, and Triggers
 
 Index capabilities vary by dialect and can include:
@@ -55,7 +78,15 @@ Index capabilities vary by dialect and can include:
 - Index comments where supported
 - Automatic names for new indexes with editable values
 
-Foreign-key editing covers column mappings and update/delete actions. Trigger editing depends on source retrieval and safe DDL generation; unsupported databases can still expose source or copyable DDL.
+Native Oracle and OceanBase Oracle both provide foreign-key create, edit, and drop actions for existing and new tables. DBX reads and verifies an existing definition before enabling its editor. Incomplete or unreadable definitions remain read-only.
+
+Composite foreign keys store each local and referenced column as an ordered pair. Moving a row moves both columns. `ON DELETE` supports `NO ACTION`, `CASCADE`, and `SET NULL`; Oracle does not expose `ON UPDATE`. Both databases expose enabled, validated, and `RELY` states. Deferrability is available only for native Oracle.
+
+Save existing-table foreign-key changes separately from columns, primary keys, indexes, triggers, partitions, table comments, or handwritten DDL. A new-table plan can include columns, a primary key, and foreign keys, including a self-reference. Before saving, DBX rechecks the source definition, parent key, permissions, and applicable data conditions. If required metadata is unreadable or validation data fails, DBX does not drop the original foreign key first. The database makes the final permission decision for a single ADD statement.
+
+Foreign-key DDL statements commit one at a time. If CREATE succeeds and a later foreign-key statement fails, the table and completed steps remain. DBX stops the remaining steps and does not drop the table, retry, or roll back automatically. A failed existing-key rebuild can also leave the original key absent. Refresh and inspect the actual definitions before retrying. Result details may include recovery SQL that requires manual review.
+
+Foreign-key editing on other databases depends on the implementation for that dialect. Trigger editing depends on source retrieval and safe DDL generation; unsupported databases can still expose source or copyable DDL.
 
 ## DDL Preview
 
@@ -115,12 +146,20 @@ Copy the complete DDL for code review or execution through a migration tool.
 
 Do not assume that every DDL feature is editable because a database can connect. Use [Database Support](/en/docs/databases) and the actual editor controls as the current source of truth.
 
+## OceanBase Oracle Structure Cloning
+
+The sidebar and Object Browser use the same scope for structure cloning and structure paste: column types and parameters, BYTE/CHAR units, defaults, nullability, primary-key column order, ordinary indexes, and table/column comments. FLOAT binary precision and NUMBER star precision or negative scale are retained. Built-in OceanBase type recommendations use CREATE-column checks against 4.2.5.7; other types can still be entered manually, and recommendations do not replace existing column types.
+
+Before execution, confirmation shows the target, SQL, copied items, and exclusions. Foreign keys, CHECK/UNIQUE constraints, triggers, special indexes, and partition definitions are excluded. UNIQUE constraint backing indexes are excluded too; independent ordinary unique indexes can be copied. Sources with virtual columns or temporary-table properties are rejected. Ordinary target names fold to uppercase, while explicitly double-quoted names retain case: `orders_copy` creates `ORDERS_COPY`, and `"OrdersCopy"` creates `OrdersCopy`.
+
+Each DDL statement commits separately. Execution stops at the first error without automatic rollback or target deletion. Failure details distinguish confirmed steps, database rejection or unknown results, and steps not executed. Before retrying, refresh and inspect the target using the reported schema and table name; a lost response does not prove creation failed. Native Oracle cloning retains its own scope and is not restricted by these OceanBase exclusions.
+
 ## Concurrency and Recovery
 
 - Drafts are based on metadata read when the editor opened and do not merge external schema changes automatically
 - If execution fails, earlier statements may already have succeeded
 - Atomicity of SQLite rebuilds and multi-statement DDL depends on database and driver behavior
-- Refresh reloads structure and may require discarding an unsaved draft
+- F5 or the toolbar Refresh Structure action reloads structure and may require discarding an unsaved draft
 - Read-only connections block save, and production writes require explicit confirmation every time
 
 ## Recommendations

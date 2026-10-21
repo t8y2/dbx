@@ -13,6 +13,14 @@ function isKnownOracleBaseTableType(tableType?: string): boolean {
   return tableType?.trim().toUpperCase() === "TABLE";
 }
 
+function isKnownPostgresBaseTableType(tableType?: string): boolean {
+  // PostgreSQL reports `relkind = 'r'` through `listTables` as the
+  // information-schema spelling `BASE TABLE`; `TABLE` still reaches this from
+  // object-browser paths and tests, so both must be accepted.
+  const normalized = tableType?.trim().toUpperCase();
+  return normalized === "TABLE" || normalized === "BASE TABLE";
+}
+
 export function isTdengineStableTableType(tableType?: string): boolean {
   const normalized = tableType?.trim().toUpperCase();
   return normalized === "STABLE" || normalized === "SUPER TABLE" || normalized === "SUPERTABLE";
@@ -40,8 +48,14 @@ export function editableRowIdentifierColumns(databaseType: DatabaseType | undefi
   const primaryKeys = editablePrimaryKeys(databaseType, columns, tableType);
   const oracleRowIdFallback = getDatabaseCapability(databaseType).syntheticKey === "oracle-rowid" && primaryKeys.length === 1 && primaryKeys[0]?.toUpperCase() === DBX_ROWID_COLUMN;
   if (primaryKeys.length > 0 && !oracleRowIdFallback) return primaryKeys;
-  const uniqueIndex = indexes?.filter((index) => !index.filter && index.columns.length > 0 && (index.is_primary || index.is_unique)).sort((left, right) => Number(right.is_primary) - Number(left.is_primary) || left.columns.length - right.columns.length)[0];
-  return uniqueIndex?.columns ?? primaryKeys;
+  const columnByName = new Map(columns.map((column) => [column.name.toLowerCase(), column]));
+  const uniqueIndex = indexes
+    ?.filter((index) => {
+      if (index.filter?.trim() || index.columns.length === 0 || (!index.is_primary && !index.is_unique) || index.key_is_expression?.some(Boolean)) return false;
+      return index.columns.every((name) => columnByName.get(name.toLowerCase())?.is_nullable === false);
+    })
+    .sort((left, right) => Number(right.is_primary) - Number(left.is_primary) || left.columns.length - right.columns.length)[0];
+  return uniqueIndex?.columns.map((name) => columnByName.get(name.toLowerCase())!.name) ?? primaryKeys;
 }
 
 export function isTableDataEditable(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string): boolean {
@@ -66,6 +80,16 @@ export function usesKeylessRowPredicate(databaseType: DatabaseType | undefined):
 
 export function canUseKeylessRowPredicate(databaseType: DatabaseType | undefined, primaryKeys: readonly string[]): boolean {
   return primaryKeys.length === 0 && usesKeylessRowPredicate(databaseType);
+}
+
+/**
+ * The toolbar badge warns that updates and deletes fall back to matching every
+ * column value, so exact duplicate rows can be changed together. A preview that
+ * carries a hidden physical row locator addresses a single row, so showing that
+ * warning for it would contradict what the save actually does.
+ */
+export function showsKeylessEditWarning(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string): boolean {
+  return canUseKeylessRowPredicate(databaseType, primaryKeys) && !shouldIncludeSyntheticRowId(databaseType, primaryKeys, tableType);
 }
 
 export function canEditExistingTableRows(databaseType: DatabaseType | undefined, hiveTableTransactional?: boolean, primaryKeys?: string[]): boolean {
@@ -113,23 +137,25 @@ export function usesSyntheticRowIdKey(databaseType: DatabaseType | undefined, pr
   const syntheticKey = getDatabaseCapability(databaseType).syntheticKey;
   if (primaryKeys.length !== 1) return false;
   if (syntheticKey === "oracle-rowid" || syntheticKey === "xugu-rowid") return primaryKeys[0].toUpperCase() === DBX_ROWID_COLUMN;
+  if (syntheticKey === "postgres-ctid") {
+    return primaryKeys[0].toUpperCase() === DBX_ROWID_COLUMN && (!tableType || isKnownPostgresBaseTableType(tableType));
+  }
   return syntheticKey === "neo4j-element-id" && primaryKeys[0] === DBX_NEO4J_ELEMENT_ID_COLUMN;
 }
 
-/**
- * Table-data tabs may start before metadata has populated declared primary keys.
- * Xugu base/partitioned/temp tables can still be addressed safely with ROWID,
- * so request the hidden projection during that cold-cache window as well.
- */
+/** Requests a hidden physical locator only when the backend knows the object type supports it. */
 export function shouldIncludeSyntheticRowId(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string): boolean {
   if (isViewTableType(tableType)) return false;
-  if (getDatabaseCapability(databaseType).syntheticKey === "oracle-rowid" && !isKnownOracleBaseTableType(tableType)) return false;
+  const syntheticKey = getDatabaseCapability(databaseType).syntheticKey;
+  if (syntheticKey === "oracle-rowid" && !isKnownOracleBaseTableType(tableType)) return false;
+  if (syntheticKey === "postgres-ctid" && !isKnownPostgresBaseTableType(tableType)) return false;
   if (usesSyntheticRowIdKey(databaseType, primaryKeys, tableType)) return true;
-  return databaseType === "xugu" && primaryKeys.length === 0;
+  return (databaseType === "xugu" || syntheticKey === "postgres-ctid") && primaryKeys.length === 0;
 }
 
 export function isHiddenGridColumn(databaseType: DatabaseType | undefined, column: string, primaryKeys: string[], tableType?: string): boolean {
   if (databaseType === "neo4j" && column === DBX_NEO4J_ELEMENT_ID_COLUMN) return true;
+  if (databaseType === "postgres" && isKnownPostgresBaseTableType(tableType) && column.toUpperCase() === DBX_ROWID_COLUMN) return true;
   // Xugu may inject ROWID before table metadata finishes loading. Keep this
   // internal projection hidden even after the real primary keys arrive.
   if (databaseType === "xugu" && !isViewTableType(tableType) && column.toUpperCase() === DBX_ROWID_COLUMN) return true;

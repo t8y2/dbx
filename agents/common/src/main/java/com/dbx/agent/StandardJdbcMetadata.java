@@ -65,6 +65,15 @@ public final class StandardJdbcMetadata {
                 } catch (Exception | AbstractMethodError ignored) {
                 }
             }
+            // HANA's databaseName (for example HXE) is not a JDBC catalog.
+            // Its driver returns no rows, rather than throwing, for that catalog.
+            // Retry without it before falling back to only the current schema.
+            if (names.isEmpty() && catalog != null && profile.getCatalogFallbackEnabled()) {
+                try {
+                    appendSchemas(names, meta.getSchemas(null, null));
+                } catch (Exception | AbstractMethodError ignored) {
+                }
+            }
             try {
                 addNonBlank(names, conn.getSchema());
             } catch (Exception | AbstractMethodError ignored) {
@@ -207,13 +216,42 @@ public final class StandardJdbcMetadata {
             Set<String> primaryKeys = primaryKeys(meta, null, schema, table);
             List<ColumnInfo> result = new ArrayList<>();
             appendColumns(result, meta, null, schema, table, primaryKeys);
+
+            // Some drivers resolve table names case-insensitively in SQL but use the exact
+            // table pattern for DatabaseMetaData. Retry only when the driver opts in and
+            // getTables() identifies one unambiguous table name.
+            if (profile.getCaseInsensitiveTableMetadata() && (result.isEmpty() || primaryKeys.isEmpty())) {
+                String resolvedTable = resolveCaseInsensitiveTableName(meta, profile, null, schema, table);
+                if (resolvedTable != null && !resolvedTable.equals(table)) {
+                    Set<String> resolvedPrimaryKeys = primaryKeys(meta, null, schema, resolvedTable);
+                    if (result.isEmpty()) {
+                        appendColumns(result, meta, null, schema, resolvedTable, resolvedPrimaryKeys);
+                    } else {
+                        markPrimaryKeys(result, resolvedPrimaryKeys);
+                    }
+                }
+            }
+
             if (!result.isEmpty() && primaryKeys.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
                 Set<String> fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, table);
+                if (profile.getCaseInsensitiveTableMetadata() && fallbackPrimaryKeys.isEmpty()) {
+                    String resolvedTable = resolveCaseInsensitiveTableName(meta, profile, configuredDatabase, schema, table);
+                    if (resolvedTable != null && !resolvedTable.equals(table)) {
+                        fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, resolvedTable);
+                    }
+                }
                 markPrimaryKeys(result, fallbackPrimaryKeys);
             }
             if (result.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
                 Set<String> fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, table);
                 appendColumns(result, meta, configuredDatabase, schema, table, fallbackPrimaryKeys);
+                if (result.isEmpty() && profile.getCaseInsensitiveTableMetadata()) {
+                    String resolvedTable = resolveCaseInsensitiveTableName(meta, profile, configuredDatabase, schema, table);
+                    if (resolvedTable != null && !resolvedTable.equals(table)) {
+                        Set<String> resolvedPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, resolvedTable);
+                        appendColumns(result, meta, configuredDatabase, schema, resolvedTable, resolvedPrimaryKeys);
+                    }
+                }
             }
             return result;
         });
@@ -228,8 +266,20 @@ public final class StandardJdbcMetadata {
     ) {
         return unchecked(() -> {
             List<IndexInfo> result = listIndexesInternal(conn, null, schema, table);
+            if (result.isEmpty() && profile.getCaseInsensitiveTableMetadata()) {
+                String resolvedTable = resolveCaseInsensitiveTableName(conn.getMetaData(), profile, null, schema, table);
+                if (resolvedTable != null && !resolvedTable.equals(table)) {
+                    result = listIndexesInternal(conn, null, schema, resolvedTable);
+                }
+            }
             if (result.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
                 result = listIndexesInternal(conn, configuredDatabase, schema, table);
+                if (result.isEmpty() && profile.getCaseInsensitiveTableMetadata()) {
+                    String resolvedTable = resolveCaseInsensitiveTableName(conn.getMetaData(), profile, configuredDatabase, schema, table);
+                    if (resolvedTable != null && !resolvedTable.equals(table)) {
+                        result = listIndexesInternal(conn, configuredDatabase, schema, resolvedTable);
+                    }
+                }
             }
             return result;
         });
@@ -583,6 +633,36 @@ public final class StandardJdbcMetadata {
         return keys;
     }
 
+    private String resolveCaseInsensitiveTableName(
+        DatabaseMetaData meta,
+        JdbcAgentProfile profile,
+        String catalog,
+        String schema,
+        String requestedTable
+    ) {
+        if (requestedTable == null || requestedTable.trim().isEmpty()) {
+            return null;
+        }
+        Set<String> matches = new LinkedHashSet<>();
+        String[] tableTypes;
+        try {
+            tableTypes = getDriverTableTypes(meta, profile);
+        } catch (Exception ignored) {
+            tableTypes = profile.getTableTypes().toArray(new String[0]);
+        }
+        try (ResultSet rs = meta.getTables(blankToNull(catalog), blankToNull(schema), "%", tableTypes)) {
+            while (rs.next()) {
+                String name = rs.getString("TABLE_NAME");
+                if (name != null && name.equalsIgnoreCase(requestedTable)) {
+                    matches.add(name);
+                }
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+        return matches.size() == 1 ? matches.iterator().next() : null;
+    }
+
     private static boolean hasConfiguredDatabase(String configuredDatabase) {
         return configuredDatabase != null && !configuredDatabase.trim().isEmpty();
     }
@@ -640,6 +720,10 @@ public final class StandardJdbcMetadata {
         String normalized = type.toUpperCase(Locale.ROOT);
         if ("BASE TABLE".equals(normalized) || "COLUMN TABLE".equals(normalized) || "ROW TABLE".equals(normalized)) {
             return "TABLE";
+        }
+        if ("CALC VIEW".equals(normalized) || "JOIN VIEW".equals(normalized)
+            || "OLAP VIEW".equals(normalized) || "HIERARCHY VIEW".equals(normalized)) {
+            return "VIEW";
         }
         return type;
     }

@@ -25,7 +25,7 @@ const busy = ref(false);
 const message = ref("");
 const error = ref("");
 const mode = ref<"create" | "alter" | "drop" | "">("");
-const name = ref("");
+const linkName = ref("");
 const username = ref("");
 const password = ref("");
 const host = ref("");
@@ -80,7 +80,7 @@ function begin(next: "create" | "alter" | "drop") {
   error.value = "";
   message.value = "";
   if (next === "create") {
-    name.value = "";
+    linkName.value = "";
     username.value = "";
     host.value = "";
     publicLink.value = false;
@@ -116,8 +116,8 @@ async function save() {
     const sql =
       mode.value === "create"
         ? oceanbase.value
-          ? createOceanBaseDatabaseLinkSql({ name: name.value.trim(), username: username.value.trim(), password: password.value, host: host.value, public: publicLink.value, tenant: tenant.value, protocol: protocol.value, cluster: protocol.value === "OB" ? cluster.value : undefined })
-          : createOracleDatabaseLinkSql({ name: name.value.trim(), username: username.value.trim(), password: password.value, host: host.value, public: publicLink.value })
+          ? createOceanBaseDatabaseLinkSql({ name: linkName.value.trim(), username: username.value.trim(), password: password.value, host: host.value, public: publicLink.value, tenant: tenant.value, protocol: protocol.value, cluster: protocol.value === "OB" ? cluster.value : undefined })
+          : createOracleDatabaseLinkSql({ name: linkName.value.trim(), username: username.value.trim(), password: password.value, host: host.value, public: publicLink.value })
         : mode.value === "alter" && selected.value && !oceanbase.value
           ? alterOracleDatabaseLinkSql(selected.value, password.value)
           : mode.value === "drop" && selected.value
@@ -212,7 +212,7 @@ async function test() {
       </template>
       <form v-if="mode" class="space-y-3 border-t pt-3" @submit.prevent="save">
         <template v-if="mode === 'create'">
-          <label class="block text-sm">{{ t("databaseLinks.name") }}<Input v-model="name" required autocomplete="off" /></label>
+          <label class="block text-sm">{{ t("databaseLinks.name") }}<Input v-model="linkName" required autocomplete="off" /></label>
           <label class="block text-sm">{{ t("databaseLinks.username") }}<Input v-model="username" required autocomplete="off" /></label>
           <label class="block text-sm">{{ t("databaseLinks.host") }}<Input v-model="host" required :placeholder="oceanbase ? 'host:2881 or host:1521/service' : '//host:1521/service'" autocomplete="off" /></label>
           <template v-if="oceanbase">

@@ -12,12 +12,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 
+mod webdav_snapshot;
+
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
-    plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
-    MQTT_AUTH_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY,
-    MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
-    PLUGIN_CONNECTION_SECRET_PREFIX,
+    is_rocketmq_connection, normalize_rocketmq_credentials, plugin_connection_secret_key,
+    CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQTT_AUTH_PASSWORD_KEY,
+    MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
+    MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
@@ -69,6 +71,10 @@ const DESKTOP_DEVICE_LOCAL_SETTINGS: &[&str] = &[
     "agent_store_dir",
     "custom_ai_skill_root_enabled",
     "custom_ai_skill_root",
+    // Device-local like the two above: it gates which of *this* device's skill
+    // files reach the prompt, so a synced "on" would inject another machine's
+    // catalog here.
+    "custom_ai_skill_auto_enabled",
 ];
 const NON_SYNCABLE_DESKTOP_SETTINGS: &[&str] = &["debug_logging_enabled"];
 const NON_SYNCABLE_EDITOR_SETTINGS: &[&str] = &[
@@ -90,6 +96,11 @@ pub struct WebDavConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub remote_path: Option<String>,
+    /// Optional User-Agent override for WebDAV gateways that only allow
+    /// specific client applications. When empty no User-Agent is sent,
+    /// matching the long-standing default behavior.
+    #[serde(default)]
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +132,12 @@ pub struct SnippetSyncConfig {
 #[serde(rename_all = "camelCase")]
 pub struct SnippetTokenStatus {
     pub has_saved_token: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetPassphraseStatus {
+    pub has_saved_passphrase: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -436,7 +453,23 @@ pub async fn describe_local_sync_state(
     )
     .await?;
     let mut catalog = describe_sync_snapshot(&snapshot, None)?;
-    catalog.connection_secrets = catalog.connections.iter().map(|item| item.id.clone()).collect();
+    // Snapshot connections are already scrubbed, so reload the hydrated rows
+    // and count only connections that would actually carry a secret into the
+    // encrypted payload.  Otherwise the export dialog lists every connection
+    // as a credential candidate while a restore of that backup reports fewer.
+    let source_connections = storage.load_connections().await?;
+    let mut connection_secret_ids = Vec::new();
+    for config in &source_connections {
+        let mut secrets = Vec::new();
+        // `true` mirrors every real export path: the Tauri/web commands tie
+        // include_plugin_secrets to include_secrets, so the catalog must count
+        // plugin-secret-only connections as credential candidates too.
+        collect_connection_secrets(&mut secrets, config, true)?;
+        if !secrets.is_empty() {
+            connection_secret_ids.push(config.id.clone());
+        }
+    }
+    catalog.connection_secrets = connection_secret_ids;
     catalog.tunnel_secrets = catalog.tunnel_profiles.iter().map(|item| item.id.clone()).collect();
     catalog.ai_configs = storage
         .load_ai_configs()
@@ -761,6 +794,12 @@ pub struct SnippetSyncSummary {
     pub bytes: usize,
     pub exported_at: Option<String>,
     pub app_version: Option<String>,
+    /// SHA-256 of the encrypted remote file content. Used by the opt-in
+    /// automatic uploader to stop when another device has changed the snippet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_content_hash: Option<String>,
+    #[serde(default)]
+    pub unchanged: bool,
     /// A new encrypted snippet was created, but the old plaintext snippet
     /// could not be removed. The caller must surface this id for manual cleanup.
     #[serde(default)]
@@ -954,6 +993,7 @@ fn syncable_desktop_settings(mut settings: DesktopSettings) -> DesktopSettings {
     settings.agent_store_dir = None;
     settings.custom_ai_skill_root_enabled = false;
     settings.custom_ai_skill_root = None;
+    settings.custom_ai_skill_auto_enabled = false;
     settings.debug_logging_enabled = false;
     settings
 }
@@ -1376,12 +1416,27 @@ pub async fn apply_sync_snapshot_with_selection(
                     .connection_secrets
                     .iter()
                     .filter(|secret| {
-                        !(matches!(
+                        let forbidden_rocketmq_auth =
+                            secret.key.starts_with(crate::connection_secrets::MQ_AUTH_SECRET_PREFIX)
+                                && connections.iter().any(|config| {
+                                    config.id == secret.connection_id
+                                        && is_rocketmq_connection(config)
+                                        && (!config.save_password
+                                            || config
+                                                .external_config
+                                                .as_ref()
+                                                .and_then(|external| external.get("auth"))
+                                                .and_then(|auth| auth.get("kind"))
+                                                .and_then(serde_json::Value::as_str)
+                                                == Some("none"))
+                                });
+                        let password_like_secret_unsaved = matches!(
                             secret.key.as_str(),
                             "password" | NACOS_AUTH_PASSWORD_KEY | NACOS_RNACOS_CONSOLE_PASSWORD_KEY
                         ) && connections
                             .iter()
-                            .any(|config| config.id == secret.connection_id && !config.save_password))
+                            .any(|config| config.id == secret.connection_id && !config.save_password);
+                        !(forbidden_rocketmq_auth || password_like_secret_unsaved)
                     })
                     .map(|secret| SyncImportSecret {
                         connection_id: secret.connection_id.clone(),
@@ -1641,6 +1696,47 @@ pub async fn forget_snippet_token(storage: &Storage, config: &SnippetSyncConfig)
     storage.delete_webdav_password_blob(&snippet_token_account(config)?).await
 }
 
+pub async fn snippet_saved_passphrase_status(
+    storage: &Storage,
+    config: &SnippetSyncConfig,
+) -> Result<SnippetPassphraseStatus, String> {
+    let account = snippet_passphrase_account(config)?;
+    Ok(SnippetPassphraseStatus { has_saved_passphrase: storage.load_webdav_password_blob(&account).await?.is_some() })
+}
+
+pub async fn save_snippet_passphrase(
+    storage: &Storage,
+    config: &SnippetSyncConfig,
+    passphrase: &str,
+) -> Result<(), String> {
+    let passphrase = normalized_passphrase(Some(passphrase))
+        .ok_or_else(|| "A snippet encryption password is required to save it.".to_string())?;
+    let secret = storage.load_or_create_local_device_secret().await?;
+    let blob = encrypt_text_with_secret(passphrase, &secret)?;
+    let value = serde_json::to_value(blob).map_err(|e| e.to_string())?;
+    storage.save_webdav_password_blob(&snippet_passphrase_account(config)?, &value).await
+}
+
+pub async fn forget_snippet_passphrase(storage: &Storage, config: &SnippetSyncConfig) -> Result<(), String> {
+    storage.delete_webdav_password_blob(&snippet_passphrase_account(config)?).await
+}
+
+pub async fn resolve_snippet_passphrase(
+    storage: &Storage,
+    config: &SnippetSyncConfig,
+    passphrase: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(passphrase) = normalized_passphrase(passphrase) {
+        return Ok(Some(passphrase.to_string()));
+    }
+    let Some(value) = storage.load_webdav_password_blob(&snippet_passphrase_account(config)?).await? else {
+        return Ok(None);
+    };
+    let blob: EncryptedSecretsBlob = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    let secret = storage.load_or_create_local_device_secret().await?;
+    Ok(Some(decrypt_text_with_secret(&blob, &secret)?))
+}
+
 pub async fn snippet_sync_settings(
     storage: &Storage,
     provider: SnippetProvider,
@@ -1784,6 +1880,10 @@ impl WebDavClient {
         let builder = Client::builder();
         let builder =
             if webdav_endpoint_uses_direct_connection(&config.endpoint) { builder.no_proxy() } else { builder };
+        let builder = match config.user_agent.as_deref().map(str::trim).filter(|ua| !ua.is_empty()) {
+            Some(user_agent) => builder.user_agent(user_agent),
+            None => builder,
+        };
         let http = builder.build().expect("failed to build WebDAV HTTP client");
         Self { http, config }
     }
@@ -1805,22 +1905,23 @@ impl WebDavClient {
 
     pub async fn put_snapshot(&self, snapshot: &SyncSnapshot) -> Result<WebDavSyncSummary, String> {
         let remote_path = self.remote_path();
+        let (bytes, content_type) = webdav_snapshot::encode(snapshot, &remote_path)?;
+        let byte_count = bytes.len();
         self.ensure_parent_collections(&remote_path).await?;
-        let bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| e.to_string())?;
         let response = self
             .request(Method::PUT, &remote_path)?
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes.clone())
+            .header(header::CONTENT_TYPE, content_type)
+            .body(bytes)
             .send()
             .await
             .map_err(|e| e.to_string())?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("WebDAV upload failed with HTTP {status}"));
+            return Err(webdav_snapshot::upload_error(status, content_type));
         }
         Ok(WebDavSyncSummary {
             remote_path,
-            bytes: bytes.len(),
+            bytes: byte_count,
             exported_at: Some(snapshot.exported_at.clone()),
             app_version: Some(snapshot.app_version.clone()),
         })
@@ -1833,8 +1934,8 @@ impl WebDavClient {
         if !status.is_success() {
             return Err(format!("WebDAV download failed with HTTP {status}"));
         }
-        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-        let snapshot: SyncSnapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let bytes = webdav_snapshot::read_response(response).await?;
+        let snapshot = webdav_snapshot::decode(&bytes)?;
         let summary = WebDavSyncSummary {
             remote_path,
             bytes: bytes.len(),
@@ -1917,6 +2018,17 @@ impl SnippetSyncClient {
         }
     }
 
+    fn gitlab_raw_file_url(&self, snippet_id: &str, reference: &str) -> Result<Url, String> {
+        let mut url = Url::parse(&self.snippet_url(Some(snippet_id))?).map_err(|e| e.to_string())?;
+        url.path_segments_mut().map_err(|_| "GitLab snippet URL cannot be a base URL".to_string())?.extend([
+            "files",
+            reference,
+            DEFAULT_SNIPPET_FILE_NAME,
+            "raw",
+        ]);
+        Ok(url)
+    }
+
     pub async fn test(&self) -> Result<(), String> {
         self.require_token()?;
         let url = match (self.config.provider, normalized_snippet_id(self.config.snippet_id.as_deref())) {
@@ -1933,12 +2045,43 @@ impl SnippetSyncClient {
         snippet_passphrase: Option<&str>,
         secrets_passphrase: Option<&str>,
     ) -> Result<SnippetSyncSummary, String> {
+        self.put_snapshot_with_expected_remote_hash(snapshot, snippet_passphrase, secrets_passphrase, None).await
+    }
+
+    pub async fn put_snapshot_with_expected_remote_hash(
+        &self,
+        snapshot: &SyncSnapshot,
+        snippet_passphrase: Option<&str>,
+        secrets_passphrase: Option<&str>,
+        expected_remote_content_hash: Option<&str>,
+    ) -> Result<SnippetSyncSummary, String> {
         self.require_token()?;
         let passphrase = required_snippet_passphrase(snippet_passphrase)?;
         let existing_id = normalized_snippet_id(self.config.snippet_id.as_deref());
+        if expected_remote_content_hash.is_some() && existing_id.is_none() {
+            return Err(
+                "Automatic snippet upload needs a snippet ID and a previous successful manual upload.".to_string()
+            );
+        }
+        if let Some(expected_hash) = expected_remote_content_hash {
+            if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(
+                    "Automatic snippet upload has an invalid saved remote version. Upload manually to reset it."
+                        .to_string(),
+                );
+            }
+        }
         let legacy_snapshot = if let Some(id) = existing_id {
             let existing_content = self.load_snippet_content(id).await?;
+            if expected_remote_content_hash
+                .is_some_and(|expected_hash| !content_hash(&existing_content).eq_ignore_ascii_case(expected_hash))
+            {
+                return Err("The remote snippet changed since the last successful upload. Automatic upload was paused to avoid overwriting newer changes. Download and review the latest snippet, then upload manually before re-enabling automatic upload.".to_string());
+            }
             if !is_encrypted_snippet_snapshot(&existing_content) {
+                if expected_remote_content_hash.is_some() && is_legacy_dbx_snapshot(&existing_content) {
+                    return Err("Automatic upload is paused because the remote snippet uses a legacy unencrypted snapshot. Migrate it manually before enabling automatic uploads.".to_string());
+                }
                 // Never delete an arbitrary snippet merely because it is not an
                 // encrypted DBX envelope. It must first prove to be a legacy DBX
                 // snapshot, and the caller must explicitly request migration.
@@ -1966,7 +2109,25 @@ impl SnippetSyncClient {
                 // password decrypts the currently stored envelope. Otherwise
                 // an accidental password change would silently lock out the
                 // user's other devices.
-                parse_snippet_snapshot(&existing_content, Some(passphrase))?;
+                let existing_snapshot = parse_snippet_snapshot(&existing_content, Some(passphrase))?;
+                if expected_remote_content_hash.is_some() {
+                    if existing_snapshot.encrypted_secrets.is_some() {
+                        return Err("Automatic upload is paused because this snippet includes encrypted credentials. Use manual upload to keep the credentials protected.".to_string());
+                    }
+                    if sync_snapshot_content_eq(&existing_snapshot, snapshot) {
+                        return Ok(SnippetSyncSummary {
+                            provider: self.config.provider,
+                            snippet_id: id.to_string(),
+                            bytes: existing_content.len(),
+                            exported_at: Some(existing_snapshot.exported_at),
+                            app_version: Some(existing_snapshot.app_version),
+                            remote_content_hash: Some(content_hash(&existing_content)),
+                            unchanged: true,
+                            legacy_cleanup_required_id: None,
+                            legacy_cleanup_expected_content_hash: None,
+                        });
+                    }
+                }
                 None
             }
         } else {
@@ -1980,6 +2141,7 @@ impl SnippetSyncClient {
         let encrypted = encrypt_snippet_snapshot(snapshot_to_upload, passphrase)?;
         let bytes = serde_json::to_vec_pretty(&encrypted).map_err(|e| e.to_string())?;
         let content = String::from_utf8(bytes.clone()).map_err(|e| e.to_string())?;
+        let remote_content_hash = content_hash(&content);
         // A migration must create a separate snippet. Updating the legacy
         // snippet would retain its plaintext revision history on the provider.
         let update_id = if legacy_snapshot.is_some() { None } else { existing_id };
@@ -2033,6 +2195,8 @@ impl SnippetSyncClient {
             bytes: bytes.len(),
             exported_at,
             app_version,
+            remote_content_hash: Some(remote_content_hash),
+            unchanged: false,
             legacy_cleanup_required_id,
             legacy_cleanup_expected_content_hash: legacy_snapshot.map(|(_, _, hash)| hash),
         })
@@ -2053,6 +2217,8 @@ impl SnippetSyncClient {
             bytes: content.len(),
             exported_at: Some(snapshot.exported_at.clone()),
             app_version: Some(snapshot.app_version.clone()),
+            remote_content_hash: Some(content_hash(&content)),
+            unchanged: false,
             legacy_cleanup_required_id: None,
             legacy_cleanup_expected_content_hash: None,
         };
@@ -2075,20 +2241,19 @@ impl SnippetSyncClient {
                 .iter()
                 .find(|file| file.get("path").and_then(serde_json::Value::as_str) == Some(DEFAULT_SNIPPET_FILE_NAME))
                 .ok_or_else(|| format!("Snippet does not contain {DEFAULT_SNIPPET_FILE_NAME}"))?;
-            // Snippet repositories default to `main` on current instances but
-            // `master` on older ones; the per-file `raw_url` always carries the
-            // snippet's actual default branch, so prefer it over guessing.
-            let constructed_main = format!("{url}/files/main/{DEFAULT_SNIPPET_FILE_NAME}/raw");
-            let raw_url = file
+            // raw_url is a browser route and can use a different scheme or host.
+            // Read its ref, but send the token only to the configured instance API.
+            let reference = file
                 .get("raw_url")
                 .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| constructed_main.clone());
-            let response = self.request(Method::GET, &raw_url)?.send().await.map_err(|e| e.to_string())?;
-            if response.status() == StatusCode::NOT_FOUND && raw_url == constructed_main {
-                let master_url = format!("{url}/files/master/{DEFAULT_SNIPPET_FILE_NAME}/raw");
-                let response = self.request(Method::GET, &master_url)?.send().await.map_err(|e| e.to_string())?;
+                .and_then(|raw_url| gitlab_snippet_raw_ref(raw_url, snippet_id))
+                .unwrap_or_else(|| "main".to_string());
+            let raw_url = self.gitlab_raw_file_url(snippet_id, &reference)?;
+            let response = self.request(Method::GET, raw_url.as_str())?.send().await.map_err(|e| e.to_string())?;
+            if response.status() == StatusCode::NOT_FOUND && reference == "main" {
+                let master_url = self.gitlab_raw_file_url(snippet_id, "master")?;
+                let response =
+                    self.request(Method::GET, master_url.as_str())?.send().await.map_err(|e| e.to_string())?;
                 ensure_snippet_success(response.status(), "raw download")?;
                 return response.text().await.map_err(|e| e.to_string());
             }
@@ -2285,6 +2450,7 @@ fn valid_mqtt_filter(topic: &str) -> bool {
 }
 
 fn scrub_connection_secrets(config: &mut ConnectionConfig) {
+    normalize_rocketmq_credentials(config);
     config.password.clear();
     for layer in &mut config.transport_layers {
         match layer {
@@ -2374,6 +2540,66 @@ async fn build_sensitive_payload(
     .await
 }
 
+/// Collects every secret a real export would place in the encrypted payload
+/// for a single connection. Shared with the export catalog so its credential
+/// counts match what a restore of that backup will report.
+fn collect_connection_secrets(
+    secrets: &mut Vec<ConnectionSecretSnapshot>,
+    config: &ConnectionConfig,
+    include_plugin_secrets: bool,
+) -> Result<(), String> {
+    // Legacy snapshots may arrive without passing through local storage.
+    let mut normalized = config.clone();
+    normalize_rocketmq_credentials(&mut normalized);
+    let config = &normalized;
+    // A transient password must not become durable through a sync snapshot.
+    if config.save_password {
+        push_secret(secrets, &config.id, "password", &config.password);
+    }
+    push_secret(secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
+    push_secret(secrets, &config.id, "url_params", config.url_params.as_deref().unwrap_or(""));
+    for (index, layer) in config.transport_layers.iter().enumerate() {
+        match layer {
+            TransportLayerConfig::Ssh(ssh) => {
+                push_secret(secrets, &config.id, &transport_layer_ssh_password_key(index, layer), &ssh.password);
+                push_secret(
+                    secrets,
+                    &config.id,
+                    &transport_layer_ssh_key_passphrase_key(index, layer),
+                    &ssh.key_passphrase,
+                );
+            }
+            TransportLayerConfig::Proxy(proxy) => {
+                push_secret(secrets, &config.id, &transport_layer_proxy_password_key(index, layer), &proxy.password);
+            }
+            TransportLayerConfig::HttpTunnel(http) => {
+                push_secret(secrets, &config.id, &transport_layer_http_tunnel_token_key(index, layer), &http.token);
+            }
+        }
+    }
+    push_secret(secrets, &config.id, "redis_sentinel_password", &config.redis_sentinel_password);
+    if let Some(connection_string) = &config.connection_string {
+        push_secret(secrets, &config.id, "connection_string", connection_string);
+    }
+    if !is_rocketmq_connection(config) || config.save_password {
+        push_mq_external_config_secrets(secrets, config);
+    }
+    push_mqtt_external_config_secret(secrets, config);
+    push_cassandra_tls_secrets(secrets, config);
+    if config.save_password {
+        push_nacos_external_config_secrets(secrets, config);
+    }
+    // Plugin secrets are independent of the primary connection password.
+    // A plugin may persist a token while `save_password` is disabled, so
+    // gate these values only on the explicit plugin export option.
+    if include_plugin_secrets {
+        for (key, secret) in &config.connection_secrets {
+            push_secret(secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
+        }
+    }
+    Ok(())
+}
+
 async fn build_sensitive_payload_with_options(
     storage: &Storage,
     connections: &[ConnectionConfig],
@@ -2382,64 +2608,7 @@ async fn build_sensitive_payload_with_options(
 ) -> Result<SensitiveSyncPayload, String> {
     let mut connection_secrets = Vec::new();
     for config in connections {
-        // A transient password must not become durable through a sync snapshot.
-        if config.save_password {
-            push_secret(&mut connection_secrets, &config.id, "password", &config.password);
-        }
-        push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
-        push_secret(&mut connection_secrets, &config.id, "url_params", config.url_params.as_deref().unwrap_or(""));
-        for (index, layer) in config.transport_layers.iter().enumerate() {
-            match layer {
-                TransportLayerConfig::Ssh(ssh) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_ssh_password_key(index, layer),
-                        &ssh.password,
-                    );
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_ssh_key_passphrase_key(index, layer),
-                        &ssh.key_passphrase,
-                    );
-                }
-                TransportLayerConfig::Proxy(proxy) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_proxy_password_key(index, layer),
-                        &proxy.password,
-                    );
-                }
-                TransportLayerConfig::HttpTunnel(http) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_http_tunnel_token_key(index, layer),
-                        &http.token,
-                    );
-                }
-            }
-        }
-        push_secret(&mut connection_secrets, &config.id, "redis_sentinel_password", &config.redis_sentinel_password);
-        if let Some(connection_string) = &config.connection_string {
-            push_secret(&mut connection_secrets, &config.id, "connection_string", connection_string);
-        }
-        push_mq_external_config_secrets(&mut connection_secrets, config);
-        push_mqtt_external_config_secret(&mut connection_secrets, config);
-        push_cassandra_tls_secrets(&mut connection_secrets, config);
-        if config.save_password {
-            push_nacos_external_config_secrets(&mut connection_secrets, config);
-        }
-        // Plugin secrets are independent of the primary connection password.
-        // A plugin may persist a token while `save_password` is disabled, so
-        // gate these values only on the explicit plugin export option.
-        if options.include_plugin_secrets {
-            for (key, secret) in &config.connection_secrets {
-                push_secret(&mut connection_secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
-            }
-        }
+        collect_connection_secrets(&mut connection_secrets, config, options.include_plugin_secrets)?;
     }
 
     // Loading AI configurations includes decrypting their secret blobs.  A
@@ -3017,6 +3186,19 @@ fn content_hash(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn sync_snapshot_content_eq(left: &SyncSnapshot, right: &SyncSnapshot) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.exported_at.clear();
+    right.exported_at.clear();
+    left.app_version.clear();
+    right.app_version.clear();
+    match (serde_json::to_value(left), serde_json::to_value(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn snippet_pending_cleanup(summary: &SnippetSyncSummary) -> Result<Option<SnippetPendingCleanup>, String> {
     match (summary.legacy_cleanup_required_id.as_deref(), summary.legacy_cleanup_expected_content_hash.as_deref()) {
         (None, None) => Ok(None),
@@ -3035,6 +3217,21 @@ fn required_snippet_passphrase(passphrase: Option<&str>) -> Result<&str, String>
 
 fn required_sync_passphrase(passphrase: Option<&str>) -> Result<&str, String> {
     normalized_passphrase(passphrase).ok_or_else(|| "A sync password is required for snippet sync.".to_string())
+}
+
+fn gitlab_snippet_raw_ref(raw_url: &str, snippet_id: &str) -> Option<String> {
+    let url = Url::parse(raw_url).ok()?;
+    let segments: Vec<_> = url.path_segments()?.collect();
+    let reference = match segments.as_slice() {
+        [.., "snippets", id, "raw", reference, DEFAULT_SNIPPET_FILE_NAME] if *id == snippet_id => *reference,
+        [.., "snippets", id, "files", reference, DEFAULT_SNIPPET_FILE_NAME, "raw"] if *id == snippet_id => *reference,
+        _ => return None,
+    };
+    percent_encoding::percent_decode_str(reference)
+        .decode_utf8()
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| value.into_owned())
 }
 
 fn gitlab_instance_url(value: Option<&str>) -> Result<String, String> {
@@ -3064,6 +3261,10 @@ fn snippet_provider_storage_key(provider: SnippetProvider, instance_url: Option<
 
 fn snippet_token_account(config: &SnippetSyncConfig) -> Result<String, String> {
     Ok(format!("snippet-token:{}", snippet_provider_storage_key(config.provider, config.instance_url.as_deref())?))
+}
+
+fn snippet_passphrase_account(config: &SnippetSyncConfig) -> Result<String, String> {
+    Ok(format!("snippet-passphrase:{}", snippet_provider_storage_key(config.provider, config.instance_url.as_deref())?))
 }
 
 fn validate_snippet_id(provider: SnippetProvider, id: &str) -> Result<(), String> {
@@ -3221,7 +3422,7 @@ mod tests {
     use super::{
         apply_sensitive_payload, apply_sync_snapshot, build_sensitive_payload, build_sync_snapshot,
         build_sync_snapshot_with_options, build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload,
-        encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
+        describe_local_sync_state, encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
         forget_webdav_sync_secrets_passphrase, gitee_snippet_payload, gitlab_instance_url, is_legacy_dbx_snapshot,
         normalized_remote_path, parent_collection_paths, parse_legacy_dbx_snapshot, parse_snippet_snapshot,
         prepare_legacy_snippet_snapshot, resolve_snippet_token, resolve_webdav_password,
@@ -3275,6 +3476,7 @@ mod tests {
                 pi_agent_cli_env: Default::default(),
                 opencode_cli_path: None,
                 opencode_cli_env: Default::default(),
+                opencode_cli_version: None,
                 cursor_cli_path: None,
                 cursor_cli_env: Default::default(),
                 grok_cli_path: None,
@@ -3422,6 +3624,29 @@ mod tests {
         (format!("http://{address}/"), server)
     }
 
+    /// Single-request WebDAV server that returns the complete request head
+    /// (request line plus headers) instead of just the request line.
+    async fn spawn_webdav_request_capture_server() -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let response = "HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}/"), server)
+    }
+
     fn github_snippet_response(content: &str) -> String {
         serde_json::json!({
             "files": { DEFAULT_SNIPPET_FILE_NAME: { "content": content } }
@@ -3462,6 +3687,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3469,6 +3695,8 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
@@ -3488,6 +3716,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3504,6 +3733,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }
@@ -3548,6 +3778,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3555,6 +3786,8 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
@@ -3574,6 +3807,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3598,6 +3832,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }
@@ -3675,6 +3910,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3700,6 +3936,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3725,6 +3962,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         let error = client.put_snapshot(&snapshot).await.unwrap_err();
@@ -3743,6 +3981,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3758,11 +3997,105 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.test().await.unwrap();
 
         assert_eq!(server.await.unwrap(), vec!["PROPFIND / HTTP/1.1"]);
+    }
+
+    #[tokio::test]
+    async fn webdav_requests_send_configured_user_agent() {
+        let (endpoint, server) = spawn_webdav_request_capture_server().await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint,
+            username: None,
+            password: None,
+            remote_path: None,
+            user_agent: Some("Zotero/7.0.15".to_string()),
+        });
+
+        client.test().await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("PROPFIND / "));
+        assert!(request.lines().any(|line| line.eq_ignore_ascii_case("user-agent: Zotero/7.0.15")));
+    }
+
+    #[tokio::test]
+    async fn webdav_requests_omit_user_agent_by_default() {
+        let (endpoint, server) = spawn_webdav_request_capture_server().await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint,
+            username: None,
+            password: None,
+            remote_path: None,
+            user_agent: None,
+        });
+
+        client.test().await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(!request.to_ascii_lowercase().contains("user-agent:"));
+    }
+
+    #[test]
+    fn rocketmq_legacy_sync_secrets_use_auth_and_never_leak_extra_copies() {
+        let mut config = postgres_connection("rocket", "");
+        config.db_type = DatabaseType::MessageQueue;
+        config.external_config =
+            Some(serde_json::json!({"systemKind":"rocketmq", "extra":{"accessKey":"ak", "secretKey":"legacy-sk"}}));
+        let mut secrets = Vec::new();
+        super::collect_connection_secrets(&mut secrets, &config, false).unwrap();
+        assert!(secrets.iter().any(|secret| secret.key == super::MQ_AUTH_PASSWORD_KEY && secret.secret == "legacy-sk"));
+        let mut public = config.clone();
+        scrub_connection_secrets(&mut public);
+        assert_eq!(public.external_config.as_ref().unwrap()["auth"]["username"], "ak");
+        assert_eq!(public.external_config.as_ref().unwrap()["auth"]["password"], "");
+        assert!(!serde_json::to_string(&public).unwrap().contains("secretKey"));
+        config.save_password = false;
+        let mut secrets = Vec::new();
+        super::collect_connection_secrets(&mut secrets, &config, false).unwrap();
+        assert!(secrets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rocketmq_legacy_snapshot_restore_obeys_secret_consent_and_save_preference() {
+        for (label, restore_secrets, save_password, auth_none) in [
+            ("restore", true, true, false),
+            ("metadata", false, true, false),
+            ("transient", true, false, false),
+            ("none", true, true, true),
+        ] {
+            let path = temp_db_path(&format!("rocketmq-sync-{label}"));
+            let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+            let mut snapshot = build_sync_snapshot(&storage, "test", None, None).await.unwrap();
+            let mut config = postgres_connection("rocket", "");
+            config.db_type = DatabaseType::MessageQueue;
+            config.save_password = save_password;
+            config.external_config =
+                Some(serde_json::json!({"systemKind":"rocketmq", "extra":{"accessKey":"ak", "secretKey":"legacy-sk"}}));
+            if auth_none {
+                config.external_config.as_mut().unwrap()["auth"] = serde_json::json!({"kind":"none"});
+            }
+            snapshot.connections = vec![config];
+            apply_sync_snapshot(
+                &storage,
+                &snapshot,
+                ApplySnapshotOptions { secrets_passphrase: None, restore_secrets },
+            )
+            .await
+            .unwrap();
+            let expected = if restore_secrets && save_password && !auth_none { Some("legacy-sk") } else { None };
+            assert_eq!(
+                storage.get_secret("rocket", super::MQ_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+                expected,
+                "{label}"
+            );
+            let loaded = storage.load_connections().await.unwrap();
+            assert_eq!(loaded[0].external_config.as_ref().unwrap()["extra"], serde_json::json!({}));
+        }
     }
 
     #[test]
@@ -3789,6 +4122,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');".to_string()),
             color: None,
@@ -3819,12 +4153,15 @@ mod tests {
                     enabled: true,
                     url: "https://dbx.example.com/dbx_tunnel.php".to_string(),
                     token: "tunnel-token".to_string(),
+                    protocol: crate::models::connection::HttpTunnelProtocol::DbxTcp,
                     connect_timeout_secs: 10,
                 }),
             ],
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
@@ -3845,6 +4182,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3861,6 +4199,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         };
         config.connection_secrets.insert("api_token".to_string(), "plugin-secret".to_string());
@@ -4416,6 +4755,56 @@ mod tests {
         assert!(requests[1].starts_with("GET /api/v4/snippets/42/files/master/dbx-sync.json/raw HTTP/1.1"));
     }
 
+    #[test]
+    fn gitlab_raw_file_url_keeps_configured_https_instance() {
+        let client = SnippetSyncClient::new(SnippetSyncConfig {
+            provider: SnippetProvider::GitLab,
+            instance_url: Some("https://gitlab.example.com/gitlab".to_string()),
+            token: Some("test-token".to_string()),
+            snippet_id: Some("42".to_string()),
+            replace_legacy_snippet: false,
+        })
+        .unwrap();
+        assert_eq!(
+            client.gitlab_raw_file_url("42", "feature/sync").unwrap().as_str(),
+            "https://gitlab.example.com/gitlab/api/v4/snippets/42/files/feature%2Fsync/dbx-sync.json/raw"
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_download_uses_instance_api_for_web_raw_urls() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-web-raw-url")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
+        for (raw_url, reference) in [
+            ("{SERVER_BASE}/-/snippets/42/raw/master/dbx-sync.json", "master"),
+            ("http://127.0.0.1:9/-/snippets/42/raw/custom/dbx-sync.json", "custom"),
+            ("{SERVER_BASE}/gitlab/-/snippets/42/raw/feature%2Fsync/dbx-sync.json", "feature%2Fsync"),
+            ("not-a-url", "main"),
+        ] {
+            let (base, server) = spawn_gitlab_server(vec![
+                serde_json::json!({"files": [{"path": "dbx-sync.json", "raw_url": raw_url}]}).to_string(),
+                encrypted.clone(),
+            ])
+            .await;
+            let client = SnippetSyncClient::new(SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: Some(base.strip_suffix("/api/v4").unwrap().to_string()),
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            })
+            .unwrap();
+            let (restored, _) = client.get_snapshot(Some("password")).await.unwrap();
+            assert_eq!(restored.app_version, snapshot.app_version);
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]
+                .starts_with(&format!("GET /api/v4/snippets/42/files/{reference}/dbx-sync.json/raw HTTP/1.1")));
+            assert!(requests[1].to_ascii_lowercase().contains("private-token: test-token"));
+        }
+    }
+
     #[tokio::test]
     async fn gitlab_download_falls_back_to_master_when_main_raw_file_is_missing() {
         let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-master-fallback")).await.unwrap();
@@ -4662,6 +5051,7 @@ mod tests {
             username: Some("alice".to_string()),
             password: None,
             remote_path: None,
+            user_agent: None,
         };
         let snippet = SnippetSyncConfig {
             provider: SnippetProvider::GitHub,
@@ -4840,6 +5230,7 @@ mod tests {
             username: Some("alice".to_string()),
             password: None,
             remote_path: Some("DBX/sync/snapshot.json".to_string()),
+            user_agent: None,
         };
         save_webdav_password(&source, &webdav, "webdav-secret").await.unwrap();
         let snippet = SnippetSyncConfig {
@@ -5031,6 +5422,26 @@ mod tests {
 
         assert_eq!(target.get_secret("pg", "password").await.unwrap(), None);
         assert!(target.load_connections().await.unwrap()[0].password.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_sync_catalog_lists_only_connections_with_exportable_secrets() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("sync-catalog-secret-count")).await.unwrap();
+        let mut unsaved = postgres_connection("unsaved", "transient-secret");
+        unsaved.save_password = false;
+        storage
+            .save_connections(&[
+                postgres_connection("with-secret", "db-secret"),
+                postgres_connection("no-secret", ""),
+                unsaved,
+            ])
+            .await
+            .unwrap();
+
+        let catalog = describe_local_sync_state(&storage, None, None).await.unwrap();
+
+        assert_eq!(catalog.connections.len(), 3);
+        assert_eq!(catalog.connection_secrets, vec!["with-secret".to_string()]);
     }
 
     #[tokio::test]
@@ -5279,6 +5690,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("snapshot.json".to_string()),
+            user_agent: None,
         });
         client.put_snapshot(&snapshot).await.unwrap();
         let (downloaded, _) = client.get_snapshot().await.unwrap();

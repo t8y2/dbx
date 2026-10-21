@@ -1,14 +1,23 @@
+mod alter_dialect;
+pub use alter_dialect::StarRocksAlterOptions;
 mod column_alter;
 mod column_format;
 mod columns;
 mod comments;
+mod create_dialect;
+mod create_options;
 mod create_table;
 mod dialect;
+mod existing_primary_key;
 mod foreign_keys;
 mod indexes;
 mod mysql_engine;
+mod oracle_constraints;
+mod oracle_foreign_keys;
 mod owner;
 mod partitions;
+mod starrocks_layout;
+mod starrocks_partition;
 mod transwarp;
 mod triggers;
 mod types;
@@ -19,7 +28,10 @@ mod validation;
 mod tests;
 
 pub use column_alter::build_single_column_alter_sql;
-pub use create_table::build_create_table_sql;
+pub use create_options::*;
+pub use create_table::{
+    build_create_table_sql, build_create_table_sql_for_version, build_create_table_sql_with_dialect_options,
+};
 pub use owner::build_table_owner_change_sql;
 pub use partitions::{build_create_partitioned_table_sql, build_table_partition_operation_sql};
 pub use types::*;
@@ -42,7 +54,26 @@ use triggers::build_trigger_sql;
 use validation::validate_concurrent_index_scope;
 pub use validation::validate_draft;
 
-pub fn build_table_structure_change_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+pub fn build_table_structure_change_sql(options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    build_table_structure_change_sql_with_context(options, None)
+}
+
+pub fn build_table_structure_change_sql_with_context(
+    mut options: TableStructureSqlOptions,
+    starrocks: Option<StarRocksAlterOptions>,
+) -> TableStructureSqlResult {
+    if options.oracle_constraint_changes.is_some() {
+        return oracle_constraints::build_changes(options);
+    }
+    if options.oracle_foreign_key_changes.is_some() {
+        return oracle_foreign_keys::build_changes(options);
+    }
+    if options.primary_key_change.is_some() {
+        return existing_primary_key::build_existing_primary_key_change(options);
+    }
+    if alter_dialect::is_starrocks(&options) {
+        return alter_dialect::build(&options, starrocks);
+    }
     let mysql_engine_errors = validate_mysql_engine(&options);
     if !mysql_engine_errors.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings: mysql_engine_errors };

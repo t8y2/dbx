@@ -16,7 +16,7 @@
 ### 环境要求
 
 - Node.js >= 22.13.0
-- pnpm 10.27.0
+- pnpm 10.34.7
 - Rust >= 1.88
 - Make
 
@@ -172,3 +172,5 @@ make docs
 - [官方文档](https://dbxio.com/cn/docs/what-is-dbx)
 
 合并后的贡献者会出现在 [DBX 贡献墙](https://dbxio.com/cn/community)。
+
+贡献墙按发起并合入 `t8y2/dbx` 的 PR 的 GitHub 账号认定；仅有提交记录不满足展示条件。请用希望署名的账号创建 PR。

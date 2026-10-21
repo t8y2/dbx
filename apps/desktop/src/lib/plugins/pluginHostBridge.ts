@@ -8,6 +8,9 @@ import { isValidPluginAiRecommendationTemplate, resolvePluginAiRecommendationUpd
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
 import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_SQL_CHARS, MAX_PLUGIN_DATA_TIMEOUT_MS, PLUGIN_DATA_ACCESS_NOT_GRANTED, PLUGIN_DATA_CAPABILITY, PLUGIN_DATA_READ_PERMISSION, type PluginDataQueryRequest, type PluginDataQueryResult } from "@/types/pluginData";
+import { PLUGIN_CONNECTIONS_CAPABILITY, PLUGIN_CONNECTIONS_READ_PERMISSION, type PluginConnectionSummary } from "@/types/pluginConnection";
+import { floatingWindowLabel } from "@/lib/app/windowContext";
+import { parseFloatingWindowRequest, type FloatingRect, type OpenFloatingWindowRequest, type OpenFloatingWindowResult } from "@/lib/plugins/pluginFloatingWindow";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -176,6 +179,13 @@ export interface PluginHostBridgeApi {
   setAiRecommendations?(update: PluginAiRecommendationHostUpdate): void;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean; target?: "tab" }): Promise<void> | void;
   /**
+   * Updates the calling workbench tab/dock title (or resets to default when title is null).
+   * Scoped to the single surface hosting the caller.
+   */
+  setTitle?(title: string | null): Promise<void> | void;
+  /** Reads the calling workbench tab/dock title. */
+  getTitle?(): Promise<string> | string;
+  /**
    * §4/§5 command execution asked from a plugin webview: the same registry
    * path as menu execution — enablement (§5.4), §4.1 singleton reuse,
    * host-authored context — scoped to the calling plugin's own declared
@@ -193,8 +203,11 @@ export interface PluginHostBridgeApi {
    * PR-A4 generic extension point: a read-only, secret-free connection list scoped to the calling plugin's own
    * connection-providers, so plugins can implement their own connection switching inside panels/workbenches and
    * their own business (the host stays unaware of the purpose).
+   *
+   * With `host.connections:read` (#12603), returns all connections when requested.
    */
-  listConnections?(pluginId: string): Array<{ id: string; name: string; providerId: string; connectionType?: string; readOnly: boolean }>;
+  listConnections?(pluginId: string, options?: { all?: boolean }): PluginConnectionSummary[];
+  listAllConnections?(): PluginConnectionSummary[];
   /**
    * Estimated plan capability metadata for one connection. Requires the plugin
    * to declare `host.plans:read`. The host only reads the stored connection
@@ -225,6 +238,27 @@ export interface PluginHostBridgeApi {
   /** Persists the grant the user just allowed. */
   grantDataAccess?(pluginId: string, connectionId: string): Promise<void>;
   closeTab?(): Promise<void> | void;
+  /**
+   * Floating plugin windows (the §8.3 "window" surface): a frameless,
+   * always-on-top desktop widget outside the main shell. Desktop hosts only — a
+   * host without it omits these so `capabilities.floating` stays false and the
+   * plugin can fall back to an in-shell surface (tab or dock).
+   *
+   * Geometry is host-owned end to end: the plugin asks to open/close its window
+   * and reports drag intent, while positions, work-area snapping, and DPI
+   * conversion stay here. A drag is driven by the native cursor position rather
+   * than plugin-supplied coordinates, which would be relative to a viewport that
+   * is itself moving.
+   */
+  openFloatingWindow?(request: OpenFloatingWindowRequest): Promise<OpenFloatingWindowResult>;
+  /** Closes floating windows by host label; callers derive labels from their own manifest, never from plugin input. */
+  closeFloatingWindows?(labels: string[]): Promise<void>;
+  /** Hands the calling floating window's movement to the OS drag loop. */
+  beginFloatingDrag?(): Promise<void>;
+  /** Ends a drag, snapping the window onto the work-area edges it landed near. Resolves the final physical rect. */
+  endFloatingDrag?(snap: boolean): Promise<FloatingRect | null>;
+  /** Resizes the calling floating window (logical pixels). */
+  setFloatingSize?(width: number, height: number): Promise<void>;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
   downloadFile?(pluginId: string, request: PluginDownloadRequest, onProgress: (progress: unknown) => void): Promise<PluginSaveFileResult | null>;
@@ -484,6 +518,10 @@ export class PluginHostBridge {
         clipboardRead: !!this.api.clipboardRead,
         clipboardImageRead: !!this.api.clipboardReadImage,
         mediaUrl: !!this.api.openMedia && !!this.api.closeMedia,
+        // Floating desktop widget windows: advertised only when the host can both
+        // open a window and drive its geometry, so a plugin sees one honest flag.
+        floating: !!this.api.openFloatingWindow && !!this.api.beginFloatingDrag && !!this.api.endFloatingDrag,
+        workbenchTitle: !!this.api.setTitle,
         // The namespace exists on both hosts, but what it can DO differs:
         // portable plugins gate on these flags instead of probing calls.
         fileTransfer: {
@@ -494,6 +532,7 @@ export class PluginHostBridge {
           drop: !!this.api.receiveOsDrops,
           folderExpansion: !!this.api.receiveOsDrops,
         },
+        [PLUGIN_CONNECTIONS_CAPABILITY]: !!this.api.listConnections || !!this.api.listAllConnections,
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });
@@ -752,6 +791,20 @@ export class PluginHostBridge {
       await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined, { forceNew: input.forceNew === true, target: input.target === "tab" ? "tab" : undefined });
       return null;
     }
+    if (method === "host.setTitle") {
+      this.requirePermission("host.workbench");
+      if (!this.api.setTitle) throw new Error("Host tab title update is unavailable");
+      const input = requireRecord(params, "setTitle params");
+      const rawTitle = input.title;
+      const title = typeof rawTitle === "string" ? rawTitle.trim().slice(0, 256) || null : null;
+      await this.api.setTitle(title);
+      return null;
+    }
+    if (method === "host.getTitle") {
+      this.requirePermission("host.workbench");
+      if (!this.api.getTitle) throw new Error("Host tab title read is unavailable");
+      return (await this.api.getTitle()) ?? "";
+    }
     if (method === "host.executeCommand") {
       this.requirePermission("host.workbench");
       if (!this.api.executeCommand) throw new Error("Host command execution is unavailable");
@@ -764,10 +817,24 @@ export class PluginHostBridge {
       await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
       return { ok: true };
     }
+    if (method === "host.getConnections") {
+      this.requirePermission(PLUGIN_CONNECTIONS_READ_PERMISSION);
+      if (!this.api.listConnections && !this.api.listAllConnections) throw new Error("Connection enumeration is unavailable on this host");
+      if (this.api.listAllConnections) return this.api.listAllConnections();
+      return this.api.listConnections!(this.plugin.manifest.id, { all: true });
+    }
     if (method === "host.listConnections") {
-      this.requirePermission("host.workbench");
-      if (!this.api.listConnections) throw new Error("Connection enumeration is unavailable on this host");
-      return this.api.listConnections(this.plugin.manifest.id);
+      const hasConnectionsRead = this.hasPermission(PLUGIN_CONNECTIONS_READ_PERMISSION);
+      const forceScoped = isRecord(params) && params.scoped === true;
+      if (!hasConnectionsRead) {
+        this.requirePermission("host.workbench");
+      }
+      if (!this.api.listConnections && !this.api.listAllConnections) throw new Error("Connection enumeration is unavailable on this host");
+      if (hasConnectionsRead && !forceScoped) {
+        if (this.api.listAllConnections) return this.api.listAllConnections();
+        return this.api.listConnections!(this.plugin.manifest.id, { all: true });
+      }
+      return this.api.listConnections ? this.api.listConnections(this.plugin.manifest.id) : [];
     }
     if (method === "host.openFilesystem") {
       this.requirePermission("host.filesystem");
@@ -933,7 +1000,52 @@ export class PluginHostBridge {
       await this.api.storageDelete(this.plugin.manifest.id, requireStorageKey(input.key));
       return null;
     }
+    if (method === "host.openFloating") {
+      // A floating window is a workbench surface in its own right, so it shares
+      // the workbench permission gate instead of introducing a new one.
+      this.requirePermission("host.workbench");
+      if (!this.api.openFloatingWindow) throw new Error("Floating plugin windows require the desktop host");
+      const request = parseFloatingWindowRequest(this.plugin.manifest.id, requireRecord(params, "host.openFloating params"));
+      if (!this.ownWorkbenchContributionIds().has(request.contributionId)) throw new Error("Unknown workbench contribution");
+      return this.api.openFloatingWindow(request);
+    }
+    if (method === "host.closeFloating") {
+      if (!this.api.closeFloatingWindows) throw new Error("Floating plugin windows require the desktop host");
+      const input = isRecord(params) ? params : {};
+      const contributionId = optionalTrimmedString(input.contributionId);
+      const own = this.ownWorkbenchContributionIds();
+      if (contributionId && !own.has(contributionId)) throw new Error("Unknown workbench contribution");
+      // Without an explicit contribution every floating window of this plugin
+      // closes; labels are host-derived, so a plugin can never reach another
+      // plugin's window (or the main shell) through this path.
+      const contributionIds = contributionId ? [contributionId] : [...own];
+      await this.api.closeFloatingWindows(contributionIds.map((id) => floatingWindowLabel(this.plugin.manifest.id, id)));
+      return null;
+    }
+    if (method === "host.beginFloatingDrag") {
+      if (!this.api.beginFloatingDrag) throw new Error("Floating plugin windows require the desktop host");
+      await this.api.beginFloatingDrag();
+      return null;
+    }
+    if (method === "host.endFloatingDrag") {
+      if (!this.api.endFloatingDrag) throw new Error("Floating plugin windows require the desktop host");
+      const input = isRecord(params) ? params : {};
+      return (await this.api.endFloatingDrag(input.snap !== false)) ?? null;
+    }
+    if (method === "host.setFloatingSize") {
+      if (!this.api.setFloatingSize) throw new Error("Floating plugin windows require the desktop host");
+      const input = requireRecord(params, "host.setFloatingSize params");
+      const width = requireFloatingDimension(input.width, "width");
+      const height = requireFloatingDimension(input.height, "height");
+      await this.api.setFloatingSize(width, height);
+      return null;
+    }
     throw new Error(`Unsupported plugin host method '${method}'`);
+  }
+
+  /** The plugin's own declared workbench contributions — the only ones it may host in a floating window. */
+  private ownWorkbenchContributionIds(): Set<string> {
+    return new Set((this.plugin.manifest.contributions || []).filter((candidate) => candidate.type === "workbench").map((candidate) => candidate.id));
   }
 
   private async requireClipboardRead(): Promise<number> {
@@ -987,7 +1099,12 @@ export class PluginHostBridge {
   }
 
   private hasPermission(permission: string): boolean {
-    return (this.plugin.manifest.permissions || []).includes(permission);
+    const permissions = this.plugin.manifest.permissions || [];
+    if (permissions.includes(permission)) return true;
+    if (permission === PLUGIN_CONNECTIONS_READ_PERMISSION && permissions.includes("host.connections::read")) {
+      return true;
+    }
+    return false;
   }
 
   private respond(target: Window, id: string, payload: { result?: unknown; error?: string }): void {
@@ -1018,23 +1135,32 @@ export function pluginNetworkOrigins(permissions: readonly string[] | undefined)
 
 export interface PluginSandboxOptions {
   /**
-   * Base URL under which the workbench document may fetch further plugin UI
-   * assets (code-split chunks, fonts) — `dbx-plugin://localhost/<id>/assets/`
-   * on native custom schemes, `http(s)://dbx-plugin.localhost/<id>/assets/`
-   * where WebView2 maps the scheme to an http subdomain. Injected as the
-   * document `<base>` and allowed in the resource CSP directives. Omit on
-   * hosts without the plugin asset protocol (the web host).
+   * Base URL for plugin UI resources resolved relative to the srcdoc document
+   * (for example, inlined CSS `url()` references) — `dbx-plugin://localhost/<id>/`
+   * on native custom schemes, `http(s)://dbx-plugin.localhost/<id>/` where
+   * WebView2 maps the scheme to an http subdomain. Injected as the document
+   * `<base>` and allowed in resource CSP directives. External module imports
+   * resolve from their own preserved URLs. Omit on hosts without the plugin
+   * asset protocol (the web host).
    */
   baseUrl?: string;
+  /**
+   * Adds `'unsafe-eval'` to `script-src`. WebGL graphics engines codegen their
+   * uniform sync with `new Function` and refuse to initialize without it, so
+   * the user grants this per plugin (see `pluginGraphicsEngine.ts`). Off by
+   * default: the sandbox stays eval-free for every other plugin.
+   */
+  allowUnsafeEval?: boolean;
 }
 
 export function pluginSandboxDocument(html: string, permissions?: readonly string[], theme?: PluginBridgeTheme, options?: PluginSandboxOptions): string {
   const networkOrigins = pluginNetworkOrigins(permissions);
   const connectSrc = networkOrigins.length > 0 ? `connect-src ${networkOrigins.join(" ")};` : "connect-src 'none';";
   const assetSource = pluginAssetCspSource(options?.baseUrl);
-  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:${assetSource}; style-src 'unsafe-inline' blob:; img-src data: blob:${assetSource}; font-src data: blob:${assetSource}; ${connectSrc} media-src data: blob:${assetSource};">`;
-  // <base> must precede every relative URL the document resolves (inlined CSS
-  // url(), dynamic import specifiers), so it leads the injection.
+  const scriptSrc = options?.allowUnsafeEval ? "script-src 'unsafe-inline' 'unsafe-eval'" : "script-src 'unsafe-inline'";
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; ${scriptSrc} blob:${assetSource}; style-src 'unsafe-inline' blob:; img-src data: blob:${assetSource}; font-src data: blob:${assetSource}; ${connectSrc} media-src data: blob:${assetSource};">`;
+  // <base> must precede relative URLs resolved from the srcdoc itself (such as
+  // inlined CSS url() references), so it leads the injection.
   const base = options?.baseUrl && assetSource ? `<base href="${escapeHtmlAttribute(options.baseUrl)}">` : "";
   const sdk = `<script>${pluginSdkSource(theme)}</script>`;
   const uiKit = `<style>${pluginUiKitCss()}</style>`;
@@ -1173,6 +1299,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     const pending = new Map();
     const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set() };
     let sequence = 0;
+    let contributionId;
     let context;
     let locale = 'en';
     let theme;
@@ -1274,6 +1401,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     };
     window.dbxPlugin = Object.freeze({
       ready,
+      get contributionId() { return contributionId; },
       get context() { return context; },
       get locale() { return locale; },
       get theme() { return theme; },
@@ -1311,6 +1439,31 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
       },
       openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew), target: options && options.target === "tab" ? "tab" : undefined }),
+      setTitle: (title) => request('host.setTitle', { title }),
+      getTitle: () => request('host.getTitle'),
+      // Closes whatever surface hosts this plugin UI — a workbench tab, a dock
+      // entry, or this plugin's floating window. Same path as the Ctrl+W
+      // shortcut, so a plugin can offer its own close/minimize affordance.
+      closeWorkbench: () => parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*'),
+      // Floating desktop widget windows (the "window" surface): a frameless,
+      // always-on-top window that stays visible over other applications. Gate on
+      // capabilities.floating — a web host, or a desktop host without window
+      // support, omits it and the plugin should fall back to tab or dock.
+      //
+      // Dragging is split by design: the plugin decides WHEN a drag starts
+      // (thresholds, which element is a grip) and the host owns the movement —
+      // beginDrag hands the window to the OS move loop, and the host snaps it
+      // onto the work-area edges and remembers the spot once the loop goes
+      // quiet. Per-move coordinates are deliberately not part of the protocol:
+      // once the window follows the pointer, the webview's pointer capture is
+      // cancelled and the move stream dies mid-drag.
+      floating: Object.freeze({
+        open: (options) => request('host.openFloating', options || {}),
+        close: (contributionId) => request('host.closeFloating', { contributionId }),
+        beginDrag: () => request('host.beginFloatingDrag'),
+        endDrag: (options) => request('host.endFloatingDrag', options || {}),
+        setSize: (width, height) => request('host.setFloatingSize', { width, height }),
+      }),
       // §4/§5 command execution from a webview — the same registry path a menu
       // placement takes (enablement, §4.1 reuse, host-authored context),
       // scoped to the plugin's own declared commands. The optional context
@@ -1322,6 +1475,12 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       executeCommand: (commandId, context) => request('host.executeCommand', { commandId, context }),
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
       reopenConnection: (connectionId) => request('host.reopenConnection', { connectionId }),
+      getConnections: () => request('host.getConnections', {}),
+      listConnections: (options) => request('host.listConnections', options || {}),
+      connections: Object.freeze({
+        list: (options) => request('host.listConnections', options || {}),
+        getAll: () => request('host.getConnections', {}),
+      }),
       // Estimated plans only: mode must be sent explicitly so a plugin states
       // its intent, and the host refuses anything other than "estimated".
       getPlanCapabilities: (connectionId) => request('host.getPlanCapabilities', { connectionId }),
@@ -1396,6 +1555,8 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       // listener has settled. The host bounds the wait on its side.
       workbench: Object.freeze({
         onClose: (listener) => { listeners.close.add(listener); return () => listeners.close.delete(listener); },
+        setTitle: (title) => request('host.setTitle', { title }),
+        getTitle: () => request('host.getTitle'),
       }),
       decodeBase64: decode,
       encodeBase64: encode,
@@ -1409,6 +1570,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         pending.delete(message.id);
         if (message.error) handler.reject(new Error(message.error)); else handler.resolve(message.result);
       } else if (message.type === 'init') {
+        contributionId = message.contributionId;
         capabilities = message.capabilities || {};
         context = message.context;
         locale = typeof message.locale === 'string' ? message.locale : 'en';
@@ -1650,6 +1812,12 @@ function requireStorageKey(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > MAX_PLUGIN_STORAGE_KEY_CHARS || /[\u0000-\u001f]/.test(value)) {
     throw new Error("storage key is invalid");
   }
+  return value;
+}
+
+/** A floating window dimension in logical pixels; the host clamps it to its own bounds. */
+function requireFloatingDimension(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error(`${label} must be a positive number`);
   return value;
 }
 

@@ -172,6 +172,9 @@ pub async fn list_indexes(client: &RqliteClient, _schema: &str, table: &str) -> 
             .filter_map(|row| value_by_column(&column_result.columns, row, "name"))
             .collect();
         indexes.push(IndexInfo {
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
             name,
             columns,
             is_unique,
@@ -286,7 +289,14 @@ pub async fn object_source(
         )
         .await?,
     )?;
-    Ok(ObjectSource { name: name.to_string(), object_type: object_type.clone(), schema: None, source, editable: None })
+    Ok(ObjectSource {
+        name: name.to_string(),
+        object_type: object_type.clone(),
+        schema: None,
+        source,
+        editable: None,
+        routine_parameters: None,
+    })
 }
 
 pub async fn execute_query(client: &RqliteClient, sql: &str) -> Result<QueryResult, String> {

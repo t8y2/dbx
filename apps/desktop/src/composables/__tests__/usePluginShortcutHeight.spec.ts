@@ -24,10 +24,10 @@ async function setup() {
     },
   );
   root = document.createElement("div");
-  root.innerHTML = '<div></div><nav><div data-shortcut-resize></div><div style="padding:4px"><div style="gap:0px"><span data-shortcut-id="a"></span></div></div></nav>';
+  root.innerHTML = '<div data-sidebar-connection-tree></div><div data-sidebar-connection-endpoint></div><nav><div data-shortcut-resize></div><div style="padding:4px"><div style="gap:0px"><span data-shortcut-id="a"></span></div></div></nav>';
   document.body.append(root);
   const tree = root.children[0] as HTMLElement;
-  const section = root.children[1] as HTMLElement;
+  const section = root.querySelector("nav") as HTMLElement;
   const handle = section.children[0] as HTMLElement;
   const scroll = section.children[1] as HTMLElement;
   let width = 184;
@@ -76,6 +76,15 @@ async function setup() {
   };
 }
 describe("shortcut sidebar height", () => {
+  it("measures the tree rather than a fixed sibling like the endpoint bar", async () => {
+    const { sizing } = await setup();
+    const endpoint = root.querySelector<HTMLElement>("[data-sidebar-connection-endpoint]")!;
+    Object.defineProperty(endpoint, "offsetHeight", { get: () => 25 });
+    for (let measurement = 0; measurement < 3; measurement++) {
+      resizeObserver();
+      expect(sizing.height.value).toBe(148);
+    }
+  });
   it("reserves the title row as well as 120px for the connection tree", async () => {
     const { sizing, savedHeight, setTotal } = await setup();
     const header = document.createElement("div");

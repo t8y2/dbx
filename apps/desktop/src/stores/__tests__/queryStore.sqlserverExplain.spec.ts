@@ -84,7 +84,7 @@ describe("queryStore SQL Server explain", () => {
   it("executes all SHOWPLAN batches in an isolated session and closes it", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
-    const tabId = store.createTab("sqlserver-1", "dbx_explain_plan_test", "Query", "query", "dbo");
+    const tabId = store.createTab("sqlserver-1", "dbx_explain_plan_test", "Query", "query", "dbo", undefined, undefined, { schemaQualifiesSql: true });
 
     await store.explainTabSql(tabId, sourceSql, "sqlserver");
 
@@ -118,7 +118,7 @@ describe("queryStore SQL Server explain", () => {
     mocks.executeMulti.mockResolvedValue([rowsResult, planResult]);
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
-    const tabId = store.createTab("sqlserver-1", "dbx_explain_plan_test", "Query", "query", "dbo");
+    const tabId = store.createTab("sqlserver-1", "dbx_explain_plan_test", "Query", "query", "dbo", undefined, undefined, { schemaQualifiesSql: true });
 
     await store.explainTabSql(tabId, sourceSql, "sqlserver", "autotrace");
 
@@ -137,7 +137,7 @@ describe("queryStore SQL Server explain", () => {
   it("keeps SHOWPLAN when the autotrace toggle is off", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
-    const tabId = store.createTab("sqlserver-1", "dbx_explain_plan_test", "Query", "query", "dbo");
+    const tabId = store.createTab("sqlserver-1", "dbx_explain_plan_test", "Query", "query", "dbo", undefined, undefined, { schemaQualifiesSql: true });
 
     await store.explainTabSql(tabId, sourceSql, "sqlserver", "explain");
 
@@ -178,5 +178,17 @@ describe("queryStore SQL Server explain", () => {
     expect(mocks.executeMulti).not.toHaveBeenCalled();
     expect(mocks.executeQuery.mock.calls[0]?.[2]).toBe("SET SHOWPLAN_XML ON;");
     await vi.waitFor(() => expect(mocks.closeClientConnectionSession).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps an implicit tab schema out of the SHOWPLAN batches", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    // 恢复的页签 / 连接默认 schema：只用于浏览，不参与 SQL 改写。
+    const tabId = store.createTab("sqlserver-1", "dbx_explain_plan_test", "Query", "query", "dbo");
+
+    await store.explainTabSql(tabId, sourceSql, "sqlserver");
+
+    expect(mocks.executeQuery.mock.calls[0]?.slice(0, 4)).toEqual(["sqlserver-1", "dbx_explain_plan_test", "SET SHOWPLAN_XML ON;", undefined]);
+    expect(mocks.executeMulti.mock.calls[0]?.slice(0, 4)).toEqual(["sqlserver-1", "dbx_explain_plan_test", sourceSql, undefined]);
   });
 });

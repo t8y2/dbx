@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS, elasticsearchCursorPageJumpRequestCount, hasCompleteLocalDataGridResult } from "@/lib/dataGrid/dataGridPagination";
+import { ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS, elasticsearchCursorPageJumpRequestCount, hasCompleteLocalDataGridResult, isDataGridSurfaceBusy, reconcileDataGridExactTotalWithObservedPage } from "@/lib/dataGrid/dataGridPagination";
 
 describe("Elasticsearch cursor page jumps", () => {
   it("counts only missing forward cursors", () => {
@@ -52,5 +52,55 @@ describe("complete local DataGrid results", () => {
         hasMore: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe("DataGrid surface busy overlay", () => {
+  const idle = { isRefreshingData: false, loading: false, pageJumpBusy: false };
+
+  it("keeps the full-surface overlay off while a footer total-row count runs", () => {
+    expect(isDataGridSurfaceBusy({ ...idle, manualTotalRowCountLoading: true, manualTotalRowCountCoversSurface: false })).toBe(false);
+  });
+
+  it("covers the surface for count-then-navigate flows", () => {
+    expect(isDataGridSurfaceBusy({ ...idle, manualTotalRowCountLoading: true, manualTotalRowCountCoversSurface: true })).toBe(true);
+  });
+
+  it("covers the surface for real reloads, page jumps, and row preparation", () => {
+    expect(isDataGridSurfaceBusy({ ...idle, isRefreshingData: true })).toBe(true);
+    expect(isDataGridSurfaceBusy({ ...idle, loading: true })).toBe(true);
+    expect(isDataGridSurfaceBusy({ ...idle, pageJumpBusy: true })).toBe(true);
+    expect(isDataGridSurfaceBusy({ ...idle, rowPreparationBusy: true })).toBe(true);
+    expect(isDataGridSurfaceBusy(idle)).toBe(false);
+  });
+});
+
+describe("reconciling an exact total with an observed page (#10968)", () => {
+  it("adopts the observed extent when a page lands past the counted total", () => {
+    // Issue screenshot: COUNT said 2892, but the counted last page (offset 2800,
+    // 200 rows) came back full from a snapshot holding more rows.
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: 2800, rowCount: 200, exactTotal: 2892 })).toBe(3000);
+  });
+
+  it("keeps the counted total for pages that fit inside it", () => {
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: 2800, rowCount: 92, exactTotal: 2892 })).toBeUndefined();
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: 0, rowCount: 200, exactTotal: 2892 })).toBeUndefined();
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: 400, rowCount: 200, exactTotal: 2892 })).toBeUndefined();
+  });
+
+  it("keeps the counted total when the page comes back short at its end", () => {
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: 2800, rowCount: 92, exactTotal: 2892 })).toBeUndefined();
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: 2800, rowCount: 0, exactTotal: 2892 })).toBeUndefined();
+  });
+
+  it("extends a zero or missing total as soon as rows are on screen", () => {
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: 0, rowCount: 5, exactTotal: 0 })).toBe(5);
+  });
+
+  it("ignores malformed offsets, rows, and totals", () => {
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: -1, rowCount: 200, exactTotal: 2892 })).toBeUndefined();
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: 2800, rowCount: -1, exactTotal: 2892 })).toBeUndefined();
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: Number.NaN, rowCount: 200, exactTotal: 2892 })).toBeUndefined();
+    expect(reconcileDataGridExactTotalWithObservedPage({ offset: 2800, rowCount: 200, exactTotal: Number.NaN })).toBeUndefined();
   });
 });

@@ -46,8 +46,9 @@ export type DataGridContextMenuIcons = {
 export function createDataGridFilterSubmenu(options: {
   label: string;
   icon: Component;
-  labels: Record<"equals" | "notEquals" | "like" | "notLike" | "lessThan" | "greaterThan" | "isNull" | "isNotNull" | "clear", string>;
+  labels: Record<"equals" | "notEquals" | "like" | "notLike" | "lessThan" | "greaterThan" | "custom" | "isNull" | "isNotNull" | "clear", string>;
   apply: (mode: "equals" | "not-equals" | "like" | "not-like" | "less-than" | "greater-than" | "is-null" | "is-not-null") => void;
+  applyCustom: () => void;
   clear: () => void;
 }): DataGridContextMenuItem {
   const { labels } = options;
@@ -61,6 +62,7 @@ export function createDataGridFilterSubmenu(options: {
       { label: labels.notLike, action: () => options.apply("not-like") },
       { label: labels.lessThan, action: () => options.apply("less-than") },
       { label: labels.greaterThan, action: () => options.apply("greater-than") },
+      { label: labels.custom, action: () => options.applyCustom() },
       { label: "", separator: true },
       { label: labels.isNull, action: () => options.apply("is-null") },
       { label: labels.isNotNull, action: () => options.apply("is-not-null") },
@@ -70,10 +72,52 @@ export function createDataGridFilterSubmenu(options: {
   };
 }
 
+export function createDataGridHighlightSubmenu(options: {
+  label: string;
+  icon: Component;
+  labels: {
+    duplicates: string;
+    nulls: string;
+    clear: string;
+  };
+  hasDuplicatesActive?: boolean;
+  hasNullsActive?: boolean;
+  canClear?: boolean;
+  toggleDuplicates: () => void;
+  toggleNulls: () => void;
+  clear: () => void;
+}): DataGridContextMenuItem {
+  return {
+    label: options.label,
+    icon: options.icon,
+    children: [
+      {
+        label: options.labels.duplicates,
+        checked: options.hasDuplicatesActive,
+        action: options.toggleDuplicates,
+      },
+      {
+        label: options.labels.nulls,
+        checked: options.hasNullsActive,
+        action: options.toggleNulls,
+      },
+      { label: "", separator: true },
+      {
+        label: options.labels.clear,
+        disabled: !options.canClear,
+        action: options.clear,
+      },
+    ],
+  };
+}
+
 export function createDataGridColumnContextMenuItems(options: {
   headerColumn: boolean;
   contextColumn: boolean;
   canCopyAlterSql: boolean;
+  canCopyMetadata?: boolean;
+  /** 当前列（或选中列）解析到了非空注释时才提供「复制列注释」。 */
+  canCopyComment?: boolean;
   canFilter: boolean;
   hasSort: boolean;
   sortMode: "database" | "local";
@@ -87,17 +131,20 @@ export function createDataGridColumnContextMenuItems(options: {
   visibleColumnCount?: number;
   /** 当前被隐藏的列数量，用于决定是否显示「显示全部列」。 */
   hiddenColumnCount?: number;
+  canHideIdenticalColumns?: boolean;
   labels: Record<
-    "copyName" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
+    "copyName" | "copyComment" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
     string
   > &
-    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn", string>>;
+    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata", string>>;
   icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort">;
   actions: {
     copyName: () => void;
+    copyComment: () => void;
     copyNames: () => void;
     details: () => void;
     copyAlterSql: () => void;
+    copyMetadata?: () => void;
     sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void;
     freezeToColumn: () => void;
     freezeSelectedColumns: () => void;
@@ -106,16 +153,22 @@ export function createDataGridColumnContextMenuItems(options: {
     unfreezeColumns: () => void;
     hideColumn: () => void;
     hideSelectedColumns: () => void;
+    hideIdenticalColumns?: () => void;
     showAllColumnsMenu: () => void;
   };
   filterSubmenu: DataGridContextMenuItem;
+  highlightSubmenu?: DataGridContextMenuItem;
 }): DataGridContextMenuItem[] {
   const items: DataGridContextMenuItem[] = [];
   if (options.headerColumn) {
     items.push({ label: options.labels.copyName, action: options.actions.copyName, icon: options.icons.copy });
+    if (options.canCopyMetadata) items.push({ label: options.labels.copyMetadata ?? "Copy column metadata", action: options.actions.copyMetadata!, icon: options.icons.copy });
+    // 只有解析到注释时才给出入口：无元数据的查询结果里永远为空，展示反而误导。
+    if (options.canCopyComment) items.push({ label: options.labels.copyComment, action: options.actions.copyComment, icon: options.icons.copy });
     items.push({ label: options.labels.copyNames, action: options.actions.copyNames, icon: options.icons.copy });
     items.push({ label: options.labels.details, action: options.actions.details, icon: options.icons.columnDetails });
     if (options.canCopyAlterSql) items.push({ label: options.labels.copyAlterSql, action: options.actions.copyAlterSql, icon: options.icons.copy });
+    if (options.highlightSubmenu) items.push({ label: "", separator: true }, options.highlightSubmenu);
   }
   if (!options.contextColumn && !options.headerColumn) return items;
   if (options.contextColumn) {
@@ -129,6 +182,7 @@ export function createDataGridColumnContextMenuItems(options: {
     items.push({ label: options.labels.localAscending, action: () => options.actions.sort("asc", "local"), icon: options.icons.ascending }, { label: options.labels.localDescending, action: () => options.actions.sort("desc", "local"), icon: options.icons.descending });
     if (options.hasSort) items.push({ label: options.labels.clearSort, action: () => options.actions.sort(null, options.sortMode), icon: options.icons.clearSort });
     if (options.canFilter) items.push({ label: "", separator: true }, options.filterSubmenu);
+    if (!options.headerColumn && options.highlightSubmenu) items.push({ label: "", separator: true }, options.highlightSubmenu);
   }
   if (options.contextVisibleColIdx !== undefined) {
     items.push({ label: "", separator: true });
@@ -140,6 +194,13 @@ export function createDataGridColumnContextMenuItems(options: {
     // 仅在多选（>1）时提供批量隐藏；选中列覆盖全部可见列时禁用，而不是悄悄少隐藏一列。
     if (options.hasColumnSelection && selectedColumnCount > 1) {
       items.push({ label: options.labels.hideSelectedColumns, action: options.actions.hideSelectedColumns, disabled: visibleColumnCount > 0 && selectedColumnCount >= visibleColumnCount });
+    }
+    if (options.labels.hideIdenticalColumns && options.actions.hideIdenticalColumns) {
+      items.push({
+        label: options.labels.hideIdenticalColumns,
+        action: options.actions.hideIdenticalColumns,
+        disabled: options.canHideIdenticalColumns === false,
+      });
     }
     if ((options.hiddenColumnCount ?? 0) > 0) {
       items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
@@ -153,6 +214,16 @@ export function createDataGridColumnContextMenuItems(options: {
     }
     if (options.labels.freezeCurrentColumn && options.actions.freezeCurrentColumn) items.push({ label: options.labels.freezeCurrentColumn, action: options.actions.freezeCurrentColumn });
     items.push({ label: options.labels.freezeToColumn, action: options.actions.freezeToColumn });
+  } else if (options.labels.hideIdenticalColumns && options.actions.hideIdenticalColumns) {
+    items.push({ label: "", separator: true });
+    items.push({
+      label: options.labels.hideIdenticalColumns,
+      action: options.actions.hideIdenticalColumns,
+      disabled: options.canHideIdenticalColumns === false,
+    });
+    if ((options.hiddenColumnCount ?? 0) > 0) {
+      items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
+    }
   }
   return items;
 }

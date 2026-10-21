@@ -1,6 +1,9 @@
 schemaVersion: 1
 order: 420
 dbType: opengauss
+compareModes: [schema, data]
+transferSupportLevel: family-compatible
+transferObjectFamily: postgres
 rustVariant: OpenGauss
 label: openGauss
 dialect: openGauss
@@ -26,7 +29,7 @@ capabilities:
   diagram: true
   tableDataEdit: true
   tableStructureEdit: true
-  tableImport: false
+  tableImport: true
   dataTransfer: true
   sqlFileExecution: true
   databaseCreate: true

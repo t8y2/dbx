@@ -35,7 +35,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
@@ -159,7 +159,7 @@ jobs:
         run: cargo check -p dbx-mcp -p dbx-cli --no-default-features
 
       - name: Install nextest
-        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.68.13
+        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b # v2.68.13
         with:
           tool: cargo-nextest@0.9.137
 
@@ -440,7 +440,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Publish platform package
@@ -453,7 +453,22 @@ jobs:
             echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          # npm can accept a publish but leave the version stuck in a staged
+          # (invisible, blocks republication) state; the only recovery is
+          # to drop the staged version and publish again.
+          publish_log="${RUNNER_TEMP}/npm-publish.log"
+          if ! npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance 2>&1 | tee "$publish_log"; then
+            if ! grep -q "previously staged version" "$publish_log"; then
+              exit 1
+            fi
+            if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${{ matrix.package-name }}@${VERSION} became visible despite the error; continuing."
+              exit 0
+            fi
+            echo "::warning::npm holds ${{ matrix.package-name }}@${VERSION} in a staged (invisible) state; dropping it and retrying."
+            npm unpublish "${{ matrix.package-name }}@${VERSION}" --force
+            npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          fi
 
   publish-cli:
     name: Publish @dbx-app/cli
@@ -471,7 +486,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
@@ -674,7 +689,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Sign macOS MCP binary
@@ -709,6 +724,25 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          # npm can accept a publish but leave the version stuck in a staged
+          # (invisible, blocks republication) state; the only recovery is
+          # to drop the staged version and publish again.
+          npm_publish_with_staged_recovery() {
+            local publish_log="${RUNNER_TEMP}/npm-publish.log"
+            if ! npm publish "$@" --access public --provenance 2>&1 | tee "$publish_log"; then
+              if ! grep -q "previously staged version" "$publish_log"; then
+                return 1
+              fi
+              if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+                echo "${{ matrix.package-name }}@${VERSION} became visible despite the error; continuing."
+                return 0
+              fi
+              echo "::warning::npm holds ${{ matrix.package-name }}@${VERSION} in a staged (invisible) state; dropping it and retrying."
+              npm unpublish "${{ matrix.package-name }}@${VERSION}" --force
+              npm publish "$@" --access public --provenance
+              return
+            fi
+          }
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             work_dir="$(mktemp -d)"
             trap 'rm -rf "$work_dir"' EXIT
@@ -727,14 +761,14 @@ jobs:
               exit 0
             fi
             cmp "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}" "$work_dir/package/bin/${{ matrix.binary }}"
-            npm publish "$tarball" --access public --provenance --ignore-scripts
+            npm_publish_with_staged_recovery "$tarball" --ignore-scripts
             exit 0
           fi
           if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
             echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+          npm_publish_with_staged_recovery "./packages/${{ matrix.package-dir }}"
 
       - name: Show sccache stats
         if: always()
@@ -757,7 +791,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
@@ -811,7 +845,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Build native release archives from npm packages
@@ -919,7 +953,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.13.0
+          node-version: 22.23.3
           registry-url: https://registry.npmjs.org
 
       - name: Build native CLI release archives from npm packages

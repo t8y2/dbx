@@ -180,12 +180,32 @@ export function isExecuteSqlInNewResultTabShortcut(event: ShortcutLikeEvent, sho
   return matchesShortcut(event, actionShortcut("executeSqlInNewResultTab", shortcuts));
 }
 
+export function isExplainSqlShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("explainSql", shortcuts));
+}
+
 export function isCloseTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("closeTab", shortcuts));
 }
 
+export function isReopenClosedTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("reopenClosedTab", shortcuts));
+}
+
 export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
+}
+
+export function isCloseAllTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("closeAllTabs", shortcuts), platform);
+}
+
+export function isSaveAllTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("saveAllTabs", shortcuts), platform);
+}
+
+export function isCloseWindowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("closeWindow", shortcuts));
 }
 
 export function isSendSelectionToAiShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
@@ -202,6 +222,19 @@ export function isConvertNamingStyleShortcut(event: ShortcutLikeEvent, shortcuts
 
 export function isNewQueryShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("newQuery", shortcuts));
+}
+
+/** Whether a global shortcut originated from the sidebar navigation surface. */
+export function isSidebarFocusedTarget(target: EventTarget | null, lastFocusedSidebarSurface = false): boolean {
+  if (typeof Element !== "undefined" && target instanceof Element && target.closest("[data-app-sidebar]")) return true;
+  if (!lastFocusedSidebarSurface || typeof document === "undefined") return false;
+  return !target || target === document.body || target === document.documentElement;
+}
+
+/** Whether the default-query shortcut is being invoked from navigation/search UI. */
+export function isDefaultQueryShortcutTarget(target: EventTarget | null, lastFocusedSidebarSurface = false): boolean {
+  if (isSidebarFocusedTarget(target, lastFocusedSidebarSurface)) return true;
+  return typeof Element !== "undefined" && target instanceof Element && !!target.closest("[data-object-search-input]");
 }
 
 export function isOpenSettingsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
@@ -261,8 +294,40 @@ export function isObjectSourceSaveShortcutTarget(target: { closest(selector: str
   return !!target?.closest("[data-object-source-editor], [data-object-source-preview]");
 }
 
+/**
+ * Which surface the "save" shortcut should act on.
+ *
+ * The settings page, plugin center and driver store replace the content area but
+ * keep the previously active query tab activated, so `activeTab.mode === "query"`
+ * stays true while one of those surfaces is on screen. Without this decision the
+ * save shortcut popped the "SQL saved" dialog on top of the settings page instead
+ * of applying the edited draft (#13020).
+ */
+export type SaveShortcutSurface = "settings" | "query" | "none";
+
+export interface SaveShortcutSurfaceInput {
+  settingsPageOpen?: boolean;
+  pluginCenterOpen?: boolean;
+  driverStoreOpen?: boolean;
+  activeTabMode?: string | null;
+  saveSqlDialogOpen?: boolean;
+}
+
+export function saveShortcutSurface(input: SaveShortcutSurfaceInput): SaveShortcutSurface {
+  if (input.settingsPageOpen) return "settings";
+  // Browsing surfaces have nothing to save, and must not fall through to the
+  // query branch just because a query tab is still the active tab.
+  if (input.pluginCenterOpen || input.driverStoreOpen) return "none";
+  if (input.activeTabMode !== "query" || input.saveSqlDialogOpen) return "none";
+  return "query";
+}
+
 export function isCopyCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("copyCurrentRow", shortcuts));
+}
+
+export function isEditCellShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("editCell", shortcuts, platform), platform);
 }
 
 export function isEditTableStructureShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
@@ -309,6 +374,10 @@ export function isToggleZenModeShortcut(event: ShortcutLikeEvent, shortcuts?: Pa
   return matchesShortcut(event, actionShortcut("toggleZenMode", shortcuts));
 }
 
+export function isDisconnectAllActiveConnectionsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("disconnectAllActiveConnections", shortcuts));
+}
+
 export function isCopySidebarSelectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("copySidebarSelection", shortcuts));
 }
@@ -329,12 +398,28 @@ export function isViewTableDdlShortcut(event: ShortcutLikeEvent, shortcuts?: Par
   return matchesShortcut(event, actionShortcut("viewTableDdl", shortcuts));
 }
 
+export function isEditSidebarTableStructureShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("editSidebarTableStructure", shortcuts, platform), platform);
+}
+
 export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("quickOpen", shortcuts));
 }
 
 export function isGlobalSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("globalSearch", shortcuts));
+}
+
+export function isOpenConnectionPickerShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("openConnectionPicker", shortcuts));
+}
+
+export function isOpenDatabasePickerShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("openDatabasePicker", shortcuts));
+}
+
+export function isOpenSchemaPickerShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("openSchemaPicker", shortcuts));
 }
 
 export function isNavigateTabHistoryBackShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
@@ -388,4 +473,27 @@ export function isBrowserTaskManagerShortcut(event: ShortcutLikeEvent): boolean 
   if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return false;
   if (!event.shiftKey) return false;
   return event.key === "Escape" || event.key === "Esc" || event.code === "Escape";
+}
+
+export function isCaretBrowsingShortcut(event: ShortcutLikeEvent): boolean {
+  if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  return event.key === "F7" || event.code === "F7";
+}
+
+export function isConfiguredShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  if (!shortcuts) return false;
+  const normalized = normalizeShortcutSettings(shortcuts, platform);
+  return Object.values(normalized).some((shortcut) => matchesShortcut(event, shortcut, platform));
+}
+
+export interface CaretBrowsingBlockOptions {
+  caretBrowsingEnabled?: boolean;
+  shortcuts?: Partial<ShortcutSettings>;
+}
+
+export function shouldBlockCaretBrowsing(event: ShortcutLikeEvent, options?: CaretBrowsingBlockOptions, platform = globalThis.navigator?.platform || ""): boolean {
+  if (options?.caretBrowsingEnabled) return false;
+  if (!isCaretBrowsingShortcut(event)) return false;
+  if (options?.shortcuts && isConfiguredShortcut(event, options.shortcuts, platform)) return false;
+  return true;
 }

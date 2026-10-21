@@ -68,6 +68,7 @@ describe("semantic SQL completion candidates", () => {
 
     const nickname = items.find((item) => item.type === "column" && item.label === "nickname");
     expect(nickname?.detail).toContain("-- 用户昵称");
+    expect(nickname?.comment).toBe("用户昵称");
   });
 
   it("ignores line-comment semicolons after a real statement boundary", () => {

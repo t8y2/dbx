@@ -5,6 +5,7 @@ import { buildDataGridContextFilterCondition } from "@/lib/dataGrid/dataGridSql"
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import { materializeLargeValueSnapshot, waitForLargeValueSnapshot } from "@/lib/dataGrid/largeValueSnapshot";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import type { DataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 import {
@@ -79,8 +80,21 @@ export interface UseDataGridLargeValuesOptions {
 }
 
 type ResolvedLargeValueCells = Map<number, Map<number, CellValue>>;
+export interface LargeValueSnapshotDownloadTarget {
+  readonly result: QueryResult;
+  readonly rowId: number;
+  readonly sourceIndex: number;
+  readonly columnIndex: number;
+  readonly valueRef: string;
+  readonly context: Readonly<NonNullable<QueryResult["large_value_context"]>>;
+  readonly connectionId: string | undefined;
+  readonly database: string;
+  readonly operation: number;
+  readonly signal: AbortSignal;
+}
+const materializedSnapshotBytes = new WeakMap<QueryResult, Map<string, number>>();
 type LargeValueCellRequest = {
-  item: LargeValueRowItem;
+  rowId: number;
   sourceIndex: number;
   columnIndex: number;
   originalBytes: number;
@@ -90,6 +104,16 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   const LARGE_VALUE_FETCH_MAX_ROWS = 200;
   const LARGE_VALUE_FETCH_TARGET_BYTES = 64 * 1024 * 1024;
   const pendingLargeValueHydrations = createResultScopedPendingRequests<boolean>();
+  const snapshotExecutionIds = new Set<string>();
+  let snapshotController = new AbortController();
+  const cancelSnapshotReads = () => {
+    snapshotController.abort(new Error("LOB reading cancelled locally"));
+    snapshotController = new AbortController();
+    for (const executionId of snapshotExecutionIds) void api.cancelQuery(executionId).catch(() => {});
+    snapshotExecutionIds.clear();
+  };
+  watch(() => [options.result.value, options.connectionId.value, options.executionDatabase.value], cancelSnapshotReads);
+  options.runtimeScope.addCleanup(cancelSnapshotReads);
   const largeValueCellsByKey = computed(() => largeValueCellMap(options.result.value));
   type VisibleLargeValuePreviewRequest = {
     item: LargeValueRowItem;
@@ -111,13 +135,66 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   }
 
   function largeValueOriginalBytes(item: Pick<LargeValueRowItem, "sourceIndex" | "isNew" | "isDraft" | "isDirtyCol"> | undefined, columnIndex: number): number | undefined {
-    if (options.databaseType.value !== "mysql" || !item || item.isNew || item.isDraft || item.sourceIndex === undefined || item.isDirtyCol[columnIndex]) return undefined;
+    // Other PostgreSQL preview types still carry an internal estimate, not an exact size.
+    const hasKnownByteSize = options.databaseType.value === "mysql" || (options.databaseType.value === "postgres" && options.allColumnTypes.value[columnIndex]?.trim().toLowerCase() === "bytea");
+    if (!hasKnownByteSize || !item || item.isNew || item.isDraft || item.sourceIndex === undefined || item.isDirtyCol[columnIndex]) return undefined;
     return largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex))?.original_bytes;
   }
 
   function formatGridItemCell(item: LargeValueRowItem, columnIndex: number): string {
     void visibleLargeValuePreviewVersion.value;
-    return options.formatCellCached(visibleLargeValuePreviewValue(item, columnIndex, item.data[columnIndex] ?? null), columnIndex, largeValueOriginalBytes(item, columnIndex));
+    const text = options.formatCellCached(visibleLargeValuePreviewValue(item, columnIndex, item.data[columnIndex] ?? null), columnIndex, largeValueOriginalBytes(item, columnIndex));
+    return snapshotReference(item, columnIndex) ? options.translate("grid.largeValueSnapshotPreview", { value: text }) : text;
+  }
+
+  function snapshotReference(item: LargeValueRowItem | undefined, columnIndex: number): string | undefined {
+    if (!item || !isLargeValuePreview(item, columnIndex) || item.sourceIndex === undefined) return undefined;
+    return largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex))?.value_ref;
+  }
+
+  function captureSnapshotDownloadTarget(rowId: number, columnIndex: number): LargeValueSnapshotDownloadTarget | undefined {
+    const result = options.result.value;
+    const item = options.getRowItem(rowId);
+    const valueRef = snapshotReference(item, columnIndex);
+    const context = result.large_value_context;
+    if (!valueRef || !context || item?.sourceIndex === undefined) return undefined;
+    return {
+      result,
+      rowId,
+      sourceIndex: item.sourceIndex,
+      columnIndex,
+      valueRef,
+      context: { ...context },
+      connectionId: options.connectionId.value,
+      database: options.executionDatabase.value,
+      operation: options.resultLifecycle.beginOperation(),
+      signal: snapshotController.signal,
+    };
+  }
+
+  function isSnapshotDownloadTargetCurrent(target: LargeValueSnapshotDownloadTarget): boolean {
+    if (target.signal.aborted || options.runtimeScope.disposed || !options.resultLifecycle.isCurrent(target.operation) || options.result.value !== target.result || options.connectionId.value !== target.connectionId || options.executionDatabase.value !== target.database) return false;
+    const item = options.getRowItem(target.rowId);
+    const context = options.result.value.large_value_context;
+    return item?.sourceIndex === target.sourceIndex && snapshotReference(item, target.columnIndex) === target.valueRef && !!context && (["connectionId", "database", "clientSessionId", "txnSessionId", "catalog"] as const).every((key) => context[key] === target.context[key]);
+  }
+
+  async function downloadSnapshotTarget(target: LargeValueSnapshotDownloadTarget, filePath: string, downloadEncoding?: "binary" | "utf8" | "gbk"): Promise<void> {
+    if (!isSnapshotDownloadTargetCurrent(target)) throw new Error("LOB result context changed");
+    const executionId = options.uuid();
+    snapshotExecutionIds.add(executionId);
+    try {
+      await waitForLargeValueSnapshot(api.downloadLargeValue({ ...target.context, valueRef: target.valueRef, executionId, downloadEncoding }, filePath, target.signal), target.signal);
+      if (!isSnapshotDownloadTargetCurrent(target)) throw new Error("LOB result context changed");
+    } finally {
+      snapshotExecutionIds.delete(executionId);
+    }
+  }
+
+  async function downloadSnapshotCell(rowId: number, columnIndex: number, filePath: string, downloadEncoding?: "binary" | "utf8" | "gbk"): Promise<void> {
+    const target = captureSnapshotDownloadTarget(rowId, columnIndex);
+    if (!target) throw new Error("LOB snapshot is unavailable");
+    await downloadSnapshotTarget(target, filePath, downloadEncoding);
   }
 
   function formatGridItemCellForConfirmation(item: LargeValueRowItem, columnIndex: number): string {
@@ -254,7 +331,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       if (sourceColumn && !selectedColumns.some((column) => column.toLocaleLowerCase() === sourceColumn.toLocaleLowerCase())) selectedColumns.push(sourceColumn);
     }
     const selectedColumnTypes = selectedColumns.map((column) => tableMeta.columns.find((candidate) => candidate.name.toLocaleLowerCase() === column.toLocaleLowerCase())?.data_type ?? "");
-    const predicates = await Promise.all([...requests.values()].map((request) => largeValueRowPredicate(request.item, primaryKeyIndexes)));
+    const predicates = await Promise.all([...requests.values()].map((request) => largeValueRowPredicate(request.sourceIndex, primaryKeyIndexes)));
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
     const sql = await buildTableSelectSql({
       databaseType: options.databaseType.value,
@@ -383,11 +460,15 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   options.runtimeScope.addCleanup(pauseVisibleLargeValuePreviewHydration);
 
   function chunkLargeValueRequests(requests: LargeValueCellRequest[]): LargeValueCellRequest[][] {
+    // PostgreSQL full-value SQL uses SELECT *, so this column's exact byte size
+    // cannot bound other large columns in the same row. Keep the one-row batches
+    // used before bytea markers started reporting exact sizes.
+    const maxRows = options.databaseType.value === "postgres" ? 1 : LARGE_VALUE_FETCH_MAX_ROWS;
     const chunks: LargeValueCellRequest[][] = [];
     let chunk: LargeValueCellRequest[] = [];
     let bytes = 0;
     for (const request of requests) {
-      if (chunk.length > 0 && (chunk.length >= LARGE_VALUE_FETCH_MAX_ROWS || bytes + request.originalBytes > LARGE_VALUE_FETCH_TARGET_BYTES)) {
+      if (chunk.length > 0 && (chunk.length >= maxRows || bytes + request.originalBytes > LARGE_VALUE_FETCH_TARGET_BYTES)) {
         chunks.push(chunk);
         chunk = [];
         bytes = 0;
@@ -399,8 +480,8 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     return chunks;
   }
 
-  async function largeValueRowPredicate(item: LargeValueRowItem, primaryKeyIndexes: number[]): Promise<string> {
-    const originalRow = item.sourceIndex === undefined ? undefined : options.result.value.rows[item.sourceIndex];
+  async function largeValueRowPredicate(sourceIndex: number, primaryKeyIndexes: number[]): Promise<string> {
+    const originalRow = options.result.value.rows[sourceIndex];
     if (!originalRow) throw new Error(options.translate("grid.largeValueRowUnavailable"));
     const tableMeta = options.tableMeta.value!;
     const conditions = await Promise.all(
@@ -423,7 +504,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     const tableMeta = options.tableMeta.value!;
     const sourceColumn = options.resultSourceColumns.value[columnIndex];
     if (!sourceColumn) throw new Error(options.translate("grid.largeValueColumnUnavailable"));
-    const predicates = await Promise.all(requests.map((request) => largeValueRowPredicate(request.item, primaryKeyIndexes)));
+    const predicates = await Promise.all(requests.map((request) => largeValueRowPredicate(request.sourceIndex, primaryKeyIndexes)));
     const selectedColumns = [...new Set([...tableMeta.primaryKeys, sourceColumn])];
     const sql = await buildTableSelectSql({
       databaseType: options.databaseType.value,
@@ -464,14 +545,21 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       const originalRow = options.result.value.rows[request.sourceIndex];
       const identity = originalRow ? largeValueIdentityKey(originalRow, primaryKeyIndexes) : "";
       if (!valuesByIdentity.has(identity)) throw new Error(options.translate("grid.largeValueRowUnavailable"));
-      const rowValues = resolved.get(request.item.id) ?? new Map<number, CellValue>();
+      const rowValues = resolved.get(request.rowId) ?? new Map<number, CellValue>();
       rowValues.set(columnIndex, valuesByIdentity.get(identity) ?? null);
-      resolved.set(request.item.id, rowValues);
+      resolved.set(request.rowId, rowValues);
     }
   }
 
   async function resolveLargeValueCells(rowIds: number[], columnIndexes: number[]): Promise<ResolvedLargeValueCells> {
+    const signal = snapshotController.signal;
+    const sourceResult = options.result.value;
+    const connectionId = options.connectionId.value;
+    const executionDatabase = options.executionDatabase.value;
+    const operation = options.resultLifecycle.beginOperation();
+    const isCurrent = () => !signal.aborted && options.result.value === sourceResult && options.connectionId.value === connectionId && options.executionDatabase.value === executionDatabase && options.resultLifecycle.isCurrent(operation);
     const resolved: ResolvedLargeValueCells = new Map();
+    let snapshotBytes = 0;
     const requestedColumns = new Set(columnIndexes);
     const requestsByColumn = new Map<number, LargeValueCellRequest[]>();
     for (const rowId of new Set(rowIds)) {
@@ -481,24 +569,91 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
         if (!isLargeValuePreview(item, columnIndex)) continue;
         const metadata = largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex));
         if (!metadata) continue;
+        if (metadata.value_ref) {
+          const context = sourceResult.large_value_context;
+          if (!context || context.connectionId !== connectionId || context.database !== executionDatabase) {
+            throw new Error("LOB result connection is unavailable; execute the query again");
+          }
+          const executionId = options.uuid();
+          snapshotExecutionIds.add(executionId);
+          try {
+            const value = await materializeLargeValueSnapshot({ ...context, valueRef: metadata.value_ref, executionId }, isCurrent, signal);
+            snapshotBytes += new TextEncoder().encode(value).length;
+            if (snapshotBytes > 64 * 1024 * 1024) throw new Error("LOB selection exceeds the 64 MiB view/copy limit; use CSV/JSON export or download individual complete values");
+            const rowValues = resolved.get(item.id) ?? new Map<number, CellValue>();
+            rowValues.set(columnIndex, value);
+            resolved.set(item.id, rowValues);
+          } finally {
+            snapshotExecutionIds.delete(executionId);
+          }
+          continue;
+        }
         const requests = requestsByColumn.get(columnIndex) ?? [];
-        requests.push({ item, sourceIndex: item.sourceIndex, columnIndex, originalBytes: metadata.original_bytes });
+        requests.push({ rowId: item.id, sourceIndex: item.sourceIndex, columnIndex, originalBytes: metadata.original_bytes });
         requestsByColumn.set(columnIndex, requests);
       }
     }
     if (requestsByColumn.size === 0) return resolved;
-    if ((options.databaseType.value !== "mysql" && options.databaseType.value !== "postgres" && options.databaseType.value !== "oracle") || !options.connectionId.value || !options.tableMeta.value?.tableName || options.tableMeta.value.primaryKeys.length === 0) {
-      throw new Error(options.translate("grid.largeValueNeedsStableKey"));
+    if (
+      (options.databaseType.value !== "mysql" && options.databaseType.value !== "postgres" && options.databaseType.value !== "oracle" && options.databaseType.value !== "db2") ||
+      !options.connectionId.value ||
+      !options.tableMeta.value?.tableName ||
+      options.tableMeta.value.primaryKeys.length === 0
+    ) {
+      throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
     }
     const primaryKeyIndexes = options.tableMeta.value.primaryKeys.map(largeValueSourceColumnIndex);
-    if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueNeedsStableKey"));
+    if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
 
     for (const [columnIndex, requests] of requestsByColumn) {
       for (const chunk of chunkLargeValueRequests(requests)) {
         await fetchLargeValueRequestChunk(columnIndex, chunk, primaryKeyIndexes, resolved);
+        if (!isCurrent()) throw new Error("LOB result context changed");
       }
     }
     return resolved;
+  }
+
+  /**
+   * Resolve every truncated cell the caller can currently see in one batch and
+   * write the full values back into the result. Used by the table-preview
+   * "load current page" action; the result-level display cache still applies to
+   * cells the user has not chosen to expand.
+   */
+  async function hydrateLargeValueCells(rowIds: number[], columnIndexes: number[]): Promise<number> {
+    const sourceResult = options.result.value;
+    const resolved = await resolveLargeValueCells(rowIds, columnIndexes);
+    // Same staleness guard as the single-cell path: paginating or refreshing
+    // mid-load replaces tab.result, and the row metadata below belongs to the
+    // result the batch was resolved for.
+    if (options.result.value !== sourceResult) return 0;
+    let changed = 0;
+    for (const [rowId, values] of resolved) {
+      const item = options.getRowItem(rowId);
+      if (item?.sourceIndex === undefined) continue;
+      for (const [columnIndex, value] of values) {
+        sourceResult.rows[item.sourceIndex]![columnIndex] = value;
+        const hydrationKey = largeValueCellKey(item.sourceIndex, columnIndex);
+        const metadata = largeValueCellsByKey.value.get(hydrationKey);
+        if (metadata?.value_ref && typeof value === "string") {
+          // Keep the shared 64 MiB view/edit budget aware of batch-hydrated
+          // cells so later single-cell loads and save baselines stay bounded.
+          const sizes = materializedSnapshotBytes.get(sourceResult) ?? new Map<string, number>();
+          sizes.set(hydrationKey, new TextEncoder().encode(value).length);
+          materializedSnapshotBytes.set(sourceResult, sizes);
+        }
+        if (metadata?.value_ref) sourceResult.large_value_refs = [...new Set([...(sourceResult.large_value_refs ?? []), metadata.value_ref])];
+        sourceResult.large_value_cells = sourceResult.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
+        visibleLargeValuePreviewCaches.get(sourceResult)?.forget(item.sourceIndex, columnIndex);
+        changed += 1;
+      }
+    }
+    if (changed > 0) {
+      options.largeValueResolutionVersion.value += 1;
+      options.clearCellFormatCache();
+      options.invalidateResultEstimate(sourceResult);
+    }
+    return changed;
   }
 
   function reportLargeValueLoadError(error: unknown) {
@@ -534,6 +689,8 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     if (!isLargeValuePreview(item, columnIndex) || item?.sourceIndex === undefined) return true;
     const sourceResult = options.result.value;
     const hydrationKey = largeValueCellKey(item.sourceIndex, columnIndex);
+    const valueRef = largeValueCellsByKey.value.get(hydrationKey)?.value_ref;
+    const ownsSnapshot = !!valueRef;
     const operation = options.resultLifecycle.beginOperation();
     return pendingLargeValueHydrations.run(hydrationKey, sourceResult, async () => {
       try {
@@ -541,11 +698,17 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
         if (!options.resultLifecycle.isCurrent(operation) || options.result.value !== sourceResult) return false;
         const value = resolved.get(rowId)?.get(columnIndex);
         if (value === undefined && !resolved.get(rowId)?.has(columnIndex)) return false;
-        const row = [...(sourceResult.rows[item.sourceIndex!] ?? [])];
-        row[columnIndex] = value ?? null;
-        const rows = sourceResult.rows.slice();
-        rows[item.sourceIndex!] = row;
-        sourceResult.rows = rows;
+        if (ownsSnapshot && typeof value === "string") {
+          const sizes = materializedSnapshotBytes.get(sourceResult) ?? new Map<string, number>();
+          const bytes = new TextEncoder().encode(value).length;
+          const total = [...sizes.values()].reduce((sum, size) => sum + size, 0) - (sizes.get(hydrationKey) ?? 0) + bytes;
+          if (total > 64 * 1024 * 1024) throw new Error("LOB result exceeds the 64 MiB view/edit limit; use CSV/JSON export or download individual complete values");
+          sizes.set(hydrationKey, bytes);
+          materializedSnapshotBytes.set(sourceResult, sizes);
+        }
+        // Keep row identity so loading another LOB does not clear pending edits or undo history.
+        sourceResult.rows[item.sourceIndex!]![columnIndex] = value ?? null;
+        if (valueRef) sourceResult.large_value_refs = [...new Set([...(sourceResult.large_value_refs ?? []), valueRef])];
         visibleLargeValuePreviewCaches.get(sourceResult)?.forget(item.sourceIndex!, columnIndex);
         sourceResult.large_value_cells = sourceResult.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
         options.largeValueResolutionVersion.value += 1;
@@ -559,14 +722,118 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     });
   }
 
+  /**
+   * Rollback statements are built from the baseline rows, so a changed or deleted
+   * cell that still holds a truncated server preview (no `value_ref`, e.g.
+   * PostgreSQL json/text) must be replaced with its full value first. Otherwise
+   * the recorded rollback SQL carries the `...`-suffixed preview (issue #12964).
+   */
+  async function preparePreviewSaveBaseline(changes: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; deletedRows: ReadonlySet<number> }, signal: AbortSignal): Promise<void> {
+    const source = options.result.value;
+    const cells = (source.large_value_cells ?? []).filter((cell) => !cell.value_ref && (changes.deletedRows.has(cell.row_index) || changes.dirtyRows.get(cell.row_index)?.has(cell.column_index)));
+    if (!cells.length) return;
+    const connectionId = options.connectionId.value;
+    const database = options.executionDatabase.value;
+    const tableMeta = options.tableMeta.value;
+    if (!connectionId || !tableMeta?.tableName || tableMeta.primaryKeys.length === 0) throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
+    const primaryKeyIndexes = tableMeta.primaryKeys.map(largeValueSourceColumnIndex);
+    if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
+    const operation = options.resultLifecycle.beginOperation();
+    const isCurrent = () => !signal.aborted && options.result.value === source && options.connectionId.value === connectionId && options.executionDatabase.value === database && options.resultLifecycle.isCurrent(operation);
+    const requestsByColumn = new Map<number, LargeValueCellRequest[]>();
+    for (const cell of cells) {
+      const requests = requestsByColumn.get(cell.column_index) ?? [];
+      // Keyed by source index: this map never leaves the function.
+      requests.push({ rowId: cell.row_index, sourceIndex: cell.row_index, columnIndex: cell.column_index, originalBytes: cell.original_bytes });
+      requestsByColumn.set(cell.column_index, requests);
+    }
+    const resolved: ResolvedLargeValueCells = new Map();
+    for (const [columnIndex, requests] of requestsByColumn) {
+      for (const chunk of chunkLargeValueRequests(requests)) {
+        await fetchLargeValueRequestChunk(columnIndex, chunk, primaryKeyIndexes, resolved);
+        if (!isCurrent()) throw new Error("LOB result context changed");
+      }
+    }
+    // Preserve row identity so the editor keeps pending edits, deletes and undo history.
+    for (const [sourceIndex, values] of resolved) {
+      const row = source.rows[sourceIndex];
+      if (!row) throw new Error(options.translate("grid.largeValueRowUnavailable"));
+      for (const [columnIndex, value] of values) {
+        row[columnIndex] = value;
+        visibleLargeValuePreviewCaches.get(source)?.forget(sourceIndex, columnIndex);
+      }
+    }
+    const resolvedKeys = new Set(cells.map((cell) => largeValueCellKey(cell.row_index, cell.column_index)));
+    source.large_value_cells = source.large_value_cells?.filter((cell) => !resolvedKeys.has(largeValueCellKey(cell.row_index, cell.column_index)));
+    options.largeValueResolutionVersion.value += 1;
+    options.clearCellFormatCache();
+    options.invalidateResultEstimate(source);
+  }
+
+  async function prepareSaveBaseline(changes: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; deletedRows: ReadonlySet<number> }): Promise<void> {
+    const snapshotSignal = snapshotController.signal;
+    await preparePreviewSaveBaseline(changes, snapshotSignal);
+    const source = options.result.value;
+    const cells = (source.large_value_cells ?? []).filter((cell) => cell.value_ref && (changes.deletedRows.has(cell.row_index) || changes.dirtyRows.get(cell.row_index)?.has(cell.column_index)));
+    const context = source.large_value_context;
+    const connectionId = options.connectionId.value;
+    const database = options.executionDatabase.value;
+    if ((cells.length || source.large_value_refs?.length) && (!context || context.connectionId !== connectionId || context.database !== database)) throw new Error("LOB result connection is unavailable; execute the query again");
+    if (!cells.length) return;
+    if (!context) throw new Error("LOB result connection is unavailable; execute the query again");
+    const operation = options.resultLifecycle.beginOperation();
+    const isCurrent = () => !snapshotSignal.aborted && options.result.value === source && options.connectionId.value === connectionId && options.executionDatabase.value === database && options.resultLifecycle.isCurrent(operation);
+    const executionId = options.uuid();
+    snapshotExecutionIds.add(executionId);
+    try {
+      const sizes = new Map(materializedSnapshotBytes.get(source));
+      const rows = source.rows.map((row) => [...row]);
+      for (const cell of cells) {
+        const value = await materializeLargeValueSnapshot({ ...context, valueRef: cell.value_ref!, executionId }, isCurrent, snapshotSignal);
+        if (!rows[cell.row_index] || cell.column_index >= rows[cell.row_index]!.length) throw new Error("LOB result column is unavailable");
+        sizes.set(largeValueCellKey(cell.row_index, cell.column_index), new TextEncoder().encode(value).length);
+        if ([...sizes.values()].reduce((sum, size) => sum + size, 0) > 64 * 1024 * 1024) throw new Error("LOB save baseline exceeds the 64 MiB view/edit limit; reload and edit a smaller selection");
+        rows[cell.row_index]![cell.column_index] = value;
+      }
+      if (!isCurrent()) throw new Error("LOB result context changed");
+      // Other consumers can hydrate another cell while these requests await.
+      // Merge only the requested baselines into the latest rows and budget.
+      const mergedSizes = new Map(materializedSnapshotBytes.get(source));
+      for (const cell of cells) {
+        if (!source.rows[cell.row_index] || cell.column_index >= source.rows[cell.row_index]!.length) throw new Error("LOB result column is unavailable");
+        const key = largeValueCellKey(cell.row_index, cell.column_index);
+        mergedSizes.set(key, sizes.get(key)!);
+      }
+      if ([...mergedSizes.values()].reduce((sum, size) => sum + size, 0) > 64 * 1024 * 1024) throw new Error("LOB save baseline exceeds the 64 MiB view/edit limit; reload and edit a smaller selection");
+      source.large_value_refs = [...new Set([...(source.large_value_refs ?? []), ...cells.map((cell) => cell.value_ref!)])];
+      const resolved = new Set(cells.map((cell) => largeValueCellKey(cell.row_index, cell.column_index)));
+      // Preserve row identity so the editor keeps pending edits, deletes and undo history.
+      for (const cell of cells) source.rows[cell.row_index]![cell.column_index] = rows[cell.row_index]![cell.column_index];
+      source.large_value_cells = source.large_value_cells?.filter((cell) => !resolved.has(largeValueCellKey(cell.row_index, cell.column_index)));
+      materializedSnapshotBytes.set(source, mergedSizes);
+      options.largeValueResolutionVersion.value += 1;
+      options.clearCellFormatCache();
+      options.invalidateResultEstimate(source);
+    } finally {
+      snapshotExecutionIds.delete(executionId);
+    }
+  }
+
   return {
+    snapshotReference,
+    captureSnapshotDownloadTarget,
+    isSnapshotDownloadTargetCurrent,
+    downloadSnapshotTarget,
+    downloadSnapshotCell,
     isLargeValuePreview,
     largeValueOriginalBytes,
     formatGridItemCell,
     formatGridItemCellForConfirmation,
     visibleLargeValuePreviewValue,
     resolveLargeValueCells,
+    hydrateLargeValueCells,
     hydrateLargeValueCell,
+    prepareSaveBaseline,
     invalidateVisibleLargeValuePreviewCell,
     scheduleVisibleLargeValuePreviewHydration,
     reportLargeValueLoadError,

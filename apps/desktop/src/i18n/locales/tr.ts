@@ -4121,6 +4121,9 @@ export default withEnglishFallback({
     loadMore: "Daha fazla yükle...",
     extensions: "Uzantılar",
     eventTriggers: "Olay tetikleyicileri",
+    foreignDataWrappers: "Dış veri sarmalayıcıları",
+    foreignServers: "Dış sunucular",
+    userMappings: "Kullanıcı eşlemeleri",
   },
   eventTrigger: {
     detailsTitle: "Olay tetikleyici ayrıntıları",
@@ -4132,6 +4135,38 @@ export default withEnglishFallback({
     enabled: "Etkin",
     tags: "Etiketler",
     definition: "Tanım",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "Dış veri sarmalayıcısı ayrıntıları",
+    viewDetails: "Ayrıntıları gör",
+    name: "Ad",
+    owner: "Sahip",
+    handler: "İşleyici",
+    validator: "Doğrulayıcı",
+    options: "Seçenekler",
+    definition: "DDL",
+  },
+
+  foreignServer: {
+    detailsTitle: "Dış sunucu ayrıntıları",
+    viewDetails: "Ayrıntıları gör",
+    name: "Ad",
+    owner: "Sahip",
+    foreignDataWrapper: "Dış veri sarmalayıcısı",
+    type: "Tür",
+    version: "Sürüm",
+    options: "Seçenekler",
+    definition: "DDL",
+  },
+
+  userMapping: {
+    detailsTitle: "Kullanıcı eşlemesi ayrıntıları",
+    viewDetails: "Ayrıntıları gör",
+    userName: "Kullanıcı",
+    serverName: "Sunucu",
+    options: "Seçenekler",
+    definition: "DDL",
   },
 
   extension: {

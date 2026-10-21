@@ -2699,3 +2699,63 @@ describe("EnumCellEditor boolean labels", () => {
     expect(commit).toHaveBeenCalledWith("true");
   });
 });
+
+describe("DataGrid large-table preview notice", () => {
+  const HIDDEN_KEY = "dbx-table-data-preview-notice-hidden";
+
+  function mountGrid() {
+    setActivePinia(createPinia());
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const result = {
+      columns: ["id", "content"],
+      column_types: ["int4", "text"],
+      rows: [[1, "preview"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      large_value_cells: [{ row_index: 0, column_index: 1, original_bytes: 5000 }],
+    };
+    const tableMeta = { schema: "app", tableName: "t", columns: [], primaryKeys: [] };
+    const app = createApp(defineComponent({ setup: () => () => h(DataGrid, { result, tableMeta, context: "table-data" }) }));
+    app.mount(host);
+    return {
+      host,
+      notice: () => host.querySelector("[data-grid-preview-notice]"),
+      destroy() {
+        app.unmount();
+        host.remove();
+      },
+    };
+  }
+
+  beforeEach(() => {
+    localStorage.removeItem(HIDDEN_KEY);
+  });
+
+  // #12906: the banner only stayed away for the current result, so every new
+  // table brought it back. "Don't show again" has to persist across tables and
+  // leave an icon that still loads the full text.
+  it("persists the don't-show-again choice and keeps the full-text icon", async () => {
+    const grid = mountGrid();
+    await nextTick();
+    expect(grid.notice()?.textContent).toContain("grid.tableDataPreviewNotice");
+
+    const dontShowAgain = [...grid.host.querySelectorAll("button")].find((button) => button.textContent?.trim() === "grid.tableDataPreviewDontShowAgain");
+    expect(dontShowAgain).toBeTruthy();
+    dontShowAgain!.click();
+    await nextTick();
+
+    expect(localStorage.getItem(HIDDEN_KEY)).toBe("1");
+    // The strip stays (so the full text is still one click away) but the text
+    // and the dismiss action are gone.
+    expect(grid.notice()?.textContent).not.toContain("grid.tableDataPreviewNotice");
+    expect(grid.notice()?.querySelector("button")?.getAttribute("title")).toBe("grid.tableDataPreviewNotice");
+    grid.destroy();
+
+    const reopened = mountGrid();
+    await nextTick();
+    expect(reopened.notice()?.textContent).not.toContain("grid.tableDataPreviewNotice");
+    expect(reopened.notice()?.querySelector("button")?.getAttribute("title")).toBe("grid.tableDataPreviewNotice");
+    reopened.destroy();
+  });
+});

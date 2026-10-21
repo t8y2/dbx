@@ -3200,6 +3200,7 @@ export default withEnglishFallback({
     tableDataPreviewLoadPage: "現在のページの完全なテキストを読み込む",
     tableDataPreviewLoading: "現在のページの完全なテキストを読み込み中…",
     tableDataPreviewDismiss: "今後表示しない",
+    tableDataPreviewDontShowAgain: "次回から表示しない",
     tableDataPreviewLoaded: "現在のページの完全なテキストセルを {count} 個読み込みました",
     tableDataPreviewLoadFailed: "完全なテキストの読み込みに失敗しました：{message}",
     searchValuesOrCountTooltip: "値の検索または件数による絞り込み（例: >1, >=2, =1, count>1）",

@@ -3303,6 +3303,7 @@ export default withEnglishFallback({
     tableDataPreviewLoadPage: "Cargar el texto completo de la página actual",
     tableDataPreviewLoading: "Cargando el texto completo de la página actual…",
     tableDataPreviewDismiss: "No volver a mostrar",
+    tableDataPreviewDontShowAgain: "No mostrar nunca",
     tableDataPreviewLoaded: "Se cargaron {count} celdas con texto completo de la página actual",
     tableDataPreviewLoadFailed: "Error al cargar el texto completo: {message}",
     searchValuesOrCountTooltip: "Buscar valores o filtrar por cantidad (p. ej., >1, >=2, =1, count>1)",

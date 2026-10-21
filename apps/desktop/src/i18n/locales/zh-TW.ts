@@ -3186,6 +3186,7 @@ export default withEnglishFallback({
     tableDataPreviewLoadPage: "載入目前頁面的完整文字",
     tableDataPreviewLoading: "正在載入目前頁面的完整文字…",
     tableDataPreviewDismiss: "不再提示",
+    tableDataPreviewDontShowAgain: "不再提示",
     tableDataPreviewLoaded: "已載入目前頁面 {count} 個完整文字儲存格",
     tableDataPreviewLoadFailed: "載入完整文字失敗：{message}",
   },

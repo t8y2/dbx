@@ -479,8 +479,20 @@ const largeValueResolutionVersion = ref(0);
 const tableDataFullTextMode = ref(false);
 const tableDataFullTextLoading = ref(false);
 const tableDataPreviewNoticeDismissed = ref(false);
+// Dismissing the banner only silences it for the current result, so every new
+// table or page brought it back. The "don't show again" action persists here
+// and leaves a compact icon that still loads the full text on demand (#12906).
+const TABLE_DATA_PREVIEW_NOTICE_HIDDEN_KEY = "dbx-table-data-preview-notice-hidden";
+function readTableDataPreviewNoticeHidden(): boolean {
+  try {
+    return localStorage.getItem(TABLE_DATA_PREVIEW_NOTICE_HIDDEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+const tableDataPreviewNoticeHidden = ref(readTableDataPreviewNoticeHidden());
 const tableDataPreviewTruncated = computed(() => !!props.tableMeta && (props.result.large_value_cells?.length ?? 0) > 0);
-const showTableDataPreviewNotice = computed(() => tableDataPreviewTruncated.value && !tableDataFullTextMode.value && !tableDataPreviewNoticeDismissed.value);
+const showTableDataPreviewNotice = computed(() => tableDataPreviewTruncated.value && !tableDataFullTextMode.value && (tableDataPreviewNoticeHidden.value || !tableDataPreviewNoticeDismissed.value));
 const tableDataFullTextEnabled = computed(() => !!props.tableMeta && tableDataFullTextMode.value);
 const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
@@ -5969,6 +5981,18 @@ async function loadCurrentPageFullText() {
 
 function dismissTableDataPreviewNotice() {
   tableDataPreviewNoticeDismissed.value = true;
+}
+
+/// Persistently silences the banner across tables and pages. The compact icon
+/// in the same strip keeps "load the full text for this page" reachable.
+function hideTableDataPreviewNoticeForGood() {
+  tableDataPreviewNoticeHidden.value = true;
+  try {
+    localStorage.setItem(TABLE_DATA_PREVIEW_NOTICE_HIDDEN_KEY, "1");
+  } catch {
+    // Storage can be unavailable (private mode, quota); the banner then simply
+    // comes back on the next start instead of failing the click.
+  }
 }
 
 const exportContextCell = computed(() => {
@@ -14829,22 +14853,39 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @copy-sql="copySortSqlPreview"
           @apply="applyStructuredSortRules"
         />
-        <!-- Large table preview notice: explicit opt-in instead of guessing from column width (#12289). -->
+        <!-- Large table preview notice: explicit opt-in instead of guessing from column width (#12289).
+             Once "don't show again" is used it collapses to an icon so the full-text load stays reachable (#12906). -->
         <div v-if="showTableDataPreviewNotice" data-grid-preview-notice class="shrink-0 px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-700 dark:text-amber-300 flex flex-wrap items-center gap-x-2 gap-y-1">
-          <Info class="h-3.5 w-3.5 shrink-0" />
-          <span>{{ t("grid.tableDataPreviewNotice") }}</span>
-          <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 disabled:opacity-50 dark:hover:text-amber-100" :disabled="tableDataFullTextLoading" @click="loadCurrentPageFullText">
-            {{ tableDataFullTextLoading ? t("grid.tableDataPreviewLoading") : t("grid.tableDataPreviewLoadPage") }}
-          </button>
           <button
+            v-if="tableDataPreviewNoticeHidden"
             type="button"
-            class="ml-auto shrink-0 rounded p-0.5 text-amber-600/70 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400/70 dark:hover:text-amber-200"
-            :title="t('grid.tableDataPreviewDismiss')"
-            :aria-label="t('grid.tableDataPreviewDismiss')"
-            @click="dismissTableDataPreviewNotice"
+            class="flex items-center gap-1 rounded px-0.5 py-0 text-amber-600/80 hover:bg-amber-500/10 hover:text-amber-800 disabled:opacity-50 dark:text-amber-400/80 dark:hover:text-amber-200"
+            :title="t('grid.tableDataPreviewNotice')"
+            :aria-label="t('grid.tableDataPreviewNotice')"
+            :disabled="tableDataFullTextLoading"
+            @click="loadCurrentPageFullText"
           >
-            <X class="h-3.5 w-3.5" />
+            <Info class="h-3.5 w-3.5 shrink-0" />
           </button>
+          <template v-else>
+            <Info class="h-3.5 w-3.5 shrink-0" />
+            <span>{{ t("grid.tableDataPreviewNotice") }}</span>
+            <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 disabled:opacity-50 dark:hover:text-amber-100" :disabled="tableDataFullTextLoading" @click="loadCurrentPageFullText">
+              {{ tableDataFullTextLoading ? t("grid.tableDataPreviewLoading") : t("grid.tableDataPreviewLoadPage") }}
+            </button>
+            <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 dark:hover:text-amber-100" @click="hideTableDataPreviewNoticeForGood">
+              {{ t("grid.tableDataPreviewDontShowAgain") }}
+            </button>
+            <button
+              type="button"
+              class="ml-auto shrink-0 rounded p-0.5 text-amber-600/70 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400/70 dark:hover:text-amber-200"
+              :title="t('grid.tableDataPreviewDismiss')"
+              :aria-label="t('grid.tableDataPreviewDismiss')"
+              @click="dismissTableDataPreviewNotice"
+            >
+              <X class="h-3.5 w-3.5" />
+            </button>
+          </template>
         </div>
 
         <!-- Truncation warning banner -->

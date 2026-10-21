@@ -309,7 +309,7 @@ import {
   toggleMcpAllowedToolName,
   type McpExecutionMode,
 } from "@/lib/mcp/mcpPolicySelection";
-import { isMacOS, isWindows } from "@/lib/backend/platform";
+import { getPlatform, isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
 import type { InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
@@ -802,6 +802,7 @@ const editTabGroupMode = ref<TabGroupMode>(settingsStore.editorSettings.tabGroup
 const editTabSortMode = ref<TabSortMode>(settingsStore.editorSettings.tabSortMode);
 const editTabMaxWidth = ref<number>(settingsStore.editorSettings.tabMaxWidth);
 const editTabGroupRows = ref<TabGroupRowMode>(settingsStore.editorSettings.tabGroupRows);
+const editLinuxFloatingFrameEnabled = ref(settingsStore.desktopSettings.linux_floating_frame_enabled ?? true);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
 const desktopCloseBehaviorResetPending = ref(false);
@@ -2219,6 +2220,7 @@ watch(
       void historyRetention.load();
       void mcpHistoryRetention.load();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
+      editLinuxFloatingFrameEnabled.value = settingsStore.desktopSettings.linux_floating_frame_enabled ?? true;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
@@ -2501,6 +2503,7 @@ function hasChanges(): boolean {
     mcpHistoryRetention.changed.value ||
     hasImportedSettingsPendingApply.value ||
     hasEditorDraftChanges.value ||
+    editLinuxFloatingFrameEnabled.value !== (settingsStore.desktopSettings.linux_floating_frame_enabled ?? true) ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
     editQuitOnClose.value !== settingsStore.desktopSettings.quit_on_close ||
     editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
@@ -2542,6 +2545,7 @@ async function persistSettings() {
   const metadataCacheMaxMemoryMb = normalizeMetadataCacheMemoryMb(editMetadataCacheMaxMemoryMb.value);
   await settingsStore.updateDesktopSettings({
     show_tray_icon: editShowTrayIcon.value,
+    linux_floating_frame_enabled: editLinuxFloatingFrameEnabled.value,
     quit_on_close: editQuitOnClose.value,
     close_action_prompted: desktopCloseBehaviorResetPending.value ? false : true,
     icon_theme: editIconTheme.value,
@@ -2677,6 +2681,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editTabMaxWidth.value = DEFAULT_EDITOR_SETTINGS.tabMaxWidth;
     editTabGroupRows.value = DEFAULT_EDITOR_SETTINGS.tabGroupRows;
     editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
+    editLinuxFloatingFrameEnabled.value = DEFAULT_DESKTOP_SETTINGS.linux_floating_frame_enabled ?? true;
     editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
     desktopCloseBehaviorResetPending.value = true;
     editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
@@ -2849,6 +2854,7 @@ function resetAllDefaults() {
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editWebLogoPosition.value = DEFAULT_EDITOR_SETTINGS.webLogoPosition;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
+  editLinuxFloatingFrameEnabled.value = DEFAULT_DESKTOP_SETTINGS.linux_floating_frame_enabled ?? true;
   editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
   desktopCloseBehaviorResetPending.value = true;
   editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
@@ -5587,6 +5593,7 @@ watch(
       await settingsStore.initAiConfigs();
       await settingsStore.initDesktopSettings();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
+      editLinuxFloatingFrameEnabled.value = settingsStore.desktopSettings.linux_floating_frame_enabled ?? true;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
@@ -8676,6 +8683,14 @@ onUnmounted(() => {
                   <p>{{ t("settings.tabGroupRowsDescription") }}</p>
                   <p>{{ t("settings.tabMaxWidthDescription") }}</p>
                 </div>
+              </div>
+
+              <div v-if="!isWeb && getPlatform() === 'linux'" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="linux-floating-frame">{{ t("settings.linuxFloatingFrame") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.linuxFloatingFrameDescription") }}</p>
+                </div>
+                <Switch id="linux-floating-frame" v-model="editLinuxFloatingFrameEnabled" />
               </div>
 
               <div v-if="!isWeb" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

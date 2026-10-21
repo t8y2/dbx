@@ -84,6 +84,7 @@ export type {
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
+  linux_floating_frame_enabled?: boolean;
   icon_theme: DesktopIconTheme;
   quit_on_close: boolean;
   close_action_prompted: boolean;
@@ -168,6 +169,7 @@ const SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED = false;
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   show_tray_icon: true,
+  linux_floating_frame_enabled: true,
   icon_theme: "default",
   quit_on_close: false,
   close_action_prompted: false,
@@ -275,6 +277,7 @@ export function normalizeDesktopSettings(settings: Partial<DesktopSettings> | nu
   const iconTheme = settings?.icon_theme === "black" ? "black" : DEFAULT_DESKTOP_SETTINGS.icon_theme;
   const sidebarTablePageSize = typeof settings?.sidebar_table_page_size === "number" && settings.sidebar_table_page_size > 0 ? settings.sidebar_table_page_size : DEFAULT_DESKTOP_SETTINGS.sidebar_table_page_size;
   return {
+    linux_floating_frame_enabled: settings?.linux_floating_frame_enabled ?? true,
     show_tray_icon: settings?.show_tray_icon ?? DEFAULT_DESKTOP_SETTINGS.show_tray_icon,
     icon_theme: iconTheme,
     quit_on_close: settings?.quit_on_close ?? DEFAULT_DESKTOP_SETTINGS.quit_on_close,

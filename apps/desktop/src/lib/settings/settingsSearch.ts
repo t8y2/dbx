@@ -1,3 +1,4 @@
+import { getPlatform } from "@/lib/backend/platform";
 import { SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS } from "@/lib/sql/sqlVariableSyntax";
 import { APP_CUSTOM_UI_COLOR_DEFS } from "@/lib/app/appTheme";
 import { MCP_TOOL_OPTIONS, MCP_EXECUTION_MODE_COLUMNS } from "@/lib/mcp/mcpPolicySelection";
@@ -333,6 +334,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     visible: webOnly,
     keywordKeys: ["settings.webLogoPositionLeft", "settings.webLogoPositionRight", "settings.webLogoPositionHidden"],
   },
+  { id: "appearance-linux-floating-frame", category: "appearance", titleKey: "settings.linuxFloatingFrame", descriptionKey: "settings.linuxFloatingFrameDescription", targetId: "appearance", visible: (context) => !context.isWeb && getPlatform() === "linux" },
   { id: "appearance-tray", category: "appearance", titleKey: "settings.showTrayIcon", descriptionKey: "settings.showTrayIconDescription", targetId: "appearance", visible: desktopOnly },
   { id: "appearance-quit", category: "appearance", titleKey: "settings.quitOnClose", descriptionKey: "settings.quitOnCloseDescription", targetId: "appearance", visible: desktopOnly },
   { id: "about-debug-logs", category: "about", titleKey: "settings.debugLoggingEnabled", descriptionKey: "settings.debugLoggingEnabledDescription", targetId: "about", visible: desktopOnly },

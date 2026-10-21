@@ -71,6 +71,7 @@ const backupSettingsCategoryLabelKeys: Record<BackupSettingsCategoryId, string> 
 const nonSyncableEditorSettingIds = new Set(["updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins", "updateDownloadSource", "ignoredUpdateVersion"]);
 const desktopSettingCategories: Record<string, BackupSettingsCategoryId> = {
   show_tray_icon: "appearance",
+  linux_floating_frame_enabled: "appearance",
   icon_theme: "appearance",
   quit_on_close: "appearance",
   close_action_prompted: "appearance",

@@ -342,6 +342,7 @@ import { uuid } from "@/lib/common/utils";
 const DESKTOP_SETTINGS_STORAGE_KEY = "dbx-desktop-settings";
 const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   show_tray_icon: true,
+  linux_floating_frame_enabled: true,
   icon_theme: "default",
   quit_on_close: false,
   close_action_prompted: false,

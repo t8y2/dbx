@@ -45,6 +45,7 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/lib/table/tableSelectSql", () => ({
   buildTableSelectSql: mocks.buildTableSelectSql,
   quoteTableDataIdentifier: (_databaseType: string, name: string) => `"${name}"`,
+  requiresEagerTableMetadataForDataOpen: (databaseType: string | undefined) => databaseType === "mysql" || databaseType === "postgres" || databaseType === "oracle",
 }));
 
 vi.mock("@/stores/connectionStore", () => ({

@@ -368,10 +368,11 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         const connectionGeneration = connectionStore.metadataGenerationFor(tab.connectionId, tab.database);
         const lifecycleStale = isDataTabMetadataLifecycleStale(tab, connectionGeneration);
         const shouldRefreshMetadata = lifecycleStale || tab.tableMetaPending || !hasRealTableMetaColumns || metadataAgeMs > DATA_TAB_METADATA_TTL_MS;
+        const effectiveDbType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId));
         // Dameng 元数据必须与数据查询串行（同 useSidebarDataOpenRuntime），
         // 延后到查询完成后再启动。主动刷新和跨生命周期重建除外：必须先拿到新列再
         // 构建 SQL，否则第一次 toolbar reload 仍会沿用断链前的显式列列表。
-        const deferMetadataRefresh = intent !== "refresh" && !lifecycleStale && effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId)) === "dameng";
+        const deferMetadataRefresh = intent !== "refresh" && !lifecycleStale && effectiveDbType === "dameng";
         const startMetadataRefresh = () => {
           console.info("[DBX][reloadData:metadata:background:start]", { traceId, elapsed: elapsed(), reason: hasRealTableMetaColumns ? "stale" : "missing", metadataAgeMs });
           void refreshDataTabTableMeta(tab, { force: lifecycleStale, trace: { traceId, elapsed } })
@@ -442,7 +443,28 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
           // 挂起等待，防止数据查询先返回后编辑/保存以空 primaryKeys 短暂可用，
           // 走整行 WHERE 保存路径（#3727）。真实元数据经 setTableMeta 落地后解除
           if (!hasRealTableMetaColumns) tab.tableMetaPending = true;
-          if (!deferMetadataRefresh) startMetadataRefresh();
+          // Oracle 的 LOB 预览投影依赖列清单：缺失时先等元数据落地再构建 SQL，
+          // 否则恢复 tab 的翻页会退回无截断的 SELECT *。MySQL/PostgreSQL 维持
+          // 既有语义——reload 先执行、元数据后台补（app-test
+          // "data reload executes before slow metadata refresh completes"）。
+          if (!hasRealTableMetaColumns && effectiveDbType === "oracle") {
+            console.info("[DBX][reloadData:metadata:await:missing]", { traceId, elapsed: elapsed() });
+            try {
+              const rebuilt = await refreshDataTabTableMeta(tab, { force: false, trace: { traceId, elapsed } });
+              console.info("[DBX][reloadData:metadata:await:done]", { traceId, elapsed: elapsed(), rebuilt });
+              if (!rebuilt) {
+                stopPreparing();
+                return;
+              }
+            } catch (e: any) {
+              console.warn("[DBX][reloadData:metadata:await:error]", { traceId, elapsed: elapsed(), error: e });
+              stopPreparing();
+              toast(e?.message || String(e), 5000);
+              throw e;
+            }
+          } else if (!deferMetadataRefresh) {
+            startMetadataRefresh();
+          }
         } else {
           console.info("[DBX][reloadData:metadata:skip]", { traceId, elapsed: elapsed(), columnCount: tab.tableMeta!.columns.length, metadataAgeMs });
         }

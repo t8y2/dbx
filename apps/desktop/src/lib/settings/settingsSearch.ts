@@ -555,6 +555,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
       "connection.sshKeyPath",
       "connection.sshKeyPassphrase",
       "connection.sshAgentSockPath",
+      "connection.sshAgentKey",
       "connection.sshExposeLan",
       "connection.sshConnectTimeout",
       "connection.sshAuthMethodPassword",

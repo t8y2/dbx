@@ -111,6 +111,7 @@ import type {
   SavedSqlLibrary,
   SshConfigHostEntry,
   LocalSshKey,
+  SshAgentIdentity,
   TunnelProfile,
   TransactionLog,
   ExternalSqlFileVersion,
@@ -2880,6 +2881,10 @@ export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<voi
 
 export async function testTunnelProfile(profile: TunnelProfile): Promise<string> {
   return invoke("test_tunnel_profile", { profile });
+}
+
+export async function listSshAgentIdentities(sshAgentSockPath: string): Promise<SshAgentIdentity[]> {
+  return invoke("list_ssh_agent_identities", { sshAgentSockPath });
 }
 
 export async function resolveSshPrompt(resolution: SshPromptResolution): Promise<void> {

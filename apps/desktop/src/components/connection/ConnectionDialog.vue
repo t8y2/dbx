@@ -32,6 +32,7 @@ import type {
   PluginFormField,
   PluginFormFieldValue,
   ProxyTunnelConfig,
+  SshAgentIdentity,
   SshConfigHostEntry,
   SshTunnelConfig,
   TransportLayerConfig,
@@ -534,6 +535,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     expose_lan: false,
     use_ssh_agent: false,
     ssh_agent_sock_path: "",
+    ssh_agent_key_fingerprint: "",
     auth_method: "password",
     allow_exec_channel_proxy: false,
     proxy_command: "",
@@ -555,6 +557,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     expose_lan: !!hop.expose_lan,
     use_ssh_agent: !!hop.use_ssh_agent,
     ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
+    ssh_agent_key_fingerprint: hop.ssh_agent_key_fingerprint || "",
     auth_method: hop.auth_method || inferSshAuthMethod(hop),
     allow_exec_channel_proxy: !!hop.allow_exec_channel_proxy,
     proxy_command: hop.proxy_command || "",
@@ -6930,6 +6933,58 @@ async function browseSshKeyPath(target?: SshTunnelConfig | null) {
   }
 }
 
+const SSH_AGENT_ALL_IDENTITIES = "__all__";
+const sshAgentIdentities = ref<SshAgentIdentity[]>([]);
+const sshAgentIdentitiesLoading = ref(false);
+const sshAgentIdentitiesError = ref("");
+let sshAgentIdentitiesTimer: ReturnType<typeof setTimeout> | undefined;
+let sshAgentIdentitiesRequest = 0;
+
+const sshAgentIdentityOptions = computed(() => {
+  const fingerprint = selectedSshLayer.value?.ssh_agent_key_fingerprint || "";
+  if (!fingerprint || sshAgentIdentities.value.some((identity) => identity.fingerprint === fingerprint)) {
+    return sshAgentIdentities.value;
+  }
+  return [{ fingerprint, algorithm: "", comment: "" }, ...sshAgentIdentities.value];
+});
+
+function sshAgentIdentityLabel(identity: SshAgentIdentity) {
+  if (!identity.comment) return identity.fingerprint;
+  return identity.algorithm ? `${identity.comment} (${identity.algorithm})` : identity.comment;
+}
+
+function updateSelectedSshAgentKeyFingerprint(value: unknown) {
+  if (!selectedSshLayer.value) return;
+  const fingerprint = String(value);
+  selectedSshLayer.value.ssh_agent_key_fingerprint = fingerprint === SSH_AGENT_ALL_IDENTITIES ? "" : fingerprint;
+}
+
+async function loadSshAgentIdentities(sshAgentSockPath: string) {
+  const request = ++sshAgentIdentitiesRequest;
+  sshAgentIdentitiesLoading.value = true;
+  sshAgentIdentitiesError.value = "";
+  try {
+    const identities = await api.listSshAgentIdentities(sshAgentSockPath);
+    if (request === sshAgentIdentitiesRequest) sshAgentIdentities.value = identities;
+  } catch (cause) {
+    if (request === sshAgentIdentitiesRequest) {
+      sshAgentIdentitiesError.value = t("connection.sshAgentKeyLoadFailed", { error: cause instanceof Error ? cause.message : String(cause) });
+    }
+  } finally {
+    if (request === sshAgentIdentitiesRequest) sshAgentIdentitiesLoading.value = false;
+  }
+}
+
+watch(
+  () => (selectedSshLayer.value?.auth_method === "agent" ? selectedSshLayer.value.ssh_agent_sock_path || "" : null),
+  (sshAgentSockPath) => {
+    if (sshAgentSockPath === null) return;
+    clearTimeout(sshAgentIdentitiesTimer);
+    sshAgentIdentitiesTimer = setTimeout(() => void loadSshAgentIdentities(sshAgentSockPath), 400);
+  },
+  { immediate: true },
+);
+
 async function browseCaCertPath() {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -10927,6 +10982,35 @@ function openExternalUrl(url: string) {
                     <div v-if="selectedSshLayer.auth_method === 'agent'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentSockPath") }}</Label>
                       <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                    </div>
+                    <div v-if="selectedSshLayer.auth_method === 'agent'" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentKey") }}</Label>
+                      <div class="col-span-3 flex min-w-0 items-center gap-1">
+                        <div class="min-w-0 flex-1">
+                          <Select :model-value="selectedSshLayer.ssh_agent_key_fingerprint || SSH_AGENT_ALL_IDENTITIES" :disabled="selectedSshLayer.enabled === false" @update:model-value="updateSelectedSshAgentKeyFingerprint">
+                            <SelectTrigger class="h-9 w-full min-w-0">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem :value="SSH_AGENT_ALL_IDENTITIES">{{ t("connection.sshAgentKeyAll") }}</SelectItem>
+                              <SelectItem v-for="identity in sshAgentIdentityOptions" :key="identity.fingerprint" :value="identity.fingerprint" :title="identity.fingerprint">
+                                {{ sshAgentIdentityLabel(identity) }}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :title="t('connection.sshAgentKeyRefresh')" :disabled="selectedSshLayer.enabled === false || sshAgentIdentitiesLoading" @click="loadSshAgentIdentities(selectedSshLayer.ssh_agent_sock_path || '')">
+                          <Loader2 v-if="sshAgentIdentitiesLoading" class="h-4 w-4 animate-spin" />
+                          <RefreshCw v-else class="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                    <div v-if="selectedSshLayer.auth_method === 'agent'" class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <div class="col-span-3 text-xs text-muted-foreground">
+                        <p>{{ t("connection.sshAgentKeyHint") }}</p>
+                        <p v-if="sshAgentIdentitiesError" class="mt-1">{{ sshAgentIdentitiesError }}</p>
+                      </div>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />

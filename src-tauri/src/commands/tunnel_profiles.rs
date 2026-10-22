@@ -25,3 +25,10 @@ pub async fn test_tunnel_profile(
 ) -> Result<String, String> {
     state.test_tunnel_profile(&profile).await
 }
+
+#[tauri::command]
+pub async fn list_ssh_agent_identities(
+    ssh_agent_sock_path: String,
+) -> Result<Vec<dbx_core::db::ssh_tunnel::AgentIdentityInfo>, String> {
+    dbx_core::db::ssh_tunnel::list_agent_identities(&ssh_agent_sock_path).await
+}

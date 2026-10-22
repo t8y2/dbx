@@ -45,6 +45,10 @@ const TOFU_PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Maximum time to wait for the user to answer one keyboard-interactive
 /// challenge (for example a TOTP code).
 const KEYBOARD_INTERACTIVE_PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
+/// Minimum budget for ssh-agent authentication. A local agent (1Password,
+/// Secretive, ...) can hold a sign request until the user approves it in a
+/// dialog or with Touch ID, which takes far longer than a TCP handshake.
+const SSH_AGENT_AUTH_TIMEOUT_SECS: u64 = 60;
 
 /// SSH client handler. Holds a host-key verifier so that
 /// [`client::Handler::check_server_key`] can reject untrusted/changed server
@@ -408,6 +412,7 @@ pub async fn connect_and_authenticate(
     ssh_key_passphrase: &str,
     use_ssh_agent: bool,
     ssh_agent_sock_path: &str,
+    ssh_agent_key_fingerprint: &str,
     auth_method: &str,
     connect_timeout_secs: u64,
     known_hosts_path: &Path,
@@ -668,7 +673,15 @@ pub async fn connect_and_authenticate(
             ));
         }
     } else if try_agent {
-        match try_authenticate_with_agent(&mut session, ssh_user, ssh_agent_sock_path, &connect_timeout).await {
+        match try_authenticate_with_agent(
+            &mut session,
+            ssh_user,
+            ssh_agent_sock_path,
+            ssh_agent_key_fingerprint,
+            &connect_timeout,
+        )
+        .await
+        {
             Ok(AgentAuthenticationOutcome::Success) => {}
             Ok(AgentAuthenticationOutcome::KeyboardInteractiveRequired) => {
                 authenticate_keyboard_interactive(
@@ -746,6 +759,200 @@ fn resolve_ssh_agent_socket_path(path: &str) -> String {
     expand_tilde(path)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentIdentityInfo {
+    pub fingerprint: String,
+    pub algorithm: String,
+    pub comment: String,
+}
+
+impl AgentIdentityInfo {
+    fn from_identity(identity: &AgentIdentity) -> Self {
+        let public_key = identity.public_key();
+        Self {
+            fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
+            algorithm: public_key.algorithm().as_str().to_string(),
+            comment: identity.comment().to_string(),
+        }
+    }
+}
+
+fn agent_identity_fingerprint(identity: &AgentIdentity) -> String {
+    identity.public_key().fingerprint(HashAlg::Sha256).to_string()
+}
+
+/// Normalizes the fingerprint forms users paste: `SHA256:abc...`,
+/// `SHA256_abc...` (1Password's .pub filename form), any letter case,
+/// surrounding whitespace.
+fn normalize_ssh_fingerprint(value: &str) -> String {
+    let trimmed = value.trim();
+    let has_prefix = trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("SHA256:") || prefix.eq_ignore_ascii_case("SHA256_"));
+    if !has_prefix {
+        return trimmed.to_string();
+    }
+    format!("SHA256:{}", trimmed[7..].trim_end_matches('=').to_uppercase())
+}
+
+/// Keeps only the identity whose fingerprint the user selected. An empty
+/// fingerprint keeps every identity, in the order the agent reported them.
+fn select_agent_identities(
+    identities: Vec<AgentIdentity>,
+    ssh_agent_key_fingerprint: &str,
+) -> Result<Vec<AgentIdentity>, String> {
+    if ssh_agent_key_fingerprint.trim().is_empty() {
+        return Ok(identities);
+    }
+
+    let wanted = normalize_ssh_fingerprint(ssh_agent_key_fingerprint);
+    let available: Vec<(String, String)> = identities
+        .iter()
+        .map(|identity| (identity.comment().to_string(), agent_identity_fingerprint(identity)))
+        .collect();
+    let selected: Vec<AgentIdentity> = identities
+        .into_iter()
+        .filter(|identity| normalize_ssh_fingerprint(&agent_identity_fingerprint(identity)) == wanted)
+        .collect();
+    if !selected.is_empty() {
+        return Ok(selected);
+    }
+
+    let available = available
+        .iter()
+        .take(10)
+        .map(
+            |(comment, fingerprint)| {
+                if comment.trim().is_empty() {
+                    fingerprint.clone()
+                } else {
+                    format!("{comment} ({fingerprint})")
+                }
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "No ssh-agent identity matches the selected fingerprint {}. The agent reported: {available}. Select the key again in the tunnel profile's SSH settings.",
+        ssh_agent_key_fingerprint.trim()
+    ))
+}
+
+/// Lists the identities an agent exposes without asking it to sign anything,
+/// so no confirmation dialog is triggered.
+pub async fn list_agent_identities(ssh_agent_sock_path: &str) -> Result<Vec<AgentIdentityInfo>, String> {
+    #[cfg(unix)]
+    {
+        let mut agent = connect_unix_agent(ssh_agent_sock_path).await?;
+        list_identities_from_client(&mut agent).await
+    }
+
+    #[cfg(windows)]
+    {
+        let mut failures = Vec::new();
+        for endpoint in windows_ssh_agent_endpoints(ssh_agent_sock_path) {
+            let label = endpoint.label();
+            let identities = match endpoint {
+                WindowsSshAgentEndpoint::NamedPipe(path) => match AgentClient::connect_named_pipe(&path).await {
+                    Ok(mut agent) => list_identities_from_client(&mut agent).await,
+                    Err(error) => Err(format!("{label} is unavailable: {error}")),
+                },
+                WindowsSshAgentEndpoint::Pageant => match AgentClient::connect_pageant().await {
+                    Ok(mut agent) => list_identities_from_client(&mut agent).await,
+                    Err(error) => Err(format!("{label} is unavailable: {error}")),
+                },
+            };
+
+            match identities {
+                Ok(identities) => return Ok(identities),
+                Err(error) => failures.push(error),
+            }
+        }
+
+        Err(format!("No configured Windows ssh-agent transport could list identities: {}", failures.join("; ")))
+    }
+}
+
+#[cfg(unix)]
+async fn connect_unix_agent(ssh_agent_sock_path: &str) -> Result<AgentClient<tokio::net::UnixStream>, String> {
+    if ssh_agent_sock_path.is_empty() {
+        AgentClient::connect_env().await.map_err(|e| format!("ssh-agent is unavailable: {e}"))
+    } else {
+        let resolved_path = resolve_ssh_agent_socket_path(ssh_agent_sock_path);
+        AgentClient::connect_uds(&resolved_path)
+            .await
+            .map_err(|e| format!("ssh-agent at '{resolved_path}' is unavailable: {e}"))
+    }
+}
+
+async fn list_identities_from_client<S>(agent: &mut AgentClient<S>) -> Result<Vec<AgentIdentityInfo>, String>
+where
+    S: AgentStream + Send + Unpin,
+{
+    let identities = agent.request_identities().await.map_err(|e| format!("ssh-agent request failed: {e}"))?;
+    Ok(identities.iter().map(AgentIdentityInfo::from_identity).collect())
+}
+
+/// What one public-key probe through an agent identity tells us about what to
+/// do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentAttempt {
+    Success,
+    KeyboardInteractiveRequired,
+    Continue,
+    /// The server answered with an empty remaining-methods list: it will accept
+    /// no further attempt on this connection (OpenSSH `MaxAuthTries`).
+    ServerClosedAuthentication,
+    /// The SSH session is gone; retrying the remaining identities cannot work.
+    ConnectionLost,
+}
+
+fn classify_agent_attempt(result: &Result<AuthResult, russh::AgentAuthError>) -> AgentAttempt {
+    match result {
+        Ok(AuthResult::Success) => AgentAttempt::Success,
+        Ok(AuthResult::Failure { remaining_methods, .. }) => {
+            if server_offers_keyboard_interactive(remaining_methods) {
+                AgentAttempt::KeyboardInteractiveRequired
+            } else if remaining_methods.is_empty() {
+                AgentAttempt::ServerClosedAuthentication
+            } else {
+                AgentAttempt::Continue
+            }
+        }
+        Err(russh::AgentAuthError::Send(_)) => AgentAttempt::ConnectionLost,
+        Err(russh::AgentAuthError::Key(_)) => AgentAttempt::Continue,
+    }
+}
+
+fn describe_agent_attempt_failure(result: &Result<AuthResult, russh::AgentAuthError>) -> String {
+    match result {
+        Ok(AuthResult::Failure { remaining_methods, .. }) => {
+            format!("the server rejected the key (remaining methods: {remaining_methods:?})")
+        }
+        Ok(_) => "the server rejected the key".to_string(),
+        Err(error) => error.to_string(),
+    }
+}
+
+fn agent_attempts_stopped_error(
+    attempted: usize,
+    total: usize,
+    ssh_agent_key_fingerprint: &str,
+    server_closed: bool,
+) -> String {
+    let cause = if server_closed { "the server closed authentication" } else { "the SSH session was lost" };
+    if ssh_agent_key_fingerprint.trim().is_empty() {
+        format!(
+            "SSH agent authentication stopped: {cause} after attempting {attempted} of the {total} agent identities. Select the matching agent key so DBX offers only that identity; servers limit authentication attempts per connection."
+        )
+    } else {
+        format!(
+            "SSH agent authentication stopped: {cause} after attempting {attempted} of the {total} agent identities, before the selected key ({}) was accepted. Check the selected fingerprint.",
+            ssh_agent_key_fingerprint.trim()
+        )
+    }
+}
+
 /// Try to authenticate using ssh-agent identities. A key may be only the first
 /// successful factor, so preserve a server request to continue with
 /// keyboard-interactive instead of discarding it and trying the next identity.
@@ -753,31 +960,16 @@ async fn try_authenticate_with_agent(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
     ssh_agent_sock_path: &str,
+    ssh_agent_key_fingerprint: &str,
     connect_timeout: &Duration,
 ) -> Result<AgentAuthenticationOutcome, String> {
     #[cfg(unix)]
-    let agent = if ssh_agent_sock_path.is_empty() {
-        match AgentClient::connect_env().await {
-            Ok(a) => a,
-            Err(e) => {
-                return Err(format!("No SSH password or key provided, and ssh-agent is unavailable: {e}"));
-            }
-        }
-    } else {
-        let resolved_path = resolve_ssh_agent_socket_path(ssh_agent_sock_path);
-        match AgentClient::connect_uds(&resolved_path).await {
-            Ok(a) => a,
-            Err(e) => {
-                return Err(format!(
-                    "No SSH password or key provided, and ssh-agent at '{}' is unavailable: {e}",
-                    resolved_path
-                ));
-            }
-        }
-    };
-
-    #[cfg(unix)]
-    return authenticate_with_agent_client(session, ssh_user, agent, connect_timeout).await;
+    {
+        let agent = connect_unix_agent(ssh_agent_sock_path)
+            .await
+            .map_err(|error| format!("No SSH password or key provided, and {error}"))?;
+        authenticate_with_agent_client(session, ssh_user, agent, ssh_agent_key_fingerprint, connect_timeout).await
+    }
 
     #[cfg(windows)]
     {
@@ -792,18 +984,30 @@ async fn try_authenticate_with_agent(
             let outcome = match endpoint {
                 WindowsSshAgentEndpoint::NamedPipe(path) => {
                     match tokio::time::timeout(*connect_timeout, AgentClient::connect_named_pipe(&path)).await {
-                        Ok(Ok(agent)) => authenticate_with_agent_client(session, ssh_user, agent, connect_timeout)
-                            .await
-                            .map_err(|error| format!("{label}: {error}")),
+                        Ok(Ok(agent)) => authenticate_with_agent_client(
+                            session,
+                            ssh_user,
+                            agent,
+                            ssh_agent_key_fingerprint,
+                            connect_timeout,
+                        )
+                        .await
+                        .map_err(|error| format!("{label}: {error}")),
                         Ok(Err(error)) => Err(format!("{label} is unavailable: {error}")),
                         Err(_) => Err(format!("{label} connection timed out")),
                     }
                 }
                 WindowsSshAgentEndpoint::Pageant => {
                     match tokio::time::timeout(*connect_timeout, AgentClient::connect_pageant()).await {
-                        Ok(Ok(agent)) => authenticate_with_agent_client(session, ssh_user, agent, connect_timeout)
-                            .await
-                            .map_err(|error| format!("{label}: {error}")),
+                        Ok(Ok(agent)) => authenticate_with_agent_client(
+                            session,
+                            ssh_user,
+                            agent,
+                            ssh_agent_key_fingerprint,
+                            connect_timeout,
+                        )
+                        .await
+                        .map_err(|error| format!("{label}: {error}")),
                         Ok(Err(error)) => Err(format!("{label} is unavailable: {error}")),
                         Err(_) => Err(format!("{label} connection timed out")),
                     }
@@ -827,6 +1031,7 @@ async fn authenticate_with_agent_client<S>(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
     mut agent: AgentClient<S>,
+    ssh_agent_key_fingerprint: &str,
     connect_timeout: &Duration,
 ) -> Result<AgentAuthenticationOutcome, String>
 where
@@ -841,12 +1046,21 @@ where
             return Err(format!("No SSH password or key provided, and ssh-agent request failed: {e}"));
         }
     };
+    let total_reported = identities.len();
+    let identities = select_agent_identities(identities, ssh_agent_key_fingerprint)?;
 
     let hash_alg = session.best_supported_rsa_hash().await.ok().flatten().flatten();
+    // An agent may hold the sign request until the user approves it, so the
+    // network-oriented connect budget is only a lower bound here.
+    let agent_auth_timeout = (*connect_timeout).max(Duration::from_secs(SSH_AGENT_AUTH_TIMEOUT_SECS));
+    let total = identities.len();
+    let mut attempted = 0usize;
 
-    let auth_result = tokio::time::timeout(*connect_timeout, async {
-        for identity in identities {
-            let result = match &identity {
+    let auth_result = tokio::time::timeout(agent_auth_timeout, async {
+        for identity in &identities {
+            let comment = identity.comment();
+            let fingerprint = agent_identity_fingerprint(identity);
+            let result = match identity {
                 AgentIdentity::PublicKey { key, .. } => {
                     session.authenticate_publickey_with(ssh_user, key.clone(), hash_alg, &mut agent).await
                 }
@@ -854,27 +1068,54 @@ where
                     session.authenticate_certificate_with(ssh_user, certificate.clone(), hash_alg, &mut agent).await
                 }
             };
+            attempted += 1;
 
-            match result {
-                Ok(auth_res) if auth_res.success() => return Ok(AgentAuthenticationOutcome::Success),
-                Ok(auth_res) if auth_result_offers_keyboard_interactive(&auth_res) => {
+            match classify_agent_attempt(&result) {
+                AgentAttempt::Success => return Ok(AgentAuthenticationOutcome::Success),
+                AgentAttempt::KeyboardInteractiveRequired => {
                     return Ok(AgentAuthenticationOutcome::KeyboardInteractiveRequired)
                 }
-                Ok(_) => continue,
-                Err(e) => {
-                    log::debug!("SSH agent identity ({}) auth failed: {e}", identity.comment());
-                    continue;
+                AgentAttempt::Continue => {
+                    // Debug, not warn: offering every identity of an agent is
+                    // the normal path, so a rejection here is expected traffic
+                    // for a working setup and would spam the log on every
+                    // connect.
+                    log::debug!(
+                        "SSH agent identity ({comment}, {fingerprint}) auth failed: {}",
+                        describe_agent_attempt_failure(&result)
+                    );
+                }
+                AgentAttempt::ServerClosedAuthentication => {
+                    return Err(agent_attempts_stopped_error(
+                        attempted,
+                        total_reported,
+                        ssh_agent_key_fingerprint,
+                        true,
+                    ))
+                }
+                AgentAttempt::ConnectionLost => {
+                    return Err(agent_attempts_stopped_error(
+                        attempted,
+                        total_reported,
+                        ssh_agent_key_fingerprint,
+                        false,
+                    ))
                 }
             }
         }
-        Err("No SSH password or key provided, and no ssh-agent identity was accepted".to_string())
+        Err(format!(
+            "No SSH password or key provided, and no ssh-agent identity was accepted ({attempted} of {total} identities tried)"
+        ))
     })
     .await;
 
     match auth_result {
         Ok(Ok(outcome)) => Ok(outcome),
         Ok(Err(e)) => Err(e),
-        Err(_) => Err("No SSH password or key provided, and ssh-agent auth timed out".to_string()),
+        Err(_) => Err(format!(
+            "SSH agent authentication timed out after {}s; approve the agent prompt and retry",
+            agent_auth_timeout.as_secs()
+        )),
     }
 }
 
@@ -1262,6 +1503,7 @@ async fn tunnel_reconnect_loop(
     ssh_key_passphrase: String,
     use_ssh_agent: bool,
     ssh_agent_sock_path: String,
+    ssh_agent_key_fingerprint: String,
     auth_method: String,
     connect_timeout_secs: u64,
     known_hosts_path: PathBuf,
@@ -1307,6 +1549,7 @@ async fn tunnel_reconnect_loop(
                 &ssh_key_passphrase,
                 use_ssh_agent,
                 &ssh_agent_sock_path,
+                &ssh_agent_key_fingerprint,
                 &auth_method,
                 connect_timeout_secs,
                 &known_hosts_path,
@@ -1487,6 +1730,7 @@ impl TunnelManager {
         ssh_key_passphrase: &str,
         use_ssh_agent: bool,
         ssh_agent_sock_path: &str,
+        ssh_agent_key_fingerprint: &str,
         auth_method: &str,
         connect_timeout_secs: u64,
         remote_host: &str,
@@ -1507,6 +1751,7 @@ impl TunnelManager {
             ssh_key_passphrase,
             use_ssh_agent,
             ssh_agent_sock_path,
+            ssh_agent_key_fingerprint,
             auth_method,
             connect_timeout_secs,
             remote_host,
@@ -1533,6 +1778,7 @@ impl TunnelManager {
         ssh_key_passphrase: &str,
         use_ssh_agent: bool,
         ssh_agent_sock_path: &str,
+        ssh_agent_key_fingerprint: &str,
         auth_method: &str,
         connect_timeout_secs: u64,
         remote_host: &str,
@@ -1579,6 +1825,7 @@ impl TunnelManager {
             ssh_key_passphrase,
             use_ssh_agent,
             ssh_agent_sock_path,
+            ssh_agent_key_fingerprint,
             auth_method,
             connect_timeout_secs,
             &self.known_hosts_path,
@@ -1612,6 +1859,7 @@ impl TunnelManager {
         ssh_key_passphrase: &str,
         use_ssh_agent: bool,
         ssh_agent_sock_path: &str,
+        ssh_agent_key_fingerprint: &str,
         auth_method: &str,
         connect_timeout_secs: u64,
         allow_exec_channel_proxy: bool,
@@ -1649,6 +1897,7 @@ impl TunnelManager {
             ssh_key_passphrase,
             use_ssh_agent,
             ssh_agent_sock_path,
+            ssh_agent_key_fingerprint,
             auth_method,
             connect_timeout_secs,
             &self.known_hosts_path,
@@ -1759,6 +2008,7 @@ impl TunnelManager {
                 &hop.key_passphrase,
                 hop.use_ssh_agent,
                 &hop.ssh_agent_sock_path,
+                &hop.ssh_agent_key_fingerprint,
                 &hop.auth_method,
                 effective_hop_timeout(hop),
                 &self.known_hosts_path,
@@ -1858,6 +2108,7 @@ async fn spawn_tunnel(
     ssh_key_passphrase: &str,
     use_ssh_agent: bool,
     ssh_agent_sock_path: &str,
+    ssh_agent_key_fingerprint: &str,
     auth_method: &str,
     connect_timeout_secs: u64,
     known_hosts_path: &Path,
@@ -1879,6 +2130,7 @@ async fn spawn_tunnel(
         ssh_key_passphrase,
         use_ssh_agent,
         ssh_agent_sock_path,
+        ssh_agent_key_fingerprint,
         auth_method,
         connect_timeout_secs,
         known_hosts_path,
@@ -1903,6 +2155,7 @@ async fn spawn_socks5_proxy(
     ssh_key_passphrase: &str,
     use_ssh_agent: bool,
     ssh_agent_sock_path: &str,
+    ssh_agent_key_fingerprint: &str,
     auth_method: &str,
     connect_timeout_secs: u64,
     known_hosts_path: &Path,
@@ -1920,6 +2173,7 @@ async fn spawn_socks5_proxy(
         ssh_key_passphrase,
         use_ssh_agent,
         ssh_agent_sock_path,
+        ssh_agent_key_fingerprint,
         auth_method,
         connect_timeout_secs,
         known_hosts_path,
@@ -1944,6 +2198,7 @@ async fn spawn_tunnel_target(
     ssh_key_passphrase: &str,
     use_ssh_agent: bool,
     ssh_agent_sock_path: &str,
+    ssh_agent_key_fingerprint: &str,
     auth_method: &str,
     connect_timeout_secs: u64,
     known_hosts_path: &Path,
@@ -1967,6 +2222,7 @@ async fn spawn_tunnel_target(
         ssh_key_passphrase,
         use_ssh_agent,
         ssh_agent_sock_path,
+        ssh_agent_key_fingerprint,
         auth_method,
         connect_timeout_secs,
         known_hosts_path,
@@ -1987,6 +2243,7 @@ async fn spawn_tunnel_target(
         ssh_key_passphrase.to_string(),
         use_ssh_agent,
         ssh_agent_sock_path.to_string(),
+        ssh_agent_key_fingerprint.to_string(),
         auth_method.to_string(),
         connect_timeout_secs,
         known_hosts_path.to_path_buf(),
@@ -2076,17 +2333,18 @@ mod tests {
     use super::resolve_ssh_agent_socket_path;
     use super::SshClient;
     use super::{
-        bind_tunnel_listener, connect_and_authenticate, describe_terminal_auth_failure, effective_hop_timeout,
-        netcat_proxy_command, openssh_padding_len, plan_chain, read_ssh_string,
-        sanitize_unencrypted_openssh_comment_bytes, server_offers_keyboard_interactive, server_offers_password,
-        ssh_client_config, tofu_prompt_deadline, HostKeyState, HostKeyVerifier, PlannedTunnel, TunnelEntry, TunnelKind,
-        TunnelManager, TunnelStatus, TOFU_PROMPT_TIMEOUT,
+        agent_attempts_stopped_error, bind_tunnel_listener, classify_agent_attempt, connect_and_authenticate,
+        describe_terminal_auth_failure, effective_hop_timeout, netcat_proxy_command, normalize_ssh_fingerprint,
+        openssh_padding_len, plan_chain, read_ssh_string, sanitize_unencrypted_openssh_comment_bytes,
+        server_offers_keyboard_interactive, server_offers_password, ssh_client_config, tofu_prompt_deadline,
+        AgentAttempt, HostKeyState, HostKeyVerifier, PlannedTunnel, TunnelEntry, TunnelKind, TunnelManager,
+        TunnelStatus, TOFU_PROMPT_TIMEOUT,
     };
     use super::{windows_ssh_agent_endpoints, WindowsSshAgentEndpoint, WINDOWS_OPENSSH_AGENT_PIPE};
     use crate::db::ssh_prompt;
     use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
     use russh::client;
-    use russh::client::Handler;
+    use russh::client::{AuthResult, Handler};
     use russh::keys::decode_secret_key;
     use russh::keys::ssh_key::PublicKey;
     use russh::server::{self, Auth, Response, Server};
@@ -2147,6 +2405,53 @@ mod tests {
             windows_ssh_agent_endpoints(r"  \\.\pipe\custom-agent  "),
             vec![WindowsSshAgentEndpoint::NamedPipe(r"\\.\pipe\custom-agent".to_string())]
         );
+    }
+
+    #[test]
+    fn normalizes_ssh_fingerprint_forms() {
+        let expected = "SHA256:ABC+/DEF";
+        assert_eq!(normalize_ssh_fingerprint("SHA256:abc+/def="), expected);
+        assert_eq!(normalize_ssh_fingerprint("  sha256:abc+/def  "), expected);
+        assert_eq!(normalize_ssh_fingerprint("SHA256_abc+/def"), expected);
+        assert_eq!(normalize_ssh_fingerprint("SHA256_ABC+/DEF"), expected);
+        assert_eq!(normalize_ssh_fingerprint(" MD5:aa:bb "), "MD5:aa:bb");
+        assert_eq!(normalize_ssh_fingerprint(""), "");
+    }
+
+    #[test]
+    fn classifies_every_agent_attempt_outcome() {
+        assert_eq!(classify_agent_attempt(&Ok(AuthResult::Success)), AgentAttempt::Success);
+
+        let keyboard_interactive = AuthResult::Failure {
+            remaining_methods: MethodSet::from(&[MethodKind::KeyboardInteractive][..]),
+            partial_success: false,
+        };
+        assert_eq!(classify_agent_attempt(&Ok(keyboard_interactive)), AgentAttempt::KeyboardInteractiveRequired);
+
+        let password_still_offered = AuthResult::Failure {
+            remaining_methods: MethodSet::from(&[MethodKind::Password][..]),
+            partial_success: false,
+        };
+        assert_eq!(classify_agent_attempt(&Ok(password_still_offered)), AgentAttempt::Continue);
+
+        let exhausted = AuthResult::Failure { remaining_methods: MethodSet::empty(), partial_success: false };
+        assert_eq!(classify_agent_attempt(&Ok(exhausted)), AgentAttempt::ServerClosedAuthentication);
+
+        assert_eq!(
+            classify_agent_attempt(&Err(russh::AgentAuthError::Send(russh::SendError {}))),
+            AgentAttempt::ConnectionLost
+        );
+    }
+
+    #[test]
+    fn stopped_agent_error_reports_attempted_and_total_counts() {
+        let without_filter = agent_attempts_stopped_error(6, 17, "", true);
+        assert!(without_filter.contains("6 of the 17"), "{without_filter}");
+        assert!(without_filter.contains("Select the matching agent key"), "{without_filter}");
+
+        let with_filter = agent_attempts_stopped_error(1, 17, "SHA256:abc", false);
+        assert!(with_filter.contains("1 of the 17"), "{with_filter}");
+        assert!(with_filter.contains("SHA256:abc"), "{with_filter}");
     }
 
     #[test]
@@ -2240,6 +2545,7 @@ mod tests {
             expose_lan: false,
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
+            ssh_agent_key_fingerprint: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
             proxy_command: String::new(),
@@ -3001,6 +3307,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "",
             false,
             "",
+            "",
             "password",
             5,
             &known_hosts_path,
@@ -3047,6 +3354,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             key_path.to_str().unwrap(),
             "",
             false,
+            "",
             "",
             "key",
             5,
@@ -3171,6 +3479,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 "",
                 false,
                 "",
+                "",
                 "none",
                 5,
                 false,
@@ -3190,6 +3499,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 "",
                 "",
                 false,
+                "",
                 "",
                 "none",
                 5,
@@ -3324,6 +3634,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 "",
                 false,
                 "",
+                "",
                 "none",
                 5,
                 "db.internal",
@@ -3380,6 +3691,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 "",
                 false,
                 "",
+                "",
                 "none",
                 5,
                 "db.internal",
@@ -3426,6 +3738,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "",
             "",
             false,
+            "",
             "",
             "none",
             5,
@@ -3477,6 +3790,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "",
             false,
             "",
+            "",
             "none",
             1,
             &known_hosts_path,
@@ -3524,6 +3838,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "",
             false,
             "",
+            "",
             "none",
             5,
             "db.internal",
@@ -3543,6 +3858,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             "",
             "",
             false,
+            "",
             "",
             "none",
             5,
@@ -3755,6 +4071,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 "",
                 false,
                 "",
+                "",
                 "key",
                 5,
                 "db.internal",
@@ -3799,6 +4116,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 &key_path,
                 "",
                 false,
+                "",
                 "",
                 "key",
                 5,
@@ -3849,6 +4167,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             key_path.to_str().unwrap(),
             "",
             false,
+            "",
             "",
             "key",
             5,

@@ -500,6 +500,10 @@ pub struct SshTunnelConfig {
     /// the `SSH_AUTH_SOCK` environment variable.
     #[serde(default)]
     pub ssh_agent_sock_path: String,
+    /// SHA-256 fingerprint (`SHA256:...`) of the one agent identity to use.
+    /// Empty means every identity the agent reports is tried, in order.
+    #[serde(default)]
+    pub ssh_agent_key_fingerprint: String,
     /// Login method: `"password"`, `"key"`, `"key+password"`, `"agent"`, or `"none"`.
     /// Empty string means an older saved connection predating this field —
     /// the backend falls back to probing key > password > agent based on

@@ -79,6 +79,7 @@ import type {
   SavedSqlLibrary,
   SshConfigHostEntry,
   LocalSshKey,
+  SshAgentIdentity,
   TunnelProfile,
 } from "@/types/database";
 import type { DetachedTabHandoff } from "@/lib/app/detachedTabHandoff";
@@ -622,6 +623,10 @@ export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<voi
 
 export async function testTunnelProfile(profile: TunnelProfile): Promise<string> {
   return post("/api/tunnel-profiles/test", profile);
+}
+
+export async function listSshAgentIdentities(_sshAgentSockPath: string): Promise<SshAgentIdentity[]> {
+  return []; // The web backend cannot reach a local SSH agent socket
 }
 
 export async function resolveSshPrompt(resolution: SshPromptResolution): Promise<void> {

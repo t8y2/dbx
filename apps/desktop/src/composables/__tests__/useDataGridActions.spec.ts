@@ -824,8 +824,31 @@ describe("useDataGridActions", () => {
         resultBaseSql: "SELECT 1",
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
+        refreshActiveResultRun: true,
       }),
     );
+  });
+
+  it("does not mark explicit executions as in-place result refreshes", async () => {
+    const tab = {
+      id: "tab-1",
+      connectionId: "postgres-1",
+      database: "app",
+      title: "Query",
+      sql: "SELECT 1",
+      result: { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+      mode: "query",
+      isDirty: false,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+    } as QueryTab;
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onExecuteSql(tab.id, "SELECT 2");
+
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT 2", expect.objectContaining({ preserveResultDuringExecution: true }));
+    expect(mocks.executeTabSql.mock.calls[0]![2]).not.toHaveProperty("refreshActiveResultRun");
   });
 
   it("marks row identity pending and refreshes metadata when real columns are missing, despite fallback result columns", async () => {
@@ -1054,6 +1077,7 @@ describe("useDataGridActions", () => {
       "SELECT name, email FROM users",
       expect.objectContaining({
         resultBaseSql: "SELECT name, email FROM users",
+        refreshActiveResultRun: true,
         querySort: {
           resultColumns: ["name", "email"],
           columnIndex: 1,
@@ -1125,6 +1149,7 @@ describe("useDataGridActions", () => {
       { offset: 300, limit: 100, sessionId: "cursor-3", clientSessionId: "client-1" },
     ]);
     expect(mocks.executeTabSql.mock.calls.map((call) => call[2].retainDisplayedResult)).toEqual([true, true, undefined]);
+    expect(mocks.executeTabSql.mock.calls.map((call) => call[2].refreshActiveResultRun)).toEqual([true, true, true]);
     expect(tab.resultPageOffset).toBe(300);
     expect(tab.resultPageJumpProgress).toBeUndefined();
   });

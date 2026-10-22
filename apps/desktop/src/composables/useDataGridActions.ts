@@ -68,6 +68,12 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return activeTab.value?.id === tabId ? activeTab.value : undefined;
   }
 
+  function refreshActiveResultRunOptions(tab: QueryTab): { refreshActiveResultRun?: boolean } {
+    // Reloads/pagination/sorting re-run the displayed SQL; they are result-view
+    // operations and must not capture another result run when auto-keep is on.
+    return tab.mode === "query" ? { refreshActiveResultRun: true } : {};
+  }
+
   function activeQueryTargetOptions(tab: QueryTab) {
     const executionTarget = queryStore.activeResultExecutionTarget(tab.id);
     if (!executionTarget) return {};
@@ -491,6 +497,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tab.resultSortedSql = undefined;
       await queryStore.executeTabSql(tab.id, resultGroupSql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: resultGroupSql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
@@ -503,6 +510,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const rebuildHiddenKeySort = !!tab.result?.hidden_column_indexes?.length && tab.resultSortMode === "database" && !!tab.resultSortDirection && !!tab.resultSortColumn && !!sortColumns;
       await queryStore.executeTabSql(tab.id, rebuildHiddenKeySort ? (tab.resultBaseSql ?? tab.sql) : tab.resultSortedSql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: tab.resultBaseSql ?? tab.sql,
         ...(rebuildHiddenKeySort
           ? {
@@ -523,6 +531,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const hasMultiResults = tab.mode === "query" && (tab.results?.length ?? 0) > 1;
       await queryStore.executeTabSql(tab.id, sql, {
         ...(tab.mode === "query" ? activeQueryTargetOptions(tab) : {}),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: sql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
@@ -556,6 +565,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const executePage = (pageOffset: number, pageSessionId?: string, retainDisplayedResult = false) =>
         queryStore.executeTabSql(tab.id, baseSql, {
           ...activeQueryTargetOptions(tab),
+          ...refreshActiveResultRunOptions(tab),
           resultBaseSql,
           resultSortedSql: tab.resultSortedSql,
           ...(hasDatabaseSort
@@ -740,6 +750,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     if (!direction) {
       await queryStore.executeTabSql(tab.id, baseSql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: undefined,
         ...(pagination ? { pagination } : {}),
@@ -761,6 +772,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       queryStore.updateSql(tab.id, sortedSql);
       await queryStore.executeTabSql(tab.id, sortedSql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: sortedSql,
         ...(pagination ? { pagination } : {}),
@@ -792,6 +804,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       }
       await queryStore.executeTabSql(tab.id, built.sql, {
         ...activeQueryTargetOptions(tab),
+        ...refreshActiveResultRunOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: built.sql,
         ...(pagination ? { pagination } : {}),
@@ -803,6 +816,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     }
     await queryStore.executeTabSql(tab.id, baseSql, {
       ...activeQueryTargetOptions(tab),
+      ...refreshActiveResultRunOptions(tab),
       resultBaseSql: baseSql,
       querySort: {
         resultColumns: sortColumns.resultColumns,

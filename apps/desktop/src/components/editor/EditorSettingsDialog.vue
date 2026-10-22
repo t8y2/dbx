@@ -358,7 +358,7 @@ import {
   type EditorSettingsDraftKey,
 } from "@/lib/settings/editorSettingsDraft";
 import { applyEditorSettingsDraftToRefs, type EditorSettingsDraftRefMap } from "@/lib/settings/applyEditorSettingsDraft";
-import { serializeSettingsTransfer, sortTransferCategories, transferCategoryForKey, type SettingsTransferCategoryId } from "@/lib/settings/settingsTransfer";
+import { pickTransferableDesktopSettings, serializeSettingsTransfer, sortTransferCategories, transferCategoryForKey, type SettingsTransferCategoryId, type SettingsTransferExtras, type TransferableDesktopSettings, type TransferableDesktopSettingsKey } from "@/lib/settings/settingsTransfer";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -3939,9 +3939,17 @@ async function copyAppSupportInfo() {
 // --- Settings import / export (About page card) ---
 
 function buildSettingsExportPayload(): string {
-  return serializeSettingsTransfer(settingsStore.editorSettings, {
-    appVersion: props.appVersion || appSupportInfo.value?.appVersion || undefined,
-  });
+  return serializeSettingsTransfer(
+    settingsStore.editorSettings,
+    { appVersion: props.appVersion || appSupportInfo.value?.appVersion || undefined },
+    {
+      themeMode: themeMode.value,
+      // On web the desktop store only holds defaults (the switches are hidden),
+      // so exporting them would let a web-made file overwrite a desktop user's
+      // real tray/close preferences on import.
+      desktopSettings: isWeb ? undefined : pickTransferableDesktopSettings(settingsStore.desktopSettings),
+    },
+  );
 }
 
 // "Apply and export": reuse the regular apply flow so validation, persistence
@@ -3972,16 +3980,55 @@ function applyImportedEditorSettings(imported: Partial<EditorSettings>) {
   hasImportedSettingsPendingApply.value = true;
 }
 
+// Imported desktop preferences load into the same draft refs the settings
+// switches use, so the footer Apply (and its unapplied-changes protection)
+// covers them exactly like a manual toggle. The desktop section is skipped on
+// web: those switches have no meaning there.
+function applyImportedDesktopSettings(desktop: Partial<TransferableDesktopSettings>) {
+  if (isWeb) return;
+  if (desktop.show_tray_icon !== undefined) editShowTrayIcon.value = desktop.show_tray_icon;
+  if (desktop.quit_on_close !== undefined) editQuitOnClose.value = desktop.quit_on_close;
+  if (desktop.icon_theme !== undefined) editIconTheme.value = desktop.icon_theme;
+  if (desktop.debug_logging_enabled !== undefined) editDebugLoggingEnabled.value = desktop.debug_logging_enabled;
+  if (desktop.metadata_cache_max_memory_mb !== undefined) editMetadataCacheMaxMemoryMb.value = desktop.metadata_cache_max_memory_mb;
+  if (desktop.duckdb_worker_process_isolation !== undefined) editDuckDbWorkerProcessIsolation.value = desktop.duckdb_worker_process_isolation;
+  if (desktop.duckdb_worker_max_processes !== undefined) editDuckDbWorkerMaxProcesses.value = desktop.duckdb_worker_max_processes;
+  if (desktop.sidebar_table_page_size !== undefined) editSidebarTablePageSize.value = desktop.sidebar_table_page_size;
+}
+
+// The app-wide theme mode has no draft state: it applies immediately through
+// the same live path the theme buttons in the appearance tab use.
+function applyImportedExtras(extras: SettingsTransferExtras) {
+  if (extras.themeMode) setThemeMode(extras.themeMode);
+  const desktopKeys = Object.keys(extras.desktopSettings ?? {}) as TransferableDesktopSettingsKey[];
+  if (desktopKeys.length === 0) return;
+  applyImportedDesktopSettings(extras.desktopSettings ?? {});
+  hasImportedSettingsPendingApply.value = true;
+}
+
 // Categories whose draft values differ from the saved base AND are covered by
 // the imported file — these draft changes will be replaced by the import.
-function getDraftConflictCategories(imported: Partial<EditorSettings>): SettingsTransferCategoryId[] {
+function getDraftConflictCategories(imported: Partial<EditorSettings>, extras?: SettingsTransferExtras): SettingsTransferCategoryId[] {
   const changedKeys = new Set(Object.keys(editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value)));
   const conflicts = new Set<SettingsTransferCategoryId>();
   for (const key of Object.keys(imported)) {
     const category = transferCategoryForKey(key);
     if (category && changedKeys.has(key)) conflicts.add(category);
   }
+  if (extras?.desktopSettings && !isWeb && importedDesktopKeysTouchDraft(extras.desktopSettings)) conflicts.add("other");
   return sortTransferCategories(conflicts);
+}
+
+function importedDesktopKeysTouchDraft(desktop: Partial<TransferableDesktopSettings>): boolean {
+  if (desktop.show_tray_icon !== undefined && editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon) return true;
+  if (desktop.quit_on_close !== undefined && editQuitOnClose.value !== settingsStore.desktopSettings.quit_on_close) return true;
+  if (desktop.icon_theme !== undefined && editIconTheme.value !== settingsStore.desktopSettings.icon_theme) return true;
+  if (desktop.debug_logging_enabled !== undefined && editDebugLoggingEnabled.value !== settingsStore.desktopSettings.debug_logging_enabled) return true;
+  if (desktop.metadata_cache_max_memory_mb !== undefined && editMetadataCacheMaxMemoryMb.value !== settingsStore.desktopSettings.metadata_cache_max_memory_mb) return true;
+  if (desktop.duckdb_worker_process_isolation !== undefined && editDuckDbWorkerProcessIsolation.value !== settingsStore.desktopSettings.duckdb_worker_process_isolation) return true;
+  if (desktop.duckdb_worker_max_processes !== undefined && editDuckDbWorkerMaxProcesses.value !== settingsStore.desktopSettings.duckdb_worker_max_processes) return true;
+  if (desktop.sidebar_table_page_size !== undefined && editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE)) return true;
+  return false;
 }
 
 function clearDebugLogs() {
@@ -13178,6 +13225,7 @@ LIMIT 100;</pre>
                 :build-saved-export-payload="buildSettingsExportPayload"
                 :build-applied-export-payload="buildAppliedExportPayload"
                 :apply-imported-settings="applyImportedEditorSettings"
+                :apply-imported-extras="applyImportedExtras"
                 :get-draft-conflict-categories="getDraftConflictCategories"
               />
 

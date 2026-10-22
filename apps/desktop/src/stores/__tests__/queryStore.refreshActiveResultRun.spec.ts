@@ -252,4 +252,70 @@ describe("queryStore refreshActiveResultRun", () => {
     expect(tab.result?.rows).toEqual([[3]]);
     expect(tab.resultRuns).toHaveLength(2);
   });
+
+  it("does not overwrite a run the user switched to while a refresh executes", async () => {
+    mocks.executeMulti.mockResolvedValueOnce([resultOf([[1]])]).mockResolvedValueOnce([resultOf([[2]])]);
+    const { store, tabId } = await createStore();
+    store.toggleResultAutoSave(tabId);
+    await store.executeTabSql(tabId, "SELECT value FROM t");
+    await store.executeTabSql(tabId, "SELECT value FROM t");
+    const tab0 = store.tabs.find((item) => item.id === tabId)!;
+    const firstRunId = tab0.resultRuns![0]!.id;
+    const secondRunId = tab0.activeResultRunId!;
+
+    const pending = deferred<ReturnType<typeof resultOf>[]>();
+    mocks.executeMulti.mockImplementationOnce(() => pending.promise);
+    const refresh = store.executeTabSql(tabId, "SELECT value FROM t", {
+      resultBaseSql: "SELECT value FROM t",
+      preserveResultDuringExecution: true,
+      refreshActiveResultRun: true,
+    });
+    await vi.waitFor(() => {
+      expect(store.tabs.find((item) => item.id === tabId)!.executingResultRunId).toBe(secondRunId);
+    });
+
+    // The user switches to the first run while the refresh of the second run is
+    // still in flight.
+    await store.setActiveResultRun(tabId, firstRunId);
+    pending.resolve([resultOf([[3]])]);
+    await refresh;
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.isExecuting).toBe(false);
+    // Neither retained run may receive the refresh output of the other run.
+    expect(tab.resultRuns?.find((run) => run.id === firstRunId)?.result?.rows).toEqual([[1]]);
+    // The refreshed run kept its payload (possibly evicted to disk by the
+    // switch); restoring it must show its own data, not the refresh output.
+    await store.setActiveResultRun(tabId, secondRunId);
+    expect(store.tabs.find((item) => item.id === tabId)!.result?.rows).toEqual([[2]]);
+  });
+
+  it("keeps the retained run dataset when an in-place refresh fails", async () => {
+    mocks.executeMulti.mockResolvedValueOnce([resultOf([[1]])]);
+    const { store, tabId } = await createStore();
+    store.toggleResultAutoSave(tabId);
+    await store.executeTabSql(tabId, "SELECT value FROM t");
+    const runId = store.tabs.find((item) => item.id === tabId)!.activeResultRunId!;
+
+    const pending = deferred<ReturnType<typeof resultOf>[]>();
+    mocks.executeMulti.mockImplementationOnce(() => pending.promise);
+    const refresh = store.executeTabSql(tabId, "SELECT value FROM t", {
+      resultBaseSql: "SELECT value FROM t",
+      preserveResultDuringExecution: true,
+      refreshActiveResultRun: true,
+    });
+    await vi.waitFor(() => {
+      expect(store.tabs.find((item) => item.id === tabId)!.isExecuting).toBe(true);
+    });
+    pending.reject(new Error("connection lost"));
+    await refresh;
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.isExecuting).toBe(false);
+    expect(tab.activeResultRunId).toBe(runId);
+    // The error stays on the displayed surface; the retained run keeps its data.
+    expect(tab.result?.execution_error).toBe(true);
+    expect(tab.resultRuns?.find((run) => run.id === runId)?.result?.rows).toEqual([[1]]);
+    expect(tab.resultRuns?.find((run) => run.id === runId)?.result?.execution_error).toBeFalsy();
+  });
 });

@@ -36,11 +36,13 @@ use crate::types::SpatialColumn;
 use crate::xlsx_export::{
     finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options, StreamingXlsxWriter, XlsxWorksheetData,
 };
+use mysql_async::prelude::Queryable;
 use serde_json::Value;
 use sqlparser::ast::{
-    GroupByExpr, ObjectName, ObjectNamePart, ObjectType, OrderByKind, SelectItem, SetExpr, Statement, TableFactor,
+    Expr, GroupByExpr, ObjectName, ObjectNamePart, ObjectType, OrderByKind, SelectItem, Set, SetExpr, Statement,
+    TableFactor,
 };
-use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use tokio_util::sync::CancellationToken;
 
@@ -232,6 +234,43 @@ fn safe_postgres_temp_setup_sql(setup_sql: &[String]) -> Option<Vec<String>> {
     }
 
     Some(setup_sql.to_vec())
+}
+
+/// MySQL setup statements an export may replay: only `SET @user_var = <literal>`.
+///
+/// Exports run on a dedicated session, so user variables set earlier in the same batch
+/// (`SET @id = '123'; SELECT ... WHERE id = @id`) are NULL there and the export comes back
+/// empty (#13111). Literal user-variable assignments have no side effects and do not depend
+/// on the statements skipped around them, so they are the only ones replayed.
+fn mysql_user_variable_setup_sql(setup_sql: &[String]) -> Vec<String> {
+    let is_user_variable = |name: &ObjectName| {
+        let name = name.to_string();
+        name.starts_with('@') && !name.starts_with("@@")
+    };
+    let is_literal = |expr: &Expr| match expr {
+        Expr::Value(_) => true,
+        Expr::UnaryOp { expr, .. } => matches!(expr.as_ref(), Expr::Value(_)),
+        _ => false,
+    };
+    let dialect = MySqlDialect {};
+    setup_sql
+        .iter()
+        .filter(|sql| {
+            let Ok(statements) = Parser::parse_sql(&dialect, sql) else {
+                return false;
+            };
+            match statements.as_slice() {
+                [Statement::Set(Set::SingleAssignment { scope: None, hivevar: false, variable, values })] => {
+                    is_user_variable(variable) && values.len() == 1 && is_literal(&values[0])
+                }
+                [Statement::Set(Set::MultipleAssignments { assignments })] => assignments.iter().all(|assignment| {
+                    assignment.scope.is_none() && is_user_variable(&assignment.name) && is_literal(&assignment.value)
+                }),
+                _ => false,
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 fn split_excel_cell_text(value: &str) -> Vec<String> {
@@ -1619,6 +1658,11 @@ async fn try_export_mysql_query_result_stream(
         cancel_token.as_ref(),
     )
     .await?;
+    for setup in mysql_user_variable_setup_sql(&request.setup_sql) {
+        conn.query_drop(setup)
+            .await
+            .map_err(|error| format!("Failed to restore session variables for export: {error}"))?;
+    }
     let mysql_connection_id = conn.id();
     let kill_opts = conn.opts().clone();
     if let Some(execution_id) = request.execution_id.clone() {
@@ -2574,6 +2618,24 @@ mod tests {
             std::fs::read_to_string(&file_path).expect("read SQL export"),
             "INSERT INTO \"public\".\"users\" (\"ID\", \"id\", \"name\") VALUES (91, 1, 'Ada');\n"
         );
+    }
+
+    #[test]
+    fn mysql_setup_replays_only_literal_user_variable_assignments() {
+        let setup = vec![
+            "SET @ID = '123'".to_string(),
+            "SET @a = 1, @b = -2".to_string(),
+            "UPDATE orders SET status = 'x'".to_string(),
+            "SET @@session.sql_mode = ''".to_string(),
+            "SET SESSION wait_timeout = 10".to_string(),
+            "SET @n = (SELECT COUNT(*) FROM orders)".to_string(),
+            "SET @f = my_function()".to_string(),
+        ];
+        assert_eq!(
+            mysql_user_variable_setup_sql(&setup),
+            vec!["SET @ID = '123'".to_string(), "SET @a = 1, @b = -2".to_string()]
+        );
+        assert!(mysql_user_variable_setup_sql(&[]).is_empty());
     }
 
     #[test]

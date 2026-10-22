@@ -10710,7 +10710,10 @@ export const useQueryStore = defineStore("query", () => {
     const queryBaseSql = effectiveDbType === "mysql" ? stripMysqlClientDisplayCommand(queryResultBaseSql(tab)) : queryResultBaseSql(tab);
     const resultStatementIndex = tab.result.statement_index;
     const batchSql = tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
-    const batchStatements = effectiveDbType === "postgres" && tab.result.truncated === true && Number.isInteger(resultStatementIndex) && resultStatementIndex! > 0 ? splitSqlStatementRanges(batchSql, effectiveDbType) : [];
+    // The export runs on its own session, so replay earlier statements of the batch: PostgreSQL
+    // temp tables, MySQL user variables (#13111). The backend keeps only side-effect-free ones.
+    const replaysBatchSetup = effectiveDbType === "postgres" || effectiveDbType === "mysql";
+    const batchStatements = replaysBatchSetup && tab.result.truncated === true && Number.isInteger(resultStatementIndex) && resultStatementIndex! > 0 ? splitSqlStatementRanges(batchSql, effectiveDbType) : [];
     const setupSql = batchStatements[resultStatementIndex!]?.sql === tab.result.sourceStatement ? batchStatements.slice(0, resultStatementIndex).map((statement) => statement.sql) : undefined;
     const rowLimit = settings.exportRowLimitEnabled ? settings.exportRowLimit : null;
     const totalRows = typeof tab.resultTotalRowCount === "number" ? (rowLimit === null ? tab.resultTotalRowCount : Math.min(tab.resultTotalRowCount, rowLimit)) : null;

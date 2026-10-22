@@ -37,17 +37,20 @@ pub fn app_bundle_path(executable: &Path) -> Option<PathBuf> {
 
 /// Builds the detached helper script run by [`spawn_launch_services_relaunch`].
 ///
-/// `data_dir` is forwarded as `DBX_DATA_DIR` when set, because LaunchServices does not pass this
-/// process's environment to the new instance. `open --env` needs macOS 13+, so the helper falls
-/// back to a plain launch when that option is unavailable.
+/// `forwarded_env` (the caller's `DBX_*` variables) is passed to the new instance with
+/// `open --env`, because LaunchServices does not inherit this process's environment.
+/// `open --env` needs macOS 13+, so the helper falls back to a plain launch when that
+/// option is unavailable.
 #[cfg(any(target_os = "macos", test))]
-fn relaunch_script(waiter_pid: u32, data_dir: Option<&str>) -> String {
-    let open = match data_dir {
-        Some(data_dir) => format!(
-            "/usr/bin/open -n --env 'DBX_DATA_DIR={}' \"$1\" || exec /usr/bin/open -n \"$1\"",
-            data_dir.replace('\'', "'\\''")
-        ),
-        None => "/usr/bin/open -n \"$1\"".to_string(),
+fn relaunch_script(waiter_pid: u32, forwarded_env: &[(String, String)]) -> String {
+    let open = if forwarded_env.is_empty() {
+        "/usr/bin/open -n \"$1\"".to_string()
+    } else {
+        let env_args = forwarded_env
+            .iter()
+            .map(|(key, value)| format!(" --env '{}={}'", key, value.replace('\'', "'\\''")))
+            .collect::<String>();
+        format!("/usr/bin/open -n{env_args} \"$1\" || exec /usr/bin/open -n \"$1\"")
     };
     format!("while /bin/kill -0 {waiter_pid} 2>/dev/null; do /bin/sleep 0.1; done; exec {open}")
 }
@@ -62,10 +65,17 @@ fn relaunch_script(waiter_pid: u32, data_dir: Option<&str>) -> String {
 pub fn spawn_launch_services_relaunch(waiter_pid: u32, bundle: &Path) -> std::io::Result<u32> {
     use std::process::{Command, Stdio};
 
-    let data_dir = std::env::var_os("DBX_DATA_DIR")
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string_lossy().into_owned());
-    let script = relaunch_script(waiter_pid, data_dir.as_deref());
+    // The previous spawn-based restart inherited the whole environment; LaunchServices
+    // starts a fresh one, so forward every DBX_* override (data dir, secret key file, ...).
+    let mut forwarded_env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.to_string_lossy().into_owned();
+            let value = value.to_string_lossy().into_owned();
+            (key.starts_with("DBX_") && !value.is_empty()).then_some((key, value))
+        })
+        .collect();
+    forwarded_env.sort();
+    let script = relaunch_script(waiter_pid, &forwarded_env);
     Command::new("/bin/sh")
         .arg("-c")
         .arg(script)
@@ -114,7 +124,7 @@ mod tests {
 
     #[test]
     fn helper_waits_for_the_current_process_and_opens_the_bundle() {
-        let script = relaunch_script(4242, None);
+        let script = relaunch_script(4242, &[]);
         assert!(script.starts_with("while /bin/kill -0 4242 2>/dev/null; do /bin/sleep 0.1; done; "));
         assert!(script.ends_with("exec /usr/bin/open -n \"$1\""));
         assert!(!script.contains("--env"));
@@ -122,15 +132,27 @@ mod tests {
 
     #[test]
     fn helper_forwards_the_custom_data_dir_to_the_new_instance() {
-        let script = relaunch_script(7, Some("/tmp/dbx dev/data"));
+        let script = relaunch_script(7, &[("DBX_DATA_DIR".to_string(), "/tmp/dbx dev/data".to_string())]);
         assert!(script.contains("--env 'DBX_DATA_DIR=/tmp/dbx dev/data'"));
         assert!(script.contains("|| exec /usr/bin/open -n \"$1\""));
     }
 
     #[test]
     fn helper_escapes_single_quotes_in_the_data_dir() {
-        let script = relaunch_script(7, Some("/tmp/it's here"));
+        let script = relaunch_script(7, &[("DBX_DATA_DIR".to_string(), "/tmp/it's here".to_string())]);
         assert!(script.contains("--env 'DBX_DATA_DIR=/tmp/it'\\''s here'"));
+    }
+
+    #[test]
+    fn helper_forwards_every_dbx_override_as_its_own_env_argument() {
+        let script = relaunch_script(
+            9,
+            &[
+                ("DBX_DATA_DIR".to_string(), "/tmp/dbx".to_string()),
+                ("DBX_SECRET_KEY_FILE".to_string(), "/tmp/key file".to_string()),
+            ],
+        );
+        assert!(script.contains("--env 'DBX_DATA_DIR=/tmp/dbx' --env 'DBX_SECRET_KEY_FILE=/tmp/key file'"));
     }
 
     /// Exercises the real helper against a throwaway bundle. Needs a macOS GUI session, so it is

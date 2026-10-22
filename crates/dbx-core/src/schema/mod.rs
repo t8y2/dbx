@@ -9665,7 +9665,7 @@ pub async fn get_table_export_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(
+    let ddl = get_table_ddl_core_with_options(
         state,
         connection_id,
         database,
@@ -9675,7 +9675,8 @@ pub async fn get_table_export_ddl_core(
         TableDdlOptions::EXPORT,
         None,
     )
-    .await
+    .await?;
+    Ok(rewrite_postgres_standard_serial_defaults(&ddl))
 }
 
 /// Source DDL for a table transfer that reuses it on the target.
@@ -13364,6 +13365,31 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_export_ddl_infers_standard_serial_defaults() {
+        // #13058: a standalone export must not keep `bigint DEFAULT nextval(...)`
+        // for the standard serial sequence, because restoring the SQL would
+        // reference a sequence that was never created.
+        for (data_type, serial_type) in [("smallint", "smallserial"), ("integer", "serial"), ("bigint", "bigserial")] {
+            let ddl = format!(
+                "CREATE TABLE \"public\".\"ceshi\" (\n  \"ID\" {data_type} DEFAULT nextval('\"ceshi_ID_seq\"'::regclass) NOT NULL,\n  \"name\" text\n)"
+            );
+            let rewritten = rewrite_postgres_standard_serial_defaults(&ddl);
+            assert!(rewritten.contains(&format!("\"ID\" {serial_type} NOT NULL")), "ddl: {rewritten}");
+            assert!(!rewritten.contains("nextval("), "ddl: {rewritten}");
+        }
+
+        // A schema-qualified standard sequence name is also recognized.
+        let ddl = "CREATE TABLE \"app\".\"ceshi\" (\n  \"ID\" bigint DEFAULT nextval('\"app\".\"ceshi_ID_seq\"'::regclass)\n)";
+        let rewritten = rewrite_postgres_standard_serial_defaults(ddl);
+        assert!(rewritten.contains("\"ID\" bigserial"), "ddl: {rewritten}");
+        assert!(!rewritten.contains("nextval("), "ddl: {rewritten}");
+
+        // Custom/shared sequences keep the explicit default.
+        let custom = "CREATE TABLE \"public\".\"orders\" (\n  \"id\" bigint DEFAULT nextval('shared.custom_id_source'::regclass) NOT NULL\n)";
+        assert_eq!(rewrite_postgres_standard_serial_defaults(custom), custom);
+    }
+
+    #[test]
     fn postgres_table_ddl_keeps_generated_columns_distinct_from_serial_markers() {
         let mut generated = column("total", "numeric");
         generated.column_default = Some("should_not_be_rendered".to_string());
@@ -15857,6 +15883,60 @@ pub async fn opentenbase_ddl(
             Ok(ddl)
         }
     }
+}
+
+/// Whether a `nextval` sequence is the standard `<table>_<column>_seq` serial
+/// sequence for this column, and which serial spelling it maps to.
+fn postgres_serial_type_for_sequence(
+    table: &str,
+    column: &str,
+    data_type: &str,
+    sequence: &str,
+) -> Option<&'static str> {
+    let unqualified = sequence.rsplit('.').next().unwrap_or(sequence).trim().trim_matches('"').replace("\"\"", "\"");
+    if !unqualified.eq_ignore_ascii_case(&format!("{table}_{column}_seq")) {
+        return None;
+    }
+    match data_type.trim().to_ascii_lowercase().as_str() {
+        "smallint" | "int2" => Some("smallserial"),
+        "integer" | "int" | "int4" => Some("serial"),
+        "bigint" | "int8" => Some("bigserial"),
+        _ => None,
+    }
+}
+
+/// Rewrites standard serial defaults in an exported PostgreSQL table DDL.
+///
+/// `BIGSERIAL` is stored as `bigint DEFAULT nextval('<table>_<column>_seq'::regclass)`.
+/// The renderer keeps that spelling when the metadata does not carry the serial
+/// marker, which is correct for transfers (the sequence is copied separately) but
+/// not for a standalone export: restoring the exported SQL would reference a
+/// sequence that was never created. Rewrite only the standard serial sequence
+/// name; shared/custom sequences keep their explicit default.
+fn rewrite_postgres_standard_serial_defaults(ddl: &str) -> String {
+    let create_table = Regex::new(r#"(?i)^CREATE TABLE\s+(?:"(?:[^"]|"")*"\.)?"((?:[^"]|"")*)""#).unwrap();
+    let serial_column = Regex::new(
+        r#"(?i)^(\s*)"((?:[^"]|"")*)"\s+(smallint|integer|bigint)\s+DEFAULT\s+nextval\('([^']*)'::regclass\)(.*)$"#,
+    )
+    .unwrap();
+    let mut current_table: Option<String> = None;
+    let mut output = Vec::with_capacity(ddl.len());
+    for line in ddl.split('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("CREATE TABLE ") {
+            current_table = create_table.captures(trimmed).map(|caps| caps[1].replace("\"\"", "\""));
+        } else if trimmed.starts_with(')') {
+            current_table = None;
+        }
+        let rewritten = current_table.as_deref().and_then(|table| {
+            let caps = serial_column.captures(line)?;
+            let column = caps[2].replace("\"\"", "\"");
+            let serial_type = postgres_serial_type_for_sequence(table, &column, &caps[3], &caps[4])?;
+            Some(format!("{}\"{}\" {}{}", &caps[1], &caps[2], serial_type, &caps[5]))
+        });
+        output.push(rewritten.unwrap_or_else(|| line.to_string()));
+    }
+    output.join("\n")
 }
 
 pub fn render_postgres_table_ddl(

@@ -5480,6 +5480,7 @@ export const useQueryStore = defineStore("query", () => {
         driverProfile: conn?.driver_profile,
         serverVersion: conn?.database_info?.productVersion,
         identifierQuote,
+        connectionId: tab.connectionId,
         database: tableMeta.database,
         schema: tableMeta.schema,
         tableName: tableMeta.tableName,

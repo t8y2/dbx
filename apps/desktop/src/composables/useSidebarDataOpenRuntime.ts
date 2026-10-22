@@ -409,6 +409,7 @@ export function useSidebarDataOpenRuntime() {
         driverProfile: config?.driver_profile || (config?.db_type === "gbase8s" ? "gbase8s" : undefined),
         serverVersion: connectionStore.getConfig(node.connectionId)?.database_info?.productVersion,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
+        connectionId: node.connectionId,
         schema: connectionTableSqlSchema(config, tableSchema),
         database: node.database,
         tableName: node.label,

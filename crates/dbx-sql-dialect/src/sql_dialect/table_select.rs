@@ -371,6 +371,27 @@ pub fn build_table_data_select_sql_with_database(
     } else {
         rownum_select_columns.clone()
     };
+    // Doris/StarRocks clusters commonly guard ad-hoc queries with sql block
+    // rules that cap scanned partitions (`partition_num`). An unfiltered
+    // preview on a frequently partitioned table (hourly/daily) trips those
+    // rules even with a small LIMIT, so data-tab callers pass the latest
+    // partition name and we pin the scan to it when the user gave no WHERE.
+    let partition_clause = if effective_predicate.is_empty()
+        && matches!(database_type, Some(DatabaseType::Doris) | Some(DatabaseType::StarRocks))
+    {
+        options
+            .default_partition
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| format!(" PARTITION (`{}`)", name.replace('`', "``")))
+    } else {
+        None
+    };
+    let table = match partition_clause {
+        Some(clause) => format!("{table}{clause}"),
+        None => table,
+    };
     let table_alias = if include_oracle_row_id { format!("{table} t") } else { table };
 
     match table_pagination_strategy(database_type) {
@@ -1136,6 +1157,7 @@ mod tests {
             use_driver_row_offset: false,
             where_input: None,
             inject_default_time_series_where: false,
+            default_partition: None,
             include_row_id: false,
         }
     }
@@ -1284,6 +1306,49 @@ mod tests {
         let sql =
             build_table_data_select_sql(opts(DatabaseType::StarRocks, Some("hive_catalog"), Some("sales"), "orders"));
         assert!(sql.contains("FROM `hive_catalog`.`sales`.`orders`"), "sql was: {sql}");
+    }
+
+    #[test]
+    fn doris_default_partition_pins_unfiltered_preview() {
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Doris),
+            schema: Some("dw".to_string()),
+            table_name: "ads_adx_dsp_realtime_stc_detail_1h".to_string(),
+            default_partition: Some("p2025101918".to_string()),
+            limit: Some(100),
+            ..Default::default()
+        });
+        assert_eq!(sql, "SELECT * FROM `dw`.`ads_adx_dsp_realtime_stc_detail_1h` PARTITION (`p2025101918`) LIMIT 100;");
+    }
+
+    #[test]
+    fn doris_default_partition_ignored_when_where_supplied() {
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Doris),
+            schema: Some("dw".to_string()),
+            table_name: "ads_adx_dsp_realtime_stc_detail_1h".to_string(),
+            default_partition: Some("p2025101918".to_string()),
+            where_input: Some("dt >= '2026-10-13'".to_string()),
+            limit: Some(100),
+            ..Default::default()
+        });
+        assert_eq!(
+            sql,
+            "SELECT * FROM `dw`.`ads_adx_dsp_realtime_stc_detail_1h` WHERE (dt >= '2026-10-13') LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn default_partition_ignored_for_other_engines() {
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: Some("dw".to_string()),
+            table_name: "events".to_string(),
+            default_partition: Some("p2025101918".to_string()),
+            limit: Some(100),
+            ..Default::default()
+        });
+        assert_eq!(sql, "SELECT * FROM `dw`.`events` LIMIT 100;");
     }
 
     #[test]

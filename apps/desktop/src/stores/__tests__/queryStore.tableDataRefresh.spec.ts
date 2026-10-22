@@ -278,6 +278,7 @@ describe("queryStore table data refresh", () => {
     expect(mocks.buildTableSelectSql).toHaveBeenCalledWith({
       databaseType: "postgres",
       identifierQuote: undefined,
+      connectionId: "pg-1",
       database: "analytics",
       schema: "public",
       tableName: "users",

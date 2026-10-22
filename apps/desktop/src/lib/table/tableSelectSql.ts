@@ -3,6 +3,7 @@ import { isSchemaAware, usesDatabaseObjectTreeMode } from "@/lib/database/databa
 import { DATABASE_SCHEMA_QUALIFIED_TYPES } from "@/lib/database/databaseCapabilitySets";
 import { jdbcDriverProfileUsesSchemaQualification } from "@/lib/database/jdbcDialect";
 import * as api from "@/lib/backend/api.ts";
+import { latestDorisPreviewPartition } from "@/lib/table/dorisPartitionPreview.ts";
 import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/database/sqlServerLinkedServers.ts";
 import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
 import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
@@ -33,6 +34,12 @@ export interface BuildTableSelectSqlOptions {
   whereInput?: string;
   /** Time-series quick-open: inject a rolling `time` window when no WHERE is supplied. */
   injectDefaultTimeSeriesWhere?: boolean;
+  /** Connection used to resolve the Doris/StarRocks preview partition hint.
+   * Omitted by callers that cannot query the server (exports, SQL templates). */
+  connectionId?: string;
+  /** Doris/StarRocks preview: pin the scan to this partition when no WHERE is
+   * supplied. Usually resolved from `connectionId` by `buildTableSelectSql`. */
+  defaultPartition?: string;
   includeRowId?: boolean;
   catalog?: string;
   database?: string;
@@ -457,5 +464,24 @@ export function requiresEagerTableMetadataForDataOpen(databaseType: DatabaseType
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {
   if (options.databaseType === "victoriametrics") return metricRangeQuery(options.tableName);
-  return api.buildTableSelectSql(options);
+  return api.buildTableSelectSql(await withDorisDefaultPartition(options));
+}
+
+/**
+ * Pins an unfiltered Doris/StarRocks data-tab preview to the newest partition
+ * so clusters with partition-count sql block rules (errCode 2 "reach
+ * partition_num") can still serve quick-open previews. Users who typed their
+ * own WHERE keep it untouched, and non-partitioned tables resolve to no hint.
+ */
+async function withDorisDefaultPartition(options: BuildTableSelectSqlOptions): Promise<BuildTableSelectSqlOptions> {
+  if (!options.connectionId || normalizeWhereInput(options.whereInput)) return options;
+  const defaultPartition = await latestDorisPreviewPartition({
+    connectionId: options.connectionId,
+    databaseType: options.databaseType,
+    catalog: options.catalog,
+    database: options.database,
+    schema: options.schema,
+    tableName: options.tableName,
+  });
+  return defaultPartition ? { ...options, defaultPartition } : options;
 }

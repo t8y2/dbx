@@ -79,6 +79,12 @@ pub struct TableDataSelectSqlOptions {
     /// keep the historical unbounded scan semantics.
     #[serde(default)]
     pub inject_default_time_series_where: bool,
+    /// Doris/StarRocks quick-open ergonomics: restrict the scan to this
+    /// partition when no WHERE was supplied, so partitioned tables do not
+    /// hit sql block rules that cap the number of scanned partitions
+    /// (for example `partition_num`). Ignored by other engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_partition: Option<String>,
     #[serde(default)]
     pub include_row_id: bool,
 }

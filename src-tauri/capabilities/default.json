@@ -58,7 +58,6 @@
     "fs:allow-read-file",
     "fs:allow-open",
     "fs:allow-read",
-    "process:default",
     "shell:allow-open",
     "updater:default",
     "window-state:default"

@@ -12,14 +12,13 @@ const mocks = vi.hoisted(() => ({
   discardDownloadedUpdate: vi.fn(),
   getAppVersion: vi.fn(),
   listen: vi.fn(),
-  relaunch: vi.fn(),
+  relaunchApp: vi.fn(),
   persist: vi.fn(),
   toast: vi.fn(),
 }));
 vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
-vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: mocks.relaunch }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 const settings = reactive({ updateDownloadSource: "official", ignoredUpdateVersion: "", updateNotificationsEnabled: true, autoDownloadUpdates: true, autoUpdateApp: true, toolbarItems: { checkUpdates: true } });
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: settings, updateEditorSettingsAndPersist: mocks.persist }) }));
@@ -206,7 +205,7 @@ describe("silent update lifecycle", () => {
     expect(updater.showUpdateDialog.value).toBe(false);
     expect(mocks.toast).not.toHaveBeenCalled();
     expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
-    expect(mocks.relaunch).not.toHaveBeenCalled();
+    expect(mocks.relaunchApp).not.toHaveBeenCalled();
   });
   it("keeps the cloud icon available while downloading, and closing does not cancel", async () => {
     const pending = deferred<typeof cache>();
@@ -233,7 +232,7 @@ describe("silent update lifecycle", () => {
     expect(mocks.downloadUpdate).not.toHaveBeenCalled();
     expect(mocks.installDownloadedUpdate).toHaveBeenCalledWith("cached", "1.1.0");
     expect(prepare.mock.invocationCallOrder[0]).toBeLessThan(mocks.installDownloadedUpdate.mock.invocationCallOrder[0]);
-    expect(mocks.installDownloadedUpdate.mock.invocationCallOrder[0]).toBeLessThan(mocks.relaunch.mock.invocationCallOrder[0]);
+    expect(mocks.installDownloadedUpdate.mock.invocationCallOrder[0]).toBeLessThan(mocks.relaunchApp.mock.invocationCallOrder[0]);
     expect(release).not.toHaveBeenCalled();
   });
   it("preparation failure retains the package and repeated clicks cannot bypass preparation", async () => {
@@ -257,13 +256,13 @@ describe("silent update lifecycle", () => {
     expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
   });
   it("retries only restart after relaunch fails", async () => {
-    mocks.relaunch.mockRejectedValueOnce(new Error("restart failed"));
+    mocks.relaunchApp.mockRejectedValueOnce(new Error("restart failed"));
     const updater = mount();
     await updater.checkUpdates({ silent: true });
     await updater.installDownloadedUpdate();
     await updater.restartApp();
     expect(mocks.installDownloadedUpdate).toHaveBeenCalledOnce();
-    expect(mocks.relaunch).toHaveBeenCalledTimes(2);
+    expect(mocks.relaunchApp).toHaveBeenCalledTimes(2);
   });
   it("persists ignore before deleting a ready cache", async () => {
     const updater = mount();
@@ -369,7 +368,7 @@ describe("silent update lifecycle", () => {
     await updater.installDownloadedUpdate();
     expect(updater.phase.value).toBe("idle");
     expect(updater.updateDownloaded.value).toBe(false);
-    expect(mocks.relaunch).not.toHaveBeenCalled();
+    expect(mocks.relaunchApp).not.toHaveBeenCalled();
   });
 
   it("holds the preparation barrier through install and releases it only on failure", async () => {

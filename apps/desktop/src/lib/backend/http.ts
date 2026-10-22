@@ -5679,6 +5679,10 @@ export async function installDownloadedUpdate(_cacheId: string, _expectedVersion
   throw new Error("In-app update installation is only available in the desktop app.");
 }
 
+export async function relaunchApp(): Promise<void> {
+  throw new Error("Restarting DBX is only available in the desktop app.");
+}
+
 export async function getAppVersion(): Promise<string> {
   const res: { version: string } = await get("/api/version");
   return res.version;

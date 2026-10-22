@@ -90,9 +90,6 @@ importers:
       '@tauri-apps/plugin-fs':
         specifier: 2.5.1
         version: 2.5.1
-      '@tauri-apps/plugin-process':
-        specifier: 2.3.1
-        version: 2.3.1
       '@tauri-apps/plugin-shell':
         specifier: 2.3.5
         version: 2.3.5
@@ -300,22 +297,22 @@ importers:
     optionalDependencies:
       '@dbx-app/cli-darwin-arm64':
         specifier: 0.4.127
-        version: link:../cli-darwin-arm64
+        version: 0.4.127
       '@dbx-app/cli-darwin-x64':
         specifier: 0.4.127
-        version: link:../cli-darwin-x64
+        version: 0.4.127
       '@dbx-app/cli-linux-arm64-gnu':
         specifier: 0.4.127
-        version: link:../cli-linux-arm64-gnu
+        version: 0.4.127
       '@dbx-app/cli-linux-x64-gnu':
         specifier: 0.4.127
-        version: link:../cli-linux-x64-gnu
+        version: 0.4.127
       '@dbx-app/cli-win32-arm64':
         specifier: 0.4.127
-        version: link:../cli-win32-arm64
+        version: 0.4.127
       '@dbx-app/cli-win32-x64':
         specifier: 0.4.127
-        version: link:../cli-win32-x64
+        version: 0.4.127
 
   packages/cli-darwin-arm64: {}
 
@@ -348,22 +345,22 @@ importers:
     optionalDependencies:
       '@dbx-app/mcp-darwin-arm64':
         specifier: 0.4.127
-        version: link:../mcp-darwin-arm64
+        version: 0.4.127
       '@dbx-app/mcp-darwin-x64':
         specifier: 0.4.127
-        version: link:../mcp-darwin-x64
+        version: 0.4.127
       '@dbx-app/mcp-linux-arm64-gnu':
         specifier: 0.4.127
-        version: link:../mcp-linux-arm64-gnu
+        version: 0.4.127
       '@dbx-app/mcp-linux-x64-gnu':
         specifier: 0.4.127
-        version: link:../mcp-linux-x64-gnu
+        version: 0.4.127
       '@dbx-app/mcp-win32-arm64':
         specifier: 0.4.127
-        version: link:../mcp-win32-arm64
+        version: 0.4.127
       '@dbx-app/mcp-win32-x64':
         specifier: 0.4.127
-        version: link:../mcp-win32-x64
+        version: 0.4.127
 
   packages/mcp-win32-arm64: {}
 
@@ -633,78 +630,78 @@ packages:
   '@codemirror/view@6.43.0':
     resolution: {integrity: sha512-V7ZCLQO3Jus9hzh2jVCCPW3mO4IBMr43O37PqSUYautJSnnJF41YlgLw21x0fLJTYvJ+Vkm6Gp+qKGH9pltgXA==}
 
-  '@dbx-app/cli-darwin-arm64@0.4.120':
-    resolution: {integrity: sha512-ovoiVCL+7xSDEs9m5tsZZ+2Q/ECFEP1Ra0BTvvrsIRjo40XQR9h4RandyUQwhXAabARU/diIXC2muXesCn8hoQ==}
+  '@dbx-app/cli-darwin-arm64@0.4.127':
+    resolution: {integrity: sha512-NTRkHKBHyD59o2s+57xpB+ly4zct2ZKnLbEPxwNWXTBOybch4oWeQ9Op+FLcVqlIFmbSWKrjzOs+NYaRyhf4ug==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/cli-darwin-x64@0.4.120':
-    resolution: {integrity: sha512-RUYrhxhWIUIEKBg8rrtOCBBmy/2im42F1AjE0G4GCnfZ6C7nwISeXKp//qiw1nU0a11bkw/IngNbT31foSP+RA==}
+  '@dbx-app/cli-darwin-x64@0.4.127':
+    resolution: {integrity: sha512-1kdOI6bMzVLN4rsz1hcvh0bN9hyi3i7bAVPHNK32Kgu7njz80VJhS2b4j4E+UcvImHI3Yyqji1v8loGTkNKmuA==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/cli-linux-arm64-gnu@0.4.120':
-    resolution: {integrity: sha512-wx3lG4cwE7DNBQZSf9oE4XOtq8msK1JpiS8eiySTyPA9WwO3HAmtAiXWyZncTKrEMRSQ1JWopvdcLFcxoACqyA==}
+  '@dbx-app/cli-linux-arm64-gnu@0.4.127':
+    resolution: {integrity: sha512-Ntbe4pDCNx0Dh9/PusLl+zD+lpJLrrr1cXToALZMKTDwI/prazKmSQxMpRO0U+JehteJgrwwBrz7knMgBcZZ+Q==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@dbx-app/cli-linux-x64-gnu@0.4.120':
-    resolution: {integrity: sha512-H5v7LU3hV0MMJXxSgGoxyWHuP5PRVfhYN5l3zyP7n3j+sZOXpF9EKLPgKjuL2N80ZipShjJ3m5bZYsbOH2JeXA==}
+  '@dbx-app/cli-linux-x64-gnu@0.4.127':
+    resolution: {integrity: sha512-Vi7RFToL6cqeNIImkNmNpEMm3hXvrqxgRm7nKhsX1Gh974fAYJgpxmJgglr/WkiCBeBlDRvWh6/ywh7kM3hF9g==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@dbx-app/cli-win32-arm64@0.4.120':
-    resolution: {integrity: sha512-B9MDxs822ksk9i3Xe7vPB3appEMrwhckCVE4Q6aC7mMNcA1gFewmzg+Wp/hPcXeqMC/IYxyYtsqe0xIB94yTNA==}
+  '@dbx-app/cli-win32-arm64@0.4.127':
+    resolution: {integrity: sha512-X6eUfeLi4bz+Gv9UIkfLwQ13hcz3XVHBJJiHYRBGcfr45fxvJAJvIBfwXWEMaPmFBpKgnWTYr/+AhfkergI12g==}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/cli-win32-x64@0.4.120':
-    resolution: {integrity: sha512-r5JyknyykBESBkEnBzZuUZvCjfdZxwCyk/1mITM8ESw8QDnfgCAAJmlJTwC7MvwkuloXi/xiAJLq19cFekVmOw==}
+  '@dbx-app/cli-win32-x64@0.4.127':
+    resolution: {integrity: sha512-Adaj3OhcixHeOiazGum/iOGAnhDa5SZ59Ha6j0cWMfBluWBmU79lboghElFFkuyDPk6ZS3EherpO3PJraV2Tsg==}
     cpu: [x64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/mcp-darwin-arm64@0.4.120':
-    resolution: {integrity: sha512-eHNisWnHHc7+MktpUn9uMez5o/ewkbZcqmL6X8SL+ylUnzxJcsase9v7jHB1fkGOtb4AYBuFCkGgvrqJ5CIvjw==}
+  '@dbx-app/mcp-darwin-arm64@0.4.127':
+    resolution: {integrity: sha512-UZ52Ng9Xn3w0PRP4lWpvLrTjsUP32dPGw2PmCpdreTRjCr0nT0O4SsiOLsu8BoL/ah8gDhxZ6KzPuyyVgy4aqg==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/mcp-darwin-x64@0.4.120':
-    resolution: {integrity: sha512-4e4kNMzb4J3Pljb6kiD2MXDi5g9Xm9lZYO6i6KYsrG8tgsr4qrgpiWyBm+pLlcoTEHdkxXb6fghvgxHo19w81w==}
+  '@dbx-app/mcp-darwin-x64@0.4.127':
+    resolution: {integrity: sha512-8oNtVvzQ3z6F4RvIiHTSQysDf/ww7ns5XrrEj8k69QWgCJDA7Z3hmjq094TypyuWOxMHp9OTskUbE8XTSSZmUg==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/mcp-linux-arm64-gnu@0.4.120':
-    resolution: {integrity: sha512-IgsTDcjV41H8i8Bpw9PXtmWMZJPWuM5k+pttttrbN4quoXV8xLPEXbtS9TEpiQFMmRJd3oiGTUCFaeHvrppNwA==}
+  '@dbx-app/mcp-linux-arm64-gnu@0.4.127':
+    resolution: {integrity: sha512-Z3EzSTU9qXl3YMGfcusbC5JKW66BQ6WO7O1f8AKYr7+X6i72DXjxNyKeAMpftXtbM2t1ts2ia4U/kJ2Z6NyRJg==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@dbx-app/mcp-linux-x64-gnu@0.4.120':
-    resolution: {integrity: sha512-WRVgp36/6N9rRGkNVbX8vN9ce48NY3aiey2NoDMyhbLrY3hfk3Md8StU4NZ4I+n3UeW3nNvTnU4jqNtT4r6T0w==}
+  '@dbx-app/mcp-linux-x64-gnu@0.4.127':
+    resolution: {integrity: sha512-L7EqsCLn3tIg26ahTzZmRfdqv2oVRYHmCeVCNx9gJpTpRXvfEUGcIuSZ4Vhhf5OQAAfWMtAbGWSp1N+b2SBcLg==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@dbx-app/mcp-win32-arm64@0.4.120':
-    resolution: {integrity: sha512-31qDHOMco5Dq7CV25AEo7UUumxlj8RaxUSzh/jRbQfLHLsk8Jw8iAhelJoI/uM5Xs1AXvlzt4khvZArE/ej/ow==}
+  '@dbx-app/mcp-win32-arm64@0.4.127':
+    resolution: {integrity: sha512-6IGJkLRFszkoYcfQ+odMNA0EJk3Lcl3c3ScYEvwcH5o/aOJFfzJr2rbYJP/fEg25fZ6/ZJNuG+/KdnlQph3Fqw==}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/mcp-win32-x64@0.4.120':
-    resolution: {integrity: sha512-RtqY8MtI+lYDl669HqnkDhNyU9S8LdmCsdACxU6j2SgogFGmyJ8OcuvrCFg7zjdQ0yB6J9p1+K2ts/3NijOFXw==}
+  '@dbx-app/mcp-win32-x64@0.4.127':
+    resolution: {integrity: sha512-MdlWLIfG/N+ilQUFzmbVDDcrZWuT/Dhz36oa4ptjI0EZvs0PWPFdo1HOaR2h5KnReD4xX4k6SUPOYmsdXKrabg==}
     cpu: [x64]
     os: [win32]
     hasBin: true
@@ -1686,9 +1683,6 @@ packages:
 
   '@tauri-apps/plugin-fs@2.5.1':
     resolution: {integrity: sha512-9Lz+Jopp6QyeEWhlpkMx4R/+P9HgR+AVAI4vOZhlT8Xaymtz8iVI/Ov984/XTqgJz/5gz5NretqPB/XEMS3NhQ==}
-
-  '@tauri-apps/plugin-process@2.3.1':
-    resolution: {integrity: sha512-nCa4fGVaDL/B9ai03VyPOjfAHRHSBz5v6F/ObsB73r/dA3MHHhZtldaDMIc0V/pnUw9ehzr2iEG+XkSEyC0JJA==}
 
   '@tauri-apps/plugin-shell@2.3.5':
     resolution: {integrity: sha512-jewtULhiQ7lI7+owCKAjc8tYLJr92U16bPOeAa472LHJdgaibLP83NcfAF2e+wkEcA53FxKQAZ7byDzs2eeizg==}
@@ -4516,40 +4510,40 @@ snapshots:
       style-mod: 4.1.4
       w3c-keyname: 2.2.8
 
-  '@dbx-app/cli-darwin-arm64@0.4.120':
+  '@dbx-app/cli-darwin-arm64@0.4.127':
     optional: true
 
-  '@dbx-app/cli-darwin-x64@0.4.120':
+  '@dbx-app/cli-darwin-x64@0.4.127':
     optional: true
 
-  '@dbx-app/cli-linux-arm64-gnu@0.4.120':
+  '@dbx-app/cli-linux-arm64-gnu@0.4.127':
     optional: true
 
-  '@dbx-app/cli-linux-x64-gnu@0.4.120':
+  '@dbx-app/cli-linux-x64-gnu@0.4.127':
     optional: true
 
-  '@dbx-app/cli-win32-arm64@0.4.120':
+  '@dbx-app/cli-win32-arm64@0.4.127':
     optional: true
 
-  '@dbx-app/cli-win32-x64@0.4.120':
+  '@dbx-app/cli-win32-x64@0.4.127':
     optional: true
 
-  '@dbx-app/mcp-darwin-arm64@0.4.120':
+  '@dbx-app/mcp-darwin-arm64@0.4.127':
     optional: true
 
-  '@dbx-app/mcp-darwin-x64@0.4.120':
+  '@dbx-app/mcp-darwin-x64@0.4.127':
     optional: true
 
-  '@dbx-app/mcp-linux-arm64-gnu@0.4.120':
+  '@dbx-app/mcp-linux-arm64-gnu@0.4.127':
     optional: true
 
-  '@dbx-app/mcp-linux-x64-gnu@0.4.120':
+  '@dbx-app/mcp-linux-x64-gnu@0.4.127':
     optional: true
 
-  '@dbx-app/mcp-win32-arm64@0.4.120':
+  '@dbx-app/mcp-win32-arm64@0.4.127':
     optional: true
 
-  '@dbx-app/mcp-win32-x64@0.4.120':
+  '@dbx-app/mcp-win32-x64@0.4.127':
     optional: true
 
   '@dbx-app/plugin-cli-darwin-arm64@0.1.9':
@@ -5229,10 +5223,6 @@ snapshots:
       '@tauri-apps/api': 2.11.0
 
   '@tauri-apps/plugin-fs@2.5.1':
-    dependencies:
-      '@tauri-apps/api': 2.11.0
-
-  '@tauri-apps/plugin-process@2.3.1':
     dependencies:
       '@tauri-apps/api': 2.11.0
 

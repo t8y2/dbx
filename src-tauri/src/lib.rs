@@ -1799,7 +1799,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
@@ -2906,6 +2905,7 @@ pub fn run() {
             commands::mcp::install_native_mcp_server,
             commands::mcp::uninstall_mcp_server,
             commands::mcp::uninstall_npm_mcp_server,
+            commands::app_relaunch::relaunch_app,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
             commands::update::get_system_proxy_url,

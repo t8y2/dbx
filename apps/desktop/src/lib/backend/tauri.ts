@@ -3484,6 +3484,11 @@ export async function installDownloadedUpdate(cacheId: string, expectedVersion: 
   return invoke("install_downloaded_update", { cacheId, expectedVersion });
 }
 
+export async function relaunchApp(): Promise<void> {
+  // macOS relaunches through LaunchServices so the new process keeps its local-network grant.
+  return invoke("relaunch_app");
+}
+
 export async function getAppVersion(): Promise<string> {
   const { getVersion } = await import("@tauri-apps/api/app");
   return getVersion();

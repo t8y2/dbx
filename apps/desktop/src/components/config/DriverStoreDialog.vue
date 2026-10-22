@@ -183,8 +183,7 @@ async function applyDriverStoreDir(kind: DriverStoreDirKind, newDir: string | nu
     };
     toast(t("driverStore.driverStoreDirSuccess", { target }));
     // Restart the app to use the new paths
-    const { relaunch } = await import("@tauri-apps/plugin-process");
-    relaunch();
+    await api.relaunchApp();
   } catch (e: any) {
     toast(t("driverStore.driverStoreDirMigrationFailed", { error: backendError(e) }), 5000);
   } finally {

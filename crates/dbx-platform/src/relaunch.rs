@@ -44,7 +44,7 @@ pub fn app_bundle_path(executable: &Path) -> Option<PathBuf> {
 #[cfg(any(target_os = "macos", test))]
 fn relaunch_script(waiter_pid: u32, forwarded_env: &[(String, String)]) -> String {
     let open = if forwarded_env.is_empty() {
-        "/usr/bin/open -n \"$1\"".to_string()
+        "exec /usr/bin/open -n \"$1\"".to_string()
     } else {
         let env_args = forwarded_env
             .iter()
@@ -52,7 +52,9 @@ fn relaunch_script(waiter_pid: u32, forwarded_env: &[(String, String)]) -> Strin
             .collect::<String>();
         format!("/usr/bin/open -n{env_args} \"$1\" || exec /usr/bin/open -n \"$1\"")
     };
-    format!("while /bin/kill -0 {waiter_pid} 2>/dev/null; do /bin/sleep 0.1; done; exec {open}")
+    // Keep the shell alive for the first open so an unsupported --env option
+    // can return to it and run the fallback. exec would bypass that fallback.
+    format!("while /bin/kill -0 {waiter_pid} 2>/dev/null; do /bin/sleep 0.1; done; {open}")
 }
 
 /// Spawns a detached helper that waits for `waiter_pid` to exit, then opens `bundle` through
@@ -153,6 +155,22 @@ mod tests {
             ],
         );
         assert!(script.contains("--env 'DBX_DATA_DIR=/tmp/dbx' --env 'DBX_SECRET_KEY_FILE=/tmp/key file'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_runs_the_fallback_when_open_rejects_env() {
+        // Simulate an older open rejecting --env, then observe the fallback
+        // without launching an app. Execute the actual generated shell script.
+        let script = relaunch_script(u32::MAX, &[("DBX_DATA_DIR".to_string(), "/tmp/dbx".to_string())])
+            .replacen("/usr/bin/open", "/usr/bin/false", 1)
+            .replace("/usr/bin/open", "/bin/echo");
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &script, "dbx-relaunch", "/Applications/Test App.app"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "/Applications/Test App.app");
     }
 
     /// Exercises the real helper against a throwaway bundle. Needs a macOS GUI session, so it is

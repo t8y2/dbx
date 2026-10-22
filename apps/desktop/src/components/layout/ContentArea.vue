@@ -85,6 +85,7 @@ import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPane
 import { objectDependencyTarget, isObjectDependencySection, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import DataGridFreezeFirstColumnControl from "@/components/grid/DataGridFreezeFirstColumnControl.vue";
 import DataGridStatusSqlControl from "@/components/grid/DataGridStatusSqlControl.vue";
+import type { DataGridSqlPreview } from "@/components/grid/dataGridSqlPreview";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
 import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
@@ -113,6 +114,7 @@ function preloadDataGridComponent() {
 
 const QueryEditor = defineAsyncComponent({ loader: () => import("@/components/editor/QueryEditor.vue"), loadingComponent: QueryLoadingState, delay: 0 });
 const DataGrid = defineAsyncComponent(loadDataGridComponent);
+const DataGridSqlPreviewDialog = defineAsyncComponent(() => import("@/components/grid/DataGridSqlPreviewDialog.vue"));
 const QueryResultTransferDialog = defineAsyncComponent(() => import("@/components/transfer/QueryResultTransferDialog.vue"));
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
 const RedisQueryConsoleOutput = defineAsyncComponent(() => import("@/components/redis/RedisQueryConsoleOutput.vue"));
@@ -437,6 +439,41 @@ function viewObjectDependencySql(context: ObjectDependencyTarget, sql: string) {
 const canOpenTableImport = computed(() => supportsTableImport(activeEffectiveDatabaseType.value));
 const activeVectorConnection = computed(() => connectionStore.getConfig(props.activeTab.connectionId) ?? props.activeConnection);
 const activeDataTabExecutionDatabase = computed(() => dataTabExecutionDatabase(props.activeConnection, props.activeTab.database, activeDataTabTableMeta.value?.catalog));
+const tableSqlPreview = ref<{
+  preview: DataGridSqlPreview;
+  connectionId: string;
+  database: string;
+  schema?: string;
+  catalog?: string;
+} | null>(null);
+
+function viewTableSql(preview: DataGridSqlPreview) {
+  const tab = props.activeTab;
+  if (tab.mode !== "data") return;
+  const meta = activeDataTabTableMeta.value;
+  tableSqlPreview.value = {
+    preview,
+    connectionId: tab.connectionId,
+    // Query tabs need the logical database inside the catalog, not the pool's internal database.
+    database: tab.database,
+    schema: meta?.schema ?? tab.schema,
+    catalog: meta?.catalog ?? tab.catalog,
+  };
+}
+
+function openTableSqlInNewQuery(sql: string) {
+  const snapshot = tableSqlPreview.value;
+  if (!snapshot?.connectionId || !sql.trim()) return;
+  tableSqlPreview.value = null;
+  queryStore.createTab(snapshot.connectionId, snapshot.database, undefined, "query", snapshot.schema, sql, snapshot.catalog, { forceNew: true, schemaQualifiesSql: true });
+}
+
+watch(
+  () => props.activeTab.id,
+  () => {
+    tableSqlPreview.value = null;
+  },
+);
 const activeSqlStatementParameterOptions = computed(() =>
   sqlStatementParameterOptionsForCompatibility(activeEffectiveDatabaseType.value, activeEffectiveDatabaseType.value === "opengauss" ? connectionStore.databaseCompatibilityMode(activeResultConnectionId.value, activeResultDatabase.value) : undefined),
 );
@@ -1170,13 +1207,12 @@ watch(
     // surface (a background group's editor) must never redirect the global
     // view when its own tab finishes executing.
     if (props.editorOnly) return;
-    // A batch run reports its progress statement by statement, and only the
-    // summary view shows that, so a run of several statements opens there
-    // instead of on the first statement's grid. The switch is recorded against
-    // the run it happened in: a user who picks another view mid-run keeps it,
-    // and the next run switches again.
+    // Show statement-by-statement progress only when summary is the configured
+    // default; otherwise this watcher would override the execution entry point's
+    // result-grid selection. Record the switch per run so a user's subsequent
+    // manual view selection survives progress updates.
     const batchExecution = props.activeTab.batchSqlExecution;
-    if (batchExecution && batchExecution.finishedAt === undefined && batchExecution.total > 1 && props.activeOutputView === "result" && props.activeTab.uiState?.batchSummaryExecutionId !== batchExecution.executionId) {
+    if (settingsStore.editorSettings.multiStatementDefaultView === "summary" && batchExecution && batchExecution.finishedAt === undefined && batchExecution.total > 1 && props.activeOutputView === "result" && props.activeTab.uiState?.batchSummaryExecutionId !== batchExecution.executionId) {
       queryStore.updateTabUiState(props.activeTab.id, { activeOutputView: "summary", batchSummaryExecutionId: batchExecution.executionId });
       emit("update:activeOutputView", props.activeTab.id, "summary");
       return;
@@ -2152,7 +2188,7 @@ defineExpose({
           </div>
         </Pane>
         <Pane v-if="(resultsPaneOpen || resultOnly) && !editorOnly" class="min-h-0" :size="resultOnly ? 100 : resultsPaneSize" :min-size="resultOnly ? 100 : 20">
-          <div data-query-result-surface class="h-full flex flex-col border border-transparent" :style="activeResultColor ? { borderColor: activeResultColor } : undefined">
+          <div data-query-result-surface class="h-full flex flex-col">
             <!--
               The shared result surface (resultOnly) is always mounted regardless of
               whether the active tab has run a query yet, and this toolbar is the only
@@ -2673,12 +2709,12 @@ defineExpose({
             />
 
             <div v-else-if="activeOutputView === 'summary'" class="flex flex-1 min-h-0 min-w-0 overflow-auto bg-background">
-              <div v-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
+              <div v-if="summaryItems.length === 0" class="flex flex-1 h-full min-w-0 items-center justify-center text-sm text-muted-foreground">
                 <Loader2 v-if="activeTab.isExecuting" class="mr-2 h-4 w-4 animate-spin" />
                 <template v-if="activeTab.isExecuting">{{ t("executionSummary.executing") }}</template>
                 <template v-else>{{ t("executionSummary.empty") }}</template>
               </div>
-              <div v-else class="flex min-h-full min-w-[46rem] flex-col">
+              <div v-else class="flex flex-1 min-h-full min-w-[46rem] flex-col">
                 <div v-if="batchExecutionProgress" class="z-10 shrink-0 border-b bg-background/95 px-3 py-2 backdrop-blur">
                   <div class="mb-1.5 flex items-center gap-3 text-xs">
                     <span class="font-medium">{{ activeTab.isExecuting ? t("executionSummary.executing") : t("executionSummary.finished") }}</span>
@@ -3360,6 +3396,7 @@ defineExpose({
           :editable="!activeTab.tableMetaPending && (isTableDataEditable(activeEffectiveDatabaseType, activeTableMeta?.primaryKeys ?? [], activeTableMeta?.tableType) || !!influxDbV1DeleteSaveHandler)"
           :custom-save-handler="influxDbV1DeleteSaveHandler"
           context="table-data"
+          @view-sql="viewTableSql"
           :initial-where-input="activeTab.whereInput"
           :database-type="activeEffectiveDatabaseType"
           :connection-id="activeTab.connectionId"
@@ -3742,6 +3779,7 @@ defineExpose({
       <DamengRoleAdmin :key="activeTab.id" :connection="activeConnection" />
     </template>
 
+    <DataGridSqlPreviewDialog v-if="tableSqlPreview" :preview="tableSqlPreview.preview" :can-open-query="!!tableSqlPreview.connectionId" @close="tableSqlPreview = null" @open-query="openTableSqlInNewQuery" />
     <Dialog v-model:open="resultRunRenameOpen">
       <DialogContent class="sm:max-w-[400px]">
         <DialogHeader>

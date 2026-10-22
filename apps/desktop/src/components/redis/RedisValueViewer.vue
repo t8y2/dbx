@@ -70,6 +70,7 @@ import { decompressRedisValue, decodeBase64RedisValue, decodePickle, decodeProto
 import { nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
 import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
 import RedisHorizontalScrollbar from "@/components/redis/RedisHorizontalScrollbar.vue";
+import RedisPluginCodecView from "@/components/redis/RedisPluginCodecView.vue";
 import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/lib/common/safeJsonFormat";
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
@@ -209,6 +210,9 @@ const stringValueView = ref<RedisValueFormat>(readStoredRedisValueFormat() ?? "u
 const memberValueView = ref<RedisValueFormat>(readStoredRedisValueFormat() ?? "utf8");
 const stringValueCodec = ref<RedisValueCodec>(readStoredRedisValueCodec() ?? "none");
 const memberValueCodec = ref<RedisValueCodec>(readStoredRedisValueCodec() ?? "none");
+const stringPluginCodecView = ref(false);
+const memberPluginCodecView = ref(false);
+const pluginCodecContext = computed(() => ({ db: props.db, keyRaw: props.keyRaw, redisType: data.value?.data.kind ?? "string" }));
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonUnicodeMode = ref(readRedisJsonUnicodeMode());
 const redisJsonDecoded = computed(() => redisJsonUnicodeMode.value === "decoded");
@@ -654,7 +658,7 @@ const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.bina
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
 // kvrocks 位图不是字符串，写回会成为字符串，因此位图详情只读
 const canEditCurrentStringFormat = computed(() => !isBitmapKind.value && !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
-const showStringEditActions = computed(() => canEditCurrentStringFormat.value);
+const showStringEditActions = computed(() => !stringPluginCodecView.value && canEditCurrentStringFormat.value);
 const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
 const stringJsonRawBaseline = ref("");
 const stringJsonDraftBaseline = ref("");
@@ -856,7 +860,7 @@ const zsetRows = computed<RedisCollectionRow<RedisZsetItem>[]>(() =>
 );
 
 /** True when Ctrl+F content find applies (STRING, RedisJSON, or open member detail). */
-const valueSearchSupported = computed(() => showMemberDetail.value || isStringLikeKind.value || redisKind.value === "json");
+const valueSearchSupported = computed(() => !(showMemberDetail.value ? memberPluginCodecView.value : stringPluginCodecView.value) && (showMemberDetail.value || isStringLikeKind.value || redisKind.value === "json"));
 // Resolve exactly the surface rendered by the active codec/view, including fallbacks.
 const activeSearchTree = computed(() => {
   const member = showMemberDetail.value;
@@ -1613,6 +1617,7 @@ function setStringValueFormat(format: RedisValueFormat) {
 
 function setStringValueCodec(codec: RedisValueCodec) {
   if (isStringValueTruncated.value && codec !== "none") return;
+  stringPluginCodecView.value = false;
   stringValueCodec.value = codec;
   rememberRedisValueCodec(codec);
 }
@@ -1640,6 +1645,7 @@ function setMemberValueFormat(format: RedisValueFormat) {
 }
 
 function setMemberValueCodec(codec: RedisValueCodec) {
+  memberPluginCodecView.value = false;
   memberValueCodec.value = codec;
   rememberRedisValueCodec(codec);
 }
@@ -1853,7 +1859,10 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
       // kvrocks 位图复用字符串的预览/编码渲染链路；位图不允许 JSON 视图与编辑，
       // 因为它并不是字符串（写回会改变服务端类型）。
       const allowJsonText = loadedValue.data.kind === "string";
-      if (loadedValue.data.truncated) stringValueCodec.value = "none";
+      if (loadedValue.data.truncated) {
+        stringValueCodec.value = "none";
+        stringPluginCodecView.value = false;
+      }
       const detail = formatRedisMemberDetail(loadedValue.data.content, { allowJsonText });
       // Issue #10922: detected JSON opens pretty-printed, detected structured
       // codecs open decoded — unless the user pinned an explicit format/codec.
@@ -3053,7 +3062,9 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             @disable="disableAutoRefresh"
             @select="selectAutoRefreshInterval"
           />
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
+          <Button v-if="!stringPluginCodecView" variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"
+            ><Copy class="h-3.5 w-3.5"
+          /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"
             ><ClipboardCopy class="h-3.5 w-3.5"
           /></Button>
@@ -3128,24 +3139,25 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               variant="ghost"
               size="sm"
               class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
-              :class="{ 'bg-background shadow-sm': stringValueCodec === codec }"
+              :class="{ 'bg-background shadow-sm': !stringPluginCodecView && stringValueCodec === codec }"
               :disabled="isStringValueTruncated && codec !== 'none'"
               :title="isStringValueTruncated && codec !== 'none' ? t('redis.largeStringPreviewActionUnavailable') : undefined"
               @click="setStringValueCodec(codec)"
             >
               {{ redisCodecLabel(codec) }}
             </Button>
+            <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': stringPluginCodecView }" :disabled="isStringValueTruncated || hasUnsavedRedisDraft" @click="stringPluginCodecView = true">{{ t("redis.pluginCodecLabel") }}</Button>
           </RedisHorizontalScrollbar>
           <Badge v-if="stringValueDetectionLabel" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.detectedBadgeTitle')" :aria-label="t('redis.detectedBadgeTitle')">{{ stringValueDetectionLabel }}</Badge>
           <FileArchive v-if="!isStringValueTruncated && stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
           <span class="flex-1" />
-          <label v-if="isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec)" class="flex items-center gap-1.5 text-muted-foreground">
+          <label v-if="!stringPluginCodecView && (isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
+        <div v-if="!stringPluginCodecView" class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
           <span class="shrink-0 text-muted-foreground">{{ t("redis.viewRowLabel") }}</span>
           <RedisHorizontalScrollbar>
             <Button
@@ -3167,8 +3179,9 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
           </div>
         </div>
+        <RedisPluginCodecView v-if="stringPluginCodecView && !isStringValueTruncated" :raw-base64="stringValueDetail.base64Text" :context="pluginCodecContext" />
         <RedisJsonEditor
-          v-if="stringValueView === 'json' && stringValueDetail.json && stringValueCodec === 'none'"
+          v-else-if="stringValueView === 'json' && stringValueDetail.json && stringValueCodec === 'none'"
           ref="stringJsonEditorRef"
           :search-highlights="stringSearchHighlights"
           v-model="editValue"
@@ -3987,18 +4000,19 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
             <span class="shrink-0 text-muted-foreground">{{ t("redis.codecRowLabel") }}</span>
             <RedisHorizontalScrollbar>
-              <Button v-for="codec in REDIS_VALUE_CODEC_ORDER" :key="codec" variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': memberValueCodec === codec }" @click="setMemberValueCodec(codec)">
+              <Button v-for="codec in REDIS_VALUE_CODEC_ORDER" :key="codec" variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !memberPluginCodecView && memberValueCodec === codec }" @click="setMemberValueCodec(codec)">
                 {{ redisCodecLabel(codec) }}
               </Button>
+              <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': memberPluginCodecView }" :disabled="hasUnsavedRedisDraft" @click="memberPluginCodecView = true">{{ t("redis.pluginCodecLabel") }}</Button>
             </RedisHorizontalScrollbar>
             <span class="flex-1" />
-            <label v-if="isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec)" class="flex items-center gap-1.5 text-muted-foreground">
+            <label v-if="!memberPluginCodecView && (isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
               <WrapText class="h-3.5 w-3.5" />
               {{ t("redis.wordWrap") }}
               <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
             </label>
           </div>
-          <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
+          <div v-if="!memberPluginCodecView" class="flex h-9 items-center gap-2 border-b px-5 text-xs">
             <span class="shrink-0 text-muted-foreground">{{ t("redis.viewRowLabel") }}</span>
             <RedisHorizontalScrollbar>
               <Button
@@ -4020,9 +4034,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
             </div>
           </div>
+          <RedisPluginCodecView v-if="memberPluginCodecView" :raw-base64="selectedMemberDetail.base64Text" :context="pluginCodecContext" />
           <RedisJsonEditor
             :search-highlights="memberSearchHighlights"
-            v-if="isEditingHashJson"
+            v-else-if="isEditingHashJson"
             ref="memberJsonEditorRef"
             v-model="memberEditValue"
             class="min-h-0 flex-1"
@@ -4138,7 +4153,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               {{ t("grid.save") }}
             </Button>
           </template>
-          <template v-else-if="isEditingHashJson">
+          <template v-else-if="!memberPluginCodecView && isEditingHashJson">
             <Button variant="ghost" :disabled="savingMember || !memberValueChanged" @click="discardHashJsonEdit">
               {{ t("grid.discard") }}
             </Button>
@@ -4148,11 +4163,11 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               {{ t("grid.save") }}
             </Button>
           </template>
-          <Button v-else-if="canEditCurrentMemberFormat" variant="outline" @click="startEditMember">
+          <Button v-else-if="!memberPluginCodecView && canEditCurrentMemberFormat" variant="outline" @click="startEditMember">
             <Pencil class="h-4 w-4" />
             {{ t("redis.editMember") }}
           </Button>
-          <Button variant="outline" @click="copyText(redisClipboardSafeText(memberCopyText))">
+          <Button v-if="!memberPluginCodecView" variant="outline" @click="copyText(redisClipboardSafeText(memberCopyText))">
             <Copy class="h-4 w-4" />
             {{ t("redis.copyMember") }}
           </Button>

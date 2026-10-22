@@ -1868,9 +1868,18 @@ fn replace_sqlserver_create_with_alter(source: &str) -> String {
 }
 
 fn build_sqlserver_alter_view_sql(schema: Option<&str>, name: &str, source: &str) -> String {
+    // A view definition fetched from SQL Server carries the same header comment
+    // block a routine does. Matching the CREATE prefix at offset 0 made the
+    // rewrite miss on those, so the body kept its own `CREATE VIEW` underneath a
+    // freshly prepended `ALTER VIEW ... AS` header — two conflicting statements
+    // in one save (issue #13004). Mirror the routine path: locate the first
+    // statement start, match there, and keep the leading prefix untouched.
+    let statement_start = leading_sql_statement_start(source);
+    let executable = &source[statement_start..];
     let existing_view_statement = Regex::new(r"(?i)^CREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+|^ALTER\s+VIEW\s+").unwrap();
-    if existing_view_statement.is_match(source) {
-        return ensure_semicolon(&existing_view_statement.replace(source, "ALTER VIEW "));
+    if existing_view_statement.is_match(executable) {
+        let replaced = existing_view_statement.replace(executable, "ALTER VIEW ");
+        return ensure_semicolon(&format!("{}{}", &source[..statement_start], replaced));
     }
 
     format!("ALTER VIEW {} AS\n{}", sqlserver_qualified_name(schema, name), ensure_semicolon(source))
@@ -2245,6 +2254,48 @@ mod tests {
         .unwrap();
 
         assert_eq!(sql, "ALTER VIEW [dbo].[new_view] AS\nSELECT\n  *\nFROM AppInfo;");
+    }
+
+    #[test]
+    fn sqlserver_commented_view_source_preserves_comments_and_uses_alter_view() {
+        // SQL Server returns view definitions with the same header comment block
+        // a routine carries. The view rewrite used to match its CREATE prefix at
+        // offset 0, so the comment made it miss and the saved script became
+        // `ALTER VIEW ... AS` followed by the untouched `CREATE VIEW ...` body —
+        // two conflicting statements (issue #13004).
+        let source = "-- =============================================\n-- Author: DBX\n-- =============================================\n\nCREATE VIEW [dbo].[v_demo]\nAS\nSELECT id FROM users;";
+        let expected = "-- =============================================\n-- Author: DBX\n-- =============================================\n\nALTER VIEW [dbo].[v_demo]\nAS\nSELECT id FROM users;";
+
+        assert_sqlserver_editable_and_executable(ObjectSourceKind::View, source, expected);
+    }
+
+    #[test]
+    fn sqlserver_block_commented_view_source_preserves_comment_and_uses_alter_view() {
+        let source = "/* keep this view header */\nCREATE OR ALTER VIEW dbo.v_demo AS SELECT id FROM users;";
+        let expected = "/* keep this view header */\nALTER VIEW dbo.v_demo AS SELECT id FROM users;";
+
+        assert_sqlserver_editable_and_executable(ObjectSourceKind::View, source, expected);
+    }
+
+    #[test]
+    fn sqlserver_commented_alter_view_source_remains_unchanged() {
+        let source = "-- keep this note\nALTER VIEW dbo.v_demo AS SELECT id FROM users;";
+
+        assert_sqlserver_editable_and_executable(ObjectSourceKind::View, source, source);
+    }
+
+    #[test]
+    fn sqlserver_unclosed_block_commented_view_source_is_not_rewritten() {
+        // An unclosed block comment has no statement start, so nothing is
+        // rewritten: the whole payload stays the view body and only gets the
+        // ALTER VIEW header, exactly like a bare SELECT body does.
+        let source = "/* unclosed header\nCREATE VIEW dbo.v_demo AS SELECT id FROM users;";
+
+        assert_sqlserver_editable_and_executable(
+            ObjectSourceKind::View,
+            source,
+            "ALTER VIEW [dbo].[usp_demo] AS\n/* unclosed header\nCREATE VIEW dbo.v_demo AS SELECT id FROM users;",
+        );
     }
 
     #[test]

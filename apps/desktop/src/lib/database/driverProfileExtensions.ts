@@ -1,3 +1,4 @@
+import { COCKROACHDB_DRIVER_PROFILE_EXTENSION } from "@/lib/database/cockroachdbProfile";
 import { DOLT_DRIVER_PROFILE_EXTENSION } from "@/lib/database/doltProfile";
 import type { SqlCompletionObject, SqlCompletionTable, SqlStatementKind } from "@/lib/sql/sqlCompletion";
 import type { ConnectionConfig, QueryTab, TableNameFilter, TreeNodeType } from "@/types/database";
@@ -48,11 +49,15 @@ export type DriverProfileExtensionDefinition = {
   completionObjects?: (context: DriverProfileSqlCompletionContext) => SqlCompletionObject[];
   completionTables?: (context: DriverProfileSqlCompletionContext) => SqlCompletionTable[];
   sqlBuiltinTerms?: () => string;
+  /** 叠加到方言关键字表上，用于 profile 专有语法（例如 CockroachDB 的 FAMILY）。 */
+  sqlKeywords?: () => readonly string[];
+  /** 叠加到方言函数表上，用于 profile 专有函数。 */
+  functionSignatures?: () => Map<string, string[]>;
   routineSignatures?: () => Map<string, string[]>;
   databaseWorkspace?: DriverProfileDatabaseWorkspace;
 };
 
-export const DRIVER_PROFILE_EXTENSIONS = [DOLT_DRIVER_PROFILE_EXTENSION] as const satisfies readonly DriverProfileExtensionDefinition[];
+export const DRIVER_PROFILE_EXTENSIONS = [DOLT_DRIVER_PROFILE_EXTENSION, COCKROACHDB_DRIVER_PROFILE_EXTENSION] as const satisfies readonly DriverProfileExtensionDefinition[];
 
 export function driverProfileExtension(driverProfile?: string): DriverProfileExtensionDefinition | undefined {
   const normalized = driverProfile?.trim().toLowerCase();
@@ -84,6 +89,14 @@ export function driverProfileHasCompletionCandidates(driverProfile: string | und
 
 export function driverProfileSqlBuiltinTerms(driverProfile?: string): string {
   return driverProfileExtension(driverProfile)?.sqlBuiltinTerms?.() ?? "";
+}
+
+export function driverProfileSqlKeywords(driverProfile?: string): readonly string[] {
+  return driverProfileExtension(driverProfile)?.sqlKeywords?.() ?? [];
+}
+
+export function driverProfileFunctionSignatures(driverProfile?: string): Map<string, string[]> {
+  return driverProfileExtension(driverProfile)?.functionSignatures?.() ?? new Map();
 }
 
 export function driverProfileRoutineSignatures(driverProfile?: string): Map<string, string[]> {

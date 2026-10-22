@@ -134,6 +134,8 @@ import { spannerDisplayDatabase, spannerSchemaDisplayName } from "@/lib/connecti
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes, collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findNodePathByIdentity, nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
+import { sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
+import { invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex } from "@/lib/sidebar/sidebarTableSearchIndex";
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
 import { simpleModeEmptyShellNeedsConfirmedLoad, treeNodeLoadedChildrenContentPresent } from "@/lib/sidebar/treeLoadedChildrenMarker";
 import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
@@ -165,7 +167,7 @@ import {
   type DatabaseObjectTreeKind,
 } from "@/lib/table/tableTree";
 import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNodeSchemaCachePrefix } from "@/lib/sidebar/treeNodeContext";
-import { decodeSchemaTreeCache, decodeTableSearchIndexManifest, encodeSchemaTreeCache, encodeTableSearchIndexManifest, type TableSearchIndexManifestEntry } from "@/lib/metadata/schemaTreeCache";
+import { decodeSchemaTreeCache, decodeTableSearchIndexManifest, encodeSchemaTreeCache, encodeTableSearchIndexManifest, SCHEMA_TREE_CACHE_TTL_MS, type TableSearchIndexManifestEntry } from "@/lib/metadata/schemaTreeCache";
 import { sortSidebarTreeChildrenByNameKeepingTableVGroups, sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
 import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
@@ -581,11 +583,13 @@ export const useConnectionStore = defineStore("connection", () => {
   const schemaListCache = ref<Record<string, string[]>>({});
   const sidebarSearchQuery = ref("");
   const sidebarTableSearchQueries = ref<Record<string, string>>({});
-  // Local table indexes are immutable snapshots until an explicit refresh.
-  // Keep both resolved values and in-flight reads here so regex typing does
-  // not reread SQLite for every keypress or issue duplicate concurrent loads.
-  const sidebarTableSearchIndexCache = new Map<string, TableInfo[] | null>();
-  const sidebarTableSearchIndexInFlight = new Map<string, Promise<TableInfo[] | null>>();
+  type SidebarTableSearchIndexCacheEntry = { entries: TableInfo[] | null; stale: boolean; staleAt: number };
+  // Cached indexes are published immediately, then ordinary global search can
+  // revalidate them in the background. Keep resolved values and in-flight
+  // reads here so typing does not reread SQLite or duplicate cache reads.
+  const sidebarTableSearchIndexCache = new Map<string, SidebarTableSearchIndexCacheEntry>();
+  const sidebarTableSearchIndexInFlight = new Map<string, Promise<SidebarTableSearchIndexCacheEntry>>();
+  const sidebarTableSearchBuildingScopes = new Map<string, SidebarTableSearchIndexScope>();
   const sidebarTableSearchIndexConnectionGenerations = new Map<string, number>();
   const sidebarTableSearchIndexScopeGenerations = new Map<string, number>();
   const sidebarTableSearchIndexPersistenceQueues = new Map<string, Promise<void>>();
@@ -715,6 +719,7 @@ export const useConnectionStore = defineStore("connection", () => {
     ttlMs: METADATA_LIST_PAGE_CACHE_TTL_MS,
     maxEntries: METADATA_LIST_PAGE_CACHE_MAX_ENTRIES,
   });
+  const sidebarObjectSearchRevision = ref(0);
   const metadataTraceLogger: MetadataLoadTraceLogger = (event) => {
     console.debug("[DBX][metadata-load:trace]", event);
   };
@@ -2661,12 +2666,15 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function invalidateMetadataCaches(match: MetadataCacheInvalidation): number {
+    const { tableName: _tableName, ...searchMatch } = match;
+    const invalidatedSearchPages = metadataListPageCache.invalidate({ ...searchMatch, kind: "sidebar-object-search-page" });
+    sidebarObjectSearchRevision.value += 1;
     for (const config of connections.value) {
       if (config.db_type === "tdengine" && (!match.connectionId || match.connectionId === config.id)) {
         tdengineTreeCacheRevisions.set(config.id, (tdengineTreeCacheRevisions.get(config.id) ?? 0) + 1);
       }
     }
-    return metadataListPageCache.invalidate(match) + invalidateTableMetadataCache(match) + invalidateObjectBrowserRowsCache(match);
+    return invalidatedSearchPages + metadataListPageCache.invalidate(match) + invalidateTableMetadataCache(match) + invalidateObjectBrowserRowsCache(match);
   }
 
   function invalidateMetadataCachesByTreePrefix(prefix: string) {
@@ -3020,6 +3028,82 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  async function searchSidebarObjects(node: TreeNode, query: string, signal: AbortSignal, onProgress?: (children: TreeNode[]) => void): Promise<TreeNode[]> {
+    const revision = sidebarObjectSearchRevision.value;
+    const connectionId = node.connectionId;
+    if (!query.trim() || !connectionId || node.database == null || !connectedIds.value.has(connectionId) || signal.aborted) return [];
+    const config = getConfig(connectionId);
+    const groupTypes = objectTypesForGroupNode(node.type);
+    const objectTypes = (groupTypes ?? sidebarObjectTypesForScope(config, node.database, node.schema)).filter((type) => type !== "TABLE" && type !== "VIEW" && type !== "MATERIALIZED_VIEW");
+    if (!objectTypes.length) return [];
+    const querySchema = connectionObjectTreeQuerySchema(config, node.database, node.schema);
+    const effectiveSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
+    const pageSize = sidebarObjectGroupPageSize();
+    let objects: ObjectInfo[] = [];
+    const childrenFromObjects = () => {
+      const children = groupTypes
+        ? objectGroupChildrenFromObjects({ node, parentNodeId: objectGroupRefreshParentId(node) ?? node.id, effectiveSchema, objectTypes, objects })
+        : markPackageNodesExpandable(buildSimpleObjectTreeNodes({ nodeId: node.id, connectionId, database: node.database!, schema: effectiveSchema, objects, databaseType: effectiveDatabaseTypeForConnection(config) }));
+      return children.map((child) => ({ ...child, catalog: node.catalog, linkedServer: node.linkedServer, linkedCatalog: node.linkedCatalog, linkedSchema: node.linkedSchema }));
+    };
+    const publish = () => {
+      if (!signal.aborted) onProgress?.(childrenFromObjects());
+    };
+    const pageScope = (offset: number) => metadataListCacheScope({ kind: "sidebar-object-search-page", connectionId, database: node.database!, schema: querySchema, nodeKind: node.type, objectTypes, searchFilter: query, limit: pageSize, offset, extra: { catalog: node.catalog ?? "" } });
+    const loadRemotePage = (offset: number, force: boolean) =>
+      loadCachedMetadataListPage<ObjectInfo[]>(
+        pageScope(offset),
+        async () => {
+          signal.throwIfAborted();
+          const executionId = `sidebar-search-${uuid()}`;
+          const cancel = () => {
+            void api.cancelQuery(executionId).catch(() => false);
+          };
+          signal.addEventListener("abort", cancel, { once: true });
+          try {
+            const rows = await api.listObjects(connectionId, node.database!, querySchema, objectTypes, query, pageSize, offset, node.catalog, undefined, executionId);
+            signal.throwIfAborted();
+            if (revision !== sidebarObjectSearchRevision.value) throw new DOMException("Search metadata invalidated", "AbortError");
+            return rows;
+          } finally {
+            signal.removeEventListener("abort", cancel);
+          }
+        },
+        { force },
+      );
+
+    let offset = 0;
+    let refreshFromStart = false;
+
+    // Publish consecutive cached pages immediately. A stale page remains useful
+    // as the first paint. Any cached snapshot is then revalidated from zero so
+    // a fresh-but-incomplete cache cannot hide objects added outside the app.
+    while (!signal.aborted && connectedIds.value.has(connectionId)) {
+      const cached = metadataListPageCache.get(pageScope(offset), { allowStale: true });
+      if (!cached) break;
+      refreshFromStart = true;
+      objects.push(...(cached.value as ObjectInfo[]));
+      publish();
+      if (cached.stale || cached.value.length < pageSize) break;
+      offset += cached.value.length;
+    }
+
+    if (refreshFromStart) {
+      objects = [];
+      offset = 0;
+    }
+    while (!signal.aborted && connectedIds.value.has(connectionId)) {
+      const page = await loadRemotePage(offset, refreshFromStart);
+      signal.throwIfAborted();
+      objects.push(...page);
+      publish();
+      if (page.length < pageSize) break;
+      offset += page.length;
+    }
+    if (signal.aborted || !connectedIds.value.has(connectionId)) return [];
+    return childrenFromObjects();
+  }
+
   async function loadPagedSimpleTableChildren(options: {
     nodeId: string;
     connectionId: string;
@@ -3319,7 +3403,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function sidebarTableSearchTreeCacheKey(parent: TreeNode): string | null {
     if (!parent.connectionId || !hasTreeNodeDatabaseContext(parent)) return null;
-    if (parent.type === "group-tables") return objectGroupCacheKey(parent);
+    if (sidebarIndexedObjectGroupTypes.has(parent.type)) return objectGroupCacheKey(parent);
     if (parent.type !== "database" && parent.type !== "schema" && parent.type !== "linked-server-schema") return null;
     const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
     const cacheVersion = ownerAwareMetadataCacheVersion(getConfig(parent.connectionId), simpleObjectDisplay ? "objects-simple-v9" : "objects-grouped-v9", parent.schema);
@@ -3338,17 +3422,18 @@ export const useConnectionStore = defineStore("connection", () => {
     return `${treeCacheKey}:table-search-index-v1`;
   }
 
-  function getSidebarTableSearchIndexMemoryCache(cacheKey: string): TableInfo[] | null | undefined {
+  function getSidebarTableSearchIndexMemoryCache(cacheKey: string): SidebarTableSearchIndexCacheEntry | undefined {
     if (!sidebarTableSearchIndexCache.has(cacheKey)) return undefined;
-    const cached = sidebarTableSearchIndexCache.get(cacheKey) ?? null;
+    const cached = sidebarTableSearchIndexCache.get(cacheKey)!;
+    const current = cached.stale || Date.now() >= cached.staleAt ? { ...cached, stale: true } : cached;
     sidebarTableSearchIndexCache.delete(cacheKey);
-    sidebarTableSearchIndexCache.set(cacheKey, cached);
-    return cached;
+    sidebarTableSearchIndexCache.set(cacheKey, current);
+    return current;
   }
 
-  function setSidebarTableSearchIndexMemoryCache(cacheKey: string, entries: TableInfo[] | null) {
+  function setSidebarTableSearchIndexMemoryCache(cacheKey: string, value: SidebarTableSearchIndexCacheEntry) {
     sidebarTableSearchIndexCache.delete(cacheKey);
-    sidebarTableSearchIndexCache.set(cacheKey, entries);
+    sidebarTableSearchIndexCache.set(cacheKey, value);
     while (sidebarTableSearchIndexCache.size > SIDEBAR_TABLE_SEARCH_INDEX_CACHE_MAX_ENTRIES) {
       const oldest = sidebarTableSearchIndexCache.keys().next().value;
       if (oldest === undefined) break;
@@ -3470,14 +3555,13 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function manifestTableSearchScopeMatchesTreeRefresh(scope: TableSearchIndexManifestEntry, node: TreeNode): boolean {
     if (!node.connectionId || scope.connectionId !== node.connectionId) return false;
-    const pathMatch = scope.path?.some((pathNode) => pathNode.id === node.id && pathNode.type === node.type && pathNode.connectionId === node.connectionId);
+    const pathMatch = scope.path?.some((pathNode) => pathNode.id === node.id && pathNode.type === node.type && pathNode.connectionId === node.connectionId && pathNode.database === node.database && pathNode.schema === node.schema && pathNode.catalog === node.catalog);
     if (pathMatch) return true;
     if (node.type === "connection") return true;
     if (node.type === "doris-catalog") return scope.catalog === node.catalog;
     if (node.type === "database") return scope.database === node.database && scope.catalog === node.catalog;
     if (node.type === "schema") return scope.database === node.database && scope.schema === node.schema && scope.catalog === node.catalog;
-    if (node.type === "linked-server-schema") return scope.parentNodeId === node.id && scope.nodeType === node.type;
-    if (node.type === "group-tables") return scope.parentNodeId === node.id && scope.nodeType === node.type;
+    if (node.type === "linked-server-schema" || sidebarIndexedObjectGroupTypes.has(node.type)) return nodeMatchesRegexScopeIdentity(node, scope.parentNodeId, scope);
     return false;
   }
 
@@ -3510,6 +3594,7 @@ export const useConnectionStore = defineStore("connection", () => {
       sidebarTableSearchIndexScopeGenerations.set(cacheKey, sidebarTableSearchIndexScopeGeneration(cacheKey) + 1);
       sidebarTableSearchIndexCache.delete(cacheKey);
       sidebarTableSearchIndexInFlight.delete(cacheKey);
+      invalidateSidebarTableSearchBuild(cacheKey);
     }
 
     const deletePersisted = Promise.all(
@@ -3555,7 +3640,8 @@ export const useConnectionStore = defineStore("connection", () => {
       }));
     const connectionNode = findConnectionNode(connectionId);
     const activeScopes = connectionNode ? collectActiveTableSearchScopes(connectionNode) : [];
-    await invalidateSidebarTableSearchIndexScopes([...manifestScopes, ...activeScopes], (scope) => scope.connectionId === connectionId);
+    const buildingScopes = [...sidebarTableSearchBuildingScopes.values()].filter((scope) => scope.connectionId === connectionId);
+    await invalidateSidebarTableSearchIndexScopes([...manifestScopes, ...activeScopes, ...buildingScopes], (scope) => scope.connectionId === connectionId);
   }
 
   async function invalidateSidebarTableSearchIndexesForTreeRefresh(node: TreeNode): Promise<void> {
@@ -3572,7 +3658,8 @@ export const useConnectionStore = defineStore("connection", () => {
         cacheKey: scope.cacheKey,
       }));
     const activeScopes = collectActiveTableSearchScopes(node);
-    await invalidateSidebarTableSearchIndexScopes([...manifestScopes, ...activeScopes], (scope) => manifestTableSearchScopeMatchesTreeRefresh(scope, node));
+    const buildingScopes = [...sidebarTableSearchBuildingScopes.values()].filter((scope) => manifestTableSearchScopeMatchesTreeRefresh(scope, node));
+    await invalidateSidebarTableSearchIndexScopes([...manifestScopes, ...activeScopes, ...buildingScopes], (scope) => manifestTableSearchScopeMatchesTreeRefresh(scope, node));
   }
 
   async function registerSidebarTableSearchIndexScope(parent: TreeNode, cacheKey: string): Promise<void> {
@@ -3591,7 +3678,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await sidebarTableSearchIndexManifestWriteQueue;
   }
 
-  async function readSidebarTableSearchIndexCache(cacheKey: string, connectionId: string): Promise<TableInfo[] | null> {
+  async function readSidebarTableSearchIndexCache(cacheKey: string, connectionId: string): Promise<SidebarTableSearchIndexCacheEntry> {
     const cached = getSidebarTableSearchIndexMemoryCache(cacheKey);
     if (cached !== undefined) return cached;
     const pending = sidebarTableSearchIndexInFlight.get(cacheKey);
@@ -3602,9 +3689,11 @@ export const useConnectionStore = defineStore("connection", () => {
       const decoded = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
       const index = decoded?.tableSearchIndex;
       const entries = index ? index.entries.map((entry) => ({ name: entry.name, table_type: entry.tableType, ...(entry.comment !== undefined ? { comment: entry.comment } : {}) })) : null;
-      if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return null;
-      setSidebarTableSearchIndexMemoryCache(cacheKey, entries);
-      return entries;
+      const indexedAt = index ? Date.parse(index.indexedAt) : Number.NaN;
+      const value = { entries, stale: decoded?.isStale ?? false, staleAt: Number.isFinite(indexedAt) ? indexedAt + SCHEMA_TREE_CACHE_TTL_MS : Date.now() };
+      if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return { entries: null, stale: false, staleAt: Date.now() };
+      setSidebarTableSearchIndexMemoryCache(cacheKey, value);
+      return value;
     })();
     sidebarTableSearchIndexInFlight.set(cacheKey, read);
     try {
@@ -3626,22 +3715,49 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!parent) return null;
     const cacheKey = sidebarTableSearchIndexCacheKey(parent);
     if (!cacheKey) return null;
-    const entries = await readSidebarTableSearchIndexCache(cacheKey, parent.connectionId || "");
+    const { entries } = await readSidebarTableSearchIndexCache(cacheKey, parent.connectionId || "");
     if (entries) await registerSidebarTableSearchIndexScope(parent, cacheKey);
     return entries;
   }
 
-  async function loadSidebarTableSearchIndexScopes(): Promise<Array<{ scope: TableSearchIndexManifestEntry; entries: TableInfo[] }>> {
+  async function loadSidebarTableSearchIndexScopes(includeScope: (scope: TableSearchIndexManifestEntry) => boolean = () => true): Promise<Array<{ scope: TableSearchIndexManifestEntry; entries: TableInfo[]; stale: boolean }>> {
     const manifest = await loadSidebarTableSearchIndexManifest();
-    const scopes: Array<{ scope: TableSearchIndexManifestEntry; entries: TableInfo[] }> = [];
+    const scopes: Array<{ scope: TableSearchIndexManifestEntry; entries: TableInfo[]; stale: boolean }> = [];
     for (const scope of manifest) {
-      const entries = await readSidebarTableSearchIndexCache(scope.cacheKey, scope.connectionId);
-      if (entries) scopes.push({ scope, entries });
+      if (!includeScope(scope)) continue;
+      const cached = await readSidebarTableSearchIndexCache(scope.cacheKey, scope.connectionId);
+      if (cached.entries) scopes.push({ scope, entries: cached.entries, stale: cached.stale });
     }
     return scopes;
   }
 
+  async function ensureSidebarTableSearchIndex(parentNodeId: string, query: string, identity?: SidebarRegexScopeIdentity, options?: { refresh?: boolean; connectedOnly?: boolean }): Promise<TableInfo[] | null> {
+    const parent = identity ? findSidebarTreeNodeByIdentity(parentNodeId, identity) : findNode(treeNodes.value, parentNodeId);
+    if (!parent) return null;
+    const cacheKey = sidebarTableSearchIndexCacheKey(parent);
+    if (!cacheKey) return null;
+    return loadOrBuildSidebarTableSearchIndex(
+      cacheKey,
+      query,
+      () => loadSidebarTableSearchIndex(parentNodeId, identity),
+      () => (options?.connectedOnly && !connectedIds.value.has(parent.connectionId || "") ? Promise.resolve(null) : refreshSidebarTableSearchIndex(parentNodeId, identity)),
+      options?.refresh,
+    );
+  }
+
   async function refreshSidebarTableSearchIndex(parentNodeId: string, identity?: SidebarRegexScopeIdentity): Promise<TableInfo[] | null> {
+    const parent = identity ? findSidebarTreeNodeByIdentity(parentNodeId, identity) : findNode(treeNodes.value, parentNodeId);
+    const scope = parent && sidebarTableSearchIndexScopeForNode(parent);
+    if (!scope) return null;
+    sidebarTableSearchBuildingScopes.set(scope.cacheKey, scope);
+    try {
+      return await buildSidebarTableSearchIndex(parentNodeId, identity);
+    } finally {
+      if (sidebarTableSearchBuildingScopes.get(scope.cacheKey) === scope) sidebarTableSearchBuildingScopes.delete(scope.cacheKey);
+    }
+  }
+
+  async function buildSidebarTableSearchIndex(parentNodeId: string, identity?: SidebarRegexScopeIdentity): Promise<TableInfo[] | null> {
     const parent = identity ? findSidebarTreeNodeByIdentity(parentNodeId, identity) : findNode(treeNodes.value, parentNodeId);
     if (!parent?.connectionId || !hasTreeNodeDatabaseContext(parent)) return [];
     const connectionId = parent.connectionId;
@@ -3657,7 +3773,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await ensureConnected(connectionId);
     const config = getConfig(connectionId);
     const querySchema = connectionObjectTreeQuerySchema(config, parent.database, parent.schema);
-    const objectTypes = parent.type === "group-tables" ? (objectTypesForGroupNode(parent.type) ?? undefined) : undefined;
+    const objectTypes = sidebarIndexedObjectGroupTypes.has(parent.type) ? (objectTypesForGroupNode(parent.type) ?? undefined) : undefined;
     const pageSize = sidebarObjectGroupPageSize();
     const entries: TableInfo[] = [];
     for (let offset = 0; ; offset += pageSize) {
@@ -3673,18 +3789,18 @@ export const useConnectionStore = defineStore("connection", () => {
       entries: deduped.map((entry) => ({ name: entry.name, tableType: entry.table_type, ...(entry.comment !== undefined ? { comment: entry.comment } : {}) })),
     };
     if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
-    let persisted = false;
+    let indexIsCurrent = false;
     await serializeSidebarTableSearchIndexPersistence(cacheKey, async () => {
       if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return;
-      await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache<TreeNode[]>([], Date.now(), tableSearchIndex));
+      await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache<TreeNode[]>([], Date.now(), tableSearchIndex)).catch(() => undefined);
       if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) {
         await api.deleteSchemaCachePrefix(cacheKey).catch(() => undefined);
         return;
       }
-      persisted = true;
+      indexIsCurrent = true;
     });
-    if (!persisted || !sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
-    setSidebarTableSearchIndexMemoryCache(cacheKey, deduped);
+    if (!indexIsCurrent || !sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
+    setSidebarTableSearchIndexMemoryCache(cacheKey, { entries: deduped, stale: false, staleAt: Date.now() + SCHEMA_TREE_CACHE_TTL_MS });
     await registerSidebarTableSearchIndexScope(parent, cacheKey);
     return deduped;
   }
@@ -11056,6 +11172,9 @@ export const useConnectionStore = defineStore("connection", () => {
     setSidebarTableSearchQuery,
     refreshSidebarTableSearch,
     loadSidebarTableSearchIndex,
+    ensureSidebarTableSearchIndex,
+    searchSidebarObjects,
+    sidebarObjectSearchRevision,
     loadSidebarTableSearchIndexScopes,
     refreshSidebarTableSearchIndex,
     createConnectionGroup(name: string, parentGroupId?: string | null) {

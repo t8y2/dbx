@@ -1,7 +1,7 @@
 import type { GridCellValue } from "@/lib/dataGrid/dataGridSql";
 import type { DatabaseType, ColumnInfo } from "@/types/database";
-import { binaryCellBytesToHexValue, binaryCellUtf8Text, isBlobCellColumnType, isBlobTextPreviewDatabase } from "@/lib/dataGrid/binaryCellDownload";
-import { isNumericColumnType, resolveDataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
+import { binaryCellBytesToHexValue, binaryCellUtf8Text, decodeBinaryUuidText, isBlobCellColumnType, isBlobTextPreviewDatabase } from "@/lib/dataGrid/binaryCellDownload";
+import { isNumericColumnType, isUuidColumnType, resolveDataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
 import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
 
 export interface CoerceDataGridCellValueOptions {
@@ -26,6 +26,8 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   const { value, oldValue } = options;
   if (value === "" && options.emptyStringAsNull) return null;
   if (value === "" && oldValue === null && !keepsEmptyStringInColumn(options)) return null;
+  const uuidValue = coerceUuidTextValue(options);
+  if (uuidValue !== undefined) return uuidValue;
   const blobValue = coerceBlobTextValue(options);
   if (blobValue !== undefined) return blobValue;
   const postgresArrayValue = coercePostgresArrayValue(options);
@@ -92,6 +94,8 @@ function parseBooleanInput(value: string, allowNumericAliases: boolean): boolean
 export function dataGridCellEditorText(options: { value: GridCellValue | undefined; databaseType: DatabaseType | undefined; columnInfo: Pick<ColumnInfo, "data_type"> | undefined }): string {
   const value = options.value ?? null;
   if (value === null) return "";
+  const uuidText = decodeBinaryUuidText(value, options.columnInfo?.data_type);
+  if (uuidText !== null) return uuidText;
   if (isBlobTextPreviewDatabase(options.databaseType) && isBlobCellColumnType(options.columnInfo?.data_type)) {
     const text = binaryCellUtf8Text(value, options.columnInfo?.data_type, options.databaseType);
     if (text !== null) return text;
@@ -100,6 +104,23 @@ export function dataGridCellEditorText(options: { value: GridCellValue | undefin
     return formatPostgresArrayText(value);
   }
   return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function coerceUuidTextValue(options: CoerceDataGridCellValueOptions): GridCellValue | undefined {
+  if (!isUuidColumnType(options.columnInfo?.data_type)) return undefined;
+  const originalUuid = decodeBinaryUuidText(options.oldValue, options.columnInfo?.data_type);
+  if (originalUuid !== null) {
+    if (options.value === originalUuid) return options.oldValue;
+    if (options.value.trim() === "") return null;
+    return options.value.trim();
+  }
+  if (typeof options.oldValue === "string") {
+    if (options.value === options.oldValue) return options.oldValue;
+    if (options.value.trim() === "") return null;
+    return options.value.trim();
+  }
+  if (options.value.trim() === "") return null;
+  return options.value.trim();
 }
 
 function coerceBlobTextValue(options: CoerceDataGridCellValueOptions): GridCellValue | undefined {

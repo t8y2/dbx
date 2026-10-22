@@ -746,6 +746,16 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
     }
 }
 
+fn uses_shared_database_comments(config: &ConnectionConfig) -> bool {
+    match config.db_type {
+        DatabaseType::Postgres => {
+            matches!(config.driver_profile.as_deref(), None | Some("postgres" | "opengauss" | "gaussdb"))
+        }
+        DatabaseType::OpenGauss | DatabaseType::Gaussdb => true,
+        _ => false,
+    }
+}
+
 async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
     let config = connection_config(state, connection_id).await;
     if config.as_ref().is_some_and(|config| {
@@ -768,7 +778,8 @@ async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> R
         };
     }
     if let Some(pool) = extract_pool!(pool_handle.as_ref(), Postgres) {
-        return db::postgres::list_database_metadata(&pool).await;
+        let shared_comments = config.as_ref().is_some_and(uses_shared_database_comments);
+        return db::postgres::list_database_metadata(&pool, shared_comments).await;
     }
     list_databases_once(state, connection_id).await
 }
@@ -4999,6 +5010,38 @@ for line in sys.stdin:
 
         profiled_postgres.driver_profile = Some("gaussdb".to_string());
         assert!(super::is_opengauss_family_config(&profiled_postgres));
+    }
+
+    #[test]
+    fn database_metadata_limits_shared_comments_to_verified_postgres_families() {
+        for (db_type, profile, expected) in [
+            (DatabaseType::Postgres, None, true),
+            (DatabaseType::Postgres, Some("postgres"), true),
+            (DatabaseType::Postgres, Some("opengauss"), true),
+            (DatabaseType::Postgres, Some("gaussdb"), true),
+            (DatabaseType::OpenGauss, None, true),
+            (DatabaseType::OpenGauss, Some("opengauss"), true),
+            (DatabaseType::Gaussdb, None, true),
+            (DatabaseType::Gaussdb, Some("gaussdb"), true),
+            (DatabaseType::Postgres, Some("cockroachdb"), false),
+            (DatabaseType::Postgres, Some("redshift"), false),
+            (DatabaseType::Postgres, Some("questdb"), false),
+            (DatabaseType::Postgres, Some("cloudberry"), false),
+            (DatabaseType::Postgres, Some("kwdb"), false),
+            (DatabaseType::Postgres, Some("unknown"), false),
+            (DatabaseType::Redshift, None, false),
+            (DatabaseType::Questdb, None, false),
+            (DatabaseType::Kwdb, None, false),
+            (DatabaseType::Mysql, None, false),
+        ] {
+            let mut config = test_connection_config(db_type);
+            config.driver_profile = profile.map(str::to_string);
+            assert_eq!(
+                super::uses_shared_database_comments(&config),
+                expected,
+                "unexpected shared comment support for {db_type:?} / {profile:?}"
+            );
+        }
     }
 
     #[test]
@@ -11191,7 +11234,7 @@ async fn mysql_object_source(
 ) -> Result<String, String> {
     let primary_sql = mysql_object_source_sql(database, name, kind);
     let primary_column_index = mysql_object_source_ddl_column_index(kind);
-    let mut conn = db::mysql::get_conn_with_timeout(pool, db::connection_timeout()).await?;
+    let mut conn = db::mysql::get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
 
     match read_mysql_object_source_row(&mut conn, &primary_sql, primary_column_index).await {
         Ok(source) => Ok(source),

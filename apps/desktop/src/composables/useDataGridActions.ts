@@ -9,7 +9,7 @@ import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions, tableDataPreviewRowBudget } from "@/lib/dataGrid/dataGridLargeValues";
 import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
 import { editablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
-import { markRowIdLocatorSupported, markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
+import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { loadVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
 import * as api from "@/lib/backend/api";
@@ -110,15 +110,15 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return typeof limit === "number" && limit > 0 ? { limit, offset: 0 } : undefined;
   }
 
-  function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string; previewPageSize?: number } = {}): Promise<string> {
-    const { previewPageSize, ...sqlOptions } = options;
+  function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string; previewPageSize?: number; includeRowId?: boolean } = {}): Promise<string> {
+    const { previewPageSize, includeRowId, ...sqlOptions } = options;
     const config = connectionStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
     // 已确认该连接拒绝合成行定位器（如 Hologres 拒绝 tableoid，#12647）时不再注入，
     // 避免无主键表每次打开都报错。
-    const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType) && !rowIdLocatorUnsupported(tab.connectionId);
+    const useRowId = includeRowId ?? (shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType) && !rowIdLocatorUnsupported(tab.connectionId));
     // 列投影只信任真实元数据列：tableMetaForDataTab 的 fallback 列来自查询
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *
@@ -149,18 +149,17 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
 
   // 行定位器被服务端拒绝时的降级执行（#12647）：首次带定位器的加载失败后，
   // 去掉定位器重试一次；重试成功才记住该连接，之后由 buildTableSql 直接跳过
-  // 定位器。重试也失败则还原标记，让真实的服务端错误可见。
+  // 定位器。重试失败不改共享能力状态，让真实的服务端错误可见。
   async function executeTableDataSqlWithRowIdFallback(tab: QueryTab, sql: string, executeOptions: Parameters<typeof queryStore.executeTabSql>[2], rebuildSql: () => Promise<string>): Promise<void> {
     await queryStore.executeTabSql(tab.id, sql, executeOptions);
-    if (!shouldRetryWithoutRowIdLocator(sql, tab.connectionId, tabResultFor(tab))) return;
-    markRowIdLocatorUnsupported(tab.connectionId);
+    if (!shouldRetryWithoutRowIdLocator(sql, tabResultFor(tab))) return;
     try {
       const fallbackSql = await rebuildSql();
       queryStore.updateSql(tab.id, fallbackSql);
       await queryStore.executeTabSql(tab.id, fallbackSql, executeOptions);
-      if (!shouldKeepRowIdLocatorDisabled(tabResultFor(tab))) markRowIdLocatorSupported(tab.connectionId);
+      if (shouldKeepRowIdLocatorDisabled(tabResultFor(tab))) markRowIdLocatorUnsupported(tab.connectionId);
     } catch {
-      markRowIdLocatorSupported(tab.connectionId);
+      // Keep the fallback/build error visible without changing shared capability memory.
     }
   }
 
@@ -460,7 +459,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
                 pagination: { limit: pageLimit, offset: pageOffset },
                 preserveResultDuringExecution: true,
               },
-              () => buildTableSql(tab, { whereInput, orderBy: incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset }),
+              () => buildTableSql(tab, { whereInput, orderBy: incomingSortMissing ? undefined : orderBy, limit: pageLimit, offset: pageOffset, includeRowId: false }),
             );
           } else {
             await queryStore.executeTabSql(tab.id, nextSql, {
@@ -683,6 +682,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
           offset,
           whereInput,
           orderBy: orderBy ?? tab.orderByInput,
+          includeRowId: false,
           previewPageSize: tableDataPreviewRowBudget({
             limit,
             offset,

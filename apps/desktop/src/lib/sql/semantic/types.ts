@@ -173,6 +173,8 @@ export interface SqlSemanticModel {
 export interface SqlSemanticBuildOptions {
   databaseType?: DatabaseType;
   dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris";
+  /** Connection driver profile (for example `cockroachdb`), when the caller has one. */
+  driverProfile?: string;
   /**
    * Live CodeMirror state for the document being edited, when the caller has one (i.e. this is a
    * real editor completion request, not a pure-string test/utility call). When present and its

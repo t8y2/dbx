@@ -800,6 +800,55 @@ Host rules (`crates/dbx-core/src/ai/plugin_tools.rs`):
 - Names are exposed as `<prefix>__<tool>` (`io.dbx.ssh` → `ssh__…`). Schemas are reduced to a provider-portable subset (`type`, `description`, `properties`, `required`, `items`, string `enum`, numeric/length/item bounds); argument names must match `[A-Za-z_][A-Za-z0-9_]{0,63}`.
 - Discovery times out after 8 s per connection, calls after 120 s, and results are compacted before reaching the model.
 
+## Redis value codec capability
+
+Native plugins can expose decoders in Redis String/bitmap and collection-member
+details using Manifest v1 capability metadata:
+
+```json
+{ "capabilities": [{ "id": "my-codec", "label": "My format", "kind": "redis-value-codec-v1" }] }
+```
+
+The user opens **Plugin** in the Decode row and explicitly selects a codec.
+Listing the plugins sends no value. The selection stays local to that view,
+and later visible-payload changes re-run that decoder; stale responses are
+discarded. Compatible plugins must have a native backend entrypoint.
+
+The host invokes the chosen sidecar's `redis/codec/decode` method:
+
+```json
+{
+  "codecId": "my-codec",
+  "rawBase64": "AP+A",
+  "context": { "db": 0, "keyRaw": "opaque-key-identity", "redisType": "string" }
+}
+```
+
+`rawBase64` is canonical standard Base64 of the original bytes, including NUL
+and non-UTF-8 data. `keyRaw` is the existing Redis API's opaque Key identity;
+do not reinterpret its encoding. For collection members, the bytes belong to
+the selected member/field value and `redisType` names the containing Redis
+type; no field or index identity is supplied. The plugin receives no database
+credentials, connection configuration, connection string or host driver.
+
+Return `{ "format": "json", "value": <JSON value> }` or
+`{ "format": "text", "value": "UTF-8 text" }`. The host uses its JSON tree or
+escaped text renderer, never HTML. JSON primitives, including `null`, are valid.
+JSON numbers follow JavaScript semantics; use strings for precise large integers.
+
+Calls time out after 10 seconds. Raw input and the UTF-8 serialized result
+value are each limited to 2 MiB. Truncated previews are not passed to plugins.
+Errors clear the previous decoded result; choose a built-in codec to return
+to the raw view. This surface is read-only: it never calls an encoder or
+writes data back to Redis. Plugins may expose encode and round-trip tests in
+their own workbench. External-program plugins should use binary stdin/stdout,
+bounded execution/output, and stderr for diagnostics.
+
+This requires a DBX build with the Redis plugin codec view; older hosts may
+install a plugin but do not offer it in Redis details. Package with the current
+source CLI if an older published CLI rejects `capabilities`: the current
+Manifest schema and runtime accept that field.
+
 ## Backend protocol
 
 The backend is a persistent child process with stdin/stdout reserved for the DBX protocol. Diagnostics must go to stderr.

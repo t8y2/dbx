@@ -3174,6 +3174,20 @@ fn generate_mysql_foreign_key_alter_statements(
     statements
 }
 
+/// Single `setval` statement that moves the sequence behind `column` on `full_table`
+/// (already identifier-quoted) past the column's current maximum. `MAX(...::bigint)`
+/// keeps the expression type-safe for non-integer sequence-backed columns, and the
+/// statement is a no-op when `pg_get_serial_sequence` returns NULL for an unowned
+/// sequence.
+pub(crate) fn postgres_sequence_sync_statement(full_table: &str, column: &str) -> String {
+    let quoted_column = quote_identifier(column, &DatabaseType::Postgres);
+    format!(
+        "SELECT setval(pg_get_serial_sequence({}, {})::regclass, GREATEST(COALESCE(MAX({quoted_column}::bigint), 0), 1), MAX({quoted_column}::bigint) IS NOT NULL) FROM {full_table}",
+        quote_string_literal(full_table),
+        quote_string_literal(column)
+    )
+}
+
 /// `setval` statements that move a PostgreSQL sequence or identity column past the
 /// values already in the table.
 ///
@@ -3189,14 +3203,7 @@ fn generate_postgres_sequence_sync_sql(columns: &[db::ColumnInfo], table: &str, 
                 || is_postgres_identity_extra(column.extra.as_deref())
                 || (column.is_primary_key && column_is_auto_increment(column))
         })
-        .map(|column| {
-            let quoted_column = quote_identifier(&column.name, &DatabaseType::Postgres);
-            format!(
-                "SELECT setval(pg_get_serial_sequence({}, {})::regclass, GREATEST(COALESCE(MAX({quoted_column}::bigint), 0), 1), MAX({quoted_column}::bigint) IS NOT NULL) FROM {full_table}",
-                quote_string_literal(&full_table),
-                quote_string_literal(&column.name)
-            )
-        })
+        .map(|column| postgres_sequence_sync_statement(&full_table, &column.name))
         .collect()
 }
 

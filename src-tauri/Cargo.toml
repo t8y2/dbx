@@ -51,7 +51,6 @@ tauri-plugin-fs = "2.5.0"
 tauri-plugin-single-instance = "2.4.2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "=2.10.1"
-tauri-plugin-process = "2"
 tauri-plugin-window-state = "2"
 redis = { version = "1.7.1", features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "cluster-async"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
@@ -73,6 +72,7 @@ csv = "1.4.0"
 calamine = "0.30.1"
 zip = "4.6.1"
 dbx-core = { path = "../crates/dbx-core", default-features = false }
+dbx-platform = { path = "../crates/dbx-platform", default-features = false }
 dbx-mcp = { path = "../crates/dbx-mcp", default-features = false, features = ["duckdb-sidecar", "mq-admin"] }
 dbx-tauri-consul = { path = "../crates/dbx-tauri-consul" }
 dbx-tauri-schema = { path = "../crates/dbx-tauri-schema" }
@@ -98,9 +98,13 @@ gtk = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # 与 vendored wry / tauri-runtime-wry 同版本（Cargo.lock 只有一份 0.38.x），用于在
-# 快捷键录入态运行时切换 WebView2 的浏览器加速键开关（见 commands/shortcut_recording.rs）。
+# 快捷键录入态运行时切换 WebView2 的浏览器加速键开关（见 commands/shortcut_recording.rs），
+# 以及启动兼容模式下直接探测 WebView2 环境能否创建（见 webview2_preflight.rs）。
 webview2-com = "0.38"
+# `windows` crate 与 wry/webview2-com 使用同一份 0.61，仅用其 core 类型
+# （HSTRING/PCWSTR/PWSTR/Interface），供 WebView2 预检调用 COM 接口时构造参数。
+windows = { version = "0.61", default-features = false }
 # `cast`（Settings → Settings3 的 QueryInterface）来自 windows-core 的 Interface trait，
 # 版本与 vendored wry / webview2-com-sys 一致。
 windows-core = "0.61"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

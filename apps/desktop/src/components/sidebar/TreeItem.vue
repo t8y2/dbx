@@ -49,14 +49,14 @@ import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
+import ConnectionDetailContent from "@/components/connection/ConnectionDetailContent.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import { encodeOceanBaseUrlUsername } from "@/lib/connection/connectionUrlBuilder";
-import type { ColumnInfo, ConnectionConfig, CustomTypeTreeMemberMeta, DatabaseType, TreeNode, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, CustomTypeTreeMemberMeta, DatabaseType, TreeNode, TriggerInfo } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, isSidebarCommentSupportedType, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import {
   clearActiveTableReferencePayload,
@@ -72,16 +72,13 @@ import {
 import { AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR } from "@/lib/ai/aiTableReferenceDrop";
 import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableReferenceDragFeedback } from "@/lib/editor/tableReferenceDragFeedback";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
-import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isTableVGroupGroupableRowType, selectedTableVGroupMoveTargets, tableVGroupIdFromNodeId } from "@/lib/table/tableVGroup";
 import { findTreeNodeById } from "@/lib/sql/newQueryContext";
 import { resolveTableVGroupDropTarget, setTableVGroupDropTargetNodeId, tableVGroupDropTargetNodeId } from "@/lib/sidebar/sidebarTableVGroupDrag";
-import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentation";
-import { redactConnectionStringSecrets } from "@/lib/connection/connectionStringRedaction";
 import { isExecuteSqlShortcut, isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
-import { encodeSpannerResourcePath } from "@/lib/connection/spannerResourcePath";
+import { connectionDetailRows, type ConnectionDetailRow } from "@/lib/connection/connectionDetailRows";
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
@@ -504,16 +501,6 @@ function hasActiveObjectNameFilter(node: TreeNode): boolean {
   return !!filter && (filter.includePatterns.length > 0 || filter.excludePatterns.length > 0);
 }
 
-type DetailTooltipRow = {
-  label: string;
-  value: string;
-  multiline?: boolean;
-  /** When set, renders each value on its own line (e.g. one host per line) */
-  values?: string[];
-  action?: () => void;
-  actionLabel?: string;
-};
-
 function cleanTooltipValue(value: string | number | null | undefined): string {
   return String(value ?? "").trim();
 }
@@ -534,63 +521,13 @@ function formatXuguStorageDetailValue(key: string, value: string): string {
   return value;
 }
 
-function isLocalFileConnection(config: Pick<ConnectionConfig, "db_type" | "port">): boolean {
-  return config.db_type === "sqlite" || config.db_type === "duckdb" || config.db_type === "access" || (config.db_type === "h2" && config.port === 0);
-}
-
-function hostForDisplay(host: string): string {
-  if (!host.includes(":") || host.startsWith("[") || host.includes("://") || host.includes(",")) return host;
-  return `[${host}]`;
-}
-
-// A Redis database is a numeric index; dirty stored values (e.g. redis-cli flags
-// pasted into the field) resolve to the index the backend actually connects with.
-function tooltipDatabaseValue(config: ConnectionConfig): string {
-  const database = cleanTooltipValue(config.database);
-  return config.db_type === "redis" && database ? effectiveRedisDatabaseIndex(database) : database;
-}
-
-function connectionTooltipUrl(config: ConnectionConfig): string {
-  const explicit = cleanTooltipValue(config.connection_string);
-  if (explicit) return redactConnectionStringSecrets(explicit);
-
-  const host = cleanTooltipValue(config.host);
-  if (!host) return "";
-  if (host.includes("://")) return redactConnectionStringSecrets(host);
-
-  if (isLocalFileConnection(config)) {
-    if (config.db_type === "access") return `jdbc:ucanaccess://${host}`;
-    return `${config.db_type}://${host}`;
-  }
-
-  const scheme = connectionDisplayUrlScheme(config);
-  const port = Number(config.port) > 0 ? `:${config.port}` : "";
-  const user = cleanTooltipValue(config.username);
-  const encodedUser = config.db_type === "mysql" && config.driver_profile?.trim().toLowerCase() === "oceanbase" ? encodeOceanBaseUrlUsername(user) : encodeURIComponent(user).replace(/%40/g, "@");
-  const userInfo = user ? `${encodedUser}@` : "";
-  const database = tooltipDatabaseValue(config);
-  const encodedDatabase = config.db_type === "spanner" ? encodeSpannerResourcePath(database) : encodeURIComponent(database);
-  const path = database ? `/${encodedDatabase}` : "";
-  const params = cleanTooltipValue(config.url_params);
-  const query = params ? (params.startsWith("?") ? params : `?${params}`) : "";
-  return redactConnectionStringSecrets(`${scheme}://${userInfo}${hostForDisplay(host)}${port}${path}${query}`);
-}
-
 const detailTooltip = computed(() => {
   const node = activeNode.value;
   if (node.type === "connection" && node.connectionId) {
     const config = connectionStore.getConfig(node.connectionId);
     if (!config) return null;
-    const hostLabel = isLocalFileConnection(config) ? t("connection.filePath") : t("connection.host");
-    const hostValue = cleanTooltipValue(config.host);
-    const hostValues = hostValue.includes(",")
-      ? hostValue
-          .split(",")
-          .map((h) => h.trim())
-          .filter(Boolean)
-      : [];
     const visibleFilterSummary = connectionCanConfigureSidebarVisibleDatabases(config.db_type) || config.db_type === "nacos" ? connectionStore.getSidebarVisibleFilterSummary(node.connectionId) : null;
-    const visibleFilterRow: DetailTooltipRow | null =
+    const visibleFilterRow: ConnectionDetailRow | null =
       visibleFilterSummary?.selected != null && visibleFilterSummary.total != null
         ? {
             label: t(visibleFilterSummary.mode === "namespace" ? "nacos.nacosVisibleNamespacesDetailLabel" : visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailLabel" : "visibleDatabases.detailLabel"),
@@ -599,25 +536,14 @@ const detailTooltip = computed(() => {
             actionLabel: t(visibleFilterSummary.mode === "namespace" ? "nacos.nacosVisibleNamespacesDetailActionLabel" : visibleFilterSummary.mode === "schema" ? "visibleSchemas.detailActionLabel" : "visibleDatabases.detailActionLabel", { connection: config.name }),
           }
         : null;
-    const rows: DetailTooltipRow[] = [
-      { label: t("connection.name"), value: cleanTooltipValue(config.name) },
-      { label: "URL", value: connectionTooltipUrl(config), multiline: true },
-      ...(hostValues.length > 0 ? [{ label: hostLabel, value: hostValues[0], values: hostValues } as DetailTooltipRow] : [{ label: hostLabel, value: hostValue, multiline: isLocalFileConnection(config) } as DetailTooltipRow]),
-      { label: "Port", value: Number(config.port) > 0 ? String(config.port) : "" },
-      { label: t("connection.database"), value: tooltipDatabaseValue(config) },
-      { label: t("connection.user"), value: cleanTooltipValue(config.username) },
-      { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
-      { label: t("connection.databaseInfo.productVersion"), value: cleanTooltipValue(config.database_info?.productVersion) },
-      ...(visibleFilterRow ? [visibleFilterRow] : []),
-      { label: t("connection.note"), value: cleanTooltipValue(config.note), multiline: true },
-    ].filter((row) => row.value);
+    const rows = connectionDetailRows(config, t, visibleFilterRow ?? undefined);
     return { rows };
   }
   if (node.type === "trigger" && node.meta && node.connectionId && effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) === "xugu") {
     const trigger = node.meta as TriggerInfo;
     const hasXuguDetails = trigger.level != null || trigger.condition != null || trigger.language != null || trigger.enabled != null || trigger.valid != null || trigger.created_at != null || trigger.comment != null;
     if (!hasXuguDetails) return null;
-    const rows: DetailTooltipRow[] = [
+    const rows: ConnectionDetailRow[] = [
       { label: t("objects.name"), value: visibleLabel(node) },
       { label: t("objects.triggerTiming"), value: cleanTooltipValue(trigger.timing) },
       { label: t("objects.triggerEvent"), value: cleanTooltipValue(trigger.event) },
@@ -632,7 +558,7 @@ const detailTooltip = computed(() => {
     return rows.length ? { rows } : null;
   }
   if (node.type === "tablespace" && node.xuguTablespace && node.connectionId && effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) === "xugu") {
-    const rows: DetailTooltipRow[] = xuguTablespaceDetailRows(node.xuguTablespace).map((row) => ({
+    const rows: ConnectionDetailRow[] = xuguTablespaceDetailRows(node.xuguTablespace).map((row) => ({
       label: t(`tree.xuguStorage.${row.key}`),
       value: formatXuguStorageDetailValue(row.key, row.value),
       multiline: row.multiline,
@@ -640,7 +566,7 @@ const detailTooltip = computed(() => {
     return rows.length ? { rows } : null;
   }
   if (node.type === "datafile" && node.xuguDatafile && node.connectionId && effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) === "xugu") {
-    const rows: DetailTooltipRow[] = xuguDatafileDetailRows(node.xuguDatafile).map((row) => ({
+    const rows: ConnectionDetailRow[] = xuguDatafileDetailRows(node.xuguDatafile).map((row) => ({
       label: t(`tree.xuguStorage.${row.key}`),
       value: formatXuguStorageDetailValue(row.key, row.value),
       multiline: row.multiline,
@@ -660,7 +586,7 @@ const detailTooltip = computed(() => {
   const column = node.type === "column" ? (node.meta as ColumnInfo | undefined) : undefined;
   const comment = column && "comment" in column ? column.comment : node.comment;
   if ((!comment && !column) || !isSidebarCommentSupportedType(node.type)) return null;
-  const rows: DetailTooltipRow[] = [
+  const rows: ConnectionDetailRow[] = [
     { label: t("connection.name"), value: visibleLabel(node) },
     ...(column ? [{ label: t("structureEditor.nullable"), value: t(column.is_nullable ? "structureEditor.nullable" : "structureEditor.notNull") }] : []),
     { label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true },
@@ -1035,7 +961,9 @@ const selectionVisual = computed(() => {
   return {
     selected,
     multiSelected,
-    rowSelected: selected || multiSelected,
+    // The active row can remain the keyboard lead after Ctrl/Cmd toggles it
+    // out of the selection. Only actual members should keep the highlight.
+    rowSelected: connectionStore.selectedTreeNodeIds.length > 0 ? multiSelected : selected,
     usesSelectionSetHighlight: connectionStore.connectionMultiSelectActive || connectionStore.selectedTreeNodeIds.length > 1,
   };
 });
@@ -1893,32 +1821,7 @@ function onKeydown(event: KeyboardEvent) {
         </button>
       </div>
       <template v-if="detailTooltip" #content>
-        <div class="w-max min-w-40 max-w-[min(28rem,calc(100vw-24px))] rounded-md border border-border bg-popover p-2 text-popover-foreground shadow-lg">
-          <div class="space-y-1">
-            <div v-for="row in detailTooltip.rows" :key="row.label" class="grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
-              <span class="text-muted-foreground shrink-0">{{ row.label }}</span>
-              <template v-if="row.values">
-                <div class="flex flex-col gap-0.5 font-mono text-foreground/90">
-                  <span v-for="(v, vi) in row.values" :key="vi" class="break-all">{{ v }}</span>
-                </div>
-              </template>
-              <button
-                v-else-if="row.action"
-                type="button"
-                class="w-fit rounded bg-primary/10 px-1 font-mono text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                :aria-label="row.actionLabel"
-                :title="row.actionLabel"
-                @click.stop="row.action()"
-              >
-                {{ row.value }}
-              </button>
-              <span v-else-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
-                {{ row.value }}
-              </span>
-              <span v-else class="truncate font-mono text-foreground/90" :title="row.value">{{ row.value }}</span>
-            </div>
-          </div>
-        </div>
+        <ConnectionDetailContent :rows="detailTooltip.rows" />
       </template>
     </LightTooltip>
   </div>
@@ -2020,10 +1923,6 @@ function onKeydown(event: KeyboardEvent) {
   background-color: var(--tree-connection-active-focus-bg, var(--tree-connection-active-bg));
 }
 
-.tree-item-connection-tint.tree-item-active--selection-set:focus::before {
-  background-color: var(--tree-connection-active-bg, var(--tree-connection-row-bg));
-}
-
 .tree-table-search-control {
   position: relative;
   isolation: isolate;
@@ -2068,15 +1967,33 @@ function onKeydown(event: KeyboardEvent) {
   background-color: var(--tree-connection-active-focus-bg, rgb(33 60 89)) !important;
 }
 
-/* Multi-selection treats every selected row as equal; keep focus neutral. */
-.tree-item-active--selection-set:focus {
-  background-color: var(--tree-connection-active-bg, rgb(235 235 235)) !important;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 14%, transparent);
+/* Keep every member of a multi-selection visible, including after focus leaves
+   the tree. The inset marker also distinguishes selection from hover/tint. */
+.tree-item-active--selection-set {
+  --tree-selection-set-bg: rgb(211 227 245);
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 
+:root.dark .tree-item-active--selection-set {
+  --tree-selection-set-bg: rgb(33 60 89);
+}
+
+.tree-item-active--selection-set,
+.tree-item-active--selection-set:focus,
+:root.dark .tree-item-active--selection-set,
 :root.dark .tree-item-active--selection-set:focus {
-  background-color: var(--tree-connection-active-bg, rgb(36 36 36)) !important;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent);
+  background-color: var(--tree-selection-set-bg) !important;
+}
+
+/* Colored connections paint their descendants through a separate background
+   layer; use the same selection tint on that layer as on ordinary rows. */
+.tree-item-connection-tint.tree-item-active--selection-set::before,
+.tree-item-connection-tint.tree-item-active--selection-set:focus::before {
+  /* Labels can be nested under display: contents wrappers, so keep the
+     opaque selection layer behind all content in the isolated row. */
+  z-index: -1;
+  background-color: var(--tree-selection-set-bg);
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 
 /* Locate highlight: instant warning tint, then fade on removal */

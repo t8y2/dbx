@@ -207,6 +207,7 @@ import {
   webdavSyncInspect,
   webdavSyncSecretsStatus,
   webdavSyncTest,
+  relaunchApp,
   webdavSyncUpload,
   listInstalledAgentsLocal,
   listPlugins,
@@ -403,8 +404,11 @@ import {
   readSyncMethod,
   WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY,
   WEB_DAV_SYNC_SUCCESS_EVENT,
+  readWebDavAutoUploadConfig,
+  webDavSyncTarget,
   writeWebDavAutoUploadFields,
   writeWebDavBackupSelection,
+  writeWebDavLastUploadAt,
   writeSyncMethod,
   type SyncMethod,
 } from "@/lib/webdav/webdavAutoUploadConfig";
@@ -2650,8 +2654,7 @@ async function restartDbxForDuckDbIsolation() {
   duckDbRestarting.value = true;
   try {
     await persistSettings();
-    const { relaunch } = await import("@tauri-apps/plugin-process");
-    await relaunch();
+    await relaunchApp();
   } catch (e: any) {
     toast(t("settings.restartDbxFailed", { error: e?.message || String(e) }), 5000);
   } finally {
@@ -5560,6 +5563,9 @@ async function confirmSyncSelection(selection: SyncSelection) {
       const summary = await webdavSyncUpload(config, settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
       recordWebDavSyncSuccess(config);
       writeWebDavBackupSelection(selection);
+      const currentConfig = readWebDavAutoUploadConfig();
+      const isCurrent = Boolean(currentConfig.enabled && currentConfig.webDavConfig && webDavSyncTarget(currentConfig.webDavConfig) === webDavSyncTarget(config));
+      writeWebDavLastUploadAt(config, Date.now(), isCurrent);
       return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
     });
     return;

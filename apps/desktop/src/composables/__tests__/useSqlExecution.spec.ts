@@ -517,7 +517,7 @@ describe("useSqlExecution", () => {
     expect(activeOutputView.value).toBe("result");
   });
 
-  it("opens the execution summary for a multi-statement batch when configured", async () => {
+  it("reads the latest multi-statement default view on each execution in the same tab", async () => {
     const sql = "SELECT 1;\nSELECT 2;";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
@@ -536,9 +536,11 @@ describe("useSqlExecution", () => {
       activeOutputView,
     });
 
-    await execution.tryExecute();
-
-    expect(activeOutputView.value).toBe("summary");
+    for (const view of ["summary", "result", "summary"] as const) {
+      useSettingsStore().editorSettings.multiStatementDefaultView = view;
+      await execution.tryExecute();
+      expect(activeOutputView.value).toBe(view);
+    }
   });
 
   it("does not change the current output view when a background tab finishes", async () => {

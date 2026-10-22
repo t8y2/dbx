@@ -648,7 +648,8 @@ sf`,
       // synchronous snippet-only localResult.
       await provide(false);
       await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(store.listCompletionColumns).toHaveBeenCalled();
+      const columnFetchArgs = store.listCompletionColumns.mock.calls[0];
+      expect(columnFetchArgs?.slice(0, 3)).toEqual(["connection", "demo", "users"]);
     } finally {
       vi.useFakeTimers();
     }
@@ -709,4 +710,55 @@ describe("quoted identifier completion results (issue #12008)", () => {
       vi.useFakeTimers();
     }
   }, 8000);
+});
+
+describe.each([false, true])("bare alias-dot column resolution (semantic=%s)", (semanticCompletionEnabled) => {
+  beforeEach(() => vi.useRealTimers());
+
+  const aliasDotSql = "SELECT * FROM users u WHERE u.";
+
+  it("fetches column metadata at a bare `alias.` position when nothing is cached yet (#12227 #12692)", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: aliasDotSql }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users" }]);
+    store.listCompletionColumns.mockResolvedValue([
+      { name: "id", table: "users" },
+      { name: "email", table: "users" },
+    ]);
+    const result = await provide(false);
+    const columnFetchArgs = store.listCompletionColumns.mock.calls[0];
+    expect(columnFetchArgs?.slice(0, 3)).toEqual(["connection", "demo", "users"]);
+    expect(result?.options.some((option) => option.label === "id")).toBe(true);
+  });
+
+  it("still serves cached columns synchronously at a bare `alias.` position without a remote fetch", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: aliasDotSql }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users" }]);
+    store.lookupLocalCompletionColumns.mockReturnValue([{ name: "id", table: "users" }]);
+    const result = await provide(false);
+    expect(result?.options.some((option) => option.label === "id")).toBe(true);
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("keeps an empty non-qualifier position from fetching metadata", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: "SELECT * FROM users u WHERE " }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users" }]);
+    await provide(false);
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("keeps schema-qualified table dots on the instant local table path", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: "SELECT * FROM myschema." }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users", schema: "myschema" }]);
+    const result = await provide(false);
+    expect(store.listCompletionTables).not.toHaveBeenCalled();
+    expect(result?.options.some((option) => option.label === "users")).toBe(true);
+  });
+
+  it("fetches schema-qualified column metadata at a bare `schema.table.` position", async () => {
+    const { provide, store } = createHarness({ databaseType: "postgres", dialect: "postgres", modelValue: "SELECT * FROM myschema.users WHERE myschema.users." }, undefined, semanticCompletionEnabled);
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users", schema: "myschema" }]);
+    store.listCompletionColumns.mockResolvedValue([{ name: "id", table: "users", schema: "myschema" }]);
+    const result = await provide(false);
+    expect(result?.options.some((option) => option.label === "id")).toBe(true);
+  });
 });

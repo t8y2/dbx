@@ -36,6 +36,10 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   // Fifth argument: the custom prompt context (globals, templates, skill listing).
   runAgentStreamCustoms: [] as unknown[],
   savedConversations: [] as Array<Record<string, unknown>>,
+  // Namespace listings the composer asks for when its pickers open (#12972).
+  // Empty by default, so no existing test's behavior changes.
+  databaseNames: [] as string[],
+  schemaNames: [] as string[],
   codeHighlighterDelayMs: 0,
   // Skill catalog + body a test wants the backend to answer with.
   skillCatalog: {
@@ -191,7 +195,12 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     // Metadata reads a real send performs before `runAgentStream`. Without these
     // the panel would hit the HTTP backend inside happy-dom and the request
     // would never leave, which is exactly the moment under test.
-    listSchemas: empty,
+    listSchemas: () => Promise.resolve(aiAssistantMountApi.schemaNames),
+    listDatabases: () => Promise.resolve(aiAssistantMountApi.databaseNames.map((name) => ({ name }))),
+    // `loadDatabaseOptions`/`loadSchemaOptions` call `ensureConnected`, which
+    // probes health for an already-flagged connection; without this stub the
+    // probe would reach the HTTP backend.
+    checkConnectionHealth: () => Promise.resolve({ ok: true }),
     listTables: empty,
     getColumns: empty,
     listIndexes: empty,
@@ -211,6 +220,8 @@ afterEach(() => {
   aiAssistantMountApi.runAgentStreamHistories = [];
   aiAssistantMountApi.runAgentStreamCustoms = [];
   aiAssistantMountApi.savedConversations = [];
+  aiAssistantMountApi.databaseNames = [];
+  aiAssistantMountApi.schemaNames = [];
   aiAssistantMountApi.codeHighlighterDelayMs = 0;
   aiAssistantMountApi.skillCatalog = { defaultRoot: { status: "ok", skills: [] }, customRoot: null };
   aiAssistantMountApi.skillReadResult = undefined;
@@ -1040,6 +1051,65 @@ describe("AiAssistant mount", () => {
     expect(stored.database).toBe("db_a");
     expect(stored.updatedAt).toBe("2026-09-27T00:00:00.000Z");
     expect(aiAssistantMountApi.savedConversations).toEqual([]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #12972: the database picked in the composer is the chat's execution target,
+  // not just AI context, and it must survive the schema pick that follows. The
+  // old schema belongs to the old database, so retargeting drops it instead of
+  // carrying a namespace the new database may not even have.
+  it("retargets the chat to the database picked in the composer and re-picks its schema (#12972)", async () => {
+    aiAssistantMountApi.databaseNames = ["postgres", "appdb"];
+    aiAssistantMountApi.schemaNames = ["old_schema", "public"];
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-pg", connectionId: "postgres", connectionName: "PostgreSQL", database: "postgres", schema: "old_schema" })];
+    const { container, errors, pinia } = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    // Loads the composer's database options without a real backend connect.
+    useConnectionStore(pinia).connectedIds.add(POSTGRES.id);
+    await settle();
+    expect(container.textContent).toContain("previous question");
+
+    // Open the database picker: the bound database is the marked target, appdb is context.
+    container.querySelector<HTMLButtonElement>(".ai-database-selector-trigger")!.click();
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-database-target]")).not.toBeNull());
+    expect(container.querySelector("[data-ai-database-target]")?.textContent).toContain(i18n.global.t("ai.databaseTarget"));
+
+    // Promote appdb to the target through the UI.
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-database-target-action]")).not.toBeNull());
+    container.querySelector<HTMLButtonElement>("[data-ai-database-target-action]")!.click();
+
+    // The old database's schema is dropped, and the new target is persisted.
+    await vi.waitFor(() => {
+      const saved = aiAssistantMountApi.savedConversations.at(-1) as { database?: string; schema?: string } | undefined;
+      expect(saved?.database).toBe("appdb");
+      expect(saved?.schema).toBeUndefined();
+    });
+
+    // Pick a schema in the retargeted database via the schema selector (SearchableSelect).
+    const schemaTrigger = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.title === i18n.global.t("editor.selectSchema"));
+    expect(schemaTrigger).toBeDefined();
+    schemaTrigger!.click();
+    await vi.waitFor(() => {
+      const option = [...container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button')].find((button) => button.textContent?.trim() === "public");
+      expect(option).toBeDefined();
+    });
+    [...container.querySelectorAll<HTMLButtonElement>('[data-slot="popover-content"] button')].find((button) => button.textContent?.trim() === "public")!.click();
+
+    await vi.waitFor(() => {
+      const saved = aiAssistantMountApi.savedConversations.at(-1) as { database?: string; schema?: string } | undefined;
+      expect(saved?.database).toBe("appdb");
+      expect(saved?.schema).toBe("public");
+    });
+
+    // The request that leaves for the backend targets appdb, not the previously bound postgres.
+    await sendPrompt(container, "count orders");
+    const input = aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput | undefined;
+    expect(input).toBeTruthy();
+    const context = input!.context as AiContext;
+    expect(context.database).toBe("appdb");
+    expect(context.schema).toBe("public");
     expect(errors.map(String)).toEqual([]);
   });
 

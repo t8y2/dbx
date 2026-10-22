@@ -3867,8 +3867,12 @@ fn list_opengauss_databases_sql() -> &'static str {
      ORDER BY datname"
 }
 
-fn database_metadata_sql() -> &'static str {
-    "SELECT d.datname, \
+fn database_metadata_sql(shared_comments: bool) -> String {
+    // Database comments are shared objects on PostgreSQL and openGauss, but
+    // other PG-protocol servers must keep their existing catalog query.
+    let comment_function = if shared_comments { "shobj_description" } else { "obj_description" };
+    format!(
+        "SELECT d.datname, \
             CASE \
               WHEN has_database_privilege(d.datname, 'CONNECT') \
                 OR COALESCE(( \
@@ -3879,11 +3883,12 @@ fn database_metadata_sql() -> &'static str {
               THEN pg_database_size(d.oid) \
               ELSE NULL \
             END AS size_bytes, \
-            obj_description(d.oid, 'pg_database') AS comment, \
+            {comment_function}(d.oid, 'pg_database') AS comment, \
             pg_encoding_to_char(d.encoding) AS default_charset \
      FROM pg_database d \
      WHERE datallowconn = true \
      ORDER BY d.datname"
+    )
 }
 
 fn database_storage_sql() -> &'static str {
@@ -3947,10 +3952,11 @@ pub async fn list_opengauss_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, 
         .collect())
 }
 
-pub async fn list_database_metadata(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
+pub async fn list_database_metadata(pool: &Pool, shared_comments: bool) -> Result<Vec<DatabaseInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
-    let rows = postgres_query_cached(client, database_metadata_sql(), &[]).await.map_err(|e| e.to_string())?;
+    let sql = database_metadata_sql(shared_comments);
+    let rows = postgres_query_cached(client, &sql, &[]).await.map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
         .map(|row| DatabaseInfo {
@@ -8549,6 +8555,42 @@ fn is_postgres_user_placeholder(element: &str) -> bool {
     matches!(element, "$user" | "\"$user\"")
 }
 
+fn postgres_quoted_search_path_elements(configured: &str) -> Vec<String> {
+    let mut elements = Vec::new();
+    // Match PostgreSQL's scanner_isspace; Unicode whitespace can be name data.
+    let is_space = |ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}');
+    let mut remaining = configured.trim_matches(is_space);
+    // The server has already validated this GUC list. Its unquoted names can
+    // contain punctuation that SQL identifiers require us to quote.
+    while !remaining.is_empty() {
+        let quoted = remaining.starts_with('"');
+        let mut end = remaining.len();
+        if quoted {
+            let mut chars = remaining.char_indices().skip(1).peekable();
+            while let Some((index, ch)) = chars.next() {
+                if ch == '"' {
+                    if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                        chars.next();
+                    } else {
+                        end = index + 1;
+                        break;
+                    }
+                }
+            }
+        } else if let Some(index) = remaining.find(',') {
+            end = index;
+        }
+        let (element, rest) = remaining.split_at(end);
+        elements.push(if quoted {
+            element.to_string()
+        } else {
+            pg_quote_ident(&element.trim_matches(is_space).to_ascii_lowercase())
+        });
+        remaining = rest.trim_start_matches(is_space).strip_prefix(',').unwrap_or("").trim_start_matches(is_space);
+    }
+    elements
+}
+
 fn postgres_set_preserved_search_path_sql(
     schema: &str,
     context: PostgresSearchPathContext,
@@ -8562,7 +8604,6 @@ fn postgres_set_preserved_search_path_sql(
     } else {
         ""
     };
-    let configured = baseline.configured.trim();
     // Redshift rejects the "$user" placeholder inside `SET search_path` even
     // though `current_setting('search_path')` reports it, so any preserved-path
     // statement containing the element fails with a syntax error. Drop the
@@ -8570,25 +8611,20 @@ fn postgres_set_preserved_search_path_sql(
     // also mangle ordinary identifiers containing that substring); keeping the
     // placeholder is pointless while switching schemas anyway because the
     // selected schema is already prepended first.
-    let configured_elements: Vec<&str> = configured.split(',').map(str::trim).collect();
+    let configured_elements = postgres_quoted_search_path_elements(&baseline.configured);
     let drops_user_placeholder = configured_elements.iter().any(|element| is_postgres_user_placeholder(element));
-    let configured = if drops_user_placeholder {
-        configured_elements
-            .iter()
-            .filter(|element| !is_postgres_user_placeholder(element))
-            .copied()
-            .collect::<Vec<_>>()
-            .join(", ")
-    } else {
-        configured.to_string()
-    };
+    let configured = configured_elements
+        .iter()
+        .filter(|element| !is_postgres_user_placeholder(element))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
     let selected_schema = pg_quote_ident(schema);
     // The first resolved schema can come from "$user". Once that placeholder is
     // removed for compatible servers, the selected schema must replace it unless
     // the configured path also contains that schema explicitly.
-    let selected_schema_is_explicit = configured_elements
-        .iter()
-        .any(|element| !is_postgres_user_placeholder(element) && (*element == schema || *element == selected_schema));
+    let selected_schema_is_explicit =
+        configured_elements.iter().any(|element| !is_postgres_user_placeholder(element) && *element == selected_schema);
     let selected_schema_was_removed = drops_user_placeholder
         && baseline.first_resolved_schema.as_deref() == Some(schema)
         && !selected_schema_is_explicit;
@@ -12215,8 +12251,66 @@ mod tests {
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
-            "SET search_path TO application, extensions, public, pg_catalog"
+            "SET search_path TO \"application\", \"extensions\", \"public\", pg_catalog"
         );
+    }
+
+    #[test]
+    fn postgres_search_path_quotes_preserved_identifiers() {
+        for (configured, first_schema, selected_schema, expected_path) in [
+            (
+                "certification-lvpeng3, public",
+                "certification-lvpeng3",
+                "certification-lvpeng3",
+                r#""certification-lvpeng3", "public", pg_catalog"#,
+            ),
+            (
+                "certification-lvpeng3, public",
+                "certification-lvpeng3",
+                "other-schema",
+                r#""other-schema", "certification-lvpeng3", "public", pg_catalog"#,
+            ),
+            (
+                r#""tenant,alpha", "$user", public"#,
+                "tenant,alpha",
+                "tenant,alpha",
+                r#""tenant,alpha", "public", pg_catalog"#,
+            ),
+            (r#""a""b", public"#, "a\"b", "a\"b", r#""a""b", "public", pg_catalog"#),
+            (r#"foo"bar, public"#, "foo\"bar", "foo\"bar", r#""foo""bar", "public", pg_catalog"#),
+            ("MiXeD-Name, public", "mixed-name", "mixed-name", r#""mixed-name", "public", pg_catalog"#),
+            (r#""MiXeD Name", public"#, "MiXeD Name", "MiXeD Name", r#""MiXeD Name", "public", pg_catalog"#),
+            ("select, public", "select", "select", r#""select", "public", pg_catalog"#),
+            ("APPLICATION, $user, public", "application", "application", r#""application", "public", pg_catalog"#),
+            ("$USER, public", "public", "application", r#""application", "public", pg_catalog"#),
+            (r#""$USER", public"#, "$USER", "$USER", r#""$USER", "public", pg_catalog"#),
+            ("\u{2003}tenant,public", "\u{2003}tenant", "\u{2003}tenant", "\"\u{2003}tenant\", \"public\", pg_catalog"),
+            ("tenant\u{2003},public", "tenant\u{2003}", "tenant\u{2003}", "\"tenant\u{2003}\", \"public\", pg_catalog"),
+            (
+                "\u{b}application\u{b},\u{c}public\u{c}",
+                "application",
+                "application",
+                r#""application", "public", pg_catalog"#,
+            ),
+        ] {
+            let baseline = PostgresSearchPathBaseline {
+                configured: configured.to_string(),
+                first_resolved_schema: Some(first_schema.to_string()),
+                has_explicit_pg_catalog: false,
+            };
+            for (context, scope) in [
+                (PostgresSearchPathContext::Query, ""),
+                (PostgresSearchPathContext::Transaction, ""),
+                (PostgresSearchPathContext::LocalTransaction, " LOCAL"),
+                (PostgresSearchPathContext::LocalQueryTransaction, " LOCAL"),
+            ] {
+                assert_eq!(
+                    postgres_set_preserved_search_path_sql(selected_schema, context, &baseline),
+                    format!("SET{scope} search_path TO {expected_path}"),
+                    "configured={configured:?}, selected={selected_schema:?}, context={context:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -12228,7 +12322,7 @@ mod tests {
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
-            "SET search_path TO \"application\", extensions, public, pg_catalog"
+            "SET search_path TO \"application\", \"extensions\", \"public\", pg_catalog"
         );
         assert_eq!(
             postgres_set_preserved_search_path_sql(
@@ -12236,7 +12330,7 @@ mod tests {
                 PostgresSearchPathContext::LocalQueryTransaction,
                 &baseline,
             ),
-            "SET LOCAL search_path TO \"application\", extensions, public, pg_catalog"
+            "SET LOCAL search_path TO \"application\", \"extensions\", \"public\", pg_catalog"
         );
     }
 
@@ -12249,7 +12343,7 @@ mod tests {
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("dwd_views", PostgresSearchPathContext::Query, &baseline),
-            "SET search_path TO \"dwd_views\", public, pg_catalog"
+            "SET search_path TO \"dwd_views\", \"public\", pg_catalog"
         );
 
         let bare_baseline = PostgresSearchPathBaseline {
@@ -12259,7 +12353,7 @@ mod tests {
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("dwd_views", PostgresSearchPathContext::Query, &bare_baseline),
-            "SET search_path TO \"dwd_views\", public, pg_catalog"
+            "SET search_path TO \"dwd_views\", \"public\", pg_catalog"
         );
     }
 
@@ -12273,7 +12367,7 @@ mod tests {
 
         assert_eq!(
             postgres_set_preserved_search_path_sql("dbx_test", PostgresSearchPathContext::Query, &baseline),
-            "SET search_path TO \"dbx_test\", public, pg_catalog"
+            "SET search_path TO \"dbx_test\", \"public\", pg_catalog"
         );
 
         let explicit_baseline = PostgresSearchPathBaseline {
@@ -12283,7 +12377,7 @@ mod tests {
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("dbx_test", PostgresSearchPathContext::Query, &explicit_baseline),
-            "SET search_path TO dbx_test, public, pg_catalog"
+            "SET search_path TO \"dbx_test\", \"public\", pg_catalog"
         );
     }
 
@@ -12340,7 +12434,7 @@ mod tests {
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("dwd_views", PostgresSearchPathContext::Query, &baseline),
-            "SET search_path TO \"dwd_views\", my$user_schema, \"$user_backup\", public, pg_catalog"
+            "SET search_path TO \"dwd_views\", \"my$user_schema\", \"$user_backup\", \"public\", pg_catalog"
         );
     }
 
@@ -12353,7 +12447,7 @@ mod tests {
         };
         assert_eq!(
             postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
-            "SET search_path TO \"application\", extensions, pg_catalog, public"
+            "SET search_path TO \"application\", \"extensions\", \"pg_catalog\", \"public\""
         );
     }
 
@@ -12443,6 +12537,22 @@ mod tests {
     fn database_list_does_not_collect_storage_usage() {
         assert!(list_databases_sql().contains("pg_database"));
         assert!(!list_databases_sql().contains("pg_database_size"));
+    }
+
+    #[test]
+    fn database_metadata_reads_shared_database_comments() {
+        let sql = database_metadata_sql(true);
+        assert!(sql.contains("shobj_description(d.oid, 'pg_database') AS comment"));
+        assert!(sql.contains("FROM pg_database d"));
+        assert!(sql.contains("has_database_privilege"));
+        assert!(sql.contains("pg_database_size(d.oid)"));
+    }
+
+    #[test]
+    fn database_metadata_keeps_legacy_comments_for_other_pg_servers() {
+        let sql = database_metadata_sql(false);
+        assert!(sql.contains("obj_description(d.oid, 'pg_database') AS comment"));
+        assert!(!sql.contains("shobj_description"));
     }
 
     #[test]

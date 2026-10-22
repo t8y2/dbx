@@ -413,8 +413,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       // Windows installers and the portable helper own process replacement/relaunch.
       if (!cache?.portable_mode && !navigator.userAgent.includes("Windows")) {
         phase.value = "restart";
-        const { relaunch } = await import("@tauri-apps/plugin-process");
-        await relaunch();
+        await api.relaunchApp();
       }
     } catch (error) {
       failed = true;

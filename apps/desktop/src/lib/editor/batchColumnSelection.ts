@@ -28,8 +28,8 @@ export function batchColumnSelectionColumnList(candidates: Array<string | BatchC
     .join("\n");
 }
 
-export function shouldResolveSqlColumnCompletion(options: { suggestColumns: boolean; hasReferencedTables: boolean; prefix: string; typedActivation: boolean; selectListColumnContext: boolean }): boolean {
-  return options.suggestColumns && options.hasReferencedTables && (options.prefix.length > 0 || options.typedActivation || options.selectListColumnContext);
+export function shouldResolveSqlColumnCompletion(options: { suggestColumns: boolean; hasReferencedTables: boolean; prefix: string; typedActivation: boolean; selectListColumnContext: boolean; qualifierDot?: boolean }): boolean {
+  return options.suggestColumns && options.hasReferencedTables && (options.prefix.length > 0 || options.typedActivation || options.selectListColumnContext || !!options.qualifierDot);
 }
 
 export function shouldSwallowSelectStar(from: number, to: number, nextCharacter: string, replaceSelectWildcard = false): boolean {

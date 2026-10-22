@@ -518,6 +518,32 @@ pub(crate) fn uses_metadata_gate(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::SqlServer)
 }
 
+/// Wait budget for the metadata gate.
+///
+/// The gate serializes metadata work against a connection's pool. On a slow
+/// link each in-flight operation can spend the connection's configured connect
+/// timeout, so the previous fixed 5 s wait reported "DBX metadata pool is busy"
+/// while useful work was still making progress. Honor the configured connect
+/// timeout (already clamped to 1-300 s by `effective_connect_timeout_secs`)
+/// without going below the old 5 s floor, so fast links keep today's behavior.
+fn metadata_pool_acquire_timeout(config: Option<&ConnectionConfig>) -> Duration {
+    let configured = config.map(ConnectionConfig::effective_connect_timeout_secs);
+    Duration::from_secs(
+        configured
+            .map_or(METADATA_POOL_ACQUIRE_TIMEOUT.as_secs(), |secs| secs.max(METADATA_POOL_ACQUIRE_TIMEOUT.as_secs())),
+    )
+}
+
+/// Whether the MySQL stale-pool probe has an idle connection to validate.
+///
+/// With zero idle connections the probe would start a fresh physical connection
+/// just to abandon it at the short probe budget; on a slow link that is one
+/// wasted handshake per metadata request. In that case keep the pool and let the
+/// real checkout report any failure.
+fn mysql_probe_has_idle_connection(connections_in_pool: usize) -> bool {
+    connections_in_pool > 0
+}
+
 /// Session-scoped metadata gate allowance for a database type.
 ///
 /// A non-empty `client_session_id` normally means the caller opened a
@@ -1820,17 +1846,22 @@ impl AppState {
             let mut gates = self.metadata_gates.lock().await;
             gates.entry(key.clone()).or_insert_with(|| Arc::new(Semaphore::new(limit))).clone()
         };
+        let acquire_timeout = {
+            let configs = self.configs.read().await;
+            metadata_pool_acquire_timeout(configs.get(connection_id))
+        };
         let started = Instant::now();
         let queued = gate.available_permits() == 0;
-        let permit = match tokio::time::timeout(METADATA_POOL_ACQUIRE_TIMEOUT, gate.acquire_owned()).await {
+        let permit = match tokio::time::timeout(acquire_timeout, gate.acquire_owned()).await {
             Ok(Ok(permit)) => permit,
             Ok(Err(_)) => return Err(crate::query::METADATA_POOL_BUSY_ERROR.to_string()),
             Err(_) => {
                 log::warn!(
-                    "[metadata:pool:busy] connection_id={} database={} wait_ms={} limit={}",
+                    "[metadata:pool:busy] connection_id={} database={} wait_ms={} timeout_ms={} limit={}",
                     connection_id,
                     database.unwrap_or_default(),
                     started.elapsed().as_millis(),
+                    acquire_timeout.as_millis(),
                     limit
                 );
                 return Err(crate::query::METADATA_POOL_BUSY_ERROR.to_string());
@@ -4500,38 +4531,50 @@ impl AppState {
             match &checked.pool {
                 PoolKind::Mysql(pool, _) => {
                     let pool = pool.clone();
-                    match db::mysql::checkout_mysql_conn(&pool, HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT).await {
-                        // The 500 ms probe budget is intentionally shorter than a foreground checkout. A timeout
-                        // while waiting, creating, or recycling is inconclusive: slow remote handshakes and active
-                        // metadata exports can legitimately exceed it. Removing the pool here would start competing
-                        // reconnects while useful work is still running.
-                        Err(err @ db::PoolCheckoutError::Timeout { .. }) => {
-                            log::debug!(
+                    let connections_in_pool = pool.metrics().connections_in_pool.load(Ordering::Relaxed);
+                    if !mysql_probe_has_idle_connection(connections_in_pool) {
+                        log::debug!(
+                            "MySQL connection pool '{pool_key}' has no idle connection; skipping the stale-pool probe"
+                        );
+                        false
+                    } else {
+                        match db::mysql::checkout_mysql_conn(&pool, HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT).await {
+                            // The 500 ms probe budget is intentionally shorter than a foreground checkout. A timeout
+                            // while waiting, creating, or recycling is inconclusive: slow remote handshakes and active
+                            // metadata exports can legitimately exceed it. Removing the pool here would start competing
+                            // reconnects while useful work is still running.
+                            Err(err @ db::PoolCheckoutError::Timeout { .. }) => {
+                                log::debug!(
                                 "MySQL connection pool '{pool_key}' did not finish a health checkout; keeping pool: {err}"
                             );
-                            false
-                        }
-                        Err(err) => {
-                            log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
-                            true
-                        }
-                        Ok(mut conn) => {
-                            // The probe runs no statement, so a shared pool can take
-                            // the connection back without COM_RESET_CONNECTION and the
-                            // setup replay, and a connection verified moments ago (by
-                            // this probe or the checkout that follows it) is not
-                            // pinged again.
-                            conn.reset_connection(false);
-                            let timeout = crate::db::connection_timeout();
-                            match tokio::time::timeout(timeout, db::mysql::verify_pooled_conn(&pool, &mut conn)).await {
-                                Ok(Ok(())) => false,
-                                Ok(Err(err)) => {
-                                    log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
-                                    true
-                                }
-                                Err(_) => {
-                                    log::warn!("MySQL connection pool '{pool_key}' is stale: health check timed out");
-                                    true
+                                false
+                            }
+                            Err(err) => {
+                                log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
+                                true
+                            }
+                            Ok(mut conn) => {
+                                // The probe runs no statement, so a shared pool can take
+                                // the connection back without COM_RESET_CONNECTION and the
+                                // setup replay, and a connection verified moments ago (by
+                                // this probe or the checkout that follows it) is not
+                                // pinged again.
+                                conn.reset_connection(false);
+                                let timeout = crate::db::connection_timeout();
+                                match tokio::time::timeout(timeout, db::mysql::verify_pooled_conn(&pool, &mut conn))
+                                    .await
+                                {
+                                    Ok(Ok(())) => false,
+                                    Ok(Err(err)) => {
+                                        log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
+                                        true
+                                    }
+                                    Err(_) => {
+                                        log::warn!(
+                                            "MySQL connection pool '{pool_key}' is stale: health check timed out"
+                                        );
+                                        true
+                                    }
                                 }
                             }
                         }
@@ -9234,7 +9277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mysql_health_check_keeps_pool_when_connection_creation_exceeds_probe_budget() {
+    async fn mysql_stale_pool_probe_skips_checkout_when_nothing_is_idle() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -9256,7 +9299,15 @@ mod tests {
         let started = Instant::now();
         assert!(!state.remove_stale_connection_pool("conn").await);
 
-        assert!(started.elapsed() >= super::HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT);
+        // A pool with no idle connection has nothing to validate: the probe must
+        // not start a fresh physical connection (and abandon it at the short
+        // probe budget). It therefore returns without the 500 ms checkout wait.
+        assert!(
+            started.elapsed() < super::HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT,
+            "empty-pool probe must not run into the checkout budget, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(pool.metrics().connection_count.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert!(matches!(
             state.connections.read().await.get("conn"),
             Some(PoolKind::Mysql(current, _)) if pool.is_same_pool(current)
@@ -10094,6 +10145,28 @@ sleep 30
         assert_eq!(super::metadata_gate_session_allowance(DatabaseType::Mysql), 1);
         // SQL Server gate is intentionally shared/serialized regardless.
         assert_eq!(super::metadata_gate_session_allowance(DatabaseType::SqlServer), 1);
+    }
+
+    #[test]
+    fn metadata_pool_acquire_timeout_honors_configured_connect_budget() {
+        assert_eq!(super::metadata_pool_acquire_timeout(None), super::METADATA_POOL_ACQUIRE_TIMEOUT);
+
+        let mut config = mysql_config(Some("app"));
+        config.connect_timeout_secs = 300;
+        assert_eq!(super::metadata_pool_acquire_timeout(Some(&config)), Duration::from_secs(300));
+        config.connect_timeout_secs = 60;
+        assert_eq!(super::metadata_pool_acquire_timeout(Some(&config)), Duration::from_secs(60));
+
+        // The gate keeps today's 5 s floor for fast links and tiny configured values.
+        config.connect_timeout_secs = 1;
+        assert_eq!(super::metadata_pool_acquire_timeout(Some(&config)), super::METADATA_POOL_ACQUIRE_TIMEOUT);
+    }
+
+    #[test]
+    fn mysql_stale_pool_probe_only_runs_with_an_idle_connection() {
+        assert!(!super::mysql_probe_has_idle_connection(0));
+        assert!(super::mysql_probe_has_idle_connection(1));
+        assert!(super::mysql_probe_has_idle_connection(3));
     }
 
     #[test]

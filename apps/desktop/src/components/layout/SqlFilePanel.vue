@@ -41,6 +41,7 @@ interface FolderState {
   entries: SqlFileEntry[];
   expanded: Set<string>;
   loading: boolean;
+  refreshing: boolean;
   collapsed: boolean;
 }
 
@@ -214,6 +215,7 @@ async function addFolder(folderPath: string) {
     entries: [],
     expanded: new Set(),
     loading: true,
+    refreshing: false,
     collapsed: false,
   };
   folders.value.push(folder);
@@ -257,10 +259,18 @@ async function locateCurrentFile() {
 // Re-scan a single top-level folder and replace its entries. Mutated via the
 // reactive proxy (folders.value[idx]) so Vue tracks the change — see the note
 // in addFolder above.
+//
+// `loading` only goes true when the folder has nothing to show yet, because it
+// swaps the row list for a "loading" line and the list lives inside the panel's
+// only scroll container: tearing the rows down resets `scrollTop` to 0, which is
+// what made the panel jump back to the top after every add/rename/refresh
+// (#13038). A folder that already has entries stays rendered and is swapped in
+// place, so the scroll offset survives; `refreshing` only drives the spinner.
 async function loadFolderEntries(folderPath: string): Promise<string | null> {
   const idx = folders.value.findIndex((f) => f.path === folderPath);
   if (idx === -1) return null;
-  folders.value[idx].loading = true;
+  folders.value[idx].loading = folders.value[idx].entries.length === 0;
+  folders.value[idx].refreshing = true;
   try {
     const entries = await api.listSqlFilesInFolder(folderPath, getSqlFileFilter(), true);
     const target = folders.value.findIndex((f) => f.path === folderPath);
@@ -289,6 +299,7 @@ async function loadFolderEntries(folderPath: string): Promise<string | null> {
     const target = folders.value.findIndex((f) => f.path === folderPath);
     if (target !== -1) {
       folders.value[target].loading = false;
+      folders.value[target].refreshing = false;
     }
   }
   return null;
@@ -1036,7 +1047,7 @@ function clearContextTarget() {
       </HelpTooltip>
       <span class="flex-1" />
       <LightTooltip :text="t('sqlFileTree.locateActiveFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentFilePath || locatingFile || folders.some((folder) => folder.loading)" @locate="locateCurrentFile" />
+        <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentFilePath || locatingFile || folders.some((folder) => folder.loading || folder.refreshing)" @locate="locateCurrentFile" />
       </LightTooltip>
       <LightTooltip :text="t('sqlFileTree.panelSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button
@@ -1139,7 +1150,7 @@ function clearContextTarget() {
                 <span class="truncate flex-1 text-[10px] text-muted-foreground/50" :title="folder.path">{{ folder.path }}</span>
                 <LightTooltip :text="t('sqlFileTree.refreshFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
                   <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="refreshFolder(folder.path)">
-                    <RefreshCw class="h-3 w-3" :class="folder.loading ? 'animate-spin' : ''" />
+                    <RefreshCw class="h-3 w-3" :class="folder.loading || folder.refreshing ? 'animate-spin' : ''" />
                   </Button>
                 </LightTooltip>
                 <LightTooltip :text="t('sqlFileTree.newSqlFile')" side="bottom" :delay="0" :close-delay="0" nowrap>

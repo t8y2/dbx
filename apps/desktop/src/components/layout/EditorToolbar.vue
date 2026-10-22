@@ -38,9 +38,11 @@ import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
+import ConnectionDetailContent from "@/components/connection/ConnectionDetailContent.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -61,6 +63,8 @@ import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
+import { connectionDetailRows } from "@/lib/connection/connectionDetailRows";
+import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
 
 const props = defineProps<{
   activeTab: QueryTab;
@@ -253,6 +257,12 @@ const activeProductionContext = computed(() => productionContextForDatabase(prop
 const showConnectionProductionBadge = computed(() => activeProductionContext.value.reason === "connection");
 const showDatabaseProductionBadge = computed(() => activeProductionContext.value.reason === "database");
 const activeConnectionValue = computed(() => props.activeConnection?.id || "");
+const activeConnectionDetailRows = computed(() => (props.activeConnection ? connectionDetailRows(props.activeConnection, t) : []));
+const activeConnectionGroupPath = computed(() => {
+  const connection = props.activeConnection;
+  if (!connection) return "";
+  return findConnectionGroupPath(connectionStore.sidebarLayout, connection.id)?.join(" / ") || "";
+});
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 // Salesforce identity badge. A Salesforce tab talks to one live org and every grid
 // save is a real REST write, so the signed-in user stays visible next to the
@@ -991,28 +1001,33 @@ defineExpose({
     <div class="flex shrink-0 items-center gap-2">
       <div class="flex shrink-0 items-center gap-1" :class="{ 'connection-required-prompt': connectionRequiredVisible }">
         <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
-        <ConnectionTreeSelect
-          ref="connectionPickerRef"
-          :model-value="activeConnectionValue"
-          :connections="connectionStore.connections"
-          :layout="connectionStore.sidebarLayout"
-          :placeholder="t('editor.selectConnection')"
-          :search-placeholder="t('editor.searchConnection')"
-          :empty-text="t('grid.noSearchResults')"
-          trigger-class="font-medium text-foreground"
-          trigger-icon-class="h-3 w-3"
-          list-class="w-96 max-w-[calc(100vw-2rem)]"
-          @update:model-value="(connectionId) => emit('changeConnection', connectionId)"
-        >
-          <template #trigger-label="{ label }">
-            <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
-              <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
-              <span class="truncate">{{ label }}</span>
-              <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
-            </div>
-            <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>
-          </template>
-        </ConnectionTreeSelect>
+        <LightTooltip text="" :disabled="!activeConnectionDetailRows.length" side="bottom" :side-offset="6" :delay="250" :close-delay="80" surface="popover">
+          <ConnectionTreeSelect
+            ref="connectionPickerRef"
+            :model-value="activeConnectionValue"
+            :connections="connectionStore.connections"
+            :layout="connectionStore.sidebarLayout"
+            :placeholder="t('editor.selectConnection')"
+            :search-placeholder="t('editor.searchConnection')"
+            :empty-text="t('grid.noSearchResults')"
+            :hide-title="activeConnectionDetailRows.length > 0"
+            trigger-class="font-medium text-foreground"
+            trigger-icon-class="h-3 w-3"
+            list-class="w-96 max-w-[calc(100vw-2rem)]"
+            @update:model-value="(connectionId) => emit('changeConnection', connectionId)"
+          >
+            <template #trigger-label="{ label }">
+              <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
+                <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
+                <span v-if="activeConnectionGroupPath" class="shrink-0 text-muted-foreground">{{ activeConnectionGroupPath }} /</span>
+                <span class="truncate">{{ label }}</span>
+                <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
+              </div>
+              <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>
+            </template>
+          </ConnectionTreeSelect>
+          <template #content><ConnectionDetailContent :rows="activeConnectionDetailRows" /></template>
+        </LightTooltip>
       </div>
       <div v-if="showCatalogSelector" class="flex shrink-0 items-center gap-1">
         <SearchableSelect

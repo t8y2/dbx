@@ -36,17 +36,21 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.admin.AlterConfigOp;
+import org.apache.kafka.clients.admin.ConsumerGroupDescription;
+import org.apache.kafka.clients.admin.DescribeConsumerGroupsResult;
 import org.apache.kafka.clients.admin.Config;
 import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.clients.admin.RaftVoterEndpoint;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.admin.TopicListing;
+import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
+import org.apache.kafka.common.internals.KafkaFutureImpl;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
@@ -140,6 +144,28 @@ class KafkaAgentTest {
         assertNull(group.get("totalLag"));
         assertNull(group.get("memberCount"));
         assertEquals("End offsets unavailable for 1 partition(s)", group.get("error"));
+    }
+
+    @Test
+    void groupDescriptionsShareOneDeadlineInsteadOfOneTimeoutPerGroup() {
+        // Coordinators that never answer used to cost the full timeout per group (#13122).
+        List<String> groupIds = List.of("a", "b", "c", "d", "e");
+        Map<String, KafkaFuture<ConsumerGroupDescription>> pending = new HashMap<>();
+        for (String groupId : groupIds) pending.put(groupId, new KafkaFutureImpl<>());
+        List<String> failed = new ArrayList<>();
+
+        long start = System.currentTimeMillis();
+        Map<String, ConsumerGroupDescription> descriptions = KafkaAgent.awaitGroupDescriptions(
+            new DescribeConsumerGroupsResult(pending),
+            groupIds,
+            start + 300,
+            (groupId, message) -> failed.add(groupId)
+        );
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertTrue(descriptions.isEmpty());
+        assertEquals(groupIds, failed);
+        assertTrue(elapsed < 1000, "waited " + elapsed + "ms; five groups must share one 300ms deadline");
     }
 
     @Test

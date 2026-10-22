@@ -811,39 +811,6 @@
   opacity: 0.82;
 }
 
-/* The group rail sits above the classic active inset shadow. Reuse the same
- * rail segment as the active indicator so a colored group cannot hide it. */
-.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-tab[data-active-tab="true"]::after,
-.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-entry:has(.tab-group-tab[data-active-tab="true"])::after {
-  z-index: 2;
-  background: color-mix(in srgb, var(--foreground) 72%, transparent);
-  opacity: 1;
-}
-
-/* With several groups in view, the neutral rail segment above is not enough
- * to spot the active tab at a glance (issue #12485): every tab already owns a
- * colored group rail, so the bottom edge cannot carry a unique signal. Mark
- * the active grouped tab with a primary-colored edge accent on the opposite
- * edge instead — the same vocabulary as the vertical tab's inset --ring edge.
- * The var fallback keeps legacy WebViews (no color-mix()) painted. */
-.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab[data-active-tab="true"]::before {
-  content: "";
-  position: absolute;
-  z-index: 2;
-  top: -0.5px;
-  right: 0;
-  left: 0;
-  height: 3px;
-  border-radius: 9999px;
-  background: var(--app-tab-active-accent, var(--ring));
-  pointer-events: none;
-}
-
-.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-tab[data-active-tab="true"]::before {
-  top: auto;
-  bottom: -0.5px;
-}
-
 .app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-tab::after {
   top: -0.5px;
   bottom: auto;
@@ -1464,4 +1431,103 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
 
 .vertical-tab-layout .tab-group-tab--first::after {
   display: none;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Grouped tab selection                                                     */
+/*                                                                           */
+/* Grouped tabs already carry their group color on the bottom edge, so the   */
+/* selected state uses a single full-width group-colored underline instead   */
+/* of a second accent on the opposite edge. Inactive rails stay quiet so the */
+/* selected tab stays easy to find among several colored groups.             */
+/* ------------------------------------------------------------------------- */
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-tab::after,
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-entry:has(.tab-group-tab)::after,
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-tab::after {
+  opacity: 0.3;
+}
+
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-tab[data-active-tab="true"]::after,
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-entry:has(.tab-group-tab[data-active-tab="true"])::after {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2.5px;
+  background: var(--tab-group-color);
+  opacity: 1;
+}
+
+/* Wrapped rows paint a rail on each pill as well; the selected pill must use
+ * the group color there too, otherwise the quiet entry rail shows through. */
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-tab[data-active-tab="true"]::after {
+  left: 0;
+  right: 0;
+  bottom: -0.5px;
+  height: 2.5px;
+  background: var(--tab-group-color);
+  opacity: 1;
+}
+
+/* Two-row grouped bars keep headers and pills on separate rows, so the 0.2rem
+ * overlap used to join them in the single-row strip reads as a stray overhang
+ * on the header's right edge. Drop it and keep both ends rounded. */
+.app-tab-bar.tab-two-row-groups .tab-group-header::after,
+.app-tab-bar.tab-two-row-groups .tab-group-tab::after {
+  left: 0;
+  right: 0;
+  border-radius: 9999px;
+}
+
+/* The selected grouped tab gets a very light same-hue gradient that fades
+ * upward, so the group color reads as depth instead of a flat tint. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab[data-active-tab="true"] {
+  background-color: var(--background, #fff);
+  background-image: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--tab-group-color) 12%, transparent),
+    color-mix(in srgb, var(--tab-group-color) 0%, transparent)
+  );
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+}
+
+/* Classic layout injects a dark inset selected bar inline; grouped tabs use
+ * the group-colored underline instead, so override the inline shadow. */
+.app-tab-bar.classic-tab-layout:not(.vertical-tab-layout) .tab-group-tab[data-active-tab="true"] {
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.07) !important;
+}
+
+/* Group headers keep the label neutral so it stays readable on the tinted
+ * header background; the group color remains on the marker, rail and badge. */
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header {
+  color: var(--foreground);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after {
+  right: 0;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-count {
+  color: color-mix(in srgb, var(--foreground) 72%, transparent);
+  background: color-mix(in srgb, var(--tab-group-color) 16%, transparent);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-header-content {
+  background: color-mix(in srgb, var(--tab-group-color) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tab-group-color) 28%, transparent);
+}
+
+/* Vertical bars use the same neutral-label rule for the active group header. */
+.vertical-tab-layout .tab-group-header,
+.vertical-tab-layout .tab-group-header--active {
+  color: var(--foreground);
+}
+
+.vertical-tab-layout .tab-group-count {
+  color: color-mix(in srgb, var(--foreground) 72%, transparent);
+  background: color-mix(in srgb, var(--tab-group-color) 16%, transparent);
+}
+
+.vertical-tab-layout .tab-group-header:hover .tab-group-header-content,
+.vertical-tab-layout .tab-group-header--active .tab-group-header-content {
+  background: color-mix(in srgb, var(--tab-group-color) 10%, transparent);
 }

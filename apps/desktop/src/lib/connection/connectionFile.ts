@@ -26,9 +26,19 @@ export function isLocalFileTypeDb(dbType: DatabaseType | string): boolean {
  * Returns `null` for in-memory (`:memory:`), empty paths, H2 server/mem mode,
  * and any DB type that isn't local-file.
  */
+/**
+ * Whether `host` carries an on-disk file path instead of a network hostname.
+ *
+ * SQLite, DuckDB and Access store their database file in `host`; whitespace there can
+ * be part of the path, so submit normalization must leave the field byte-exact.
+ */
+export function connectionHostIsFilePath(dbType: DatabaseType): boolean {
+  return dbType === "sqlite" || dbType === "duckdb" || dbType === "access";
+}
+
 export function connectionFilePath(config: Pick<ConnectionConfig, "db_type" | "host" | "connection_string">): string | null {
   const dbType = config.db_type;
-  if (dbType === "sqlite" || dbType === "duckdb" || dbType === "access") {
+  if (connectionHostIsFilePath(dbType)) {
     const host = (config.host ?? "").trim();
     if (!host || host === ":memory:") return null;
     return host;

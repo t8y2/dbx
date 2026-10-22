@@ -306,3 +306,40 @@ describe("buildSnippetItems", () => {
     expect(items).toEqual([]);
   });
 });
+
+describe("snippet ranking", () => {
+  const SEQUENCE_OBJECTS = [
+    { name: "SEQ_SEL_A", type: "sequence" as const },
+    { name: "SEQ_SEL_B", type: "sequence" as const },
+  ];
+
+  // Regression for #13115: sequences pin themselves to the top of the list while
+  // no columns are expected, so on an Oracle-family connection (Dameng here)
+  // typing the `sel` trigger listed every `SEL*` sequence above `select *` and
+  // Tab expanded a sequence instead of the snippet.
+  it("ranks an exactly matched snippet above sequences without a column context", () => {
+    const items = buildSqlCompletionItems("sel", 3, {
+      databaseType: "dameng",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: SEQUENCE_OBJECTS,
+    });
+
+    expect(items[0]).toMatchObject({ type: "snippet", label: "select *", filterText: "sel" });
+    expect(items.filter((item) => item.type === "sequence").map((item) => item.label)).toEqual(["SEQ_SEL_A", "SEQ_SEL_B"]);
+  });
+
+  it("keeps sequences ahead of ordinary candidates when the prefix is only a partial match", () => {
+    const items = buildSqlCompletionItems("se", 2, {
+      databaseType: "dameng",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: SEQUENCE_OBJECTS,
+    });
+
+    const firstSequence = items.findIndex((item) => item.type === "sequence");
+    const firstNonSequence = items.findIndex((item) => item.type !== "sequence");
+    expect(firstSequence).toBeGreaterThanOrEqual(0);
+    expect(firstSequence).toBeLessThan(firstNonSequence);
+  });
+});

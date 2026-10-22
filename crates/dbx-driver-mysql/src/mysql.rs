@@ -6335,9 +6335,18 @@ pub async fn kill_query(pool: &MySqlPool, connection_id: u32) -> Result<(), Stri
     Ok(())
 }
 
-pub async fn kill_query_with_opts(opts: mysql_async::Opts, connection_id: u32) -> Result<(), String> {
+/// Kills a query through a dedicated connection rebuilt from its `Opts`.
+///
+/// Cancel paths run while the original pool may be busy, so this opens a new
+/// physical connection. `timeout` is the caller's infrastructure budget (the
+/// connection's configured connect/checkout timeout), not the old compile-time
+/// 5 s: on a slow link a hardcoded budget turns cancellation into a failure.
+pub async fn kill_query_with_opts(
+    opts: mysql_async::Opts,
+    connection_id: u32,
+    timeout: Duration,
+) -> Result<(), String> {
     let start = Instant::now();
-    let timeout = super::connection_timeout();
     let mut conn = tokio::time::timeout(timeout, mysql_async::Conn::new(opts))
         .await
         .map_err(|_| {
@@ -9181,6 +9190,17 @@ mod tests {
 
         assert_eq!(mysql_column_type_name(&text_column), "varchar");
         assert_eq!(mysql_bytes_to_json(b"TEXT-001".to_vec(), &text_column), serde_json::json!("TEXT-001"));
+    }
+
+    #[test]
+    fn mysql_binary_string_preserves_canonical_hex_for_ascii_uuid() {
+        let binary_column = mysql_test_column(ColumnType::MYSQL_TYPE_STRING, 63, ColumnFlags::BINARY_FLAG, 36);
+        let uuid_bytes = b"01a057bf-2bbd-70a6-b3c3-56eb409a0f95".to_vec();
+
+        assert_eq!(
+            mysql_bytes_to_json(uuid_bytes, &binary_column),
+            serde_json::json!("0x30316130353762662d326262642d373061362d623363332d353665623430396130663935")
+        );
     }
 
     #[test]

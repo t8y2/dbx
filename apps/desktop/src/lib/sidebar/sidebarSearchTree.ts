@@ -131,6 +131,7 @@ export interface SidebarRegexIndexScope {
   schema?: string;
   catalog?: string;
   nodeType: string;
+  stale?: boolean;
   path?: Array<Pick<TreeNode, "id" | "label" | "type" | "connectionId" | "database" | "catalog" | "schema" | "linkedServer" | "linkedCatalog" | "linkedSchema">>;
   entries: TableInfo[];
 }
@@ -198,7 +199,7 @@ export function buildSidebarIndexedTableNodes(scope: SidebarRegexIndexScope): Tr
     // Grouped object lists include the schema in each child id; simple table
     // lists do not. Search must use the same id because persisted pin keys
     // include it, even when an index hit has not been loaded into the live tree.
-    includeSchemaInId: scope.nodeType === "group-tables",
+    includeSchemaInId: scope.nodeType.startsWith("group-"),
   });
 }
 
@@ -254,7 +255,7 @@ function mergeRegexTreeNodes(liveNodes: readonly TreeNode[], indexedNodes: reado
  */
 export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], scopes: readonly SidebarRegexIndexScope[]): TreeNode[] {
   const selected = new Map<string, { rank: number; scope: SidebarRegexIndexScope; entry: TableInfo }>();
-  const rankFor = (scope: SidebarRegexIndexScope) => (scope.nodeType === "group-tables" ? 3 : scope.nodeType === "schema" ? 2 : 1);
+  const rankFor = (scope: SidebarRegexIndexScope) => (scope.nodeType.startsWith("group-") ? 3 : scope.nodeType === "schema" ? 2 : 1);
   for (const scope of scopes) {
     for (const entry of scope.entries) {
       const key = `${scope.connectionId}\0${scope.catalog || ""}\0${scope.database}\0${scope.schema || ""}\0${entry.table_type}\0${entry.name}`;

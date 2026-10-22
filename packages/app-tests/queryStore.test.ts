@@ -7504,6 +7504,48 @@ test("buildQueryResultExportRequest includes PostgreSQL batch setup for a trunca
   }
 });
 
+test("buildQueryResultExportRequest includes MySQL batch setup so user variables reach the export session (#13111)", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection({ ...conn("conn-mysql"), db_type: "mysql", port: 3306 });
+  const tabId = store.createTab("conn-mysql", "lishi", "Query");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  const batchSql = ["SET @ID = '123'", "SELECT * FROM NewTable nt WHERE ID = @ID"].join(";\n");
+  tab.lastExecutedSql = batchSql;
+  tab.resultBaseSql = batchSql;
+  tab.result = {
+    columns: ["ID"],
+    rows: [["123"]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    statement_index: 1,
+    sourceStatement: "SELECT * FROM NewTable nt WHERE ID = @ID",
+    truncated: true,
+    has_more: false,
+  };
+
+  globalThis.fetch = withConnectionHealthMock(async () => new Response("unexpected request", { status: 500 }));
+
+  try {
+    const request = await store.buildQueryResultExportRequest(tabId, {
+      exportId: "export-mysql-vars",
+      filePath: "C:\\tmp\\new-table.xlsx",
+      format: "xlsx",
+    });
+
+    assert.equal(request?.sql, "SELECT * FROM NewTable nt WHERE ID = @ID");
+    assert.deepEqual(request?.setupSql, ["SET @ID = '123'"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("buildQueryResultExportRequest caps progress total when export row limit is enabled", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

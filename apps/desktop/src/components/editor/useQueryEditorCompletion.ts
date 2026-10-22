@@ -1012,6 +1012,12 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
         prefix: completionContext.prefix,
         typedActivation,
         selectListColumnContext: completionContext.selectListColumnContext,
+        // The cursor sits right after `alias.` with nothing typed yet: columns for the
+        // referenced table are exactly what the user is asking for, so cold metadata
+        // must still be fetched instead of silently yielding no candidates (#12227).
+        // Table-name dots (`FROM myschema.`) share this shape but must keep their
+        // instant local path, hence the tableNameCompletion exclusion.
+        qualifierDot: !tableNameCompletion && !!completionContext.qualifier && !completionContext.prefix,
       });
       const shouldResolveAsyncCompletion = tableNameCompletion || shouldResolveColumnCompletion;
       const localResult = buildLocalSqlCompletionResult(completionContext, fullDoc, position, completionScope);

@@ -1,6 +1,7 @@
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { DatabaseType } from "@/types/database";
+import { isUuidColumnType } from "@/lib/dataGrid/dataGridColumnType";
 
 export type BinaryCellDownloadMode = "binary" | "utf8" | "gbk";
 
@@ -111,6 +112,9 @@ const HEX_VALUE_RE = /^(?:0[xX]|\\x)([0-9a-fA-F\s]*)$/;
 const TRUNCATED_HEX_VALUE_RE = /^(?:0[xX]|\\x)[0-9a-fA-F\s]+\.\.\.$/;
 const BARE_HEX_RE = /^[0-9a-fA-F\s]+$/;
 const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
+const UUID_HEX_ASCII_RE = /^(?:0[xX])([0-9a-fA-F]{72})$/;
+const UUID_HEX_RAW_RE = /^(?:0[xX])([0-9a-fA-F]{32})$/;
+const UUID_CANONICAL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
 const FIXED_BINARY_TYPE_RE = /^binary(?:\b|\()/i;
 const BINARY_STRING_TYPE_RE = /^(?:binary|varbinary)(?:\b|\()/i;
@@ -129,6 +133,33 @@ export function parseBinaryCellHexValue(value: CellValue): Uint8Array | null {
   if (!match) return null;
 
   return bytesFromHex(match[1]);
+}
+
+export function decodeBinaryUuidText(value: unknown, columnType?: string): string | null {
+  if (!isUuidColumnType(columnType)) return null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+
+  const matchAscii = trimmed.match(UUID_HEX_ASCII_RE);
+  if (matchAscii) {
+    const bytes = parseBinaryCellHexValue(trimmed);
+    if (bytes && bytes.length === 36) {
+      try {
+        const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        if (UUID_CANONICAL_RE.test(decoded)) return decoded;
+      } catch {
+        // Not valid UTF-8
+      }
+    }
+  }
+
+  const matchRaw = trimmed.match(UUID_HEX_RAW_RE);
+  if (matchRaw) {
+    const hex = matchRaw[1].toLowerCase();
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+  }
+
+  return null;
 }
 
 function bytesFromHex(value: string): Uint8Array | null {
@@ -222,6 +253,8 @@ export function binaryCellDisplayText(value: unknown, columnType?: string, origi
     const size = originalBytes === undefined ? "..." : formatBinaryCellByteSize(originalBytes);
     return `${binaryCellDisplayLabel(columnType)} [${size}]`;
   }
+  const uuidText = decodeBinaryUuidText(value, columnType);
+  if (uuidText !== null) return uuidText;
   const bytes = parseBinaryCellBytes(value, columnType, databaseType);
   if (!bytes || !isBinaryCellColumnType(columnType)) return null;
   if (isBinaryCellTextPreviewColumn(columnType, databaseType)) {
@@ -291,6 +324,8 @@ export function binaryCellTextPreview(value: unknown, encoding: BinaryCellTextEn
 // VARBINARY，避免改变 MySQL BINARY/BLOB、SQL Server VARBINARY、PostgreSQL BYTEA、
 // Oracle RAW 等现有语义。
 export function binaryCellClipboardText(value: unknown, columnType?: string, databaseType?: DatabaseType): string | null {
+  const uuidText = decodeBinaryUuidText(value, columnType);
+  if (uuidText !== null) return uuidText;
   // 覆盖上方注释里「严格限于 VARBINARY」的旧范围（#12413）：网格已经对文本型 BLOB
   // 显示文本预览（MySQL 与 Oracle 家族；AES_DECRYPT 这类表达式的结果列常报成 BLOB），
   // 显示 `secret` 却复制出 hex 与预览自相矛盾，因此并入同一闸门；严格往返校验与 hex

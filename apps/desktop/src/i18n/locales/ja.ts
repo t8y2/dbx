@@ -1883,6 +1883,11 @@ export default withEnglishFallback({
     redisClientKeyBrowse: "Redis クライアント秘密鍵を選択",
     redisTlsCertificateHint: "CA 証明書を空欄にするとシステムの信頼ストアを使用します。サーバーが相互認証（tls-auth-clients yes）を要求する場合は、クライアント証明書と秘密鍵も合わせて設定してください。",
     redisClientCertPairRequired: "Redis TLS のクライアント証明書と秘密鍵は同時に設定する必要があります",
+    sshAgentKey: "エージェントキー",
+    sshAgentKeyAll: "すべての identity（順番に試行）",
+    sshAgentKeyHint: "このホストで承認済みのキーを選択します。サーバーは単一接続での認証試行回数を制限するため、すべてのエージェントキーを順番に試すと、正しいキーに到達する前に試行回数を使い切る可能性があります。",
+    sshAgentKeyLoadFailed: "SSH エージェントの identity リストを読み取れません：{error}",
+    sshAgentKeyRefresh: "更新",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",

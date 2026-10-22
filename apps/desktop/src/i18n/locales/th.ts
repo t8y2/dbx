@@ -2060,6 +2060,11 @@ export default withEnglishFallback({
     redisClientKeyBrowse: "เลือกคีย์ส่วนตัวไคลเอนต์ของ Redis",
     redisTlsCertificateHint: "เมื่อเว้นว่างใบรับรอง CA ระบบจะใช้ที่เก็บความเชื่อถือของระบบ; เมื่อเซิร์ฟเวอร์ต้องการการตรวจสอบสิทธิ์แบบสองทาง (tls-auth-clients yes) กรุณาตั้งค่าใบรับรองไคลเอนต์และคีย์ส่วนตัวพร้อมกัน",
     redisClientCertPairRequired: "ต้องกำหนดค่าใบรับรองไคลเอนต์และคีย์ส่วนตัวสำหรับ Redis TLS พร้อมกัน",
+    sshAgentKey: "คีย์ Agent",
+    sshAgentKeyAll: "identity ทั้งหมด (ลองตามลำดับ)",
+    sshAgentKeyHint: "เลือกคีย์ที่ได้รับอนุญาตสำหรับโฮสต์นี้ เซิร์ฟเวอร์จำกัดจำนวนครั้งในการยืนยันตัวตนต่อการเชื่อมต่อหนึ่งรายการ การลองคีย์ agent ทุกคีย์ทีละคีย์อาจทำให้จำนวนครั้งหมดก่อนที่จะถึงคีย์ที่ถูกต้อง",
+    sshAgentKeyLoadFailed: "ไม่สามารถอ่านรายการ identity ของ SSH agent: {error}",
+    sshAgentKeyRefresh: "รีเฟรช",
   },
   editor: {
     duckdbDraining: "Query DuckDB ก่อนหน้ายังหยุดไม่เสร็จ โปรดลองอีกครั้งในไม่ช้า",

@@ -1863,6 +1863,11 @@ export default withEnglishFallback({
     redisClientKeyBrowse: "Selecionar chave privada do cliente do Redis",
     redisTlsCertificateHint: "Quando o certificado CA estiver em branco, o repositório de confiança do sistema será usado; se o servidor exigir autenticação mútua (tls-auth-clients yes), configure também o certificado do cliente e a chave privada.",
     redisClientCertPairRequired: "O certificado do cliente Redis TLS e a chave privada devem ser configurados juntos",
+    sshAgentKey: "Chave do agente",
+    sshAgentKeyAll: "Todas as identidades (tentar em sequência)",
+    sshAgentKeyHint: "Selecione uma chave já autorizada para este host. O servidor limita o número de tentativas de autenticação por conexão; tentar todas as chaves do agente uma a uma pode esgotar as tentativas antes de chegar à chave correta.",
+    sshAgentKeyLoadFailed: "Não foi possível ler a lista de identidades do agente SSH: {error}",
+    sshAgentKeyRefresh: "Atualizar",
   },
   editor: {
     duckdbDraining: "A consulta anterior do DuckDB ainda está sendo interrompida. Tente novamente em breve.",

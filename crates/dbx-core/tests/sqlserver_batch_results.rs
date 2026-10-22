@@ -280,3 +280,32 @@ async fn sqlserver_stops_reading_after_row_limit_and_flags_the_connection() {
     assert!(!small_result.truncated);
     assert!(!small.take_abandoned_after_row_limit());
 }
+
+#[tokio::test]
+#[ignore = "requires DBX_TEST_SQLSERVER_HOST and DBX_TEST_SQLSERVER_PASSWORD"]
+async fn sqlserver_stopping_path_finishes_stored_procedure_side_effects() {
+    let mut client = connect_sqlserver().await;
+    sqlserver::execute_query(
+        &mut client,
+        "CREATE TABLE #dbx_row_limit_marker (value INT); INSERT INTO #dbx_row_limit_marker VALUES (0);",
+    )
+    .await
+    .unwrap();
+    sqlserver::execute_query(
+        &mut client,
+        "CREATE PROCEDURE #dbx_row_limit_proc AS BEGIN SET NOCOUNT ON; \
+         SELECT TOP (100000) a.object_id FROM sys.all_columns a CROSS JOIN sys.all_columns b; \
+         UPDATE #dbx_row_limit_marker SET value = 1; END;",
+    )
+    .await
+    .unwrap();
+
+    let result = sqlserver::execute_query_with_max_rows_stopping(&mut client, "EXEC #dbx_row_limit_proc", Some(1))
+        .await
+        .unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.truncated);
+    assert!(!client.take_abandoned_after_row_limit(), "a procedure must finish before returning");
+    let marker = sqlserver::execute_query(&mut client, "SELECT value FROM #dbx_row_limit_marker").await.unwrap();
+    assert_eq!(marker.rows[0][0].as_i64(), Some(1));
+}

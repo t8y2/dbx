@@ -2041,7 +2041,8 @@ async fn do_execute_typed(
             // the connection as abandoned, which then gets dropped instead of
             // returned to the pool. Session-pinned executions keep the old
             // draining path because the connection carries user state.
-            let stop_at_row_limit = max_rows.is_some() && options.client_session_id.is_none();
+            let stop_at_row_limit =
+                max_rows.is_some() && options.client_session_id.is_none() && !options.use_transaction.unwrap_or(false);
             let execution = async {
                 if execution_mode == QueryExecutionMode::Simple {
                     let mut results =

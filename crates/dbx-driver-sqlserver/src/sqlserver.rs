@@ -1757,6 +1757,14 @@ fn is_single_sqlserver_select(sql: &str) -> bool {
     normalized_sqlserver_select_statement(&statements[0]).is_some()
 }
 
+/// Abandoning a stream also cancels the server's remaining work. Require a
+/// parsed query so EXEC, DML OUTPUT and scripts (including statements separated
+/// without semicolons) cannot lose side effects after their first result set.
+fn sqlserver_can_stop_at_row_limit(sql: &str) -> bool {
+    is_single_sqlserver_select(sql)
+        && matches!(Parser::parse_sql(&MsSqlDialect {}, sql).as_deref(), Ok([Statement::Query(_)]))
+}
+
 fn sqlserver_source_column_name(index: usize) -> String {
     format!("dbx_col_{}", index + 1)
 }
@@ -3779,12 +3787,14 @@ pub async fn execute_query_with_max_rows(
 /// connection is left with unread tokens: the driver sends a best-effort TDS
 /// ATTENTION and marks the client as abandoned, and the caller must discard
 /// that pooled connection ([`SqlServerClient::take_abandoned_after_row_limit`]).
+/// Stored procedures, writes and scripts always drain to completion so their
+/// side effects are not canceled by a display row limit.
 pub async fn execute_query_with_max_rows_stopping(
     client: &mut SqlServerClient,
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<QueryResult, String> {
-    execute_query_with_max_rows_inner(client, sql, max_rows, None, true).await
+    execute_query_with_max_rows_inner(client, sql, max_rows, None, sqlserver_can_stop_at_row_limit(sql)).await
 }
 
 async fn abandon_sqlserver_result_stream(client: &mut SqlServerClient) {
@@ -3933,7 +3943,7 @@ pub async fn execute_batch_with_max_rows_metadata_stopping(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<Vec<SqlServerBatchResult>, String> {
-    execute_batch_with_max_rows_metadata_inner(client, sql, max_rows, true).await
+    execute_batch_with_max_rows_metadata_inner(client, sql, max_rows, sqlserver_can_stop_at_row_limit(sql)).await
 }
 
 async fn execute_batch_with_max_rows_metadata_inner(
@@ -4431,6 +4441,29 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn row_limit_stopping_only_accepts_single_read_queries() {
+        for sql in [
+            "SELECT * FROM dbo.items",
+            "SELECT DISTINCT id FROM dbo.items ORDER BY id;",
+            "WITH items AS (SELECT 1 AS id) SELECT id FROM items;",
+        ] {
+            assert!(super::sqlserver_can_stop_at_row_limit(sql), "{sql}");
+        }
+        for sql in [
+            "EXEC dbo.read_then_update;",
+            "EXECUTE dbo.read_then_update;",
+            "UPDATE dbo.items SET value = 1 OUTPUT inserted.id;",
+            "SELECT * INTO dbo.copy FROM dbo.items;",
+            "SELECT * FROM dbo.items; UPDATE dbo.items SET value = 1;",
+            "SELECT * FROM dbo.items\nUPDATE dbo.items SET value = 1",
+            "SELECT * FROM dbo.items\nSELECT 2",
+            "WITH items AS (SELECT 1 AS id) DELETE FROM dbo.items OUTPUT deleted.id;",
+        ] {
+            assert!(!super::sqlserver_can_stop_at_row_limit(sql), "{sql}");
+        }
+    }
+
     #[test]
     fn manual_transaction_status_keeps_legacy_and_modern_safety_explicit() {
         use super::{uses_legacy_transaction_status as legacy, ManualTransactionStatus as Status};

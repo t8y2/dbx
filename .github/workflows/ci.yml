@@ -389,9 +389,11 @@ jobs:
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
       RUSTC_WRAPPER: sccache
-      # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
-      # Linux target caches when thousands of GHA sccache entries pile up.
-      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
+      # On main, read S3 hits and seed GHA for fork PRs.
+      # Keep PR writes off because GHA entries can evict other caches.
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'push' && 'READ_WRITE' || 'READ_ONLY' }}
+      SCCACHE_S3_AVAILABLE: ${{ secrets.SCCACHE_S3_BUCKET != '' && 'true' || 'false' }}
       SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
       SCCACHE_IDLE_TIMEOUT: "0"
       # Single source for the job's nightly pin: the toolchain step and the
@@ -425,7 +427,7 @@ jobs:
           version: "v0.16.0"
 
       - name: Configure S3 sccache
-        if: env.SCCACHE_GHA_ENABLED != 'true'
+        if: env.SCCACHE_S3_AVAILABLE == 'true'
         shell: bash
         env:
           CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -441,6 +443,8 @@ jobs:
             echo "SCCACHE_REGION=${CACHE_REGION}"
             echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
             echo "SCCACHE_S3_USE_SSL=true"
+            echo "SCCACHE_MULTILEVEL_CHAIN=gha,s3"
+            echo "SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
           } >> "$GITHUB_ENV"

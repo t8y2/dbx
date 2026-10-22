@@ -6,6 +6,10 @@ pub const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
 pub const DBX_NEO4J_ELEMENT_ID_COLUMN: &str = "__DBX_ELEMENT_ID";
 pub const DBX_TDENGINE_TBNAME_COLUMN: &str = "tbname";
 
+fn default_quote_identifiers() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TableSelectSqlOptions<'a> {
     pub database_type: Option<DatabaseType>,
@@ -16,7 +20,7 @@ pub struct TableSelectSqlOptions<'a> {
     pub limit: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataSelectSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,6 +78,14 @@ pub struct TableDataSelectSqlOptions {
     pub use_driver_row_offset: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_input: Option<String>,
+    /// `生成 SQL 时不加引号`: emit table/column identifiers bare when the
+    /// dialect's can-unquote rules prove the unquoted spelling resolves to
+    /// the same object; anything unsafe (mixed case, reserved words, the
+    /// grid's synthetic marker aliases) keeps its quotes. Defaults to true so
+    /// older agents that do not know the field keep the historical
+    /// always-quoted SQL.
+    #[serde(default = "default_quote_identifiers")]
+    pub quote_identifiers: bool,
     /// Time-series quick-open ergonomics: inject a rolling `time` window
     /// when no WHERE was supplied. Opt-in so sampling and export callers
     /// keep the historical unbounded scan semantics.
@@ -81,4 +93,36 @@ pub struct TableDataSelectSqlOptions {
     pub inject_default_time_series_where: bool,
     #[serde(default)]
     pub include_row_id: bool,
+}
+
+impl Default for TableDataSelectSqlOptions {
+    fn default() -> Self {
+        Self {
+            database_type: None,
+            driver_profile: None,
+            identifier_quote: None,
+            server_version: None,
+            schema: None,
+            table_name: String::new(),
+            catalog: None,
+            database: None,
+            table_type: None,
+            primary_keys: Vec::new(),
+            columns: Vec::new(),
+            column_types: Vec::new(),
+            large_value_preview_size: None,
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: None,
+            offset: None,
+            use_driver_row_offset: false,
+            where_input: None,
+            // Mirrors the serde default: Rust-side `..Default::default()`
+            // constructors (export, sampling, agent tools) keep the
+            // historical always-quoted SQL.
+            quote_identifiers: default_quote_identifiers(),
+            inject_default_time_series_where: false,
+            include_row_id: false,
+        }
+    }
 }

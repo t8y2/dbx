@@ -162,7 +162,13 @@ mod tests {
     fn helper_runs_the_fallback_when_open_rejects_env() {
         // Simulate an older open rejecting --env, then observe the fallback
         // without launching an app. Execute the actual generated shell script.
-        let script = relaunch_script(u32::MAX, &[("DBX_DATA_DIR".to_string(), "/tmp/dbx".to_string())])
+        // The wait loop has its own test. Run only the launch section here:
+        // Linux kill narrows u32::MAX to pid -1, which can wait indefinitely.
+        let helper = relaunch_script(4242, &[("DBX_DATA_DIR".to_string(), "/tmp/dbx".to_string())]);
+        let script = helper
+            .split_once("; done; ")
+            .unwrap()
+            .1
             .replacen("/usr/bin/open", "/usr/bin/false", 1)
             .replace("/usr/bin/open", "/bin/echo");
         let output = std::process::Command::new("/bin/sh")

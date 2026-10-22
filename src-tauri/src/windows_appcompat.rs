@@ -22,14 +22,19 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumValueW, RegOpenKeyExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+use crate::windows_appcompat_state::{self, LayerRegistry, LayerValue};
 
 /// Per-user AppCompat layer store; the shim engine reads it when a process with a
 /// matching full path starts.
 const LAYERS_KEY: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
+/// Separate DBX-owned key records the exact values created by the recovery
+/// chain. Never enumerate the shared Layers key to decide what to remove.
+const OWNED_LAYERS_KEY: &str = r"Software\com.dbx.app\StartupCompat\OwnedWebView2Layers";
 /// "Windows 8" mode token; `~` marks the data as a compatibility-layer token list.
 const WIN8_LAYER_DATA: &str = "~ WIN8RTM";
 /// `KEY_QUERY_VALUE` keeps `RegCreateKeyExW` working on an already existing key;
@@ -64,63 +69,36 @@ pub(crate) fn find_runtime_browser_executable() -> Option<PathBuf> {
     None
 }
 
-/// Writes the per-user AppCompat "Windows 8" layer for `msedgewebview2.exe`. Idempotent:
-/// Evergreen updates move the version directory, so the ladder re-runs this each startup.
-/// Returns a log-safe summary (source class + version, never the path) or an error string
-/// carrying the Win32 error code.
+/// Sets the Windows 8 layer only when no user/application layer exists.
+/// Ownership is persisted separately for cleanup across recovery processes.
 pub(crate) fn set_win8_compat_layer() -> Result<String, String> {
     let Some(executable) = find_runtime_browser_executable() else {
         return Err("appcompat win8 layer not set: no WebView2 runtime msedgewebview2.exe found".to_string());
     };
-    let key = open_layers_key(true).map_err(|code| {
-        format!("appcompat win8 layer not set: failed to open AppCompatFlags\\Layers (Win32 error {code})")
-    })?;
-    let value_name = wide(&executable.to_string_lossy());
-    let value_data = wide(WIN8_LAYER_DATA);
-    // SAFETY: `key` is a valid HKCU handle opened above; both buffers are NUL-terminated
-    // UTF-16 and outlive the call. REG_SZ data length is expressed in bytes.
-    let status = unsafe {
-        RegSetValueExW(
-            key,
-            value_name.as_ptr(),
-            0,
-            REG_SZ,
-            value_data.as_ptr().cast(),
-            (value_data.len() * std::mem::size_of::<u16>()) as u32,
-        )
-    };
-    // SAFETY: `key` was opened by us and is not used afterwards.
-    unsafe { RegCloseKey(key) };
-    if status != ERROR_SUCCESS {
-        return Err(format!("appcompat win8 layer not set: failed to write layer value (Win32 error {status})"));
-    }
+    let registry = WindowsLayerRegistry::open(true)
+        .map_err(|code| format!("appcompat win8 layer not set: registry open failed (Win32 error {code})"))?;
+    let value =
+        LayerValue { value_type: REG_SZ, data: wide(WIN8_LAYER_DATA).into_iter().flat_map(u16::to_le_bytes).collect() };
+    let created = windows_appcompat_state::set_if_unconfigured(&registry, &executable.to_string_lossy(), &value)
+        .map_err(|code| format!("appcompat win8 layer not set: registry update failed (Win32 error {code})"))?;
     let version = version_from_executable(&executable).unwrap_or_else(|| "unknown".to_string());
-    Ok(format!("appcompat win8 layer set runtime_source={} version={version}", runtime_source_class(&executable)))
+    Ok(format!(
+        "appcompat win8 layer created={created} existing_layer_preserved={} runtime_source={} version={version}",
+        !created,
+        runtime_source_class(&executable)
+    ))
 }
 
-/// Removes every layer value whose name points at `msedgewebview2.exe` and whose data
-/// selects Windows 8 mode (same-executable layers with other data are left alone; an
-/// absent key counts as "not present"). Returns a log-safe summary.
+/// Removes only DBX-created values that have not subsequently been edited.
 pub(crate) fn remove_win8_compat_layer() -> Result<String, String> {
-    let key = match open_layers_key(false) {
-        Ok(key) => key,
+    let registry = match WindowsLayerRegistry::open(false) {
+        Ok(registry) => registry,
         Err(ERROR_FILE_NOT_FOUND) => return Ok("appcompat win8 layer not present".to_string()),
-        Err(code) => {
-            return Err(format!(
-                "appcompat win8 layer not removed: failed to open AppCompatFlags\\Layers (Win32 error {code})"
-            ));
-        }
+        Err(code) => return Err(format!("appcompat cleanup registry open failed (Win32 error {code})")),
     };
-    let removed = remove_win8_values(key);
-    // SAFETY: `key` was opened by us and is not used afterwards.
-    unsafe { RegCloseKey(key) };
-    match removed {
-        Ok(0) => Ok("appcompat win8 layer not present".to_string()),
-        Ok(count) => Ok(format!("appcompat win8 layer removed count={count}")),
-        Err(code) => Err(format!(
-            "appcompat win8 layer not removed: failed to enumerate/delete layer values (Win32 error {code})"
-        )),
-    }
+    let count = windows_appcompat_state::remove_owned(&registry)
+        .map_err(|code| format!("appcompat owned layer cleanup failed (Win32 error {code})"))?;
+    Ok(format!("appcompat win8 owned layers removed count={count}"))
 }
 
 /// True when the process token is elevated (UAC High or SYSTEM). WHY: the elevated-relaunch
@@ -260,8 +238,8 @@ fn path_starts_with_ci(path: &Path, root: &Path) -> bool {
 
 /// Open (optionally creating) the per-user `AppCompatFlags\Layers` key. Errors are
 /// returned as raw Win32 codes so callers can special-case "key absent".
-fn open_layers_key(create: bool) -> Result<HKEY, u32> {
-    let path = wide(LAYERS_KEY);
+fn open_registry_key(path: &str, create: bool) -> Result<HKEY, u32> {
+    let path = wide(path);
     let mut key: HKEY = std::ptr::null_mut();
     // SAFETY: `path` is NUL-terminated and outlives the call; optional class/security
     // pointers are null, and `key` is only used when the API reports success.
@@ -291,11 +269,114 @@ fn open_layers_key(create: bool) -> Result<HKEY, u32> {
     Ok(key)
 }
 
-/// Enumerate and delete matching layer values; returns the number removed or a raw Win32
-/// error code.
-fn remove_win8_values(key: HKEY) -> Result<u32, u32> {
+struct WindowsLayerRegistry {
+    layers: HKEY,
+    owned: HKEY,
+}
+
+impl WindowsLayerRegistry {
+    fn open(create_ownership: bool) -> Result<Self, u32> {
+        let owned = open_registry_key(OWNED_LAYERS_KEY, create_ownership)?;
+        match open_registry_key(LAYERS_KEY, true) {
+            Ok(layers) => Ok(Self { layers, owned }),
+            Err(code) => {
+                unsafe { RegCloseKey(owned) };
+                Err(code)
+            }
+        }
+    }
+}
+
+impl Drop for WindowsLayerRegistry {
+    fn drop(&mut self) {
+        // Both handles were opened by this instance and are no longer used.
+        unsafe {
+            RegCloseKey(self.layers);
+            RegCloseKey(self.owned);
+        }
+    }
+}
+
+impl LayerRegistry for WindowsLayerRegistry {
+    type Error = u32;
+
+    fn current(&self, name: &str) -> Result<Option<LayerValue>, u32> {
+        read_registry_value(self.layers, name)
+    }
+    fn write(&self, name: &str, value: &LayerValue) -> Result<(), u32> {
+        write_registry_value(self.layers, name, value)
+    }
+    fn delete(&self, name: &str) -> Result<(), u32> {
+        delete_registry_value(self.layers, name)
+    }
+    fn owned(&self) -> Result<Vec<(String, LayerValue)>, u32> {
+        owned_registry_values(self.owned)
+    }
+    fn remember(&self, name: &str, value: &LayerValue) -> Result<(), u32> {
+        write_registry_value(self.owned, name, value)
+    }
+    fn forget(&self, name: &str) -> Result<(), u32> {
+        delete_registry_value(self.owned, name)
+    }
+}
+
+fn write_registry_value(key: HKEY, name: &str, value: &LayerValue) -> Result<(), u32> {
+    let name = wide(name);
+    // Buffers outlive the call; registry lengths are expressed in bytes.
+    let status = unsafe {
+        RegSetValueExW(key, name.as_ptr(), 0, value.value_type, value.data.as_ptr(), value.data.len() as u32)
+    };
+    if status == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(status)
+    }
+}
+
+fn delete_registry_value(key: HKEY, name: &str) -> Result<(), u32> {
+    let name = wide(name);
+    let status = unsafe { RegDeleteValueW(key, name.as_ptr()) };
+    if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
+        Ok(())
+    } else {
+        Err(status)
+    }
+}
+
+fn read_registry_value(key: HKEY, name: &str) -> Result<Option<LayerValue>, u32> {
+    let name = wide(name);
+    let mut value_type = 0;
+    let mut size = 0;
+    let status = unsafe {
+        RegQueryValueExW(key, name.as_ptr(), std::ptr::null(), &mut value_type, std::ptr::null_mut(), &mut size)
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != ERROR_SUCCESS {
+        return Err(status);
+    }
+    if size as usize > MAX_VALUE_DATA_BYTES {
+        return Err(ERROR_MORE_DATA);
+    }
+    let mut data = vec![0; size as usize];
+    let status = unsafe {
+        RegQueryValueExW(key, name.as_ptr(), std::ptr::null(), &mut value_type, data.as_mut_ptr(), &mut size)
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != ERROR_SUCCESS {
+        return Err(status);
+    }
+    data.truncate(size as usize);
+    Ok(Some(LayerValue { value_type, data }))
+}
+
+/// Enumerate the separate DBX ownership key, never the user's shared Layers.
+fn owned_registry_values(key: HKEY) -> Result<Vec<(String, LayerValue)>, u32> {
+    let mut values = Vec::new();
     let mut index = 0u32;
-    let mut removed = 0u32;
     let mut name_capacity = INITIAL_VALUE_NAME_CHARS;
     let mut data_capacity = INITIAL_VALUE_DATA_BYTES;
     loop {
@@ -304,8 +385,6 @@ fn remove_win8_values(key: HKEY) -> Result<u32, u32> {
         let mut name_length = name_capacity as u32;
         let mut data_length = data_capacity as u32;
         let mut value_type: REG_VALUE_TYPE = 0;
-        // SAFETY: both buffers are sized by their matching `*_length` variables, so the
-        // API only writes within them.
         let status = unsafe {
             RegEnumValueW(
                 key,
@@ -320,49 +399,28 @@ fn remove_win8_values(key: HKEY) -> Result<u32, u32> {
         };
         match status {
             ERROR_SUCCESS => {
-                // Clamp defensively: never index past the allocations (no panics).
                 let name_length = (name_length as usize).min(name.len());
-                let data_length = (data_length as usize).min(data.len());
                 let value_name = String::from_utf16_lossy(&name[..name_length]);
-                let is_string = value_type == REG_SZ || value_type == REG_EXPAND_SZ;
-                let value_data = if is_string { registry_string(&data[..data_length]) } else { String::new() };
-                if is_msedgewebview2_layer_name(&value_name) && is_win8_layer_data(&value_data) {
-                    let value_name = wide(&value_name);
-                    // SAFETY: `key` is valid and the name is NUL-terminated.
-                    let delete_status = unsafe { RegDeleteValueW(key, value_name.as_ptr()) };
-                    if delete_status != ERROR_SUCCESS {
-                        return Err(delete_status);
-                    }
-                    removed += 1;
-                    // Deleted values shift down, so re-read the same index.
-                    name_capacity = INITIAL_VALUE_NAME_CHARS;
-                    data_capacity = INITIAL_VALUE_DATA_BYTES;
-                    continue;
-                }
+                data.truncate((data_length as usize).min(data.len()));
+                values.push((value_name, LayerValue { value_type, data }));
                 index += 1;
                 name_capacity = INITIAL_VALUE_NAME_CHARS;
                 data_capacity = INITIAL_VALUE_DATA_BYTES;
             }
             ERROR_MORE_DATA => {
-                // `*_length` now holds the required size; grow and retry the same index.
-                // Pathological values beyond our caps are skipped, not allocated.
-                let required_name = (name_length as usize).max(1);
+                // Value-name lengths exclude the terminating NUL.
+                let required_name = name_length as usize + 1;
                 let required_data = (data_length as usize).max(1);
-                let grow_name = required_name > name_capacity;
-                let grow_data = required_data > data_capacity;
-                if required_name > MAX_VALUE_NAME_CHARS
-                    || required_data > MAX_VALUE_DATA_BYTES
-                    || (!grow_name && !grow_data)
-                {
-                    index += 1;
-                    name_capacity = INITIAL_VALUE_NAME_CHARS;
-                    data_capacity = INITIAL_VALUE_DATA_BYTES;
-                    continue;
+                if required_name > MAX_VALUE_NAME_CHARS || required_data > MAX_VALUE_DATA_BYTES {
+                    return Err(ERROR_MORE_DATA);
                 }
-                name_capacity = required_name;
-                data_capacity = required_data;
+                if required_name <= name_capacity && required_data <= data_capacity {
+                    return Err(ERROR_MORE_DATA);
+                }
+                name_capacity = name_capacity.max(required_name);
+                data_capacity = data_capacity.max(required_data);
             }
-            ERROR_NO_MORE_ITEMS => return Ok(removed),
+            ERROR_NO_MORE_ITEMS => return Ok(values),
             other => return Err(other),
         }
     }
@@ -371,30 +429,6 @@ fn remove_win8_values(key: HKEY) -> Result<u32, u32> {
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-/// Decode a registry string value (UTF-16LE, possibly NUL-terminated; odd-length byte
-/// buffers are tolerated) into a `String`.
-fn registry_string(bytes: &[u8]) -> String {
-    let mut units: Vec<u16> =
-        bytes.chunks_exact(std::mem::size_of::<u16>()).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
-    if let Some(terminator) = units.iter().position(|unit| *unit == 0) {
-        units.truncate(terminator);
-    }
-    String::from_utf16_lossy(&units)
-}
-
-/// A layer value belongs to the WebView2 browser process when its name ends with the full
-/// path of `msedgewebview2.exe` (the shim matches full paths; both separators and any case
-/// are accepted).
-fn is_msedgewebview2_layer_name(name: &str) -> bool {
-    name.replace('/', "\\").to_ascii_lowercase().ends_with(r"\msedgewebview2.exe")
-}
-
-/// Whether the layer data selects Windows 8 mode (`"~ WIN8RTM"`). The token list may
-/// contain several modes separated by spaces, so a substring test is correct.
-fn is_win8_layer_data(data: &str) -> bool {
-    data.to_ascii_uppercase().contains("WIN8RTM")
-}
 
 /// NUL-terminated wide string for Win32 registry APIs.
 fn wide(text: &str) -> Vec<u16> {
@@ -421,29 +455,6 @@ mod tests {
         // Non-numeric names are rejected.
         assert_eq!(compare_versions("EBWebView", "133.0.3065.92"), None);
         assert_eq!(parse_version(""), None);
-    }
-
-    #[test]
-    fn matches_layer_names_and_win8_data() {
-        assert!(is_msedgewebview2_layer_name(
-            r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\133.0.3065.92\msedgewebview2.exe"
-        ));
-        assert!(is_msedgewebview2_layer_name("C:/app/MSEDGEWEBVIEW2.EXE"));
-        // Other executables and lookalikes must not match.
-        for name in [
-            r"C:\app\msedge.exe",
-            r"C:\app\notmsedgewebview2.exe",
-            r"C:\app\msedgewebview2.exe.bak",
-            "msedgewebview2.exe",
-        ] {
-            assert!(!is_msedgewebview2_layer_name(name), "unexpected match: {name}");
-        }
-
-        assert!(is_win8_layer_data("~ WIN8RTM"));
-        assert!(is_win8_layer_data("~ win8rtm"));
-        assert!(is_win8_layer_data("~ WIN8RTM WIN7RTM"));
-        assert!(!is_win8_layer_data("~ WIN7RTM"));
-        assert!(!is_win8_layer_data(""));
     }
 
     #[test]

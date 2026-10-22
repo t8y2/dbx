@@ -26,6 +26,8 @@ mod webview2_recovery;
 mod window_state_guard;
 #[cfg(target_os = "windows")]
 mod windows_appcompat;
+#[cfg(any(target_os = "windows", test))]
+mod windows_appcompat_state;
 #[cfg(not(target_os = "windows"))]
 #[path = "windows_appcompat_noop.rs"]
 mod windows_appcompat;

@@ -145,6 +145,61 @@ describe("EditorToolbar mount contract", () => {
     host.remove();
   });
 
+  it("emits toolbarExecuteAll when clicking the execute all button", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "conn-1",
+        name: "conn",
+        db_type: "mysql",
+        color: "",
+      } as never,
+    ];
+
+    const host = createHost();
+    const onToolbarExecuteAll = vi.fn();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-1",
+        title: "SQL",
+        connectionId: "conn-1",
+        database: "db",
+        sql: "SELECT 1;\nSELECT 2;",
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig("conn-1"),
+      executableSql: "SELECT 1",
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      txnSessionId: undefined,
+      txnAutoRolledBack: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
+      onToolbarExecuteAll,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    const executeAllButton = host.querySelector<HTMLButtonElement>('button[aria-label="toolbar.executeAllSql"]');
+    expect(executeAllButton).not.toBeNull();
+    executeAllButton!.dispatchEvent(new MouseEvent("click", { detail: 1, bubbles: true }));
+    await nextTick();
+
+    expect(onToolbarExecuteAll).toHaveBeenCalledTimes(1);
+    expect(onToolbarExecuteAll.mock.calls[0]?.[0]).toBe("pointer");
+
+    app.unmount();
+    host.remove();
+  });
+
   it("keeps the manually selected SQL from pointer-down through toolbar execution", async () => {
     const connectionStore = useConnectionStore();
     connectionStore.connections = [

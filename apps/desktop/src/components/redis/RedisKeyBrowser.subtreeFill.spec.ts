@@ -30,6 +30,8 @@ const mocks = vi.hoisted(() => ({
   listRedisCompletionCommandDocs: vi.fn(),
   listRedisCompletionKeys: vi.fn(),
   redisScanPageSize: 100,
+  separator: ":",
+  keyFilter: "",
   infiniteScroll: true,
   queryResultMaxRowsEnabled: true,
   queryResultMaxRows: 5000,
@@ -60,7 +62,7 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: vi.fn().mockResolvedValue(undefined),
-    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize }),
+    getConfig: () => ({ name: "Redis", redis_key_separator: mocks.separator, redis_key_filter: mocks.keyFilter, redis_scan_page_size: mocks.redisScanPageSize }),
     updateRedisDbKeyStats: mocks.updateRedisDbKeyStats,
     listRedisCompletionCommandDocs: mocks.listRedisCompletionCommandDocs,
     listRedisCompletionKeys: mocks.listRedisCompletionKeys,
@@ -222,7 +224,21 @@ vi.mock("@/components/editor/DangerConfirmDialog.vue", async () => {
 
 vi.mock("./RedisValueViewer.vue", async () => {
   const { defineComponent, h } = await import("vue");
-  return { default: defineComponent({ setup: () => () => h("div") }) };
+  return {
+    default: defineComponent({
+      props: { keyRaw: String, metadata: Object },
+      emits: ["deleted", "renamed", "loaded"],
+      setup(props, { emit }) {
+        return () =>
+          h("div", [
+            h("output", { "data-viewer-metadata": "" }, JSON.stringify(props.metadata)),
+            h("button", { "data-viewer-delete": "", onClick: () => emit("deleted", props.keyRaw) }),
+            h("button", { "data-viewer-rename": "", onClick: () => emit("renamed", props.keyRaw, "grp:renamed", "grp:renamed") }),
+            h("button", { "data-viewer-loaded": "", onClick: () => emit("loaded", { key_raw: props.keyRaw, key_display: props.metadata?.key_display, redis_type: "string", ttl: 120, data: { kind: "string", content: { display: "updated", raw_base64: "dXBkYXRlZA==", encoding: "utf8" } } }) }),
+          ]);
+      },
+    }),
+  };
 });
 
 vi.mock("./RedisPubSubPanel.vue", async () => {
@@ -241,8 +257,9 @@ vi.mock("vue-virtual-scroller", async () => {
     RecycleScroller: defineComponent({
       inheritAttrs: false,
       props: { items: { type: Array, default: () => [] } },
-      setup(props, { attrs, slots }) {
+      setup(props, { attrs, slots, expose }) {
         const visibleItemCount = 50;
+        expose({ scrollToItem: () => undefined });
         return () =>
           h(
             "div",
@@ -334,7 +351,10 @@ function deferred<T>() {
 
 function resetApiMocks() {
   vi.clearAllMocks();
+  mocks.redisScanKeysBatch.mockReset();
   mocks.redisScanPageSize = 100;
+  mocks.separator = ":";
+  mocks.keyFilter = "";
   mocks.infiniteScroll = true;
   mocks.queryResultMaxRowsEnabled = true;
   mocks.queryResultMaxRows = 5000;
@@ -409,6 +429,304 @@ function leafVisible(host: HTMLElement, keyRaw: string): boolean {
 // bound needs 5 calls; the iteration bound alone needs 7.
 const SUBTREE_FILL_MAX_CALLS_BY_KEYS = 5;
 const SUBTREE_FILL_MAX_CALLS_BY_ITERATIONS = 7;
+
+function groupCheckbox(host: HTMLElement, path: string[], db = 0): HTMLInputElement {
+  const checkbox = Array.from(host.querySelectorAll<HTMLInputElement>("[data-redis-group]")).find((element) => element.dataset.redisGroup === `group:${db}:${JSON.stringify(path)}`);
+  expect(checkbox, `group ${path.join(":")}`).toBeDefined();
+  return checkbox!;
+}
+
+function refreshGroupButton(host: HTMLElement, path = ["grp"]): HTMLButtonElement {
+  const button = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-redis-refresh-group]")).find((element) => element.dataset.redisRefreshGroup === `group:0:${JSON.stringify(path)}`);
+  expect(button, `refresh action for ${path.join(":")}`).toBeDefined();
+  return button!;
+}
+
+describe("RedisKeyBrowser prefix refresh (issue #13028)", () => {
+  beforeEach(stubOverflowingViewport);
+
+  function completeTree(keys = ["grp:old", "grp:keep", "other:keep"]) {
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: keys.map(keyInfo), total_keys: keys.length });
+  }
+
+  it("replaces only the refreshed prefix and preserves sibling expansion and checked keys", async () => {
+    completeTree(["grp:old", "grp:keep", "grp:child:keep", "other:keep"]);
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    groupCheckbox(host, ["grp", "child"]).parentElement!.parentElement!.click();
+    groupCheckbox(host, ["other"]).parentElement!.parentElement!.click();
+    await settleThoroughly();
+    host.querySelector<HTMLInputElement>("[data-redis-leaf='other:keep']")!.click();
+    host.querySelector<HTMLInputElement>("[data-redis-leaf='grp:old']")!.click();
+    await settleThoroughly();
+
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("grp:keep"), keyInfo("grp:new"), keyInfo("grp:child:keep")], total_keys: 4 });
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+
+    expect(leafVisible(host, "grp:old")).toBe(false);
+    expect(leafVisible(host, "grp:new")).toBe(true);
+    expect(leafVisible(host, "grp:keep")).toBe(true);
+    expect(leafVisible(host, "grp:child:keep")).toBe(true);
+    expect(host.querySelector<HTMLInputElement>("[data-redis-leaf='other:keep']")?.checked).toBe(true);
+    expect(host.textContent).toContain("redis.deselectAll");
+    expect(mocks.redisScanKeysBatch).toHaveBeenLastCalledWith("connection", 0, 0, "grp:*", 100, 8, true);
+  });
+
+  it("removes an expired empty prefix without touching a neighboring prefix", async () => {
+    completeTree(["grp:old", "grp2:keep"]);
+    const host = mountBrowser();
+    await settleThoroughly();
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 1 });
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    expect(host.querySelectorAll("[data-redis-group]")).toHaveLength(1);
+    groupCheckbox(host, ["grp2"]).parentElement!.parentElement!.click();
+    await settleThoroughly();
+    expect(leafVisible(host, "grp2:keep")).toBe(true);
+  });
+
+  it("refreshes metadata of existing keys", async () => {
+    completeTree(["grp:keep"]);
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [{ ...keyInfo("grp:keep"), key_type: "hash", ttl: 3600 }], total_keys: 1 });
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    const row = host.querySelector("[data-redis-key-raw='grp:keep']")!;
+    expect(row.textContent).toContain("hash");
+    expect(row.textContent).not.toContain("string");
+    expect(row.textContent).not.toContain("redis.noExpiry");
+  });
+
+  it("retains the previous tree on failure and retries the prefix", async () => {
+    completeTree();
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    mocks.redisScanKeysBatch.mockRejectedValueOnce(new Error("prefix scan failed"));
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    expect(leafVisible(host, "grp:old")).toBe(true);
+    expect(mocks.toast).toHaveBeenCalledWith("prefix scan failed", 5000);
+    expect(refreshGroupButton(host).disabled).toBe(false);
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("grp:retry")], total_keys: 2 });
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    expect(leafVisible(host, "grp:retry")).toBe(true);
+    expect(leafVisible(host, "grp:old")).toBe(false);
+  });
+
+  it("bounds sparse refreshes and keeps old keys until explicit continuation completes", async () => {
+    completeTree();
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve({ cursor: cursor + 1, keys: [], total_keys: 3 }));
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(7);
+    expect(leafVisible(host, "grp:old")).toBe(true);
+    expect(refreshGroupButton(host).title).toBe("redis.loadMoreKeys");
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(7);
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("grp:fresh")], total_keys: 2 });
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    expect(subtreeCalls()[7][2]).toBe(7);
+    expect(leafVisible(host, "grp:fresh")).toBe(true);
+    expect(leafVisible(host, "grp:old")).toBe(false);
+  });
+
+  it("bounds dense refreshes and preserves buffered results across passes", async () => {
+    completeTree();
+    const host = mountBrowser();
+    await settleThoroughly();
+    let page = 0;
+    mocks.redisScanKeysBatch.mockImplementation(() => Promise.resolve({ cursor: ++page, keys: subtreeBatchKeys(100, page), total_keys: 1000 }));
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(5);
+    expect(host.textContent).toContain("(2)");
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("grp:last")], total_keys: 502 });
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    expect(subtreeCalls()[5][2]).toBe(5);
+    expect(host.textContent).toContain("(501)");
+  });
+
+  it("escapes literal prefixes with a custom separator and honors the connection scope", async () => {
+    mocks.separator = "/";
+    mocks.keyFilter = "g*/*keep*";
+    completeTree(["g[1]/keep-old"]);
+    const host = mountBrowser();
+    await settleThoroughly();
+    groupCheckbox(host, ["g[1]"]).parentElement!.parentElement!.click();
+    await settleThoroughly();
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("g[1]/keep-new"), keyInfo("g[1]/hidden")], total_keys: 2 });
+    refreshGroupButton(host, ["g[1]"]).click();
+    await settleThoroughly();
+    expect(mocks.redisScanKeysBatch).toHaveBeenLastCalledWith("connection", 0, 0, "g\\[1\\]/*", 100, 8, true);
+    expect(leafVisible(host, "g[1]/keep-new")).toBe(true);
+    expect(leafVisible(host, "g[1]/hidden")).toBe(false);
+  });
+
+  it("disables duplicate refresh clicks and discards late results after KeepAlive deactivation", async () => {
+    completeTree();
+    const browser = mountKeptAliveBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(browser.host);
+    await settleThoroughly();
+    const pending = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    mocks.redisScanKeysBatch.mockReturnValue(pending.promise);
+    refreshGroupButton(browser.host).click();
+    await settleThoroughly();
+    expect(refreshGroupButton(browser.host).disabled).toBe(true);
+    refreshGroupButton(browser.host).click();
+    expect(subtreeCalls()).toHaveLength(1);
+    await browser.deactivate();
+    pending.resolve({ cursor: 0, keys: [keyInfo("grp:late")], total_keys: 1 });
+    await settleThoroughly();
+    await browser.activate();
+    await settleThoroughly();
+    expect(leafVisible(browser.host, "grp:old")).toBe(true);
+    expect(leafVisible(browser.host, "grp:late")).toBe(false);
+    expect(refreshGroupButton(browser.host).disabled).toBe(false);
+  });
+
+  it("does not change the main scan cursor when refreshing a partial tree", async () => {
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, _cursor: number, pattern: string) => Promise.resolve({ cursor: pattern === "*" ? 91 : 0, keys: [keyInfo("grp:keep")], total_keys: 1000 }));
+    const host = mountBrowser();
+    await settleThoroughly();
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    clickLoadMore(host);
+    await settleThoroughly();
+    const mainCalls = mocks.redisScanKeysBatch.mock.calls.filter((call: unknown[]) => call[3] === "*");
+    expect(mainCalls[1][2]).toBe(91);
+  });
+
+  it("keeps nonmatching cached keys when refreshing a locally searched full snapshot", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValueOnce({ cursor: 91, keys: [keyInfo("grp:keep-old"), keyInfo("grp:hidden")], total_keys: 2 });
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
+    const host = mountBrowser();
+    await settleThoroughly();
+    Array.from(host.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("redis.fetchAllKeys"))!
+      .click();
+    await settleThoroughly();
+    host.querySelector<HTMLButtonElement>("button[title='redis.fuzzyMatchTitle']")!.click();
+    await settleThoroughly();
+    const input = host.querySelector<HTMLInputElement>("input[placeholder='redis.fuzzyPattern']")!;
+    input.value = "keep";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settleThoroughly();
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("grp:keep-new"), keyInfo("grp:hidden")], total_keys: 2 });
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    input.value = "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    expect(leafVisible(host, "grp:hidden")).toBe(true);
+  });
+
+  it.each(["resolves", "rejects"])("ignores an old prefix refresh that %s after switching databases", async (outcome) => {
+    completeTree();
+    const db = ref(0);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(defineComponent({ setup: () => () => h(RedisKeyBrowser, { connectionId: "connection", db: db.value, blockDangerousRedisCommands: false }) }));
+    app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+    app.mount(host);
+    mountedApps.push({ unmount: () => app.unmount(), host });
+    await settleThoroughly();
+    const pending = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    mocks.redisScanKeysBatch.mockReturnValueOnce(pending.promise);
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    completeTree(["db1:keep"]);
+    db.value = 1;
+    await settleThoroughly();
+    if (outcome === "resolves") pending.resolve({ cursor: 0, keys: [keyInfo("grp:late")], total_keys: 1 });
+    else pending.reject(new Error("late failure"));
+    await settleThoroughly();
+    expect(mocks.toast).not.toHaveBeenCalled();
+    expect(host.querySelectorAll("[data-redis-group]")).toHaveLength(1);
+    groupCheckbox(host, ["db1"], 1).parentElement!.parentElement!.click();
+    await settleThoroughly();
+    expect(leafVisible(host, "db1:keep")).toBe(true);
+    expect(leafVisible(host, "grp:late")).toBe(false);
+  });
+
+  it("retains unrelated groups' pending subtree cursors after refreshing a prefix", async () => {
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "other:*") return Promise.resolve({ cursor: cursor + 1, keys: [], total_keys: 0 });
+      if (pattern === "grp:*") return Promise.resolve({ cursor: 0, keys: [keyInfo("grp:new")], total_keys: 1000 });
+      return Promise.resolve({ cursor: 91, keys: [keyInfo("grp:old"), keyInfo("other:keep")], total_keys: 1000 });
+    });
+    const host = mountBrowser();
+    await settleThoroughly();
+    groupCheckbox(host, ["other"]).parentElement!.parentElement!.click();
+    await settleThoroughly();
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    clickLoadMore(host);
+    await settleThoroughly();
+    const otherCalls = mocks.redisScanKeysBatch.mock.calls.filter((call: unknown[]) => call[3] === "other:*");
+    expect(otherCalls).toHaveLength(14);
+    expect(otherCalls[7][2]).toBe(7);
+  });
+
+  it("publishes refreshed metadata to the surviving selected detail viewer", async () => {
+    completeTree(["grp:keep"]);
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    host.querySelector<HTMLElement>("[data-redis-key-raw='grp:keep']")!.click();
+    await settleThoroughly();
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [{ ...keyInfo("grp:keep"), size: 99, ttl: 120 }], total_keys: 1 });
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    const metadata = JSON.parse(host.querySelector("[data-viewer-metadata]")!.textContent!);
+    expect(metadata.size).toBe(99);
+    expect(metadata.ttl).toBe(120);
+  });
+
+  it.each(["delete", "rename", "loaded"])("discards buffered prefix records after a confirmed detail %s", async (action) => {
+    completeTree();
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    host.querySelector<HTMLElement>("[data-redis-key-raw='grp:old']")!.click();
+    await settleThoroughly();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve({ cursor: cursor + 1, keys: [keyInfo("grp:old")], total_keys: 3 }));
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    expect(refreshGroupButton(host).title).toBe("redis.loadMoreKeys");
+    host.querySelector<HTMLButtonElement>(`[data-viewer-${action}]`)!.click();
+    await settleThoroughly();
+    expect(refreshGroupButton(host).title).toBe("common.refresh");
+    const keys = action === "delete" ? [keyInfo("grp:keep")] : action === "rename" ? [keyInfo("grp:keep"), keyInfo("grp:renamed")] : [{ ...keyInfo("grp:old"), ttl: 120 }];
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys, total_keys: 2 });
+    refreshGroupButton(host).click();
+    await settleThoroughly();
+    expect(subtreeCalls()[7][2]).toBe(0);
+    if (action !== "loaded") expect(leafVisible(host, "grp:old")).toBe(false);
+    else expect(host.querySelector("[data-redis-key-raw='grp:old']")!.textContent).not.toContain("redis.noExpiry");
+  });
+});
 
 beforeEach(() => {
   resetApiMocks();

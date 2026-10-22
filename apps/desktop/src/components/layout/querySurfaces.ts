@@ -22,6 +22,7 @@ export interface QueryEditorSurfaceHandle {
   refreshQueryEditorCompletionCache(): boolean;
   handleModRTarget(target: Element): boolean;
   requestQueryEditorExecute(): boolean;
+  requestQueryEditorExecuteAll(): boolean;
   captureQueryEditorExecutionSnapshot(): SqlExecutionSnapshot | undefined;
   requestQueryEditorExecuteInNewResultTab(): boolean;
   requestQueryEditorPreviewChanges(stackSql?: string): Promise<boolean>;

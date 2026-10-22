@@ -97,7 +97,7 @@ import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectName
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
-import { showSidebarRowProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
+import { isSidebarProductionContainer, showSidebarRowProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
@@ -241,6 +241,11 @@ const showProductionBadge = computed(() => {
   const node = activeNode.value;
   return showSidebarRowProductionBadge(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined, props.isStickyContext);
 });
+
+// Object rows use an icon-only marker pinned to the row's trailing edge, so
+// every production table lines up in one column instead of pushing the name
+// aside at a different x per name length. Container rows keep the text badge.
+const showProductionRowMarker = computed(() => showProductionBadge.value && !isSidebarProductionContainer(activeNode.value));
 
 function currentDatabaseType(): DatabaseType | undefined {
   return activeNode.value.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(activeNode.value.connectionId)) : undefined;
@@ -1040,7 +1045,7 @@ const rowStyle = computed(() => {
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
   return {
     paddingLeft: paddingLeft.value,
-    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : trailingComment.value ? "12px" : undefined,
+    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : showProductionRowMarker.value ? "8px" : trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
     "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.2 : 0.16),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
@@ -1790,7 +1795,7 @@ function onKeydown(event: KeyboardEvent) {
               <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
             </button>
             <Pin v-else-if="isPinned" class="h-3 w-3 shrink-0 fill-current text-primary" aria-hidden="true" />
-            <ProductionContextBadge v-if="showProductionBadge" compact />
+            <ProductionContextBadge v-if="showProductionBadge && !showProductionRowMarker" compact />
             <span
               v-if="
                 (node.type === 'group-tables' ||
@@ -1844,6 +1849,9 @@ function onKeydown(event: KeyboardEvent) {
         <ReadOnlySessionControl v-if="isConnectionReadonly && activeNode.connectionId" :connection-id="activeNode.connectionId" show-label />
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
+        <span v-if="showProductionRowMarker" class="flex w-4 shrink-0 items-center justify-center" :class="{ 'ml-auto': !formattedObjectStorage() }">
+          <ProductionContextBadge marker />
+        </span>
         <button
           v-if="isConnecting"
           type="button"

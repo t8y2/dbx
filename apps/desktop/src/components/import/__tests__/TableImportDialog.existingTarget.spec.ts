@@ -260,7 +260,17 @@ beforeEach(() => {
     { name: "name", data_type: "TEXT", nullable: true, is_primary_key: false },
   ]);
   mocks.listDataTypes.mockClear();
-  mocks.previewTableImportFile.mockClear();
+  mocks.previewTableImportFile.mockReset().mockResolvedValue({
+    fileName: "rows.xlsx",
+    filePath: "/tmp/rows.xlsx",
+    fileType: "excel",
+    sizeBytes: 24,
+    columns: ["id", "name"],
+    rows: [[1, "Alice"]],
+    totalRows: 1,
+    sourceFingerprint: "rows-xlsx",
+    sheets: ["Data"],
+  });
   mocks.importTableFile.mockReset().mockImplementation(async (request, onProgress) => {
     onProgress({ importId: request.importId, status: "done", rowsImported: 1, totalRows: 1, elapsedMs: 1 });
     return { importId: request.importId, rowsImported: 1, totalRows: 1, elapsedMs: 1 };
@@ -511,7 +521,7 @@ describe("TableImportDialog existing targets", () => {
   });
 
   it("allows selecting update-existing on options step when target has keys even if preview columns are initially unmapped, and guards mapping step", async () => {
-    mocks.previewTableImportFile.mockResolvedValueOnce({
+    mocks.previewTableImportFile.mockResolvedValue({
       fileName: "unmapped.xlsx",
       filePath: "/tmp/unmapped.xlsx",
       fileType: "excel",
@@ -727,5 +737,77 @@ describe("TableImportDialog existing targets", () => {
     await flushAsyncUpdates();
     const nameSelects = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
     expect(nameSelects.map((s) => s.value)).toEqual(["__skip__", "__skip__"]);
+  });
+
+  it("renders strikethrough on skipped column header and preview cells in mapping step", async () => {
+    i18n.global.locale.value = "en";
+    mocks.previewTableImportFile.mockResolvedValueOnce({
+      fileName: "preview_strikethrough.csv",
+      filePath: "/tmp/preview_strikethrough.csv",
+      fileType: "csv",
+      sizeBytes: 30,
+      columns: ["id", "name"],
+      rows: [
+        ["101", "Alice"],
+        ["102", "Bob"],
+      ],
+      totalRows: 2,
+      sourceFingerprint: "preview_strikethrough",
+    });
+
+    await mountDialog({ prefillTable: "existing_target" });
+    await selectWorkbook("preview_strikethrough.csv");
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+
+    const getHeaderSpans = () => [...document.body.querySelectorAll<HTMLElement>("thead th span")];
+    const getRowCells = (rowIdx: number) => [...document.body.querySelectorAll<HTMLElement>(`tbody tr:nth-child(${rowIdx}) td span`)];
+
+    // Initially both columns match "id" and "name"
+    expect(getHeaderSpans()).toHaveLength(2);
+    expect(getHeaderSpans()[0].classList.contains("line-through")).toBe(false);
+    expect(getHeaderSpans()[1].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[0].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[1].classList.contains("line-through")).toBe(false);
+
+    // Skip the second column ("name")
+    const selects = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
+    expect(selects).toHaveLength(2);
+    selects[1].value = "__skip__";
+    selects[1].dispatchEvent(new Event("change"));
+    await flushAsyncUpdates();
+
+    // Column 0 is still active, Column 1 has strikethrough
+    expect(getHeaderSpans()[0].classList.contains("line-through")).toBe(false);
+    expect(getHeaderSpans()[1].classList.contains("line-through")).toBe(true);
+    expect(getRowCells(1)[0].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[1].classList.contains("line-through")).toBe(true);
+    expect(getRowCells(2)[0].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(2)[1].classList.contains("line-through")).toBe(true);
+
+    // Click "Skip all"
+    const skipAllBtn = document.body.querySelector<HTMLButtonElement>('button[data-action="skip-all"]');
+    expect(skipAllBtn).toBeTruthy();
+    skipAllBtn?.click();
+    await flushAsyncUpdates();
+
+    // Both columns now have strikethrough
+    expect(getHeaderSpans()[0].classList.contains("line-through")).toBe(true);
+    expect(getHeaderSpans()[1].classList.contains("line-through")).toBe(true);
+    expect(getRowCells(1)[0].classList.contains("line-through")).toBe(true);
+    expect(getRowCells(1)[1].classList.contains("line-through")).toBe(true);
+
+    // Re-map by position
+    const mapByPositionBtn = document.body.querySelector<HTMLButtonElement>('button[data-action="map-by-position"]');
+    mapByPositionBtn?.click();
+    await flushAsyncUpdates();
+
+    // Neither column has strikethrough
+    expect(getHeaderSpans()[0].classList.contains("line-through")).toBe(false);
+    expect(getHeaderSpans()[1].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[0].classList.contains("line-through")).toBe(false);
+    expect(getRowCells(1)[1].classList.contains("line-through")).toBe(false);
   });
 });

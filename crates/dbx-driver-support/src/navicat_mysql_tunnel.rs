@@ -289,7 +289,7 @@ fn validate_stateless_query(sql: &str) -> Result<(), String> {
                     }));
         if transaction {
             return Err(
-                "Transactions and autocommit settings are not supported by Navicat HTTP tunnels: each request uses a separate MySQL session"
+                "Transactions, autocommit settings, and consistent snapshots are not supported by the stateless Navicat HTTP tunnel; use the DBX TCP HTTP tunnel (dbx_tunnel.php) for a fixed database session"
                     .to_string(),
             );
         }
@@ -684,7 +684,9 @@ mod tests {
             let response = send_test_command(&mut client, 0x03, sql.as_bytes()).await;
             assert_eq!(response[0], 0xff, "{sql}");
             assert_eq!(u16::from_le_bytes(response[1..3].try_into().unwrap()), 1235, "{sql}");
-            assert!(String::from_utf8_lossy(&response[9..]).contains("separate MySQL session"));
+            let message = String::from_utf8_lossy(&response[9..]);
+            assert!(message.contains("stateless Navicat HTTP tunnel"), "{sql}: {message}");
+            assert!(message.contains("fixed database session"), "{sql}: {message}");
         }
         assert!(tokio::time::timeout(std::time::Duration::from_millis(50), http_listener.accept()).await.is_err());
         assert_eq!(send_test_command(&mut client, 0x0e, b"").await[0], 0);

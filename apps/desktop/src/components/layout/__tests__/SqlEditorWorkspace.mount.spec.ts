@@ -63,6 +63,10 @@ vi.mock("@/components/layout/EditorGroup.vue", () => ({
         groupExecutionCalls.request.push(this.groupId);
         return true;
       },
+      requestQueryEditorExecuteAll(this: { groupId: string }) {
+        groupExecutionCalls.request.push(`all:${this.groupId}`);
+        return true;
+      },
     },
     template: `<div data-test="editor-group" :data-group-id="groupId" :data-tab-ids="tabIds.join(',')" :data-active-tab-id="activeTabId" :data-content-suppressed="contentSuppressed ? 'true' : 'false'"><button data-test="emit-execute" @click="$emit('execute', { fullSql: 'SELECT 1', selectedSql: 'SELECT 1', cursorPos: 0, selectionFrom: 0, selectionTo: 8 })">execute</button></div>`,
   },
@@ -210,6 +214,7 @@ describe("SqlEditorWorkspace mount contract", () => {
     const vm = app.mount(host) as unknown as {
       captureQueryEditorExecutionSnapshot: (tabId?: string) => { selectedSql: string } | undefined;
       requestQueryEditorExecute: (tabId?: string) => boolean;
+      requestQueryEditorExecuteAll: (tabId?: string) => boolean;
     };
     await nextTick();
 
@@ -217,7 +222,8 @@ describe("SqlEditorWorkspace mount contract", () => {
     expect(snapshot?.selectedSql).toBe("SELECT g2");
     expect(groupExecutionCalls.capture).toEqual(["g2"]);
     expect(vm.requestQueryEditorExecute("tab-b")).toBe(true);
-    expect(groupExecutionCalls.request).toEqual(["g2"]);
+    expect(vm.requestQueryEditorExecuteAll("tab-b")).toBe(true);
+    expect(groupExecutionCalls.request).toEqual(["g2", "all:g2"]);
 
     app.unmount();
     host.remove();

@@ -58,6 +58,7 @@ vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
       initColumnWidths: vi.fn(),
       onResizeStart: vi.fn(),
       autoFitColumn: vi.fn(),
+      hasUserSizedColumns: ref(false),
       renderedColumnWidths: ref([120]),
       totalWidth: ref(120),
       columnVars: ref({ "--total-w": "120px" }),

@@ -6577,7 +6577,14 @@ fn generate_schema_sync_sql_inner(
                             } else {
                                 String::new()
                             };
-                            let definition = column_def(&convert_col(source), db_type, source_dialect);
+                            // A MySQL column added without its own `CHARACTER SET`/`COLLATE`
+                            // inherits the target table default, so a source column that differs
+                            // from that default would show up again as a collation change on the
+                            // next comparison (#11802).
+                            let include_charset =
+                                effective_source_dialect(source_dialect, db_type) == DialectKind::Mysql;
+                            let definition =
+                                column_def_with_charset(&convert_col(source), db_type, source_dialect, include_charset);
                             // Oracle has no `COLUMN` keyword here: it parenthesizes the whole
                             // definition (`ADD (AMT NUMBER(12,2))`) instead.
                             parts.push(if profile.add_column_uses_column_keyword {
@@ -7200,6 +7207,41 @@ mod tests {
             Some("CREATE TABLE users (name varchar(64)) DEFAULT CHARSET=latin1".to_string());
 
         assert!(prepare_schema_diff(options).diffs.is_empty());
+    }
+
+    #[test]
+    fn mysql_added_column_keeps_source_charset_and_collation() {
+        let mut options = mysql_charset_options(true);
+        let mut name = options.source_details[0].columns[0].clone();
+        name.collation = Some("utf8mb4_general_ci".to_string());
+        options.source_details[0].columns = vec![column("id", "int", None), name, column("amount", "int", None)];
+        options.target_details[0].columns = vec![column("id", "int", None)];
+
+        let result = prepare_schema_diff(options);
+
+        assert!(
+            result.sync_sql.contains(
+                "ADD COLUMN `name` varchar(64) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_general_ci` NOT NULL AFTER `id`"
+            ),
+            "{}",
+            result.sync_sql
+        );
+        assert!(result.sync_sql.contains("ADD COLUMN `amount` int NOT NULL AFTER `name`"), "{}", result.sync_sql);
+    }
+
+    #[test]
+    fn added_column_charset_is_not_carried_across_dialects() {
+        let mut options = mysql_charset_options(true);
+        let name = options.source_details[0].columns[0].clone();
+        options.source_details[0].columns = vec![column("id", "int", None), name];
+        options.target_details[0].columns = vec![column("id", "int", None)];
+        options.source_dialect = Some(DialectKind::Postgres);
+
+        let result = prepare_schema_diff(options);
+
+        assert!(result.sync_sql.contains("ADD COLUMN `name`"), "{}", result.sync_sql);
+        assert!(!result.sync_sql.contains("CHARACTER SET"), "{}", result.sync_sql);
+        assert!(!result.sync_sql.contains("COLLATE"), "{}", result.sync_sql);
     }
 
     #[test]

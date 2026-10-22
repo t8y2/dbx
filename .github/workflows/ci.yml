@@ -324,6 +324,21 @@ jobs:
       - name: Setup Rust for standard Windows
         uses: dtolnay/rust-toolchain@1.97.1
 
+      - name: MCP replacement temporary file cleanup tests
+        shell: pwsh
+        run: |
+          @'
+          #[path = "src-tauri/src/commands/mcp_cleanup.rs"]
+          mod cleanup;
+          '@ | rustc --edition 2021 --test -o "$env:RUNNER_TEMP/mcp-cleanup-tests.exe" -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/mcp-cleanup-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: PowerShell MCP installer tests
+        shell: pwsh
+        run: ./.github/scripts/install-mcp-powershell.test.ps1
+
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"

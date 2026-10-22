@@ -169,6 +169,17 @@ describe("shortcutRegistry editor actions", () => {
     expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.openDataInNewTab, "MacIntel")).toBe("Alt");
   });
 
+  it("registers a conflict-free DBeaver-style shortcut for executing all SQL", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "executeAllSql");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Alt+X" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.executeAllSql).toBe("Alt+X");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.executeAllSql, "MacIntel")).toBe("Alt+X");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.executeAllSql, "Win32")).toBe("Alt+X");
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.executeAllSql)).toBe("Alt-x");
+    expect(findShortcutConflict("executeAllSql", DEFAULT_SHORTCUT_SETTINGS.executeAllSql, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("registers a conflict-free DBeaver-style shortcut for executing in a new result tab", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "executeSqlInNewResultTab");
 

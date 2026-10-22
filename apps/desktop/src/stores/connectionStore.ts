@@ -82,6 +82,7 @@ import {
   findTableVGroupContainerNode,
   hasTableTreeLoadMore,
   hasTableVGroupEntries,
+  isTableVGroupContainerNode,
   moveTableToVGroup as moveTableToVGroupOp,
   normalizeTableVGroupLayout as normalizeTableVGroupLayoutOp,
   pruneTableVGroupMembers as pruneTableVGroupMembersOp,
@@ -98,6 +99,7 @@ import {
   type TableVGroupLayout,
   type TableVGroupScope,
 } from "@/lib/table/tableVGroup";
+import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
 import {
   buildConnectionConfigBundle,
   parseConnectionConfigObject,
@@ -2143,8 +2145,13 @@ export const useConnectionStore = defineStore("connection", () => {
       persistPinnedTreeNodeIds();
     }
     syncPinnedTreeState(children);
-    const vgroupResolved = resolveTableVGroupScope(parent);
-    children = applyTableVGroupsToChildren(children, vgroupResolved ? tableVGroupLayouts.value[vgroupResolved.scopeKey] : undefined, vgroupResolved?.scope ?? parent);
+    const shouldApplyVGroups = isTableVGroupContainerNode(parent) && !children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type));
+    if (shouldApplyVGroups) {
+      const vgroupResolved = resolveTableVGroupScope(parent);
+      if (vgroupResolved) {
+        children = applyTableVGroupsToChildren(children, tableVGroupLayouts.value[vgroupResolved.scopeKey], vgroupResolved.scope);
+      }
+    }
     parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
     syncConfirmedEmptyTreeNodeId(parent);
@@ -8286,6 +8293,8 @@ export const useConnectionStore = defineStore("connection", () => {
         return;
       }
     }
+    // !node.tableName is generic: table-level structure groups (columns/indexes/fkeys/constraints/partitions/table triggers)
+    // stay off the schema-level object-group loader, not just triggers.
     if (objectTypesForGroupNode(node.type) && !node.tableName) {
       clearLoadedChildrenCache(node.id, { deletePersisted: false });
       await loadObjectGroupChildren(node, { force: true });
@@ -8362,6 +8371,8 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function refreshTreeNodeForTableNameFilter(node: TreeNode, scopeKey: string, revision: number) {
     invalidateMetadataCachesForNode(node);
+    // !node.tableName is generic: table-level structure groups (columns/indexes/fkeys/constraints/partitions/table triggers)
+    // stay off the schema-level object-group loader, not just triggers.
     if (objectTypesForGroupNode(node.type) && !node.tableName) {
       clearLoadedChildrenCache(node.id);
       await loadObjectGroupChildren(node, {
@@ -10182,6 +10193,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function reprojectTableVGroupScope(scope: TableVGroupScope, scopeKey: string, tableName?: string, rowType?: string) {
     const container = findTableVGroupContainerNode(treeNodes.value, scope, tableName, rowType);
     if (!container?.children) return;
+    if (container.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) return;
     container.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(container.children), tableVGroupLayouts.value[scopeKey], scope);
   }
 
@@ -10352,6 +10364,8 @@ export const useConnectionStore = defineStore("connection", () => {
           if (node.children) await refreshNodes(node.children);
           continue;
         }
+        // !node.tableName is generic: table-level structure groups (columns/indexes/fkeys/constraints/partitions/table triggers)
+        // stay off the schema-level object-group loader, not just triggers.
         if (objectTypesForGroupNode(node.type) && !node.tableName) {
           if (node.connectionId && connectedIds.value.has(node.connectionId)) {
             clearLoadedChildrenCache(node.id);

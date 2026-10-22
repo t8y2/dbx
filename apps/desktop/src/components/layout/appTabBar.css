@@ -1200,6 +1200,33 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
   box-shadow: 0 0 0 1px var(--background);
 }
 
+/* Icon-only rail: the close affordance overlays the pill on hover/focus so the
+ * rail stays 2.5rem wide (#12942). Bottom-right keeps it clear of the dirty dot. */
+.vertical-tab-layout--collapsed .compact-close-tab-button {
+  position: absolute;
+  right: 0.1rem;
+  bottom: 0.1rem;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 0.95rem;
+  height: 0.95rem;
+  padding: 0;
+  border-radius: 9999px;
+  background: var(--background);
+  color: var(--muted-foreground);
+}
+
+.vertical-tab-layout--collapsed .app-tab-pill:hover .compact-close-tab-button,
+.vertical-tab-layout--collapsed .app-tab-pill:focus-within .compact-close-tab-button {
+  display: inline-flex;
+}
+
+.vertical-tab-layout--collapsed .compact-close-tab-button:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
 /* Both portal hosts size from the badges actually rendered, including search
  * filtering and multiple editor groups. All bars fill the same host width. */
 [data-workspace-tab-navigation],

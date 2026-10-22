@@ -815,6 +815,8 @@ const TAB_LAYOUT_MODES = ["scroll", "wrap"] as const;
 export type TabLayoutMode = (typeof TAB_LAYOUT_MODES)[number];
 const TAB_PLACEMENTS = ["top", "bottom", "left", "right"] as const;
 export type TabPlacement = (typeof TAB_PLACEMENTS)[number];
+const CONNECTION_TAB_COLOR_SCOPES = ["all", "active"] as const;
+export type ConnectionTabColorScope = (typeof CONNECTION_TAB_COLOR_SCOPES)[number];
 const TAB_GROUP_MODES = ["none", "database-type", "database", "connection", "sidebar"] as const;
 export type TabGroupMode = (typeof TAB_GROUP_MODES)[number];
 export interface TabGroupCustomization {
@@ -999,6 +1001,7 @@ export interface EditorSettings {
   insertSpaceAfterCompletion: boolean;
   sqlServerSpaceConfirmsCompletion: boolean;
   functionCompletionIncludeParams: boolean;
+  sequenceCompletionEnabled: boolean;
   sortCompletionColumnsAlphabetically: boolean;
   selectFirstCompletionOnOpen: boolean;
   wordWrap: boolean;
@@ -1029,6 +1032,7 @@ export interface EditorSettings {
   tabLayout: TabLayoutMode;
   tabPlacement: TabPlacement;
   colorizeConnectionTabs: boolean;
+  colorizeConnectionTabsScope: ConnectionTabColorScope;
   tabGroupMode: TabGroupMode;
   tabGroupCustomizations: Record<string, TabGroupCustomization>;
   tabSortMode: TabSortMode;
@@ -1195,6 +1199,7 @@ export interface EditorSettings {
   sidebarObjectInfoMode: SidebarObjectInfoMode;
   sidebarShowConnectionNotes: boolean;
   sidebarShowTooltips: boolean;
+  sidebarShowUserAdmin: boolean;
   sidebarAllowHorizontalScroll: boolean;
   sidebarIndent: number;
   sidebarFontSize: number;
@@ -1384,6 +1389,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   insertSpaceAfterCompletion: true,
   sqlServerSpaceConfirmsCompletion: false,
   functionCompletionIncludeParams: true,
+  sequenceCompletionEnabled: true,
   snippetTriggerKey: "tab",
   sortCompletionColumnsAlphabetically: true,
   selectFirstCompletionOnOpen: true,
@@ -1412,6 +1418,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tabLayout: "scroll",
   tabPlacement: "top",
   colorizeConnectionTabs: true,
+  colorizeConnectionTabsScope: "all",
   tabGroupMode: "none",
   tabGroupCustomizations: {},
   tabSortMode: "manual",
@@ -1543,6 +1550,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarObjectInfoMode: "comment-inline",
   sidebarShowConnectionNotes: false,
   sidebarShowTooltips: true,
+  sidebarShowUserAdmin: true,
   sidebarAllowHorizontalScroll: false,
   sidebarIndent: SIDEBAR_INDENT_DEFAULT,
   sidebarFontSize: SIDEBAR_FONT_SIZE_DEFAULT,
@@ -1643,6 +1651,10 @@ export function normalizeWebLogoPosition(value: unknown): WebLogoPosition {
 
 function normalizeTabPlacement(value: unknown): TabPlacement {
   return TAB_PLACEMENTS.includes(value as TabPlacement) ? (value as TabPlacement) : DEFAULT_EDITOR_SETTINGS.tabPlacement;
+}
+
+function normalizeConnectionTabColorScope(value: unknown): ConnectionTabColorScope {
+  return CONNECTION_TAB_COLOR_SCOPES.includes(value as ConnectionTabColorScope) ? (value as ConnectionTabColorScope) : DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabsScope;
 }
 
 function normalizeTabGroupMode(value: unknown): TabGroupMode {
@@ -2057,6 +2069,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
     sqlServerSpaceConfirmsCompletion: typeof settings.sqlServerSpaceConfirmsCompletion === "boolean" ? settings.sqlServerSpaceConfirmsCompletion : DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion,
     functionCompletionIncludeParams: typeof settings.functionCompletionIncludeParams === "boolean" ? settings.functionCompletionIncludeParams : DEFAULT_EDITOR_SETTINGS.functionCompletionIncludeParams,
+    sequenceCompletionEnabled: typeof settings.sequenceCompletionEnabled === "boolean" ? settings.sequenceCompletionEnabled : DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled,
     snippetTriggerKey: settings.snippetTriggerKey === "space" || settings.snippetTriggerKey === "both" ? settings.snippetTriggerKey : DEFAULT_EDITOR_SETTINGS.snippetTriggerKey,
     sortCompletionColumnsAlphabetically: typeof settings.sortCompletionColumnsAlphabetically === "boolean" ? settings.sortCompletionColumnsAlphabetically : DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically,
     selectFirstCompletionOnOpen: typeof settings.selectFirstCompletionOnOpen === "boolean" ? settings.selectFirstCompletionOnOpen : DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen,
@@ -2085,6 +2098,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tabLayout: normalizeTabLayout(settings.tabLayout),
     tabPlacement: normalizeTabPlacement(settings.tabPlacement),
     colorizeConnectionTabs: typeof settings.colorizeConnectionTabs === "boolean" ? settings.colorizeConnectionTabs : DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs,
+    colorizeConnectionTabsScope: normalizeConnectionTabColorScope(settings.colorizeConnectionTabsScope),
     tabGroupMode: normalizeTabGroupMode(settings.tabGroupMode),
     tabGroupCustomizations: normalizeTabGroupCustomizations(settings.tabGroupCustomizations),
     tabSortMode: normalizeTabSortMode(settings.tabSortMode),
@@ -2263,6 +2277,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     ),
     sidebarShowConnectionNotes: settings.sidebarShowConnectionNotes === true,
     sidebarShowTooltips: settings.sidebarShowTooltips ?? DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips,
+    sidebarShowUserAdmin: settings.sidebarShowUserAdmin ?? DEFAULT_EDITOR_SETTINGS.sidebarShowUserAdmin,
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     sidebarIndent: normalizeSidebarIndent(settings.sidebarIndent),
     sidebarFontSize: normalizeSidebarFontSize(settings.sidebarFontSize),
@@ -2975,6 +2990,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
     if (partial.sqlServerSpaceConfirmsCompletion !== undefined) editorSettings.value.sqlServerSpaceConfirmsCompletion = partial.sqlServerSpaceConfirmsCompletion === true;
     if (partial.functionCompletionIncludeParams !== undefined) editorSettings.value.functionCompletionIncludeParams = partial.functionCompletionIncludeParams === true;
+    if (partial.sequenceCompletionEnabled !== undefined) editorSettings.value.sequenceCompletionEnabled = partial.sequenceCompletionEnabled === true;
     if (partial.snippetTriggerKey !== undefined) editorSettings.value.snippetTriggerKey = partial.snippetTriggerKey === "space" || partial.snippetTriggerKey === "both" ? partial.snippetTriggerKey : "tab";
     if (partial.sortCompletionColumnsAlphabetically !== undefined) editorSettings.value.sortCompletionColumnsAlphabetically = partial.sortCompletionColumnsAlphabetically === true;
     if (partial.selectFirstCompletionOnOpen !== undefined) editorSettings.value.selectFirstCompletionOnOpen = partial.selectFirstCompletionOnOpen === true;
@@ -3009,6 +3025,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
     if (partial.tabPlacement !== undefined) editorSettings.value.tabPlacement = normalizeTabPlacement(partial.tabPlacement);
     if (partial.colorizeConnectionTabs !== undefined) editorSettings.value.colorizeConnectionTabs = partial.colorizeConnectionTabs === true;
+    if (partial.colorizeConnectionTabsScope !== undefined) editorSettings.value.colorizeConnectionTabsScope = normalizeConnectionTabColorScope(partial.colorizeConnectionTabsScope);
     if (partial.tabGroupMode !== undefined) editorSettings.value.tabGroupMode = normalizeTabGroupMode(partial.tabGroupMode);
     if (partial.tabGroupCustomizations !== undefined) editorSettings.value.tabGroupCustomizations = normalizeTabGroupCustomizations(partial.tabGroupCustomizations);
     if (partial.tabSortMode !== undefined) editorSettings.value.tabSortMode = normalizeTabSortMode(partial.tabSortMode);
@@ -3158,6 +3175,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
     if (partial.sidebarShowConnectionNotes !== undefined) editorSettings.value.sidebarShowConnectionNotes = partial.sidebarShowConnectionNotes === true;
     if (partial.sidebarShowTooltips !== undefined) editorSettings.value.sidebarShowTooltips = partial.sidebarShowTooltips;
+    if (partial.sidebarShowUserAdmin !== undefined) editorSettings.value.sidebarShowUserAdmin = partial.sidebarShowUserAdmin;
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.sidebarIndent !== undefined) editorSettings.value.sidebarIndent = normalizeSidebarIndent(partial.sidebarIndent);
     if (partial.sidebarFontSize !== undefined) editorSettings.value.sidebarFontSize = normalizeSidebarFontSize(partial.sidebarFontSize);

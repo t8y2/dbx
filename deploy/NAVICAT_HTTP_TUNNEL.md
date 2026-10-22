@@ -23,6 +23,14 @@ can change a POST request into a GET.
 
 This protocol supports regular queries, `USE`, ping, and disconnect. MySQL TLS
 and prepared statements are not supported by the Navicat HTTP tunnel protocol.
-Each HTTP request opens a separate MySQL session. Transactions (including manual
-transactions and consistent backup snapshots), savepoints, and autocommit
-settings are rejected before any SQL is sent to the PHP host.
+Each HTTP request opens a separate MySQL session, so this endpoint is appropriate
+only for non-transactional operations and backups that do not request a consistent
+snapshot. Transactions, savepoints, autocommit settings, and consistent-snapshot
+backup sequences are rejected before any SQL is sent to the PHP host; this prevents
+a successful-looking `ROLLBACK` from failing to undo a write that ran in another
+session.
+
+For transaction workflows or backups that require a consistent snapshot, deploy
+DBX's own `deploy/dbx_tunnel.php` endpoint instead. That endpoint keeps one
+database TCP session alive for the lifetime of the tunnel and is configured as the
+DBX TCP HTTP tunnel, not as the Navicat-compatible endpoint.

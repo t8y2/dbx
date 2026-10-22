@@ -1033,6 +1033,30 @@ describe("shared tab presentation helpers", () => {
     }
   });
 
+  it("restricts connection tab coloring to active tab when scope is active (#12955)", () => {
+    const settings = useSettingsStore().editorSettings;
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "conn-1", name: "One", db_type: "mysql", color: "#3b82f6" }] as ConnectionConfig[];
+    const tab = queryTab({ connectionId: "conn-1" });
+
+    settings.colorizeConnectionTabs = true;
+    settings.colorizeConnectionTabsScope = "all";
+    const activeAll = tabColorStyle(tab, true, false);
+    const inactiveAll = tabColorStyle(tab, false, false);
+    expect(activeAll?.["--app-tab-background"]).toBe("rgba(59, 130, 246, 0.24)");
+    expect(activeAll?.borderColor).toBe("rgba(59, 130, 246, 0.72)");
+    expect(inactiveAll?.["--app-tab-background"]).toBe("rgba(59, 130, 246, 0.09)");
+    expect(inactiveAll?.borderColor).toBe("rgba(59, 130, 246, 0.18)");
+
+    settings.colorizeConnectionTabsScope = "active";
+    const activeScope = tabColorStyle(tab, true, false);
+    const inactiveScope = tabColorStyle(tab, false, false);
+    expect(activeScope?.["--app-tab-background"]).toBe("rgba(59, 130, 246, 0.24)");
+    expect(activeScope?.borderColor).toBe("rgba(59, 130, 246, 0.72)");
+    expect(inactiveScope?.borderColor).toBeUndefined();
+    expect(inactiveScope?.["--app-tab-background"]).toBeUndefined();
+  });
+
   it("swaps inline color-mix tab colors for concrete rgba on legacy WebViews", () => {
     useSettingsStore().editorSettings.colorizeConnectionTabs = false;
     // WebKit without color-mix() invalidates the inline values at computed-value

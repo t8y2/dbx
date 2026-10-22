@@ -215,18 +215,21 @@ pub fn build_query_pagination_execution_plan(
         return plan;
     }
 
-    if options.database_type == Some(DatabaseType::OceanbaseOracle)
-        && (!rownum_wrapper_projection_is_safe(&options.sql) || has_top_level_rownum(&options.sql))
-    {
-        if options.use_agent_cursor {
-            plan.page_limit = Some(options.pagination.limit.max(1));
-            plan.page_offset = Some(options.pagination.offset);
-            plan.use_agent_result_session = true;
-        } else if options.pagination.offset > 0 {
-            plan.pagination_error = Some("This query requires an Agent result session for offset pagination".into());
-            plan.sql_to_execute.clear();
+    if let Some(db_type) = options.database_type {
+        if matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+            && rownum_wrapper_is_unsupported(&options.sql, db_type)
+        {
+            if options.use_agent_cursor {
+                plan.page_limit = Some(options.pagination.limit.max(1));
+                plan.page_offset = Some(options.pagination.offset);
+                plan.use_agent_result_session = true;
+            } else if options.pagination.offset > 0 {
+                plan.pagination_error =
+                    Some("This query requires an Agent result session for offset pagination".into());
+                plan.sql_to_execute.clear();
+            }
+            return plan;
         }
-        return plan;
     }
 
     if sql_server_cte {
@@ -243,9 +246,13 @@ pub fn build_query_pagination_execution_plan(
     // callers should add ORDER BY when that matters.
     // Kingbase keeps the cursor for unordered queries to preserve its behavior.
     let prefer_server_pagination = match options.database_type {
-        Some(DatabaseType::Goldendb | DatabaseType::Highgo | DatabaseType::OceanbaseOracle | DatabaseType::Xugu) => {
-            true
-        }
+        Some(
+            DatabaseType::Goldendb
+            | DatabaseType::Highgo
+            | DatabaseType::OceanbaseOracle
+            | DatabaseType::Oracle
+            | DatabaseType::Xugu,
+        ) => true,
         Some(DatabaseType::Kingbase) => kingbase_server_pagination_is_stable(&options.query_base_sql),
         _ => false,
     };
@@ -390,10 +397,12 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
             ok(add_fetch_first_limit(&statement, safe_limit, safe_offset))
         }
         TablePaginationStrategy::Rownum => {
-            if options.database_type == Some(DatabaseType::OceanbaseOracle)
-                && !rownum_wrapper_projection_is_safe(&statement)
-            {
-                return err("unsupported");
+            if let Some(db_type) = options.database_type {
+                if matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+                    && rownum_wrapper_is_unsupported(&statement, db_type)
+                {
+                    return err("unsupported");
+                }
             }
             ok(add_rownum_limit(&statement, safe_limit, safe_offset))
         }
@@ -2237,6 +2246,49 @@ fn references_sequence_pseudocolumn(statement: &Statement) -> bool {
     .is_break()
 }
 
+fn has_top_level_lock(sql: &str) -> bool {
+    let tokens = top_level_sql_tokens(sql);
+    tokens.iter().enumerate().any(|(index, token)| {
+        token.text == "FOR" && tokens.get(index + 1).is_some_and(|next| next.text == "UPDATE" || next.text == "SHARE")
+    })
+}
+
+fn oracle_rownum_wrapper_is_unsupported(statement: &str) -> bool {
+    if !rownum_wrapper_projection_is_safe(statement)
+        || has_top_level_rownum(statement)
+        || has_top_level_fetch_first(statement)
+        || has_top_level_offset_fetch_next(statement)
+        || has_top_level_limit(statement)
+        || has_top_level_lock(statement)
+    {
+        return true;
+    }
+    if let Ok(statements) = Parser::parse_sql(&GenericDialect {}, statement) {
+        if let [Statement::Query(query)] = statements.as_slice() {
+            if query.limit_clause.is_some()
+                || query.fetch.is_some()
+                || !query.locks.is_empty()
+                || query.for_clause.is_some()
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn oceanbase_rownum_wrapper_is_unsupported(statement: &str) -> bool {
+    !rownum_wrapper_projection_is_safe(statement) || has_top_level_rownum(statement) || has_top_level_lock(statement)
+}
+
+fn rownum_wrapper_is_unsupported(statement: &str, database_type: DatabaseType) -> bool {
+    match database_type {
+        DatabaseType::Oracle => oracle_rownum_wrapper_is_unsupported(statement),
+        DatabaseType::OceanbaseOracle => oceanbase_rownum_wrapper_is_unsupported(statement),
+        _ => false,
+    }
+}
+
 fn add_rownum_limit(statement: &str, limit: usize, offset: usize) -> String {
     if has_top_level_rownum(statement) {
         return format!("{statement};");
@@ -2935,6 +2987,18 @@ mod tests {
         })
     }
 
+    fn oracle_plan(sql: &str, limit: usize, offset: usize, cursor: bool) -> QueryPaginationExecutionPlan {
+        build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.into(),
+            query_base_sql: sql.into(),
+            database_type: Some(DatabaseType::Oracle),
+            pagination: QueryPagination { limit, offset, session_id: None },
+            use_agent_cursor: cursor,
+            first_page_uses_actual_sql: true,
+            execution_hint: None,
+        })
+    }
+
     #[test]
     fn oceanbase_cursor_fallback_preserves_limits_and_rejects_unavailable_offsets() {
         for sql in [
@@ -3212,6 +3276,160 @@ mod tests {
                 let rewritten = super::build_paginated_query_sql(super::PaginatedQuerySqlOptions {
                     original_sql: sql.into(),
                     database_type: Some(super::DatabaseType::OceanbaseOracle),
+                    limit: 100,
+                    offset,
+                });
+                assert!(!rewritten.ok, "{sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_cursor_fallback_preserves_limits_and_rejects_unavailable_offsets() {
+        for sql in [
+            "SELECT a.name, a.* FROM people a ORDER BY a.id",
+            "SELECT name, name FROM people WHERE ROWNUM <= 9",
+            "SELECT name, name FROM people ORDER BY name FETCH FIRST 9 ROWS ONLY",
+            "SELECT * FROM people WHERE ROWNUM <= 9",
+            "SELECT * FROM (SELECT name, name FROM people) p",
+            "SELECT a.id AS label, a.name AS \"LABEL\" FROM people a",
+            "SELECT a.name || a.name, a.name || a.name FROM people a",
+            "SELECT a.id, b.id FROM people a JOIN people b ON a.id = b.id",
+            "SELECT id FROM people FOR UPDATE",
+            "SELECT id FROM people FOR UPDATE NOWAIT",
+            "SELECT id FROM people FOR UPDATE SKIP LOCKED",
+            "SELECT id FROM people WHERE ROWNUM <= 10",
+            "SELECT id FROM people FETCH FIRST 10 ROWS ONLY",
+        ] {
+            for limit in [0, 1, 100, i32::MAX as usize] {
+                for offset in [0, 1, 100, 500] {
+                    let plan = oracle_plan(sql, limit, offset, true);
+                    assert_eq!(plan.sql_to_execute, sql);
+                    assert!(plan.use_agent_result_session, "{sql}");
+                    assert_eq!(plan.page_limit, Some(limit.max(1)));
+                    assert_eq!(plan.page_offset, Some(offset));
+                    assert!(plan.pagination_error.is_none());
+                    let plan = oracle_plan(sql, limit, offset, false);
+                    assert!(!plan.use_agent_result_session);
+                    assert!(plan.page_sql.is_none());
+                    if offset == 0 {
+                        assert_eq!(plan.sql_to_execute, sql);
+                        assert!(plan.pagination_error.is_none());
+                    } else {
+                        assert!(plan.pagination_error.is_some());
+                        assert!(plan.sql_to_execute.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_sequence_pseudocolumns_keep_the_original_statement() {
+        for sql in [
+            "SELECT to_char(sysdate,'yyyymmdd')||seq_yaz001.nextval FROM DUAL",
+            "SELECT seq_yaz001.NEXTVAL AS id FROM DUAL",
+            "SELECT app.seq_yaz001.currval AS id FROM DUAL",
+            "SELECT \"SEQ_YAZ001\".\"NEXTVAL\" AS id FROM DUAL",
+            "SELECT NVL(seq_yaz001.nextval, 0) AS id FROM DUAL",
+        ] {
+            for limit in [1, 100] {
+                let plan = oracle_plan(sql, limit, 0, true);
+                assert_eq!(plan.sql_to_execute, sql);
+                assert!(plan.use_agent_result_session, "{sql}");
+                assert!(plan.page_sql.is_none());
+                assert_eq!(plan.page_limit, Some(limit));
+
+                let plan = oracle_plan(sql, limit, 0, false);
+                assert_eq!(plan.sql_to_execute, sql);
+                assert!(plan.page_sql.is_none());
+                assert!(plan.pagination_error.is_none());
+            }
+            let paginated = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql: sql.into(),
+                database_type: Some(DatabaseType::Oracle),
+                limit: 100,
+                offset: 100,
+            });
+            assert!(!paginated.ok, "{sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_columns_named_like_pseudocolumns_keep_bounded_sql() {
+        for sql in ["SELECT t.\"nextval\" AS v FROM t", "SELECT nextval AS v FROM t"] {
+            let plan = oracle_plan(sql, 100, 0, true);
+            assert!(!plan.use_agent_result_session, "{sql}");
+            assert!(plan.sql_to_execute.contains("ROWNUM <= 100"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_safe_projections_keep_bounded_sql_at_every_offset() {
+        for sql in [
+            "SELECT a.id, a.name FROM people a",
+            "SELECT a.id AS left_id, b.id AS right_id FROM people a JOIN people b ON a.id=b.id",
+            "SELECT a.id AS label, a.name AS \"label\" FROM people a",
+            "SELECT name AS label, COUNT(*) AS n FROM people GROUP BY name",
+            "SELECT code, name FROM BD_MATERIAL",
+            "SELECT DISTINCT bm.code 物料编码, bm.name 物料名称, bs.name 仓库 FROM BD_MATERIAL bm INNER JOIN BD_MATERIALSTOCK bm2 ON bm.PK_MATERIAL = bm2.PK_MATERIAL",
+        ] {
+            for cursor in [false, true] {
+                for limit in [0, 1, 100, i32::MAX as usize] {
+                    for offset in [0, 100, 500] {
+                        let plan = oracle_plan(sql, limit, offset, cursor);
+                        assert!(!plan.use_agent_result_session, "{sql}");
+                        assert!(plan.pagination_error.is_none());
+                        assert!(plan.sql_to_execute.contains(sql));
+                        assert!(plan.sql_to_execute.contains(&format!("ROWNUM <= {}", offset + limit.max(1))));
+                        assert_eq!(plan.pagination_row_number_column.is_some(), offset > 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_unsafe_projection_uses_cursor_at_every_offset() {
+        for sql in [
+            "SELECT * FROM people",
+            "SELECT a.* FROM people a",
+            "SELECT ID, BUSINESS_ROWID AS \"rowid\" FROM DBX_LOB_NOPK ORDER BY ID",
+            "SELECT BUSINESS_ROWID AS ROWID FROM DBX_LOB_NOPK",
+            "SELECT BUSINESS_ROWID AS \"RoWiD\", ROWIDTOCHAR(ROWID) AS \"__DBX_PK_0\" FROM DBX_LOB_NOPK",
+            "SELECT t.\"rowid\" FROM DBX_LOB_NOPK t",
+            "SELECT a.name, a.* FROM people a ORDER BY a.id",
+            "SELECT a.name, a.name FROM people a",
+            "SELECT a.id, b.id FROM people a JOIN people b ON a.id = b.id",
+            "SELECT * FROM people a JOIN people b ON a.id = b.id",
+            "SELECT a.*, b.* FROM people a JOIN people b ON a.id = b.id",
+            "SELECT a.id AS label, a.name AS LABEL FROM people a",
+            "SELECT DISTINCT a.name, a.name FROM people a",
+            "SELECT a.name, a.name, COUNT(*) FROM people a GROUP BY a.name",
+            "WITH p AS (SELECT * FROM people) SELECT p.name, p.* FROM p",
+            "SELECT name, name FROM people UNION ALL SELECT name, name FROM people",
+            "SELECT id FROM people FOR UPDATE",
+            "SELECT id FROM people WHERE ROWNUM <= 10",
+            "SELECT id FROM people FETCH FIRST 10 ROWS ONLY",
+        ] {
+            for offset in [0, 100, 500] {
+                let plan = super::build_query_pagination_execution_plan(super::QueryPaginationExecutionPlanOptions {
+                    sql: sql.into(),
+                    query_base_sql: sql.into(),
+                    database_type: Some(super::DatabaseType::Oracle),
+                    pagination: super::QueryPagination { limit: 100, offset, session_id: None },
+                    use_agent_cursor: true,
+                    first_page_uses_actual_sql: true,
+                    execution_hint: None,
+                });
+                assert!(plan.use_agent_result_session, "{sql} offset {offset}");
+                assert_eq!(plan.sql_to_execute, sql);
+                assert_eq!(plan.page_offset, Some(offset));
+                assert!(plan.pagination_row_number_column.is_none());
+                assert!(plan.page_sql.is_none());
+                let rewritten = super::build_paginated_query_sql(super::PaginatedQuerySqlOptions {
+                    original_sql: sql.into(),
+                    database_type: Some(super::DatabaseType::Oracle),
                     limit: 100,
                     offset,
                 });
@@ -4841,7 +5059,7 @@ WHERE u.id = picked.id;
     }
 
     #[test]
-    fn oracle_pagination_skips_sql_clause() {
+    fn oracle_pagination_wraps_with_rownum() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT id FROM users".to_string(),
             database_type: Some(DatabaseType::Oracle),
@@ -4849,7 +5067,44 @@ WHERE u.id = picked.id;
             offset: 0,
         });
 
-        assert_eq!(result.sql.unwrap(), "SELECT id FROM users;");
+        assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id FROM users) WHERE ROWNUM <= 100;");
+    }
+
+    #[test]
+    fn oracle_pagination_wraps_offset_with_rownum_bounds() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT id FROM users".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            limit: 100,
+            offset: 200,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT id FROM users) dbx_inner WHERE ROWNUM <= 300) WHERE \"__dbx_row_num\" > 200;"
+        );
+    }
+
+    #[test]
+    fn oracle_pagination_rejects_unsafe_queries() {
+        for sql in [
+            "SELECT a.id, b.id FROM a JOIN b ON a.id = b.id",
+            "SELECT a.id, a.* FROM a",
+            "SELECT * FROM users",
+            "SELECT id FROM users FOR UPDATE",
+            "SELECT id FROM users FOR UPDATE NOWAIT",
+            "SELECT id FROM users WHERE ROWNUM <= 10",
+            "SELECT id FROM users FETCH FIRST 10 ROWS ONLY",
+        ] {
+            let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Oracle),
+                limit: 100,
+                offset: 0,
+            });
+            assert!(!result.ok, "expected query to be rejected: {sql}");
+            assert_eq!(result.reason.as_deref(), Some("unsupported"), "reason mismatch: {sql}");
+        }
     }
 
     #[test]
@@ -5821,7 +6076,7 @@ WHERE u.id = picked.id;
     }
 
     #[test]
-    fn oracle_offset_jump_keeps_agent_result_session() {
+    fn oracle_offset_jump_with_wildcard_keeps_agent_result_session() {
         let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
             sql: "SELECT * FROM events".to_string(),
             query_base_sql: "SELECT * FROM events".to_string(),
@@ -5832,12 +6087,37 @@ WHERE u.id = picked.id;
             execution_hint: None,
         });
 
-        // Oracle user queries are Unbounded: the SQL stays unchanged, so the
-        // client must consume the agent result session through to the offset.
-        assert_eq!(plan.sql_to_execute, "SELECT * FROM events;");
+        // Wildcard projections cannot safely be wrapped in a derived table due to unknown
+        // column collisions; offset jumps must keep the agent cursor session.
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM events");
         assert_eq!(plan.page_limit, Some(100));
         assert_eq!(plan.page_offset, Some(200));
         assert!(plan.use_agent_result_session);
+        assert!(plan.pagination_row_number_column.is_none());
+    }
+
+    #[test]
+    fn oracle_offset_jump_with_safe_projection_rewrites_with_rownum() {
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT id FROM events".to_string(),
+            query_base_sql: "SELECT id FROM events".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            pagination: QueryPagination { limit: 100, offset: 200, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+            execution_hint: None,
+        });
+
+        // Safe projections without wildcard or duplicate output names support ROWNUM pagination (#12789),
+        // so offset jumps rewrite the query with server-side row-number bounds.
+        assert_eq!(
+            plan.sql_to_execute,
+            "SELECT * FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT id FROM events) dbx_inner WHERE ROWNUM <= 300) WHERE \"__dbx_row_num\" > 200;"
+        );
+        assert_eq!(plan.page_limit, Some(100));
+        assert_eq!(plan.page_offset, Some(200));
+        assert!(!plan.use_agent_result_session);
+        assert_eq!(plan.pagination_row_number_column.as_deref(), Some("__dbx_row_num"));
     }
 
     #[test]

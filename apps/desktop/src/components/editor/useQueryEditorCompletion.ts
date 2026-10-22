@@ -14,6 +14,7 @@ import {
   isSqlLikeCompletionStatement,
   normalizeIdentifierPart,
   prepareSqlCompletionReplacement,
+  quotedCompletionFilterPrefix,
   recordCompletionSelection,
   shouldAutoOpenSqlCompletion,
   shouldChainSqlCompletionAfterAccept,
@@ -281,16 +282,23 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return true;
   }
 
-  function buildCompletionResult(sourceItems: Array<QueryCompletionItem | BatchColumnSelectionActionItem>, from: number, validFor?: RegExp, prefix?: string) {
+  function buildCompletionResult(sourceItems: Array<QueryCompletionItem | BatchColumnSelectionActionItem>, from: number, validFor?: RegExp, prefix?: string, queryText?: string) {
     const items = filterExcludedCompletions(sourceItems, excludedCompletionLabelSet(settingsStore.editorSettings.excludedCompletionItems));
     if (items.length === 0) return null;
-    const bypassFilter = !!prefix && shouldBypassCompletionFilter(prefix, items);
-    const resultItems = bypassFilter && prefix ? completionItemsForBypassedFilter(prefix, items) : items;
+    const matcherBypass = !!prefix && shouldBypassCompletionFilter(prefix, items);
+    // CodeMirror matches each label against `queryText` (the document span from
+    // `from` to the cursor). Inside a quoted identifier that span keeps the
+    // opening quote, so no label ever matches and the menu comes up empty
+    // (#12008). The provider already filtered by the unquoted prefix, so take
+    // over matching for exactly that case, like the Han/pinyin bypass does.
+    const quotedBypassPrefix = prefix && queryText ? quotedCompletionFilterPrefix(queryText, prefix) : undefined;
+    const bypassFilter = matcherBypass || !!quotedBypassPrefix;
+    const resultItems = matcherBypass && prefix ? completionItemsForBypassedFilter(prefix, items) : items;
     return {
       from,
       // Keep CodeMirror's live filtering enabled so an already-open menu follows the typed prefix.
       options: resultItems.map((item) => completionOptionForItem(item)),
-      validFor,
+      validFor: bypassFilter ? undefined : validFor,
       // When bypassing CodeMirror's matcher, supply our own highlight ranges so
       // the matched characters (Han substring or pinyin initials) stay marked.
       // Ranges must target the rendered text, which is displayLabel when set.
@@ -326,7 +334,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           },
         ]
       : [];
-    return buildCompletionResult(actions.length > 0 ? [...replacement.items, ...actions] : replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+    return buildCompletionResult(actions.length > 0 ? [...replacement.items, ...actions] : replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix, fullDoc.slice(replacement.from, position));
   }
 
   function itemHasHanText(item: QueryCompletionItem | BatchColumnSelectionActionItem): boolean {
@@ -807,7 +815,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       const analysis = await getEditorSqlCompletionAnalysis(fullDoc, position, currentState);
       if (!analysis || context.aborted || epoch !== completionEpoch) return null;
       analyzedCtes = { sql: fullDoc, definitions: analysis.cteDefinitions };
-      const { sequenceLiteralContext, databaseLinkContext, useDatabaseCompletion } = analysis;
+      const sequenceLiteralContext = settingsStore.editorSettings.sequenceCompletionEnabled ? analysis.sequenceLiteralContext : null;
+      const { databaseLinkContext, useDatabaseCompletion } = analysis;
       if (analysis.suppressed && !sequenceLiteralContext) return null;
       const useDatabasePrefix = useDatabaseCompletion?.prefix ?? null;
 
@@ -925,6 +934,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
+          sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -990,6 +1000,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
+          sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -1104,7 +1115,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     const expectedDoc = currentView?.state.doc;
     const analysis = await getEditorSqlCompletionAnalysis(fullDoc, position, currentView?.state);
     if (!analysis || view.value !== currentView || currentView?.state.doc !== expectedDoc || settingsStore.editorSettings.completionTriggerMode !== mode) return false;
-    const { sequenceLiteralContext, databaseLinkContext, useDatabaseCompletion } = analysis;
+    const sequenceLiteralContext = settingsStore.editorSettings.sequenceCompletionEnabled ? analysis.sequenceLiteralContext : null;
+    const { databaseLinkContext, useDatabaseCompletion } = analysis;
     if (analysis.suppressed && !sequenceLiteralContext) return false;
     const context = databaseLinkContext ?? sequenceLiteralContext ?? analysis.completionContext;
     const prevChar = fullDoc[position - 1] ?? "";
@@ -1307,6 +1319,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
+      sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -1539,7 +1552,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
   function completionObjectKindsForContext(completionContext: ReturnType<typeof getSqlCompletionContext>): CompletionAssistantObjectKind[] {
     if (completionContext.contextKind === "exec") return ["procedure"];
-    if (isSequenceCompletionDatabase(props.databaseType)) {
+    const allowSequences = settingsStore.editorSettings.sequenceCompletionEnabled;
+    if (allowSequences && isSequenceCompletionDatabase(props.databaseType)) {
       if (completionContext.suggestColumns && completionContext.referencedTables.length > 0 && !completionContext.qualifier) {
         return ["function", "sequence"];
       }
@@ -1844,6 +1858,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
+      sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);

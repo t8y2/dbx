@@ -22,6 +22,9 @@ export interface DataGridColumnLayoutHandle {
   /** Fit every visible column to its content (#9813). Optional so grids that
    *  only expose the visibility/order surface keep working. */
   autoFitAllColumns?: () => void;
+  /** Clear manual/remembered column widths and restore automatic calculation. */
+  resetColumnWidths?: () => void;
+  hasUserSizedColumns?: boolean;
 }
 
 export interface DataGridColumnLayoutVirtualWindow {

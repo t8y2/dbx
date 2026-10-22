@@ -149,6 +149,7 @@ describe("QueryEditor component split integration", () => {
       "cancelGutterExecutionViewport",
       "shouldBlockExecutionShortcut",
       "requestExecute",
+      "requestExecuteAll",
       "requestExecuteInNewResultTab",
       "requestPreviewChanges",
       "captureExecutionSnapshot",
@@ -191,6 +192,24 @@ describe("QueryEditor component split integration", () => {
     expect(source.selectedSql).toBe(executeMode === "current" ? "SELECT 2" : props.modelValue);
     expect(source.selectionFrom).toBe(executeMode === "current" ? 10 : 0);
     expect(source.selectionTo).toBe(executeMode === "current" ? 18 : props.modelValue.length);
+  });
+
+  it.each(["current", "all"] as const)("executes the full document despite a selection and the %s execution mode", async (executeMode) => {
+    const { editor, host, view, props, settingsStore, onExecute } = await mountEditor();
+    settingsStore.editorSettings.executeMode = executeMode;
+    settingsStore.editorSettings.showExecutionTargetPicker = true;
+    view.dispatch({ selection: EditorSelection.range(10, 18) });
+
+    expect(editor.requestExecuteAll()).toBe(true);
+    await nextTick();
+
+    expect(onExecute).toHaveBeenCalledTimes(1);
+    const snapshot = onExecute.mock.calls[0][0];
+    expect(snapshot.fullSql).toBe(props.modelValue);
+    expect(snapshot.selectedSql).toBe(props.modelValue);
+    expect(snapshot.selectionFrom).toBe(0);
+    expect(snapshot.selectionTo).toBe(props.modelValue.length);
+    expect(host.querySelector('[role="listbox"]')).toBeNull();
   });
 
   it("keeps the new-result-tab shortcut independent of the optional picker", async () => {

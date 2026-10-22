@@ -270,7 +270,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::UserQuery),
-        TablePaginationStrategy::Unbounded
+        TablePaginationStrategy::Rownum
     );
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Jdbc)), TablePaginationStrategy::AgentMaxRows);
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.

@@ -856,7 +856,8 @@ export function appTabActiveIndicator(): string {
 }
 
 export function tabColorStyle(tab: QueryTab, active: boolean, isClassic: boolean): CSSProperties | undefined {
-  if (!useSettingsStore().editorSettings.colorizeConnectionTabs) {
+  const settings = useSettingsStore().editorSettings;
+  if (!settings.colorizeConnectionTabs || (settings.colorizeConnectionTabsScope === "active" && !active)) {
     const activeIndicator = appTabActiveIndicator();
     const background = appTabActiveBackground();
     if (isClassic) return active ? { "--app-tab-background": background, boxShadow: activeIndicator } : undefined;

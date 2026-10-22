@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildInstalledUpdateIndex,
   buildMarketplacePluginListings,
   compareVersions,
   extractRepositoryBaseUrl,
+  fetchPluginInstallCounts,
   filterMarketplacePluginListings,
   formatMarketplaceReleasedDate,
   marketplaceHomepageUrl,
@@ -421,5 +422,45 @@ describe("sortMarketplacePluginListings", () => {
     // The update-bearing listing leads even though its displayed date is the older one.
     expect(displayedTimes(updatesFirst)).toEqual([Date.parse("2025-01-01T00:00:00Z"), Date.parse("2026-06-01T00:00:00Z")]);
     expect(ids(sortMarketplacePluginListings(listings, "name"))).toEqual(["a.alpha", "b.zulu"]);
+  });
+
+  it("sorts by install count descending and sinks plugins with no positive count", () => {
+    const catalog = datedCatalog([
+      { id: "c.none", name: "Gamma", latestVersion: "1.0.0", versions: [{ version: "1.0.0" }] },
+      { id: "a.few", name: "Alpha", latestVersion: "1.0.0", versions: [{ version: "1.0.0" }] },
+      { id: "b.many", name: "Beta", latestVersion: "1.0.0", versions: [{ version: "1.0.0" }] },
+      { id: "d.tie", name: "Delta", latestVersion: "1.0.0", versions: [{ version: "1.0.0" }] },
+    ]);
+    const listings = buildMarketplacePluginListings([catalog], [], "en");
+
+    expect(ids(sortMarketplacePluginListings(listings, "installs", { "b.many": 40, "a.few": 3, "d.tie": 3, "c.none": 0 }))).toEqual(["b.many", "a.few", "d.tie", "c.none"]);
+    expect(ids(sortMarketplacePluginListings(listings, "installs"))).toEqual(["a.few", "b.many", "d.tie", "c.none"]);
+  });
+});
+
+describe("fetchPluginInstallCounts", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("keeps positive finite counts for valid plugin ids", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ installs: { "io.dbx.ssh": 12, "not an id": 4, "io.dbx.zero": 0, "io.dbx.nan": Number.NaN, "io.dbx.text": "9" } }),
+      }),
+    );
+
+    await expect(fetchPluginInstallCounts()).resolves.toEqual({ "io.dbx.ssh": 12 });
+  });
+
+  it("returns null when the endpoint fails or the payload is malformed", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+    await expect(fetchPluginInstallCounts()).resolves.toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }));
+    await expect(fetchPluginInstallCounts()).resolves.toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    await expect(fetchPluginInstallCounts()).resolves.toBeNull();
   });
 });

@@ -84,6 +84,12 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(draft.queryResultExportFileNameSource).toBe("tab-title");
   });
 
+  it("includes colorizeConnectionTabsScope (#12955)", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeConnectionTabsScope");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ colorizeConnectionTabsScope: "active" } as Partial<EditorSettings>));
+    expect(draft.colorizeConnectionTabsScope).toBe("active");
+  });
+
   it("includes continueOnErrorOnBatch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("continueOnErrorOnBatch");
   });
@@ -218,6 +224,15 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(draft.functionCompletionIncludeParams).toBe(false);
     expect(editorSettingsDraftChanged(draft, base)).toBe(true);
     expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ functionCompletionIncludeParams: false });
+  });
+
+  it("includes sequenceCompletionEnabled in draft keys, draft conversion, and patch", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("sequenceCompletionEnabled");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ sequenceCompletionEnabled: false }));
+    const base = editorSettingsDraftFromSettings(makeSettings({ sequenceCompletionEnabled: true }));
+    expect(draft.sequenceCompletionEnabled).toBe(false);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ sequenceCompletionEnabled: false });
   });
 });
 

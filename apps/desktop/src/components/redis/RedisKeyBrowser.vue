@@ -300,6 +300,14 @@ const subtreePendingGroupCursors = new Map<string, number>();
 // 旧 generation 的 catch/finally 清掉或覆盖同 id 的新补扫。
 const subtreeFillOperations = new Map<string, number>();
 let subtreeFillOperationId = 0;
+const refreshingGroupId = ref<string | null>(null);
+const groupRefresh = shallowRef<{
+  groupId: string;
+  pattern: string;
+  cursor: number;
+  keys: Map<string, { key: RedisKeyInfo; observedAt: number }>;
+  totalKeys: number;
+} | null>(null);
 // 刷新前已展开分组的快照（#7173）：刷新首屏重建树时，本轮尚未扫到的分组会被
 // rebuildTree 从 expandedGroupIds 中裁掉；后续 load-more 页面让这些分组重新
 // 出现时，用该快照恢复展开状态。SCAN 游标归零（本轮已扫尽，仍未出现的分组
@@ -340,8 +348,8 @@ function matchesDefaultKeyScope(key: Pick<RedisKeyInfo, "key_display" | "key_raw
 function filterScanResultToScope(result: RedisScanResult): RedisScanResult {
   return hasDefaultKeyScope.value ? { ...result, keys: result.keys.filter(matchesDefaultKeyScope) } : result;
 }
-/** True while a key-list mutation (delete or batch expiry) owns the visible result set. */
-const mutatingKeys = computed(() => deletingKeys.value || savingBatchExpiry.value);
+/** True while a key-list mutation owns the visible result set. */
+const mutatingKeys = computed(() => deletingKeys.value || savingBatchExpiry.value || refreshingGroupId.value !== null);
 const selectionBusy = computed(() => mutatingKeys.value || loading.value || loadingMore.value || isFetchingAll.value || searchPending.value);
 // checkedKeys is always a subset of loaded keys, so size equality is enough.
 const allLoadedKeysSelected = computed(() => flatKeys.value.length > 0 && checkedKeys.value.size === flatKeys.value.length);
@@ -1009,13 +1017,15 @@ function invalidateScanRequests(resetAutoLoadBudget = true): number {
   loadMoreOperationId++;
   loadingMore.value = false;
   subtreeFillOperations.clear();
+  groupRefresh.value = null;
+  refreshingGroupId.value = null;
   if (resetAutoLoadBudget) autoLoadBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS, total: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
   return searchRequestId;
 }
 
 function invalidateFetchAllForStructuralMutation() {
   fetchAllSnapshotComplete.value = false;
-  if (isFetchingAll.value || fetchAllPublicationRollback) invalidateScanRequests();
+  if (isFetchingAll.value || fetchAllPublicationRollback || groupRefresh.value) invalidateScanRequests();
 }
 
 function isCurrentScanOperation(requestId: number, operationId?: number): boolean {
@@ -1281,7 +1291,7 @@ async function maybeAutoLoadMoreRedisKeys() {
   const shouldLoad = shouldLoadMoreRedisKeys({
     enabled: redisInfiniteScrollEnabled.value,
     hasMore: hasMore.value,
-    busy: loading.value || loadingMore.value || searchPending.value || deletingKeys.value || isFetchingAll.value,
+    busy: loading.value || loadingMore.value || searchPending.value || mutatingKeys.value || isFetchingAll.value,
     loadedKeys: flatKeys.value.length,
     maxKeys: redisInfiniteScrollMaxKeys.value,
     scrollTop: scroller.scrollTop,
@@ -1565,8 +1575,88 @@ const SUBTREE_SCAN_ITERATIONS_PER_CALL = 8;
 const SUBTREE_FILL_MAX_NEW_KEYS = 500;
 const SUBTREE_FILL_MAX_SCAN_ITERATIONS = 50;
 
+function groupRefreshLabel(groupId: string): string {
+  return groupRefresh.value?.groupId === groupId ? t("redis.loadMoreKeys") : t("common.refresh");
+}
+
+async function refreshGroupSubtree(group: RedisKeyTreeGroupNode) {
+  if (!redisBrowserIsActive || selectionBusy.value) return;
+  const pending = groupRefresh.value?.groupId === group.id ? groupRefresh.value : null;
+  // Cancel older main/subtree pages without resetting the main cursor. A late
+  // append must not resurrect keys removed by this prefix refresh.
+  const requestId = invalidateScanRequests(false);
+  const session = pending ?? {
+    groupId: group.id,
+    pattern: redisGroupSubtreePattern(group.pathSegments, redisKeySeparator.value),
+    cursor: 0,
+    keys: new Map<string, { key: RedisKeyInfo; observedAt: number }>(),
+    totalKeys: lastTotalKeys.value,
+  };
+  groupRefresh.value = session;
+  refreshingGroupId.value = group.id;
+  const current = () => requestId === searchRequestId && redisBrowserIsActive && groupRefresh.value === session;
+  let iterationsLeft = SUBTREE_FILL_MAX_SCAN_ITERATIONS;
+  const initialKeyCount = session.keys.size;
+  try {
+    while (current() && iterationsLeft > 0 && session.keys.size - initialKeyCount < SUBTREE_FILL_MAX_NEW_KEYS) {
+      const iterations = Math.min(SUBTREE_SCAN_ITERATIONS_PER_CALL, iterationsLeft);
+      const result = filterScanResultToScope(
+        isValueSearchMode.value && valueQuery.value
+          ? await api.redisScanValues(props.connectionId, props.db, session.cursor, session.pattern, valueQuery.value, redisScanPageSize.value, searchMode.value === "all")
+          : await api.redisScanKeysBatch(props.connectionId, props.db, session.cursor, session.pattern, redisScanPageSize.value, iterations, true),
+      );
+      if (!current()) return;
+      iterationsLeft -= iterations;
+      const observedAt = Date.now();
+      for (const key of result.keys) {
+        if (searchMode.value === "key" && !fetchAllSnapshotComplete.value && !localKeyPatternMatcher.value(key.key_display, key.key_raw)) continue;
+        session.keys.set(key.key_raw, { key, observedAt });
+      }
+      if (session.cursor === 0) session.totalKeys = result.total_keys;
+      session.cursor = result.cursor;
+      if (session.cursor !== 0) continue;
+
+      // SCAN is not a snapshot: only a completed traversal can establish which
+      // previously loaded keys disappeared. Keep old rows intact between passes.
+      const matches = createRedisKeyPatternMatcher(session.pattern);
+      const retained = flatKeys.value.filter((key) => !matches(key.key_display, key.key_raw));
+      for (const key of flatKeys.value) {
+        if (matches(key.key_display, key.key_raw)) {
+          ttlObservedAtByRaw.delete(key.key_raw);
+          positiveTtlKeyRaws.delete(key.key_raw);
+        }
+      }
+      for (const { key, observedAt } of session.keys.values()) {
+        retained.push(key);
+        recordKeyTtlObservedAt(key);
+        if ((key.ttl ?? -2) > 0) ttlObservedAtByRaw.set(key.key_raw, observedAt);
+      }
+      loadedKeyRaws = new Set(retained.map((key) => key.key_raw));
+      replaceFlatKeyRecords(retained);
+      for (const candidate of treeIndex?.groupById.values() ?? []) {
+        if (candidate.pathSegments.length < group.pathSegments.length || !group.pathSegments.every((segment, index) => candidate.pathSegments[index] === segment)) continue;
+        subtreeFilledGroupIds.delete(candidate.id);
+        subtreePendingGroupCursors.delete(candidate.id);
+      }
+      rebuildTree();
+      keyMetadataEpoch.value++;
+      lastTotalKeys.value = session.totalKeys;
+      connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
+        loaded: hasFilteredKeyRange.value ? undefined : retained.length,
+        total: session.totalKeys,
+      });
+      groupRefresh.value = null;
+      return;
+    }
+  } catch (error) {
+    if (current()) toast(errorMessage(error), 5000);
+  } finally {
+    if (requestId === searchRequestId) refreshingGroupId.value = null;
+  }
+}
+
 function shouldFillGroupSubtree(): boolean {
-  return hasMore.value && !useFlatKeySearchRows.value && !hasFilteredKeyRange.value && !isFetchingAll.value;
+  return hasMore.value && !useFlatKeySearchRows.value && !hasFilteredKeyRange.value && !isFetchingAll.value && !refreshingGroupId.value;
 }
 
 function mergeScannedKeys(newKeys: RedisKeyInfo[]) {
@@ -1783,6 +1873,7 @@ function onKeyLoaded(value: RedisValue) {
   const previousTtl = flatKeyByRaw.get(keyInfo.key_raw)?.ttl ?? -2;
   const noExpiryMembershipChanged = (previousTtl === -1) !== (keyInfo.ttl === -1);
   if (!updateRedisKeyInfoMetadataByRaw(flatKeyByRaw, keyInfo)) return;
+  if (groupRefresh.value) invalidateScanRequests(false);
   // 详情面板回写了最新的 TTL，同步刷新观测时刻，保证两侧倒计时一致
   recordKeyTtlObservedAt(keyInfo);
   loadedKeyRaws.add(keyInfo.key_raw);
@@ -1850,6 +1941,12 @@ function redisKeyContextMenuItems(node: RedisKeyTreeNode): ContextMenuItem[] {
   if (node.kind === "group") {
     const groupPath = node.pathSegments.join(redisKeySeparator.value);
     const items: ContextMenuItem[] = [
+      {
+        label: groupRefreshLabel(node.id),
+        icon: RefreshCw,
+        action: () => refreshGroupSubtree(node),
+        disabled: () => selectionBusy.value,
+      },
       {
         label: t("redis.createKey"),
         icon: Plus,
@@ -2038,6 +2135,7 @@ function applyKeyTtlMetadata(keyRaw: string, ttl: number): boolean {
   const previousTtl = keyInfo.ttl ?? -2;
   const nextKeyInfo: RedisKeyInfo = { ...keyInfo, ttl };
   if (!updateRedisKeyInfoMetadataByRaw(flatKeyByRaw, nextKeyInfo)) return false;
+  if (groupRefresh.value) invalidateScanRequests(false);
   recordKeyTtlObservedAt(nextKeyInfo);
   if (treeIndex) updateRedisKeyTreeLeafMetadata(treeIndex, nextKeyInfo);
   return (previousTtl === -1) !== (ttl === -1);
@@ -3656,6 +3754,23 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                     </template>
                   </div>
                   <div class="flex shrink-0 items-center justify-end gap-1">
+                    <Button
+                      v-if="row.node.kind === 'group'"
+                      variant="ghost"
+                      size="icon"
+                      class="h-5 w-5 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                      :class="{ 'opacity-100': groupRefresh?.groupId === row.node.id }"
+                      :title="groupRefreshLabel(row.node.id)"
+                      :aria-label="groupRefreshLabel(row.node.id)"
+                      :aria-busy="refreshingGroupId === row.node.id"
+                      :disabled="selectionBusy"
+                      :data-redis-refresh-group="row.node.id"
+                      @click.stop="refreshGroupSubtree(row.node)"
+                    >
+                      <Loader2 v-if="refreshingGroupId === row.node.id" class="h-3 w-3 animate-spin" />
+                      <ChevronDown v-else-if="groupRefresh?.groupId === row.node.id" class="h-3 w-3" />
+                      <RefreshCw v-else class="h-3 w-3" />
+                    </Button>
                     <Badge v-if="row.node.kind === 'leaf' && redisRowKeyType(row.node)" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(redisRowKeyType(row.node))">{{ redisRowKeyType(row.node) }}</Badge>
                     <!-- TTL 徽标：与类型徽标保持一致的胶囊样式，永不过期为琥珀色、临近过期/已过期为红色警示 -->
                     <span

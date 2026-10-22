@@ -1983,7 +1983,7 @@ const filteredIndexRowIds = computed(() => {
   return new Set(indexes.value.filter((index) => indexMatchesSearch(index, query)).map((index) => index.id));
 });
 const indexSearchMatchCount = computed(() => (indexSearchText.value.trim() ? filteredIndexRowIds.value.size : 0));
-const foreignKeyActionOptions = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION"];
+const foreignKeyActionOptions = computed(() => (structureDialect.value === "sqlserver" ? ["", "CASCADE", "SET NULL", "NO ACTION"] : ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION"]));
 const triggerTimingOptions = computed(() => (databaseType.value === "sqlserver" ? ["AFTER", "INSTEAD OF"] : ["BEFORE", "AFTER"]));
 const triggerEventOptions = ["INSERT", "UPDATE", "DELETE"];
 const metadataSchema = computed(() => connectionObjectTreeQuerySchema(connection.value, props.database, props.schema));

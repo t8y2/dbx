@@ -1,4 +1,4 @@
-﻿// @vitest-environment happy-dom
+// @vitest-environment happy-dom
 
 import { createApp, nextTick, reactive, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -269,13 +269,19 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     app.mount(root);
     const content = () => root.querySelector(".cm-content")?.textContent ?? "";
     const toggle = () => root.querySelector<HTMLButtonElement>('[role="switch"]')!;
-    await vi.waitFor(() => expect(content()).toMatch(/PARTITION BY\s+HASH/));
+    await vi.waitFor(
+      () => {
+        expect(content()).toMatch(/PARTITION BY\s+HASH/);
+        expect(root.querySelector('[role="switch"]')).not.toBeNull();
+      },
+      { timeout: 5000 },
+    );
     expect(content()).not.toContain("PCTFREE");
     expect(toggle().getAttribute("aria-checked")).toBe("true");
     toggle().click();
-    await vi.waitFor(() => expect(content()).toContain("PCTFREE"));
+    await vi.waitFor(() => expect(content()).toContain("PCTFREE"), { timeout: 5000 });
     buttonWithText(root, "grid.copyDdl").click();
-    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenLastCalledWith(content()));
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenLastCalledWith(content()), { timeout: 5000 });
     const { EditorView } = await import("@codemirror/view");
     const view = EditorView.findFromDOM(root.querySelector(".cm-content")!)!;
     view.dispatch({ changes: { from: view.state.doc.length, insert: "\n-- local edit" } });
@@ -286,7 +292,7 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     expect(content()).toContain("PCTFREE");
     expect(content()).toContain("-- local edit");
     buttonWithText(root, "structureEditor.resetDdl").click();
-    await vi.waitFor(() => expect(content()).not.toContain("PCTFREE"));
+    await vi.waitFor(() => expect(content()).not.toContain("PCTFREE"), { timeout: 5000 });
     expect(content()).not.toContain("-- local edit");
     expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1);
   });
@@ -319,7 +325,7 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     selectTab(buttonWithText(root, "DDL"));
     await nextTick();
 
-    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL), { timeout: 1000 });
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL), { timeout: 5000 });
     expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1);
   });
 

@@ -202,6 +202,7 @@ describe("EditorGroup mount contract", () => {
       ...createNoopEditorToolbarActions(),
       captureExecutionSnapshot: vi.fn(),
       toolbarExecute: vi.fn(),
+      toolbarExecuteAll: vi.fn(),
       toolbarExecuteInNewResultTab: vi.fn(),
       cancelExecution: vi.fn(),
       explain: vi.fn(),
@@ -238,6 +239,7 @@ describe("EditorGroup mount contract", () => {
     // Toolbar events flow to the injected actions with the group's tab id.
     (toolbar as any).__vueParentComponent.emit("executePointerDown");
     (toolbar as any).__vueParentComponent.emit("toolbarExecute", "pointer");
+    (toolbar as any).__vueParentComponent.emit("toolbarExecuteAll", "pointer");
     (toolbar as any).__vueParentComponent.emit("toolbarExecuteInNewResultTab", "pointer");
     (toolbar as any).__vueParentComponent.emit("cancel");
     (toolbar as any).__vueParentComponent.emit("explain");
@@ -248,6 +250,7 @@ describe("EditorGroup mount contract", () => {
     await nextTick();
     expect(actions.captureExecutionSnapshot).toHaveBeenCalledWith(queryId);
     expect(actions.toolbarExecute).toHaveBeenCalledWith("pointer", queryId);
+    expect(actions.toolbarExecuteAll).toHaveBeenCalledWith("pointer", queryId);
     expect(actions.toolbarExecuteInNewResultTab).toHaveBeenCalledWith("pointer", queryId);
     expect(actions.cancelExecution).toHaveBeenCalledWith(queryId);
     expect(actions.explain).toHaveBeenCalledWith(queryId);

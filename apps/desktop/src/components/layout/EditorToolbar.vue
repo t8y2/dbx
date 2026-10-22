@@ -3,6 +3,7 @@ import { computed, nextTick, onUnmounted, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Play,
+  FastForward,
   SquarePlay,
   CirclePlay,
   Loader2,
@@ -96,6 +97,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   toolbarExecute: [source: "pointer" | "keyboard"];
+  toolbarExecuteAll: [source: "pointer" | "keyboard"];
   toolbarExecuteInNewResultTab: [source: "pointer" | "keyboard"];
   executePointerDown: [];
   cancel: [];
@@ -331,6 +333,7 @@ function refreshObjectSource() {
 }
 const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql));
 const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
+const executeAllShortcutTooltip = computed(() => formatShortcutTooltip(t("toolbar.executeAllSql"), settingsStore.editorSettings.shortcuts.executeAllSql));
 const executeInNewResultTabTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutExecuteSqlInNewResultTab"), settingsStore.editorSettings.shortcuts.executeSqlInNewResultTab));
 // executableSql 在无选区时可能是整篇文档；只要有 DML 语句出现就显示预览按钮，
 // 具体"当前语句"由编辑器（QueryEditor）按执行模式解析。
@@ -405,6 +408,9 @@ const transactionTooltip = computed(() => {
 const executeButtonClass = computed(() => {
   if (props.activeTab.isExecuting) return "";
   return activeProductionContext.value.active ? "bg-red-500/10 text-red-700 hover:bg-red-500/20 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200" : "bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200";
+});
+const executeAllButtonClass = computed(() => {
+  return activeProductionContext.value.active ? "text-red-700 hover:bg-red-500/10 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200" : "text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-300 dark:hover:text-emerald-200";
 });
 
 const canMultiExecute = computed(() => {
@@ -551,6 +557,10 @@ function onExecuteClick(event: MouseEvent) {
   emit("toolbarExecute", event.detail > 0 ? "pointer" : "keyboard");
 }
 
+function onExecuteAllClick(event: MouseEvent) {
+  emit("toolbarExecuteAll", event.detail > 0 ? "pointer" : "keyboard");
+}
+
 function onExecuteInNewResultTabClick(event: MouseEvent) {
   emit("toolbarExecuteInNewResultTab", event.detail > 0 ? "pointer" : "keyboard");
 }
@@ -607,6 +617,14 @@ defineExpose({
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : executeShortcutTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6" :class="executeAllButtonClass" :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !activeTab.sql.trim()" :aria-label="t('toolbar.executeAllSql')" @click="onExecuteAllClick">
+            <FastForward class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ executeAllShortcutTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>

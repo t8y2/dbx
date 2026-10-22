@@ -4557,10 +4557,18 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
             DatabaseType::SqlServer => "INT".into(),
             _ => "INTEGER".into(),
         },
-        "bigint" | "int8" => "BIGINT".into(),
+        // Oracle has no BIGINT/TINYINT spelling. `INTEGER` and `SMALLINT` are ANSI
+        // synonyms for NUMBER(38, 0), so they hold the full MySQL range (#12976:
+        // a MySQL -> OceanBase Oracle structure transfer failed with ORA-00900 at
+        // `BIGINT NOT NULL`). Other targets keep their native widths.
+        "bigint" | "int8" => match target_db {
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => "INTEGER".into(),
+            _ => "BIGINT".into(),
+        },
         "smallint" | "int2" => "SMALLINT".into(),
         "tinyint" => match target_db {
             target_db if is_postgres_transfer_dialect(target_db) => "SMALLINT".into(),
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => "SMALLINT".into(),
             _ => "TINYINT".into(),
         },
         "serial" | "bigserial" | "smallserial" => match target_db {
@@ -4891,7 +4899,14 @@ fn generate_create_table_ddl_with_column_quoting(
                     // sources must pass the same target type gate: Doris/StarRocks accept
                     // only BIGINT auto-increment columns, so an `INT AUTO_INCREMENT` from a
                     // MySQL source must stay a plain column there too (#12691 review).
+                    // MySQL also requires the auto-increment column to be a key, and the
+                    // generated DDL only recreates the primary key: a source column with
+                    // `extra = auto_increment` but no PK (a UNIQUE-key auto-increment is
+                    // legal MySQL) must stay a plain column instead of producing DDL MySQL
+                    // rejects ("there can be only one auto column and it must be defined
+                    // as a key").
                     let mysql_auto_increment = mysql_auto_increment_type_ok
+                        && c.is_primary_key
                         && (mysql_identity_source
                             || mysql_extra_clauses.as_ref().is_some_and(|extra| extra.auto_increment));
                     if !skip_default && !mysql_auto_increment {
@@ -22885,6 +22900,61 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn map_column_type_uses_oracle_family_integer_types_for_mysql_widths() {
+        // Issue #12976: MySQL `bigint` / `tinyint` were emitted verbatim, but
+        // Oracle-compatible targets have no BIGINT/TINYINT type. INTEGER and
+        // SMALLINT are ANSI synonyms for NUMBER(38, 0) and cover the source range.
+        for target in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("BIGINT", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("bigint unsigned", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("BIGINT(20)", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("int8", &DatabaseType::Postgres, &target), "INTEGER");
+            assert_eq!(map_column_type("tinyint", &DatabaseType::Mysql, &target), "SMALLINT");
+            assert_eq!(map_column_type("TINYINT(1)", &DatabaseType::Mysql, &target), "SMALLINT");
+            assert_eq!(map_column_type("int", &DatabaseType::Mysql, &target), "INTEGER");
+            assert_eq!(map_column_type("smallint", &DatabaseType::Mysql, &target), "SMALLINT");
+        }
+
+        // Other targets keep their native integer spellings.
+        assert_eq!(map_column_type("bigint", &DatabaseType::Postgres, &DatabaseType::Mysql), "BIGINT");
+        assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &DatabaseType::Postgres), "BIGINT");
+        assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &DatabaseType::SqlServer), "BIGINT");
+        assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &DatabaseType::Dameng), "BIGINT");
+        assert_eq!(map_column_type("tinyint", &DatabaseType::SqlServer, &DatabaseType::Mysql), "TINYINT");
+        assert_eq!(map_column_type("tinyint", &DatabaseType::Mysql, &DatabaseType::SqlServer), "TINYINT");
+        assert_eq!(map_column_type("tinyint", &DatabaseType::Mysql, &DatabaseType::Dameng), "TINYINT");
+    }
+
+    #[test]
+    fn transfer_create_table_mysql_bigint_to_oceanbase_oracle_uses_integer() {
+        let columns = vec![
+            db::ColumnInfo { is_primary_key: true, ..test_column("ID", "bigint") },
+            test_column("GROUPNO", "int"),
+            test_column("GROUPDESC", "varchar(100)"),
+            test_column("TINY", "tinyint"),
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &columns,
+            "CLAIM",
+            "nw",
+            "NWGJ",
+            &DatabaseType::OceanbaseOracle,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("\"ID\" INTEGER"), "{ddl}");
+        assert!(ddl.contains("\"GROUPNO\" INTEGER"), "{ddl}");
+        assert!(ddl.contains("\"GROUPDESC\" VARCHAR(100 CHAR)"), "{ddl}");
+        assert!(ddl.contains("\"TINY\" SMALLINT"), "{ddl}");
+        assert!(!ddl.contains("BIGINT"), "{ddl}");
+        assert!(!ddl.contains("TINYINT"), "{ddl}");
+    }
+
+    #[test]
     fn transfer_create_table_oracle_to_oceanbase_oracle_keeps_number_scale() {
         let columns = vec![
             db::ColumnInfo { is_primary_key: true, ..test_column("ID", "NUMBER(10)") },
@@ -23787,6 +23857,50 @@ SELECT 1 FROM dual"#
         );
 
         assert!(!ddl.contains("AUTO_INCREMENT"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn transfer_create_table_keeps_non_key_auto_increment_sources_out_of_auto_increment() {
+        // A MySQL source may define AUTO_INCREMENT on a UNIQUE-key column without a
+        // primary key. The generated transfer DDL only recreates the primary key, so
+        // emitting AUTO_INCREMENT there would fail with "there can be only one auto
+        // column and it must be defined as a key"; keep it a plain column instead.
+        let non_key = vec![db::ColumnInfo {
+            is_primary_key: false,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("ticket", "int")
+        }];
+        let non_key_ddl = generate_create_table_ddl(
+            &non_key,
+            "users",
+            "source",
+            "shop",
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        assert!(!non_key_ddl.contains("AUTO_INCREMENT"), "ddl: {non_key_ddl}");
+
+        // A primary-key AUTO_INCREMENT column keeps the clause.
+        let primary_key = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+        let primary_key_ddl = generate_create_table_ddl(
+            &primary_key,
+            "users",
+            "source",
+            "shop",
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            None,
+            None,
+        );
+        assert!(primary_key_ddl.contains("AUTO_INCREMENT"), "ddl: {primary_key_ddl}");
     }
 
     #[test]

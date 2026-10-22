@@ -24,6 +24,37 @@ set clipboard=unnamedplus
 
 配置 `set clipboard=unnamedplus` 后，Vim 的复制和删除会写入系统剪贴板，普通模式下的 `p` 和 `P` 会从系统剪贴板读取。不支持的命令不会阻止编辑器启动。
 
+### 在 Vim 中执行 DBX 操作
+
+在 Vim 命令行中输入 `:dbx <action>` 即可执行 DBX 操作。操作名与快捷键的 action ID 一致，且不区分大小写，例如 `:dbx formatsql` 同样有效。输入未知的操作名时只会显示提示，不会执行任何操作。
+
+| 范围 | 操作 |
+| --- | --- |
+| 编辑器 | `executeSql`、`executeSqlInNewResultTab`、`explainSql`、`formatSql`、`saveSql`、`expandSelectStar`、`toggleLineComment`、`toggleBlockComment`、`selectCurrentStatement`、`previousStatement`、`nextStatement`、`statementStart`、`uppercaseSelection`、`lowercaseSelection`、`sendSelectionToAi`、`sqlIntentionActions` |
+| 应用 | `newQuery`、`closeTab`、`closeOtherTabs`、`closeAllTabs`、`reopenClosedTab`、`openSettings` |
+
+编辑器操作的行为与对应的快捷键相同。例如 `executeSql` 有选区时执行选中内容，否则执行当前语句。在可视模式下执行（命令行会变成 `:'<,'>dbx executeSql`）时，会先恢复可视选区，只使用选中的 SQL；行可视和块可视选区会扩展为整行。
+
+撤销、缩进、删除行、合并行等 Vim 本身已提供的编辑操作不会通过 `:dbx` 提供，请直接使用 Vim 原生命令。
+
+每个操作还有一个不含空格的命令：`:Dbx` 加上首字母大写的操作名，例如 `:DbxExecuteSql`、`:DbxFormatSql`。在 `vimrc` 的映射中请使用这些命令，因为 CodeMirror Vim 的映射遇到第一个空格就会截断，无法直接映射 `:dbx executeSql`：
+
+```vim
+nnoremap Qr :DbxExecuteSql<CR>
+vnoremap Qr :DbxExecuteSql<CR>
+nnoremap Qf :DbxFormatSql<CR>
+nnoremap Qj :DbxNextStatement<CR>
+nnoremap Qk :DbxPreviousStatement<CR>
+```
+
+CodeMirror Vim 在已输入的按键完整匹配某个内置命令时会立即执行，不会像 Vim 那样按 `timeoutlen` 等待后续按键。因此映射前缀请选择本身不是单键命令的键，例如 `Q`。常用的 leader 键 `<Space>`（光标右移）和 `,`（反向重复上一次 `f`/`t` 查找）会被内置命令直接吃掉，`<Space>r`、`,x` 这类映射不会被触发。如果想用它们作为前缀，请先取消其内置命令（该键原本的功能也会随之失效）：
+
+```vim
+unmap <Space>
+nnoremap <Space>r :DbxExecuteSql<CR>
+vnoremap <Space>r :DbxExecuteSql<CR>
+```
+
 ## 基本工作流
 
 <Steps>

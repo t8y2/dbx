@@ -87,6 +87,7 @@ defineExpose({
   refreshQueryEditorCompletionCache: () => activeSurfaceRef.value?.refreshQueryEditorCompletionCache() ?? false,
   handleModRTarget: (target: Element) => activeSurfaceRef.value?.handleModRTarget(target) ?? false,
   requestQueryEditorExecute: () => activeSurfaceRef.value?.requestQueryEditorExecute() ?? false,
+  requestQueryEditorExecuteAll: () => activeSurfaceRef.value?.requestQueryEditorExecuteAll() ?? false,
   captureQueryEditorExecutionSnapshot: () => activeSurfaceRef.value?.captureQueryEditorExecutionSnapshot(),
   requestQueryEditorExecuteInNewResultTab: () => activeSurfaceRef.value?.requestQueryEditorExecuteInNewResultTab() ?? false,
   requestQueryEditorPreviewChanges: async (stackSql?: string) => (await activeSurfaceRef.value?.requestQueryEditorPreviewChanges(stackSql)) ?? false,
@@ -242,6 +243,7 @@ const groupExecutableSql = computed(() => {
         @dismiss-auto-commit-session-txn-rolled-back="activeTab && (activeTab.autoCommitSessionTxnRolledBack = false)"
         @execute-pointer-down="toolbar.captureExecutionSnapshot(activeTab.id)"
         @toolbar-execute="toolbar.toolbarExecute($event, activeTab.id)"
+        @toolbar-execute-all="toolbar.toolbarExecuteAll($event, activeTab.id)"
         @toolbar-execute-in-new-result-tab="toolbar.toolbarExecuteInNewResultTab($event, activeTab.id)"
         @multi-execute="toolbar.multiExecute()"
         @preview-changes="activeTab && toolbar.previewChanges(activeTab.id)"

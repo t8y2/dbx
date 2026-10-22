@@ -41,6 +41,19 @@ function Move-Atomic([string]$Source, [string]$Destination) {
     if ([IO.File]::Exists($Destination)) { [IO.File]::Replace($Source, $Destination, [NullString]::Value) }
     else { [IO.File]::Move($Source, $Destination) }
 }
+function Remove-McpReplacementTempFiles([string]$Directory) {
+    try {
+        $item = Get-Item -LiteralPath $Directory -Force -ErrorAction Stop
+        if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return }
+        Get-ChildItem -LiteralPath $Directory -Force -ErrorAction Stop | Where-Object {
+            !$_.PSIsContainer -and !($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+            $_.Name -imatch '\Adbx-mcp\.exe~RF[0-9a-f]+\.TMP\z'
+        } | ForEach-Object {
+            # A running MCP process may still hold the old executable; retry on the next run.
+            try { [IO.File]::Delete($_.FullName) } catch {}
+        }
+    } catch {}
+}
 function Set-InstallPath([string]$Directory) {
     try {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -162,7 +175,10 @@ function Install-DbxMcp {
         Set-InstallPath $installDir
         Write-Output "Installed dbx-mcp $version at $binary"
         Show-Configs $binary
-    } finally { Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue }
+    } finally {
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-McpReplacementTempFiles $installDir
+    }
 }
 
 Install-DbxMcp

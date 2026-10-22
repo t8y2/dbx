@@ -4769,9 +4769,11 @@ fn sqlserver_rejects_identity_on_incompatible_type() {
 }
 
 #[test]
-fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
+fn sqlserver_foreign_key_edits_generate_alter_statements() {
     let mut user_fk = foreign_key("fk_orders_user_id", "user_id", "accounts", "id");
     user_fk.ref_schema = "dbo".to_string();
+    user_fk.on_delete = "CASCADE".to_string();
+    user_fk.on_update = "RESTRICT".to_string();
     user_fk.original = Some(ForeignKeyInfo {
         name: "fk_orders_user_id".to_string(),
         column: "user_id".to_string(),
@@ -4806,8 +4808,14 @@ fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
         oracle_foreign_key_changes: None,
     });
 
-    assert_eq!(result.statements, Vec::<String>::new());
-    assert_eq!(result.warnings, vec!["Editing foreign keys is not supported for sqlserver from this editor."]);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE [dbo].[orders] DROP CONSTRAINT [fk_orders_user_id];",
+            "ALTER TABLE [dbo].[orders] ADD CONSTRAINT [fk_orders_user_id] FOREIGN KEY ([user_id]) REFERENCES [dbo].[accounts] ([id]) ON DELETE CASCADE ON UPDATE NO ACTION;"
+        ]
+    );
 }
 
 #[test]

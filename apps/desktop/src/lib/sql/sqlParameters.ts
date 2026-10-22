@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import { collectSqlDatabaseLinkStarts } from "@/lib/sql/sqlDatabaseLinks";
+import { isOracleSubstitutionDatabase } from "@/lib/sql/sqlVariableSyntax";
 
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
@@ -8,7 +9,7 @@ export interface SqlParameterInput {
   value: string;
 }
 
-export type SqlParameterSyntax = "positional" | "named" | "shell" | "mybatis" | "sqlserver";
+export type SqlParameterSyntax = "positional" | "named" | "shell" | "mybatis" | "sqlserver" | "substitution";
 
 export interface SqlParameterDescriptor {
   key: string;
@@ -381,7 +382,13 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const nativeSqlServerParameters = collectNativeSqlServerParameters(sql, databaseType);
   const supportsNamedParameters = databaseType !== "saphana" && databaseType !== "neo4j" && databaseType !== "nebula";
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
-  const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
+  const isSyntaxEnabled = (syntax: SqlParameterSyntax) => {
+    if (enabledSyntaxes) return enabledSyntaxes.has(syntax);
+    if (syntax === "substitution") {
+      return isOracleSubstitutionDatabase(databaseType, options?.compatibilityMode);
+    }
+    return true;
+  };
   const databaseLinkStarts = isSyntaxEnabled("sqlserver") ? collectSqlDatabaseLinkStarts(sql, databaseType) : new Set<number>();
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql, databaseType) : new Set<number>();
   const duckDbStructFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") && databaseType === "duckdb" ? collectDuckDbStructFieldSeparators(sql) : new Set<number>();
@@ -444,6 +451,14 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         occurrences.push(quoted);
         i = quoted.end;
         continue;
+      }
+      if (ch === "'" && isSyntaxEnabled("substitution")) {
+        const quotedSubstitution = tryReadQuotedSubstitutionPlaceholder(sql, i, databaseType);
+        if (quotedSubstitution) {
+          occurrences.push(quotedSubstitution);
+          i = quotedSubstitution.end;
+          continue;
+        }
       }
       const quotedEnd = skipQuoted(sql, i, ch, databaseType);
       // Double quotes can delimit identifiers, so only ordinary single-quoted
@@ -553,6 +568,14 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
           end: i + 1 + name.length,
         });
         i += 1 + name.length;
+        continue;
+      }
+    }
+    if (ch === "&" && isSyntaxEnabled("substitution")) {
+      const occurrence = readSubstitutionParameterOccurrence(sql, i);
+      if (occurrence) {
+        occurrences.push(occurrence);
+        i = occurrence.end;
         continue;
       }
     }
@@ -1636,7 +1659,82 @@ function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" |
     name,
     syntax,
     token: sql.slice(start, end),
-    ...(quote === "\'" ? { replacement: "quoted-string" as const } : {}),
+    ...(quote === "'" ? { replacement: "quoted-string" as const } : {}),
+    start,
+    end,
+  };
+}
+
+function tryReadQuotedSubstitutionPlaceholder(sql: string, start: number, databaseType?: DatabaseType): ParameterOccurrence | null {
+  if (sql[start] !== "'") return null;
+  if (hasSqlStringLiteralPrefix(sql, start)) return null;
+
+  const contentStart = start + 1;
+  if (sql[contentStart] !== "&") return null;
+
+  const isDouble = sql[contentStart + 1] === "&";
+  const prefixLength = isDouble ? 2 : 1;
+  const nameStart = contentStart + prefixLength;
+  if (sql[nameStart] === "&") return null;
+  if (/^&(?:lt|gt|amp|quot|apos);/i.test(sql.slice(contentStart))) return null;
+
+  let nameEnd = nameStart;
+  if (/[0-9]/.test(sql[nameStart] ?? "")) {
+    while (nameEnd < sql.length && /[0-9]/.test(sql[nameEnd] ?? "")) nameEnd += 1;
+  } else if (PARAMETER_NAME_START_RE.test(sql[nameStart] ?? "")) {
+    while (nameEnd < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[nameEnd] ?? "")) nameEnd += 1;
+  } else {
+    return null;
+  }
+  if (nameEnd === nameStart) return null;
+
+  const name = sql.slice(nameStart, nameEnd);
+  let contentEnd = nameEnd;
+  if (sql[contentEnd] === ".") contentEnd += 1;
+
+  if (sql[contentEnd] !== "'") return null;
+  const quoteEnd = contentEnd + 1;
+  if (skipQuoted(sql, start, "'", databaseType) !== quoteEnd) return null;
+
+  return {
+    key: name,
+    name,
+    syntax: "substitution",
+    token: sql.slice(start, quoteEnd),
+    replacement: "quoted-string",
+    start,
+    end: quoteEnd,
+  };
+}
+
+function readSubstitutionParameterOccurrence(sql: string, start: number): ParameterOccurrence | null {
+  if (start > 0 && (PARAMETER_NAME_CHAR_RE.test(sql[start - 1] ?? "") || sql[start - 1] === "?" || sql[start - 1] === "&")) return null;
+
+  const isDouble = sql[start + 1] === "&";
+  const prefixLength = isDouble ? 2 : 1;
+  const nameStart = start + prefixLength;
+  if (sql[nameStart] === "&") return null;
+  if (/^&(?:lt|gt|amp|quot|apos);/i.test(sql.slice(start))) return null;
+
+  let nameEnd = nameStart;
+  if (/[0-9]/.test(sql[nameStart] ?? "")) {
+    while (nameEnd < sql.length && /[0-9]/.test(sql[nameEnd] ?? "")) nameEnd += 1;
+  } else if (PARAMETER_NAME_START_RE.test(sql[nameStart] ?? "")) {
+    while (nameEnd < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[nameEnd] ?? "")) nameEnd += 1;
+  } else {
+    return null;
+  }
+  if (nameEnd === nameStart) return null;
+
+  const name = sql.slice(nameStart, nameEnd);
+  let end = nameEnd;
+  if (sql[end] === ".") end += 1;
+
+  return {
+    key: name,
+    name,
+    syntax: "substitution",
+    token: sql.slice(start, end),
     start,
     end,
   };

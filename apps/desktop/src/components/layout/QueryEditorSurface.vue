@@ -34,6 +34,7 @@ defineExpose<QueryEditorSurfaceHandle>({
   refreshQueryEditorCompletionCache: () => contentAreaRef.value?.refreshQueryEditorCompletionCache() ?? false,
   handleModRTarget: (target: Element) => contentAreaRef.value?.handleModRTarget(target) ?? false,
   requestQueryEditorExecute: () => contentAreaRef.value?.requestQueryEditorExecute() ?? false,
+  requestQueryEditorExecuteAll: () => contentAreaRef.value?.requestQueryEditorExecuteAll() ?? false,
   captureQueryEditorExecutionSnapshot: () => contentAreaRef.value?.captureQueryEditorExecutionSnapshot(),
   requestQueryEditorExecuteInNewResultTab: () => contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab() ?? false,
   requestQueryEditorPreviewChanges: (stackSql?: string) => Promise.resolve(contentAreaRef.value?.requestQueryEditorPreviewChanges(stackSql) ?? false),

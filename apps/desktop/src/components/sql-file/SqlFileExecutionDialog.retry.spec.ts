@@ -1217,3 +1217,58 @@ describe("SqlFileExecutionDialog completion prompt and close (#12608)", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });
+
+describe("SqlFileExecutionDialog closeOnSuccess option (#12891)", () => {
+  it("toggles closeOnSuccess option and updates localStorage", async () => {
+    await mountReadyDialog();
+    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBeNull();
+
+    const toggleButton = findButton("sqlFile.closeOnSuccess");
+    toggleButton.click();
+    await nextTick();
+
+    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("false");
+
+    toggleButton.click();
+    await nextTick();
+
+    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("true");
+  });
+
+  it("keeps dialog open after successful execution when closeOnSuccess is false", async () => {
+    localStorage.setItem("dbx-sql-file-close-on-success", "false");
+    const onOpenChange = vi.fn();
+    await mountReadyDialog(onOpenChange);
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request) => {
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 1, successCount: 1, failureCount: 0 }));
+    });
+
+    findButton("sqlFile.execute").click();
+
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("sqlFile.executeSuccess", 3000));
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(findButton("sqlFile.execute").disabled).toBe(false);
+  });
+
+  it("keeps dialog open after manual transaction commit when closeOnSuccess is false", async () => {
+    localStorage.setItem("dbx-sql-file-close-on-success", "false");
+    const onOpenChange = vi.fn();
+    await mountReadyDialog(onOpenChange);
+    const label = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("toolbar.manualTransaction"));
+    label!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    await nextTick();
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 1, successCount: 1, failureCount: 0 }));
+    });
+    findButton("sqlFile.execute").click();
+
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    findButton("toolbar.commit").click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("sqlFile.executeSuccess", 3000));
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+});

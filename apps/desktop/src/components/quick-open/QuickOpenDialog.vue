@@ -4,9 +4,11 @@ import { useI18n } from "vue-i18n";
 import { Command, FileCode, FileText, Search, FolderPlus, SlidersHorizontal, X } from "@lucide/vue";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import { useQuickOpen, type QuickOpenItem } from "@/composables/useQuickOpen";
 import { usePluginCommandPalette } from "@/lib/plugins/pluginCommandPalette";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
@@ -45,6 +47,9 @@ const {
   contentSelectedItem,
   contentSearching,
   setContentMode: setSearchContentMode,
+  scopeConnectionIds,
+  scopeActive,
+  setScopeConnectionIds,
 } = useQuickOpen({ extraItems: pluginPalette.items });
 const previewEditing = ref(false);
 const pinnedPreviewItem = ref<QuickOpenItem | null>(null);
@@ -74,6 +79,19 @@ const globalSearchShortcut = computed(() => formatShortcutDisplay(settingsStore.
 const searchSettingsOpen = ref(false);
 const searchRoots = ref<string[]>([]);
 const extensionsInput = ref("");
+
+// Connection scope: empty selection = all connections.
+const connectionStore = useConnectionStore();
+const scopeConnections = computed(() => connectionStore.connections);
+/** Select value for "all connections"; a real connection id never uses this sentinel. */
+const SCOPE_ALL_VALUE = "__all_connections__";
+
+const scopeSelection = computed<string>({
+  get: () => (scopeActive.value && scopeConnectionIds.value.length === 1 ? scopeConnectionIds.value[0] : SCOPE_ALL_VALUE),
+  set: (value) => {
+    setScopeConnectionIds(value === SCOPE_ALL_VALUE ? [] : [value]);
+  },
+});
 
 function refreshSearchSettings(): void {
   searchRoots.value = getGlobalSearchRoots();
@@ -348,6 +366,16 @@ watch(selectedIndex, async () => {
                 <Search class="h-4 w-4" />
               </button>
             </div>
+            <!-- Connection scope: file-content search ignores connections, so the picker only shows in object mode. -->
+            <Select v-if="!contentMode" v-model="scopeSelection" :disabled="previewEditing">
+              <SelectTrigger class="h-7 w-[132px] gap-1 px-2 text-xs" :title="t('quickOpen.scope')">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="SCOPE_ALL_VALUE">{{ t("quickOpen.scopeAll") }}</SelectItem>
+                <SelectItem v-for="conn in scopeConnections" :key="conn.id" :value="conn.id">{{ conn.name }}</SelectItem>
+              </SelectContent>
+            </Select>
             <!-- Search settings (roots & extensions) -->
             <button
               :disabled="previewEditing"

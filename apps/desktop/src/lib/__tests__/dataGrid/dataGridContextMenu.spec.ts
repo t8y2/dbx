@@ -444,4 +444,76 @@ describe("dataGridContextMenu", () => {
 
     expect(cellItems.map((item) => item.label)).toContain("highlight");
   });
+
+  it("includes clear remembered column widths action when hasUserSizedColumns is true and omits it otherwise", () => {
+    const action = vi.fn();
+    const clearAction = vi.fn();
+    const filter = createDataGridFilterSubmenu({
+      label: "filter",
+      icon,
+      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", custom: "custom", isNull: "null", isNotNull: "not null", clear: "clear" },
+      apply: action,
+      applyCustom: action,
+      clear: action,
+    });
+    const baseOptions = {
+      headerColumn: true,
+      contextColumn: true,
+      contextVisibleColIdx: 0,
+      canCopyAlterSql: false,
+      canFilter: true,
+      hasSort: false,
+      sortMode: "database" as const,
+      labels: {
+        copyName: "copy name",
+        copyComment: "copy comment",
+        copyNames: "copy names",
+        details: "details",
+        copyAlterSql: "alter",
+        databaseAscending: "db asc",
+        databaseDescending: "db desc",
+        localAscending: "local asc",
+        localDescending: "local desc",
+        clearSort: "clear sort",
+        freezeToColumn: "freeze",
+        freezeSelectedColumns: "freeze selected",
+        unfreezeColumns: "unfreeze",
+        hideColumn: "hide",
+        hideSelectedColumns: "hide selected",
+        showAllColumnsMenu: "show all",
+        clearRememberedColumnWidths: "Clear remembered column widths",
+      },
+      icons: { copy: icon, columnDetails: icon, database: icon, ascending: icon, descending: icon, clearSort: icon, clearRememberedColumnWidths: icon },
+      actions: {
+        copyName: action,
+        copyNames: action,
+        details: action,
+        copyAlterSql: action,
+        sort: action,
+        freezeToColumn: action,
+        freezeSelectedColumns: action,
+        unfreezeColumns: action,
+        hideColumn: action,
+        hideSelectedColumns: action,
+        showAllColumnsMenu: action,
+        clearRememberedColumnWidths: clearAction,
+      },
+      filterSubmenu: filter,
+    };
+
+    const withoutUserSized = createDataGridColumnContextMenuItems({
+      ...baseOptions,
+      hasUserSizedColumns: false,
+    });
+    expect(withoutUserSized.map((item) => item.label)).not.toContain("Clear remembered column widths");
+
+    const withUserSized = createDataGridColumnContextMenuItems({
+      ...baseOptions,
+      hasUserSizedColumns: true,
+    });
+    expect(withUserSized.map((item) => item.label)).toContain("Clear remembered column widths");
+    const clearItem = withUserSized.find((item) => item.label === "Clear remembered column widths");
+    clearItem?.action?.();
+    expect(clearAction).toHaveBeenCalledTimes(1);
+  });
 });

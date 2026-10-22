@@ -30,6 +30,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 webpki-roots = "0.26"
 
 [dev-dependencies]
-portpicker = "0.1.1"
 tempfile = "3"
 tokio-openssl = "0.6"

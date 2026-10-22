@@ -4986,6 +4986,18 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.host = serialized.host;
     config.port = serialized.port;
   }
+  // Hostnames and usernames cannot contain leading/trailing whitespace, so a
+  // stray space (typically from copy-pasting) can only be a mistake — but it
+  // still reaches the driver and fails in a way the error message does not
+  // make visible. Passwords are left untouched because surrounding spaces can
+  // be significant, and file-path hosts (SQLite/DuckDB/H2 file mode) keep
+  // their exact value for the same reason.
+  const usesLocalFilePathHost = isLocalFileTypeDb(config.db_type) && (config.db_type !== "h2" || h2ConnectionModeForConfig(config) === "file");
+  if (!usesLocalFilePathHost) {
+    config.host = config.host.trim();
+  }
+  config.username = config.username.trim();
+  config.database = config.database?.trim() || undefined;
   if (isCloudflareD1Connection(config)) {
     normalizeCloudflareD1Connection(config);
     if (!hasCloudflareD1Credentials(config)) {

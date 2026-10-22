@@ -32,6 +32,7 @@ export interface EditorToolbarActions {
   /** Captures the acting editor's execution snapshot before a toolbar click. */
   captureExecutionSnapshot(tabId: string): void;
   toolbarExecute(source: "pointer" | "keyboard", tabId: string): void;
+  toolbarExecuteAll(source: "pointer" | "keyboard", tabId: string): void;
   toolbarExecuteInNewResultTab(source: "pointer" | "keyboard", tabId: string): void;
   cancelExecution(tabId: string): void;
   explain(tabId: string): void;
@@ -85,6 +86,7 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
     connectionRequiredSignalFor: () => 0,
     captureExecutionSnapshot: noop,
     toolbarExecute: noop,
+    toolbarExecuteAll: noop,
     toolbarExecuteInNewResultTab: noop,
     cancelExecution: noop,
     explain: noop,

@@ -146,13 +146,12 @@ pub(super) async fn prepare_table_ddl(
                 }
             }
         } else {
-            match crate::schema::get_table_ddl_core(
+            match crate::schema::get_table_transfer_ddl_core(
                 state,
                 &request.source_connection_id,
                 &request.source_database,
                 &request.source_schema,
                 table,
-                None,
             )
             .await
             {

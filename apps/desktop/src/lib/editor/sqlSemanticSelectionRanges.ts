@@ -384,8 +384,42 @@ function collectSqlRanges(input: string, statement: StatementWindow, maps: { ope
   return ranges;
 }
 
-function stringContentRange(token: SqlSelectionToken): SemanticSelectionRange | null {
+function isRoutineStatement(statement: StatementWindow): boolean {
+  const words = statement.tokens.filter((t) => t.kind === "word").map((t) => t.normalized);
+  if (words.length === 0) return false;
+  if (words[0] === "do") return true;
+  if (words[0] === "create" || words[0] === "alter") {
+    const prefix = words.slice(1, 6);
+    return prefix.some((word) => word === "procedure" || word === "proc" || word === "function" || word === "trigger" || word === "package");
+  }
+  return false;
+}
+
+function isRoutineBodyToken(token: SqlSelectionToken, statement: StatementWindow): boolean {
+  const index = statement.tokens.indexOf(token);
+  if (index > 0 && statement.tokens[index - 1]?.normalized === "as") {
+    return true;
+  }
+  return false;
+}
+
+function stringContentRange(token: SqlSelectionToken, statement?: PreparedStatementWindow): SemanticSelectionRange | null {
   if (token.kind !== "string") return null;
+
+  // Multi-line strings (such as procedure/function bodies, long text blocks, or template strings)
+  // should never select the entire multi-line block on double-click; fall back to word selection (#12966).
+  if (token.text.includes("\n") || token.text.includes("\r")) return null;
+
+  // Dollar-quoted strings containing statement terminators (;) are procedural/SQL bodies rather than
+  // scalar string literals; allow normal word selection inside them (#12966).
+  if (token.quote?.startsWith("$") && token.text.includes(";")) return null;
+
+  // Inside routine definitions (CREATE/ALTER PROCEDURE, FUNCTION, TRIGGER, PACKAGE, or DO blocks),
+  // dollar-quoted or body string tokens represent code rather than scalar string values (#12966).
+  if (statement && isRoutineStatement(statement) && (token.quote?.startsWith("$") || isRoutineBodyToken(token, statement))) {
+    return null;
+  }
+
   const quote = token.quote ?? token.text[0] ?? "";
   const quoteLength = quote.startsWith("$") ? quote.length : 1;
   const from = token.from + quoteLength;
@@ -402,7 +436,7 @@ export function analyzeSqlSemanticSelectionRanges(doc: string, options: SqlSeman
     const statementValidationTokens = validationTokens.filter((token) => token.from >= statement.start && token.to <= statement.end);
     return validateTokens(doc.slice(statement.start, statement.end), statementValidationTokens);
   });
-  const stringContents = statements.flatMap((statement) => statement.tokens.map(stringContentRange).filter((range): range is SemanticSelectionRange => range != null));
+  const stringContents = statements.flatMap((statement) => statement.tokens.map((token) => stringContentRange(token, statement)).filter((range): range is SemanticSelectionRange => range != null));
   return { doc, statements, stringContents };
 }
 

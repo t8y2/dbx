@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, watch } from "vue";
+import { ref, computed, nextTick, onMounted, watch, useId } from "vue";
 import { useI18n } from "vue-i18n";
 import { FolderOpen, FolderClosed, FileCode, FolderPlus, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil, Search, ArrowDownAZ, ArrowUpAZ } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,8 @@ import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
 import { filterAndSortSqlFileEntries, getSqlFileSortOrder, saveSqlFileSortOrder, type SqlFileSortOrder } from "@/lib/sql/sqlFileTreeFilter";
-import { orderedListRangeAnchorIndex, orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
+import { orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
+import { getSqlFileOpenMode, saveSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 
 const emit = defineEmits<{
   close: [];
@@ -52,6 +53,10 @@ const currentFilePath = computed(() => {
 });
 const filterSettingsOpen = ref(false);
 const fileFilterDraft = ref(getSqlFileFilter());
+const openMode = ref<SqlFileOpenMode>(getSqlFileOpenMode());
+const openModeDraft = ref<SqlFileOpenMode>(openMode.value);
+const treeId = useId();
+let lastClickedKey: string | null = null;
 const fileFilterRegexExample = "(?i)[.](sql|ddl|sh|py)$";
 
 const searchText = ref("");
@@ -94,9 +99,9 @@ const showRenameFolderDialog = ref(false);
 const showDeleteDialog = ref(false);
 const showDeleteFolderDialog = ref(false);
 
-const selectedPaths = ref<Set<string>>(new Set());
-const activePath = ref<string | null>(null);
-const selectionAnchorIndex = ref<number | null>(null);
+const selectedKeys = ref<Set<string>>(new Set());
+const activeKey = ref<string | null>(null);
+const selectionAnchorKey = ref<string | null>(null);
 
 function findFileAncestors(entries: SqlFileEntry[], path: string): string[] | null {
   for (const entry of entries) {
@@ -125,7 +130,7 @@ async function locateActiveFile() {
   const target = activeFileTarget.value;
   if (!target) return;
   if (searchText.value) {
-    const isVisibleNow = visibleItems.value.some((item) => item.type === "file" && normalizeExternalSqlPath(item.id) === target.path);
+    const isVisibleNow = visibleItems.value.some((item) => item.folder === target.folder && item.type === "file" && normalizeExternalSqlPath(item.path) === target.path);
     if (!isVisibleNow) {
       searchText.value = "";
       await nextTick();
@@ -133,25 +138,45 @@ async function locateActiveFile() {
   }
   target.folder.collapsed = false;
   target.folder.expanded = new Set([...target.folder.expanded, ...target.ancestors]);
-  const itemIndex = visibleItems.value.findIndex((item) => item.type === "file" && normalizeExternalSqlPath(item.id) === target.path);
+  const itemIndex = visibleItems.value.findIndex((item) => item.folder === target.folder && item.type === "file" && normalizeExternalSqlPath(item.path) === target.path);
   const item = visibleItems.value[itemIndex];
   if (!item) return;
-  selectedPaths.value = new Set();
-  activePath.value = item.id;
-  selectionAnchorIndex.value = itemIndex;
+  selectedKeys.value = new Set();
+  activeKey.value = item.id;
+  selectionAnchorKey.value = item.id;
   await nextTick();
-  const row = Array.from(fileTree.value?.querySelectorAll<HTMLElement>("[data-sql-file-path]") ?? []).find((row) => normalizeExternalSqlPath(row.dataset.sqlFilePath!) === target.path);
+  const row = document.getElementById(`${treeId}-row-${activeItemIndex.value}`);
   row?.scrollIntoView({ block: "center", inline: "nearest" });
 }
 
 function clearSelection() {
-  selectedPaths.value = new Set();
-  activePath.value = null;
-  selectionAnchorIndex.value = null;
+  selectedKeys.value = new Set();
+  activeKey.value = null;
+  selectionAnchorKey.value = null;
 }
 
-function isPathHighlighted(path: string) {
-  return activePath.value === path || selectedPaths.value.has(path);
+type NodeKind = "folderHeader" | "dir" | "file";
+
+function nodeKey(rootPath: string, kind: NodeKind, path: string): string {
+  // A path may appear under multiple opened roots, or as both a root and a child.
+  return JSON.stringify([normalizeExternalSqlPath(rootPath), kind, normalizeExternalSqlPath(path)]);
+}
+
+function isPathHighlighted(rootPath: string, kind: NodeKind, path: string) {
+  const key = nodeKey(rootPath, kind, path);
+  return activeKey.value === key || selectedKeys.value.has(key);
+}
+
+function remapSelectionPaths(mapPath: (path: string) => string | null) {
+  const remapKey = (key: string): string | null => {
+    const [rootPath, kind, path] = JSON.parse(key) as [string, NodeKind, string];
+    const root = mapPath(rootPath);
+    const mapped = mapPath(path);
+    return root !== null && mapped !== null ? nodeKey(root, kind, mapped) : null;
+  };
+  selectedKeys.value = new Set([...selectedKeys.value].map(remapKey).filter((key): key is string => key !== null));
+  activeKey.value = activeKey.value ? remapKey(activeKey.value) : null;
+  selectionAnchorKey.value = selectionAnchorKey.value ? remapKey(selectionAnchorKey.value) : null;
 }
 
 function loadSavedFolders(): string[] {
@@ -254,8 +279,7 @@ async function loadFolderEntries(folderPath: string): Promise<string | null> {
         if (displayPath && stillPresent.has(displayPath)) nextExpanded.add(displayPath);
       }
       folders.value[target].expanded = nextExpanded;
-      selectedPaths.value = new Set([...selectedPaths.value].map((path) => displayPaths.get(normalizeExternalSqlPath(path)) ?? path));
-      if (activePath.value) activePath.value = displayPaths.get(normalizeExternalSqlPath(activePath.value)) ?? activePath.value;
+      // Selection keys already normalize both root and entry paths.
     }
   } catch (e: any) {
     const message = e?.message || String(e);
@@ -291,6 +315,10 @@ async function refreshAll() {
 
 async function saveFileFilter() {
   const previousFilter = getSqlFileFilter();
+  if (fileFilterDraft.value.trim() === previousFilter) {
+    commitInteractionSettings();
+    return;
+  }
   saveSqlFileFilter(fileFilterDraft.value);
   const errors = await Promise.all(folders.value.map((f) => loadFolderEntries(f.path)));
   // An unparsable pattern must not survive in localStorage: it would fail
@@ -302,9 +330,15 @@ async function saveFileFilter() {
     toast(t("sqlFileTree.filterInvalid", { message: invalidFilter }), 5000);
     return;
   }
-  filterSettingsOpen.value = false;
+  commitInteractionSettings();
   notifySqlFileFoldersChanged();
   toast(t("sqlFileTree.refreshed"), 1500);
+}
+
+function commitInteractionSettings() {
+  openMode.value = openModeDraft.value;
+  saveSqlFileOpenMode(openMode.value);
+  filterSettingsOpen.value = false;
 }
 
 async function reloadFolderAfterMutation(folderPath: string) {
@@ -500,46 +534,143 @@ function flatTree(entries: SqlFileEntry[], expanded: Set<string>): TreeEntry[] {
   return result;
 }
 
-const visibleItems = computed<OrderedListSelectionItem[]>(() => {
-  const items: OrderedListSelectionItem[] = [];
+type VisibleItem = OrderedListSelectionItem & { type: NodeKind; path: string; folder: FolderState; entry?: SqlFileEntry };
+const visibleItems = computed<VisibleItem[]>(() => {
+  const items: VisibleItem[] = [];
   for (const folder of folders.value) {
-    items.push({ type: "folderHeader", id: folder.path });
-    if (!isFolderContentVisible(folder)) continue;
+    items.push({ type: "folderHeader", id: nodeKey(folder.path, "folderHeader", folder.path), path: folder.path, folder });
+    if (folder.loading || !isFolderContentVisible(folder)) continue;
     for (const { entry } of flatTree(getProcessedEntries(folder.path), getEffectiveExpanded(folder))) {
-      items.push({ type: entry.is_dir ? "dir" : "file", id: entry.path });
+      const type = entry.is_dir ? "dir" : "file";
+      items.push({ type, id: nodeKey(folder.path, type, entry.path), path: entry.path, folder, entry });
     }
   }
   return items;
 });
 
+const visibleRowIds = computed(() => {
+  const ids = new Map<FolderState, Map<string, string>>();
+  visibleItems.value.forEach((item, index) => {
+    let folderIds = ids.get(item.folder);
+    if (!folderIds) {
+      folderIds = new Map();
+      ids.set(item.folder, folderIds);
+    }
+    folderIds.set(item.path, `${treeId}-row-${index}`);
+  });
+  return ids;
+});
+
+const activeItemIndex = computed(() => visibleItems.value.findIndex((item) => item.id === activeKey.value));
+
+function focusTree() {
+  fileTree.value?.focus({ preventScroll: true });
+}
+
+function restoreTreeFocus(event: Event) {
+  event.preventDefault();
+  focusTree();
+}
+
+async function scrollActiveRow() {
+  await nextTick();
+  document.getElementById(`${treeId}-row-${activeItemIndex.value}`)?.scrollIntoView({ block: "nearest" });
+}
+
+// Preserve identity across sorting; replace hidden or removed selection only once
+// all roots have finished loading, so refresh does not discard the active file.
+watch(visibleItems, (items, previous) => {
+  if (folders.value.some((folder) => folder.loading)) return;
+  const ids = new Set(items.map((item) => item.id));
+  selectedKeys.value = new Set([...selectedKeys.value].filter((key) => ids.has(key)));
+  if (activeKey.value && !ids.has(activeKey.value)) {
+    const oldIndex = previous.findIndex((item) => item.id === activeKey.value);
+    activeKey.value = items[Math.min(Math.max(oldIndex, 0), items.length - 1)]?.id ?? null;
+  }
+  // Resolve the anchor by identity: callers may have already selected a node
+  // in the new list before this watcher runs (for example, Locate Current File).
+  if (selectionAnchorKey.value && !ids.has(selectionAnchorKey.value)) {
+    selectionAnchorKey.value = activeKey.value;
+  }
+  if (document.activeElement === fileTree.value) void scrollActiveRow();
+});
+
+function activateItem(item: VisibleItem) {
+  if (item.folder.loading) return;
+  if (item.type === "folderHeader") toggleFolderCollapse(item.folder);
+  else if (item.type === "dir") toggleExpand(item.folder, item.path);
+  else void openFile(item.path);
+}
+
+function handleTreeKeydown(event: KeyboardEvent) {
+  if (event.target !== fileTree.value || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (contextTarget.value || filterSettingsOpen.value || showCreateDialog.value || showCreateFolderDialog.value || showRenameDialog.value || showRenameFolderDialog.value || showDeleteDialog.value || showDeleteFolderDialog.value) return;
+  const items = visibleItems.value;
+  if (!items.length) return;
+  const index = activeItemIndex.value;
+  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+    const nextIndex = index < 0 ? (event.key === "ArrowDown" ? 0 : items.length - 1) : Math.max(0, Math.min(items.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+    activeKey.value = items[nextIndex].id;
+    selectedKeys.value = new Set();
+    selectionAnchorKey.value = items[nextIndex].id;
+    void scrollActiveRow();
+  } else if (event.key === "Enter" || event.key === " " || event.key === "F2") {
+    const item = items[index];
+    if (!item || [...selectedKeys.value].some((key) => key !== item.id)) return;
+    if (event.key === "F2") {
+      if (!item.entry || item.folder.loading) return;
+      if (!event.repeat) {
+        if (item.type === "dir") openRenameFolderDialog({ kind: "dir", folderPath: item.folder.path, entry: item.entry });
+        else openRenameDialog({ kind: "file", folderPath: item.folder.path, entry: item.entry });
+      }
+    } else if (!event.repeat) activateItem(item);
+  } else return;
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handlePathDoubleClick(rootPath: string, path: string, type: NodeKind, event: MouseEvent) {
+  event.stopPropagation();
+  if ((event.target as HTMLElement | null)?.closest("button, input, select, textarea, [contenteditable='true']")) return;
+  if (openMode.value !== "double" || orderedListSelectionIntent(event) !== "single" || event.altKey) return;
+  const key = nodeKey(rootPath, type, path);
+  const item = visibleItems.value.find((item) => item.id === key);
+  if (item) activateItem(item);
+}
+
 function selectedRangeAnchorIndex() {
-  const activeItem = activePath.value ? (visibleItems.value.find((item) => item.id === activePath.value) ?? null) : null;
-  return orderedListRangeAnchorIndex(visibleItems.value, selectionAnchorIndex.value, activeItem);
+  const anchorIndex = visibleItems.value.findIndex((item) => item.id === selectionAnchorKey.value);
+  if (anchorIndex >= 0) return anchorIndex;
+  return activeItemIndex.value >= 0 ? activeItemIndex.value : null;
 }
 
 function selectRangeTo(currentIndex: number) {
   const anchorIndex = selectedRangeAnchorIndex();
   if (anchorIndex === null) {
     const current = visibleItems.value[currentIndex];
-    selectedPaths.value = new Set(current ? [current.id] : []);
-    selectionAnchorIndex.value = currentIndex;
+    selectedKeys.value = new Set(current ? [current.id] : []);
+    selectionAnchorKey.value = current?.id ?? null;
     return;
   }
 
   const start = Math.min(anchorIndex, currentIndex);
   const end = Math.max(anchorIndex, currentIndex);
-  const next = new Set(selectedPaths.value);
+  const next = new Set(selectedKeys.value);
   for (let i = start; i <= end; i++) {
     const item = visibleItems.value[i];
     if (item) next.add(item.id);
   }
-  selectedPaths.value = next;
+  selectedKeys.value = next;
 }
 
-function handlePathClick(path: string, type: OrderedListSelectionItem["type"], event: MouseEvent, activate: () => void) {
-  const currentIndex = visibleItems.value.findIndex((item) => item.id === path && item.type === type);
+function handlePathClick(rootPath: string, path: string, type: NodeKind, event: MouseEvent) {
+  const key = nodeKey(rootPath, type, path);
+  const currentIndex = visibleItems.value.findIndex((item) => item.id === key);
   if (currentIndex < 0) return;
 
+  focusTree();
+  const repeatedClick = event.detail > 1 && lastClickedKey === key;
+  lastClickedKey = key;
   const selectionIntent = orderedListSelectionIntent(event);
   if (selectionIntent === "range") {
     event.preventDefault();
@@ -550,18 +681,18 @@ function handlePathClick(path: string, type: OrderedListSelectionItem["type"], e
   if (selectionIntent === "toggle") {
     event.preventDefault();
     event.stopPropagation();
-    const next = new Set(selectedPaths.value);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
-    selectedPaths.value = next;
-    selectionAnchorIndex.value = currentIndex;
+    const next = new Set(selectedKeys.value);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    selectedKeys.value = next;
+    selectionAnchorKey.value = key;
     return;
   }
 
-  selectedPaths.value = new Set();
-  activePath.value = path;
-  selectionAnchorIndex.value = currentIndex;
-  activate();
+  selectedKeys.value = new Set();
+  activeKey.value = key;
+  selectionAnchorKey.value = key;
+  if (openMode.value === "single" && !repeatedClick) activateItem(visibleItems.value[currentIndex]);
 }
 
 function handlePanelClick(event: MouseEvent) {
@@ -605,9 +736,7 @@ function updateFolderPaths(previousPath: string, nextPath?: string) {
     folder.expanded = mapSet(folder.expanded);
     return true;
   });
-  selectedPaths.value = mapSet(selectedPaths.value);
-  activePath.value = activePath.value ? mapPath(activePath.value) : null;
-  selectionAnchorIndex.value = null;
+  remapSelectionPaths(mapPath);
   saveFolders();
 }
 
@@ -636,13 +765,10 @@ async function createSqlFolder() {
       folder.collapsed = false;
       folder.expanded = new Set([...folder.expanded, target.directoryPath, path]);
     }
-    activePath.value = path;
-    selectedPaths.value = new Set();
-    selectionAnchorIndex.value = null;
-    await nextTick();
-    Array.from(fileTree.value?.querySelectorAll<HTMLElement>("[data-sql-file-path]") ?? [])
-      .find((row) => row.dataset.sqlFilePath === path)
-      ?.scrollIntoView({ block: "nearest" });
+    activeKey.value = nodeKey(target.rootPath, "dir", path);
+    selectedKeys.value = new Set();
+    selectionAnchorKey.value = activeKey.value;
+    await scrollActiveRow();
     toast(t("sqlFileTree.folderCreated"), 1500);
   } catch (e: any) {
     toast(t("sqlFileTree.createFolderFailed", { message: translateBackendError(t, e) }), 5000);
@@ -706,6 +832,7 @@ async function renameSqlFile() {
     // successful rename appear to fail for files too large for the editor.
     queryStore.relocateExternalSqlFilePath(target.entry.path, nextPath);
     moveExternalSqlFileTarget(target.entry.path, nextPath);
+    remapSelectionPaths((path) => (normalizeExternalSqlPath(path) === normalizeExternalSqlPath(target.entry.path) ? nextPath : path));
     showRenameDialog.value = false;
     await reloadFolderAfterMutation(target.folderPath);
     toast(t("sqlFileTree.fileRenamed"), 1500);
@@ -911,13 +1038,14 @@ function clearContextTarget() {
       <LightTooltip :text="t('sqlFileTree.locateActiveFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentFilePath || locatingFile || folders.some((folder) => folder.loading)" @locate="locateCurrentFile" />
       </LightTooltip>
-      <LightTooltip :text="t('sqlFileTree.filterSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
+      <LightTooltip :text="t('sqlFileTree.panelSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button
           variant="ghost"
           size="icon"
           class="h-5 w-5"
           @click="
             fileFilterDraft = getSqlFileFilter();
+            openModeDraft = openMode;
             filterSettingsOpen = true;
           "
         >
@@ -961,7 +1089,13 @@ function clearContextTarget() {
       <template #default="{ onContextMenu }">
         <div
           ref="fileTree"
-          class="flex-1 overflow-y-auto"
+          class="flex-1 overflow-y-auto focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+          tabindex="0"
+          role="tree"
+          :aria-label="t('sqlFileTree.title')"
+          aria-multiselectable="true"
+          :aria-activedescendant="activeItemIndex >= 0 ? `${treeId}-row-${activeItemIndex}` : undefined"
+          @keydown="handleTreeKeydown"
           @click="handlePanelClick"
           @contextmenu.capture="contextTarget = { kind: 'panel' }"
           @contextmenu.prevent="
@@ -980,15 +1114,21 @@ function clearContextTarget() {
               <div
                 data-sql-file-row="true"
                 class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-[color-mix(in_oklab,var(--muted)_10%,var(--background))] sticky top-0 select-none"
-                :class="isPathHighlighted(folder.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-[color-mix(in_oklab,var(--accent)_40%,var(--background))]'"
-                @click.stop="handlePathClick(folder.path, 'folderHeader', $event, () => toggleFolderCollapse(folder))"
+                :class="isPathHighlighted(folder.path, 'folderHeader', folder.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-[color-mix(in_oklab,var(--accent)_40%,var(--background))]'"
+                role="treeitem"
+                :id="visibleRowIds.get(folder)?.get(folder.path)"
+                :aria-level="1"
+                :aria-selected="isPathHighlighted(folder.path, 'folderHeader', folder.path)"
+                :aria-expanded="isFolderContentVisible(folder)"
+                @click.stop="handlePathClick(folder.path, folder.path, 'folderHeader', $event)"
+                @dblclick.stop="handlePathDoubleClick(folder.path, folder.path, 'folderHeader', $event)"
                 @contextmenu.capture="
                   contextTarget = { kind: 'folderHeader', folderPath: folder.path };
-                  activePath = folder.path;
+                  activeKey = nodeKey(folder.path, 'folderHeader', folder.path);
                 "
                 @contextmenu.prevent="
                   contextTarget = { kind: 'folderHeader', folderPath: folder.path };
-                  activePath = folder.path;
+                  activeKey = nodeKey(folder.path, 'folderHeader', folder.path);
                   onContextMenu($event);
                 "
               >
@@ -1039,18 +1179,24 @@ function clearContextTarget() {
                     v-for="{ entry, depth } in flatTree(getProcessedEntries(folder.path), getEffectiveExpanded(folder))"
                     :key="entry.path"
                     :data-sql-file-path="entry.path"
-                    :aria-current="activePath === entry.path ? 'true' : undefined"
+                    :aria-current="activeKey === nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path) ? 'true' : undefined"
                     class="flex cursor-default select-none items-center gap-1 px-2 py-1 text-sm"
-                    :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', isPathHighlighted(entry.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40']"
+                    :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', isPathHighlighted(folder.path, entry.is_dir ? 'dir' : 'file', entry.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40']"
                     :style="{ paddingLeft: depth * 16 + 8 + 'px' }"
-                    @click.stop="handlePathClick(entry.path, entry.is_dir ? 'dir' : 'file', $event, () => (entry.is_dir ? toggleExpand(folder, entry.path) : openFile(entry.path)))"
+                    role="treeitem"
+                    :id="visibleRowIds.get(folder)?.get(entry.path)"
+                    :aria-level="depth + 2"
+                    :aria-selected="isPathHighlighted(folder.path, entry.is_dir ? 'dir' : 'file', entry.path)"
+                    :aria-expanded="entry.is_dir ? getEffectiveExpanded(folder).has(entry.path) : undefined"
+                    @click.stop="handlePathClick(folder.path, entry.path, entry.is_dir ? 'dir' : 'file', $event)"
+                    @dblclick.stop="handlePathDoubleClick(folder.path, entry.path, entry.is_dir ? 'dir' : 'file', $event)"
                     @contextmenu.capture="
                       contextTarget = entry.is_dir ? { kind: 'dir', folderPath: folder.path, entry } : { kind: 'file', folderPath: folder.path, entry };
-                      activePath = entry.path;
+                      activeKey = nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path);
                     "
                     @contextmenu.prevent="
                       contextTarget = entry.is_dir ? { kind: 'dir', folderPath: folder.path, entry } : { kind: 'file', folderPath: folder.path, entry };
-                      activePath = entry.path;
+                      activeKey = nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path);
                       onContextMenu($event);
                     "
                   >
@@ -1111,9 +1257,15 @@ function clearContextTarget() {
     <Dialog v-model:open="filterSettingsOpen">
       <DialogContent class="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{{ t("sqlFileTree.filterSettings") }}</DialogTitle>
+          <DialogTitle>{{ t("sqlFileTree.panelSettings") }}</DialogTitle>
         </DialogHeader>
         <div class="grid gap-2 py-2">
+          <Label for="sql-file-open-mode">{{ t("sqlFileTree.openMode") }}</Label>
+          <select id="sql-file-open-mode" v-model="openModeDraft" class="h-8 rounded-md border border-input bg-background px-2 text-sm">
+            <option value="single">{{ t("sqlFileTree.openModeSingle") }}</option>
+            <option value="double">{{ t("sqlFileTree.openModeDouble") }}</option>
+          </select>
+          <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.keyboardHelp") }}</p>
           <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
           <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
           <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
@@ -1161,7 +1313,7 @@ function clearContextTarget() {
     </Dialog>
 
     <Dialog :open="showRenameDialog" @update:open="(open) => (showRenameDialog = open)">
-      <DialogContent class="sm:max-w-[380px]">
+      <DialogContent class="sm:max-w-[380px]" @close-auto-focus="restoreTreeFocus">
         <DialogHeader>
           <DialogTitle>{{ t("sqlFileTree.renameFile") }}</DialogTitle>
           <DialogDescription>{{ t("sqlFileTree.renameFileDescription") }}</DialogDescription>
@@ -1182,7 +1334,7 @@ function clearContextTarget() {
         }
       "
     >
-      <DialogContent class="sm:max-w-[380px]">
+      <DialogContent class="sm:max-w-[380px]" @close-auto-focus="restoreTreeFocus">
         <DialogHeader>
           <DialogTitle>{{ t("sqlFileTree.renameFolder") }}</DialogTitle>
           <DialogDescription>{{ t("sqlFileTree.renameFolderDescription") }}</DialogDescription>

@@ -740,7 +740,7 @@ export function resolveTableVGroupScopeFromNode(nodes: TreeNode[], node: TreeNod
   const row = node as Partial<TreeNode> & TableVGroupScope;
   const containerKind = isTableVGroupContainerNode(row as TreeNode) ? tableVGroupKindOfContainerNode(row as TreeNode) : null;
   if (containerKind) return { ...tableVGroupScopeFieldsOf(tableVGroupScopeHostOf(nodes, row as TreeNode)), objectType: containerKind };
-  if (row.type === "table-vgroup" || row.type?.startsWith("group-")) {
+  if (row.type === "table-vgroup") {
     const host = tableVGroupScopeHostOf(nodes, row as TreeNode);
     const holder = findTableVGroupHolderContainer(nodes, row as TreeNode);
     return { ...tableVGroupScopeFieldsOf(host), objectType: (holder && tableVGroupKindOfContainerNode(holder)) || "tables" };
@@ -756,8 +756,11 @@ export function resolveTableVGroupScopeFromNode(nodes: TreeNode[], node: TreeNod
     const host = tableVGroupScopeHostOf(nodes, holder);
     return { ...tableVGroupScopeFieldsOf(host), objectType: tableVGroupKindOfContainerNode(holder) ?? "tables" };
   }
-  const container = findTableVGroupContainerNode(nodes, row as TreeNode);
-  return tableVGroupScopeFieldsOf(container ? tableVGroupScopeHostOf(nodes, container) : (row as TreeNode));
+  if (!row.type) {
+    const container = findTableVGroupContainerNode(nodes, row as TableVGroupScope);
+    return tableVGroupScopeFieldsOf(container ? tableVGroupScopeHostOf(nodes, container) : (row as TreeNode));
+  }
+  return {};
 }
 
 /**

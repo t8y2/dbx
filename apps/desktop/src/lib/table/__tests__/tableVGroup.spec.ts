@@ -326,6 +326,18 @@ describe("resolveTableVGroupScopeFromNode", () => {
     tablesGroup.children = [row, groupRow];
     expect(resolveTableVGroupScopeFromNode([databaseNode], groupRow)).toEqual(resolveTableVGroupScopeFromNode([databaseNode], databaseNode));
   });
+
+  it("refuses scopes for non-groupable metadata and table structural children", () => {
+    const columnsGroup: TreeNode = { id: "conn-1:main:t_order:__columns", label: "Columns", type: "group-columns", connectionId: "conn-1", database: "main", tableName: "t_order" };
+    const columnNode: TreeNode = { id: "conn-1:main:t_order:col:id", label: "id", type: "column", connectionId: "conn-1", database: "main", tableName: "t_order" };
+    const indexesGroup: TreeNode = { id: "conn-1:main:t_order:__indexes", label: "Indexes", type: "group-indexes", connectionId: "conn-1", database: "main", tableName: "t_order" };
+    const tableTriggersGroup: TreeNode = { id: "conn-1:main:t_order:__triggers", label: "Triggers", type: "group-triggers", connectionId: "conn-1", database: "main", tableName: "t_order" };
+
+    expect(resolveTableVGroupScopeFromNode([databaseNode], columnsGroup)).toEqual({});
+    expect(resolveTableVGroupScopeFromNode([databaseNode], columnNode)).toEqual({});
+    expect(resolveTableVGroupScopeFromNode([databaseNode], indexesGroup)).toEqual({});
+    expect(resolveTableVGroupScopeFromNode([databaseNode], tableTriggersGroup)).toEqual({});
+  });
 });
 
 describe("table tree helpers", () => {
@@ -445,6 +457,12 @@ describe("container-kind scoped groups (views/procedures/triggers)", () => {
     expect(tableVGroupKindOfContainerNode({ type: "group-types" })).toBe("types");
     expect(tableVGroupKindOfContainerNode({ type: "group-tablespaces" })).toBeNull();
     expect(tableVGroupKindOfContainerNode({ type: "group-dolt-system-tables" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "table" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "group-columns" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "group-indexes" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "group-fkeys" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "group-constraints" })).toBeNull();
+    expect(tableVGroupKindOfContainerNode({ type: "column" })).toBeNull();
   });
 
   it("projects view rows under the views scope and passes non-member rows through", () => {

@@ -1,4 +1,5 @@
 import type { ColumnInfo, DatabaseType } from "@/types/database";
+import type { SqlFormatterCase } from "@/lib/sql/sqlFormatterConfig";
 import { metricRangeQuery, qualifiedTableName, quoteTableDataIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/tableSelectSql";
 
 export interface TableSqlTemplateOptions {
@@ -11,6 +12,7 @@ export interface TableSqlTemplateOptions {
   includeDatabaseName?: boolean;
   /** Omit optional identifier quotes while retaining quotes required by the dialect. */
   quoteIdentifiers?: boolean;
+  keywordCase?: SqlFormatterCase;
   tableName: string;
   columns?: ColumnInfo[];
   tableType?: string;
@@ -37,11 +39,14 @@ export function buildTableSelectTemplate(options: TableSqlTemplateOptions): stri
   if (options.databaseType === "victoriametrics") return metricRangeQuery(options.tableName);
   const tableName = templateTableName(options);
   const columns = options.columns ?? [];
+  const lower = options.keywordCase === "lower";
+  const selectKw = lower ? "select" : "SELECT";
+  const fromKw = lower ? "from" : "FROM";
   if (!columns.length) {
-    return `SELECT *\nFROM ${tableName};`;
+    return `${selectKw} *\n${fromKw} ${tableName};`;
   }
   const selectColumns = columns.map((column) => templateIdentifier(options, column.name));
-  return `SELECT ${selectColumns.join(", ")}\nFROM ${tableName};`;
+  return `${selectKw} ${selectColumns.join(", ")}\n${fromKw} ${tableName};`;
 }
 
 export function buildTableInsertTemplate(options: TableSqlTemplateOptions): string {

@@ -125,6 +125,7 @@ export function createDataGridColumnContextMenuItems(options: {
   frozenColumnCount?: number;
   contextVisibleColIdx?: number;
   hasColumnSelection?: boolean;
+  hasUserSizedColumns?: boolean;
   /** 显式多选的可见列数量；为 undefined 时按 0 处理。 */
   selectedColumnCount?: number;
   /** 当前可见列总数，用于判断「选中列覆盖全部可见列」而禁用批量隐藏。 */
@@ -136,8 +137,8 @@ export function createDataGridColumnContextMenuItems(options: {
     "copyName" | "copyComment" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
     string
   > &
-    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata", string>>;
-  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort">;
+    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata" | "clearRememberedColumnWidths", string>>;
+  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort"> & Partial<Record<"clearRememberedColumnWidths", Component>>;
   actions: {
     copyName: () => void;
     copyComment: () => void;
@@ -155,6 +156,7 @@ export function createDataGridColumnContextMenuItems(options: {
     hideSelectedColumns: () => void;
     hideIdenticalColumns?: () => void;
     showAllColumnsMenu: () => void;
+    clearRememberedColumnWidths?: () => void;
   };
   filterSubmenu: DataGridContextMenuItem;
   highlightSubmenu?: DataGridContextMenuItem;
@@ -205,6 +207,13 @@ export function createDataGridColumnContextMenuItems(options: {
     if ((options.hiddenColumnCount ?? 0) > 0) {
       items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
     }
+    if (options.hasUserSizedColumns && options.labels.clearRememberedColumnWidths && options.actions.clearRememberedColumnWidths) {
+      items.push({
+        label: options.labels.clearRememberedColumnWidths,
+        action: options.actions.clearRememberedColumnWidths,
+        icon: options.icons.clearRememberedColumnWidths,
+      });
+    }
     if ((options.frozenColumnCount ?? 0) > 0) {
       if ((options.contextVisibleColIdx ?? -1) < (options.frozenColumnCount ?? 0) && options.labels.unfreezeCurrentColumn && options.actions.unfreezeCurrentColumn) items.push({ label: options.labels.unfreezeCurrentColumn, action: options.actions.unfreezeCurrentColumn });
       items.push({ label: options.labels.unfreezeColumns, action: options.actions.unfreezeColumns });
@@ -223,6 +232,13 @@ export function createDataGridColumnContextMenuItems(options: {
     });
     if ((options.hiddenColumnCount ?? 0) > 0) {
       items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
+    }
+    if (options.hasUserSizedColumns && options.labels.clearRememberedColumnWidths && options.actions.clearRememberedColumnWidths) {
+      items.push({
+        label: options.labels.clearRememberedColumnWidths,
+        action: options.actions.clearRememberedColumnWidths,
+        icon: options.icons.clearRememberedColumnWidths,
+      });
     }
   }
   return items;

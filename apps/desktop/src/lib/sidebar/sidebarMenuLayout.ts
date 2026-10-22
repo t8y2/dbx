@@ -189,6 +189,9 @@ export function buildSidebarMenuLayout(items: readonly ContextMenuItem[], scope:
     }
     const actionGroup = sidebarMenuActionGroup(item);
     const group: MenuGroup = scope === "connection" && ["data", "sql", "structure"].includes(actionGroup) ? "manage" : (scope === "table" || scope === "view") && actionGroup === "manage" ? "structure" : actionGroup;
+    // Unchecking an action in the customize dialog has to hide it, not just drop
+    // it back into its group (#12791). Built-in actions cannot be unchecked.
+    if (group !== "danger" && !builtInIds.has(item.sidebarActionId) && hiddenIds.has(item.sidebarActionId)) continue;
     if (group !== "danger" && (builtInIds.has(item.sidebarActionId) || pinned.has(item.sidebarActionId) || (recommendedIds.has(item.sidebarActionId) && !hiddenIds.has(item.sidebarActionId)))) {
       primary.push(item);
       continue;

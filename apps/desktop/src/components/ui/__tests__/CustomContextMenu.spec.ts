@@ -669,25 +669,79 @@ describe("submenu hand-over between rows", () => {
     }
   });
 
-  it("hands the submenu over once the pointer settles on a neighbouring row", async () => {
+  it("hands the submenu over shortly after the pointer settles on a neighbouring row", async () => {
     vi.useFakeTimers();
     try {
       const { app } = await mountRowMenu();
 
       // Crossing the row inside the wedge keeps the panel. Moving on down, below
-      // the wedge, is the pointer asking for this row after all.
+      // the wedge, is the pointer asking for this row after all; a vertical move
+      // along the menu does not wait for the diagonal settle delay.
+      slideInto("Copy", 60, 145);
+      await nextTick();
+      movePointerTo(60, 260);
+      await nextTick();
+      expect(bodyText()).toContain("Export");
+
+      vi.advanceTimersByTime(100);
+      await nextTick();
+      expect(bodyText()).toContain("Copy cell");
+      expect(bodyText()).not.toContain("Export");
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the diagonal settle delay while the pointer swings sideways towards the open panel", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app } = await mountRowMenu();
+
+      // The pointer drops below the wedge, then swings sideways back towards the
+      // panel: it may be re-aiming at that panel, so the row underneath must not
+      // take it over right away.
+      rowButton("Data tools").dispatchEvent(new MouseEvent("mouseleave", { bubbles: true, clientX: 50, clientY: 140 }));
+      movePointerTo(50, 300);
+      movePointerTo(120, 290);
+      await nextTick();
+      rowButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, clientX: 170, clientY: 285 }));
+      await nextTick();
+      vi.advanceTimersByTime(100);
+      await nextTick();
+      expect(bodyText()).toContain("Export");
+      expect(bodyText()).not.toContain("Copy cell");
+
+      vi.advanceTimersByTime(400);
+      await nextTick();
+      expect(bodyText()).toContain("Copy cell");
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("switches between sibling submenus without the diagonal settle delay", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app } = await mountRowMenu();
+
       slideInto("Copy", 60, 145);
       await nextTick();
       movePointerTo(60, 260);
       await nextTick();
       vi.advanceTimersByTime(100);
       await nextTick();
-      expect(bodyText()).toContain("Export");
-
-      vi.advanceTimersByTime(400);
-      await nextTick();
       expect(bodyText()).toContain("Copy cell");
-      expect(bodyText()).not.toContain("Export");
+
+      // Moving straight back up is the same deliberate row travel in reverse.
+      rowButton("Copy").dispatchEvent(new MouseEvent("mouseleave", { bubbles: true, clientX: 60, clientY: 260 }));
+      rowButton("Data tools").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, clientX: 60, clientY: 140 }));
+      await nextTick();
+      vi.advanceTimersByTime(100);
+      await nextTick();
+      expect(bodyText()).toContain("Export");
+      expect(bodyText()).not.toContain("Copy cell");
       app.unmount();
     } finally {
       vi.useRealTimers();

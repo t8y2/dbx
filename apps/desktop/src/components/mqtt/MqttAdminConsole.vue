@@ -62,6 +62,8 @@ const messages = ref<MqttMessage[]>([]);
 const collapsedMessageKeys = ref<Set<string>>(new Set());
 const noLocalSubscribe = ref(false);
 const selectedTopic = ref<string>(restoredUiState.selectedTopic ?? props.initialTopic ?? "");
+const publishInitialTopic = ref(selectedTopic.value);
+const publishTopic = ref(selectedTopic.value);
 const loading = ref(true);
 const error = ref<string | null>(null);
 const pollingIntervalMs = ref<number>(MQTT_POLLING_INTERVAL_OPTIONS.some((opt) => opt.value === restoredUiState.pollingIntervalMs) ? restoredUiState.pollingIntervalMs! : DEFAULT_MQTT_POLLING_INTERVAL_MS);
@@ -117,6 +119,12 @@ trackUiState(() => ({
   publishPanelCollapsed: publishPanelCollapsed.value,
   pollingIntervalMs: pollingIntervalMs.value,
 }));
+
+function suggestPublishTopic(topic: string, force = false) {
+  if (!force && publishTopic.value.length > 0) return;
+  publishTopic.value = topic;
+  publishInitialTopic.value = topic;
+}
 
 const connected = computed(() => brokerInfo.value?.connected ?? false);
 const mqtt5 = computed(() => brokerInfo.value?.protocolVersion?.includes("5") ?? false);
@@ -213,6 +221,7 @@ async function handleSubscribe(topic: string, qos: MqttQoS = "atmostonce", noLoc
   try {
     await mqttSubscribe(props.connectionId, topic, qos, noLocal);
     selectedTopic.value = topic;
+    suggestPublishTopic(topic);
     await refreshData();
   } catch (e) {
     error.value = String(e);
@@ -238,7 +247,10 @@ async function handleDelete(config: MqttSavedTopic) {
   try {
     if (subscribedTopics.value.some(([topic]) => topic === config.topic)) await mqttUnsubscribe(props.connectionId, config.topic);
     await mqttDeleteTopicConfig(props.connectionId, config.topic);
-    if (selectedTopic.value === config.topic) selectedTopic.value = "";
+    if (selectedTopic.value === config.topic) {
+      selectedTopic.value = "";
+      suggestPublishTopic("");
+    }
     await refreshData();
   } catch (e) {
     error.value = String(e);
@@ -357,6 +369,7 @@ async function saveSubscription() {
     if (topicChanged && previousWasActive && previousTopic) await mqttUnsubscribe(props.connectionId, previousTopic);
     if (topicChanged && previousTopic) await mqttDeleteTopicConfig(props.connectionId, previousTopic);
     selectedTopic.value = topic;
+    suggestPublishTopic(topic);
     showSubscriptionDialog.value = false;
     await refreshData();
   } catch (e) {
@@ -369,6 +382,7 @@ async function saveSubscription() {
 
 function handleTopicClick(topic: string) {
   selectedTopic.value = topic;
+  suggestPublishTopic(topic, true);
   void refreshData();
 }
 
@@ -504,6 +518,7 @@ watch(
   (topic) => {
     if (topic !== undefined && topic !== selectedTopic.value) {
       selectedTopic.value = topic;
+      suggestPublishTopic(topic, true);
       void refreshData();
     }
   },
@@ -717,7 +732,7 @@ onUnmounted(stopPolling);
             </div>
           </CustomContextMenu>
         </div>
-        <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="selectedTopic" @published="handleMessagePublished" />
+        <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="publishInitialTopic" @topic-changed="publishTopic = $event" @published="handleMessagePublished" />
       </div>
     </div>
 

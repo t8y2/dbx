@@ -3088,9 +3088,97 @@ mod tests {
         let req = request("csv", Some(1000), None);
         assert!(supports_streaming_offset_pagination(&req, 100));
 
+        let oscar_req =
+            QueryResultExportRequest { database_type: DatabaseType::Oscar, ..request("csv", Some(1000), None) };
+        assert!(!supports_streaming_offset_pagination(&oscar_req, 100));
+
         let oracle_req =
             QueryResultExportRequest { database_type: DatabaseType::Oracle, ..request("csv", Some(1000), None) };
         assert!(!supports_streaming_offset_pagination(&oracle_req, 100));
+
+        let oracle_safe_req = QueryResultExportRequest {
+            database_type: DatabaseType::Oracle,
+            sql: "SELECT id, name FROM users".to_string(),
+            query_base_sql: "SELECT id, name FROM users".to_string(),
+            ..request("csv", Some(1000), None)
+        };
+        assert!(supports_streaming_offset_pagination(&oracle_safe_req, 100));
+    }
+
+    #[test]
+    fn oracle_streaming_offset_pagination_supports_single_and_join_queries() {
+        let mut req = request("csv", Some(1000), None);
+        req.database_type = DatabaseType::Oracle;
+        req.sql = "SELECT code, name FROM BD_MATERIAL".to_string();
+        req.query_base_sql = req.sql.clone();
+        assert!(supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, false), None);
+
+        let plan1 = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: req.sql.clone(),
+            query_base_sql: req.query_base_sql.clone(),
+            database_type: Some(DatabaseType::Oracle),
+            pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+            use_agent_cursor: false,
+            first_page_uses_actual_sql: true,
+            execution_hint: None,
+        });
+        assert_eq!(
+            plan1.page_sql.as_deref(),
+            Some("SELECT * FROM (SELECT code, name FROM BD_MATERIAL) WHERE ROWNUM <= 100;")
+        );
+
+        let plan2 = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: req.sql.clone(),
+            query_base_sql: req.query_base_sql.clone(),
+            database_type: Some(DatabaseType::Oracle),
+            pagination: QueryPagination { limit: 100, offset: 100, session_id: None },
+            use_agent_cursor: false,
+            first_page_uses_actual_sql: true,
+            execution_hint: None,
+        });
+        assert_eq!(
+            plan2.page_sql.as_deref(),
+            Some("SELECT * FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT code, name FROM BD_MATERIAL) dbx_inner WHERE ROWNUM <= 200) WHERE \"__dbx_row_num\" > 100;")
+        );
+
+        req.sql = "SELECT DISTINCT bm.code 物料编码, bm.name 物料名称, bs.name 仓库 FROM BD_MATERIAL bm INNER JOIN BD_MATERIALSTOCK bm2 ON bm.PK_MATERIAL = bm2.PK_MATERIAL".to_string();
+        req.query_base_sql = req.sql.clone();
+        assert!(supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, false), None);
+
+        req.sql = "SELECT code, name FROM BD_MATERIAL ORDER BY code ASC".to_string();
+        req.query_base_sql = req.sql.clone();
+        assert!(supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, false), None);
+    }
+
+    #[test]
+    fn oracle_wildcard_and_duplicate_projection_export_require_cursor_and_follow_its_end() {
+        for sql in [
+            "SELECT * FROM events",
+            "SELECT t.* FROM events t",
+            "SELECT a.name, a.* FROM people a ORDER BY a.id",
+            "SELECT a.id, b.id FROM people a JOIN people b ON a.id = b.id",
+            "SELECT id FROM people FOR UPDATE",
+            "SELECT id FROM people WHERE ROWNUM <= 10",
+            "SELECT id FROM people FETCH FIRST 10 ROWS ONLY",
+        ] {
+            let mut req = request("csv", None, None);
+            req.database_type = DatabaseType::Oracle;
+            req.sql = sql.into();
+            req.query_base_sql = req.sql.clone();
+            req.use_agent_cursor = true;
+            assert!(!supports_streaming_offset_pagination(&req, 100));
+            assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor), None);
+            assert!(should_fetch_next_page(true, true, 100, 100, 100));
+            assert!(!should_fetch_next_page(true, false, 100, 100, 100));
+            req.use_agent_cursor = false;
+            assert_eq!(
+                streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor),
+                Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            );
+        }
     }
 
     #[test]

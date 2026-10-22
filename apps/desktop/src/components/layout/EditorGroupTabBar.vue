@@ -1330,6 +1330,7 @@ function tabColorStyle(tab: QueryTab): CSSProperties | undefined {
   if (isVerticalLayout.value) {
     if (settingsStore.editorSettings.tabGroupMode !== "none" || !settingsStore.editorSettings.colorizeConnectionTabs) return undefined;
     const active = isTabActive(tab);
+    if (settingsStore.editorSettings.colorizeConnectionTabsScope === "active" && !active) return undefined;
     const color = tabConnectionColor(tab.connectionId);
     return {
       "--app-tab-background": hexToRgba(color, active ? 0.24 : 0.09),
@@ -1343,6 +1344,7 @@ function tabColorStyle(tab: QueryTab): CSSProperties | undefined {
     } as CSSProperties;
   }
   if (!isTabActive(tab)) {
+    if (settingsStore.editorSettings.colorizeConnectionTabsScope === "active") return undefined;
     // Grouped horizontal tabs already show the group identity on the header
     // and rail (the connection color when grouping by connection), so keep
     // their washes quiet to make the active tab easy to spot (issue #12485).
@@ -1951,7 +1953,14 @@ watch(
         if (container) {
           const activeEl = container.querySelector('[data-active-tab="true"]');
           if (activeEl) {
-            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: isVerticalLayout.value ? "nearest" : "center" });
+            // `inline: "nearest"` only scrolls when the tab is actually clipped.
+            // Centering every newly activated tab re-centered ones that were
+            // already fully visible, and because the built-in Settings / Driver
+            // Manager / Plugin Center tabs share this scrollable row, activating
+            // the last regular tab pushed those trailing tabs off the right edge
+            // (#12010). This also matches revealActiveTabAfterLayout and the
+            // special-page watcher below.
+            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: "nearest" });
           }
         }
       }
@@ -2329,6 +2338,12 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                             </button>
                             <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
                               <X class="h-3 w-3" />
+                            </button>
+                            <!-- The collapsed rail has no row width for the label or the trailing
+                                 close button (#12942); overlay it so a tab can be closed without
+                                 expanding the rail and switching to it first. -->
+                            <button v-else class="compact-close-tab-button" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
+                              <X class="h-2.5 w-2.5" />
                             </button>
                           </div>
                         </TooltipTrigger>

@@ -6318,6 +6318,502 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn collection_overflow_session_store_and_take_lifecycle() {
+        let scope_a = super::RedisOperationScope { connection_id: "conn-alpha".to_string(), db: 2 };
+        let scope_b = super::RedisOperationScope { connection_id: "conn-beta".to_string(), db: 2 };
+        let scope_a_db3 = super::RedisOperationScope { connection_id: "conn-alpha".to_string(), db: 3 };
+        let unscoped = super::RedisOperationScope::default();
+
+        // 1. Direct Hash overflow store & take lifecycle
+        {
+            let key = b"direct-hash-lifecycle";
+            let mut items: Vec<RedisHashItem> = (0..5)
+                .map(|i| RedisHashItem {
+                    field: text_blob(&format!("f{i}")),
+                    value: text_blob(&format!("v{i}")),
+                    field_ttl: None,
+                })
+                .collect();
+
+            // Storing with count = 2 keeps 2 items in `items` and buffers the remaining 3 items.
+            let followup_cursor = 888u64;
+            let session_cursor =
+                super::store_hash_overflow_page(&scope_a, key, &mut items, 2, followup_cursor, None).await;
+            assert_eq!(items.len(), 2);
+            assert!(session_cursor >= super::COLLECTION_OVERFLOW_CURSOR_START);
+
+            // Scope isolation: foreign connection, foreign db, unscoped default, wrong key, wrong filter, wrong kind
+            // must all return None and leave the stored session intact.
+            assert!(super::take_hash_overflow_page(&scope_b, key, session_cursor, 2, None).await.is_none());
+            assert!(super::take_hash_overflow_page(&scope_a_db3, key, session_cursor, 2, None).await.is_none());
+            assert!(super::take_hash_overflow_page(&unscoped, key, session_cursor, 2, None).await.is_none());
+            assert!(super::take_hash_overflow_page(&scope_a, b"other-key", session_cursor, 2, None).await.is_none());
+            assert!(super::take_hash_overflow_page(&scope_a, key, session_cursor, 2, Some("query")).await.is_none());
+            assert!(super::take_set_overflow_page(&scope_a, key, session_cursor, 2, None).await.is_none());
+
+            // First take with matching scope: takes 2 of the 3 buffered items.
+            // Since 1 item remains in the session, cursor must be retained.
+            let (next_cursor, p1) = super::take_hash_overflow_page(&scope_a, key, session_cursor, 2, None)
+                .await
+                .expect("take first buffered page");
+            assert_eq!(p1.len(), 2);
+            assert_eq!(p1[0].field, text_blob("f2"));
+            assert_eq!(p1[1].field, text_blob("f3"));
+            assert_eq!(next_cursor, session_cursor, "cursor must be retained while buffer has items");
+
+            // Second take: takes the last buffered item.
+            // Buffer is now empty, but followup_cursor != 0 and scope != default,
+            // so cursor is still retained for the subsequent server scan.
+            let (next_cursor, p2) = super::take_hash_overflow_page(&scope_a, key, session_cursor, 2, None)
+                .await
+                .expect("take remaining buffered page");
+            assert_eq!(p2.len(), 1);
+            assert_eq!(p2[0].field, text_blob("f4"));
+            assert_eq!(next_cursor, session_cursor, "cursor must be retained for followup server scan");
+
+            // Buffer is now empty, so take_hash_overflow_page returns None.
+            assert!(super::take_hash_overflow_page(&scope_a, key, session_cursor, 2, None).await.is_none());
+
+            // take_collection_scan_cursor must enforce scope isolation.
+            assert!(super::take_collection_scan_cursor(
+                &scope_b,
+                key,
+                session_cursor,
+                super::RedisCollectionOverflowKind::Hash,
+                None,
+            )
+            .await
+            .is_err());
+            assert!(super::take_collection_scan_cursor(
+                &unscoped,
+                key,
+                session_cursor,
+                super::RedisCollectionOverflowKind::Hash,
+                None,
+            )
+            .await
+            .is_err());
+
+            // Matching scope takes the followup server scan cursor and consumes the session.
+            let (server_cursor, session_opt) = super::take_collection_scan_cursor(
+                &scope_a,
+                key,
+                session_cursor,
+                super::RedisCollectionOverflowKind::Hash,
+                None,
+            )
+            .await
+            .expect("take scan cursor");
+            assert_eq!(server_cursor, followup_cursor);
+            assert!(session_opt.is_some());
+
+            // Session has been consumed from registry; any subsequent access is rejected.
+            assert!(super::take_collection_scan_cursor(
+                &scope_a,
+                key,
+                session_cursor,
+                super::RedisCollectionOverflowKind::Hash,
+                None,
+            )
+            .await
+            .is_err());
+        }
+
+        // 2. Direct Set overflow store & take lifecycle
+        {
+            let key = b"direct-set-lifecycle";
+            let mut items: Vec<RedisSetItem> =
+                (0..5).map(|i| RedisSetItem { member: text_blob(&format!("m{i}")) }).collect();
+
+            let followup_cursor = 999u64;
+            let session_cursor =
+                super::store_set_overflow_page(&scope_a, key, &mut items, 2, followup_cursor, None).await;
+            assert_eq!(items.len(), 2);
+            assert!(session_cursor >= super::COLLECTION_OVERFLOW_CURSOR_START);
+
+            // Scope isolation
+            assert!(super::take_set_overflow_page(&scope_b, key, session_cursor, 2, None).await.is_none());
+            assert!(super::take_set_overflow_page(&scope_a_db3, key, session_cursor, 2, None).await.is_none());
+            assert!(super::take_set_overflow_page(&unscoped, key, session_cursor, 2, None).await.is_none());
+            assert!(super::take_set_overflow_page(&scope_a, b"other-key", session_cursor, 2, None).await.is_none());
+            assert!(super::take_hash_overflow_page(&scope_a, key, session_cursor, 2, None).await.is_none());
+
+            // Paging buffered items
+            let (next_cursor, p1) =
+                super::take_set_overflow_page(&scope_a, key, session_cursor, 2, None).await.expect("take set page 1");
+            assert_eq!(p1.len(), 2);
+            assert_eq!(p1[0].member, text_blob("m2"));
+            assert_eq!(p1[1].member, text_blob("m3"));
+            assert_eq!(next_cursor, session_cursor);
+
+            let (next_cursor, p2) =
+                super::take_set_overflow_page(&scope_a, key, session_cursor, 2, None).await.expect("take set page 2");
+            assert_eq!(p2.len(), 1);
+            assert_eq!(p2[0].member, text_blob("m4"));
+            assert_eq!(next_cursor, session_cursor);
+
+            // Buffer drained -> take_collection_scan_cursor
+            let (server_cursor, session_opt) = super::take_collection_scan_cursor(
+                &scope_a,
+                key,
+                session_cursor,
+                super::RedisCollectionOverflowKind::Set,
+                None,
+            )
+            .await
+            .expect("take set scan cursor");
+            assert_eq!(server_cursor, followup_cursor);
+            assert!(session_opt.is_some());
+        }
+
+        // 3. Exhaustion behavior when followup_cursor is 0
+        {
+            let key = b"direct-exhaustion-hash";
+            let mut items: Vec<RedisHashItem> = (0..3)
+                .map(|i| RedisHashItem {
+                    field: text_blob(&format!("fx{i}")),
+                    value: text_blob(&format!("vx{i}")),
+                    field_ttl: None,
+                })
+                .collect();
+
+            // followup_cursor == 0: no further server pages exist
+            let cursor = super::store_hash_overflow_page(&scope_a, key, &mut items, 1, 0, None).await;
+            assert_eq!(items.len(), 1);
+            assert!(cursor >= super::COLLECTION_OVERFLOW_CURSOR_START);
+
+            // Drain remaining 2 items in one page
+            let (next_cursor, p) =
+                super::take_hash_overflow_page(&scope_a, key, cursor, 2, None).await.expect("take exhausted page");
+            assert_eq!(p.len(), 2);
+            // Since buffer is now empty AND followup_cursor == 0, cursor is NOT retained
+            assert_eq!(next_cursor, 0);
+
+            // Session has been evicted from registry on exhaustion
+            assert!(!super::collection_overflow_sessions().lock().await.entries.contains_key(&cursor));
+            assert!(super::take_hash_overflow_page(&scope_a, key, cursor, 1, None).await.is_none());
+            assert!(super::take_collection_scan_cursor(
+                &scope_a,
+                key,
+                cursor,
+                super::RedisCollectionOverflowKind::Hash,
+                None,
+            )
+            .await
+            .is_err());
+        }
+
+        // 4. Expiration behavior (TTL purge)
+        {
+            let key = b"direct-expiration-hash";
+            let mut items: Vec<RedisHashItem> = (0..3)
+                .map(|i| RedisHashItem {
+                    field: text_blob(&format!("fe{i}")),
+                    value: text_blob(&format!("ve{i}")),
+                    field_ttl: None,
+                })
+                .collect();
+
+            let cursor = super::store_hash_overflow_page(&scope_a, key, &mut items, 1, 0, None).await;
+            assert!(super::collection_overflow_sessions().lock().await.entries.contains_key(&cursor));
+
+            // Force expiration by winding last_used back past TTL
+            super::collection_overflow_sessions().lock().await.entries.get_mut(&cursor).unwrap().last_used =
+                std::time::Instant::now() - super::COLLECTION_OVERFLOW_SESSION_TTL - std::time::Duration::from_secs(1);
+
+            // take_matching purges expired entries
+            assert!(super::take_hash_overflow_page(&scope_a, key, cursor, 1, None).await.is_none());
+            assert!(!super::collection_overflow_sessions().lock().await.entries.contains_key(&cursor));
+            assert!(super::take_collection_scan_cursor(
+                &scope_a,
+                key,
+                cursor,
+                super::RedisCollectionOverflowKind::Hash,
+                None,
+            )
+            .await
+            .is_err());
+        }
+    }
+
+    /// Replays standalone-Redis pagination for sets (issue #12640 sibling collection):
+    /// a large set is read through get_value_scoped, then paged through load_more_collection_scoped.
+    /// Every member must arrive exactly once, foreign scopes must be rejected without server scan,
+    /// and pagination terminates cleanly when the collection is exhausted.
+    #[tokio::test]
+    async fn scoped_set_pagination_walks_large_collections_without_repeating_the_first_page() {
+        const MEMBERS: usize = 4000;
+        const PAGE: usize = 200;
+        let scope = super::RedisOperationScope { connection_id: "issue-12640-standalone-set".to_string(), db: 0 };
+
+        // Real SSCAN cursors: one batch of `PAGE` members per server round trip.
+        let mut responses = vec![bulk("set"), RedisRawValue::Int(-1), RedisRawValue::Int(MEMBERS as i64)];
+        let pages = MEMBERS.div_ceil(PAGE);
+        for page in 0..pages {
+            let cursor = if page + 1 == pages { "0".to_string() } else { (page + 1).to_string() };
+            let members: Vec<String> =
+                (page * PAGE..((page + 1) * PAGE).min(MEMBERS)).map(|index| format!("member:{index}")).collect();
+            responses.push(int_scan_response_owned(&cursor, members));
+        }
+        let mut con = FakeRedisConnection::new(responses);
+
+        let value = super::get_value_scoped(&mut con, b"issue-12640-set", &scope).await.unwrap();
+        let RedisValueData::Set { items: mut seen, scan_cursor, total } = value.data else {
+            panic!("expected set");
+        };
+        assert_eq!(total, MEMBERS as u64);
+        assert_eq!(seen.len(), PAGE, "the first page defaults to the configured page size");
+        let mut cursor = scan_cursor.expect("a 4000-member set must offer a continuation");
+        assert!(cursor >= super::COLLECTION_OVERFLOW_CURSOR_START, "the continuation is an overflow session marker");
+
+        // The unscoped path (default scope) must reject the marker without touching the server.
+        let mut mismatched = FakeRedisConnection::new(vec![]);
+        let error = super::load_more_collection(&mut mismatched, b"issue-12640-set", "set", cursor, PAGE, None, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("invalid, expired"), "{error}");
+        assert!(mismatched.commands.is_empty(), "foreign cursor must not reach the server");
+
+        // Foreign connection id must also be rejected without touching the server.
+        let foreign_scope = super::RedisOperationScope { connection_id: "foreign-conn".to_string(), db: 0 };
+        let mut wrong = FakeRedisConnection::new(vec![]);
+        let error = super::load_more_collection_scoped(
+            &mut wrong,
+            b"issue-12640-set",
+            "set",
+            cursor,
+            PAGE,
+            None,
+            None,
+            &foreign_scope,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("invalid, expired"), "{error}");
+        assert!(wrong.commands.is_empty());
+
+        // Foreign database must also be rejected without touching the server.
+        let foreign_db = super::RedisOperationScope { connection_id: scope.connection_id.clone(), db: 1 };
+        let error = super::load_more_collection_scoped(
+            &mut wrong,
+            b"issue-12640-set",
+            "set",
+            cursor,
+            PAGE,
+            None,
+            None,
+            &foreign_db,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("invalid, expired"), "{error}");
+        assert!(wrong.commands.is_empty());
+
+        // Mismatched collection type must be rejected without touching the server.
+        let error = super::load_more_collection_scoped(
+            &mut wrong,
+            b"issue-12640-set",
+            "hash",
+            cursor,
+            PAGE,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("different collection type") || error.contains("invalid, expired"), "{error}");
+        assert!(wrong.commands.is_empty());
+
+        let mut pages_seen = 1;
+        while cursor != 0 {
+            let page = super::load_more_collection_scoped(
+                &mut con,
+                b"issue-12640-set",
+                "set",
+                cursor,
+                PAGE,
+                None,
+                None,
+                &scope,
+            )
+            .await
+            .unwrap();
+            let RedisCollectionPage::Set { items, scan_cursor: next } = page else {
+                panic!("expected set");
+            };
+            seen.extend(items);
+            pages_seen += 1;
+            assert!(pages_seen <= pages, "pagination must terminate");
+            match next {
+                Some(next) => {
+                    assert_ne!(next, cursor, "each page must continue with a fresh marker");
+                    cursor = next;
+                }
+                None => break,
+            }
+        }
+
+        assert_eq!(pages_seen, pages);
+        assert_eq!(seen.len(), MEMBERS);
+        let unique: std::collections::HashSet<_> = seen.iter().map(|item| item.member.raw_base64.clone()).collect();
+        assert_eq!(unique.len(), MEMBERS, "every member arrives exactly once");
+        assert_eq!(con.command_count("SSCAN"), pages);
+    }
+
+    #[tokio::test]
+    async fn concurrent_collection_overflow_sessions_isolate_across_scopes_and_keys() {
+        let scope_1 = super::RedisOperationScope { connection_id: "conn-prod".to_string(), db: 0 };
+        let scope_2 = super::RedisOperationScope { connection_id: "conn-staging".to_string(), db: 0 };
+        let scope_3 = super::RedisOperationScope { connection_id: "conn-prod".to_string(), db: 1 };
+        let unscoped = super::RedisOperationScope::default();
+
+        let mut hash_items_1: Vec<RedisHashItem> = (0..4)
+            .map(|i| RedisHashItem {
+                field: text_blob(&format!("p_f{i}")),
+                value: text_blob(&format!("p_v{i}")),
+                field_ttl: None,
+            })
+            .collect();
+        let mut hash_items_2: Vec<RedisHashItem> = (0..4)
+            .map(|i| RedisHashItem {
+                field: text_blob(&format!("s_f{i}")),
+                value: text_blob(&format!("s_v{i}")),
+                field_ttl: None,
+            })
+            .collect();
+        let mut set_items_3: Vec<RedisSetItem> =
+            (0..4).map(|i| RedisSetItem { member: text_blob(&format!("db1_m{i}")) }).collect();
+
+        // All 3 use key b"shared-name", but have different scopes or kinds!
+        let key = b"shared-name";
+        let c1 = super::store_hash_overflow_page(&scope_1, key, &mut hash_items_1, 1, 101, None).await;
+        let c2 = super::store_hash_overflow_page(&scope_2, key, &mut hash_items_2, 1, 202, None).await;
+        let c3 = super::store_set_overflow_page(&scope_3, key, &mut set_items_3, 1, 303, None).await;
+
+        // Distinct session cursors allocated
+        assert_ne!(c1, c2);
+        assert_ne!(c1, c3);
+        assert_ne!(c2, c3);
+
+        // Cross-scope and cross-kind isolation:
+        // Session 1 (scope_1, Hash) cannot be consumed by scope_2, scope_3, unscoped, or as Set
+        assert!(super::take_hash_overflow_page(&scope_2, key, c1, 1, None).await.is_none());
+        assert!(super::take_hash_overflow_page(&scope_3, key, c1, 1, None).await.is_none());
+        assert!(super::take_hash_overflow_page(&unscoped, key, c1, 1, None).await.is_none());
+        assert!(super::take_set_overflow_page(&scope_1, key, c1, 1, None).await.is_none());
+
+        // Session 2 (scope_2, Hash) cannot be consumed by scope_1, scope_3, unscoped, or as Set
+        assert!(super::take_hash_overflow_page(&scope_1, key, c2, 1, None).await.is_none());
+        assert!(super::take_hash_overflow_page(&scope_3, key, c2, 1, None).await.is_none());
+        assert!(super::take_hash_overflow_page(&unscoped, key, c2, 1, None).await.is_none());
+        assert!(super::take_set_overflow_page(&scope_2, key, c2, 1, None).await.is_none());
+
+        // Session 3 (scope_3, Set) cannot be consumed by scope_1, scope_2, unscoped, or as Hash
+        assert!(super::take_set_overflow_page(&scope_1, key, c3, 1, None).await.is_none());
+        assert!(super::take_set_overflow_page(&scope_2, key, c3, 1, None).await.is_none());
+        assert!(super::take_set_overflow_page(&unscoped, key, c3, 1, None).await.is_none());
+        assert!(super::take_hash_overflow_page(&scope_3, key, c3, 1, None).await.is_none());
+
+        // Valid interleaved page consumption:
+        let (_, p1_a) = super::take_hash_overflow_page(&scope_1, key, c1, 1, None).await.unwrap();
+        assert_eq!(p1_a[0].field, text_blob("p_f1"));
+
+        let (_, p2_a) = super::take_hash_overflow_page(&scope_2, key, c2, 1, None).await.unwrap();
+        assert_eq!(p2_a[0].field, text_blob("s_f1"));
+
+        let (_, p3_a) = super::take_set_overflow_page(&scope_3, key, c3, 1, None).await.unwrap();
+        assert_eq!(p3_a[0].member, text_blob("db1_m1"));
+
+        // Drain the rest of session 1
+        let (_, p1_b) = super::take_hash_overflow_page(&scope_1, key, c1, 2, None).await.unwrap();
+        assert_eq!(p1_b.len(), 2);
+        assert_eq!(p1_b[0].field, text_blob("p_f2"));
+        assert_eq!(p1_b[1].field, text_blob("p_f3"));
+
+        // Session 1 buffer is drained; transition to server scan cursor
+        let (srv1, _) =
+            super::take_collection_scan_cursor(&scope_1, key, c1, super::RedisCollectionOverflowKind::Hash, None)
+                .await
+                .unwrap();
+        assert_eq!(srv1, 101);
+
+        // Session 2 and Session 3 are still intact and can continue
+        let (_, p2_b) = super::take_hash_overflow_page(&scope_2, key, c2, 2, None).await.unwrap();
+        assert_eq!(p2_b.len(), 2);
+        assert_eq!(p2_b[0].field, text_blob("s_f2"));
+        assert_eq!(p2_b[1].field, text_blob("s_f3"));
+        let (srv2, _) =
+            super::take_collection_scan_cursor(&scope_2, key, c2, super::RedisCollectionOverflowKind::Hash, None)
+                .await
+                .unwrap();
+        assert_eq!(srv2, 202);
+
+        let (_, p3_b) = super::take_set_overflow_page(&scope_3, key, c3, 2, None).await.unwrap();
+        assert_eq!(p3_b.len(), 2);
+        assert_eq!(p3_b[0].member, text_blob("db1_m2"));
+        assert_eq!(p3_b[1].member, text_blob("db1_m3"));
+        let (srv3, _) =
+            super::take_collection_scan_cursor(&scope_3, key, c3, super::RedisCollectionOverflowKind::Set, None)
+                .await
+                .unwrap();
+        assert_eq!(srv3, 303);
+    }
+
+    #[test]
+    fn collection_overflow_sessions_capacity_and_lru_eviction() {
+        let mut sessions = super::RedisCollectionOverflowSessions::default();
+        let scope = super::RedisOperationScope { connection_id: "capacity-test".to_string(), db: 0 };
+
+        let mut cursors = Vec::new();
+        for i in 0..super::COLLECTION_OVERFLOW_SESSION_LIMIT {
+            let session = super::RedisCollectionOverflowSession {
+                scope: scope.clone(),
+                key: format!("key-{i}").into_bytes(),
+                kind: super::RedisCollectionOverflowKind::Hash,
+                filter: None,
+                sort_direction: None,
+                followup_cursor: 0,
+                items: super::RedisCollectionOverflowItems::Hash(vec![]),
+                last_used: std::time::Instant::now(),
+            };
+            let cursor = sessions.insert(session);
+            cursors.push(cursor);
+        }
+
+        assert_eq!(sessions.entries.len(), super::COLLECTION_OVERFLOW_SESSION_LIMIT);
+
+        // Mark the first cursor as oldest
+        let oldest_cursor = cursors[0];
+        sessions.entries.get_mut(&oldest_cursor).unwrap().last_used =
+            std::time::Instant::now() - std::time::Duration::from_secs(60);
+
+        // Inserting the 129th session must evict the oldest cursor
+        let extra_session = super::RedisCollectionOverflowSession {
+            scope: scope.clone(),
+            key: b"extra-key".to_vec(),
+            kind: super::RedisCollectionOverflowKind::Hash,
+            filter: None,
+            sort_direction: None,
+            followup_cursor: 0,
+            items: super::RedisCollectionOverflowItems::Hash(vec![]),
+            last_used: std::time::Instant::now(),
+        };
+        let extra_cursor = sessions.insert(extra_session);
+
+        assert_eq!(sessions.entries.len(), super::COLLECTION_OVERFLOW_SESSION_LIMIT);
+        assert!(!sessions.entries.contains_key(&oldest_cursor));
+        assert!(sessions
+            .take_matching(oldest_cursor, &scope, b"key-0", super::RedisCollectionOverflowKind::Hash, None, None)
+            .is_none());
+
+        assert!(sessions.entries.contains_key(&extra_cursor));
+        assert!(sessions
+            .take_matching(extra_cursor, &scope, b"extra-key", super::RedisCollectionOverflowKind::Hash, None, None)
+            .is_some());
+    }
+
+    #[tokio::test]
     #[ignore = "requires approved disposable Valkey multi-DB, default-one and Redis cluster fixtures"]
     async fn cluster_databases_live_native_mapped_and_permission_controls() {
         let mut config = redis_test_connection_config();

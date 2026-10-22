@@ -415,6 +415,49 @@ describe("useDataGridColumnResize", () => {
     expect(remounted.columnWidths.value[0]).not.toBe(fittedWidth);
   });
 
+  it("preserves manually resized column widths while invalidating auto columns when density or font metrics change", async () => {
+    const state = createResizeState({
+      columns: ["id", "description"],
+      rows: [[1, "x".repeat(120)]],
+      cacheKey: "result-manual-preservation",
+    });
+    state.initColumnWidths();
+
+    const initialAutoWidth = state.columnWidths.value[1];
+
+    // User manually resizes column 0
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 260 }));
+    const manualWidth = state.columnWidths.value[0];
+    expect(manualWidth).toBeGreaterThan(160);
+
+    // Change density from standard to compact
+    state.setDensity("compact");
+    await nextTick();
+
+    // Manually resized column 0 preserves its exact width
+    expect(state.columnWidths.value[0]).toBe(manualWidth);
+    // Auto calculated column 1 recalculates with compact density
+    expect(state.columnWidths.value[1]).not.toBe(initialAutoWidth);
+
+    // Remount with compact density and new font metric
+    state.setHeaderTextWidth(220);
+    await nextTick();
+    const remounted = createResizeState({
+      columns: ["id", "description"],
+      rows: [[2, "short"]],
+      cacheKey: "result-manual-preservation",
+      density: "compact",
+      headerTextWidth: 220,
+    });
+    remounted.initColumnWidths();
+
+    // Manually resized column 0 is restored from cache
+    expect(remounted.columnWidths.value[0]).toBe(manualWidth);
+    // Auto column 1 is recalculated from the new rows and font metrics
+    expect(remounted.columnWidths.value[1]).not.toBe(initialAutoWidth);
+  });
+
   it("evicts the least recently used width states at the cache limit", () => {
     const structureSignature = createDataGridColumnStructureSignature(["id"]);
     const measurementSignature = createDataGridColumnMeasurementSignature("standard", true, 14);
@@ -678,6 +721,51 @@ describe("useDataGridColumnResize", () => {
     comf.initColumnWidths();
 
     expect(comf.columnWidths.value[0]).toBeGreaterThanOrEqual(std.columnWidths.value[0]);
+  });
+
+  it("clears remembered column widths and restores automatic calculation", () => {
+    const cacheKey = "test-reset-column-widths";
+    const state = createResizeState({
+      columns: ["id", "name"],
+      rows: [[1, "Alice"]],
+      cacheKey,
+      widthMode: "content",
+    });
+    state.initColumnWidths();
+    const autoWidth = state.columnWidths.value[0]!;
+    expect(state.hasUserSizedColumns.value).toBe(false);
+
+    // Resize column 0 manually
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 250 }));
+    expect(state.columnWidths.value[0]).toBeGreaterThan(autoWidth);
+    expect(state.hasUserSizedColumns.value).toBe(true);
+    expect(localStorage.getItem(`dbx-data-grid-column-widths:${cacheKey}`)).toBeTruthy();
+
+    // Reset column widths
+    state.resetColumnWidths();
+    expect(state.hasUserSizedColumns.value).toBe(false);
+    expect(state.columnWidths.value[0]).toBe(autoWidth);
+    expect(localStorage.getItem(`dbx-data-grid-column-widths:${cacheKey}`)).toBeNull();
+  });
+
+  it("clears auto-fitted widths after manual and automatic width states are split", () => {
+    const cacheKey = "test-reset-auto-fitted-column-widths";
+    const state = createResizeState({
+      columns: ["description"],
+      rows: [["A long description that has been explicitly fitted"]],
+      cacheKey,
+      widthMode: "content",
+    });
+    state.initColumnWidths();
+    const autoWidth = state.columnWidths.value[0]!;
+    state.autoFitAllColumns();
+    expect(state.hasUserSizedColumns.value).toBe(true);
+
+    state.resetColumnWidths();
+    expect(state.hasUserSizedColumns.value).toBe(false);
+    expect(state.columnWidths.value[0]).toBe(autoWidth);
+    expect(localStorage.getItem(`dbx-data-grid-column-widths:${cacheKey}`)).toBeNull();
   });
 });
 

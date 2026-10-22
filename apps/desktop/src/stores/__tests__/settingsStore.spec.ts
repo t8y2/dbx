@@ -460,6 +460,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ functionCompletionIncludeParams: "yes" as unknown as boolean }).functionCompletionIncludeParams).toBe(true);
   });
 
+  it("enables sequence completion by default and preserves an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled).toBe(true);
+    expect(normalizeEditorSettings({}).sequenceCompletionEnabled).toBe(true);
+    expect(normalizeEditorSettings({ sequenceCompletionEnabled: false }).sequenceCompletionEnabled).toBe(false);
+    expect(normalizeEditorSettings({ sequenceCompletionEnabled: "yes" as unknown as boolean }).sequenceCompletionEnabled).toBe(true);
+  });
+
   it("defaults snippetTriggerKey to tab and preserves valid options while falling back on invalid values", () => {
     expect(normalizeEditorSettings({}).snippetTriggerKey).toBe("tab");
     expect(normalizeEditorSettings({ snippetTriggerKey: "tab" }).snippetTriggerKey).toBe("tab");
@@ -1190,6 +1197,24 @@ describe("normalizeEditorSettings - tabLayout", () => {
   });
 });
 
+describe("normalizeEditorSettings - colorizeConnectionTabsScope", () => {
+  it("defaults colorizeConnectionTabsScope to all", () => {
+    expect(normalizeEditorSettings({}).colorizeConnectionTabsScope).toBe("all");
+  });
+
+  it("preserves explicit all and active modes", () => {
+    expect(normalizeEditorSettings({ colorizeConnectionTabsScope: "all" }).colorizeConnectionTabsScope).toBe("all");
+    expect(normalizeEditorSettings({ colorizeConnectionTabsScope: "active" }).colorizeConnectionTabsScope).toBe("active");
+  });
+
+  it("falls back to all for invalid values", () => {
+    expect(normalizeEditorSettings({ colorizeConnectionTabsScope: "invalid" } as any).colorizeConnectionTabsScope).toBe("all");
+    expect(normalizeEditorSettings({ colorizeConnectionTabsScope: undefined } as any).colorizeConnectionTabsScope).toBe("all");
+    expect(normalizeEditorSettings({ colorizeConnectionTabsScope: null } as any).colorizeConnectionTabsScope).toBe("all");
+    expect(normalizeEditorSettings({ colorizeConnectionTabsScope: 123 } as any).colorizeConnectionTabsScope).toBe("all");
+  });
+});
+
 describe("normalizeEditorSettings - tabMaxWidth", () => {
   it("defaults tabMaxWidth to 0", () => {
     expect(normalizeEditorSettings({}).tabMaxWidth).toBe(0);
@@ -1889,8 +1914,10 @@ describe("settingsStore persisted settings initialization", () => {
     const firstStore = useSettingsStore();
     await firstStore.initEditorSettings();
     expect(firstStore.editorSettings.colorizeConnectionTabs).toBe(true);
+    expect(firstStore.editorSettings.colorizeConnectionTabsScope).toBe("all");
     await firstStore.updateEditorSettingsAndPersist({
       colorizeConnectionTabs: false,
+      colorizeConnectionTabsScope: "active",
       tabPlacement: "left",
       tabGroupMode: "connection",
       tabSortMode: "title-asc",
@@ -1905,6 +1932,7 @@ describe("settingsStore persisted settings initialization", () => {
 
     expect(restartedStore.editorSettings).toMatchObject({
       colorizeConnectionTabs: false,
+      colorizeConnectionTabsScope: "active",
       tabPlacement: "left",
       tabGroupMode: "connection",
       tabSortMode: "title-asc",

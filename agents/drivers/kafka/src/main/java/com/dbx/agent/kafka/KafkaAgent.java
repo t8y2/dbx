@@ -1008,14 +1008,42 @@ public final class KafkaAgent {
     // Consumer groups
     // -----------------------------------------------------------------------
 
+    /** Milliseconds left before {@code deadline}; at least 1 so an already-completed future is still read. */
+    static long remainingMillis(long deadline) {
+        return Math.max(1, deadline - System.currentTimeMillis());
+    }
+
+    /**
+     * Await each group's description against one shared deadline. Waiting the full request
+     * timeout per group let unreachable group coordinators stack N timeouts, keeping the agent
+     * busy long enough that topic requests behind it failed too (#13122).
+     */
+    static Map<String, ConsumerGroupDescription> awaitGroupDescriptions(
+        DescribeConsumerGroupsResult described,
+        List<String> groupIds,
+        long deadline,
+        java.util.function.BiConsumer<String, String> onError
+    ) {
+        Map<String, ConsumerGroupDescription> descriptions = new HashMap<>();
+        for (String groupId : groupIds) {
+            try {
+                descriptions.put(groupId, described.describedGroups().get(groupId).get(remainingMillis(deadline), TimeUnit.MILLISECONDS));
+            } catch (Exception error) {
+                onError.accept(groupId, normalizeErrorMessage(error));
+            }
+        }
+        return descriptions;
+    }
+
     private static Object listConsumerGroups(JsonObject params) throws Exception {
         AdminClient admin = requireAdmin();
         int timeout = requestTimeout(params);
+        long deadline = System.currentTimeMillis() + timeout;
         String filterTopic = stringOrEmpty(params, "topic");
 
         Collection<ConsumerGroupListing> groups = admin.listConsumerGroups(
                 new ListConsumerGroupsOptions().timeoutMs(timeout))
-            .all().get(timeout, TimeUnit.MILLISECONDS);
+            .all().get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
 
         List<String> groupIds = groups.stream()
             .map(ConsumerGroupListing::groupId)
@@ -1027,21 +1055,11 @@ public final class KafkaAgent {
 
         // Batch-describe every group in one Kafka Admin request. Per-group
         // failures degrade to an empty member list instead of failing the batch.
-        Map<String, ConsumerGroupDescription> descriptions = new HashMap<>();
         DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
             groupIds,
-            new DescribeConsumerGroupsOptions().timeoutMs(timeout)
+            new DescribeConsumerGroupsOptions().timeoutMs((int) remainingMillis(deadline))
         );
-        for (String groupId : groupIds) {
-            try {
-                descriptions.put(
-                    groupId,
-                    described.describedGroups().get(groupId).get(timeout, TimeUnit.MILLISECONDS)
-                );
-            } catch (Exception error) {
-                logger().debug("Consumer group details unavailable for {}: {}", groupId, normalizeErrorMessage(error));
-            }
-        }
+        Map<String, ConsumerGroupDescription> descriptions = awaitGroupDescriptions(described, groupIds, deadline, (groupId, message) -> logger().debug("Consumer group details unavailable for {}: {}", groupId, message));
 
         // Batch-resolve committed offsets for every group in one Admin request.
         Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
@@ -1051,13 +1069,13 @@ public final class KafkaAgent {
         Map<String, Map<TopicPartition, OffsetAndMetadata>> committedOffsets = new HashMap<>();
         ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
             offsetSpecs,
-            new ListConsumerGroupOffsetsOptions().timeoutMs(timeout)
+            new ListConsumerGroupOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
         );
         for (String groupId : groupIds) {
             try {
                 Map<TopicPartition, OffsetAndMetadata> rows = offsetsResult
                     .partitionsToOffsetAndMetadata(groupId)
-                    .get(timeout, TimeUnit.MILLISECONDS);
+                    .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                 committedOffsets.put(groupId, rows == null ? Collections.emptyMap() : rows);
             } catch (Exception error) {
                 committedOffsets.put(groupId, Collections.emptyMap());
@@ -1086,13 +1104,13 @@ public final class KafkaAgent {
                 try {
                     ListOffsetsResult latestOffsets = admin.listOffsets(
                         endOffsetSpecs,
-                        new ListOffsetsOptions().timeoutMs(timeout)
+                        new ListOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
                     );
                     for (TopicPartition topicPartition : topicPartitions) {
                         try {
                             ListOffsetsResult.ListOffsetsResultInfo info = latestOffsets
                                 .partitionResult(topicPartition)
-                                .get(timeout, TimeUnit.MILLISECONDS);
+                                .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                             endOffsets.put(topicPartition, info.offset());
                         } catch (Exception error) {
                             // Leave the partition absent so callers can tell an
@@ -1192,9 +1210,10 @@ public final class KafkaAgent {
     private static Object getConsumerGroupSnapshot(JsonObject params) throws Exception {
         AdminClient admin = requireAdmin();
         int timeout = requestTimeout(params);
+        long deadline = System.currentTimeMillis() + timeout;
         Collection<ConsumerGroupListing> listings = admin.listConsumerGroups(
                 new ListConsumerGroupsOptions().timeoutMs(timeout))
-            .all().get(timeout, TimeUnit.MILLISECONDS);
+            .all().get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
 
         List<ConsumerGroupListing> sortedListings = new ArrayList<>(listings);
         sortedListings.sort(Comparator.comparing(ConsumerGroupListing::groupId));
@@ -1212,18 +1231,9 @@ public final class KafkaAgent {
 
         DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
             groupIds,
-            new DescribeConsumerGroupsOptions().timeoutMs(timeout)
+            new DescribeConsumerGroupsOptions().timeoutMs((int) remainingMillis(deadline))
         );
-        for (String groupId : groupIds) {
-            try {
-                descriptions.put(
-                    groupId,
-                    described.describedGroups().get(groupId).get(timeout, TimeUnit.MILLISECONDS)
-                );
-            } catch (Exception error) {
-                snapshotErrors(errors, groupId).add("Consumer group details unavailable: " + normalizeErrorMessage(error));
-            }
-        }
+        descriptions.putAll(awaitGroupDescriptions(described, groupIds, deadline, (groupId, message) -> snapshotErrors(errors, groupId).add("Consumer group details unavailable: " + message)));
 
         Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
         for (String groupId : groupIds) {
@@ -1231,13 +1241,13 @@ public final class KafkaAgent {
         }
         ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
             offsetSpecs,
-            new ListConsumerGroupOffsetsOptions().timeoutMs(timeout)
+            new ListConsumerGroupOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
         );
         for (String groupId : groupIds) {
             try {
                 Map<TopicPartition, OffsetAndMetadata> groupOffsets = offsetsResult
                     .partitionsToOffsetAndMetadata(groupId)
-                    .get(timeout, TimeUnit.MILLISECONDS);
+                    .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                 committedOffsets.put(groupId, groupOffsets == null ? Collections.emptyMap() : groupOffsets);
                 committedOffsetsAvailable.put(groupId, true);
             } catch (Exception error) {
@@ -1272,13 +1282,13 @@ public final class KafkaAgent {
             try {
                 ListOffsetsResult latestOffsets = admin.listOffsets(
                     endOffsetSpecs,
-                    new ListOffsetsOptions().timeoutMs(timeout)
+                    new ListOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
                 );
                 for (TopicPartition topicPartition : allPartitions) {
                     try {
                         ListOffsetsResult.ListOffsetsResultInfo info = latestOffsets
                             .partitionResult(topicPartition)
-                            .get(timeout, TimeUnit.MILLISECONDS);
+                            .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                         endOffsets.put(topicPartition, info.offset());
                     } catch (Exception error) {
                         endOffsetErrors.put(topicPartition, normalizeErrorMessage(error));

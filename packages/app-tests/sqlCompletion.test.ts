@@ -605,6 +605,25 @@ test("MongoDB completion avoids SQL keywords", () => {
   );
 });
 
+test("suggests Spanner DDL keywords and phrases (#13129)", () => {
+  const labels = (sql: string, databaseType: "spanner" | "mysql") => buildSqlCompletionItems(sql, sql.length, { tables: [], columnsByTable: new Map(), databaseType }).map((item) => item.label);
+  for (const [sql, expected] of [
+    ["CREATE CH", "CHANGE STREAM"],
+    ["CREATE SE", "SEARCH INDEX"],
+    ["CREATE VE", "VECTOR INDEX"],
+    ["CREATE PR", "PROPERTY GRAPH"],
+    ["INTERLEAVE IN PA", "INTERLEAVE IN PARENT"],
+    ["ROW DEL", "ROW DELETION POLICY"],
+    ["STOR", "STORING"],
+    ["INSERT OR UP", "INSERT OR UPDATE"],
+    ["PENDING_", "PENDING_COMMIT_TIMESTAMP"],
+  ] as const) {
+    assert.ok(labels(sql, "spanner").includes(expected), `${sql} should offer ${expected} on Spanner`);
+  }
+  assert.ok(!labels("CREATE CH", "mysql").includes("CHANGE STREAM"));
+  assert.ok(!labels("CREATE SE", "mysql").includes("SEARCH INDEX"));
+});
+
 test("quotes PostgreSQL table identifiers when completion inserts them", () => {
   const sql = "select * from Order";
   const items = buildSqlCompletionItems(sql, sql.length, {

@@ -3618,6 +3618,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "현재 페이지 SQL 복사",
     copyActualExecutionSql: "실제 실행 SQL 복사",
     pageProbeDescription: "이 페이지에는 최대 {count}행이 표시되며, 다음 페이지가 있는지 판단하기 위해 최대 1행을 추가로 읽습니다.",
+    copyExtractorQuoteIdentifiersHint: "현재 적용되지 않음: 편집기 설정 「SQL 생성 시 식별자에 따옴표 추가」가 꺼져 있어, 복사된 SQL에는 생략 가능한 따옴표가 일괄적으로 포함되지 않습니다.",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

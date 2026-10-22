@@ -3664,6 +3664,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Copiar SQL da página atual",
     copyActualExecutionSql: "Copiar SQL de execução real",
     pageProbeDescription: "Esta página exibe no máximo {count} linhas, com leitura adicional de no máximo 1 linha para determinar se há uma próxima página.",
+    copyExtractorQuoteIdentifiersHint: "Atualmente sem efeito: a configuração do editor \"Adicionar aspas aos identificadores ao gerar SQL\" está desativada; o SQL copiado nunca inclui aspas que podem ser omitidas.",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

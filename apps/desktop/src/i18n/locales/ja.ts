@@ -3688,6 +3688,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "現在のページの SQL をコピー",
     copyActualExecutionSql: "実際に実行された SQL をコピー",
     pageProbeDescription: "このページには最大 {count} 行を表示し、次のページがあるかどうかを判断するために最大 1 行を追加で読み取ります。",
+    copyExtractorQuoteIdentifiersHint: "現在は適用されません：エディター設定「SQL 生成時に識別子を引用符で囲む」がオフになっているため、コピーされる SQL には省略可能な引用符が付きません。",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

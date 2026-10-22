@@ -210,6 +210,12 @@ export function parseFilterValue(rawValue: string, columnInfo?: Pick<DataGridCol
   }
 
   if (!dataType && isNumericLiteral(unquoted)) {
+    // Leading zeros are part of the user's text value, not numeric noise:
+    // Number("0000000") is 0, which turned a text-column filter into an
+    // integer comparison when the column type was not available (#13059).
+    if (/^[+-]?0\d/.test(unquoted)) {
+      return unquoted;
+    }
     const numeric = Number(unquoted);
     if (Number.isFinite(numeric)) {
       // Keep large integers as strings to avoid JS precision loss (> Number.MAX_SAFE_INTEGER).

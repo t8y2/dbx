@@ -2799,3 +2799,27 @@ describe("quoted identifier completion filtering (issue #12008)", () => {
     expect(quotedCompletionFilterPrefix(query, prefix)).toBeUndefined();
   });
 });
+
+describe("Spanner keyword completion (issue #13129)", () => {
+  it.each(["CREATE CHANGE STREAM", "CREATE SEARCH INDEX", "CREATE VECTOR INDEX", "CREATE PROPERTY GRAPH", "INTERLEAVE IN PARENT", "STORING", "PENDING_COMMIT_TIMESTAMP", "GENERATE_UUID"])("offers %s", (label) => {
+    const sql = "CREATE ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "spanner",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === label)).toBe(true);
+  });
+
+  it("keeps Spanner-only DDL out of the PostgreSQL keyword list", () => {
+    const sql = "CREATE ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === "CREATE CHANGE STREAM")).toBe(false);
+  });
+});

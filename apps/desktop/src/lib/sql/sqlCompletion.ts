@@ -493,6 +493,62 @@ const MANTICORESEARCH_SQL_KEYWORDS = ["FACET", "MATCH", "SHOW", "SHOW META", "SH
 // CUBE grouping modifiers plus DDL vocabulary. Keep them scoped to ClickHouse.
 const CLICKHOUSE_SQL_KEYWORDS = ["FINAL", "PREWHERE", "SAMPLE", "TOTALS", "ROLLUP", "CUBE", "GLOBAL", "ARRAY", "ENGINE", "PARTITION", "TTL", "CODEC", "SETTINGS", "FORMAT", "OUTFILE", "ATTACH", "DETACH", "OPTIMIZE", "SYSTEM", "KILL", "MATERIALIZED", "PROJECTION", "GRANULARITY"];
 
+// Cloud Spanner (GoogleSQL) DDL and functions that are not part of the common
+// keyword set: change streams, search/vector indexes, property graphs, proto
+// bundles, interleaved tables and the Spanner-specific functions.
+const SPANNER_SQL_KEYWORDS = [
+  "CREATE CHANGE STREAM",
+  "ALTER CHANGE STREAM",
+  "DROP CHANGE STREAM",
+  "CREATE SEARCH INDEX",
+  "DROP SEARCH INDEX",
+  "CREATE VECTOR INDEX",
+  "DROP VECTOR INDEX",
+  "CREATE PROPERTY GRAPH",
+  "DROP PROPERTY GRAPH",
+  "CREATE SEQUENCE",
+  "ALTER SEQUENCE",
+  "DROP SEQUENCE",
+  "CREATE MODEL",
+  "DROP MODEL",
+  "CREATE PROTO BUNDLE",
+  "ALTER PROTO BUNDLE",
+  "DROP PROTO BUNDLE",
+  "CREATE SCHEMA",
+  "DROP SCHEMA",
+  "INTERLEAVE IN PARENT",
+  "ON DELETE CASCADE",
+  "STORING",
+  "NULL_FILTERED",
+  "CHANGE STREAM",
+  "SEARCH INDEX",
+  "VECTOR INDEX",
+  "PROPERTY GRAPH",
+  "WITH OFFSET",
+  "UNNEST",
+  "QUALIFY",
+  "PIVOT",
+  "UNPIVOT",
+  "TABLESAMPLE",
+  "FOR SYSTEM_TIME AS OF",
+  "SAFE_CAST",
+  "SELECT AS STRUCT",
+  "SELECT AS VALUE",
+  "EXCEPT DISTINCT",
+  "INTERSECT DISTINCT",
+  "GENERATE_UUID",
+  "GET_NEXT_SEQUENCE_VALUE",
+  "PENDING_COMMIT_TIMESTAMP",
+  "COMMIT_TIMESTAMP",
+  "JSON_QUERY",
+  "JSON_VALUE",
+  "JSON_QUERY_ARRAY",
+  "JSON_VALUE_ARRAY",
+  "PARSE_JSON",
+  "TO_JSON",
+  "TO_JSON_STRING",
+];
+
 const SQLITE_SQL_KEYWORDS = ["AUTOINCREMENT", "INTEGER", "BLOB", "BOOLEAN", "WITHOUT ROWID", "VACUUM", "PRAGMA", "JSON_EXTRACT", "JSON_SET", "STRFTIME"];
 
 // DuckDB extends the common SQL grammar with analytical clauses, relation
@@ -747,6 +803,7 @@ const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   turso: SQLITE_SQL_KEYWORDS,
   "cloudflare-d1": SQLITE_SQL_KEYWORDS,
   sqlserver: SQLSERVER_SQL_KEYWORDS,
+  spanner: SPANNER_SQL_KEYWORDS,
   oracle: ORACLE_SQL_KEYWORDS,
   "oceanbase-oracle": ORACLE_SQL_KEYWORDS,
   manticoresearch: MANTICORESEARCH_SQL_KEYWORDS,

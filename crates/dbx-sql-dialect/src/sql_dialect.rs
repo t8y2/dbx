@@ -5,6 +5,7 @@ pub mod dialect_loader;
 pub mod dialect_types;
 pub mod dialect_yaml;
 pub mod hot_reload;
+mod identifier_unquote;
 mod identifiers;
 pub mod inference;
 mod table_select;
@@ -34,6 +35,9 @@ pub use descriptor::{
     CAP_DROP_TABLE, CAP_DROP_TRIGGER, CAP_FOREIGN_KEY, CAP_GRANT_REVOKE, CAP_IDENTITY_COLUMNS, CAP_IF_NOT_EXISTS,
     CAP_INDEX_COMMENT, CAP_INDEX_FILTER, CAP_INDEX_INCLUDE, CAP_INDEX_TYPE, CAP_REBUILD_INDEX, CAP_RENAME_COLUMN,
     CAP_REORDER_COLUMN, CAP_TEMPORARY_TABLE, CAP_TRANSACTIONAL_DDL, CAP_TRUNCATE_TABLE,
+};
+pub use identifier_unquote::{
+    can_unquote_identifier, table_data_identifier_or_bare, unquote_qualified_table_reference,
 };
 pub use identifiers::{
     normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,

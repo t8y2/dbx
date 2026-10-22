@@ -11151,7 +11151,7 @@ export default withEnglishFallback({
     generateSqlIncludeDatabaseName: "Включать имя базы данных в генерируемый SQL",
     generateSqlIncludeDatabaseNameDescription: "Когда база данных это поддерживает, генерируемый SQL таблицы использует полное имя (database.schema.table в SQL Server), а не только имя таблицы.",
     generateSqlQuoteIdentifiers: "Заключать идентификаторы в кавычки в генерируемом SQL",
-    generateSqlQuoteIdentifiersDescription: "Если отключено, ссылки на таблицы в новых запросах не используют кавычки, специфичные для диалекта. Зарезервированные слова, специальные символы и имена с учётом регистра могут требовать кавычек для выполнения.",
+    generateSqlQuoteIdentifiersDescription: "Если отключено, генерируемый SQL — новые запросы, копируемый SQL и SQL представления данных — опускает необязательные кавычки диалекта. Зарезервированные слова, специальные символы и имена с учётом регистра могут требовать кавычек для выполнения.",
     formatSqlOnSqlFileSave: "Форматировать SQL при сохранении SQL-файлов",
     formatSqlOnSqlFileSaveDescription: "Автоматически форматировать SQL при сохранении SQL-файла, включая файлы библиотеки сохранённого SQL и запросы, сохранённые как .sql-файлы.",
     clickTableNavigationTarget: "Ctrl+клик по таблице открывает DDL",

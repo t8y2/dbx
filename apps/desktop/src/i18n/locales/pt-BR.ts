@@ -9534,7 +9534,7 @@ export default withEnglishFallback({
     generateSqlIncludeDatabaseName: "Incluir nome do banco de dados no SQL gerado",
     generateSqlIncludeDatabaseNameDescription: "Quando compatível com o banco de dados, o SQL de tabela gerado usa banco.tabela em vez de somente o nome da tabela.",
     generateSqlQuoteIdentifiers: "Usar aspas em identificadores no SQL gerado",
-    generateSqlQuoteIdentifiersDescription: "Quando desativado, as referências de tabela em novas consultas omitem as aspas específicas do dialeto. Palavras reservadas, caracteres especiais e nomes sensíveis a maiúsculas podem exigir aspas.",
+    generateSqlQuoteIdentifiersDescription: "Quando desativado, o SQL gerado — novas consultas, SQL copiado e o SQL da visualização de dados — omite as aspas opcionais específicas do dialeto. Palavras reservadas, caracteres especiais e nomes sensíveis a maiúsculas podem exigir aspas.",
     formatSqlOnSqlFileSave: "Formatar SQL ao salvar arquivos SQL",
     formatSqlOnSqlFileSaveDescription: "Formata automaticamente o SQL ao salvar um arquivo SQL, incluindo arquivos salvos na biblioteca SQL e consultas salvas como arquivos .sql.",
     clickTableNavigationTarget: "Ctrl+Clique abre DDL da tabela",

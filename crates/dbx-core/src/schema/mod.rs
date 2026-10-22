@@ -9676,7 +9676,7 @@ pub async fn get_table_export_ddl_core(
         None,
     )
     .await?;
-    Ok(rewrite_postgres_standard_serial_defaults(&ddl))
+    Ok(rewrite_postgres_standard_serial_defaults(&ddl, schema))
 }
 
 /// Source DDL for a table transfer that reuses it on the target.
@@ -9709,7 +9709,7 @@ pub(crate) async fn get_table_relation_export_ddl_core_for_session(
     object_type: Option<db::ObjectSourceKind>,
     client_session_id: Option<&str>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(
+    let ddl = get_table_ddl_core_with_options(
         state,
         connection_id,
         database,
@@ -9719,7 +9719,11 @@ pub(crate) async fn get_table_relation_export_ddl_core_for_session(
         TableDdlOptions::RELATION_EXPORT,
         client_session_id,
     )
-    .await
+    .await?;
+    // Whole-database exports and scheduled backups rely on the table DDL to
+    // recreate `created_by_table` sequences, so they need the same serial
+    // rewrite as the single-table export (#13058).
+    Ok(rewrite_postgres_standard_serial_defaults(&ddl, schema))
 }
 
 pub async fn get_table_display_ddl_core(
@@ -13373,20 +13377,26 @@ mod ddl_tests {
             let ddl = format!(
                 "CREATE TABLE \"public\".\"ceshi\" (\n  \"ID\" {data_type} DEFAULT nextval('\"ceshi_ID_seq\"'::regclass) NOT NULL,\n  \"name\" text\n)"
             );
-            let rewritten = rewrite_postgres_standard_serial_defaults(&ddl);
+            let rewritten = rewrite_postgres_standard_serial_defaults(&ddl, "public");
             assert!(rewritten.contains(&format!("\"ID\" {serial_type} NOT NULL")), "ddl: {rewritten}");
             assert!(!rewritten.contains("nextval("), "ddl: {rewritten}");
         }
 
         // A schema-qualified standard sequence name is also recognized.
         let ddl = "CREATE TABLE \"app\".\"ceshi\" (\n  \"ID\" bigint DEFAULT nextval('\"app\".\"ceshi_ID_seq\"'::regclass)\n)";
-        let rewritten = rewrite_postgres_standard_serial_defaults(ddl);
+        let rewritten = rewrite_postgres_standard_serial_defaults(ddl, "app");
         assert!(rewritten.contains("\"ID\" bigserial"), "ddl: {rewritten}");
         assert!(!rewritten.contains("nextval("), "ddl: {rewritten}");
 
         // Custom/shared sequences keep the explicit default.
         let custom = "CREATE TABLE \"public\".\"orders\" (\n  \"id\" bigint DEFAULT nextval('shared.custom_id_source'::regclass) NOT NULL\n)";
-        assert_eq!(rewrite_postgres_standard_serial_defaults(custom), custom);
+        assert_eq!(rewrite_postgres_standard_serial_defaults(custom, "public"), custom);
+
+        // A standard-looking sequence name that lives in another schema belongs to
+        // a shared or manually attached sequence: keep the explicit default, or a
+        // restore would re-bind the column to a fresh sequence.
+        let shared = "CREATE TABLE \"public\".\"ceshi\" (\n  \"ID\" bigint DEFAULT nextval('\"app\".\"ceshi_ID_seq\"'::regclass) NOT NULL\n)";
+        assert_eq!(rewrite_postgres_standard_serial_defaults(shared, "public"), shared);
     }
 
     #[test]
@@ -15889,10 +15899,21 @@ pub async fn opentenbase_ddl(
 /// sequence for this column, and which serial spelling it maps to.
 fn postgres_serial_type_for_sequence(
     table: &str,
+    table_schema: &str,
     column: &str,
     data_type: &str,
     sequence: &str,
 ) -> Option<&'static str> {
+    // A schema-qualified reference must point into the table's own schema: a
+    // shared or manually attached sequence in another schema that merely matches
+    // the standard name pattern must keep its explicit default, otherwise a
+    // restore would re-bind the column to a freshly created sequence.
+    if let Some((sequence_schema, _)) = sequence.split_once('.') {
+        let sequence_schema = sequence_schema.trim().trim_matches('"').replace("\"\"", "\"");
+        if !sequence_schema.eq_ignore_ascii_case(table_schema) {
+            return None;
+        }
+    }
     let unqualified = sequence.rsplit('.').next().unwrap_or(sequence).trim().trim_matches('"').replace("\"\"", "\"");
     if !unqualified.eq_ignore_ascii_case(&format!("{table}_{column}_seq")) {
         return None;
@@ -15913,7 +15934,7 @@ fn postgres_serial_type_for_sequence(
 /// not for a standalone export: restoring the exported SQL would reference a
 /// sequence that was never created. Rewrite only the standard serial sequence
 /// name; shared/custom sequences keep their explicit default.
-fn rewrite_postgres_standard_serial_defaults(ddl: &str) -> String {
+fn rewrite_postgres_standard_serial_defaults(ddl: &str, table_schema: &str) -> String {
     let create_table = Regex::new(r#"(?i)^CREATE TABLE\s+(?:"(?:[^"]|"")*"\.)?"((?:[^"]|"")*)""#).unwrap();
     let serial_column = Regex::new(
         r#"(?i)^(\s*)"((?:[^"]|"")*)"\s+(smallint|integer|bigint)\s+DEFAULT\s+nextval\('([^']*)'::regclass\)(.*)$"#,
@@ -15931,7 +15952,7 @@ fn rewrite_postgres_standard_serial_defaults(ddl: &str) -> String {
         let rewritten = current_table.as_deref().and_then(|table| {
             let caps = serial_column.captures(line)?;
             let column = caps[2].replace("\"\"", "\"");
-            let serial_type = postgres_serial_type_for_sequence(table, &column, &caps[3], &caps[4])?;
+            let serial_type = postgres_serial_type_for_sequence(table, table_schema, &column, &caps[3], &caps[4])?;
             Some(format!("{}\"{}\" {}{}", &caps[1], &caps[2], serial_type, &caps[5]))
         });
         output.push(rewritten.unwrap_or_else(|| line.to_string()));

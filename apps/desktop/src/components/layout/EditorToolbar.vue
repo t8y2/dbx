@@ -64,6 +64,7 @@ import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 import { connectionDetailRows } from "@/lib/connection/connectionDetailRows";
+import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
 
 const props = defineProps<{
   activeTab: QueryTab;
@@ -257,6 +258,11 @@ const showConnectionProductionBadge = computed(() => activeProductionContext.val
 const showDatabaseProductionBadge = computed(() => activeProductionContext.value.reason === "database");
 const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeConnectionDetailRows = computed(() => (props.activeConnection ? connectionDetailRows(props.activeConnection, t) : []));
+const activeConnectionGroupPath = computed(() => {
+  const connection = props.activeConnection;
+  if (!connection) return "";
+  return findConnectionGroupPath(connectionStore.sidebarLayout, connection.id)?.join(" / ") || "";
+});
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 // Salesforce identity badge. A Salesforce tab talks to one live org and every grid
 // save is a real REST write, so the signed-in user stays visible next to the
@@ -1013,6 +1019,7 @@ defineExpose({
             <template #trigger-label="{ label }">
               <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
                 <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
+                <span v-if="activeConnectionGroupPath" class="shrink-0 text-muted-foreground">{{ activeConnectionGroupPath }} /</span>
                 <span class="truncate">{{ label }}</span>
                 <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
               </div>

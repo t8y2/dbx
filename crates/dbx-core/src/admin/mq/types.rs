@@ -1612,6 +1612,12 @@ mod tests {
         assert_eq!(json.get("startPosition").and_then(|value| value.as_str()), Some("timestamp"));
         assert_eq!(json.get("timestamp").and_then(|value| value.as_i64()), Some(1_700_000_000_000));
 
+        // Every other start position still parses and carries no timestamp.
+        let earliest: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"startPosition":"earliest"}"#).expect("earliest peek options");
+        assert_eq!(earliest.start_position, Some(super::PeekStartPosition::Earliest));
+        assert_eq!(earliest.timestamp, None);
+
         // Requests without a timestamp keep omitting the field, and unknown
         // start positions still fail here instead of reaching the agent.
         let legacy: super::PeekMessagesOptions =

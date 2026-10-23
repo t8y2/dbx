@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, watch, useId } from "vue";
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, onUnmounted, watch, useId } from "vue";
 import { useI18n } from "vue-i18n";
 import { FolderOpen, FolderClosed, FileCode, FolderPlus, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil, Search, ArrowDownAZ, ArrowUpAZ, Loader2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -28,6 +28,7 @@ import { contentMatchPathSet, searchSqlFileContents, SQL_FILE_CONTENT_SEARCH_DEB
 import SqlSearchMatchSnippet from "@/components/layout/SqlSearchMatchSnippet.vue";
 import { orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
 import { getSqlFileOpenMode, saveSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
+import { loadSqlFileTreeState, saveSqlFileTreeState } from "@/lib/sqlFile/sqlFileTreeState";
 
 const emit = defineEmits<{
   close: [];
@@ -49,6 +50,19 @@ interface FolderState {
 }
 
 const folders = ref<FolderState[]>([]);
+const savedTreeState = loadSqlFileTreeState();
+const restoringFolders = ref(true);
+let foldersInitialized = false;
+let disposed = false;
+function persistTreeState() {
+  if (!foldersInitialized || disposed) return;
+  saveSqlFileTreeState(folders.value.map((folder) => ({ path: folder.path, collapsed: folder.collapsed, expanded: [...folder.expanded] })));
+}
+watch(() => folders.value.map((folder) => ({ path: folder.path, collapsed: folder.collapsed, expanded: [...folder.expanded] })), persistTreeState);
+onBeforeUnmount(() => {
+  persistTreeState();
+  disposed = true;
+});
 // Bumped whenever the loaded file set changes (folder added/removed/reloaded),
 // so an active content search can be re-run against the new tree.
 const foldersRevision = ref(0);
@@ -387,16 +401,17 @@ async function pickFolder() {
 }
 
 async function addFolder(folderPath: string) {
+  const saved = (restoringFolders.value ? savedTreeState : loadSqlFileTreeState()).get(normalizeExternalSqlPath(folderPath));
   const folder: FolderState = {
     path: folderPath,
     entries: [],
-    expanded: new Set(),
+    expanded: new Set(saved?.expanded ?? []),
     loading: true,
     refreshing: false,
-    collapsed: false,
+    collapsed: saved?.collapsed ?? false,
   };
   folders.value.push(folder);
-  saveFolders();
+  if (!restoringFolders.value) saveFolders();
   return loadFolderEntries(folderPath);
 }
 
@@ -722,9 +737,13 @@ function folderName(path: string): string {
 
 onMounted(async () => {
   const saved = loadSavedFolders();
-  for (const path of saved) {
-    await addFolder(path);
-  }
+  // Seed every root before awaiting scans, so closing during loading cannot
+  // persist a partial list or discard the expansion state of later roots.
+  const pending = saved.map((path) => addFolder(path));
+  foldersInitialized = true;
+  restoringFolders.value = false;
+  persistTreeState();
+  await Promise.all(pending);
 });
 
 type TreeEntry = { entry: SqlFileEntry; depth: number };

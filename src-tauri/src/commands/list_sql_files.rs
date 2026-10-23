@@ -166,7 +166,12 @@ fn compile_file_filter(file_filter: &str) -> Result<Regex, String> {
     Regex::new(&pattern).map_err(|error| format!("Invalid file filter regular expression: {error}"))
 }
 
-fn scan_sql_files(dir: &Path, depth: usize, visited: &mut HashSet<String>, file_filter: &Regex) -> Vec<SqlFileEntry> {
+fn scan_sql_files(
+    dir: &Path,
+    depth: usize,
+    visited: &mut HashSet<String>,
+    file_filter: &Regex,
+) -> Result<Vec<SqlFileEntry>, String> {
     scan_sql_files_with_directories(dir, depth, visited, file_filter, false)
 }
 
@@ -176,31 +181,38 @@ fn scan_sql_files_with_directories(
     visited: &mut HashSet<String>,
     file_filter: &Regex,
     include_empty_directories: bool,
-) -> Vec<SqlFileEntry> {
+) -> Result<Vec<SqlFileEntry>, String> {
     if depth > MAX_SCAN_DEPTH {
-        return vec![];
+        return Ok(vec![]);
     }
 
-    // Canonicalize only the top-level folder once per scan to guard against
-    // symlink loops; doing it for every subdir doubled the stat cost.
-    let canonical = std::fs::canonicalize(dir).ok();
-    if let Some(ref c) = canonical {
-        let c_str = c.to_string_lossy().to_string();
-        if !visited.insert(c_str) {
-            return vec![];
-        }
+    // Track canonical directory identities to avoid visiting a directory twice.
+    let canonical = std::fs::canonicalize(dir)
+        .map_err(|error| format!("Failed to resolve SQL folder '{}': {error}", dir.display()))?;
+    if !visited.insert(canonical.to_string_lossy().to_string()) {
+        return Ok(vec![]);
     }
 
     let mut entries = Vec::new();
-    let dir_entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return entries,
-    };
+    // A partial scan must not be presented as a successful snapshot: callers
+    // use missing paths to prune persisted folder expansion state.
+    let dir_entries =
+        std::fs::read_dir(dir).map_err(|error| format!("Failed to read SQL folder '{}': {error}", dir.display()))?;
 
-    for entry in dir_entries.flatten() {
+    for entry in dir_entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                log::warn!("Failed to read entry in SQL folder '{}': {error}", dir.display());
+                continue;
+            }
+        };
         let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
+            Ok(file_type) => file_type,
+            Err(error) => {
+                log::warn!("Failed to inspect SQL folder entry '{}': {error}", entry.path().display());
+                continue;
+            }
         };
         let path = entry.path();
         let name = match path.file_name().and_then(|n| n.to_str()) {
@@ -212,9 +224,24 @@ fn scan_sql_files_with_directories(
             if is_pruned_dir(&name) {
                 continue;
             }
-            let children =
-                scan_sql_files_with_directories(&path, depth + 1, visited, file_filter, include_empty_directories);
-            if include_empty_directories || !children.is_empty() {
+            // An unreadable child (permissions, transient network-share error)
+            // must not fail the whole root scan, but it also must not disappear:
+            // callers prune persisted expansion state for missing paths, so the
+            // folder entry stays visible with whatever children were produced.
+            let (children, degraded) = match scan_sql_files_with_directories(
+                &path,
+                depth + 1,
+                visited,
+                file_filter,
+                include_empty_directories,
+            ) {
+                Ok(children) => (children, false),
+                Err(error) => {
+                    log::warn!("Skipped unreadable SQL folder '{}': {error}", path.display());
+                    (Vec::new(), true)
+                }
+            };
+            if degraded || include_empty_directories || !children.is_empty() {
                 entries.push(SqlFileEntry { name, path: path.to_string_lossy().to_string(), is_dir: true, children });
             }
         } else if file_type.is_file() && file_filter.is_match(&name) {
@@ -235,7 +262,7 @@ fn scan_sql_files_with_directories(
         }
     });
 
-    entries
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -254,11 +281,11 @@ pub async fn list_sql_files_in_folder(
             return Err(format!("Path is not a directory: {}", folder_path));
         }
         let mut visited = HashSet::new();
-        Ok(if include_empty_directories.unwrap_or(false) {
+        if include_empty_directories.unwrap_or(false) {
             scan_sql_files_with_directories(&path, 0, &mut visited, &file_filter, true)
         } else {
             scan_sql_files(&path, 0, &mut visited, &file_filter)
-        })
+        }
     })
     .await
     .map_err(|e| format!("Failed to scan folder: {e}"))?
@@ -422,12 +449,44 @@ mod tests {
 
         let mut visited = HashSet::new();
         let filter = compile_file_filter(DEFAULT_FILE_FILTER).unwrap();
-        let entries = scan_sql_files(&root, 0, &mut visited, &filter);
+        let entries = scan_sql_files(&root, 0, &mut visited, &filter).unwrap();
         let mut names = Vec::new();
         collect_file_names(&entries, &mut names);
         names.sort();
 
         assert_eq!(names, vec!["nested.SQL", "root.sql"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scan_sql_files_keeps_root_files_when_a_child_folder_is_unreadable() {
+        let root = std::env::temp_dir().join(format!("dbx-sql-folder-degraded-{}", uuid::Uuid::new_v4()));
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(root.join("root.sql"), "SELECT 1;").unwrap();
+        std::fs::write(locked.join("hidden.sql"), "SELECT 2;").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let mut visited = HashSet::new();
+        let filter = compile_file_filter(DEFAULT_FILE_FILTER).unwrap();
+        // The unreadable child must not fail the root scan; whether its entry is
+        // empty (degraded) or full (root environments ignore the mode) the root
+        // files still load.
+        let entries = scan_sql_files(&root, 0, &mut visited, &filter)
+            .expect("unreadable child folder must not fail the root scan");
+        let mut names = Vec::new();
+        collect_file_names(&entries, &mut names);
+        assert!(names.contains(&"root.sql".to_string()), "names: {names:?}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -441,7 +500,7 @@ mod tests {
 
         let mut visited = HashSet::new();
         let filter = compile_file_filter(r"\.(sql|sh|py)$").unwrap();
-        let entries = scan_sql_files(&root, 0, &mut visited, &filter);
+        let entries = scan_sql_files(&root, 0, &mut visited, &filter).unwrap();
         let mut names = Vec::new();
         collect_file_names(&entries, &mut names);
         names.sort();

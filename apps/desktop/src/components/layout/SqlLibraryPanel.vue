@@ -53,6 +53,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
+import { loadSavedSqlTreeState, saveSavedSqlTreeState } from "@/lib/savedSql/savedSqlTreeState";
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { savedSqlBatchErrorMessage, savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
@@ -406,20 +407,31 @@ const hasAnyVisibleItem = computed(() => treeRows.value.length > 0);
 
 const collapsedFolders = ref<Set<string>>(new Set());
 
-// Seed a default-collapsed state when the library first becomes non-empty so
-// opening the panel shows every directory collapsed instead of fully expanded.
-// Guarded so a later in-session folder add/delete does not re-collapse folders
-// the user has already expanded.
+const savedTreeState = loadSavedSqlTreeState();
 const collapseDefaultsSeeded = ref(false);
 watch(
-  () => savedSqlStore.allFolders.map((folder) => folder.id),
-  (folderIds) => {
-    if (collapseDefaultsSeeded.value || folderIds.length === 0) return;
+  () => [savedSqlStore.isLoaded, savedSqlStore.allFolders.map((folder) => folder.id)] as const,
+  ([loaded, folderIds]) => {
+    // An empty list before a successful load must not erase the saved state.
+    if (!loaded) return;
+    if (collapseDefaultsSeeded.value) {
+      const currentIds = new Set(folderIds);
+      collapsedFolders.value = new Set([...collapsedFolders.value].filter((id) => currentIds.has(id)));
+      return;
+    }
+    collapsedFolders.value = new Set(folderIds.filter((id) => savedTreeState.get(id) !== true));
     collapseDefaultsSeeded.value = true;
-    collapsedFolders.value = new Set(folderIds);
   },
   { immediate: true },
 );
+
+function persistTreeState() {
+  if (!collapseDefaultsSeeded.value) return;
+  saveSavedSqlTreeState(new Map(savedSqlStore.allFolders.map((folder) => [folder.id, !collapsedFolders.value.has(folder.id)])));
+}
+
+watch(() => [collapseDefaultsSeeded.value, savedSqlStore.allFolders.map((folder) => [folder.id, !collapsedFolders.value.has(folder.id)] as const)] as const, persistTreeState, { immediate: true });
+onBeforeUnmount(persistTreeState);
 
 function collapseAllFolders() {
   // Collapse the whole tree: every folder currently known, including nested

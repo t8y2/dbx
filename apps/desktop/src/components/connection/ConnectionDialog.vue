@@ -6767,7 +6767,7 @@ function validateTransportLayers(config: LegacyConnectionConfig) {
       const localPortState = sshLocalPortState(layer.local_port);
       if (localPortState === "invalid") throw new Error(t("connection.sshHopInvalidLocalPort", { hop: label }));
       if (localPortState === "valid" && index !== lastEnabledIndex) throw new Error(t("connection.sshHopLocalPortNotLast", { hop: label }));
-      if (localPortState === "valid" && !sshLocalPortSupportedForConnection(config, mqSystemKind.value)) throw new Error(t("connection.sshHopLocalPortUnsupported", { hop: label }));
+      if (localPortState === "valid" && !sshLocalPortSupportedForConnection(config, mqSystemKind.value, selectedPluginProvider.value?.contribution.proxy_route)) throw new Error(t("connection.sshHopLocalPortUnsupported", { hop: label }));
     }
   });
 }

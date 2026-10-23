@@ -54,7 +54,7 @@ describe("ssh local port helpers", () => {
 
 describe("sshLocalPortSupportedForConnection", () => {
   type Connection = Parameters<typeof sshLocalPortSupportedForConnection>[0];
-  const CASES: { name: string; config: Connection; mqSystemKind?: string; supported: boolean }[] = [
+  const CASES: { name: string; config: Connection; mqSystemKind?: string; pluginProxyRoute?: boolean; supported: boolean }[] = [
     { name: "postgres", config: { db_type: "postgres" }, supported: true },
     { name: "mysql", config: { db_type: "mysql" }, supported: true },
     { name: "redis without a mode", config: { db_type: "redis" }, supported: true },
@@ -75,10 +75,15 @@ describe("sshLocalPortSupportedForConnection", () => {
     { name: "rocketmq picked in the form", config: { db_type: "mq", driver_profile: "kafka", external_config: { systemKind: "kafka" } }, mqSystemKind: "rocketmq", supported: false },
     { name: "kafka picked in the form over a saved rocketmq kind", config: { db_type: "mq", driver_profile: "rocketmq", external_config: { systemKind: "rocketmq" } }, mqSystemKind: "kafka", supported: true },
     { name: "form kind ignored for other database types", config: { db_type: "postgres" }, mqSystemKind: "rocketmq", supported: true },
+    { name: "a plugin whose provider declares proxy_route", config: { db_type: "plugin" }, pluginProxyRoute: true, supported: false },
+    { name: "a plugin whose provider does not declare proxy_route", config: { db_type: "plugin" }, pluginProxyRoute: false, supported: true },
+    { name: "a plugin with no provider flag", config: { db_type: "plugin" }, supported: true },
+    { name: "proxy_route ignored for other database types", config: { db_type: "postgres" }, pluginProxyRoute: true, supported: true },
+    { name: "proxy_route ignored for message queues", config: { db_type: "mq", driver_profile: "kafka" }, mqSystemKind: "kafka", pluginProxyRoute: true, supported: true },
   ];
 
-  it.each(CASES)("reports $name as supported: $supported", ({ config, mqSystemKind, supported }) => {
-    expect(sshLocalPortSupportedForConnection(config, mqSystemKind)).toBe(supported);
+  it.each(CASES)("reports $name as supported: $supported", ({ config, mqSystemKind, pluginProxyRoute, supported }) => {
+    expect(sshLocalPortSupportedForConnection(config, mqSystemKind, pluginProxyRoute)).toBe(supported);
   });
 });
 

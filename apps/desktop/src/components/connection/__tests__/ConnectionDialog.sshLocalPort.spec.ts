@@ -3,7 +3,7 @@
 import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import type { ConnectionConfig, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import type { ConnectionConfig, InstalledPlugin, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
 
 const { store, settings, backend } = vi.hoisted(() => ({
   store: {
@@ -147,6 +147,22 @@ const proxyLayer: TransportLayerConfig = { type: "proxy", id: "proxy", name: "Co
 
 function tunnelled(layers: TransportLayerConfig[], overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
   return { id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres", driver_label: "PostgreSQL", host: "db.internal", port: 5432, username: "app", password: "secret", database: "app", save_password: true, transport_layers: layers, ...overrides };
+}
+
+function pluginWithProvider(proxyRoute: boolean): InstalledPlugin {
+  return {
+    manifest: {
+      id: "sample.kafka",
+      name: "Sample Kafka",
+      drivers: [],
+      contributions: [{ type: "connection-provider", id: "sample.connection", label: "Sample Kafka", database_type: "sample", fields: [], capabilities: ["connect"], proxy_route: proxyRoute }],
+    },
+    compatibility: { compatible: true },
+  };
+}
+
+function pluginConnection(layers: TransportLayerConfig[]): ConnectionConfig {
+  return { id: "plugin-1", name: "Sample", db_type: "plugin", plugin_id: "sample.kafka", plugin_connection_provider: "sample.connection", plugin_connection_type: "sample", host: "", port: 0, username: "", password: "", transport_layers: layers };
 }
 
 async function settle() {
@@ -346,6 +362,34 @@ describe("ConnectionDialog SSH fixed local port", () => {
 
   it("accepts a port on a Redis standalone connection", async () => {
     await mountDialog(tunnelled([sshLayer("bastion", { local_port: 4059 })], { db_type: "redis", driver_profile: "redis", driver_label: "Redis", port: 6379, redis_connection_mode: "standalone" }));
+
+    await save();
+
+    expect(savedLayers()).toEqual([expect.objectContaining({ id: "bastion", local_port: 4059 })]);
+  });
+
+  it("refuses a port on a plugin connection whose provider declares proxy_route", async () => {
+    backend.listPlugins.mockResolvedValue([pluginWithProvider(true)]);
+    await mountDialog(pluginConnection([sshLayer("bastion", { local_port: 4059 })]));
+
+    await save();
+
+    expect(store.updateConnection).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Layer bastion: Local port is not supported for this connection type");
+  });
+
+  it("saves a plugin connection with proxy_route when the layer has no port", async () => {
+    backend.listPlugins.mockResolvedValue([pluginWithProvider(true)]);
+    await mountDialog(pluginConnection([sshLayer("bastion")]));
+
+    await save();
+
+    expect((savedLayers()[0] as SshTunnelConfig).local_port).toBeUndefined();
+  });
+
+  it("accepts a port on a plugin connection whose provider does not declare proxy_route", async () => {
+    backend.listPlugins.mockResolvedValue([pluginWithProvider(false)]);
+    await mountDialog(pluginConnection([sshLayer("bastion", { local_port: 4059 })]));
 
     await save();
 

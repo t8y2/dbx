@@ -46,9 +46,11 @@ function isRocketMqConnection(config: SshLocalPortConnection, mqSystemKind?: str
 /**
  * Whether the connection's primary tunnel can listen on a fixed local port (Redis Cluster and Sentinel route per node).
  * `mqSystemKind` is the message-queue kind picked in the form, which the backend reads from `external_config.systemKind`.
+ * `pluginProxyRoute` is the selected plugin provider's `proxy_route` flag: those providers connect through a SOCKS5 route.
  */
-export function sshLocalPortSupportedForConnection(config: SshLocalPortConnection, mqSystemKind?: string): boolean {
+export function sshLocalPortSupportedForConnection(config: SshLocalPortConnection, mqSystemKind?: string, pluginProxyRoute?: boolean): boolean {
   if (NO_STATIC_TUNNEL_DB_TYPES.has(config.db_type) || isCloudflareD1Connection(config) || isRocketMqConnection(config, mqSystemKind)) return false;
+  if (config.db_type === "plugin" && pluginProxyRoute === true) return false;
   return config.db_type !== "redis" || (config.redis_connection_mode !== "cluster" && config.redis_connection_mode !== "sentinel");
 }
 

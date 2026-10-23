@@ -362,6 +362,20 @@ impl PluginHost {
             Err(_) => false,
         }
     }
+
+    /// The user-facing label of the connection's provider when it declared
+    /// `proxy_route`, falling back to the plugin name like the other
+    /// user-facing messages. `None` when the provider does not route through
+    /// SOCKS5 or the config does not resolve to a provider.
+    pub fn proxy_route_provider_label(&self, config: &ConnectionConfig) -> Option<String> {
+        let (plugin, provider) = self.resolve_connection_provider(config).ok()?;
+        if !provider.proxy_route {
+            return None;
+        }
+        let label = provider.label.as_deref().unwrap_or(&plugin.manifest.name);
+        Some(label.trim().to_string())
+    }
+
     pub async fn test_connection(
         &self,
         config: &ConnectionConfig,

@@ -337,6 +337,47 @@ describe("sqlCompletion keyword snippets", () => {
       expect(items[0]?.type).toBe("function");
     });
   });
+
+  describe("clause keywords after a completed JOIN ... ON predicate (#13283)", () => {
+    const objects = ["wms_handle_order", "WhereUsed", "web_hook", "wh_sync"].flatMap((name) => [
+      { name, schema: "app", type: "procedure" as const, signature: "" },
+      { name: `${name}_fn`, schema: "app", type: "function" as const, signature: "" },
+    ]);
+
+    function rankedItems(sql: string, databaseType: "mysql" | "postgres" | "sqlserver") {
+      const legacy = getSqlCompletionContext(sql, sql.length, { databaseType });
+      const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length, { databaseType }), legacy);
+      return buildSqlCompletionItemsFromContext(context, {
+        databaseType,
+        tables: [{ name: "orders" }, { name: "users" }],
+        columnsByTable: new Map([
+          ["orders", [{ name: "user_id", table: "orders" }]],
+          ["users", [{ name: "id", table: "users" }]],
+        ]),
+        objects,
+        keywordCase: "upper",
+      });
+    }
+
+    it.each([
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id w", "WHERE"],
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id wh", "WHERE"],
+      ["SELECT * FROM orders JOIN users ON users.id = orders.user_id AND users.id > 0 w", "WHERE"],
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id gr", "GROUP"],
+    ])("ranks the clause keyword first for %s", (sql, keyword) => {
+      for (const databaseType of ["mysql", "postgres", "sqlserver"] as const) {
+        const items = rankedItems(sql, databaseType);
+        expect(items[0]?.type, `${databaseType} ${sql}`).toBe("keyword");
+        expect(items[0]?.label, `${databaseType} ${sql}`).toBe(keyword);
+      }
+    });
+
+    it("keeps columns ahead of keywords while the ON predicate is still open", () => {
+      const items = rankedItems("SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_", "mysql");
+
+      expect(items[0]?.label).toBe("user_id");
+    });
+  });
 });
 
 describe("SQL Server datepart completion", () => {

@@ -1777,6 +1777,8 @@ export interface SqlCompletionContext {
   dataTypeContext: boolean;
   /** The cursor follows a complete FROM/JOIN table reference, where the next word is an alias or a clause keyword. */
   afterTableReference?: boolean;
+  /** The cursor follows a complete `JOIN … ON` predicate, where a clause keyword is the next expected word. */
+  afterJoinCondition?: boolean;
 }
 
 const SQL_COMPLETION_CLOSING_QUOTES: Readonly<Record<string, SqlCompletionClosingQuote>> = {
@@ -3050,6 +3052,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     contextKind,
     dataTypeContext,
     afterTableReference: !dataTypeContext && !qualifier && !exclusiveTableSuggestions && !suggestColumns && !insertInfo && isAfterSelectBodyExpression(beforeToken, options.databaseType),
+    afterJoinCondition: !dataTypeContext && !qualifier && !exclusiveTableSuggestions && !insertInfo && isAfterJoinOnCondition(beforeToken, options.databaseType),
   };
 }
 
@@ -3720,6 +3723,22 @@ function isAfterSelectBodyExpression(beforeToken: string, databaseType: Database
   const lastKeyword = /\b([A-Za-z_][\w$]*)\s*$/.exec(cleaned)?.[1]?.toLowerCase();
   if (lastKeyword && SELECT_BODY_INCOMPLETE_TAIL_KEYWORDS.has(lastKeyword)) return false;
   return true;
+}
+
+/**
+ * A complete `ON a = b` predicate also ends a condition where a clause keyword can
+ * come next. `isInColumnContext` treats the operators in that predicate as "a column
+ * goes here", which kept `suggestColumns` true and silenced the keyword ranking after
+ * `LEFT JOIN … ON …` (#13283).
+ */
+function isAfterJoinOnCondition(beforeToken: string, databaseType: DatabaseType | undefined): boolean {
+  const cleaned = maskSqlLiteralsAndComments(beforeToken, databaseType).trimEnd();
+  const lastOn = lastTopLevelKeywordIndex(cleaned, "on");
+  if (lastOn < 0) return false;
+  if (lastTopLevelKeywordIndex(cleaned, "where") > lastOn || lastTopLevelKeywordIndex(cleaned, "having") > lastOn) return false;
+  const lastKeyword = /\b([A-Za-z_][\w$]*)\s*$/.exec(cleaned)?.[1]?.toLowerCase();
+  if (lastKeyword && CONDITION_INCOMPLETE_TAIL_KEYWORDS.has(lastKeyword)) return false;
+  return isExpressionTailComplete(cleaned);
 }
 
 const SELECT_BODY_INCOMPLETE_TAIL_KEYWORDS = new Set(["where", "and", "or", "not", "having", "group", "order", "by", "on", "is", "in", "like", "between", ...JOIN_MODIFIERS]);
@@ -6670,7 +6689,9 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
   // After `FROM t`, a routine name cannot come next, but a clause keyword can.
   // Without this, initials and fuzzy matches on hundreds of procedures pushed
   // WHERE out of the list for `wh`, `whe` and `wher` (#13120).
-  const clauseKeywordExpected = !!prefix && !!context.afterTableReference && !context.suggestColumns && !context.suggestTables;
+  // `afterJoinCondition` implies a finished predicate, so `suggestColumns` being
+  // true there only reflects the `=` the predicate already used.
+  const clauseKeywordExpected = !!prefix && !context.suggestTables && (!!context.afterTableReference || !!context.afterJoinCondition);
   const normalizedPrefix = prefix.toLowerCase();
 
   return activeSqlKeywords(databaseType, driverProfile)

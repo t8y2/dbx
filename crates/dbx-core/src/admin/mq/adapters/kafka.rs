@@ -683,6 +683,9 @@ fn peek_messages_params(
     if let Some(offset) = options.offset {
         params["offset"] = serde_json::json!(offset);
     }
+    if let Some(timestamp) = options.timestamp {
+        params["timestamp"] = serde_json::json!(timestamp);
+    }
     params
 }
 

@@ -29,6 +29,7 @@ const replaceText = ref("");
 const showReplace = ref(false);
 const caseSensitive = ref(false);
 const useRegex = ref(false);
+const wholeWord = ref(false);
 const matchCount = ref(0);
 const currentMatchIndex = ref(0);
 const searchInputRef = ref<HTMLInputElement>();
@@ -78,6 +79,7 @@ function dispatchSearchQuery() {
     search: searchText.value,
     caseSensitive: caseSensitive.value,
     useRegex: useRegex.value,
+    wholeWord: wholeWord.value,
     replace: replaceText.value,
   });
   v.dispatch({ effects: setSearchQuery.of(q) });
@@ -131,6 +133,7 @@ function collectScopedMatches(v: EditorView, limit = Number.POSITIVE_INFINITY) {
     search: searchText.value,
     caseSensitive: caseSensitive.value,
     useRegex: useRegex.value,
+    wholeWord: wholeWord.value,
   });
   if (!q.valid) return null;
   return collectEditorSearchMatches(q, v.state, searchScopeFrom, searchScopeTo, limit);
@@ -142,6 +145,7 @@ function collectAllMatches(v: EditorView, limit = Number.POSITIVE_INFINITY) {
     search: searchText.value,
     caseSensitive: caseSensitive.value,
     useRegex: useRegex.value,
+    wholeWord: wholeWord.value,
   });
   if (!query.valid) return [];
   return collectEditorSearchMatches(query, v.state, searchScopeFrom ?? 0, searchScopeTo ?? v.state.doc.length, limit);
@@ -153,6 +157,7 @@ function* iterateAllMatches(v: EditorView): Generator<EditorSearchMatch> {
     search: searchText.value,
     caseSensitive: caseSensitive.value,
     useRegex: useRegex.value,
+    wholeWord: wholeWord.value,
   });
   if (!query.valid) return;
   const from = searchScopeFrom ?? 0;
@@ -203,6 +208,7 @@ function updateMatchInfo(autoSelect = false) {
         search: searchText.value,
         caseSensitive: caseSensitive.value,
         useRegex: useRegex.value,
+        wholeWord: wholeWord.value,
       });
       if (!q.valid) return;
       const selFrom = v.state.selection.main.from;
@@ -218,6 +224,7 @@ function updateMatchInfo(autoSelect = false) {
       search: searchText.value,
       caseSensitive: caseSensitive.value,
       useRegex: useRegex.value,
+      wholeWord: wholeWord.value,
     });
     if (!q.valid) {
       matchCount.value = 0;
@@ -405,6 +412,7 @@ function doReplace() {
       search: searchText.value,
       caseSensitive: caseSensitive.value,
       useRegex: useRegex.value,
+      wholeWord: wholeWord.value,
     });
     if (!q.valid) return;
     const iter = q.getCursor(v.state);
@@ -470,7 +478,7 @@ function onSearchKeydown(e: KeyboardEvent) {
   }
 }
 
-watch([searchText, caseSensitive, useRegex], () => {
+watch([searchText, caseSensitive, useRegex, wholeWord], () => {
   if (searchVisible.value) scheduleSearchUpdate(true);
 });
 
@@ -521,6 +529,14 @@ defineExpose({
             @click="caseSensitive = !caseSensitive"
           >
             Aa
+          </button>
+          <button
+            class="flex h-6 min-w-7 items-center justify-center rounded px-1.5 text-xs font-medium transition-colors hover:bg-accent hover:text-foreground"
+            :class="wholeWord ? 'bg-accent text-foreground' : 'text-muted-foreground'"
+            :title="t('editor.search.wholeWord')"
+            @click="wholeWord = !wholeWord"
+          >
+            W
           </button>
           <button
             class="mr-1 flex h-6 min-w-7 items-center justify-center rounded px-1.5 font-mono text-xs transition-colors hover:bg-accent hover:text-foreground"

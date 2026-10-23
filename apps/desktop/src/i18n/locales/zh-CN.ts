@@ -2258,6 +2258,7 @@ export default withEnglishFallback({
       searchFailed: "搜索失败或超时，请简化表达式后重试。",
       caseSensitive: "区分大小写",
       regex: "正则表达式",
+      wholeWord: "全词匹配",
       collapseReplace: "收起替换",
       expandReplace: "展开替换",
       prevMatch: "上一个 (Shift+Enter)",

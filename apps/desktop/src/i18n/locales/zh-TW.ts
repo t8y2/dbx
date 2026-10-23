@@ -2060,6 +2060,7 @@ export default withEnglishFallback({
       searchFailed: "搜尋失敗或逾時，請簡化運算式後重試。",
       caseSensitive: "區分大小寫",
       regex: "正規表示式",
+      wholeWord: "全字匹配",
       collapseReplace: "收起取代",
       expandReplace: "展開取代",
       prevMatch: "上一個 (Shift+Enter)",

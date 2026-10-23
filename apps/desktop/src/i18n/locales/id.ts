@@ -1916,6 +1916,7 @@ export default withEnglishFallback({
       searchFailed: "Pencarian gagal atau kehabisan waktu. Sederhanakan ekspresi dan coba lagi.",
       caseSensitive: "Case sensitive",
       regex: "Ekspresi reguler",
+      wholeWord: "Kata utuh",
       collapseReplace: "Ciutkan ganti",
       expandReplace: "Perluas ganti",
       prevMatch: "Sebelumnya (Shift+Enter)",

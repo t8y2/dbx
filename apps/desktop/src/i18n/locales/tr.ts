@@ -1646,6 +1646,7 @@ export default withEnglishFallback({
       searchFailed: "Arama başarısız oldu veya zaman aşımına uğradı. İfadeyi basitleştirip tekrar deneyin.",
       caseSensitive: "Büyük/küçük harfe duyarlı",
       regex: "Düzenli ifade",
+      wholeWord: "Tam kelime",
       collapseReplace: "Değiştirmeyi daralt",
       expandReplace: "Değiştirmeyi genişlet",
       prevMatch: "Önceki (Shift+Enter)",

@@ -2150,6 +2150,7 @@ export default withEnglishFallback({
       searchFailed: "La búsqueda falló o agotó el tiempo. Simplifica la expresión e inténtalo de nuevo.",
       caseSensitive: "Distinguir mayúsculas",
       regex: "Expresión regular",
+      wholeWord: "Palabra completa",
       collapseReplace: "Contraer reemplazo",
       expandReplace: "Expandir reemplazo",
       prevMatch: "Anterior (Shift+Enter)",

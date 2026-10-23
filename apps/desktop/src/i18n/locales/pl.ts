@@ -1959,6 +1959,7 @@ export default withEnglishFallback({
       replaceAll: "Zamień wszystkie",
       caseSensitive: "Uwzględniaj wielkość liter",
       regex: "Wyrażenie regularne",
+      wholeWord: "Całe słowo",
       collapseReplace: "Zwiń pole zamiany",
       expandReplace: "Rozwiń pole zamiany",
       prevMatch: "Poprzednie (Shift+Enter)",

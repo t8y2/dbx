@@ -1648,6 +1648,7 @@ export default withEnglishFallback({
       searchFailed: "Axtarış uğursuz oldu və ya vaxtı bitdi. İfadəni sadələşdirib yenidən cəhd edin.",
       caseSensitive: "Böyük və kiçik hərflərə həssas",
       regex: "Müntəzəm ifadə",
+      wholeWord: "Bütöv söz",
       collapseReplace: "Əvəzetməni yığ",
       expandReplace: "Əvəzetməni genişləndir",
       prevMatch: "Əvvəlki (Shift+Enter)",

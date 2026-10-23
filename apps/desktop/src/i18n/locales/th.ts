@@ -2283,6 +2283,7 @@ export default withEnglishFallback({
       replaceAll: "แทนที่ทั้งหมด",
       caseSensitive: "คำนึงถึงตัวพิมพ์เล็กใหญ่",
       regex: "Regular Expression",
+      wholeWord: "ทั้งคำ",
       collapseReplace: "ยุบการแทนที่",
       expandReplace: "ขยายการแทนที่",
       prevMatch: "ก่อนหน้า (Shift+Enter)",

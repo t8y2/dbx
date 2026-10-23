@@ -2008,6 +2008,7 @@ export default withEnglishFallback({
       searchFailed: "검색에 실패했거나 시간이 초과되었습니다. 표현식을 간단히 하고 다시 시도하세요.",
       caseSensitive: "대소문자 구분",
       regex: "정규 표현식",
+      wholeWord: "단어 단위",
       collapseReplace: "바꾸기 접기",
       expandReplace: "바꾸기 펼치기",
       prevMatch: "이전 (Shift+Enter)",

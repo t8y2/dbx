@@ -2325,6 +2325,7 @@ export default {
       searchFailed: "Search failed or timed out. Simplify the expression and try again.",
       caseSensitive: "Case sensitive",
       regex: "Regular expression",
+      wholeWord: "Whole word",
       collapseReplace: "Collapse replace",
       expandReplace: "Expand replace",
       prevMatch: "Previous (Shift+Enter)",

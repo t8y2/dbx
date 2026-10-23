@@ -62,7 +62,7 @@ let previewTimer: ReturnType<typeof setTimeout> | undefined;
 const draftExtractor = computed<DataGridCopyExtractorId | null>(() => (selectedFormat.value === "smart" ? null : selectedFormat.value));
 const extractorCategory = computed(() => (draftExtractor.value ? DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[draftExtractor.value].category : null));
 const isDsv = computed(() => extractorCategory.value === "delimited");
-const supportsCsvOptions = computed(() => draftExtractor.value === "csv" || draftExtractor.value === "csv-with-headers" || draftExtractor.value === "dsv");
+const supportsCsvOptions = computed(() => draftExtractor.value === "csv" || draftExtractor.value === "csv-with-headers" || draftExtractor.value === "dsv" || draftExtractor.value === "tsv" || draftExtractor.value === "tsv-with-headers");
 const isSql = computed(() => draftExtractor.value === "sql-inserts" || draftExtractor.value === "sql-deletes-inserts" || draftExtractor.value === "sql-updates");
 const isJson = computed(() => extractorCategory.value === "json");
 const isDbunit = computed(() => draftExtractor.value === "dbunit");
@@ -392,7 +392,8 @@ function handleFormatKeydown(event: KeyboardEvent, itemIndex: number) {
                     ><SelectContent
                       ><SelectItem value="name">{{ t("grid.copyExtractorHeaderName") }}</SelectItem
                       ><SelectItem value="description">{{ t("grid.copyExtractorHeaderDescription") }}</SelectItem
-                      ><SelectItem value="both">{{ t("grid.copyExtractorHeaderBoth") }}</SelectItem></SelectContent
+                      ><SelectItem value="both">{{ t("grid.copyExtractorHeaderBoth") }}</SelectItem
+                      ><SelectItem value="name-and-description-two-rows">{{ t("grid.copyExtractorHeaderTwoRows") }}</SelectItem></SelectContent
                     ></Select
                   >
                 </div>

@@ -2449,6 +2449,7 @@ export default withEnglishFallback({
     copyExtractorHeaderName: "이름",
     copyExtractorHeaderDescription: "설명",
     copyExtractorHeaderBoth: "이름 및 설명",
+    copyExtractorHeaderTwoRows: "이름과 설명 (두 줄)",
     copyExtractorHeaderCase: "머리글 대소문자",
     copyExtractorHeaderPreserve: "유지",
     copyExtractorHeaderUpper: "대문자",

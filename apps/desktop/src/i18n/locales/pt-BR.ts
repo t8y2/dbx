@@ -3160,6 +3160,7 @@ export default withEnglishFallback({
     copyExtractorHeaderName: "Nome",
     copyExtractorHeaderDescription: "Descrição",
     copyExtractorHeaderBoth: "Nome e descrição",
+    copyExtractorHeaderTwoRows: "Nome e descrição (duas linhas)",
     copyExtractorHeaderCase: "Maiúsculas do cabeçalho",
     copyExtractorHeaderPreserve: "Manter",
     copyExtractorHeaderUpper: "Maiúsculas",

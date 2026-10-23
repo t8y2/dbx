@@ -2709,6 +2709,7 @@ export default withEnglishFallback({
     copyExtractorHeaderName: "名称",
     copyExtractorHeaderDescription: "说明",
     copyExtractorHeaderBoth: "名称和说明",
+    copyExtractorHeaderTwoRows: "名称和说明（分两行）",
     copyExtractorHeaderCase: "表头大小写",
     copyExtractorHeaderPreserve: "保持",
     copyExtractorHeaderUpper: "大写",

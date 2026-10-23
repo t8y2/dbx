@@ -3179,6 +3179,7 @@ export default withEnglishFallback({
     copyExtractorHeaderName: "名前",
     copyExtractorHeaderDescription: "説明",
     copyExtractorHeaderBoth: "名前と説明",
+    copyExtractorHeaderTwoRows: "名前と説明（2行）",
     copyExtractorHeaderCase: "ヘッダーの大文字・小文字",
     copyExtractorHeaderPreserve: "そのまま",
     copyExtractorHeaderUpper: "大文字",

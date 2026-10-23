@@ -270,16 +270,14 @@ fn write_extraction(
         DataGridExtractorId::Tsv | DataGridExtractorId::TsvWithHeaders => {
             let mut options = context.request.options.dsv.clone();
             options.column_separator = "\t".to_string();
-            options.include_column_header = extractor == DataGridExtractorId::TsvWithHeaders;
+            // TSV shares the CSV/DSV header, NULL-text and advanced options
+            // (#13305): only the separator is pinned and quoting stays off,
+            // because TSV is split on the tab separator with no quote state
+            // machine, so a value that merely contains a double quote must
+            // not be escaped.
+            options.include_column_header = extractor == DataGridExtractorId::TsvWithHeaders
+                && options.header_position == DataGridHeaderPosition::Legacy;
             options.quote_numeric_strings = false;
-            options.header_position = DataGridHeaderPosition::Legacy;
-            options.header_format = DataGridHeaderFormat::Name;
-            options.header_case = DataGridHeaderCase::Preserve;
-            options.escape_formulas = false;
-            options.line_feed_escape_string.clear();
-            options.array_format = DataGridArrayFormat::Preserve;
-            // TSV is split on the tab separator with no quote state machine, so a
-            // value that merely contains a double quote must not be escaped.
             write_dsv(context, output, &options, false)?;
             Ok(text_metadata("text/tab-separated-values", "tsv"))
         }

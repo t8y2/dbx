@@ -3163,6 +3163,7 @@ export default withEnglishFallback({
     copyExtractorHeaderName: "名稱",
     copyExtractorHeaderDescription: "描述",
     copyExtractorHeaderBoth: "名稱與描述",
+    copyExtractorHeaderTwoRows: "名稱和說明（分兩行）",
     copyExtractorHeaderCase: "標頭大小寫",
     copyExtractorHeaderPreserve: "保留原樣",
     copyExtractorHeaderUpper: "大寫",

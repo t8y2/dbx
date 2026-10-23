@@ -2778,6 +2778,7 @@ export default {
     copyExtractorHeaderName: "Name",
     copyExtractorHeaderDescription: "Description",
     copyExtractorHeaderBoth: "Name and description",
+    copyExtractorHeaderTwoRows: "Name and description (two rows)",
     copyExtractorHeaderCase: "Header case",
     copyExtractorHeaderPreserve: "Preserve",
     copyExtractorHeaderUpper: "Uppercase",

@@ -50,6 +50,27 @@ function createDuplicateForeignKeyPreparation(): SchemaDiffPreparation {
 }
 
 describe("schema diff SQL selection projections", () => {
+  it("retains equal and unreadable Oracle originals without selecting executable steps", () => {
+    const functionDiffs = (["equal", "unreadable", "conflict"] as const).map((type) => ({
+      type,
+      name: `${type}.Proc`,
+      source: { name: `${type}.Proc`, function_type: "PROCEDURE", data_type: "", arguments: "", definition: "retained source" },
+      target: { name: `${type}.Proc`, function_type: "PROCEDURE", data_type: "", arguments: "", definition: "retained target" },
+      changes: type === "equal" ? [] : ["read or kind issue"],
+    }));
+    const result: SchemaDiffPreparation = { diffs: [], functionDiffs, syncSql: "" };
+    const objects = convertToSchemaDiffObjects([], functionDiffs);
+    expect(objects.map((object) => [object.operationType, object.selected, object.routineType])).toEqual([
+      ["none", false, "PROCEDURE"],
+      ["none", false, "PROCEDURE"],
+      ["none", false, "PROCEDURE"],
+    ]);
+    expect(objects[1]!.sourceDdl).toBe("retained source");
+    expect(objects[1]!.targetDdl).toBe("retained target");
+    objects.forEach((object) => setSchemaDiffObjectSelected(objects, object.id, true));
+    expect(selectSchemaDiffInput(result, objects).functionDiffs).toEqual([]);
+  });
+
   it("keeps every composite foreign key column in the selection dependency closure", () => {
     const result = createPreparation();
     result.diffs[0]!.foreignKeys = [

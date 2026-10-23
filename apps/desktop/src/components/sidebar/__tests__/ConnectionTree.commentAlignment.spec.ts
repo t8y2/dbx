@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { parse } from "vue/compiler-sfc";
-import { nextTick, reactive, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, reactive, ref, shallowRef, watch } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
@@ -12,11 +12,14 @@ import ptBR from "@/i18n/locales/pt-BR";
 import zhCN from "@/i18n/locales/zh-CN";
 import zhTW from "@/i18n/locales/zh-TW";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNodeComment } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { sidebarTreeSecondaryValue } from "@/lib/sidebar/sidebarTreeLabel";
+import { showSidebarRowProductionBadge, isSidebarProductionContainer } from "@/lib/sidebar/sidebarProductionBadge";
 import type { ColumnInfo, TreeNode } from "@/types/database";
 
 const source = parse(readFileSync(new URL("../ConnectionTree.vue", import.meta.url), "utf8")).descriptor.scriptSetup!.content;
 const script = ts.createSourceFile("ConnectionTree.ts", source, ts.ScriptTarget.Latest, true);
 const measureStatement = script.statements.find((statement) => ts.isFunctionDeclaration(statement) && statement.name?.text === "measureSidebarCommentLabelWidths")!.getText(script);
+const leadingStatement = script.statements.find((statement) => ts.isVariableStatement(statement) && statement.declarationList.declarations.some((declaration) => declaration.name.getText(script) === "sidebarTreeLeadingWidthItems"))!.getText(script);
 const watchStatement = script.statements
   .find((statement) => ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression) && statement.expression.expression.getText(script) === "watch" && statement.expression.arguments[1]?.getText(script) === "scheduleSidebarCommentLabelMeasure")!
   .getText(script);
@@ -48,7 +51,12 @@ function fixture(nodes: TreeNode[], initialLocale: Locale = "en", mode = "commen
     }),
   };
   const canvas = { getContext: vi.fn((): typeof context | null => context) };
-  const scope = {
+  const bindings = {
+    computed,
+    store: { getConfig: () => undefined, isDefaultDatabase: () => false, isDefaultSchema: () => false },
+    sidebarTreeSecondaryValue,
+    showSidebarRowProductionBadge,
+    isSidebarProductionContainer,
     locale,
     flatNodes: shallowRef(nodes.map((node) => ({ id: node.id, depth: 1, node }))),
     settingsStore: reactive({ editorSettings: { sidebarObjectInfoMode: mode, sidebarShowConnectionNotes: false, sidebarHiddenTablePrefixes: [], uiFontFamily: "sans-serif", uiScale: 1, sidebarFontSize: 14 } }),
@@ -63,6 +71,7 @@ function fixture(nodes: TreeNode[], initialLocale: Locale = "en", mode = "commen
     isSidebarCommentAlignableNode,
     sidebarTreeNodeComment,
   };
+  const scope = { ...bindings, sidebarTreeLeadingWidthItems: execute(`${leadingStatement}\nreturn sidebarTreeLeadingWidthItems;`, bindings) };
   const measure = () => execute(`${measureStatement}\nmeasureSidebarCommentLabelWidths();`, scope);
   return { scope, measure, measurements, canvas };
 }

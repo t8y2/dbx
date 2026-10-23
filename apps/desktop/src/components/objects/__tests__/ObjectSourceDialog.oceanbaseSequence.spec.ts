@@ -8,12 +8,22 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind } from "@/types/database";
+import type { OracleRoutineOperation } from "@/types/schemaDiff";
 import ObjectSourceDialog from "../ObjectSourceDialog.vue";
 import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 
 const ddl = 'CREATE SEQUENCE "APP"."SEQ" START WITH 40 INCREMENT BY 1 NOCACHE;';
 const alter = 'ALTER SEQUENCE "APP"."SEQ" INCREMENT BY 1 NOCACHE;';
-const mocks = vi.hoisted(() => ({ getObjectSource: vi.fn(), buildEditableObjectSource: vi.fn(), buildExecutableObjectSourceStatements: vi.fn(), executeQuery: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  getObjectSource: vi.fn(),
+  buildEditableObjectSource: vi.fn(),
+  buildExecutableObjectSourceStatements: vi.fn(),
+  executeQuery: vi.fn(),
+  prepareOracleRoutineSave: vi.fn(),
+  updateOracleRoutineOperationReferences: vi.fn(async () => {}),
+  executeOracleRoutineOperation: vi.fn(),
+  observeOracleRoutineOperation: vi.fn(),
+}));
 // The Rust/backend boundary is mocked; the dialog, CodeMirror editor and shared
 // save/production-guard pipeline remain real. Rust builder tests cover the SQL.
 vi.mock("@/lib/backend/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/backend/api")>()), ...mocks }));
@@ -60,6 +70,61 @@ async function mount(options: { databaseType?: DatabaseType; initialEditing?: bo
 }
 
 describe("OceanBase sequence source through the shared Oracle object dialog", () => {
+  function routineOperation(source: string, valid: boolean): OracleRoutineOperation {
+    const identity = { owner: "APP", name: "SEQ", kind: "FUNCTION" as const };
+    return {
+      operationId: "dialog-save-operation",
+      target: { connectionId: "ob", database: "service", schema: "APP", databaseType: "oceanbase-oracle", generation: 0 },
+      identity,
+      lifecycle: "terminal",
+      dispatched: true,
+      acknowledged: true,
+      readback: { identity, state: valid ? "verified" : "invalid", exists: true, version: null, source, definitionMatches: true, compilerMessages: valid ? [] : [{ attribute: "ERROR", line: 2, position: 17, text: "missing identifier" }], issues: [] },
+      error: null,
+    };
+  }
+  it("retains the routine editor and compiler position when acknowledged DDL is INVALID", async () => {
+    const source = 'CREATE OR REPLACE FUNCTION "APP"."SEQ" RETURN NUMBER AS BEGIN RETURN missing_value; END;';
+    const { saved } = await mount({ type: "FUNCTION", source, initialEditing: true });
+    const operation = routineOperation(source, false);
+    mocks.prepareOracleRoutineSave.mockResolvedValue({ ...operation, lifecycle: "prepared", dispatched: false, acknowledged: false, readback: null });
+    mocks.executeOracleRoutineOperation.mockResolvedValue(operation);
+    button("objects.saveSource")!.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("ERROR 2:17 missing identifier"));
+    expect(mocks.prepareOracleRoutineSave).toHaveBeenCalledWith({ connectionId: "ob", database: "service", identity: operation.identity, sql: source });
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
+    expect(mocks.getObjectSource).toHaveBeenCalledTimes(1);
+    expect(editor()!.state.doc.toString()).toBe(source);
+    expect(editor()!.state.facet(EditorState.readOnly)).toBe(false);
+  });
+  it("reloads a routine only after the shared operation has verified the final definition", async () => {
+    const source = 'CREATE OR REPLACE FUNCTION "APP"."SEQ" RETURN NUMBER AS BEGIN RETURN 1; END;';
+    const { saved } = await mount({ type: "FUNCTION", source, initialEditing: true });
+    const operation = routineOperation(source, true);
+    mocks.prepareOracleRoutineSave.mockResolvedValue({ ...operation, lifecycle: "prepared", dispatched: false, acknowledged: false, readback: null });
+    mocks.executeOracleRoutineOperation.mockResolvedValue(operation);
+    button("objects.saveSource")!.click();
+    await vi.waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(mocks.executeOracleRoutineOperation).toHaveBeenCalledExactlyOnceWith(operation.operationId, source);
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.getObjectSource).toHaveBeenCalledTimes(2));
+  });
+  it("prepares a routine before production confirmation but does not write after cancellation", async () => {
+    const source = 'CREATE OR REPLACE FUNCTION "APP"."SEQ" RETURN NUMBER AS BEGIN RETURN 2; END;';
+    const { saved } = await mount({ type: "FUNCTION", source, initialEditing: true, production: true });
+    const operation = routineOperation(source, true);
+    mocks.prepareOracleRoutineSave.mockResolvedValue({ ...operation, lifecycle: "prepared", dispatched: false, acknowledged: false, readback: null });
+    button("objects.saveSource")!.click();
+    const safety = useProductionSafetyStore();
+    await vi.waitFor(() => expect(safety.pending).toBeDefined());
+    expect(mocks.prepareOracleRoutineSave).toHaveBeenCalledOnce();
+    safety.cancel();
+    await vi.waitFor(() => expect(button("objects.saveSource")!.disabled).toBe(false));
+    expect(mocks.executeOracleRoutineOperation).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
+    expect(editor()!.state.doc.toString()).toBe(source);
+  });
   it("rechecks identity after the real production confirmation waits", async () => {
     const source = 'CREATE OR REPLACE VIEW "APP"."SEQ" AS SELECT 3 FROM DUAL';
     const { saved } = await mount({ type: "VIEW", source, initialEditing: true, production: true });

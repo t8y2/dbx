@@ -42,6 +42,7 @@ dependencies {
     runtimeOnly 'org.slf4j:slf4j-nop:1.7.36'
 
     testImplementation 'com.h2database:h2:2.2.224'
+    testRuntimeOnly 'org.duckdb:duckdb_jdbc:2.0.0.0'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.3'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

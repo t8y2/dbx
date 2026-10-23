@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
+import { sidebarHorizontalWheelDelta, sidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
 
 describe("sidebarScrollbarGeometry", () => {
   it("returns no thumb when content fits the viewport", () => {
@@ -27,5 +27,25 @@ describe("sidebarScrollbarGeometry", () => {
       maxThumbOffset: 176,
       maxScrollOffset: 9_800,
     });
+  });
+
+  it("maps Shift+wheel movement onto horizontal scrolling", () => {
+    expect(sidebarHorizontalWheelDelta({ enabled: true, shiftKey: true, deltaX: 0, deltaY: 40, scrollLeft: 10, clientWidth: 100, scrollWidth: 300 })).toBe(40);
+    expect(sidebarHorizontalWheelDelta({ enabled: true, shiftKey: true, deltaX: -20, deltaY: 40, scrollLeft: 100, clientWidth: 100, scrollWidth: 300 })).toBe(-20);
+  });
+
+  it("normalizes line and page wheel units and clamps the final movement", () => {
+    const options = { enabled: true, shiftKey: true, deltaX: 0, deltaY: 2, scrollLeft: 0, clientWidth: 100, scrollWidth: 500 };
+    expect(sidebarHorizontalWheelDelta({ ...options, deltaMode: 1, lineHeight: 28 })).toBe(56);
+    expect(sidebarHorizontalWheelDelta({ ...options, deltaMode: 2 })).toBe(200);
+    expect(sidebarHorizontalWheelDelta({ ...options, scrollLeft: 390, deltaY: 50 })).toBe(10);
+    expect(sidebarHorizontalWheelDelta({ ...options, deltaY: -50 })).toBe(0);
+    expect(sidebarHorizontalWheelDelta({ ...options, scrollWidth: 100 })).toBe(0);
+  });
+
+  it("does not consume disabled or boundary wheel gestures", () => {
+    expect(sidebarHorizontalWheelDelta({ enabled: false, shiftKey: true, deltaX: 0, deltaY: 40, scrollLeft: 10, clientWidth: 100, scrollWidth: 300 })).toBe(0);
+    expect(sidebarHorizontalWheelDelta({ enabled: true, shiftKey: false, deltaX: 0, deltaY: 40, scrollLeft: 10, clientWidth: 100, scrollWidth: 300 })).toBe(0);
+    expect(sidebarHorizontalWheelDelta({ enabled: true, shiftKey: true, deltaX: 0, deltaY: 40, scrollLeft: 200, clientWidth: 100, scrollWidth: 300 })).toBe(0);
   });
 });

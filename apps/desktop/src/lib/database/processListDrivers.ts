@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import type { DiagnosticEngine } from "./sessionDiagnostics";
 import { buildXuguKillTransactionSql, mapXuguTransactionRows, XUGU_OWN_SESSION_SQL, XUGU_TRANSACTION_LIST_SQL, xuguTransactionKey } from "./xuguProcessList";
 import { buildCancelQuerySql as buildMysqlCancelQuerySql, buildTerminateSessionSql as buildMysqlTerminateSessionSql, mapProcessRows as mapMysqlProcessRows, PROCESS_LIST_SQL as MYSQL_PROCESS_LIST_SQL, supportsProcessList as supportsMysqlProcessList } from "./mysqlProcessList";
 import {
@@ -76,6 +77,7 @@ export interface ProcessColumn {
 }
 
 export interface ProcessListDriver {
+  diagnosticEngine?: DiagnosticEngine;
   /** Xugu displays active transactions rather than a full session list. */
   mode?: "transaction";
   /** Execution database for a system-wide administrative view. */
@@ -261,6 +263,7 @@ const XUGU_DRIVER: ProcessListDriver = {
 };
 
 const ORACLE_DRIVER: ProcessListDriver = {
+  diagnosticEngine: "oracle",
   versionSql: ORACLE_SESSION_VERSION_SQL,
   listSql: buildOracleSessionListSql(false),
   listSqlForVersion: (major) => buildOracleSessionListSql(major < 12),
@@ -282,6 +285,7 @@ const ORACLE_DRIVER: ProcessListDriver = {
 };
 
 const OCEANBASE_ORACLE_DRIVER: ProcessListDriver = {
+  diagnosticEngine: "oceanbase-oracle",
   listSql: buildOceanbaseSessionListSql(),
   ownSessionSql: OCEANBASE_OWN_SESSION_SQL,
   useClientSession: true,

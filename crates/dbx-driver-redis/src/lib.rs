@@ -3392,45 +3392,7 @@ where
 
     let data = match redis_type.as_str() {
         "string" => {
-            // GETRANGE in spans no larger than `STRING_PREVIEW_MAX_BYTES`: some
-            // Redis-compatible servers (e.g. TongRDS) reject a larger span, so a
-            // configured preview above the default budget is fetched in chunks
-            // (issue #11792). Filling the budget exactly means the value may
-            // continue — STRLEN settles that without materializing the rest in
-            // the backend or IPC layer.
-            let mut bytes: Vec<u8> = Vec::new();
-            let mut at_budget = false;
-            while bytes.len() < preview_limit_bytes {
-                let span = (preview_limit_bytes - bytes.len()).min(STRING_PREVIEW_MAX_BYTES);
-                let start = bytes.len() as i64;
-                let chunk: RedisRawValue = redis::cmd("GETRANGE")
-                    .arg(key)
-                    .arg(start)
-                    .arg(start + span as i64 - 1)
-                    .query_async(con)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let chunk = redis_value_to_bytes(chunk)
-                    .ok_or_else(|| "Redis string payload is not byte-addressable".to_string())?;
-                let chunk_len = chunk.len();
-                bytes.extend_from_slice(&chunk);
-                if chunk_len < span {
-                    break;
-                }
-                if bytes.len() >= preview_limit_bytes {
-                    at_budget = true;
-                    break;
-                }
-            }
-            let total_bytes = if at_budget {
-                redis::cmd("STRLEN").arg(key).query_async(con).await.ok()
-            } else {
-                Some(bytes.len() as u64)
-            };
-            let truncated = total_bytes.map_or(at_budget, |total| total > preview_limit_bytes as u64);
-            if truncated {
-                bytes.truncate(preview_limit_bytes);
-            }
+            let (bytes, total_bytes, truncated) = read_string_preview(con, key, preview_limit_bytes).await?;
             RedisValueData::String { content: redis_blob_from_bytes(&bytes), total_bytes, truncated }
         }
         "list" => {
@@ -3502,6 +3464,152 @@ where
         ttl,
         data,
     })
+}
+
+/// Read the preview window of a Redis string value.
+///
+/// `GETRANGE` is used instead of `GET` so a large value is never pulled over
+/// the wire in full. The window is requested optimistically first, the way
+/// Redis clamps it to the value length, so reading a value stays a single
+/// round trip for the servers that clamp.
+///
+/// Strict servers reject a window that reaches past the value instead of
+/// clamping it: TongRDS answers `ERR 0-65536 is out of bounds` and the read
+/// failed, which left the key detail empty for every string shorter than the
+/// preview window (issue #13114). Such a rejection is answered with the exact
+/// value length, and the windows are then requested inside it.
+async fn read_string_preview<C>(
+    con: &mut C,
+    key: &[u8],
+    preview_limit_bytes: usize,
+) -> Result<(Vec<u8>, Option<u64>, bool), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    match read_string_windows(con, key, preview_limit_bytes, None).await {
+        Ok(result) => Ok(result),
+        Err(error) if !is_redis_out_of_bounds_error(&error) => Err(error),
+        // The server refuses to clamp the window, so the value length
+        // decides where a window may end.
+        Err(rejected) => read_string_preview_by_length(con, key, preview_limit_bytes, rejected).await,
+    }
+}
+
+/// Read a Redis string in windows that never reach past the value.
+///
+/// `rejected` is the error the optimistic window produced. The value length
+/// decides where a window may end, so the same rejection cannot come back —
+/// unless the value shrinks between the length read and the window read,
+/// which is retried against the fresh length.
+///
+/// Without a length there is no bounded window to fall back to, and asking
+/// for the rejected window again would only repeat the same failure.
+async fn read_string_preview_by_length<C>(
+    con: &mut C,
+    key: &[u8],
+    preview_limit_bytes: usize,
+    rejected: String,
+) -> Result<(Vec<u8>, Option<u64>, bool), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let Some(known_length) = redis_string_length(con, key).await else {
+        return Err(rejected);
+    };
+    match read_string_windows(con, key, preview_limit_bytes, Some(known_length)).await {
+        Ok(result) => Ok(result),
+        Err(error) if is_redis_out_of_bounds_error(&error) => {
+            // The value shrank between the length read and the window read.
+            let Some(fresh_length) = redis_string_length(con, key).await else {
+                return Err(error);
+            };
+            read_string_windows(con, key, preview_limit_bytes, Some(fresh_length)).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Read a Redis string in windows.
+///
+/// `known_length` is the value length reported by `STRLEN`; with it a window
+/// never reaches past the value. Without it the window is requested
+/// optimistically, the way Redis clamps it, and a short read ends the value.
+async fn read_string_windows<C>(
+    con: &mut C,
+    key: &[u8],
+    preview_limit_bytes: usize,
+    known_length: Option<u64>,
+) -> Result<(Vec<u8>, Option<u64>, bool), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let limit = preview_limit_bytes as u64;
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut at_budget = false;
+    while (bytes.len() as u64) < limit {
+        // Windows stay at most `STRING_PREVIEW_MAX_BYTES` wide so a large
+        // configured budget is fetched in chunks (issue #11792).
+        let span = match known_length {
+            Some(total) => {
+                let remaining = total.saturating_sub(bytes.len() as u64);
+                if remaining == 0 {
+                    break;
+                }
+                remaining.min(limit - bytes.len() as u64).min(STRING_PREVIEW_MAX_BYTES as u64)
+            }
+            None => (limit - bytes.len() as u64).min(STRING_PREVIEW_MAX_BYTES as u64),
+        };
+        let start = bytes.len() as i64;
+        let chunk: RedisRawValue = redis::cmd("GETRANGE")
+            .arg(key)
+            .arg(start)
+            .arg(start + span as i64 - 1)
+            .query_async(con)
+            .await
+            .map_err(|e| e.to_string())?;
+        let chunk =
+            redis_value_to_bytes(chunk).ok_or_else(|| "Redis string payload is not byte-addressable".to_string())?;
+        let chunk_len = chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+        if chunk_len < span {
+            // The value ended before the window did.
+            break;
+        }
+        if (bytes.len() as u64) >= limit {
+            at_budget = true;
+            break;
+        }
+    }
+    let total_bytes = match known_length {
+        Some(total) => Some(total),
+        // The budget was filled exactly, so the value may continue — STRLEN
+        // settles that without materializing the rest in the backend or IPC
+        // layer.
+        None if at_budget => redis_string_length(con, key).await,
+        None => Some(bytes.len() as u64),
+    };
+    let truncated = total_bytes.map_or(at_budget, |total| total > limit);
+    if truncated {
+        bytes.truncate(preview_limit_bytes);
+    }
+    Ok((bytes, total_bytes, truncated))
+}
+
+/// Read the length of a Redis string value.
+async fn redis_string_length<C>(con: &mut C, key: &[u8]) -> Option<u64>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let length: i64 = redis::cmd("STRLEN").arg(key).query_async(con).await.ok()?;
+    u64::try_from(length).ok()
+}
+
+/// Whether a server rejected a range because it reached past the value.
+///
+/// TongRDS answers `ERR 0-65536 is out of bounds`; Redis never rejects a
+/// range for that reason.
+fn is_redis_out_of_bounds_error(error: &str) -> bool {
+    error.contains("out of bounds")
 }
 
 /// Read the complete raw payload for a Redis string-like key.
@@ -8013,6 +8121,19 @@ mod tests {
         assert_eq!(entry_json["deliveries"], unsafe_value.to_string());
     }
 
+    /// The `(start, end)` windows DBX requested with GETRANGE.
+    fn getrange_windows(con: &FakeRedisConnection) -> Vec<(String, String)> {
+        con.commands
+            .iter()
+            .filter(|packed| packed.contains("\r\nGETRANGE\r\n"))
+            .map(|packed| {
+                let parts: Vec<&str> = packed.split("\r\n").collect();
+                let last = parts.len();
+                (parts[last - 4].to_string(), parts[last - 2].to_string())
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn string_value_uses_a_bounded_range_for_small_values() {
         let mut con = FakeRedisConnection::new(vec![bulk("string"), RedisRawValue::Int(-1), bulk("hello")]);
@@ -8031,10 +8152,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn string_value_range_stays_within_the_64kib_server_limit() {
-        // Some Redis-compatible servers reject a GETRANGE span above 64 KiB;
-        // the old budget + 1 request asked for 65537 bytes (TongRDS answered
-        // "0-65537 is out of bounds").
+    async fn string_value_range_stays_within_the_64kib_window_limit() {
+        // A window never exceeds 64 KiB, so a configured preview above that is
+        // fetched in chunks (issue #11792).
         let mut con = FakeRedisConnection::new(vec![bulk("string"), RedisRawValue::Int(-1), bulk("hello")]);
 
         super::get_value(&mut con, b"message").await.unwrap();
@@ -8043,6 +8163,125 @@ mod tests {
             con.commands.iter().find(|packed| packed.contains("\r\nGETRANGE\r\n")).expect("GETRANGE is issued");
         assert!(getrange.contains(&format!("\r\n$5\r\n{}\r\n", super::STRING_PREVIEW_MAX_BYTES - 1)), "{getrange:?}");
         assert!(!getrange.contains(&format!("\r\n$5\r\n{}\r\n", super::STRING_PREVIEW_MAX_BYTES)), "{getrange:?}");
+    }
+
+    #[tokio::test]
+    async fn string_value_falls_back_to_the_value_length_when_the_server_rejects_the_window() {
+        // Issue #13114: TongRDS does not clamp a GETRANGE window that reaches
+        // past the value the way Redis does: it answers "ERR 0-65536 is out of
+        // bounds", which left the key detail empty for every string shorter
+        // than the preview window. The read has to fall back to the exact
+        // value length.
+        let out_of_bounds = redis::RedisError::from((
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            "ERR",
+            "0-65536 is out of bounds".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(bulk("string")),
+            Ok(RedisRawValue::Int(-1)),
+            Err(out_of_bounds),
+            Ok(RedisRawValue::Int(3)),
+            Ok(bulk("123")),
+        ]);
+
+        let value = super::get_value(&mut con, b"123").await.unwrap();
+
+        let RedisValueData::String { content, total_bytes, truncated } = &value.data else {
+            panic!("expected a String value");
+        };
+        assert_eq!(redis_blob_display_text(content), "123");
+        assert_eq!(*total_bytes, Some(3));
+        assert!(!truncated);
+        // The retry asks for the value instead of the whole preview window.
+        assert_eq!(
+            getrange_windows(&con),
+            vec![("0".to_string(), "65535".to_string()), ("0".to_string(), "2".to_string())]
+        );
+        assert_eq!(con.command_count("GETRANGE"), 2);
+        assert_eq!(con.command_count("STRLEN"), 1);
+    }
+
+    #[tokio::test]
+    async fn string_value_fails_fast_when_a_strict_server_also_refuses_strlen() {
+        // The bounded fallback needs the value length. Without it the rejected
+        // window cannot be narrowed, so the read fails instead of asking for
+        // the same rejected window again.
+        let out_of_bounds = redis::RedisError::from((
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            "ERR",
+            "0-65536 is out of bounds".to_string(),
+        ));
+        let denied = redis::RedisError::from((
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            "ERR",
+            "NOPERM this user has no permissions to run the 'strlen' command".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(bulk("string")),
+            Ok(RedisRawValue::Int(-1)),
+            Err(out_of_bounds),
+            Err(denied),
+        ]);
+
+        let error = super::get_value(&mut con, b"message").await.unwrap_err();
+
+        assert!(error.contains("out of bounds"), "{error}");
+        // One rejected window and one length read; the rejected window is not
+        // requested again.
+        assert_eq!(con.command_count("GETRANGE"), 1);
+        assert_eq!(con.command_count("STRLEN"), 1);
+    }
+
+    #[tokio::test]
+    async fn string_value_retries_when_the_value_shrinks() {
+        // The value was 100 bytes when its length was read and 10 bytes when
+        // the window was requested. The read is retried against the fresh
+        // length instead of failing.
+        let out_of_bounds = || {
+            redis::RedisError::from((
+                redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+                "ERR",
+                "0-100 is out of bounds".to_string(),
+            ))
+        };
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(bulk("string")),
+            Ok(RedisRawValue::Int(-1)),
+            Err(out_of_bounds()),
+            Ok(RedisRawValue::Int(100)),
+            Err(out_of_bounds()),
+            Ok(RedisRawValue::Int(10)),
+            Ok(bulk("0123456789")),
+        ]);
+
+        let value = super::get_value(&mut con, b"message").await.unwrap();
+
+        let RedisValueData::String { content, total_bytes, truncated } = &value.data else {
+            panic!("expected a String value");
+        };
+        assert_eq!(redis_blob_display_text(content), "0123456789");
+        assert_eq!(*total_bytes, Some(10));
+        assert!(!truncated);
+        assert_eq!(con.command_count("GETRANGE"), 3);
+        assert_eq!(con.command_count("STRLEN"), 2);
+    }
+
+    #[tokio::test]
+    async fn string_value_reports_other_errors_without_retrying() {
+        let denied = redis::RedisError::from((
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            "ERR",
+            "NOPERM this user has no permissions to run the 'getrange' command".to_string(),
+        ));
+        let mut con =
+            FakeRedisConnection::with_results(vec![Ok(bulk("string")), Ok(RedisRawValue::Int(-1)), Err(denied)]);
+
+        let error = super::get_value(&mut con, b"message").await.unwrap_err();
+
+        assert!(error.contains("NOPERM"), "{error}");
+        assert_eq!(con.command_count("GETRANGE"), 1);
+        assert_eq!(con.command_count("STRLEN"), 0);
     }
 
     #[tokio::test]
@@ -8128,7 +8367,7 @@ mod tests {
             assert_eq!(con.command_count("GET"), 0);
             assert_eq!(con.command_count("STRLEN"), 0);
         }
-        // A configured limit above the 64 KiB span cap is fetched in 64 KiB chunks,
+        // A configured limit above the 64 KiB window limit is fetched in 64 KiB chunks,
         // and filling the budget exactly asks STRLEN for the real size.
         let limit = 128 * 1024;
         let mut con = FakeRedisConnection::new(vec![
@@ -8152,6 +8391,39 @@ mod tests {
         assert_eq!(base64::engine::general_purpose::STANDARD.decode(content.raw_base64).unwrap().len(), limit);
         assert_eq!(con.command_count("GETRANGE"), 2);
         assert_eq!(con.command_count("STRLEN"), 1);
+    }
+
+    /// Live check for servers that reject a GETRANGE window that reaches past
+    /// the value. TongRDS answers `ERR 0-65536 is out of bounds` there, which
+    /// left the key detail empty, so the preview has to read the value and
+    /// report its real size.
+    ///
+    /// Set `DBX_TEST_REDIS_STRING_KEY` to read an existing key instead of
+    /// writing a temporary one.
+    #[tokio::test]
+    #[ignore = "requires a disposable Redis via DBX_TEST_REDIS_URL"]
+    async fn string_preview_reads_the_value_on_strict_range_servers() {
+        let url = std::env::var("DBX_TEST_REDIS_URL").expect("DBX_TEST_REDIS_URL");
+        let existing = std::env::var("DBX_TEST_REDIS_STRING_KEY").ok();
+        let key = existing.clone().unwrap_or_else(|| "dbx-string-preview-probe".to_string());
+        let mut con = super::connect(&url, std::time::Duration::from_secs(5)).await.unwrap();
+        if existing.is_none() {
+            let _: () = redis::cmd("SET").arg(&key).arg("123").query_async(&mut con).await.unwrap();
+        }
+        let expected_len: i64 = redis::cmd("STRLEN").arg(&key).query_async(&mut con).await.unwrap();
+
+        let value = super::get_value(&mut con, key.as_bytes()).await.unwrap();
+
+        let RedisValueData::String { content, total_bytes, truncated } = value.data else {
+            panic!("expected a String value");
+        };
+        assert_eq!(total_bytes, Some(expected_len as u64));
+        assert!(!truncated);
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&content.raw_base64).unwrap();
+        assert_eq!(decoded.len() as u64, expected_len as u64);
+        if existing.is_none() {
+            let _: u64 = redis::cmd("DEL").arg(&key).query_async(&mut con).await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ import {
 } from "@/lib/table/tableTree";
 import type { ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 import { decorateDatabaseSavedSqlTreeNodes } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
 
 const context = {
   nodeId: "connection:db",
@@ -211,6 +212,42 @@ describe("PostgreSQL overloaded routines", () => {
       { label: "calc(numeric)", objectName: "calc", signature: "numeric" },
     ]);
     expect(new Set(functionGroup?.children?.map((node) => node.id) ?? []).size).toBe(3);
+  });
+});
+
+describe("Kingbase overloaded procedures", () => {
+  it.each(["simple", "grouped"] as const)("keeps missing routine signatures and empty non-routine signatures absent in the %s tree", (layout) => {
+    const objects: ObjectInfo[] = [
+      { name: "unknown", object_type: "PROCEDURE", schema: "app", signature: null },
+      { name: "orders_view", object_type: "VIEW", schema: "app", signature: "" },
+      { name: "orders_seq", object_type: "SEQUENCE", schema: "app", signature: "" },
+    ];
+    const options = { ...context, schema: "app", objects, databaseType: "kingbase" as const };
+    const nodes = layout === "simple" ? buildSimpleObjectTreeNodes(options) : buildGroupedObjectTreeNodes(options).flatMap((group) => group.children ?? []);
+
+    expect(nodes).toHaveLength(3);
+    expect(nodes.every((node) => node.signature === undefined)).toBe(true);
+  });
+
+  it.each(["simple", "grouped"] as const)("preserves overloads and the zero-argument signature in the %s tree", (layout) => {
+    const objects: ObjectInfo[] = [
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v integer" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v text" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v text" },
+    ];
+    const options = { ...context, schema: "app", objects, databaseType: "kingbase" as const };
+    const nodes = layout === "simple" ? buildSimpleObjectTreeNodes(options) : buildGroupedObjectTreeNodes(options).find((node) => node.type === "group-procedures")!.children!;
+
+    expect(nodes).toHaveLength(3);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(3);
+    expect(nodes.map(objectSourceTargetForTreeNode)).toEqual(
+      expect.arrayContaining([
+        { name: "run", schema: "app", objectType: "PROCEDURE", signature: "" },
+        { name: "run", schema: "app", objectType: "PROCEDURE", signature: "v integer" },
+        { name: "run", schema: "app", objectType: "PROCEDURE", signature: "v text" },
+      ]),
+    );
   });
 });
 

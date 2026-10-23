@@ -129,7 +129,7 @@ async function openConnectionTooltip() {
   trigger.dispatchEvent(new MouseEvent("mouseenter"));
   await vi.runAllTimersAsync();
   await nextTick();
-  return { host, node };
+  return { host, node, container };
 }
 
 afterEach(() => {
@@ -141,6 +141,38 @@ afterEach(() => {
 });
 
 describe("TreeItem visible filter connection detail", () => {
+  it.each([
+    ["mysql", "8.0", "v8.0"],
+    ["redis", "7.1.1", "v7.1.1"],
+    ["qdrant", " v1.12.0 ", "v1.12.0"],
+    ["mysql", "V8.0.36", "v8.0.36"],
+    ["mysql", "8.0.36-commercial", "v8.0.36-commercial"],
+    ["postgres", "PostgreSQL 16.4 on x86_64-pc-linux-gnu", "PostgreSQL 16.4 on x86_64-pc-linux-gnu"],
+    ["kingbase", "V009R001", "V009R001"],
+  ] as const)("shows the existing %s server version %s only in the hover details", async (db_type, productVersion, expected) => {
+    state.config = { ...mysqlConnection(), db_type, note: "Reporting connection", database_info: { productVersion } };
+
+    const { container } = await openConnectionTooltip();
+
+    const tooltip = document.querySelector('[role="tooltip"]');
+    expect(tooltip?.textContent).toContain("Server version");
+    expect(tooltip?.querySelector(`[title="${expected}"]`)?.textContent).toBe(expected);
+    expect(tooltip?.textContent).toContain("Reporting connection");
+    expect(container.textContent).not.toContain(expected);
+    expect(state.config.database_info?.productVersion).toBe(productVersion);
+  });
+
+  it.each([undefined, "", "   "])("hides missing server versions without falling back to the driver version (%s)", async (productVersion) => {
+    state.config = { ...mysqlConnection(), database_info: { productVersion, driverVersion: "42.7.4" } };
+
+    await openConnectionTooltip();
+
+    const tooltip = document.querySelector('[role="tooltip"]');
+    expect(tooltip).not.toBeNull();
+    expect(tooltip?.textContent).not.toContain("Server version");
+    expect(tooltip?.textContent).not.toContain("42.7.4");
+  });
+
   it("shows the tenant separator without URL escaping while copied URLs remain round-trippable", async () => {
     state.config = { ...mysqlConnection(), driver_profile: "oceanbase", username: "admin@tenant", port: 2881, url_params: "password=synthetic-secret" };
 

@@ -449,7 +449,7 @@ pub fn build_create_user_sql(username: &str, password: &str, tablespace: &str) -
 }
 
 pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> String {
-    let signature = if matches!(options.database_type, Some(DatabaseType::Postgres))
+    let signature = if matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Kingbase))
         && matches!(options.object_type, DatabaseObjectType::Function | DatabaseObjectType::Procedure)
     {
         options.signature.as_deref().map(|value| format!("({value})")).unwrap_or_default()
@@ -2238,6 +2238,27 @@ mod tests {
                 value: "1".to_string(),
             })
             .is_err());
+        }
+    }
+
+    #[test]
+    fn kingbase_drop_object_sql_preserves_routine_signature() {
+        for (object_type, keyword) in
+            [(DatabaseObjectType::Procedure, "PROCEDURE"), (DatabaseObjectType::Function, "FUNCTION")]
+        {
+            for signature in ["", "v integer", "v INOUT integer"] {
+                assert_eq!(
+                    build_drop_object_sql(DropObjectSqlOptions {
+                        database_type: Some(DatabaseType::Kingbase),
+                        object_type,
+                        schema: Some("app".to_string()),
+                        name: "run".to_string(),
+                        signature: Some(signature.to_string()),
+                        identifier_quote: None,
+                    }),
+                    format!("DROP {keyword} \"app\".\"run\"({signature});")
+                );
+            }
         }
     }
 

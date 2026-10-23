@@ -23,12 +23,12 @@ export async function waitForLargeValueSnapshot<T>(promise: Promise<T>, signal?:
 }
 
 /** No cache: every request validates the original server locator's lifecycle. */
-export async function readLargeValueSnapshot(request: LargeValueRequest, isCurrent: () => boolean, consume: (chunk: LargeValueChunk) => Promise<void> | void, signal?: AbortSignal): Promise<void> {
+export async function readLargeValueSnapshot(request: LargeValueRequest, isCurrent: () => boolean, consume: (chunk: LargeValueChunk) => Promise<void> | void, signal?: AbortSignal, readChunk = api.readLargeValueChunk): Promise<void> {
   let offset = 0;
   while (true) {
     signal?.throwIfAborted();
     if (!isCurrent()) throw new Error("LOB result context changed");
-    const chunk = await waitForLargeValueSnapshot(api.readLargeValueChunk({ ...request, offset, limit: 4096 }), signal);
+    const chunk = await waitForLargeValueSnapshot(readChunk({ ...request, offset, limit: 4096 }), signal);
     signal?.throwIfAborted();
     if (!isCurrent()) throw new Error("LOB result context changed");
     if (chunk.status !== "ok") throw new Error(`LOB snapshot ${chunk.status}; execute the query again`);
@@ -51,7 +51,7 @@ export async function readLargeValueSnapshot(request: LargeValueRequest, isCurre
   }
 }
 
-export async function materializeLargeValueSnapshot(request: LargeValueRequest, isCurrent: () => boolean, signal?: AbortSignal): Promise<string> {
+export async function materializeLargeValueSnapshot(request: LargeValueRequest, isCurrent: () => boolean, signal?: AbortSignal, readChunk = api.readLargeValueChunk): Promise<string> {
   const chunks: string[] = [];
   let bytes = 0;
   let kind: LargeValueChunk["value_kind"] | undefined;
@@ -66,6 +66,7 @@ export async function materializeLargeValueSnapshot(request: LargeValueRequest, 
       chunks.push(chunk.data);
     },
     signal,
+    readChunk,
   );
   return (kind === "binary" ? "0x" : "") + chunks.join("");
 }

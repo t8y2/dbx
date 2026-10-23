@@ -222,7 +222,7 @@ describe("EditorGroupTabBar group behavior", () => {
     }
   });
 
-  it("marks the active horizontal grouped tab with a primary edge accent", async () => {
+  it("marks the active horizontal grouped tab with a full-width group-colored underline", async () => {
     const store = useQueryStore();
     const settings = useSettingsStore();
     const connectionStore = useConnectionStore();
@@ -239,35 +239,41 @@ describe("EditorGroupTabBar group behavior", () => {
 
     try {
       await settle();
-      // Exactly one pill carries the active state; the CSS accent keys off it.
+      // Exactly one pill carries the active state.
       const activeTabs = host.querySelectorAll('.tab-group-tab[data-active-tab="true"]');
       expect(activeTabs).toHaveLength(1);
       expect(activeTabs[0]!.getAttribute("data-tab-id")).toBe(activeTabId);
-      // The accent is a ::before pseudo-element, so assert it on the parsed
-      // stylesheet rather than a computed style: it must paint the active
-      // grouped tab with the primary accent, not the group color, so it
-      // stays findable among several groups (issue #12485).
-      const selectors: string[] = [];
-      const heights = new Set<string>();
+
+      // The old primary ::before top accent was removed; the active grouped tab
+      // is marked by a single full-width underline on its bottom edge instead.
+      const beforeSelectors: string[] = [];
       for (const sheet of document.styleSheets) {
         for (const rule of sheet.cssRules) {
           const styleRule = rule as CSSStyleRule;
           if (styleRule.selectorText?.includes(".tab-group-tab") && styleRule.selectorText.includes('[data-active-tab="true"]') && styleRule.selectorText.endsWith("::before")) {
-            selectors.push(styleRule.selectorText);
-            // Geometry survives happy-dom's parser; var() paints do not.
-            heights.add(styleRule.style.getPropertyValue("height"));
+            beforeSelectors.push(styleRule.selectorText);
           }
         }
       }
-      expect(selectors.length).toBeGreaterThan(0);
-      expect([...heights]).toContain("3px");
-      // The paint itself: the rule block must use the primary accent token so
-      // the active tab reads as "the chosen one", distinct from every group's
-      // own colored rail.
-      const ruleStart = sharedStyles.indexOf('.tab-group-tab[data-active-tab="true"]::before');
-      expect(ruleStart).toBeGreaterThan(-1);
-      const ruleBlock = sharedStyles.slice(ruleStart, sharedStyles.indexOf("}", ruleStart) + 1);
-      expect(ruleBlock).toContain("--app-tab-active-accent");
+      expect(beforeSelectors).toHaveLength(0);
+
+      // Geometry and paint: the underline spans the pill (no inline inset) and
+      // uses the group color, so it is not confused with the classic dark
+      // selected-state bar injected inline by tabColorStyle.
+      const underlineStart = sharedStyles.indexOf('.tab-group-tab[data-active-tab="true"]::after');
+      expect(underlineStart).toBeGreaterThan(-1);
+      const underlineBlock = sharedStyles.slice(underlineStart, sharedStyles.indexOf("}", underlineStart) + 1);
+      expect(underlineBlock).toContain("var(--tab-group-color)");
+      expect(underlineBlock).toContain("left: 0");
+      expect(underlineBlock).toContain("right: 0");
+
+      // Group headers keep their color on the marker/underline instead of the
+      // label itself, which previously used the same group color as the tinted
+      // header background and was hard to read.
+      const headerStart = sharedStyles.lastIndexOf(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header {");
+      expect(headerStart).toBeGreaterThan(-1);
+      const headerBlock = sharedStyles.slice(headerStart, sharedStyles.indexOf("}", headerStart) + 1);
+      expect(headerBlock).toContain("color: var(--foreground)");
     } finally {
       app.unmount();
       host.remove();

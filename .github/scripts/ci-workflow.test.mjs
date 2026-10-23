@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-const workflow = readFileSync(new URL("../workflows/ci.yml", import.meta.url), "utf8");
+const workflow = readFileSync(new URL("../workflows/ci.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 function job(name, content = workflow) {
   const jobs = content.slice(content.indexOf("\njobs:\n") + 7);
   const pattern = /^  ([\w-]+):\s*$/gm;
@@ -282,12 +282,57 @@ test("Rust build timings remain available after failures without waiting for can
 test("Linux Rust dependency installs bound apt mirror stalls", () => {
   for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust"]) {
     const content = job(name);
-    assert.equal((content.match(/sudo timeout --kill-after=30s 10m apt-get/g) ?? []).length, 2);
+    const deadlines = [...content.matchAll(/sudo timeout --kill-after=30s (\d+)m apt-get/g)].map((match) => Number(match[1]));
+    assert.deepEqual(deadlines, [10, name === "agent-rust" ? 10 : 20]);
     for (const option of ["Acquire::Retries=3", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30"]) {
       assert.ok(content.includes(option));
     }
   }
 });
+
+for (const name of ["rust-test", "agent-integration"]) {
+  for (const scenario of ["ready", "delayed", "unavailable", "missing-mirror"]) {
+    test(`${name} Docker readiness: ${scenario}`, () => {
+      const step = job(name).match(/      - name: Configure public Docker Hub cache\n([\s\S]*?)(?=\n      - )/)[1];
+      const block = step.slice(step.indexOf("          timeout 30s")).replace(/^          /gm, "");
+      const directory = mkdtempSync(path.join(tmpdir(), "dbx-docker-ready-"));
+      try {
+        const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", `
+          sudo() { "$@"; }
+          systemctl() { printf 'restart\\n' >> "$STATE/restarts"; }
+          timeout() { shift; "$@"; }
+          sleep() { :; }
+          ${process.platform === "win32" ? 'python3() { python "$@"; }' : ""}
+          docker() {
+            local count=0
+            [[ ! -f "$STATE/count" ]] || read -r count < "$STATE/count"
+            count=$((count + 1)); printf '%s\\n' "$count" > "$STATE/count"
+            if [[ "$SCENARIO" == unavailable ]] || { [[ "$SCENARIO" == delayed ]] && ((count < 3)); }; then
+              printf 'daemon not ready\\n' >&2; return 124
+            fi
+            if [[ "$SCENARIO" == missing-mirror ]]; then printf '[]\\n'; else printf '["https://mirror.gcr.io/"]\\n'; fi
+          }
+          ${block}
+          printf 'verified\\n'
+        `], { env: { ...process.env, STATE: directory.replaceAll("\\", "/"), SCENARIO: scenario }, encoding: "utf8", timeout: 15000 });
+        assert.ifError(result.error);
+        assert.equal(readFileSync(path.join(directory, "restarts"), "utf8"), "restart\n");
+        const count = Number(readFileSync(path.join(directory, "count"), "utf8"));
+        if (scenario === "ready" || scenario === "delayed") {
+          assert.equal(result.status, 0, result.stderr);
+          assert.match(result.stdout, /verified/);
+          assert.equal(count, scenario === "ready" ? 1 : 3);
+        } else {
+          assert.notEqual(result.status, 0);
+          assert.doesNotMatch(result.stdout, /verified/);
+          assert.equal(count, scenario === "unavailable" ? 12 : 1);
+        }
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+}
 
 test("Rust test jobs install pinned nextest and retain separate doctests", () => {
   const pluginDevHost = readFileSync(new URL("../workflows/plugin-dev-host.yml", import.meta.url), "utf8");

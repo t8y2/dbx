@@ -1,5 +1,141 @@
 export type SchemaDiffTableFilterPriority = "include" | "exclude";
 
+export interface OracleRoutineEndpoint {
+  connectionId: string;
+  database: string;
+  schema: string;
+  databaseType: "oracle" | "oceanbase-oracle";
+  generation: number;
+}
+
+export interface OracleRoutineIdentity {
+  owner: string;
+  name: string;
+  kind: "PROCEDURE" | "FUNCTION";
+}
+
+export interface OracleRoutineVersion {
+  identity: OracleRoutineIdentity;
+  objectId: string;
+  status: string;
+  lastDdlTime: string;
+}
+
+export interface OracleRoutineReadIssue {
+  stage: string;
+  code: string;
+  message: string;
+}
+
+export interface OracleRoutineDependency {
+  owner: string;
+  name: string;
+  kind: string;
+  databaseLink: string | null;
+  dependencyType: string;
+}
+
+export interface OracleRoutineObjectSnapshot {
+  version: OracleRoutineVersion;
+  source: string | null;
+  sourceComplete: boolean;
+  dependencies: OracleRoutineDependency[];
+  dependenciesComplete: boolean;
+  issues: OracleRoutineReadIssue[];
+}
+
+export interface OracleRoutineSnapshot {
+  endpoint: OracleRoutineEndpoint;
+  state: "complete" | "partial" | "failed" | "permission-denied";
+  enumerationComplete: boolean;
+  objects: OracleRoutineObjectSnapshot[];
+  issues: OracleRoutineReadIssue[];
+}
+
+export interface OracleRoutineCompareContext {
+  sourceDatabaseType: string;
+  targetDatabaseType: string;
+  sourceSchema: string;
+  targetSchema: string;
+  sourceEnumerationComplete: boolean;
+  targetEnumerationComplete: boolean;
+  sourceIncompleteNames: string[];
+  targetIncompleteNames: string[];
+}
+
+export interface OracleRoutineReadback {
+  identity: OracleRoutineIdentity;
+  state: "verified" | "invalid" | "missing" | "present" | "definition-mismatch" | "readback-failed";
+  exists: boolean | null;
+  version: OracleRoutineVersion | null;
+  source: string | null;
+  definitionMatches: boolean | null;
+  compilerMessages: { attribute: string; line: number; position: number; text: string }[];
+  issues: OracleRoutineReadIssue[];
+}
+
+export interface OracleRoutineOperation {
+  operationId: string;
+  target: OracleRoutineEndpoint;
+  identity: OracleRoutineIdentity;
+  lifecycle: "prepared" | "running" | "terminal" | "unproven";
+  dispatched: boolean;
+  acknowledged: boolean;
+  readback: OracleRoutineReadback | null;
+  error: string | null;
+}
+
+export interface OracleRoutineOperationObservation {
+  operation: OracleRoutineOperation | null;
+  lifecycle: OracleRoutineOperation["lifecycle"];
+  error: string | null;
+}
+
+export interface OracleRoutineSaveInput {
+  connectionId: string;
+  database: string;
+  identity: OracleRoutineIdentity;
+  sql: string;
+  supersedesOperationId?: string;
+}
+
+export type OracleRoutinePlanAction = "create" | "replace" | "delete";
+
+export interface OracleRoutinePlanDraft {
+  identity: OracleRoutineIdentity;
+  action: OracleRoutinePlanAction;
+  sourceName?: string;
+  sql?: string;
+  baselineOperationId?: string;
+  supersedesOperationId?: string;
+}
+
+export interface OracleRoutinePlanInput {
+  source: OracleRoutineSnapshot;
+  target: OracleRoutineSnapshot;
+  drafts: OracleRoutinePlanDraft[];
+}
+
+export interface OracleRoutinePlanStep {
+  identity: OracleRoutineIdentity;
+  action: OracleRoutinePlanAction;
+  sql: string;
+  sourceOriginal: string | null;
+  targetOriginal: string | null;
+  recoverySql: string | null;
+  recoveryComplete: boolean;
+  references: { owner: string; name: string; kind: string; member: string | null; selectedIndex: number | null; line: number; column: number }[];
+  incomingCallers: OracleRoutineDependency[];
+  issues: { code: string; message: string; line: number; column: number }[];
+  operation: OracleRoutineOperation | null;
+}
+
+export interface OracleRoutinePlan {
+  target: OracleRoutineEndpoint;
+  steps: OracleRoutinePlanStep[];
+  ready: boolean;
+}
+
 export interface SchemaDiffTableMapping {
   sourceTable: string;
   targetTable: string;

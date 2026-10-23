@@ -3621,7 +3621,7 @@ function openRenameObjectDialog() {
   routeTreeItemDialogController();
   const node = sidebarFormTarget.value ?? activeNode.value;
   const targetKey = JSON.stringify([node.connectionId, node.database, node.schema || node.database, node.type, node.objectName || node.label, databaseTypeForNode(node)]);
-  if (targetKey !== currentSidebarViewRenameTargetKey) renameObjectName.value = node.label;
+  if (targetKey !== currentSidebarViewRenameTargetKey) renameObjectName.value = node.objectName || node.label;
   renameObjectError.value = "";
   renameObjectPreviewSql.value = "";
   viewRenamePlan.value = undefined;
@@ -3732,7 +3732,7 @@ async function refreshRenameObjectPreviewSql() {
   const node = sidebarFormTarget.value ?? activeNode.value;
   const requestId = ++renameObjectPreviewRequestId;
   const newName = renameObjectName.value.trim();
-  if (!showRenameObjectDialog.value || !newName || newName === node.label) {
+  if (!showRenameObjectDialog.value || !newName || newName === (node.objectName || node.label)) {
     renameObjectPreviewSql.value = "";
     viewRenamePlan.value = undefined;
     routineRenamePlan.value = undefined;
@@ -4050,7 +4050,7 @@ async function confirmPackageSaveAs() {
 async function confirmRenameObject() {
   const node = sidebarFormTarget.value ?? activeNode.value;
   let newName = renameObjectName.value.trim();
-  if (!newName || newName === node.label || !node.connectionId || !node.database) return;
+  if (!newName || newName === (node.objectName || node.label) || !node.connectionId || !node.database) return;
   renameObjectError.value = "";
   let renameApplied = false;
   let updatedViewDependencies: number | undefined;
@@ -4194,7 +4194,7 @@ async function confirmRenameObject() {
         databaseType: dbType!,
         objectType: objectType as any,
         schema,
-        name: node.label,
+        name: node.objectName || node.label,
         newName,
         source: source.source,
       });

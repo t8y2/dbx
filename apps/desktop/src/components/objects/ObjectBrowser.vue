@@ -107,7 +107,7 @@ import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
 import { executeOceanbaseTableClone, executeOceanbaseTableCloneData, oceanbaseCloneDataPreparationError, OceanbaseTableCloneError, type OceanbaseTableClone } from "@/lib/database/oceanbaseTableClone";
 import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import { useToast } from "@/composables/useToast";
-import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, prepareObjectSourceSave, objectSourceSaveSuccessMessage, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { assertSourceIdentity, beginSourceSave, captureSourceIdentity, freezeSourceIdentities, renewSourceIdentity, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
@@ -2675,6 +2675,7 @@ async function buildDropSqlForRow(row: ObjectBrowserRow, options?: { cascade?: b
     objectType: row.type,
     schema: row.schema || selectedSchema.value,
     name: row.name,
+    signature: row.signature,
     identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   });
 }
@@ -4013,6 +4014,7 @@ async function saveSource() {
   const databaseType = effectiveDatabaseType.value;
   sourceSaving.value = true;
   sourceSaveError.value = "";
+  let save: Awaited<ReturnType<typeof prepareObjectSourceSave>> | undefined;
   try {
     if (!sourceIdentity) return;
     const identity = sourceIdentity;
@@ -4024,31 +4026,32 @@ async function saveSource() {
       name: row.name,
       source: sourceDraft.value,
     });
+    save = await prepareObjectSourceSave(connectionId, database, databaseType, statements, schema, { objectType: row.type as ObjectSourceKind, name: row.name });
+    const preparedSave = save;
     const execute = async () => {
-      if (sidePanelGuard.isStale(epoch) || sourceRow.value !== row) return false;
+      if (sidePanelGuard.isStale(epoch) || sourceRow.value !== row) return;
       const release = beginSourceSave(identity);
       try {
-        await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
-        return true;
+        return { operation: await preparedSave() };
       } finally {
         release();
       }
     };
     const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
+    let result;
     if (executableSql.trim()) {
-      const saved = await executeWithProductionSqlGuard({
+      result = await executeWithProductionSqlGuard({
         connection,
         database,
         sql: executableSql,
         source: t("production.sourceObjectSource"),
         execute,
       });
-      if (!saved || sidePanelGuard.isStale(epoch)) return;
     } else {
-      if (!(await execute())) return;
-      if (sidePanelGuard.isStale(epoch)) return;
+      result = await execute();
     }
-    toast(t("objects.sourceSaved"));
+    if (!result || sidePanelGuard.isStale(epoch)) return;
+    toast(objectSourceSaveSuccessMessage(t("objects.sourceSaved"), result.operation), result.operation?.readback?.compilerMessages.length ? 6000 : 2000);
     sourceEditing.value = false;
     sourceDraft.value = "";
     await openSource(row);
@@ -4056,6 +4059,7 @@ async function saveSource() {
     if (sidePanelGuard.isStale(epoch)) return;
     sourceSaveError.value = formatObjectSourceSaveError(e, databaseType, row.type as ObjectSourceKind, t("objects.postgresViewColumnChangeHint"));
   } finally {
+    await save?.dispose?.();
     if (sidePanelGuard.isFresh(epoch)) sourceSaving.value = false;
   }
 }

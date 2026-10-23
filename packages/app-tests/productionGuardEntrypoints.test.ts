@@ -48,21 +48,9 @@ test("secondary write entrypoints use the shared production SQL guard", () => {
       executor: "api.executeQuery",
       sourceKey: "production.sourceSidebar",
     },
-    {
-      path: "apps/desktop/src/App.vue",
-      executor: "executeObjectSourceSave",
-      sourceKey: "production.sourceObjectSource",
-    },
-    {
-      path: "apps/desktop/src/components/objects/ObjectSourceDialog.vue",
-      executor: "executeObjectSourceSave",
-      sourceKey: "production.sourceObjectSource",
-    },
-    {
-      path: "apps/desktop/src/components/objects/ObjectBrowser.vue",
-      executor: "executeObjectSourceSave",
-      sourceKey: "production.sourceObjectSource",
-    },
+    // Source saves select a prepared executor by engine. Their confirmation and
+    // dispatch behavior is exercised by objectSourceTabSave.spec.ts and the real
+    // ObjectSourceDialog/ObjectBrowser component tests, not a callee-name match.
     {
       path: "apps/desktop/src/components/objects/ObjectBrowser.vue",
       executor: "api.executeQuery",

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, watch, useId } from "vue";
+import { ref, computed, nextTick, onMounted, onUnmounted, watch, useId } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, FolderClosed, FileCode, FolderPlus, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil, Search, ArrowDownAZ, ArrowUpAZ } from "@lucide/vue";
+import { FolderOpen, FolderClosed, FileCode, FolderPlus, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil, Search, ArrowDownAZ, ArrowUpAZ, Loader2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,10 +19,13 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { forgetExternalSqlFileTarget, forgetExternalSqlFolderTargets, moveExternalSqlFileTarget, moveExternalSqlFolderTargets, resolveExternalSqlFileTargetForActiveTab } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath, normalizeExternalSqlPath, relocateExternalSqlPathWithinFolder } from "@/lib/sql/sqlFileOpen";
+import type { SavedSqlLineMatch } from "@/lib/savedSql/savedSqlSearch";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
 import { filterAndSortSqlFileEntries, getSqlFileSortOrder, saveSqlFileSortOrder, type SqlFileSortOrder } from "@/lib/sql/sqlFileTreeFilter";
+import { contentMatchPathSet, searchSqlFileContents, SQL_FILE_CONTENT_SEARCH_DEBOUNCE_MS, type SqlFileContentMatchGroup, type SqlFileContentSearchResult } from "@/lib/sql/sqlFileContentSearch";
+import SqlSearchMatchSnippet from "@/components/layout/SqlSearchMatchSnippet.vue";
 import { orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
 import { getSqlFileOpenMode, saveSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 
@@ -41,10 +44,14 @@ interface FolderState {
   entries: SqlFileEntry[];
   expanded: Set<string>;
   loading: boolean;
+  refreshing: boolean;
   collapsed: boolean;
 }
 
 const folders = ref<FolderState[]>([]);
+// Bumped whenever the loaded file set changes (folder added/removed/reloaded),
+// so an active content search can be re-run against the new tree.
+const foldersRevision = ref(0);
 const fileTree = ref<HTMLElement | null>(null);
 const locatingFile = ref(false);
 const currentFilePath = computed(() => {
@@ -64,9 +71,180 @@ const searchQuery = computed(() => searchText.value.trim().toLowerCase());
 const sortOrder = ref<SqlFileSortOrder>(getSqlFileSortOrder ? getSqlFileSortOrder() : "asc");
 const userCollapsedDuringSearch = ref<Set<string>>(new Set());
 
-watch(searchQuery, () => {
+// ---- content search ------------------------------------------------------
+// Name/dir filtering stays synchronous against the already-loaded tree; body
+// matches come from the backend after a debounce. Only the latest generation
+// may write results, so fast typing cannot apply an older query's hits.
+const contentSearchResult = ref<SqlFileContentSearchResult | null>(null);
+const contentSearching = ref(false);
+// True from the moment a query is scheduled until its backend answer (or
+// failure) lands. The tree uses it to hold back the "no results" state, which
+// would otherwise flash for the debounce window before body hits arrive.
+const contentSearchPending = ref(false);
+const contentSearchQuery = ref("");
+let contentSearchGeneration = 0;
+let contentSearchTimer: ReturnType<typeof setTimeout> | undefined;
+
+const contentMatchPaths = computed<ReadonlySet<string>>(() => contentMatchPathSet(contentSearchResult.value));
+
+function clearContentSearch() {
+  contentSearchGeneration++;
+  if (contentSearchTimer !== undefined) {
+    clearTimeout(contentSearchTimer);
+    contentSearchTimer = undefined;
+  }
+  contentSearchResult.value = null;
+  contentSearchQuery.value = "";
+  contentSearching.value = false;
+  contentSearchPending.value = false;
+}
+
+/**
+ * Walks the loaded tree once and derives what the content search needs: the
+ * extensions to filter on and how deep the backend walk may go.
+ *
+ * Depth is measured against the tree itself rather than a constant: the tree is
+ * shown from `folders[].entries`, so a hit below its deepest file could never
+ * render. `WalkBuilder` counts the root as depth 0, while a direct child of a
+ * root is tree depth 0 — hence `deepestTreeDepth + 1`. Deriving it from the
+ * data means the panel's depth can never drift from the scanner's own contract
+ * (a duplicated `MAX_SCAN_DEPTH` would).
+ */
+function visibleSqlFileSearchScope(): { extensions: string[]; maxDepth: number } {
+  const extensions = new Set<string>();
+  let deepestFileDepth = -1;
+  const visit = (items: SqlFileEntry[], depth: number) => {
+    for (const item of items) {
+      if (item.is_dir) {
+        visit(item.children, depth + 1);
+        continue;
+      }
+      if (depth > deepestFileDepth) deepestFileDepth = depth;
+      const dot = item.name.lastIndexOf(".");
+      // A dotless name has no extension; only dotted names contribute a filter.
+      if (dot > 0 && dot < item.name.length - 1) extensions.add(item.name.slice(dot + 1).toLowerCase());
+    }
+  };
+  for (const folder of folders.value) visit(folder.entries, 0);
+  // Roots are all walked with a single depth, so use the deepest one. The tree
+  // is already depth-capped by the scanner, which keeps this bounded.
+  return { extensions: [...extensions], maxDepth: Math.max(deepestFileDepth + 1, 1) };
+}
+
+async function runContentSearch(query: string) {
+  if (!query) {
+    clearContentSearch();
+    return;
+  }
+  // Web runtime has no filesystem search (the HTTP stub throws); stay on the
+  // in-memory name filter instead of issuing a request that always fails.
+  if (!isTauriRuntime()) {
+    contentSearchPending.value = false;
+    return;
+  }
+  const roots = folders.value.map((folder) => folder.path);
+  // Nothing to search against (no folders open, or a folder still loading) —
+  // keep the name-only tree and skip a request that would return nothing.
+  if (roots.length === 0) {
+    contentSearchResult.value = null;
+    contentSearchQuery.value = "";
+    contentSearching.value = false;
+    contentSearchPending.value = false;
+    return;
+  }
+  const generation = ++contentSearchGeneration;
+  const { extensions, maxDepth } = visibleSqlFileSearchScope();
+  // Nothing loaded yet (folders still scanning): a search without the panel's
+  // extension set would walk unrelated files, so wait for the next reload.
+  if (extensions.length === 0) {
+    contentSearching.value = false;
+    contentSearchPending.value = false;
+    return;
+  }
+  contentSearching.value = true;
+  try {
+    const result = await searchSqlFileContents({ roots, query, extensions, maxDepth });
+    // Discard the answer if a newer query started meanwhile, or if the box no
+    // longer shows this query — otherwise old hits would widen the tree.
+    if (generation !== contentSearchGeneration || query !== searchQuery.value) return;
+    contentSearchResult.value = result;
+    contentSearchQuery.value = query;
+  } catch {
+    // Web runtime (the stub throws) or a backend walk failure: degrade to name
+    // filtering instead of surfacing an error for every keystroke.
+    if (generation !== contentSearchGeneration) return;
+    contentSearchResult.value = null;
+    contentSearchQuery.value = "";
+  } finally {
+    if (generation === contentSearchGeneration) {
+      contentSearching.value = false;
+      // A newer query may already be queued behind the debounce; keep the
+      // pending flag set for it so the empty state does not flash in between.
+      if (query === searchQuery.value) contentSearchPending.value = false;
+    }
+  }
+}
+
+function scheduleContentSearch(query: string) {
+  if (contentSearchTimer !== undefined) {
+    clearTimeout(contentSearchTimer);
+    contentSearchTimer = undefined;
+  }
+  if (!query) {
+    clearContentSearch();
+    return;
+  }
+  // Outside the desktop runtime there is nothing to wait for: name filtering is
+  // the whole feature there, so the "no results" state must stay immediate.
+  if (!isTauriRuntime()) {
+    contentSearchPending.value = false;
+    return;
+  }
+  contentSearchPending.value = true;
+  contentSearchTimer = setTimeout(() => {
+    contentSearchTimer = undefined;
+    void runContentSearch(query);
+  }, SQL_FILE_CONTENT_SEARCH_DEBOUNCE_MS);
+}
+
+// Results are keyed to the query they were produced for; drop them as soon as
+// the box shows something else so stale hits never widen the tree.
+watch(searchQuery, (query) => {
   userCollapsedDuringSearch.value.clear();
+  if (!query) {
+    clearContentSearch();
+    return;
+  }
+  if (contentSearchQuery.value !== query) {
+    contentSearchResult.value = null;
+    contentSearchQuery.value = "";
+  }
+  scheduleContentSearch(query);
 });
+
+// Folder reloads (refresh, add/remove, rename, create/delete) change the file
+// set, so re-run the active search instead of leaving orphan hits behind.
+watch(foldersRevision, () => {
+  const query = searchQuery.value;
+  if (!query) return;
+  scheduleContentSearch(query);
+});
+
+onUnmounted(() => {
+  contentSearchGeneration++;
+  if (contentSearchTimer !== undefined) {
+    clearTimeout(contentSearchTimer);
+    contentSearchTimer = undefined;
+  }
+});
+
+function contentGroupFor(path: string): SqlFileContentMatchGroup | undefined {
+  const normalized = normalizeExternalSqlPath(path);
+  const group = contentSearchResult.value?.matchesByPath.get(normalized);
+  // Guard against a stale result slipping through while a new query is pending.
+  if (!group || contentSearchQuery.value !== searchQuery.value) return undefined;
+  return group;
+}
 
 function toggleSortOrder() {
   const next = sortOrder.value === "asc" ? "desc" : "asc";
@@ -214,6 +392,7 @@ async function addFolder(folderPath: string) {
     entries: [],
     expanded: new Set(),
     loading: true,
+    refreshing: false,
     collapsed: false,
   };
   folders.value.push(folder);
@@ -257,10 +436,18 @@ async function locateCurrentFile() {
 // Re-scan a single top-level folder and replace its entries. Mutated via the
 // reactive proxy (folders.value[idx]) so Vue tracks the change — see the note
 // in addFolder above.
+//
+// `loading` only goes true when the folder has nothing to show yet, because it
+// swaps the row list for a "loading" line and the list lives inside the panel's
+// only scroll container: tearing the rows down resets `scrollTop` to 0, which is
+// what made the panel jump back to the top after every add/rename/refresh
+// (#13038). A folder that already has entries stays rendered and is swapped in
+// place, so the scroll offset survives; `refreshing` only drives the spinner.
 async function loadFolderEntries(folderPath: string): Promise<string | null> {
   const idx = folders.value.findIndex((f) => f.path === folderPath);
   if (idx === -1) return null;
-  folders.value[idx].loading = true;
+  folders.value[idx].loading = folders.value[idx].entries.length === 0;
+  folders.value[idx].refreshing = true;
   try {
     const entries = await api.listSqlFilesInFolder(folderPath, getSqlFileFilter(), true);
     const target = folders.value.findIndex((f) => f.path === folderPath);
@@ -289,7 +476,9 @@ async function loadFolderEntries(folderPath: string): Promise<string | null> {
     const target = folders.value.findIndex((f) => f.path === folderPath);
     if (target !== -1) {
       folders.value[target].loading = false;
+      folders.value[target].refreshing = false;
     }
+    foldersRevision.value++;
   }
   return null;
 }
@@ -349,6 +538,7 @@ async function reloadFolderAfterMutation(folderPath: string) {
 async function removeFolder(index: number) {
   folders.value.splice(index, 1);
   saveFolders();
+  foldersRevision.value++;
 }
 
 async function revealInFileManager(path: string) {
@@ -381,7 +571,7 @@ interface ProcessedFolder {
 const folderProcessedMap = computed<Map<string, ProcessedFolder>>(() => {
   const map = new Map<string, ProcessedFolder>();
   for (const folder of folders.value) {
-    const res = filterAndSortSqlFileEntries(folder.entries, searchQuery.value, sortOrder.value);
+    const res = filterAndSortSqlFileEntries(folder.entries, searchQuery.value, sortOrder.value, contentMatchPaths.value);
     map.set(folder.path, {
       entries: res.entries,
       autoExpanded: res.autoExpanded,
@@ -478,12 +668,12 @@ function collectDirPaths(entries: SqlFileEntry[], into: Set<string>) {
   }
 }
 
-async function openFile(path: string) {
+async function openFile(path: string, reveal?: { line: number; column?: number }) {
   if (!isTauriRuntime()) return;
   try {
     const snapshot = await api.readExternalSqlFileSnapshot(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
     const target = resolveExternalSqlFileTargetForActiveTab(path, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId));
-    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog, target.schema, undefined, snapshot.encoding);
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog, target.schema, reveal, snapshot.encoding);
   } catch (e: any) {
     if (isExternalSqlFileTooLargeError(e) && isSqlFilePath(path)) {
       executeFile(path);
@@ -492,6 +682,24 @@ async function openFile(path: string) {
     }
     toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
+}
+
+/** Opens a file at a content-search hit, reusing the normal open flow so
+ * conflict/too-large handling stays identical. */
+async function openContentMatch(path: string, match: SavedSqlLineMatch) {
+  // Mirror the SQL library panel: clicking a snippet makes its file the active
+  // row before opening, so the highlight does not stay on an unrelated entry.
+  const normalizedPath = normalizeExternalSqlPath(path);
+  // Match on the node's own path: `id` is the composite nodeKey, so a path lookup
+  // has to compare against `item.path` (as locateActiveFile does).
+  const index = visibleItems.value.findIndex((item) => item.type === "file" && normalizeExternalSqlPath(item.path) === normalizedPath);
+  if (index >= 0) {
+    const item = visibleItems.value[index];
+    selectedKeys.value = new Set();
+    activeKey.value = item.id;
+    selectionAnchorKey.value = item.id;
+  }
+  await openFile(path, { line: match.lineNumber, column: match.column });
 }
 
 // Open the App-level SQL file execution dialog with this file pre-selected so
@@ -1036,7 +1244,7 @@ function clearContextTarget() {
       </HelpTooltip>
       <span class="flex-1" />
       <LightTooltip :text="t('sqlFileTree.locateActiveFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentFilePath || locatingFile || folders.some((folder) => folder.loading)" @locate="locateCurrentFile" />
+        <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentFilePath || locatingFile || folders.some((folder) => folder.loading || folder.refreshing)" @locate="locateCurrentFile" />
       </LightTooltip>
       <LightTooltip :text="t('sqlFileTree.panelSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button
@@ -1079,6 +1287,7 @@ function clearContextTarget() {
       <div class="relative">
         <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
         <input data-sql-file-search v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="w-full h-6 pl-7 pr-6 text-[13px] rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" :placeholder="t('grid.search')" />
+        <Loader2 v-if="contentSearching" data-sql-file-content-searching class="absolute right-6 top-1/2 -translate-y-1/2 h-3 w-3 animate-spin text-muted-foreground" />
         <button v-if="searchText" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchText = ''">
           <X class="h-3 w-3" />
         </button>
@@ -1139,7 +1348,7 @@ function clearContextTarget() {
                 <span class="truncate flex-1 text-[10px] text-muted-foreground/50" :title="folder.path">{{ folder.path }}</span>
                 <LightTooltip :text="t('sqlFileTree.refreshFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
                   <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="refreshFolder(folder.path)">
-                    <RefreshCw class="h-3 w-3" :class="folder.loading ? 'animate-spin' : ''" />
+                    <RefreshCw class="h-3 w-3" :class="folder.loading || folder.refreshing ? 'animate-spin' : ''" />
                   </Button>
                 </LightTooltip>
                 <LightTooltip :text="t('sqlFileTree.newSqlFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
@@ -1170,82 +1379,92 @@ function clearContextTarget() {
                 <div v-else-if="folder.entries.length === 0" class="px-3 py-2 text-xs text-muted-foreground">
                   {{ t("sqlFileTree.noSqlFiles") }}
                 </div>
-                <div v-else-if="searchQuery && getProcessedEntries(folder.path).length === 0" data-sql-file-empty-search class="px-3 py-2 text-xs text-muted-foreground">
+                <div v-else-if="searchQuery && !contentSearchPending && getProcessedEntries(folder.path).length === 0" data-sql-file-empty-search class="px-3 py-2 text-xs text-muted-foreground">
                   {{ t("grid.noSearchResults") }}
                 </div>
                 <div v-else>
-                  <div
-                    data-sql-file-row="true"
-                    v-for="{ entry, depth } in flatTree(getProcessedEntries(folder.path), getEffectiveExpanded(folder))"
-                    :key="entry.path"
-                    :data-sql-file-path="entry.path"
-                    :aria-current="activeKey === nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path) ? 'true' : undefined"
-                    class="flex cursor-default select-none items-center gap-1 px-2 py-1 text-sm"
-                    :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', isPathHighlighted(folder.path, entry.is_dir ? 'dir' : 'file', entry.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40']"
-                    :style="{ paddingLeft: depth * 16 + 8 + 'px' }"
-                    role="treeitem"
-                    :id="visibleRowIds.get(folder)?.get(entry.path)"
-                    :aria-level="depth + 2"
-                    :aria-selected="isPathHighlighted(folder.path, entry.is_dir ? 'dir' : 'file', entry.path)"
-                    :aria-expanded="entry.is_dir ? getEffectiveExpanded(folder).has(entry.path) : undefined"
-                    @click.stop="handlePathClick(folder.path, entry.path, entry.is_dir ? 'dir' : 'file', $event)"
-                    @dblclick.stop="handlePathDoubleClick(folder.path, entry.path, entry.is_dir ? 'dir' : 'file', $event)"
-                    @contextmenu.capture="
-                      contextTarget = entry.is_dir ? { kind: 'dir', folderPath: folder.path, entry } : { kind: 'file', folderPath: folder.path, entry };
-                      activeKey = nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path);
-                    "
-                    @contextmenu.prevent="
-                      contextTarget = entry.is_dir ? { kind: 'dir', folderPath: folder.path, entry } : { kind: 'file', folderPath: folder.path, entry };
-                      activeKey = nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path);
-                      onContextMenu($event);
-                    "
-                  >
-                    <template v-if="entry.is_dir">
-                      <ChevronRight v-if="!getEffectiveExpanded(folder).has(entry.path)" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <FolderClosed v-if="!getEffectiveExpanded(folder).has(entry.path)" class="h-4 w-4 shrink-0 text-amber-500" />
-                      <FolderOpen v-else class="h-4 w-4 shrink-0 text-amber-500" />
-                    </template>
-                    <template v-else>
-                      <span class="w-3.5 shrink-0" />
-                      <FileCode class="h-4 w-4 shrink-0 text-blue-500" />
-                    </template>
-                    <span class="truncate ml-1 flex-1">{{ entry.name }}</span>
-                    <template v-if="entry.is_dir">
-                      <LightTooltip :text="t('sqlFileTree.newSqlFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                        <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="openCreateDialog(folder.path, entry.path)">
-                          <FilePlus class="h-3 w-3" />
-                        </Button>
-                      </LightTooltip>
-                      <LightTooltip :text="t('sqlFileTree.newFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                        <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="openCreateFolderDialog(folder.path, entry.path)">
-                          <FolderPlus class="h-3 w-3" />
-                        </Button>
-                      </LightTooltip>
-                      <LightTooltip :text="t('sqlFileTree.renameFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                        <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="openRenameFolderDialog({ kind: 'dir', folderPath: folder.path, entry })">
-                          <Pencil class="h-3 w-3" />
-                        </Button>
-                      </LightTooltip>
-                      <LightTooltip :text="t('sqlFileTree.deleteFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                        <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-destructive" @click.stop="openDeleteFolderDialog({ kind: 'dir', folderPath: folder.path, entry })">
-                          <Trash2 class="h-3 w-3" />
-                        </Button>
-                      </LightTooltip>
-                    </template>
-                    <template v-else>
-                      <LightTooltip :text="t('sqlFileTree.renameFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                        <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="openRenameDialog({ kind: 'file', folderPath: folder.path, entry })">
-                          <Pencil class="h-3 w-3" />
-                        </Button>
-                      </LightTooltip>
-                      <LightTooltip :text="t('sqlFileTree.deleteFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                        <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-destructive" @click.stop="openDeleteDialog({ kind: 'file', folderPath: folder.path, entry })">
-                          <Trash2 class="h-3 w-3" />
-                        </Button>
-                      </LightTooltip>
-                    </template>
-                  </div>
+                  <template v-for="{ entry, depth } in flatTree(getProcessedEntries(folder.path), getEffectiveExpanded(folder))" :key="entry.path">
+                    <div
+                      data-sql-file-row="true"
+                      :data-sql-file-path="entry.path"
+                      :aria-current="activeKey === nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path) ? 'true' : undefined"
+                      class="flex cursor-default select-none items-center gap-1 px-2 py-1 text-sm"
+                      :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', isPathHighlighted(folder.path, entry.is_dir ? 'dir' : 'file', entry.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40']"
+                      :style="{ paddingLeft: depth * 16 + 8 + 'px' }"
+                      role="treeitem"
+                      :id="visibleRowIds.get(folder)?.get(entry.path)"
+                      :aria-level="depth + 2"
+                      :aria-selected="isPathHighlighted(folder.path, entry.is_dir ? 'dir' : 'file', entry.path)"
+                      :aria-expanded="entry.is_dir ? getEffectiveExpanded(folder).has(entry.path) : undefined"
+                      @click.stop="handlePathClick(folder.path, entry.path, entry.is_dir ? 'dir' : 'file', $event)"
+                      @dblclick.stop="handlePathDoubleClick(folder.path, entry.path, entry.is_dir ? 'dir' : 'file', $event)"
+                      @contextmenu.capture="
+                        contextTarget = entry.is_dir ? { kind: 'dir', folderPath: folder.path, entry } : { kind: 'file', folderPath: folder.path, entry };
+                        activeKey = nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path);
+                      "
+                      @contextmenu.prevent="
+                        contextTarget = entry.is_dir ? { kind: 'dir', folderPath: folder.path, entry } : { kind: 'file', folderPath: folder.path, entry };
+                        activeKey = nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path);
+                        onContextMenu($event);
+                      "
+                    >
+                      <template v-if="entry.is_dir">
+                        <ChevronRight v-if="!getEffectiveExpanded(folder).has(entry.path)" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <FolderClosed v-if="!getEffectiveExpanded(folder).has(entry.path)" class="h-4 w-4 shrink-0 text-amber-500" />
+                        <FolderOpen v-else class="h-4 w-4 shrink-0 text-amber-500" />
+                      </template>
+                      <template v-else>
+                        <span class="w-3.5 shrink-0" />
+                        <FileCode class="h-4 w-4 shrink-0 text-blue-500" />
+                      </template>
+                      <span class="truncate ml-1 flex-1">{{ entry.name }}</span>
+                      <template v-if="entry.is_dir">
+                        <LightTooltip :text="t('sqlFileTree.newSqlFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                          <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="openCreateDialog(folder.path, entry.path)">
+                            <FilePlus class="h-3 w-3" />
+                          </Button>
+                        </LightTooltip>
+                        <LightTooltip :text="t('sqlFileTree.newFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                          <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="openCreateFolderDialog(folder.path, entry.path)">
+                            <FolderPlus class="h-3 w-3" />
+                          </Button>
+                        </LightTooltip>
+                        <LightTooltip :text="t('sqlFileTree.renameFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                          <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="openRenameFolderDialog({ kind: 'dir', folderPath: folder.path, entry })">
+                            <Pencil class="h-3 w-3" />
+                          </Button>
+                        </LightTooltip>
+                        <LightTooltip :text="t('sqlFileTree.deleteFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                          <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-destructive" @click.stop="openDeleteFolderDialog({ kind: 'dir', folderPath: folder.path, entry })">
+                            <Trash2 class="h-3 w-3" />
+                          </Button>
+                        </LightTooltip>
+                      </template>
+                      <template v-else>
+                        <LightTooltip :text="t('sqlFileTree.renameFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                          <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground" @click.stop="openRenameDialog({ kind: 'file', folderPath: folder.path, entry })">
+                            <Pencil class="h-3 w-3" />
+                          </Button>
+                        </LightTooltip>
+                        <LightTooltip :text="t('sqlFileTree.deleteFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                          <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-muted-foreground hover:text-destructive" @click.stop="openDeleteDialog({ kind: 'file', folderPath: folder.path, entry })">
+                            <Trash2 class="h-3 w-3" />
+                          </Button>
+                        </LightTooltip>
+                      </template>
+                    </div>
+                    <!-- Content hits render directly under their file row so the
+                         matched lines are visible where the file lives. -->
+                    <SqlSearchMatchSnippet
+                      v-if="!entry.is_dir && contentGroupFor(entry.path)"
+                      :data-sql-file-content-snippet="entry.path"
+                      :matches="contentGroupFor(entry.path)?.matches ?? []"
+                      :total-matches="contentGroupFor(entry.path)?.totalMatches ?? 0"
+                      :depth="depth"
+                      @select-match="(match) => openContentMatch(entry.path, match)"
+                    />
+                  </template>
                 </div>
               </div>
             </div>

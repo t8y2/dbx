@@ -153,14 +153,14 @@ export function buildOracleLockDetailsSql(target: OracleSessionTarget, legacy: b
 
 export function buildOceanbaseSessionListSql(): string {
   // In Oracle mode bare USER is the login function, not the USER dictionary column.
-  return `SELECT TO_CHAR(ID) AS SESSION_ID, "USER" AS SESSION_USER, TENANT AS TENANT, HOST AS HOST, DB AS DB_NAME, COMMAND AS COMMAND, TIME AS ELAPSED_TIME, STATE AS STATE, INFO AS INFO, PROXY_SESSID AS PROXY_SESSION_ID, SVR_IP AS SERVER_IP, SVR_PORT AS SERVER_PORT FROM GV$OB_PROCESSLIST WHERE TENANT = (SELECT TENANT FROM GV$OB_SESSION WHERE ID = SYS_CONTEXT('USERENV','SID') AND "USER" = SYS_CONTEXT('USERENV','SESSION_USER') AND ROWNUM = 1) ORDER BY ID`;
+  return `SELECT TO_CHAR(ID) AS SESSION_ID, "USER" AS SESSION_USER, TENANT AS TENANT, HOST AS HOST, DB AS DB_NAME, COMMAND AS COMMAND, TIME AS ELAPSED_TIME, STATE AS STATE, INFO AS INFO, PROXY_SESSID AS PROXY_SESSION_ID, SVR_IP AS SERVER_IP, SVR_PORT AS SERVER_PORT, SQL_ID AS SQL_ID, TRACE_ID AS TRACE_ID FROM GV$OB_PROCESSLIST WHERE TENANT = (SELECT TENANT FROM GV$OB_SESSION WHERE ID = SYS_CONTEXT('USERENV','SID') AND "USER" = SYS_CONTEXT('USERENV','SESSION_USER') AND ROWNUM = 1) ORDER BY ID`;
 }
 
 export const OCEANBASE_OWN_SESSION_SQL = `SELECT TO_CHAR(ID), "USER", TENANT FROM GV$OB_SESSION WHERE ID = SYS_CONTEXT('USERENV','SID') AND "USER" = SYS_CONTEXT('USERENV','SESSION_USER') AND ROWNUM = 1`;
 
 export function mapOceanbaseSessions(result: QueryResult | null | undefined): ProcessRow[] {
   return (result?.rows ?? []).flatMap((row) => {
-    const [id, user, tenant, host, db, command, time, state, info, proxySessionId, serverIp, serverPort] = row;
+    const [id, user, tenant, host, db, command, time, state, info, proxySessionId, serverIp, serverPort, sqlId, traceId] = row;
     if (id === null || id === undefined || !/^\d+$/.test(String(id)) || user === null || tenant === null) return [];
     return [
       {
@@ -177,6 +177,8 @@ export function mapOceanbaseSessions(result: QueryResult | null | undefined): Pr
         serverIp: String(serverIp ?? ""),
         serverPort: String(serverPort ?? ""),
         server: `${String(serverIp ?? "")}:${String(serverPort ?? "")}`,
+        sqlId: String(sqlId ?? ""),
+        traceId: String(traceId ?? ""),
       },
     ];
   });

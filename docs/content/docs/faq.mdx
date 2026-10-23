@@ -37,7 +37,9 @@ description: Frequently asked questions about DBX, including where connection da
 
 The Linux main window draws a rounded, shadowed floating frame on GNOME in a Wayland session when a compositing manager is running. GNOME on X11 ("GNOME on Xorg") and other desktops (KDE, XFCE, Cinnamon, ...) use an opaque background by default to avoid transparent-window compositing problems with some graphics driver and WebKitGTK combinations. Neither mode disables GPU acceleration or changes the Wayland/X11 backend.
 
-The default can be overridden with an environment variable. To force the floating frame on X11 or another desktop:
+If the window flickers, turn off **Settings → Appearance → Window transparency**, apply the change, then fully quit DBX (including its tray process) and restart. The switch is on by default and follows the desktop detection rules.
+
+Environment overrides take priority over the setting. To force the floating frame on X11 or another desktop:
 
 ```bash
 DBX_LINUX_FLOATING_FRAME=1 dbx

@@ -63,6 +63,7 @@ export function connectionDetailUrl(config: ConnectionConfig): string {
 export function connectionDetailRows(config: ConnectionConfig, translate: (key: string) => string, visibleFilter?: ConnectionDetailVisibleFilter): ConnectionDetailRow[] {
   const hostLabel = isLocalFileConnection(config) ? translate("connection.filePath") : translate("connection.host");
   const hostValue = clean(config.host);
+  const productVersion = clean(config.database_info?.productVersion).replace(/^v?(\d+(?:\.\d+)*(?:[-+][\w.-]+)?)$/i, "v$1");
   const hostValues = hostValue.includes(",")
     ? hostValue
         .split(",")
@@ -78,7 +79,7 @@ export function connectionDetailRows(config: ConnectionConfig, translate: (key: 
     { label: translate("connection.database"), value: databaseValue(config) },
     { label: translate("connection.user"), value: clean(config.username) },
     { label: translate("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
-    { label: translate("connection.databaseInfo.productVersion"), value: clean(config.database_info?.productVersion) },
+    { label: translate("connection.databaseInfo.productVersion"), value: productVersion },
     ...(visibleFilter ? [visibleFilter] : []),
     { label: translate("connection.note"), value: clean(config.note), multiline: true },
   ].filter((row) => row.value);

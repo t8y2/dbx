@@ -23,7 +23,8 @@ import {
   type SchemaDiffRoutineMatch,
 } from "@/lib/schema/schemaDiffRoutine";
 import { createSchemaDiffTableListCoordinator, reconcileSchemaDiffSelectedTables, shouldLoadSchemaDiffTableList, type SchemaDiffTableIdentity, type SchemaDiffTableListLoader, type SchemaDiffTableSide } from "@/lib/schema/schemaDiffTableList";
-import { schemaDiffRoutineObjectTypes, schemaDiffRoutineObjectTypesIntersection, supportsSchemaDiffRoutines } from "@/lib/database/databaseObjectCapabilities";
+import { schemaDiffRoutineObjectTypes, schemaDiffRoutineObjectTypesIntersection, supportsSchemaDiffRoutines, schemaDiffRoutineProductType } from "@/lib/database/databaseObjectCapabilities";
+import { schemaDiffEngineDatabaseType } from "@/lib/schema/schemaDiff";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
@@ -266,7 +267,9 @@ const tableListCoordinator = createSchemaDiffTableListCoordinator({
 const canConfigureTableSelection = computed(() => isTableIdentityReady("source"));
 const tablesCompareEnabled = computed(() => !!props.options.tables);
 const routinesCompareEnabled = computed(() => !!props.options.functions);
-const canEnableRoutinesCompare = computed(() => schemaDiffRoutineObjectTypesIntersection(sourceDbType.value as DatabaseType | undefined, targetDbType.value as DatabaseType | undefined).length > 0);
+const sourceRoutineType = computed(() => schemaDiffRoutineProductType(sourceDbType.value, schemaDiffEngineDatabaseType(sourceConfig.value)));
+const targetRoutineType = computed(() => schemaDiffRoutineProductType(targetDbType.value, schemaDiffEngineDatabaseType(targetConfig.value)));
+const canEnableRoutinesCompare = computed(() => schemaDiffRoutineObjectTypesIntersection(sourceRoutineType.value, targetRoutineType.value).length > 0);
 /** User preference AND supported pair — drives compare/canCompare/Switch display. */
 const effectiveRoutinesEnabled = computed(() => routinesCompareEnabled.value && canEnableRoutinesCompare.value);
 
@@ -296,7 +299,7 @@ const restrictRoutines = ref(false);
 const localSelectedRoutines = ref<string[]>([]);
 const loadingRoutines = ref(false);
 
-const canConfigureRoutineSelection = computed(() => isTableIdentityReady("source") && supportsSchemaDiffRoutines(sourceDbType.value as DatabaseType));
+const canConfigureRoutineSelection = computed(() => isTableIdentityReady("source") && supportsSchemaDiffRoutines(sourceRoutineType.value));
 const activeRoutineMappings = computed(() => identitySchemaDiffRoutineMappings(props.options?.routineMappings ?? []));
 const routineMatches = computed<SchemaDiffRoutineMatch[]>(() => buildSchemaDiffRoutineMatches(localSelectedRoutines.value, targetRoutineList.value, activeRoutineMappings.value));
 const matchedRoutineCount = computed(() => routineMatches.value.filter((match) => match.targetRoutine).length);
@@ -367,7 +370,7 @@ async function loadRoutineList(side: "source" | "target") {
   const connectionId = side === "source" ? props.sourceConnectionId : props.targetConnectionId;
   const database = side === "source" ? props.sourceDatabase : props.targetDatabase;
   const schema = side === "source" ? props.sourceSchema : props.targetSchema;
-  const dbType = side === "source" ? sourceDbType.value : targetDbType.value;
+  const dbType = side === "source" ? sourceRoutineType.value : targetRoutineType.value;
   if (!isTableIdentityReady(side) || !supportsSchemaDiffRoutines(dbType as DatabaseType)) {
     if (side === "source") sourceRoutineList.value = [];
     else {
@@ -413,7 +416,7 @@ async function loadRoutineList(side: "source" | "target") {
 }
 
 watch(
-  () => [restrictRoutines.value, effectiveRoutinesEnabled.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, sourceDbType.value] as const,
+  () => [restrictRoutines.value, effectiveRoutinesEnabled.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, sourceRoutineType.value] as const,
   ([restrictEnabled, routinesEnabled]) => {
     if (!canConfigureRoutineSelection.value) {
       clearUnavailableRoutineSelection();
@@ -426,9 +429,9 @@ watch(
 );
 
 watch(
-  () => [restrictRoutines.value, localSelectedRoutines.value.length, props.targetConnectionId, props.targetDatabase, props.targetSchema, targetDbType.value] as const,
+  () => [restrictRoutines.value, localSelectedRoutines.value.length, props.targetConnectionId, props.targetDatabase, props.targetSchema, targetRoutineType.value] as const,
   ([enabled, selectedCount]) => {
-    if (!enabled || selectedCount === 0 || !isTableIdentityReady("target") || !supportsSchemaDiffRoutines(targetDbType.value as DatabaseType)) {
+    if (!enabled || selectedCount === 0 || !isTableIdentityReady("target") || !supportsSchemaDiffRoutines(targetRoutineType.value)) {
       if (!enabled) {
         targetRoutineList.value = [];
         targetRoutineListLoaded.value = false;
@@ -446,7 +449,7 @@ watch(
     selectedRoutines: props.selectedRoutines,
   }),
   (current, previous) => {
-    if (!isTableIdentityReady("source") || !supportsSchemaDiffRoutines(sourceDbType.value as DatabaseType)) {
+    if (!isTableIdentityReady("source") || !supportsSchemaDiffRoutines(sourceRoutineType.value)) {
       clearUnavailableRoutineSelection();
       return;
     }

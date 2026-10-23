@@ -7,6 +7,8 @@ import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTy
 import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+import { functionDiffsToWire, functionInfoFromWire, schemaDiffPreparationFromWire, schemaDiffPreparationToWire, type FunctionInfoWire, type SchemaDiffPreparationWire } from "./functionInfoTransport";
+import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan } from "@/types/schemaDiff";
 
 export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
   return invoke("database_backup_command", { command });
@@ -111,6 +113,7 @@ import type {
   SavedSqlLibrary,
   SshConfigHostEntry,
   LocalSshKey,
+  SshAgentIdentity,
   TunnelProfile,
   TransactionLog,
   ExternalSqlFileVersion,
@@ -318,6 +321,7 @@ export interface DriverRuntimeSummary {
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
+  linux_floating_frame_enabled?: boolean;
   icon_theme: "default" | "black";
   quit_on_close: boolean;
   close_action_prompted: boolean;
@@ -1405,6 +1409,18 @@ export interface GlobalSearchRequest {
   useRegex?: boolean;
   wholeWord?: boolean;
   limit?: number;
+  /**
+   * Whether the backend walker skips hidden paths and honors ignore files.
+   * Omit (or `true`) for the default Quick Open behavior; pass `false` to search
+   * exactly the files a raw directory listing shows (SQL file panel).
+   */
+  respectIgnoreRules?: boolean;
+  /**
+   * Maximum traversal depth using `WalkBuilder` semantics: the root itself is
+   * depth 0 and its direct entries are depth 1. Omit for an unbounded walk
+   * (Quick Open behavior).
+   */
+  maxDepth?: number;
 }
 
 export interface GlobalSearchMatch {
@@ -2764,7 +2780,7 @@ export async function getTableDisplayDdl(connectionId: string, database: string,
 }
 
 export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): Promise<SchemaDiffPreparation> {
-  return invoke("prepare_schema_diff", { options });
+  return schemaDiffPreparationFromWire(await invoke<SchemaDiffPreparationWire>("prepare_schema_diff", { options: schemaDiffPreparationToWire(options) }));
 }
 
 export async function listDialectDataTypes(dialectName: string): Promise<string[]> {
@@ -2776,7 +2792,7 @@ export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: Da
     diffs,
     databaseType,
     targetSchema,
-    functionDiffs: functionDiffs ?? [],
+    functionDiffs: functionDiffsToWire(functionDiffs ?? []),
     sequenceDiffs: sequenceDiffs ?? [],
     ruleDiffs: ruleDiffs ?? [],
     ownerDiffs: ownerDiffs ?? [],
@@ -2788,11 +2804,40 @@ export async function generateSchemaSyncPlan(input: SelectedSchemaDiffInput, opt
   return invoke("generate_schema_sync_plan", {
     ...input,
     ...options,
+    functionDiffs: functionDiffsToWire(input.functionDiffs),
   });
 }
 
 export async function listFunctions(connectionId: string, database: string, schema: string): Promise<FunctionInfo[]> {
-  return invoke("list_functions", { connectionId, database, schema });
+  return (await invoke<FunctionInfoWire[]>("list_functions", { connectionId, database, schema })).map(functionInfoFromWire);
+}
+
+export function loadSchemaDiffRoutines(connectionId: string, database: string, schema: string, selectedRoutines?: string[]): Promise<OracleRoutineSnapshot> {
+  return invoke("load_schema_diff_routines", { connectionId, database, schema, ...(selectedRoutines === undefined ? {} : { selectedRoutines }) });
+}
+
+export function prepareOracleRoutineSave(input: OracleRoutineSaveInput): Promise<OracleRoutineOperation> {
+  return invoke("prepare_oracle_routine_save", { input });
+}
+
+export function prepareOracleRoutinePlan(input: OracleRoutinePlanInput): Promise<OracleRoutinePlan> {
+  return invoke("prepare_oracle_routine_plan", { input });
+}
+
+export function prepareOracleRoutineRecovery(operationId: string): Promise<OracleRoutinePlan> {
+  return invoke("prepare_oracle_routine_recovery", { operationId });
+}
+
+export function executeOracleRoutineOperation(operationId: string, approvedSql: string): Promise<OracleRoutineOperation> {
+  return invoke("execute_oracle_routine_operation", { operationId, approvedSql });
+}
+
+export function observeOracleRoutineOperation(operationId: string, refreshReadback = false): Promise<OracleRoutineOperationObservation> {
+  return invoke("observe_oracle_routine_operation", { operationId, refreshReadback });
+}
+
+export function updateOracleRoutineOperationReferences(retainOperationIds: string[], releaseOperationIds: string[]): Promise<void> {
+  return invoke("update_oracle_routine_operation_references", { retainOperationIds, releaseOperationIds });
 }
 
 export async function listSequences(connectionId: string, database: string, schema: string, withLastValues: boolean): Promise<SequenceInfo[]> {
@@ -2880,6 +2925,10 @@ export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<voi
 
 export async function testTunnelProfile(profile: TunnelProfile): Promise<string> {
   return invoke("test_tunnel_profile", { profile });
+}
+
+export async function listSshAgentIdentities(sshAgentSockPath: string): Promise<SshAgentIdentity[]> {
+  return invoke("list_ssh_agent_identities", { sshAgentSockPath });
 }
 
 export async function resolveSshPrompt(resolution: SshPromptResolution): Promise<void> {
@@ -3482,6 +3531,11 @@ export async function discardDownloadedUpdate(cacheId: string): Promise<void> {
 
 export async function installDownloadedUpdate(cacheId: string, expectedVersion: string): Promise<void> {
   return invoke("install_downloaded_update", { cacheId, expectedVersion });
+}
+
+export async function relaunchApp(): Promise<void> {
+  // macOS relaunches through LaunchServices so the new process keeps its local-network grant.
+  return invoke("relaunch_app");
 }
 
 export async function getAppVersion(): Promise<string> {

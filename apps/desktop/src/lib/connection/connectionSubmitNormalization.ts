@@ -1,3 +1,4 @@
+import { connectionHostIsFilePath } from "@/lib/connection/connectionFile";
 import { sidebarProductionBadgeScope } from "@/lib/sidebar/sidebarProductionBadge";
 import { normalizeIdleDisconnectSecs, normalizeIdleTimeoutSecs, normalizeManualTransactionTimeoutSecs } from "@/lib/connection/timeoutLimits";
 import { isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
@@ -13,6 +14,27 @@ export function normalizeConnectionTimeouts(config: ConnectionConfig, connectTim
   config.idle_disconnect_secs = normalizeIdleDisconnectSecs(config.idle_disconnect_secs);
   const keepaliveInterval = Number(config.keepalive_interval_secs);
   config.keepalive_interval_secs = Number.isFinite(keepaliveInterval) && keepaliveInterval >= 0 ? keepaliveInterval : 30;
+}
+
+/**
+ * Trim whitespace that can never be meaningful in connection identity fields.
+ *
+ * A copy-pasted hostname often carries a stray leading/trailing space; the driver then
+ * fails with a "hostname resolve" error that hides the space, which makes the failure
+ * very hard to diagnose (#12884). Hostnames, user names and database names tolerate no
+ * surrounding whitespace.
+ *
+ * Two deliberate exceptions:
+ * - `password` is never trimmed: surrounding spaces can be part of the credential.
+ * - `host` carries the on-disk path for SQLite/DuckDB/Access, so those types keep it
+ *   byte-exact.
+ *
+ * `port` is numeric on `ConnectionConfig`, so form whitespace is already parsed away.
+ */
+export function normalizeConnectionIdentityFields(config: ConnectionConfig): void {
+  if (!connectionHostIsFilePath(config.db_type)) config.host = config.host.trim();
+  config.username = config.username.trim();
+  config.database = config.database?.trim() || undefined;
 }
 
 export function normalizeConnectionScope(config: ConnectionConfig): void {

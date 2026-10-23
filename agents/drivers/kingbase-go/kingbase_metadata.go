@@ -126,6 +126,7 @@ type objectInfo struct {
 	ParentSchema   *string `json:"parent_schema,omitempty"`
 	ParentName     *string `json:"parent_name,omitempty"`
 	Comment        *string `json:"comment"`
+	Signature      *string `json:"signature,omitempty"`
 	Valid          *bool   `json:"valid,omitempty"`
 	CustomTypeKind *string `json:"custom_type_kind,omitempty"`
 	HasMembers     *bool   `json:"has_members,omitempty"`
@@ -1671,34 +1672,11 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		}
 	}
 	if constraintsAllowRoutines(constraints) {
-		var query string
-		if s.mode.mysqlCompat {
-			query = fmt.Sprintf(`SELECT ROUTINE_NAME, ROUTINE_TYPE, ROUTINE_COMMENT
-FROM information_schema.routines
-WHERE ROUTINE_SCHEMA = %s
-ORDER BY ROUTINE_NAME`, quoteLiteral(effective))
-		} else {
-			catalog := "sys_catalog"
-			function := "sys"
-			if s.mode.postgresCatalog {
-				catalog, function = "pg_catalog", "pg"
-			}
-			query = fmt.Sprintf(`SELECT p.proname, CASE WHEN p.prorettype = 2278 THEN 'PROCEDURE' ELSE 'FUNCTION' END, d.description
-FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid = p.pronamespace
-LEFT JOIN %s.%s_description d ON d.objoid = p.oid AND d.objsubid = 0
-WHERE n.nspname = %s ORDER BY p.proname`, catalog, function, catalog, function, catalog, function, quoteLiteral(effective))
+		routines, routineErr := s.listRoutineObjects(effective)
+		if routineErr != nil {
+			return nil, fmt.Errorf("list routines in schema %q: %w", effective, routineErr)
 		}
-		rows, queryErr := s.metadataQuery(query)
-		if queryErr == nil {
-			for rows.Next() {
-				var name, kind string
-				var comment sql.NullString
-				if rows.Scan(&name, &kind, &comment) == nil {
-					result = append(result, objectInfo{Name: name, ObjectType: kind, Schema: effective, Comment: nullStringPtr(comment)})
-				}
-			}
-			_ = rows.Close()
-		}
+		result = append(result, routines...)
 	}
 	if constraintsAllowTriggers(constraints) {
 		triggers, triggerErr := s.listTriggerObjects(effective)
@@ -2778,6 +2756,10 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 }
 
 func (s *server) getObjectSourceForRelation(schema, name, objectType, relationName string) (map[string]any, error) {
+	return s.getObjectSourceWithSignature(schema, name, objectType, relationName, nil)
+}
+
+func (s *server) getObjectSourceWithSignature(schema, name, objectType, relationName string, signature *string) (map[string]any, error) {
 	effective, err := s.effectiveSchema(schema)
 	if err != nil {
 		return nil, err
@@ -2789,38 +2771,7 @@ func (s *server) getObjectSourceForRelation(schema, name, objectType, relationNa
 	} else if kind == "MATERIALIZED_VIEW" {
 		source, err = s.getMaterializedViewSource(effective, name)
 	} else if kind == "FUNCTION" || kind == "PROCEDURE" {
-		catalog, prefix, function := "sys_catalog", "sys", "sys_get_functiondef"
-		if s.mode.postgresCatalog {
-			catalog, prefix, function = "pg_catalog", "pg", "pg_get_functiondef"
-		} else if s.usePgFunctionDefinition {
-			function = "pg_get_functiondef"
-		}
-		querySource := func(definitionFunction string) error {
-			query := fmt.Sprintf("SELECT %s(p.oid) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s ORDER BY CASE WHEN p.prorettype=2278 THEN 0 ELSE 1 END LIMIT 1", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(name))
-			return s.requireDBQueryRow(query, &source)
-		}
-		queryLegacySource := func() error {
-			legacyFunction := "GET_FUNC_DDL"
-			if kind == "PROCEDURE" {
-				legacyFunction = "GET_PROCEDURE_DDL"
-			}
-			query := fmt.Sprintf("SELECT DBMS_METADATA.%s(CAST(%s AS varchar(128)), CAST(%s AS varchar(128)))", legacyFunction, quoteLiteral(name), quoteLiteral(effective))
-			return s.requireDBQueryRow(query, &source)
-		}
-		if s.useLegacyRoutineDefinition {
-			err = queryLegacySource()
-		} else {
-			err = querySource(function)
-			if err != nil && function == "sys_get_functiondef" && isUndefinedFunction(err, function) {
-				s.usePgFunctionDefinition = true
-				function = "pg_get_functiondef"
-				err = querySource(function)
-			}
-			if err != nil && !s.mode.postgresCatalog && function == "pg_get_functiondef" && isUndefinedFunction(err, function) {
-				s.useLegacyRoutineDefinition = true
-				err = queryLegacySource()
-			}
-		}
+		source, err = s.getRoutineSource(effective, name, kind, signature)
 	} else if kind == "TRIGGER" {
 		definitions, triggerErr := s.listTriggerDefinitionsFor(effective, relationName, name)
 		if triggerErr != nil {

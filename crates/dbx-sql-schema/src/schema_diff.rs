@@ -23,7 +23,9 @@ use crate::types::{
     ColumnInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, OwnerInfo, RuleInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
+mod oracle_routines;
 mod sqlserver_dependencies;
+pub use oracle_routines::{diff_oracle_routines, oracle_routine_diff_sql, OracleRoutineCompareContext};
 
 use sqlserver_dependencies::build_dependency_aware_alter_column_batch;
 
@@ -498,6 +500,8 @@ pub struct SchemaDiffPreparationOptions {
     pub source_functions: Vec<FunctionInfo>,
     #[serde(default)]
     pub target_functions: Vec<FunctionInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_routines: Option<OracleRoutineCompareContext>,
     #[serde(default)]
     pub source_sequences: Vec<SequenceInfo>,
     #[serde(default)]
@@ -1989,6 +1993,7 @@ impl Default for SchemaDiffPreparationOptions {
             target_details: Vec::new(),
             source_functions: Vec::new(),
             target_functions: Vec::new(),
+            oracle_routines: None,
             source_sequences: Vec::new(),
             target_sequences: Vec::new(),
             source_rules: Vec::new(),
@@ -2191,7 +2196,10 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
         None
     };
 
-    let function_diffs = diff_functions(&options.source_functions, &options.target_functions);
+    let function_diffs = match &options.oracle_routines {
+        Some(context) => diff_oracle_routines(&options.source_functions, &options.target_functions, context),
+        None => diff_functions(&options.source_functions, &options.target_functions),
+    };
     let sequence_diffs = diff_sequences(&options.source_sequences, &options.target_sequences);
     let rule_diffs = diff_rules(&options.source_rules, &options.target_rules);
     let owner_diffs = diff_owners(&options.source_owners, &options.target_owners);
@@ -2214,9 +2222,9 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
         }
     }
 
-    let (sync_sql, _) = generate_schema_sync_sql_inner(
+    let (mut sync_sql, _) = generate_schema_sync_sql_inner(
         &diffs,
-        &function_diffs,
+        if options.oracle_routines.is_some() { &[] } else { &function_diffs },
         &sequence_diffs,
         &rule_diffs,
         &owner_diffs,
@@ -2226,6 +2234,18 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
         options.source_dialect,
         &options.field_mappings,
     );
+    if let Some(context) = &options.oracle_routines {
+        for diff in &function_diffs {
+            if let Ok(sql) = oracle_routine_diff_sql(diff, context) {
+                if !sql.is_empty() {
+                    if !sync_sql.is_empty() {
+                        sync_sql.push_str("\n\n");
+                    }
+                    sync_sql.push_str(&sql);
+                }
+            }
+        }
+    }
 
     let (rollback_sync_sql, missing_rollback_objects) = match &rollback_graph {
         Some(graph) => {
@@ -3210,6 +3230,20 @@ fn parse_mysql_integer_type(data_type: &str) -> MysqlIntegerTypeSignature {
     MysqlIntegerTypeSignature { normalized, integer_key, width }
 }
 
+/// PostgreSQL's time types default to precision 6, but `format_type()` only prints the
+/// precision when it was declared: `timestamp` and `timestamp(6)` are the same column type
+/// yet render differently. Dropping an explicit `(6)` lets both spellings compare equal,
+/// while any other explicit precision (e.g. `timestamp(3)`) is still a real difference.
+fn normalize_postgres_temporal_type(data_type: &str) -> String {
+    let normalized = data_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    let base = normalized.split(['(', ' ', '[']).next().unwrap_or_default();
+    if matches!(base, "timestamp" | "timestamptz" | "time" | "timetz" | "interval") {
+        normalized.replacen("(6)", "", 1)
+    } else {
+        normalized
+    }
+}
+
 fn column_types_equal_for_dialects(
     source_type: &str,
     target_type: &str,
@@ -3231,6 +3265,9 @@ fn column_types_equal_for_dialects(
             return true;
         }
         _ => {}
+    }
+    if source_dialect == Some(DialectKind::Postgres) && target_dialect == Some(DialectKind::Postgres) {
+        return normalize_postgres_temporal_type(source_type) == normalize_postgres_temporal_type(target_type);
     }
     if source_dialect != Some(DialectKind::Mysql) || target_dialect != Some(DialectKind::Mysql) {
         return false;
@@ -13936,6 +13973,7 @@ mod tests {
             target_details: vec![],
             source_functions: vec![],
             target_functions: vec![],
+            oracle_routines: None,
             source_sequences: vec![],
             target_sequences: vec![],
             source_rules: vec![],
@@ -16249,5 +16287,58 @@ mod tests {
         ));
         assert_eq!(column_type_similarity_score("uniqueidentifier", "uuid"), 1.0);
         assert_eq!(column_type_similarity_score("uuid", "uniqueidentifier"), 1.0);
+    }
+
+    #[test]
+    fn postgres_temporal_default_precision_is_not_a_type_difference() {
+        let pg = Some(DialectKind::Postgres);
+        for (implicit, explicit) in [
+            ("timestamp without time zone", "timestamp(6) without time zone"),
+            ("timestamp with time zone", "timestamp(6) with time zone"),
+            ("time without time zone", "time(6) without time zone"),
+            ("time with time zone", "time(6) with time zone"),
+            ("interval", "interval(6)"),
+            ("interval day to second", "interval day to second(6)"),
+            ("timestamp without time zone[]", "timestamp(6) without time zone[]"),
+        ] {
+            assert!(column_types_equal_for_dialects(implicit, explicit, pg, pg), "{implicit} vs {explicit}");
+            assert!(column_types_equal_for_dialects(explicit, implicit, pg, pg), "{explicit} vs {implicit}");
+        }
+
+        assert!(!column_types_equal_for_dialects(
+            "timestamp without time zone",
+            "timestamp(3) without time zone",
+            pg,
+            pg
+        ));
+        assert!(!column_types_equal_for_dialects(
+            "timestamp(6) without time zone",
+            "timestamp(6) with time zone",
+            pg,
+            pg
+        ));
+        assert!(!column_types_equal_for_dialects("numeric", "numeric(6)", pg, pg));
+    }
+
+    #[test]
+    fn postgres_timestamp_default_precision_produces_no_column_diff() {
+        let column = |data_type: &str| ColumnInfo {
+            name: "created_at".into(),
+            data_type: data_type.into(),
+            is_nullable: false,
+            column_default: Some("now()".into()),
+            ..Default::default()
+        };
+        let diffs = diff_columns_with_dialect_options(
+            &[column("timestamp without time zone")],
+            &[column("timestamp(6) without time zone")],
+            false,
+            false,
+            false,
+            0.5,
+            Some(DialectKind::Postgres),
+            Some(DialectKind::Postgres),
+        );
+        assert!(diffs.is_empty(), "{diffs:?}");
     }
 }

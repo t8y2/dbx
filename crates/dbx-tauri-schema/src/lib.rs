@@ -53,6 +53,13 @@ define_registry![
     list_subpartitions,
     get_table_ddl,
     list_functions,
+    load_schema_diff_routines,
+    prepare_oracle_routine_save,
+    prepare_oracle_routine_plan,
+    prepare_oracle_routine_recovery,
+    execute_oracle_routine_operation,
+    observe_oracle_routine_operation,
+    update_oracle_routine_operation_references,
     list_sequences,
     list_rules,
     list_owners,
@@ -85,8 +92,15 @@ mod tests {
 
     #[test]
     fn handles_only_schema_commands() {
-        assert_eq!(COMMANDS.len(), 49);
+        assert_eq!(COMMANDS.len(), 56);
         assert!(handles("list_databases"));
+        assert!(handles("load_schema_diff_routines"));
+        assert!(handles("prepare_oracle_routine_save"));
+        assert!(handles("prepare_oracle_routine_plan"));
+        assert!(handles("prepare_oracle_routine_recovery"));
+        assert!(handles("execute_oracle_routine_operation"));
+        assert!(handles("observe_oracle_routine_operation"));
+        assert!(handles("update_oracle_routine_operation_references"));
         assert!(handles("list_event_triggers"));
         assert!(!handles("prepare_schema_diff"));
         assert!(!handles("load_connections"));

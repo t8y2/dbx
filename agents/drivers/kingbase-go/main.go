@@ -142,6 +142,8 @@ type server struct {
 	usePgViewDefinition             bool
 	usePgFunctionDefinition         bool
 	useLegacyRoutineDefinition      bool
+	routineKindUnsupported          bool
+	routineIdentityFallback         int
 	catalogIdentityUnsupported      bool
 	catalogGeneratedUnsupported     bool
 	catalogOIDUnsupported           bool
@@ -424,7 +426,13 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_object_source":
-		result, err := s.getObjectSourceForRelation(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"))
+		var signature *string
+		if raw, ok := params["signature"]; ok {
+			if err := json.Unmarshal(raw, &signature); err != nil {
+				return nil, false, fmt.Errorf("invalid routine signature: %w", err)
+			}
+		}
+		result, err := s.getObjectSourceWithSignature(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"), signature)
 		return result, false, err
 	case "get_type_details":
 		result, err := s.getTypeDetails(stringParam(params, "schema"), stringParam(params, "name"))
@@ -489,6 +497,8 @@ func (s *server) connect(cp connectParams) error {
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
+	s.routineKindUnsupported = false
+	s.routineIdentityFallback = 0
 	s.catalogIdentityUnsupported = false
 	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
@@ -691,6 +701,8 @@ func (s *server) disconnect() error {
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
+	s.routineKindUnsupported = false
+	s.routineIdentityFallback = 0
 	s.catalogIdentityUnsupported = false
 	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false

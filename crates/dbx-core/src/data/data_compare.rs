@@ -15,7 +15,11 @@ use crate::sql_dialect::{
     qualified_table_name, quote_iris_identifier, quote_table_identifier, table_data_qualified_table_name,
     PaginationContext, TablePaginationStrategy,
 };
-use crate::transfer::{generate_comment_ddl, generate_create_table_ddl};
+use crate::transfer::{
+    generate_comment_ddl, generate_create_table_ddl, is_identity_column_extra,
+    is_postgres_generated_always_identity_extra, postgres_sequence_sync_statement,
+    wrap_dameng_identity_insert_sql_for_table,
+};
 
 use super::sample_pairing::retain_shared_sample_rows_by_key;
 
@@ -910,11 +914,13 @@ fn generate_data_sync_statements(options: &GenerateDataSyncSqlOptions<'_>) -> Ve
     let table = qualified_table_name(options.database_type, options.schema, options.table_name);
     let column_info = options.column_info;
     let added = generate_insert_sync_statements(options, &table, column_info);
+    let sequence_resets = generate_sequence_reset_statements(options, &table, column_info);
     let modified = generate_update_sync_statements(options, &table, column_info);
     let removed = generate_delete_sync_statements(options, &table, column_info);
 
-    let mut statements = Vec::with_capacity(added.len() + modified.len() + removed.len());
+    let mut statements = Vec::with_capacity(added.len() + sequence_resets.len() + modified.len() + removed.len());
     statements.extend(added);
+    statements.extend(sequence_resets);
     statements.extend(modified);
     statements.extend(removed);
     statements
@@ -938,6 +944,23 @@ fn generate_insert_sync_statements(
     if writable_columns.is_empty() {
         return options.diff.added.par_iter().map(|_| format!("INSERT INTO {table} DEFAULT VALUES;")).collect();
     }
+    let writes_identity = |is_identity: fn(Option<&str>) -> bool| {
+        writable_columns
+            .iter()
+            .any(|column| is_identity(column_info_for(column_info, column).and_then(|info| info.extra.as_deref())))
+    };
+    // SQL Server rejects explicit identity values (error 544) unless IDENTITY_INSERT is on.
+    // The wrapper stays inside each statement so a per-statement retry keeps it.
+    let sqlserver_identity_insert =
+        options.database_type == Some(DatabaseType::SqlServer) && writes_identity(is_identity_column_extra);
+    // PostgreSQL rejects explicit values for GENERATED ALWAYS identity columns without an override.
+    let overriding = if options.database_type == Some(DatabaseType::Postgres)
+        && writes_identity(is_postgres_generated_always_identity_extra)
+    {
+        " OVERRIDING SYSTEM VALUE"
+    } else {
+        ""
+    };
     options
         .diff
         .added
@@ -961,9 +984,46 @@ fn generate_insert_sync_statements(
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("INSERT INTO {table} ({columns}) VALUES {values};")
+            let insert = format!("INSERT INTO {table} ({columns}){overriding} VALUES {values};");
+            if sqlserver_identity_insert {
+                wrap_dameng_identity_insert_sql_for_table(&insert, table)
+            } else {
+                insert
+            }
         })
         .collect()
+}
+
+/// Explicit inserts into serial/identity columns do not advance PostgreSQL sequences,
+/// so the next default value would collide with a synchronized row. Move each sequence
+/// past the column's current maximum once the inserts have run.
+///
+/// Shares the transfer pipeline's `setval` shape, so like pg_dump the reset can also
+/// move a sequence backward when it sits above the table maximum (ids that were
+/// allocated and later deleted).
+fn generate_sequence_reset_statements(
+    options: &GenerateDataSyncSqlOptions<'_>,
+    table: &str,
+    column_info: &[DataGridColumnInfo],
+) -> Vec<String> {
+    if options.database_type != Some(DatabaseType::Postgres) || options.diff.added.is_empty() {
+        return Vec::new();
+    }
+    options
+        .columns
+        .iter()
+        .filter(|column| is_postgres_sequence_backed_column(column_info_for(column_info, column)))
+        .map(|column| format!("{};", postgres_sequence_sync_statement(table, column)))
+        .collect()
+}
+
+fn is_postgres_sequence_backed_column(column_info: Option<&DataGridColumnInfo>) -> bool {
+    let Some(column_info) = column_info else {
+        return false;
+    };
+    let extra = column_info.extra.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    let default = column_info.column_default.as_deref().unwrap_or("").trim_start().to_ascii_lowercase();
+    extra.contains("identity") || extra.ends_with("serial") || default.starts_with("nextval(")
 }
 
 fn generate_update_sync_statements(
@@ -2000,10 +2060,139 @@ mod tests {
         assert_eq!(
             preparation.sync_sql,
             [
-                "INSERT INTO \"public\".\"generated_column_sync_test\" (\"id\", \"quantity\") VALUES (1, 2);",
+                "INSERT INTO \"public\".\"generated_column_sync_test\" (\"id\", \"quantity\") OVERRIDING SYSTEM VALUE VALUES (1, 2);",
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"generated_column_sync_test\"', 'id')::regclass, GREATEST(COALESCE(MAX(\"id\"::bigint), 0), 1), MAX(\"id\"::bigint) IS NOT NULL) FROM \"public\".\"generated_column_sync_test\";",
                 "UPDATE \"public\".\"generated_column_sync_test\" SET \"quantity\" = 3 WHERE \"id\" = 2;",
             ]
             .join("\n")
+        );
+    }
+
+    #[test]
+    fn postgres_sync_resets_serial_sequences_after_inserts() {
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "migration".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string(), "legacy_id".to_string(), "name".to_string()],
+            key_columns: vec!["id".to_string()],
+            column_info: vec![
+                data_compare_column_with_extra("id", "integer", "serial"),
+                DataGridColumnInfo {
+                    column_default: Some("nextval('legacy_seq'::regclass)".to_string()),
+                    ..data_compare_column("legacy_id", "bigint")
+                },
+                data_compare_column("name", "text"),
+            ],
+            source_rows: vec![vec![json!(5), json!(9), json!("add_column")]],
+            target_rows: Vec::new(),
+            database_type: Some(DatabaseType::Postgres),
+        })
+        .expect("data compare preparation should succeed");
+
+        assert_eq!(
+            preparation.sync_statements,
+            vec![
+                "INSERT INTO \"public\".\"migration\" (\"id\", \"legacy_id\", \"name\") VALUES (5, 9, 'add_column');",
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"migration\"', 'id')::regclass, GREATEST(COALESCE(MAX(\"id\"::bigint), 0), 1), MAX(\"id\"::bigint) IS NOT NULL) FROM \"public\".\"migration\";",
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"migration\"', 'legacy_id')::regclass, GREATEST(COALESCE(MAX(\"legacy_id\"::bigint), 0), 1), MAX(\"legacy_id\"::bigint) IS NOT NULL) FROM \"public\".\"migration\";",
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_sync_sequence_reset_casts_non_integer_columns_to_bigint() {
+        // A nextval-backed column does not have to be an integer column; without the
+        // ::bigint cast COALESCE(MAX(text), 0) fails to resolve types at run time.
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "legacy_shapes".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string(), "legacy_ref".to_string()],
+            key_columns: vec!["id".to_string()],
+            column_info: vec![
+                data_compare_column_with_extra("id", "integer", "serial"),
+                DataGridColumnInfo {
+                    column_default: Some("nextval('legacy_ref_seq'::regclass)::text".to_string()),
+                    ..data_compare_column("legacy_ref", "text")
+                },
+            ],
+            source_rows: vec![vec![json!(1), json!("7")]],
+            target_rows: Vec::new(),
+            database_type: Some(DatabaseType::Postgres),
+        })
+        .expect("data compare preparation should succeed");
+
+        let reset = preparation
+            .sync_statements
+            .iter()
+            .find(|statement| statement.contains("setval") && statement.contains("\"legacy_ref\""))
+            .expect("sequence reset for legacy_ref");
+        assert_eq!(
+            *reset,
+            "SELECT setval(pg_get_serial_sequence('\"public\".\"legacy_shapes\"', 'legacy_ref')::regclass, GREATEST(COALESCE(MAX(\"legacy_ref\"::bigint), 0), 1), MAX(\"legacy_ref\"::bigint) IS NOT NULL) FROM \"public\".\"legacy_shapes\";"
+        );
+    }
+
+    #[test]
+    fn postgres_sync_skips_sequence_reset_without_inserts() {
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "migration".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string(), "name".to_string()],
+            key_columns: vec!["id".to_string()],
+            column_info: vec![
+                data_compare_column_with_extra("id", "integer", "serial"),
+                data_compare_column("name", "text"),
+            ],
+            source_rows: vec![vec![json!(1), json!("new")]],
+            target_rows: vec![vec![json!(1), json!("old")], vec![json!(2), json!("gone")]],
+            database_type: Some(DatabaseType::Postgres),
+        })
+        .expect("data compare preparation should succeed");
+
+        assert!(preparation.sync_statements.iter().all(|statement| !statement.contains("setval")));
+    }
+
+    #[test]
+    fn sqlserver_sync_wraps_identity_inserts_with_identity_insert() {
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "migration".to_string(),
+            schema: Some("dbo".to_string()),
+            columns: vec!["id".to_string(), "name".to_string()],
+            key_columns: vec!["id".to_string()],
+            column_info: vec![
+                data_compare_column_with_extra("id", "int", "identity(1,1)"),
+                data_compare_column("name", "nvarchar(100)"),
+            ],
+            source_rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Bob")]],
+            target_rows: vec![vec![json!(2), json!("Bobby")]],
+            database_type: Some(DatabaseType::SqlServer),
+        })
+        .expect("data compare preparation should succeed");
+
+        assert_eq!(
+            preparation.sync_statements[0],
+            "SET IDENTITY_INSERT [dbo].[migration] ON;\nINSERT INTO [dbo].[migration] ([id], [name]) VALUES (1, N'Ada');\nSET IDENTITY_INSERT [dbo].[migration] OFF;"
+        );
+        assert!(!preparation.sync_statements[1].contains("IDENTITY_INSERT"));
+    }
+
+    #[test]
+    fn sqlserver_sync_skips_identity_insert_without_identity_columns() {
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "migration".to_string(),
+            schema: Some("dbo".to_string()),
+            columns: vec!["id".to_string(), "name".to_string()],
+            key_columns: vec!["id".to_string()],
+            column_info: vec![data_compare_column("id", "int"), data_compare_column("name", "nvarchar(100)")],
+            source_rows: vec![vec![json!(1), json!("Ada")]],
+            target_rows: Vec::new(),
+            database_type: Some(DatabaseType::SqlServer),
+        })
+        .expect("data compare preparation should succeed");
+
+        assert_eq!(
+            preparation.sync_statements,
+            vec!["INSERT INTO [dbo].[migration] ([id], [name]) VALUES (1, N'Ada');"]
         );
     }
 

@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.51"
+version = "0.6.52"
 dependencies = [
  "anyhow",
  "axum",
@@ -2153,6 +2153,7 @@ dependencies = [
  "csv",
  "dbx-core",
  "dbx-mcp",
+ "dbx-platform",
  "dbx-tauri-consul",
  "dbx-tauri-schema",
  "deadpool-postgres",
@@ -2161,6 +2162,7 @@ dependencies = [
  "grep",
  "gtk",
  "ignore",
+ "libc",
  "libloading 0.8.9",
  "log",
  "minisign-verify",
@@ -2191,7 +2193,6 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-log",
  "tauri-plugin-opener",
- "tauri-plugin-process",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
@@ -2203,6 +2204,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "webview2-com",
+ "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-sys 0.61.2",
  "wry",
@@ -2229,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.127"
+version = "0.4.128"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2569,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.127"
+version = "0.4.128"
 dependencies = [
  "async-trait",
  "axum",
@@ -2753,7 +2755,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.51"
+version = "0.6.52"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -9803,16 +9805,6 @@ dependencies = [
  "url",
  "windows 0.61.3",
  "zbus 5.18.0",
-]
-
-[[package]]
-name = "tauri-plugin-process"
-version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d55511a7bf6cd70c8767b02c97bf8134fa434daf3926cfc1be0a0f94132d165a"
-dependencies = [
- "tauri",
- "tauri-plugin",
 ]
 
 [[package]]

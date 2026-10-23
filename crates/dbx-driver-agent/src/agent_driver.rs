@@ -2383,9 +2383,23 @@ impl AgentDriverClient {
         relation_name: Option<&str>,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.get_object_source_with_identity(database, schema, name, object_type, None, relation_name, timeout_duration)
+            .await
+    }
+
+    pub async fn get_object_source_with_identity<T: DeserializeOwned + Send + 'static, K: Serialize>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &K,
+        signature: Option<&str>,
+        relation_name: Option<&str>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
         self.call_method_with_timeout(
             AgentMethod::GetObjectSource,
-            agent_object_source_params_with_relation(database, schema, name, object_type, relation_name),
+            agent_object_source_params_with_identity(database, schema, name, object_type, signature, relation_name),
             timeout_duration,
         )
         .await
@@ -3331,8 +3345,23 @@ pub fn agent_object_source_params_with_relation<K: Serialize>(
     object_type: &K,
     relation_name: Option<&str>,
 ) -> Value {
+    agent_object_source_params_with_identity(database, schema, name, object_type, None, relation_name)
+}
+
+pub fn agent_object_source_params_with_identity<K: Serialize>(
+    database: &str,
+    schema: &str,
+    name: &str,
+    object_type: &K,
+    signature: Option<&str>,
+    relation_name: Option<&str>,
+) -> Value {
     let mut params =
         serde_json::json!({ "database": database, "schema": schema, "name": name, "object_type": object_type });
+    // An empty signature identifies the zero-argument overload; absence means unknown.
+    if let Some(signature) = signature {
+        params["signature"] = Value::String(signature.to_string());
+    }
     if let Some(relation_name) = relation_name.map(str::trim).filter(|value| !value.is_empty()) {
         params["relation_name"] = Value::String(relation_name.to_string());
     }
@@ -3830,17 +3859,18 @@ mod tests {
     use super::{
         agent_close_query_session_params, agent_error_from_legacy, agent_handshake_params, agent_java_args,
         agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params,
-        agent_object_source_params_with_relation, agent_process_error_hint, agent_proxy_env_vars, agent_schema_params,
-        agent_schema_table_params, agent_supports_capability, agent_transaction_params, append_legacy_error_context,
-        decode_agent_response, format_agent_process_error, format_agent_startup_error, is_agent_rpc_response_error,
-        is_retryable_agent_startup_error, is_unsupported_handshake_error, legacy_agent_call_error,
-        mongo_collection_params, mongo_database_params, mongo_document_id_params, parse_agent_java_opts,
-        read_agent_json_response, read_agent_line, read_agent_line_with_limit, start_stderr_collector,
-        validate_dameng_java_system_properties, AgentCallError, AgentCapability, AgentDriverClient, AgentErrorCategory,
-        AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod,
-        AgentOperationOutcome, AgentRuntimeClient, AgentSessionDisposition, AgentTableReadCloseParams,
-        AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE,
-        AGENT_PROTOCOL_VERSION, AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
+        agent_object_source_params_with_identity, agent_object_source_params_with_relation, agent_process_error_hint,
+        agent_proxy_env_vars, agent_schema_params, agent_schema_table_params, agent_supports_capability,
+        agent_transaction_params, append_legacy_error_context, decode_agent_response, format_agent_process_error,
+        format_agent_startup_error, is_agent_rpc_response_error, is_retryable_agent_startup_error,
+        is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params, mongo_database_params,
+        mongo_document_id_params, parse_agent_java_opts, read_agent_json_response, read_agent_line,
+        read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties, AgentCallError,
+        AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake,
+        AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
+        AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams,
+        MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE, AGENT_PROTOCOL_VERSION,
+        AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
     };
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
@@ -6240,6 +6270,25 @@ for line in sys.stdin:
             agent_transaction_params(Some("sales"), &["BEGIN".to_string(), "COMMIT".to_string()], Some("public")),
             serde_json::json!({ "database": "sales", "statements": ["BEGIN", "COMMIT"], "schema": "public" })
         );
+    }
+
+    #[test]
+    fn object_source_params_preserve_overload_identity() {
+        for signature in ["", "v integer", "v INOUT integer"] {
+            assert_eq!(
+                agent_object_source_params_with_identity("onepass", "app", "run", &"PROCEDURE", Some(signature), None),
+                serde_json::json!({
+                    "database": "onepass", "schema": "app", "name": "run",
+                    "object_type": "PROCEDURE", "signature": signature,
+                })
+            );
+        }
+        let params = agent_object_source_params_with_identity("onepass", "app", "run", &"PROCEDURE", None, None);
+        assert!(params.get("signature").is_none());
+        let params =
+            agent_object_source_params_with_identity("onepass", "app", "audit", &"TRIGGER", None, Some("orders"));
+        assert_eq!(params["relation_name"], "orders");
+        assert!(params.get("signature").is_none());
     }
 
     #[test]

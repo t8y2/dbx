@@ -569,6 +569,8 @@ async fn serve() -> Result<(), String> {
         ))
     };
 
+    app_state.set_honor_fixed_ssh_local_ports(true);
+
     // Password hash: env var takes priority, then database
     let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
@@ -813,6 +815,13 @@ async fn serve() -> Result<(), String> {
         .route("/schema/invalid-indexes", get(routes::schema::list_invalid_indexes))
         .route("/schema/subpartitions", get(routes::schema::list_subpartitions))
         .route("/schema/functions", get(routes::schema::list_functions))
+        .route("/schema/diff-routines", get(routes::schema::load_schema_diff_routines))
+        .route("/schema/routine-save", post(routes::schema::prepare_oracle_routine_save))
+        .route("/schema/routine-plan", post(routes::schema::prepare_oracle_routine_plan))
+        .route("/schema/routine-recovery", post(routes::schema::prepare_oracle_routine_recovery))
+        .route("/schema/routine-execute", post(routes::schema::execute_oracle_routine_operation))
+        .route("/schema/routine-operation", get(routes::schema::observe_oracle_routine_operation))
+        .route("/schema/routine-operation-references", post(routes::schema::update_oracle_routine_operation_references))
         .route("/schema/sequences", get(routes::schema::list_sequences))
         .route("/schema/rules", get(routes::schema::list_rules))
         .route("/schema/owners", get(routes::schema::list_owners))

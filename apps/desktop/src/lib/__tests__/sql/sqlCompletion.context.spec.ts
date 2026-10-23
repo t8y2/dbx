@@ -2799,3 +2799,58 @@ describe("quoted identifier completion filtering (issue #12008)", () => {
     expect(quotedCompletionFilterPrefix(query, prefix)).toBeUndefined();
   });
 });
+
+describe("Spanner keyword completion (issue #13129)", () => {
+  it.each([
+    "CREATE CHANGE STREAM",
+    "CREATE SEARCH INDEX",
+    "CREATE VECTOR INDEX",
+    "CREATE PROPERTY GRAPH",
+    "INTERLEAVE IN PARENT",
+    "STORING",
+    "PENDING_COMMIT_TIMESTAMP",
+    "GENERATE_UUID",
+    // Ported from the overlapping #13138 (row-deletion policies, DML exits,
+    // scalar types, sequence options) so one list carries the full dialect.
+    "ROW DELETION POLICY",
+    "THEN RETURN",
+    "INSERT OR UPDATE",
+    "SQL SECURITY INVOKER",
+    "BIT_REVERSED_POSITIVE",
+    "INT64",
+  ])("offers %s", (label) => {
+    const sql = "CREATE ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "spanner",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === label)).toBe(true);
+  });
+
+  it("keeps BigQuery-only syntax out of the Spanner keyword list", () => {
+    const sql = "SELECT * ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "spanner",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    // TABLESAMPLE and FOR SYSTEM_TIME AS OF are BigQuery syntax; Spanner reads
+    // staleness through the API, not SQL.
+    expect(items.some((item) => item.label === "TABLESAMPLE")).toBe(false);
+    expect(items.some((item) => item.label === "FOR SYSTEM_TIME AS OF")).toBe(false);
+  });
+
+  it("keeps Spanner-only DDL out of the PostgreSQL keyword list", () => {
+    const sql = "CREATE ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === "CREATE CHANGE STREAM")).toBe(false);
+  });
+});

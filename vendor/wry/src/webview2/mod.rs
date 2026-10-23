@@ -286,14 +286,22 @@ impl InnerWebView {
     attributes: &WebViewAttributes,
     pl_attrs: super::PlatformSpecificWebViewAttributes,
   ) -> Result<ICoreWebView2Environment> {
-    let data_directory = attributes
-      .context
-      .as_deref()
-      .and_then(|context| context.data_directory())
-      .map(HSTRING::from);
+    // DBX patch: the WebView2 user data folder can be redirected at runtime
+    // through `WEBVIEW2_USER_DATA_FOLDER`. The startup compatibility ladder
+    // uses this to retry a blocked launch with a fresh user data directory
+    // (AV products and broken sandbox profiles often leave the default folder
+    // unusable). Upstream wry only lets `WebContext::new` decide this, which
+    // cannot change between startup attempts.
+    let data_directory = user_data_folder_from_environment().or_else(|| {
+      attributes
+        .context
+        .as_deref()
+        .and_then(|context| context.data_directory())
+        .map(HSTRING::from)
+    });
 
     // additional browser args
-    let additional_browser_args = pl_attrs.additional_browser_args.unwrap_or_else(|| {
+    let configured_browser_args = pl_attrs.additional_browser_args.unwrap_or_else(|| {
       // remove "mini menu" - See https://github.com/tauri-apps/wry/issues/535
       // and "smart screen" - See https://github.com/tauri-apps/tauri/issues/1345
       let default_args = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
@@ -322,6 +330,19 @@ impl InnerWebView {
 
       arguments
     });
+
+    // DBX patch: merge `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` into the browser
+    // arguments that are actually passed to
+    // `CreateCoreWebView2EnvironmentWithOptions`. The WebView2 loader only
+    // reads that environment variable when the additional arguments option is
+    // *not* set, and wry always sets it, so without this merge every runtime
+    // env override (notably the `--no-sandbox` / `--disable-gpu` /
+    // `--disable-features=RendererCodeIntegrity` set used by DBX's enterprise
+    // startup compatibility profiles) was silently ignored.
+    let additional_browser_args = match additional_browser_args_from_environment() {
+      Some(extra) => merge_browser_arguments(&configured_browser_args, &extra),
+      None => configured_browser_args,
+    };
 
     let (tx, rx) = mpsc::channel();
     let options = CoreWebView2EnvironmentOptions::default();
@@ -1929,7 +1950,76 @@ fn configured_browser_executable_folder() -> Option<HSTRING> {
     version.major,
     version.minor,
   );
-  browser_executable_folder_from(folder.as_deref(), fixed_runtime_enabled)
+  // DBX patch: an explicitly configured fixed runtime (env var) wins on any
+  // Windows version. The startup compatibility ladder can point at a
+  // self-contained WebView2 runtime when the machine-wide Evergreen runtime is
+  // hooked by a security product; upstream wry only honored the variable on the
+  // Windows 7 target.
+  browser_executable_folder_from(folder.as_deref(), fixed_runtime_enabled || folder.is_some())
+}
+
+/// DBX patch: additional browser arguments supplied through the documented
+/// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment variable.
+fn additional_browser_args_from_environment() -> Option<String> {
+  std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+    .ok()
+    .filter(|value| !value.trim().is_empty())
+}
+
+/// DBX patch: user data folder supplied through
+/// `WEBVIEW2_USER_DATA_FOLDER`, when non-empty.
+fn user_data_folder_from_environment() -> Option<HSTRING> {
+  std::env::var_os("WEBVIEW2_USER_DATA_FOLDER")
+    .filter(|value| !value.is_empty())
+    .map(HSTRING::from)
+}
+
+/// DBX patch: merges two Chromium command lines kept in single strings.
+///
+/// `--disable-features` / `--enable-features` switches replace each other in
+/// Chromium instead of accumulating, so both lists are unioned (base order
+/// first); every other switch is appended when not already present. Arguments
+/// containing embedded whitespace are not supported, which matches the fixed
+/// flag set DBX's startup compatibility ladder uses.
+fn merge_browser_arguments(base: &str, extra: &str) -> String {
+  use std::collections::BTreeMap;
+
+  let mut switches: Vec<String> = Vec::new();
+  let mut feature_lists: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+
+  for argument in base.split_whitespace().chain(extra.split_whitespace()) {
+    let (feature_kind, features) = if let Some(features) = argument.strip_prefix("--disable-features=") {
+      (Some("--disable-features"), features)
+    } else if let Some(features) = argument.strip_prefix("--enable-features=") {
+      (Some("--enable-features"), features)
+    } else {
+      (None, "")
+    };
+
+    match feature_kind {
+      Some(feature_kind) => {
+        let merged = feature_lists.entry(feature_kind).or_default();
+        for feature in features.split(',').map(str::trim).filter(|feature| !feature.is_empty()) {
+          if !merged.iter().any(|existing| existing == feature) {
+            merged.push(feature.to_string());
+          }
+        }
+      }
+      None => {
+        if !switches.iter().any(|existing| existing == argument) {
+          switches.push(argument.to_string());
+        }
+      }
+    }
+  }
+
+  for (feature_kind, features) in feature_lists {
+    if !features.is_empty() {
+      switches.push(format!("{feature_kind}={}", features.join(",")));
+    }
+  }
+
+  switches.join(" ")
 }
 
 /// Builds a structured [`WebView2ProcessFailedInfo`] from the WebView2 event
@@ -2106,6 +2196,53 @@ mod tests {
     let value = browser_executable_folder_from(Some(folder), true).unwrap();
 
     assert_eq!(value.to_string_lossy(), folder.to_string_lossy());
+  }
+
+  #[test]
+  fn merge_browser_arguments_appends_environment_switches() {
+    let merged = merge_browser_arguments(
+      "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+      "--no-sandbox --disable-gpu",
+    );
+    assert_eq!(
+      merged,
+      "--no-sandbox --disable-gpu --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
+    );
+  }
+
+  #[test]
+  fn merge_browser_arguments_unions_feature_lists_instead_of_replacing_them() {
+    let merged = merge_browser_arguments(
+      "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --no-sandbox",
+      "--disable-features=RendererCodeIntegrity,msSmartScreenProtection --disable-gpu",
+    );
+    let arguments = merged.split(' ').collect::<Vec<_>>();
+    assert_eq!(
+      arguments.iter().filter(|argument| argument.starts_with("--disable-features=")).count(),
+      1
+    );
+    assert!(merged.contains("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity"));
+    assert!(merged.contains("--no-sandbox"));
+    assert!(merged.contains("--disable-gpu"));
+  }
+
+  #[test]
+  fn merge_browser_arguments_deduplicates_identical_switches() {
+    let merged = merge_browser_arguments("--no-sandbox --disable-gpu", "--disable-gpu --no-sandbox");
+    assert_eq!(merged, "--no-sandbox --disable-gpu");
+  }
+
+  #[test]
+  fn merge_browser_arguments_keeps_enable_features_separate_from_disable_features() {
+    let merged = merge_browser_arguments("--enable-features=A", "--disable-features=B");
+    assert_eq!(merged, "--enable-features=A --disable-features=B");
+  }
+
+  #[test]
+  fn merge_browser_arguments_handles_empty_inputs() {
+    assert_eq!(merge_browser_arguments("--no-sandbox", "   "), "--no-sandbox");
+    assert_eq!(merge_browser_arguments("", "--no-sandbox"), "--no-sandbox");
+    assert_eq!(merge_browser_arguments("", ""), "");
   }
 
   #[test]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeConnectionScope, normalizeConnectionTimeouts } from "../connectionSubmitNormalization";
+import { normalizeConnectionIdentityFields, normalizeConnectionScope, normalizeConnectionTimeouts } from "../connectionSubmitNormalization";
 import type { ConnectionConfig } from "@/types/database";
 
 function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -66,5 +66,26 @@ describe("connection submit normalization", () => {
     const value = config({ db_type: "postgres", one_time: false, read_only: false, save_password: undefined, production_databases: [" app ", "app", ""] });
     normalizeConnectionScope(value);
     expect(value).toMatchObject({ one_time: undefined, read_only: undefined, save_password: true, production_databases: ["app"] });
+  });
+
+  it("trims host, username and database but never the password (#12884)", () => {
+    const value = config({ host: "  db.internal  ", username: "  app  ", database: "  appdb  ", password: "  pass  " });
+    normalizeConnectionIdentityFields(value);
+    expect(value).toMatchObject({ host: "db.internal", username: "app", database: "appdb", password: "  pass  " });
+  });
+
+  it("treats a whitespace-only database as unset (#12884)", () => {
+    const value = config({ database: "   " });
+    normalizeConnectionIdentityFields(value);
+    expect(value.database).toBeUndefined();
+  });
+
+  it("keeps file-path hosts byte-exact for local-file engines (#12884)", () => {
+    for (const dbType of ["sqlite", "duckdb", "access"] as const) {
+      const value = config({ db_type: dbType, host: "  /tmp/report.db  ", username: "  user  " });
+      normalizeConnectionIdentityFields(value);
+      expect(value.host).toBe("  /tmp/report.db  ");
+      expect(value.username).toBe("user");
+    }
   });
 });

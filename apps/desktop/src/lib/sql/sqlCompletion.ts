@@ -486,6 +486,13 @@ const MYSQL_SQL_KEYWORDS = [
   "JSON_EXTRACT",
   "JSON_UNQUOTE",
   "DATE_FORMAT",
+  // Statement and operator vocabulary MySQL understands but the common list does
+  // not cover: `SHOW BINARY LOGS`, `SHOW BINLOG EVENTS`, and the REGEXP / RLIKE
+  // pattern operators (issue #13008).
+  "BINARY LOGS",
+  "BINLOG EVENTS",
+  "REGEXP",
+  "RLIKE",
 ];
 
 const MANTICORESEARCH_SQL_KEYWORDS = ["FACET", "MATCH", "SHOW", "SHOW META", "SHOW TABLES", "CALL", "CALL PQ", "PQ", "META", "TABLES", "OPTION", "WITHIN GROUP ORDER BY"];
@@ -493,6 +500,97 @@ const MANTICORESEARCH_SQL_KEYWORDS = ["FACET", "MATCH", "SHOW", "SHOW META", "SH
 // ClickHouse query grammar adds FINAL, PREWHERE, SAMPLE and the TOTALS/ROLLUP/
 // CUBE grouping modifiers plus DDL vocabulary. Keep them scoped to ClickHouse.
 const CLICKHOUSE_SQL_KEYWORDS = ["FINAL", "PREWHERE", "SAMPLE", "TOTALS", "ROLLUP", "CUBE", "GLOBAL", "ARRAY", "ENGINE", "PARTITION", "TTL", "CODEC", "SETTINGS", "FORMAT", "OUTFILE", "ATTACH", "DETACH", "OPTIMIZE", "SYSTEM", "KILL", "MATERIALIZED", "PROJECTION", "GRANULARITY"];
+
+// Cloud Spanner (GoogleSQL) DDL and functions that are not part of the common
+// keyword set: change streams, search/vector indexes, property graphs, proto
+// bundles, interleaved tables and the Spanner-specific functions.
+const SPANNER_SQL_KEYWORDS = [
+  "CREATE CHANGE STREAM",
+  "ALTER CHANGE STREAM",
+  "DROP CHANGE STREAM",
+  "CREATE SEARCH INDEX",
+  "DROP SEARCH INDEX",
+  "CREATE VECTOR INDEX",
+  "DROP VECTOR INDEX",
+  "CREATE PROPERTY GRAPH",
+  "DROP PROPERTY GRAPH",
+  "CREATE SEQUENCE",
+  "ALTER SEQUENCE",
+  "DROP SEQUENCE",
+  "CREATE MODEL",
+  "ALTER MODEL",
+  "DROP MODEL",
+  "CREATE PROTO BUNDLE",
+  "ALTER PROTO BUNDLE",
+  "DROP PROTO BUNDLE",
+  "CREATE SCHEMA",
+  "DROP SCHEMA",
+  "ALTER DATABASE",
+  "INTERLEAVE IN PARENT",
+  "INTERLEAVE IN",
+  "ON DELETE CASCADE",
+  "ON DELETE NO ACTION",
+  "ROW DELETION POLICY",
+  "ADD ROW DELETION POLICY",
+  "DROP ROW DELETION POLICY",
+  "REPLACE ROW DELETION POLICY",
+  "OLDER_THAN",
+  "STORING",
+  "NULL_FILTERED",
+  "TOKENLIST",
+  "CHANGE STREAM",
+  "SEARCH INDEX",
+  "VECTOR INDEX",
+  "PROPERTY GRAPH",
+  "GRAPH_TABLE",
+  "NODE TABLES",
+  "EDGE TABLES",
+  "SOURCE KEY",
+  "DESTINATION KEY",
+  "FOR ALL",
+  "SET OPTIONS",
+  "SQL SECURITY INVOKER",
+  "THEN RETURN",
+  "INSERT OR UPDATE",
+  "INSERT OR IGNORE",
+  "PROTO BUNDLE",
+  "SEQUENCE",
+  "MODEL",
+  "WITH OFFSET",
+  "UNNEST",
+  "QUALIFY",
+  "PIVOT",
+  "UNPIVOT",
+  "SAFE_CAST",
+  "SELECT AS STRUCT",
+  "SELECT AS VALUE",
+  "EXCEPT DISTINCT",
+  "INTERSECT DISTINCT",
+  "GENERATE_UUID",
+  "GET_NEXT_SEQUENCE_VALUE",
+  "PENDING_COMMIT_TIMESTAMP",
+  "COMMIT_TIMESTAMP",
+  "JSON_QUERY",
+  "JSON_VALUE",
+  "JSON_QUERY_ARRAY",
+  "JSON_VALUE_ARRAY",
+  "PARSE_JSON",
+  "TO_JSON",
+  "TO_JSON_STRING",
+  "ARRAY",
+  "STRUCT",
+  "INT64",
+  "FLOAT32",
+  "FLOAT64",
+  "BIGNUMERIC",
+  "STRING",
+  "BYTES",
+  "BOOL",
+  "PROTO",
+  "BIT_REVERSED_POSITIVE",
+  "SKIP RANGE",
+  "START COUNTER WITH",
+];
 
 const SQLITE_SQL_KEYWORDS = ["AUTOINCREMENT", "INTEGER", "BLOB", "BOOLEAN", "WITHOUT ROWID", "VACUUM", "PRAGMA", "JSON_EXTRACT", "JSON_SET", "STRFTIME"];
 
@@ -748,6 +846,7 @@ const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   turso: SQLITE_SQL_KEYWORDS,
   "cloudflare-d1": SQLITE_SQL_KEYWORDS,
   sqlserver: SQLSERVER_SQL_KEYWORDS,
+  spanner: SPANNER_SQL_KEYWORDS,
   oracle: ORACLE_SQL_KEYWORDS,
   "oceanbase-oracle": ORACLE_SQL_KEYWORDS,
   manticoresearch: MANTICORESEARCH_SQL_KEYWORDS,
@@ -6750,10 +6849,15 @@ function dedupeAndSort(items: SqlCompletionItem[], context?: SqlCompletionContex
 
 function compareCompletionItems(left: SqlCompletionItem, right: SqlCompletionItem, context?: SqlCompletionContext): number {
   const columnsExpected = !!context && context.suggestColumns && context.referencedTables.length > 0;
+  // An exact match on what the user typed has to win before the "surfaces first"
+  // rule below: sequences (and variables) pin themselves to the top of the list
+  // whenever no columns are expected, so on Oracle-family connections typing the
+  // `sel` snippet trigger listed every `SEL*` sequence above `select *` and Tab
+  // expanded a sequence instead of the snippet (#13115).
+  if (!left.exactMatch !== !right.exactMatch) return left.exactMatch ? -1 : 1;
   const leftSurfacesFirst = left.type === "variable" || (!columnsExpected && left.type === "sequence");
   const rightSurfacesFirst = right.type === "variable" || (!columnsExpected && right.type === "sequence");
   if (leftSurfacesFirst !== rightSurfacesFirst) return leftSurfacesFirst ? -1 : 1;
-  if (!left.exactMatch !== !right.exactMatch) return left.exactMatch ? -1 : 1;
   const leftBonus = getHistoryBoost(left.label, left.type);
   const rightBonus = getHistoryBoost(right.label, right.type);
   return right.boost + rightBonus + getTypePriorityBoost(right.type, columnsExpected) - (left.boost + leftBonus + getTypePriorityBoost(left.type, columnsExpected));

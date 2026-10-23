@@ -1200,9 +1200,10 @@ public final class DbxJdbcPlugin {
     private static void applyConnectTimeout(JsonNode connection, Properties properties) {
         int connectTimeoutSecs = positiveInt(connection, "connect_timeout_secs", 30);
         DriverManager.setLoginTimeout(connectTimeoutSecs);
-        if (isPrestoOrTrinoConnection(connection) || isHive2Connection(connection)) {
-            // Hive/Inceptor treat unknown timeout properties inconsistently; keep only
-            // DriverManager login timeout and avoid injecting vendor-specific keys.
+        if (isPrestoOrTrinoConnection(connection) || isHive2Connection(connection)
+            || urlMatchesPrefix(jdbcUrl(connection), "jdbc:duckdb:")) {
+            // These drivers reject or inconsistently handle unknown timeout properties.
+            // Keep DriverManager login timeout without injecting vendor-specific keys.
             return;
         }
         String value = Integer.toString(connectTimeoutSecs);

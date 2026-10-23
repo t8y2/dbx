@@ -119,7 +119,27 @@ impl RunningQueries {
         metadata: RunningTaskMetadata,
         remember_completion: bool,
     ) -> RegisteredQuery {
-        let token = CancellationToken::new();
+        self.register_task_with_token(execution_id, metadata, remember_completion, CancellationToken::new())
+    }
+
+    /// Bind a controlled write to its original connection lifecycle. Cancelling
+    /// this child must never cancel other users of the connection's parent token.
+    pub fn register_task_for_terminal_confirmation_with_parent(
+        &self,
+        execution_id: String,
+        metadata: RunningTaskMetadata,
+        parent: &CancellationToken,
+    ) -> RegisteredQuery {
+        self.register_task_with_token(execution_id, metadata, true, parent.child_token())
+    }
+
+    fn register_task_with_token(
+        &self,
+        execution_id: String,
+        metadata: RunningTaskMetadata,
+        remember_completion: bool,
+        token: CancellationToken,
+    ) -> RegisteredQuery {
         let registration_id = self.next_registration_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (completion, _) = watch::channel(false);
         let previous = {
@@ -428,6 +448,7 @@ impl Drop for RegisteredQuery {
 mod tests {
     use super::{RunningQueries, RunningTaskKind, RunningTaskMetadata, DETACHED_REGISTRATION_GRACE_PERIOD};
     use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn cancel_marks_registered_query_as_cancelled() {
@@ -461,6 +482,21 @@ mod tests {
         drop(registered);
 
         assert!(!running.has("exec-1"));
+    }
+
+    #[test]
+    fn connection_lifecycle_cancels_only_its_registered_children() {
+        let running = RunningQueries::default();
+        let parent = CancellationToken::new();
+        let first =
+            running.register_task_for_terminal_confirmation_with_parent("first".into(), Default::default(), &parent);
+        running.cancel("first");
+        assert!(first.token().is_cancelled());
+        assert!(!parent.is_cancelled());
+        let second =
+            running.register_task_for_terminal_confirmation_with_parent("second".into(), Default::default(), &parent);
+        parent.cancel();
+        assert!(second.token().is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]

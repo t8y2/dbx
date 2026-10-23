@@ -1,5 +1,6 @@
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 
 const SORT_ORDER_STORAGE_KEY = "dbx-sql-file-sort-order";
 export type SqlFileSortOrder = "asc" | "desc";
@@ -76,8 +77,12 @@ function collectMatchingDescendantDirPaths(items: SqlFileEntry[], q: string, aut
  * - If a directory's name does not match, but some descendants do, the directory is kept with only the matching descendants,
  *   and its path is added to `autoExpanded`.
  * - If a file matches the query, it is kept.
+ * - A file whose normalized path is in `contentMatchPaths` (i.e. its body matched
+ *   the query in the backend content search) is treated as a match too. That keeps
+ *   the tree consistent with the snippets rendered under the file row, and makes
+ *   ancestor directories auto-expand so the hit is actually visible.
  */
-export function filterAndSortSqlFileEntries(entries: SqlFileEntry[], query: string, order: SqlFileSortOrder = "asc"): SqlFileFilterResult {
+export function filterAndSortSqlFileEntries(entries: SqlFileEntry[], query: string, order: SqlFileSortOrder = "asc", contentMatchPaths?: ReadonlySet<string>): SqlFileFilterResult {
   const trimmed = query.trim();
   if (!trimmed) {
     const sorted = recursivelySortSqlFileEntries(entries, order);
@@ -100,12 +105,18 @@ export function filterAndSortSqlFileEntries(entries: SqlFileEntry[], query: stri
   const autoExpanded = new Set<string>();
   let matchCount = 0;
 
+  function fileMatches(item: SqlFileEntry): boolean {
+    if (item.name.toLowerCase().includes(q)) return true;
+    if (!contentMatchPaths || contentMatchPaths.size === 0) return false;
+    return contentMatchPaths.has(normalizeExternalSqlPath(item.path));
+  }
+
   function filterEntries(items: SqlFileEntry[]): SqlFileEntry[] {
     const result: SqlFileEntry[] = [];
 
     for (const item of items) {
       if (!item.is_dir) {
-        if (item.name.toLowerCase().includes(q)) {
+        if (fileMatches(item)) {
           matchCount++;
           result.push(item);
         }

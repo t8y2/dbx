@@ -546,10 +546,14 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         } else {
             ("", statement.as_str())
         };
-    if statement.trim_start().to_ascii_uppercase().starts_with("WITH") {
-        return err("with");
-    }
-    if !statement.trim_start().to_ascii_uppercase().starts_with("SELECT") {
+    // SQL Server and other engines reject WITH inside a derived table, so a CTE
+    // query is sorted by appending ORDER BY <position> to its main query.
+    let is_cte = statement.trim_start().to_ascii_uppercase().starts_with("WITH");
+    if is_cte {
+        if !cte_main_statement_is_select(statement) || has_top_level_select_into(statement) {
+            return err("with");
+        }
+    } else if !statement.trim_start().to_ascii_uppercase().starts_with("SELECT") {
         return err("not_select");
     }
 
@@ -577,14 +581,16 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         Some(DatabaseType::Mysql | DatabaseType::Goldendb) => has_duplicate_labels(str::eq_ignore_ascii_case),
         _ => false,
     };
-    if derived_table_rejects_duplicate_labels
+    if is_cte
+        || derived_table_rejects_duplicate_labels
         || (options.database_type == Some(DatabaseType::OceanbaseOracle)
             && !rownum_wrapper_projection_is_safe(statement))
     {
-        let parsed = if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb)) {
-            Parser::parse_sql(&MySqlDialect {}, statement)
-        } else {
-            Parser::parse_sql(&GenericDialect {}, statement)
+        let parsed = match options.database_type {
+            Some(DatabaseType::Mysql | DatabaseType::Goldendb) => Parser::parse_sql(&MySqlDialect {}, statement),
+            Some(DatabaseType::SqlServer) => Parser::parse_sql(&MsSqlDialect {}, statement),
+            Some(DatabaseType::ClickHouse) => Parser::parse_sql(&ClickHouseDialect {}, statement),
+            _ => Parser::parse_sql(&GenericDialect {}, statement),
         };
         let Ok(statements) = parsed else {
             return err("unsupported");
@@ -7097,7 +7103,7 @@ WHERE u.id = picked.id;
                 (" \n\t", "empty"),
                 (";", "empty"),
                 ("SELECT 1; SELECT 2;", "multi"),
-                ("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte", "with"),
+                ("WITH cte AS (SELECT 1 AS id) INSERT INTO users SELECT id FROM cte", "with"),
                 ("SHOW TABLES", "not_select"),
                 ("UPDATE users SET id = 2", "not_select"),
             ] {
@@ -7612,19 +7618,152 @@ WHERE u.id = picked.id;
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t(id, name) ORDER BY id ASC;");
     }
 
-    #[test]
-    fn rejects_with_query_sorting() {
-        let result = build_sorted_query_sql(SortedQuerySqlOptions {
-            original_sql: "WITH cte AS (SELECT 1) SELECT * FROM cte".to_string(),
-            database_type: Some(DatabaseType::Postgres),
-            result_columns: vec!["id".to_string()],
-            column_index: 0,
-            column: "id".to_string(),
-            direction: QuerySortDirection::Asc,
-            tie_breaker_column_indexes: Vec::new(),
-        });
+    fn sorted_cte_sql(
+        original_sql: &str,
+        database_type: Option<DatabaseType>,
+        result_columns: &[&str],
+        column_index: usize,
+        direction: QuerySortDirection,
+        tie_breaker_column_indexes: Vec<usize>,
+    ) -> QuerySqlBuildResult {
+        build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: original_sql.to_string(),
+            database_type,
+            result_columns: result_columns.iter().map(|column| column.to_string()).collect(),
+            column_index,
+            column: result_columns.get(column_index).map(|column| column.to_string()).unwrap_or_default(),
+            direction,
+            tie_breaker_column_indexes,
+        })
+    }
 
-        assert_eq!(result, err("with"));
+    #[test]
+    fn sorts_with_query_by_appending_order_by_to_main_query() {
+        for database_type in [
+            None,
+            Some(DatabaseType::Postgres),
+            Some(DatabaseType::Mysql),
+            Some(DatabaseType::SqlServer),
+            Some(DatabaseType::Oracle),
+            Some(DatabaseType::Dameng),
+            Some(DatabaseType::Sqlite),
+            Some(DatabaseType::ClickHouse),
+            Some(DatabaseType::Hive),
+        ] {
+            let result = sorted_cte_sql(
+                "WITH t AS (SELECT a, b, c FROM src) SELECT a, b, sum(c) AS total FROM t GROUP BY a, b",
+                database_type,
+                &["a", "b", "total"],
+                2,
+                QuerySortDirection::Desc,
+                Vec::new(),
+            );
+
+            assert_eq!(
+                result,
+                ok("WITH t AS (SELECT a, b, c FROM src) SELECT a, b, sum(c) AS total FROM t GROUP BY a, b ORDER BY 3 DESC;"
+                    .to_string()),
+                "{database_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sorts_with_query_by_replacing_its_trailing_order_by() {
+        let result = sorted_cte_sql(
+            "WITH cte AS (SELECT id, name FROM users) SELECT id, name FROM cte ORDER BY id DESC;",
+            Some(DatabaseType::Postgres),
+            &["id", "name"],
+            1,
+            QuerySortDirection::Asc,
+            vec![0],
+        );
+
+        assert_eq!(
+            result,
+            ok("WITH cte AS (SELECT id, name FROM users) SELECT id, name FROM cte ORDER BY 2 ASC, 1 ASC;".to_string())
+        );
+    }
+
+    #[test]
+    fn sorts_with_query_keeping_order_by_inside_the_cte() {
+        let result = sorted_cte_sql(
+            "WITH top_users AS (SELECT TOP 5 id, name FROM users ORDER BY id) SELECT id, name FROM top_users",
+            Some(DatabaseType::SqlServer),
+            &["id", "name"],
+            1,
+            QuerySortDirection::Desc,
+            Vec::new(),
+        );
+
+        assert_eq!(
+            result,
+            ok("WITH top_users AS (SELECT TOP 5 id, name FROM users ORDER BY id) SELECT id, name FROM top_users ORDER BY 2 DESC;"
+                .to_string())
+        );
+    }
+
+    #[test]
+    fn sorts_recursive_with_query() {
+        for database_type in [Some(DatabaseType::Postgres), Some(DatabaseType::Mysql), Some(DatabaseType::Sqlite)] {
+            let result = sorted_cte_sql(
+                "WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM nums WHERE n < 5) SELECT n FROM nums",
+                database_type,
+                &["n"],
+                0,
+                QuerySortDirection::Desc,
+                Vec::new(),
+            );
+
+            assert_eq!(
+                result,
+                ok("WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM nums WHERE n < 5) SELECT n FROM nums ORDER BY 1 DESC;"
+                    .to_string()),
+                "{database_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sorts_with_query_whose_main_query_is_a_union() {
+        let result = sorted_cte_sql(
+            "WITH a AS (SELECT 1 AS id), b AS (SELECT 2 AS id) SELECT id FROM a UNION ALL SELECT id FROM b",
+            Some(DatabaseType::Postgres),
+            &["id"],
+            0,
+            QuerySortDirection::Desc,
+            Vec::new(),
+        );
+
+        assert_eq!(
+            result,
+            ok("WITH a AS (SELECT 1 AS id), b AS (SELECT 2 AS id) SELECT id FROM a UNION ALL SELECT id FROM b ORDER BY 1 DESC;"
+                .to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_with_query_sorting_when_order_by_cannot_be_appended() {
+        for (original_sql, database_type, reason) in [
+            ("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte LIMIT 10", Some(DatabaseType::Postgres), "unsupported"),
+            (
+                "WITH cte AS (SELECT 1 AS id) SELECT id FROM cte FETCH FIRST 10 ROWS ONLY",
+                Some(DatabaseType::Oracle),
+                "unsupported",
+            ),
+            ("WITH cte AS (SELECT 1 AS id) SELECT TOP 10 id FROM cte", Some(DatabaseType::SqlServer), "unsupported"),
+            ("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte FOR UPDATE", Some(DatabaseType::Mysql), "unsupported"),
+            ("WITH cte AS (SELECT 1 AS id) SELECT id INTO #ids FROM cte", Some(DatabaseType::SqlServer), "with"),
+            (
+                "WITH cte AS (SELECT 1 AS id) DELETE FROM users WHERE id IN (SELECT id FROM cte)",
+                Some(DatabaseType::Postgres),
+                "with",
+            ),
+        ] {
+            let result = sorted_cte_sql(original_sql, database_type, &["id"], 0, QuerySortDirection::Asc, Vec::new());
+
+            assert_eq!(result, err(reason), "{original_sql:?}");
+        }
     }
 
     // -----------------------------------------------------------------------

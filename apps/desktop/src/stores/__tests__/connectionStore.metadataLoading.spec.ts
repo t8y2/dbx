@@ -2136,6 +2136,51 @@ describe("connectionStore metadata loading", () => {
     expect(storedProcedureGroup?.children?.map((node) => node.label)).toEqual(["p_0999"]);
   });
 
+  it("keeps Kingbase procedure overloads and zero-argument identities across pages", async () => {
+    const objects: ObjectInfo[] = [
+      ...Array.from({ length: 10 }, (_, index) => ({ name: `p_${String(index).padStart(2, "0")}`, object_type: "PROCEDURE", schema: "app", signature: "" })),
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v integer" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v text" },
+    ];
+    const listObjects = vi.fn((_connectionId: string, _database: string, _schema: string, _objectTypes: string[], _filter?: string, limit?: number, offset = 0) => Promise.resolve(objects.slice(offset, offset + (limit ?? objects.length))));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.sidebarObjectDisplay = "grouped";
+    settings.desktopSettings.sidebar_table_page_size = 11;
+    const connection = { ...postgresConnection(), id: "kingbase-1", name: "Kingbase", db_type: "kingbase" as const, database: "onepass" };
+    const group: TreeNode = { id: "kingbase-1:onepass:app:__procedures", label: "tree.procedures", type: "group-procedures", connectionId: connection.id, database: "onepass", schema: "app", children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [{ id: "kingbase-1:onepass:app", label: "app", type: "schema", connectionId: connection.id, database: "onepass", schema: "app", children: [group] }] }];
+
+    await store.loadObjectGroupChildren(group);
+    expect(listObjects).toHaveBeenNthCalledWith(1, connection.id, "onepass", "app", ["PROCEDURE"], undefined, 12, 0);
+    expect(group.children?.filter((node) => node.type === "procedure")).toHaveLength(11);
+    const more = group.children?.at(-1);
+    expect(more?.type).toBe("load-more");
+    await store.loadMoreObjectGroupChildren(more!);
+
+    expect(listObjects).toHaveBeenNthCalledWith(2, connection.id, "onepass", "app", ["PROCEDURE"], undefined, 12, 11);
+    const procedures = group.children?.filter((node) => node.type === "procedure") ?? [];
+    expect(procedures).toHaveLength(12);
+    expect(new Set(procedures.map((node) => node.id)).size).toBe(12);
+    expect(procedures.filter((node) => node.objectName === "run").map((node) => node.signature)).toEqual(["v integer", "v text"]);
+    expect(procedures.filter((node) => node.objectName !== "run").map((node) => node.signature)).toEqual(Array(10).fill(""));
+    expect(group.children?.some((node) => node.type === "load-more")).toBe(false);
+  }, 20000);
+
   it("merges Xugu package body metadata when it arrives on the next page", async () => {
     const packageSpec: ObjectInfo = {
       name: "business_api",

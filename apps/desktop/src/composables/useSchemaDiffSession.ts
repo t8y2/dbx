@@ -10,11 +10,12 @@ import { loadSchemaDetails } from "@/lib/schema/schemaDiffMetadataLoad";
 import { registerSchemaDiffTask } from "@/lib/schema/schemaDiffCancellation";
 import type { SchemaDiffTableIdentity, SchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, shouldLoadSchemaDiffRoutines, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
-import { schemaDiffRoutineObjectTypesIntersection } from "@/lib/database/databaseObjectCapabilities";
+import { schemaDiffRoutineObjectTypesIntersection, schemaDiffRoutineProductType } from "@/lib/database/databaseObjectCapabilities";
 import { convertToSchemaDiffObjects, databaseTypeToDialectKind, normalizeDialectKind, schemaDiffDeployTargetSchema, type SchemaDiffObject } from "@/lib/schema/schemaDiff";
-import { normalizeSchemaDiffCompareOptions, type SchemaDiffCompareOptions } from "@/types/schemaDiff";
+import { normalizeSchemaDiffCompareOptions, type OracleRoutineCompareContext, type OracleRoutineSnapshot, type SchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { DatabaseType, FunctionInfo, TableInfo } from "@/types/database";
 import type { SchemaDiffPreparation } from "@/lib/schema/schemaDiff";
+import { disposeOracleRoutineDeployment, type OracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
 
 export interface SchemaDiffSessionProgress {
   phase: SchemaDiffProgressPhase;
@@ -34,8 +35,8 @@ export interface SchemaDiffSessionConfig {
   targetDbType: DatabaseType;
   /**
    * Product type behind a JDBC `sourceDbType`/`targetDbType` (see
-   * `schemaDiffEngineDatabaseType`). Only the diff engine's dialect/profile decisions use
-   * it: metadata loading, progress phases and option defaults keep the raw db types.
+   * `schemaDiffEngineDatabaseType`). The diff engine and strict Oracle routine
+   * collector use the product; unrelated metadata and option defaults keep raw db types.
    */
   sourceEngineDbType?: DatabaseType;
   targetEngineDbType?: DatabaseType;
@@ -53,6 +54,9 @@ export interface SchemaDiffSession {
   config: SchemaDiffSessionConfig;
   progress: SchemaDiffSessionProgress | null;
   result: SchemaDiffPreparation | null;
+  routineSnapshots?: { source?: OracleRoutineSnapshot; target?: OracleRoutineSnapshot };
+  oracleRoutineContext?: OracleRoutineCompareContext;
+  routineDeployment?: OracleRoutineDeployment;
   error: string | null;
   startedAt: number;
   finishedAt?: number;
@@ -101,6 +105,26 @@ function filterFunctionsByRoutineKinds(functions: FunctionInfo[], kinds: Array<"
   });
 }
 
+function isOracleRoutineEngine(databaseType: string): boolean {
+  return databaseType === "oracle" || databaseType === "oceanbase-oracle";
+}
+
+async function loadSessionRoutines(session: SchemaDiffSession, side: "source" | "target", signal: AbortSignal): Promise<FunctionInfo[]> {
+  const input = session.config;
+  const connectionId = side === "source" ? input.sourceConnectionId : input.targetConnectionId;
+  const database = side === "source" ? input.sourceDatabase : input.targetDatabase;
+  const schema = side === "source" ? input.sourceSchema : input.targetSchema;
+  const engine = side === "source" ? (input.sourceEngineDbType ?? input.sourceDbType) : (input.targetEngineDbType ?? input.targetDbType);
+  if (!isOracleRoutineEngine(engine)) return api.listFunctions(connectionId, database, schema);
+  const snapshot = await api.loadSchemaDiffRoutines(connectionId, database, schema, input.options?.selectedRoutines);
+  signal.throwIfAborted();
+  if (snapshot.endpoint.connectionId !== connectionId || snapshot.endpoint.database !== database || snapshot.endpoint.schema !== schema || snapshot.endpoint.databaseType !== engine) {
+    throw new Error("Routine snapshot endpoint does not match this comparison");
+  }
+  session.routineSnapshots = { ...session.routineSnapshots, [side]: snapshot };
+  return snapshot.objects.map((object) => ({ name: object.version.identity.name, function_type: object.version.identity.kind, data_type: "", arguments: "", definition: object.source ?? "" }));
+}
+
 function publishProgress(session: SchemaDiffSession, progress: SchemaDiffSessionProgress): void {
   session.version += 1;
   session.progress = progress;
@@ -125,11 +149,13 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
   const input = session.config;
   const tracker = useExportTracker();
   const options = normalizeSchemaDiffCompareOptions(input.options, input.targetDbType);
-  const routineKinds = schemaDiffRoutineObjectTypesIntersection(input.sourceDbType as DatabaseType, input.targetDbType);
-  const loadRoutines = shouldLoadSchemaDiffRoutines(input.sourceDbType, input.targetDbType, options);
+  const sourceRoutineType = schemaDiffRoutineProductType(input.sourceDbType, input.sourceEngineDbType);
+  const targetRoutineType = schemaDiffRoutineProductType(input.targetDbType, input.targetEngineDbType);
+  const routineKinds = schemaDiffRoutineObjectTypesIntersection(sourceRoutineType, targetRoutineType);
+  const loadRoutines = shouldLoadSchemaDiffRoutines(sourceRoutineType, targetRoutineType, options);
   const sessionOptions = options;
   const isPostgresLike = isSchemaDiffPostgresLike(input.targetDbType);
-  const hasExtraObjectPhase = shouldLoadSchemaDiffExtraObjectPhase(input.sourceDbType, input.targetDbType, sessionOptions);
+  const hasExtraObjectPhase = shouldLoadSchemaDiffExtraObjectPhase(sourceRoutineType, targetRoutineType, sessionOptions);
   const tableFilter = compileSchemaDiffTableFilter(sessionOptions);
   const loadTableMetadata = !!(sessionOptions.tables || sessionOptions.views);
 
@@ -191,8 +217,8 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
     signal.throwIfAborted();
     const promises: Promise<unknown>[] = [];
     if (loadRoutines) {
-      promises.push(api.listFunctions(input.sourceConnectionId, input.sourceDatabase, input.sourceSchema));
-      promises.push(api.listFunctions(input.targetConnectionId, input.targetDatabase, input.targetSchema));
+      promises.push(loadSessionRoutines(session, "source", signal));
+      promises.push(loadSessionRoutines(session, "target", signal));
     }
     if (isPostgresLike && sessionOptions.sequences) {
       promises.push(api.listSequences(input.sourceConnectionId, input.sourceDatabase, input.sourceSchema, !!sessionOptions.sequenceLastValues));
@@ -220,6 +246,20 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
     const targetRules = sessionOptions.rules && isPostgresLike ? (extraObjects[index++] as Awaited<ReturnType<typeof api.listRules>>) : [];
     const sourceOwners = sessionOptions.owners && isPostgresLike ? (extraObjects[index++] as Awaited<ReturnType<typeof api.listOwners>>) : [];
     const targetOwners = sessionOptions.owners && isPostgresLike ? (extraObjects[index++] as Awaited<ReturnType<typeof api.listOwners>>) : [];
+    if (loadRoutines && (isOracleRoutineEngine(input.sourceEngineDbType ?? input.sourceDbType) || isOracleRoutineEngine(input.targetEngineDbType ?? input.targetDbType))) {
+      const source = session.routineSnapshots?.source;
+      const target = session.routineSnapshots?.target;
+      session.oracleRoutineContext = {
+        sourceDatabaseType: input.sourceEngineDbType ?? input.sourceDbType,
+        targetDatabaseType: input.targetEngineDbType ?? input.targetDbType,
+        sourceSchema: input.sourceSchema,
+        targetSchema: input.targetSchema,
+        sourceEnumerationComplete: source?.enumerationComplete ?? true,
+        targetEnumerationComplete: target?.enumerationComplete ?? true,
+        sourceIncompleteNames: source?.objects.filter((object) => !object.sourceComplete).map((object) => object.version.identity.name) ?? [],
+        targetIncompleteNames: target?.objects.filter((object) => !object.sourceComplete).map((object) => object.version.identity.name) ?? [],
+      };
+    }
 
     publishProgress(session, { phase: "comparing" });
     const result = await api.prepareSchemaDiff({
@@ -229,6 +269,7 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
       targetDetails,
       sourceFunctions,
       targetFunctions,
+      oracleRoutines: session.oracleRoutineContext,
       sourceSequences,
       targetSequences,
       sourceRules,
@@ -331,11 +372,13 @@ export function getSchemaDiffSession(id: string | null | undefined): SchemaDiffS
 export function removeSchemaDiffSession(id: string): boolean {
   const session = sessions.get(id);
   if (session?.status === "running") return false;
+  if (session?.routineDeployment) void disposeOracleRoutineDeployment(session.routineDeployment);
   return sessions.delete(id);
 }
 
 export function schemaDiffSessionNextProgressStep(session: SchemaDiffSession): string | null {
-  return getSchemaDiffNextProgressStep(session.progress?.phase, shouldLoadSchemaDiffExtraObjectPhase(session.config.sourceDbType, session.config.targetDbType, session.config.options));
+  const config = session.config;
+  return getSchemaDiffNextProgressStep(session.progress?.phase, shouldLoadSchemaDiffExtraObjectPhase(schemaDiffRoutineProductType(config.sourceDbType, config.sourceEngineDbType), schemaDiffRoutineProductType(config.targetDbType, config.targetEngineDbType), config.options));
 }
 
 export function schemaDiffSessionObjects(result: SchemaDiffPreparation | null): SchemaDiffObject[] {

@@ -364,10 +364,11 @@ impl MySqlSqlFileExecutor {
             let conn = self.conn.as_mut().ok_or("MySQL SQL file executor is missing a connection".to_string())?;
             let connection_id = conn.id();
             let kill_opts = conn.opts().clone();
+            let kill_timeout = self.budget.checkout_timeout;
             state.running_queries.register_interrupt(execution_id, move || {
                 let kill_opts = kill_opts.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = db::mysql::kill_query_with_opts(kill_opts, connection_id).await {
+                    if let Err(error) = db::mysql::kill_query_with_opts(kill_opts, connection_id, kill_timeout).await {
                         log::warn!("Failed to cancel MySQL SQL file import query {connection_id}: {error}");
                     }
                 });

@@ -317,8 +317,21 @@ export interface SshTunnelConfig {
   key_passphrase?: string;
   connect_timeout_secs?: number;
   expose_lan?: boolean;
+  /**
+   * Fixed local port (1-65535) the tunnel listens on while the connection is
+   * open, so other local tools can reuse it. Only the last enabled layer uses
+   * it, and only when it is an inline SSH layer (not a shared tunnel profile).
+   * Absent means a random free port. It binds `0.0.0.0` instead of `127.0.0.1`
+   * when `expose_lan` is on.
+   */
+  local_port?: number;
   use_ssh_agent?: boolean;
   ssh_agent_sock_path?: string;
+  /**
+   * SHA-256 fingerprint (`SHA256:...`) of the one SSH agent identity to use.
+   * Empty means every identity the agent reports is tried, in order.
+   */
+  ssh_agent_key_fingerprint?: string;
   /**
    * UI-facing choice of login method. Drives which credential inputs the
    * connection dialog shows; the backend still probes "none" then falls
@@ -348,6 +361,12 @@ export interface SshTunnelConfig {
    * and `enabled` are kept).
    */
   profile_id?: string;
+}
+
+export interface SshAgentIdentity {
+  fingerprint: string;
+  algorithm: string;
+  comment: string;
 }
 
 export interface SshConfigHostEntry {

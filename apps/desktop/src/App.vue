@@ -101,8 +101,8 @@ import {
   type SqlObjectNavigationTarget,
 } from "@/lib/sql/sqlNavigation";
 import { isObjectDependencySection, type ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
-import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
-import { assertSourceIdentity, beginSourceSave } from "@/lib/table/objectSourceIdentity";
+import { buildEditableObjectSource } from "@/lib/table/objectSourceEditor";
+import { saveObjectSourceTab } from "@/lib/table/objectSourceTabSave";
 import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
 import { schemaAfterConnectionSwitch } from "@/lib/schema/connectionSchemaInitialization";
 import { canReuseTabForHistoryRestore, resolveHistorySqlRestoreTarget } from "@/lib/history/historyRestoreTarget";
@@ -189,7 +189,6 @@ import { buildAppendedEditorSql, buildDeduplicatedAppendedEditorSql } from "@/li
 import { resolveAiSqlTargetTabId, type AiSqlApplyTargetMode } from "@/lib/ai/aiSqlTargetTab";
 import { assessProductionSql } from "@/lib/database/productionSafety";
 import { normalizeSqlExecutionTarget, sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
-import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { buildHistoryAiAnalysisPrompt } from "@/lib/history/historyAiAnalysis";
 import { countAvailableAgentDriverUpdates } from "@/lib/connection/agentDriverUpdateBadge";
 import type { DriverStoreFocus, DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
@@ -2734,54 +2733,7 @@ async function openSaveSqlDialog(tabId?: string) {
 }
 
 async function saveActiveObjectSource(tab: QueryTab): Promise<boolean> {
-  const connection = connectionStore.getConfig(tab.connectionId);
-  const source = tab.objectSource;
-  if (!connection || !source) return false;
-
-  try {
-    const identity = queryStore.getObjectSourceIdentitySnapshot(tab)!;
-    assertSourceIdentity(identity);
-    const { connectionId, database } = tab;
-    const schema = source.schema || tab.schema || database;
-    const sql = tab.sql;
-    const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection.db_type;
-    const statements = await buildExecutableObjectSourceStatements({
-      databaseType,
-      objectType: source.objectType,
-      schema,
-      name: source.name,
-      source: sql,
-    });
-    const execute = async () => {
-      if (!queryStore.tabs.includes(tab) || tab.objectSource !== source || tab.connectionId !== connectionId || tab.database !== database || (source.schema || tab.schema || database) !== schema) return false;
-      const release = beginSourceSave(identity);
-      try {
-        await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
-        return true;
-      } finally {
-        release();
-      }
-    };
-    const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
-    if (executableSql.trim()) {
-      const saved = await executeWithProductionSqlGuard({
-        connection,
-        database,
-        sql: executableSql,
-        source: t("production.sourceObjectSource"),
-        execute,
-      });
-      if (!saved) return false;
-    } else {
-      if (!(await execute())) return false;
-    }
-    if (tab.sql === sql) queryStore.markTabClean(tab);
-    toast(t("objects.sourceSaved"), 2000);
-    return true;
-  } catch (e: any) {
-    toast(t("objects.sourceSaveFailed", { message: e?.message || String(e) }), 5000);
-    return false;
-  }
+  return saveObjectSourceTab(tab, { connection: connectionStore.getConfig(tab.connectionId), queryStore, t, toast });
 }
 
 function saveSqlFolderDisplayName(id: string) {

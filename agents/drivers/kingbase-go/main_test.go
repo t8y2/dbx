@@ -2673,8 +2673,8 @@ func TestListObjectsIncludesCustomTypesWhenUnfiltered(t *testing.T) {
 			}, nil
 		case strings.Contains(query, "sys_proc p"):
 			return &valueRows{
-				columns: []string{"proname", "kind", "comment"},
-				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+				columns: []string{"proname", "kind", "comment", "signature"},
+				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil, ""}},
 			}, nil
 		case strings.Contains(query, "sys_class c"):
 			return &valueRows{
@@ -2708,15 +2708,15 @@ func TestListObjectsIncludesCustomTypesWhenUnfiltered(t *testing.T) {
 func TestListObjectsIncludesMySQLCompatRoutines(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
-		case strings.Contains(query, "FROM information_schema.routines"):
-			if !strings.Contains(query, "WHERE ROUTINE_SCHEMA = 'team''s'") {
+		case strings.Contains(query, "FROM sys_catalog.sys_proc p"):
+			if !strings.Contains(query, "n.nspname = 'team''s'") {
 				return nil, errors.New("routine query did not quote the schema: " + query)
 			}
 			return &valueRows{
-				columns: []string{"routine_name", "routine_type", "routine_comment"},
+				columns: []string{"routine_name", "routine_type", "comment", "signature"},
 				rows: [][]driver.Value{
-					{"format_name", "FUNCTION", "formats a name"},
-					{"refresh_cache", "PROCEDURE", nil},
+					{"format_name", "FUNCTION", "formats a name", "value text"},
+					{"refresh_cache", "PROCEDURE", nil, ""},
 				},
 			}, nil
 		default:
@@ -2741,7 +2741,7 @@ func TestListObjectsIncludesMySQLCompatRoutines(t *testing.T) {
 		t.Fatalf("unexpected function: %#v", objects[1])
 	}
 	queries := state.snapshotQueries()
-	if len(queries) != 1 || !strings.Contains(queries[0], "FROM information_schema.routines") {
+	if len(queries) != 1 || !strings.Contains(queries[0], "FROM sys_catalog.sys_proc p") {
 		t.Fatalf("expected exactly one routine query, got %v", queries)
 	}
 }
@@ -2754,14 +2754,14 @@ func TestListObjectsFiltersSortsAndPagesMySQLCompatObjects(t *testing.T) {
 				columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"},
 				rows:    [][]driver.Value{{"match_table", "TABLE", nil, nil, nil}},
 			}, nil
-		case strings.Contains(query, "FROM information_schema.routines"):
+		case strings.Contains(query, "FROM sys_catalog.sys_proc p"):
 			return &valueRows{
-				columns: []string{"routine_name", "routine_type", "routine_comment"},
+				columns: []string{"routine_name", "routine_type", "comment", "signature"},
 				rows: [][]driver.Value{
-					{"z_match_fn", "FUNCTION", nil},
-					{"other_fn", "FUNCTION", nil},
-					{"match_proc", "PROCEDURE", nil},
-					{"a_match_fn", "FUNCTION", nil},
+					{"z_match_fn", "FUNCTION", nil, ""},
+					{"other_fn", "FUNCTION", nil, ""},
+					{"match_proc", "PROCEDURE", nil, ""},
+					{"a_match_fn", "FUNCTION", nil, ""},
 				},
 			}, nil
 		default:
@@ -2794,14 +2794,14 @@ func TestListObjectsFiltersMySQLCompatRoutineKindsWithoutTableScan(t *testing.T)
 	for _, objectType := range []string{"FUNCTION", "PROCEDURE"} {
 		t.Run(objectType, func(t *testing.T) {
 			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-				if !strings.Contains(query, "FROM information_schema.routines") {
+				if !strings.Contains(query, "FROM sys_catalog.sys_proc p") {
 					return nil, errors.New("routine-only request must not scan tables: " + query)
 				}
 				return &valueRows{
-					columns: []string{"routine_name", "routine_type", "routine_comment"},
+					columns: []string{"routine_name", "routine_type", "comment", "signature"},
 					rows: [][]driver.Value{
-						{"format_name", "FUNCTION", nil},
-						{"refresh_cache", "PROCEDURE", nil},
+						{"format_name", "FUNCTION", nil, ""},
+						{"refresh_cache", "PROCEDURE", nil, ""},
 					},
 				}, nil
 			}}
@@ -2817,7 +2817,7 @@ func TestListObjectsFiltersMySQLCompatRoutineKindsWithoutTableScan(t *testing.T)
 				t.Fatalf("expected only %s, got %#v", objectType, objects)
 			}
 			queries := state.snapshotQueries()
-			if len(queries) != 1 || !strings.Contains(queries[0], "FROM information_schema.routines") {
+			if len(queries) != 1 || !strings.Contains(queries[0], "FROM sys_catalog.sys_proc p") {
 				t.Fatalf("expected one routine query, got %v", queries)
 			}
 		})
@@ -2828,7 +2828,7 @@ func TestListObjectsSkipsMySQLCompatRoutineQueryForNonRoutineConstraints(t *test
 	for _, objectType := range []string{"TABLE", "TYPE"} {
 		t.Run(objectType, func(t *testing.T) {
 			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-				if strings.Contains(query, "information_schema.routines") {
+				if strings.Contains(query, "sys_proc p") || strings.Contains(query, "information_schema.routines") {
 					return nil, errors.New("non-routine request must not query routines: " + query)
 				}
 				if objectType == "TABLE" && strings.Contains(query, "FROM sys_catalog.sys_class c") {
@@ -2870,8 +2870,8 @@ func TestListObjectsUsesCatalogRoutinesOutsideMySQLCompat(t *testing.T) {
 					return nil, errors.New("unexpected query: " + query)
 				}
 				return &valueRows{
-					columns: []string{"proname", "kind", "comment"},
-					rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+					columns: []string{"proname", "kind", "comment", "signature"},
+					rows:    [][]driver.Value{{"format_name", "FUNCTION", nil, ""}},
 				}, nil
 			}}
 			server := newServer()
@@ -2972,7 +2972,8 @@ func TestListObjectsTriggerFallbackExcludesConstraintTriggers(t *testing.T) {
 	}
 }
 
-func TestListObjectsKeepsTablesWhenMySQLCompatRoutineQueryFails(t *testing.T) {
+func TestListObjectsPropagatesMySQLCompatRoutineQueryFailure(t *testing.T) {
+	routineErr := errors.New("routine catalog unavailable")
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
 		case strings.Contains(query, "FROM sys_catalog.sys_class c"):
@@ -2980,8 +2981,8 @@ func TestListObjectsKeepsTablesWhenMySQLCompatRoutineQueryFails(t *testing.T) {
 				columns: []string{"relname", "relkind", "comment", "parent_schema", "parent_name"},
 				rows:    [][]driver.Value{{"orders", "TABLE", "orders table", nil, nil}},
 			}, nil
-		case strings.Contains(query, "FROM information_schema.routines"):
-			return nil, errors.New("routine catalog unavailable")
+		case strings.Contains(query, "FROM sys_catalog.sys_proc p"):
+			return nil, routineErr
 		default:
 			return nil, errors.New("unexpected query: " + query)
 		}
@@ -2991,15 +2992,12 @@ func TestListObjectsKeepsTablesWhenMySQLCompatRoutineQueryFails(t *testing.T) {
 	server.mode.mysqlCompat = true
 
 	objects, err := server.listObjects("public", metadataListConstraints{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(objects) != 1 || objects[0].Name != "orders" || objects[0].ObjectType != "TABLE" || objects[0].Comment == nil || *objects[0].Comment != "orders table" {
-		t.Fatalf("table must survive a best-effort routine query failure: %#v", objects)
+	if !errors.Is(err, routineErr) || len(objects) != 0 {
+		t.Fatalf("an incomplete list must not be returned as a success: objects=%#v err=%v", objects, err)
 	}
 	queries := state.snapshotQueries()
-	if len(queries) != 2 || !strings.Contains(queries[1], "FROM information_schema.routines") {
-		t.Fatalf("unexpected best-effort query sequence: %v", queries)
+	if len(queries) != 2 || !strings.Contains(queries[1], "FROM sys_catalog.sys_proc p") {
+		t.Fatalf("unexpected query sequence after routine failure: %v", queries)
 	}
 }
 
@@ -3099,8 +3097,8 @@ func TestListObjectsUnfilteredPropagatesCustomTypesError(t *testing.T) {
 		switch {
 		case strings.Contains(query, "sys_proc p"):
 			return &valueRows{
-				columns: []string{"proname", "kind", "comment"},
-				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil}},
+				columns: []string{"proname", "kind", "comment", "signature"},
+				rows:    [][]driver.Value{{"format_name", "FUNCTION", nil, ""}},
 			}, nil
 		case strings.Contains(query, "sys_class c"):
 			return &valueRows{
@@ -3740,6 +3738,8 @@ func TestObjectSourceDoesNotFallbackOnUnrelatedErrors(t *testing.T) {
 func TestObjectSourceFallsBackToV7RoutineDDLAndCachesChoice(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
+		case strings.Contains(query, "COUNT(*)"):
+			return &valueRows{columns: []string{"count"}, rows: [][]driver.Value{{int64(1)}}}, nil
 		case strings.Contains(query, "sys_get_functiondef("):
 			return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function SYS_GET_FUNCTIONDEF(OID) does not exist"}
 		case strings.Contains(query, "pg_get_functiondef("):
@@ -3767,7 +3767,7 @@ func TestObjectSourceFallsBackToV7RoutineDDLAndCachesChoice(t *testing.T) {
 	}
 
 	queries := state.snapshotQueries()
-	if len(queries) != 4 || !strings.Contains(queries[2], "DBMS_METADATA.GET_FUNC_DDL") || !strings.Contains(queries[3], "DBMS_METADATA.GET_FUNC_DDL") || !server.useLegacyRoutineDefinition {
+	if len(queries) != 6 || !strings.Contains(queries[3], "DBMS_METADATA.GET_FUNC_DDL") || !strings.Contains(queries[5], "DBMS_METADATA.GET_FUNC_DDL") || !server.useLegacyRoutineDefinition {
 		t.Fatalf("V7 routine DDL choice was not cached: %v", queries)
 	}
 }

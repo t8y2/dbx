@@ -8,6 +8,7 @@ const apiMock = vi.hoisted(() => ({
   listSequences: vi.fn(),
   listRules: vi.fn(),
   listOwners: vi.fn(),
+  loadSchemaDiffRoutines: vi.fn().mockImplementation(async (connectionId: string, database: string, schema: string) => ({ endpoint: { connectionId, database, schema, databaseType: "oracle", generation: 1 }, state: "complete", enumerationComplete: true, objects: [], issues: [] })),
 }));
 const openMock = vi.hoisted(() => vi.fn());
 const trackerMock = vi.hoisted(() => ({
@@ -474,4 +475,81 @@ test("resolves the JDBC engine dialect from the connection's product type", asyn
   assert.equal(payload?.targetDialect, "oracle");
   // 部署脚本按目标产品类型（而不是 jdbc）生成。
   assert.equal(payload?.databaseType, "oracle");
+});
+
+test.each(["oracle", "oceanbase-oracle"] as const)("loads %s strict snapshots through the actual session entry instead of ordinary listFunctions", async (databaseType) => {
+  vi.clearAllMocks();
+  const raw = 'CREATE OR REPLACE PROCEDURE "Quoted.Proc" AS BEGIN NULL; /* keep  spaces 😀 */ END';
+  apiMock.loadSchemaDiffRoutines.mockImplementation(async (connectionId: string, database: string, schema: string) => ({
+    endpoint: { connectionId, database, schema, databaseType, generation: 4 },
+    state: connectionId.endsWith("source") ? "partial" : "complete",
+    enumerationComplete: true,
+    objects: [
+      {
+        version: { identity: { owner: schema, name: "Quoted.Proc", kind: "PROCEDURE" }, objectId: "9007199254740993", status: "VALID", lastDdlTime: "2026-10-21T00:00:00" },
+        source: raw,
+        sourceComplete: !connectionId.endsWith("source"),
+        dependenciesComplete: true,
+        dependencies: [],
+        issues: connectionId.endsWith("source") ? [{ stage: "source", code: "read-incomplete", message: "source limit" }] : [],
+      },
+    ],
+    issues: [],
+  }));
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], functionDiffs: [], syncSql: "" });
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: `${databaseType}-source`,
+      sourceDatabase: "db",
+      sourceSchema: "Source.With.Dot",
+      targetConnectionId: `${databaseType}-target`,
+      targetDatabase: "db",
+      targetSchema: "Target",
+      sourceDbType: databaseType,
+      targetDbType: databaseType,
+      options: { tables: false, views: false, functions: true, selectedRoutines: ["Quoted.Proc"] },
+      ignoreComments: false,
+      label: "strict routines",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "completed");
+  assert.equal(apiMock.listFunctions.mock.calls.length, 0);
+  assert.equal(apiMock.loadSchemaDiffRoutines.mock.calls.length, 2);
+  assert.equal(apiMock.loadSchemaDiffRoutines.mock.calls[0].length, 4);
+  assert.deepEqual(apiMock.loadSchemaDiffRoutines.mock.calls[0][3], ["Quoted.Proc"]);
+  assert.deepEqual(apiMock.loadSchemaDiffRoutines.mock.calls[1][3], ["Quoted.Proc"]);
+  const payload = apiMock.prepareSchemaDiff.mock.calls[0][0];
+  assert.equal(payload.sourceFunctions[0].function_type, "PROCEDURE");
+  assert.equal(payload.sourceFunctions[0].definition, raw);
+  assert.deepEqual(payload.oracleRoutines.sourceIncompleteNames, ["Quoted.Proc"]);
+  assert.equal(payload.oracleRoutines.sourceDatabaseType, databaseType);
+  assert.equal(payload.oracleRoutines.targetDatabaseType, databaseType);
+  assert.equal(session.routineSnapshots?.source?.objects[0].source, raw);
+});
+
+test("a strict-snapshot endpoint mismatch fails the session without generating a false comparison", async () => {
+  vi.clearAllMocks();
+  apiMock.loadSchemaDiffRoutines.mockImplementation(async (connectionId: string, database: string, schema: string) => ({ endpoint: { connectionId, database, schema: `${schema}-wrong`, databaseType: "oracle", generation: 1 }, state: "complete", enumerationComplete: true, objects: [], issues: [] }));
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "wrong-source",
+      sourceDatabase: "db",
+      sourceSchema: "SOURCE",
+      targetConnectionId: "wrong-target",
+      targetDatabase: "db",
+      targetSchema: "TARGET",
+      sourceDbType: "oracle",
+      targetDbType: "oracle",
+      options: { tables: false, functions: true },
+      ignoreComments: false,
+      label: "mismatch",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "failed");
+  assert.match(session.error ?? "", /endpoint/);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls.length, 0);
 });

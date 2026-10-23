@@ -3,6 +3,7 @@ import { createApp, defineComponent, h, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
+import * as api from "@/lib/backend/api";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import type { TreeNode } from "@/types/database";
 
@@ -237,6 +238,52 @@ describe("sidebar rename production cancellation", () => {
       await controller.confirmRenameObject();
       expect(() => assertSourceIdentity(identity)).not.toThrow();
       expect(showRenameObjectDialog.value).toBe(true);
+    } finally {
+      app.unmount();
+      container.remove();
+      showRenameObjectDialog.value = false;
+    }
+  });
+
+  it.each(["", "v integer", "v INOUT integer"])("renames the selected Kingbase overload using its object name (%j)", async (signature) => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useConnectionStore();
+    store.connections = [{ id: "rename-kingbase", name: "Kingbase", db_type: "kingbase", host: "localhost", port: 54321, username: "system" } as any];
+    vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
+    const host = ref<any>();
+    let controller: any;
+    const node: TreeNode = { id: `rename-kingbase-${signature}`, type: "procedure", label: `run(${signature})`, objectName: "run", signature, connectionId: "rename-kingbase", database: "app", schema: "public" };
+    const root = defineComponent({
+      setup: () => () =>
+        h(SidebarTreeRuntimeHost, {
+          ref: host,
+          node,
+          depth: 0,
+          onOpenDialogController: (value: unknown) => {
+            controller = value;
+          },
+        }),
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(root).use(pinia).use(i18n);
+    vi.mocked(api.getObjectSource).mockClear();
+    vi.mocked(api.buildRoutineRenameObjectSourceStatements).mockClear();
+    try {
+      app.mount(container);
+      await nextTick();
+      const items: ContextMenuItem[] = host.value.buildContextMenu(node);
+      items.find((item) => item.label === i18n.global.t("contextMenu.renameObject"))!.action!();
+      expect(renameObjectName.value).toBe("run");
+      await controller.confirmRenameObject();
+      expect(api.getObjectSource).not.toHaveBeenCalled();
+      expect(api.buildRoutineRenameObjectSourceStatements).not.toHaveBeenCalled();
+      renameObjectName.value = "run_new";
+      await nextTick();
+      await controller.confirmRenameObject();
+      expect(api.getObjectSource).toHaveBeenCalledWith("rename-kingbase", "app", "public", "run", "PROCEDURE", signature);
+      expect(api.buildRoutineRenameObjectSourceStatements).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "kingbase", name: "run", newName: "run_new" }));
     } finally {
       app.unmount();
       container.remove();

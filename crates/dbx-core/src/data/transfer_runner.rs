@@ -82,6 +82,33 @@ where
     let total_tables = request.tables.len();
     let app = ProgressEmitter::new(progress_callback);
 
+    let routine_context = match crate::schema::oracle_routines::capture_routine_transfer_context(
+        &state,
+        &request.source_connection_id,
+        &request.target_connection_id,
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            if let Some(journal) = history.as_ref() {
+                journal.record_schema_objects_error(false).await;
+            }
+            super::transfer::clear_cancelled(&transfer_id).await;
+            return TransferProgress {
+                transfer_id,
+                table: "schema objects".into(),
+                table_index: 0,
+                total_tables,
+                rows_transferred: 0,
+                total_rows: None,
+                status: TransferStatus::Error,
+                error: Some(error),
+                terminal: true,
+            };
+        }
+    };
+
     super::transfer::with_transfer_operation_timeout(operation_timeout_secs, async {
         // Sort tables by FK dependency so referenced tables are transferred first,
         // and keep the foreign key metadata fetched along the way — MySQL-family
@@ -475,11 +502,12 @@ where
         // transfers schema objects; PG→PG keeps the legacy empty-selection
         // default only when structure participates in the transfer.
         let mut object_outcome = super::transfer::TransferObjectOutcome::default();
-        match super::transfer::transfer_schema_objects(
+        match super::transfer::transfer_schema_objects_with_routine_context(
             &state,
             &request,
             &source_pool_key,
             &target_pool_key,
+            routine_context.as_ref(),
             |progress| emit_progress(&app, progress),
         )
         .await

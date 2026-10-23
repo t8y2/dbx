@@ -1,5 +1,5 @@
 import type { ColumnInfo, IndexInfo, ForeignKeyInfo, TriggerInfo, FunctionInfo, SequenceInfo, RuleInfo, OwnerInfo, DatabaseType, TableInfo, ConnectionConfig } from "@/types/database";
-import type { SchemaDiffTableMapping } from "@/types/schemaDiff";
+import type { OracleRoutineCompareContext, SchemaDiffTableMapping } from "@/types/schemaDiff";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 
@@ -171,7 +171,7 @@ export interface TriggerDiff {
 }
 
 export interface FunctionDiff {
-  type: "added" | "removed" | "modified";
+  type: "added" | "removed" | "modified" | "equal" | "unreadable" | "conflict";
   name: string;
   source?: FunctionInfo;
   target?: FunctionInfo;
@@ -241,6 +241,7 @@ export interface SchemaDiffPreparationOptions {
   targetDetails: TableSchemaDetail[];
   sourceFunctions?: FunctionInfo[];
   targetFunctions?: FunctionInfo[];
+  oracleRoutines?: OracleRoutineCompareContext;
   sourceSequences?: SequenceInfo[];
   targetSequences?: SequenceInfo[];
   sourceRules?: RuleInfo[];
@@ -423,6 +424,7 @@ export interface SchemaDiffObject {
   arguments?: string;
   /** PROCEDURE vs FUNCTION when objectKind is function (for getObjectSource). */
   routineType?: "PROCEDURE" | "FUNCTION";
+  routineComparisonState?: FunctionDiff["type"];
   renameMetadata?: {
     confirmed: boolean;
     sourceName?: string;
@@ -766,9 +768,10 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
       name: diff.name,
       arguments: args,
       routineType,
+      routineComparisonState: diff.type,
       sourceName: diff.type === "added" ? undefined : diff.name,
       targetName: diff.type === "removed" ? undefined : diff.name,
-      selected: true,
+      selected: getOperationType(diff.type) !== "none",
       sourceDdl: diff.source?.definition,
       targetDdl: diff.target?.definition,
       changes: diff.changes,

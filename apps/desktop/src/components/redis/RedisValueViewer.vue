@@ -114,6 +114,8 @@ const REDIS_COLLECTION_ROW_HEIGHT = 32;
 const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
+/** The last failed read. Without it a failed first read leaves the panel empty. */
+const loadError = ref("");
 const downloadingLargeValue = ref(false);
 const loadingMore = ref(false);
 const showRenameKeyDialog = ref(false);
@@ -1902,6 +1904,30 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
   }
 }
 
+/**
+ * Load the key and keep a failed read visible.
+ *
+ * `load()` rethrows so its callers can react to the failure, but the first
+ * read of a key has no caller waiting for it: the panel stayed empty and the
+ * failure only reached the debug log. The error is kept in the panel and
+ * reported once, so a server that rejects the read is visible instead of
+ * looking like an empty value.
+ */
+async function loadForDisplay(options: { background?: boolean; notifyParent?: boolean; preserveDraft?: boolean; selectDefaultMember?: boolean; shouldApply?: () => boolean } = {}): Promise<boolean> {
+  loadError.value = "";
+  try {
+    return await load(options);
+  } catch (error) {
+    loadError.value = errorMessage(error);
+    toast(loadError.value, 4000);
+    return false;
+  }
+}
+
+function retryValueLoad() {
+  void loadForDisplay();
+}
+
 async function loadMore() {
   if (!data.value || !hasMore.value || loadingMore.value || searchLoading.value) return;
   if (!collectionSearchSupported.value) return;
@@ -2943,7 +2969,7 @@ watch(
   () => props.previewLimitKiB,
   () => {
     // Apply the new limit immediately, but never replace an edited value.
-    if (redisValueViewerIsActive && !hasUnsavedRedisDraft.value) void load();
+    if (redisValueViewerIsActive && !hasUnsavedRedisDraft.value) void loadForDisplay();
   },
 );
 
@@ -2975,7 +3001,7 @@ watch(showMemberDetail, (open) => {
 onMounted(() => {
   window.addEventListener("pointerdown", handleValueViewerPointerDown, true);
   document.addEventListener("visibilitychange", handleDocumentVisibilityChange);
-  void load();
+  void loadForDisplay();
   void createShikiJsonHighlighter({
     appearance: () => redisJsonAppearance.value,
   })
@@ -2989,7 +3015,7 @@ onMounted(() => {
 onActivated(() => {
   redisValueViewerIsActive = true;
   collectionSearchController.setActive(true);
-  if (!loading.value && (!data.value || (loadedPreviewLimitBytes !== redisValuePreviewLimitBytes(props.previewLimitKiB) && !hasUnsavedRedisDraft.value))) void load();
+  if (!loading.value && (!data.value || (loadedPreviewLimitBytes !== redisValuePreviewLimitBytes(props.previewLimitKiB) && !hasUnsavedRedisDraft.value))) void loadForDisplay();
   startRefreshTimers();
 });
 onDeactivated(() => {
@@ -3876,6 +3902,12 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
         <div class="text-xs text-muted-foreground">{{ t("redis.unsupportedValueTypeHint") }}</div>
       </div>
     </template>
+
+    <!-- 读取失败：面板不能是空白，必须把失败原因显示出来并允许重试（issue #13114）。 -->
+    <div v-else-if="loadError" data-redis-value-load-error class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
+      <div class="text-sm text-destructive break-words">{{ loadError }}</div>
+      <Button data-redis-value-load-retry variant="outline" size="sm" :disabled="loading" @click="retryValueLoad">{{ t("grid.refresh") }}</Button>
+    </div>
 
     <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details="deleteDetails" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
 

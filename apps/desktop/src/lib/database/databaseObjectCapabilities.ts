@@ -137,7 +137,7 @@ export function databaseObjectCapabilities(dbType?: DatabaseType, compatibilityM
 const SCHEMA_DIFF_ROUTINE_KINDS = ["PROCEDURE", "FUNCTION"] as const;
 
 /** Same-dialect families with verified list_objects + get_object_source (or PG catalog) paths. */
-const SCHEMA_DIFF_ROUTINE_FAMILY = new Map<DatabaseType, "postgres" | "mysql" | "sqlserver">([
+const SCHEMA_DIFF_ROUTINE_FAMILY = new Map<DatabaseType, "postgres" | "mysql" | "sqlserver" | "oracle" | "oceanbase-oracle">([
   ["postgres", "postgres"],
   ["opengauss", "postgres"],
   ["gaussdb", "postgres"],
@@ -149,7 +149,15 @@ const SCHEMA_DIFF_ROUTINE_FAMILY = new Map<DatabaseType, "postgres" | "mysql" | 
   ["redshift", "postgres"],
   ["mysql", "mysql"],
   ["sqlserver", "sqlserver"],
+  ["oracle", "oracle"],
+  ["oceanbase-oracle", "oceanbase-oracle"],
 ]);
+
+/** Only the new Oracle JDBC path consumes inferred product identity here; do
+ * not broaden the existing generic-JDBC or other engine comparison contracts. */
+export function schemaDiffRoutineProductType(rawType?: string, productType?: string): DatabaseType | undefined {
+  return (rawType === "jdbc" && (productType === "oracle" || productType === "oceanbase-oracle") ? productType : rawType) as DatabaseType | undefined;
+}
 
 /**
  * Schema Diff routine compare is limited to an allowlist of same-dialect families.

@@ -7,7 +7,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, resolveObjectSourceEditDraft } from "@/lib/table/objectSourceEditor";
+import { buildEditableObjectSource, buildExecutableObjectSourceStatements, prepareObjectSourceSave, objectSourceSaveSuccessMessage, formatObjectSourceSaveError, resolveObjectSourceEditDraft } from "@/lib/table/objectSourceEditor";
 import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
 import { assertSourceIdentity, beginSourceSave, captureSourceIdentity, renewSourceIdentity, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
 import { jdbcRoutineMetadata, xuguRoutineMetadataFromDefinition, type RoutineMetadata } from "@/lib/table/routineParameters";
@@ -210,6 +210,7 @@ async function saveSource() {
   const schema = props.schema || props.database;
   saving.value = true;
   saveError.value = "";
+  let save: Awaited<ReturnType<typeof prepareObjectSourceSave>> | undefined;
   try {
     if (!sourceIdentity) return;
     const identity = sourceIdentity;
@@ -222,36 +223,38 @@ async function saveSource() {
       source: draft.value,
     });
     if (serial !== loadSerial) return;
+    save = await prepareObjectSourceSave(connectionId, database, databaseType, statements, schema, { objectType, name });
+    const preparedSave = save;
     const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
     const execute = async () => {
-      if (serial !== loadSerial || !props.open) return false;
+      if (serial !== loadSerial || !props.open) return;
       const release = beginSourceSave(identity);
       try {
-        await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
-        return true;
+        return { operation: await preparedSave() };
       } finally {
         release();
       }
     };
+    let result;
     if (executableSql.trim()) {
-      const saved = await executeWithProductionSqlGuard({
+      result = await executeWithProductionSqlGuard({
         connection: connectionStore.getConfig(connectionId),
         database,
         sql: executableSql,
         source: t("production.sourceObjectSource"),
         execute,
       });
-      if (!saved) return;
     } else {
-      if (!(await execute())) return;
+      result = await execute();
     }
-    if (serial !== loadSerial) return;
-    toast(t("objects.sourceSaved"));
+    if (!result || serial !== loadSerial) return;
+    toast(objectSourceSaveSuccessMessage(t("objects.sourceSaved"), result.operation), result.operation?.readback?.compilerMessages.length ? 6000 : 2000);
     emit("saved");
     await loadSource(false);
   } catch (e: unknown) {
     if (serial === loadSerial) saveError.value = formatObjectSourceSaveError(e, databaseType, objectType, t("objects.postgresViewColumnChangeHint"));
   } finally {
+    await save?.dispose?.();
     if (serial === loadSerial) saving.value = false;
   }
 }

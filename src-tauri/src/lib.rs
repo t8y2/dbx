@@ -11,15 +11,26 @@ mod migration_gate;
 mod models;
 mod plugin_ui_protocol;
 #[cfg(any(target_os = "windows", test))]
+mod startup_messages;
+#[cfg(any(target_os = "windows", test))]
 mod startup_recovery;
 #[cfg(all(not(target_os = "windows"), not(test)))]
 #[path = "startup_recovery_noop.rs"]
 mod startup_recovery;
 #[cfg(any(target_os = "windows", test))]
 mod webview2_legacy_css;
+#[cfg(target_os = "windows")]
+mod webview2_preflight;
 #[cfg(any(target_os = "windows", test))]
 mod webview2_recovery;
 mod window_state_guard;
+#[cfg(target_os = "windows")]
+mod windows_appcompat;
+#[cfg(not(target_os = "windows"))]
+#[path = "windows_appcompat_noop.rs"]
+mod windows_appcompat;
+#[cfg(any(target_os = "windows", test))]
+mod windows_appcompat_state;
 
 use commands::connection::AppState;
 use dbx_core::persistence::secret_codec::SecretKeyPolicy;
@@ -178,9 +189,8 @@ pub(crate) fn linux_compositing_available() -> bool {
     gtk::gdk::Screen::default().is_some_and(|screen| screen.is_composited())
 }
 
-/// Desktops where the transparent floating frame is known to render correctly. Others (notably
-/// KDE, which shows flickering or missing content with some driver/WebKitGTK combinations) keep
-/// the opaque window unless the user forces the frame on.
+/// Desktops where the floating frame is enabled automatically. Driver/WebKitGTK combinations
+/// can still cause flickering on GNOME, so the saved setting can disable this default.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_desktop_supports_floating_frame(current_desktop: Option<&std::ffi::OsStr>) -> bool {
     current_desktop
@@ -188,7 +198,7 @@ fn linux_desktop_supports_floating_frame(current_desktop: Option<&std::ffi::OsSt
         .unwrap_or(false)
 }
 
-/// `DBX_LINUX_FLOATING_FRAME=1|0` is an optional override; without it the frame is only used on
+/// `DBX_LINUX_FLOATING_FRAME=1|0` overrides the saved preference; otherwise the frame is only used on
 /// GNOME running as a native Wayland client. GNOME on X11 ("GNOME on Xorg") keeps the opaque
 /// window: there the transparent WebKitGTK window stays see-through and only repaints the regions
 /// that get damaged (e.g. under the mouse).
@@ -198,6 +208,7 @@ fn should_enable_linux_floating_frame(
     native_wayland: bool,
     override_value: Option<&std::ffi::OsStr>,
     current_desktop: Option<&std::ffi::OsStr>,
+    enabled: bool,
 ) -> bool {
     if !compositing {
         return false;
@@ -205,14 +216,14 @@ fn should_enable_linux_floating_frame(
     match override_value.and_then(|value| value.to_str()) {
         Some("1") => true,
         Some("0") => false,
-        _ => native_wayland && linux_desktop_supports_floating_frame(current_desktop),
+        _ => enabled && native_wayland && linux_desktop_supports_floating_frame(current_desktop),
     }
 }
 
 /// The Linux config declares the main window with `create: false` so its transparency can
 /// depend at runtime on the desktop, the Wayland/X11 session and whether a compositor is available.
 #[cfg(target_os = "linux")]
-fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
+fn create_linux_main_window(app: &tauri::App, floating_frame_enabled: bool) -> tauri::Result<()> {
     let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main").cloned() else {
         return Ok(());
     };
@@ -229,6 +240,7 @@ fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
         native_wayland,
         override_value.as_deref(),
         current_desktop.as_deref(),
+        floating_frame_enabled,
     );
     log::info!(
         "[WINDOW] Linux main window compositing={compositing}; native_wayland={native_wayland}; floating_frame={floating_frame}"
@@ -641,21 +653,26 @@ fn apply_linux_webkit_rendering_workarounds() {
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("[WINDOW] show_main_window: no \"main\" webview window to reveal");
+        startup_recovery::record("show_main_window: main webview window is missing");
         return false;
     };
     if let Err(err) = window.show() {
         eprintln!("[WINDOW] show_main_window: show() failed: {err}");
+        startup_recovery::record(format!("show_main_window: show() failed: {err}"));
     }
     if let Err(err) = window.unminimize() {
         eprintln!("[WINDOW] show_main_window: unminimize() failed: {err}");
+        startup_recovery::record(format!("show_main_window: unminimize() failed: {err}"));
     }
     if let Err(err) = window.set_focus() {
         eprintln!("[WINDOW] show_main_window: set_focus() failed: {err}");
+        startup_recovery::record(format!("show_main_window: set_focus() failed: {err}"));
     }
     match window.is_visible() {
         Ok(visible) => visible,
         Err(err) => {
             eprintln!("[WINDOW] show_main_window: is_visible() failed: {err}");
+            startup_recovery::record(format!("show_main_window: is_visible() failed: {err}"));
             false
         }
     }
@@ -1255,36 +1272,83 @@ mod tests {
     #[test]
     fn linux_floating_frame_is_enabled_by_default_on_gnome_wayland_only() {
         for desktop in ["GNOME", "ubuntu:GNOME", "gnome", "GNOME-Classic:GNOME"] {
-            assert!(should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop))), "{desktop}");
+            assert!(should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop)), true), "{desktop}");
         }
         for desktop in ["KDE", "XFCE", "X-Cinnamon", "sway", "", "GNOMEISH"] {
-            assert!(!should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop))), "{desktop}");
+            assert!(
+                !should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop)), true),
+                "{desktop}"
+            );
         }
-        assert!(!should_enable_linux_floating_frame(true, true, None, None));
+        assert!(!should_enable_linux_floating_frame(true, true, None, None, true));
     }
 
     #[test]
     fn linux_floating_frame_is_disabled_by_default_on_gnome_x11() {
         for desktop in ["GNOME", "ubuntu:GNOME", "GNOME-Classic:GNOME"] {
-            assert!(!should_enable_linux_floating_frame(true, false, None, Some(OsStr::new(desktop))), "{desktop}");
+            assert!(
+                !should_enable_linux_floating_frame(true, false, None, Some(OsStr::new(desktop)), true),
+                "{desktop}"
+            );
         }
-        assert!(should_enable_linux_floating_frame(true, false, Some(OsStr::new("1")), Some(OsStr::new("GNOME"))));
+        assert!(should_enable_linux_floating_frame(
+            true,
+            false,
+            Some(OsStr::new("1")),
+            Some(OsStr::new("GNOME")),
+            true
+        ));
     }
 
     #[test]
     fn linux_floating_frame_override_wins_over_desktop() {
-        assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new("1")), Some(OsStr::new("KDE"))));
-        assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new("0")), Some(OsStr::new("GNOME"))));
+        assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new("1")), Some(OsStr::new("KDE")), true));
+        assert!(!should_enable_linux_floating_frame(
+            true,
+            true,
+            Some(OsStr::new("0")),
+            Some(OsStr::new("GNOME")),
+            true
+        ));
         for value in ["", "true", "auto", "01"] {
-            assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new(value)), Some(OsStr::new("GNOME"))));
-            assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new(value)), Some(OsStr::new("KDE"))));
+            assert!(should_enable_linux_floating_frame(
+                true,
+                true,
+                Some(OsStr::new(value)),
+                Some(OsStr::new("GNOME")),
+                true
+            ));
+            assert!(!should_enable_linux_floating_frame(
+                true,
+                true,
+                Some(OsStr::new(value)),
+                Some(OsStr::new("KDE")),
+                true
+            ));
         }
     }
 
     #[test]
     fn linux_floating_frame_requires_compositing() {
-        assert!(!should_enable_linux_floating_frame(false, true, Some(OsStr::new("1")), Some(OsStr::new("GNOME"))));
-        assert!(!should_enable_linux_floating_frame(false, true, None, Some(OsStr::new("GNOME"))));
+        assert!(!should_enable_linux_floating_frame(
+            false,
+            true,
+            Some(OsStr::new("1")),
+            Some(OsStr::new("GNOME")),
+            true
+        ));
+        assert!(!should_enable_linux_floating_frame(false, true, None, Some(OsStr::new("GNOME")), true));
+    }
+
+    #[test]
+    fn linux_floating_frame_setting_can_disable_gnome_default() {
+        let desktop = Some(OsStr::new("GNOME"));
+        assert!(!should_enable_linux_floating_frame(true, true, None, desktop, false));
+        assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new("auto")), desktop, false));
+        assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new("1")), desktop, false));
+        assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new("0")), desktop, true));
+        assert!(!should_enable_linux_floating_frame(true, false, None, desktop, true));
+        assert!(!should_enable_linux_floating_frame(false, true, Some(OsStr::new("1")), desktop, false));
     }
 
     #[test]
@@ -1729,6 +1793,17 @@ fn route_external_commands(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebView2 warm-up child mode: when a compatibility profile asks for a
+    // preflight, the parent re-launches this executable with
+    // DBX_WEBVIEW2_PREFLIGHT_CHILD=1. The child only creates and releases a
+    // WebView2 environment (forcing AV products to scan/trust msedgewebview2.exe)
+    // and exits before any Tauri/window setup. Doing this in a separate process
+    // isolates a hanging environment creation from the real startup attempt.
+    #[cfg(target_os = "windows")]
+    if webview2_preflight::run_child_if_requested() {
+        return;
+    }
+
     // Metadata/completion command chains nest very large async futures and can
     // exhaust tokio's default 2 MiB worker stack, which aborts the process with
     // STATUS_STACK_OVERFLOW. Share the roomier stack the backup worker and Web
@@ -1741,6 +1816,68 @@ pub fn run() {
     startup_recovery::initialize();
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
     append_startup_probe("runtime prerequisites configured");
+    // Record the WebView2 / security-software environment before any window is
+    // created. This is the first thing to look at when a startup recovery chain
+    // fails: it distinguishes a missing/hooked WebView2 runtime from an AV
+    // product that blocks the child browser process.
+    #[cfg(target_os = "windows")]
+    let webview2_runtime_health = webview2_preflight::runtime_health();
+    #[cfg(target_os = "windows")]
+    append_startup_probe(format!("webview2 runtime_health={}", webview2_runtime_health.as_str()));
+
+    #[cfg(target_os = "windows")]
+    {
+        // Collect WebView2/AV diagnostics on a worker thread with a hard deadline:
+        // on machines where a security product hooks the WebView2 loader (the very
+        // machines this diagnostics targets) the version query must never be able
+        // to delay the real startup path. A timed-out worker is abandoned and dies
+        // with the process.
+        let (diagnostics_tx, diagnostics_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let diagnostics = webview2_preflight::collect_diagnostics();
+            let _ = diagnostics_tx.send(webview2_preflight::format_diagnostics(&diagnostics));
+        });
+        match diagnostics_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(lines) => {
+                for line in lines {
+                    append_startup_probe(line);
+                }
+            }
+            Err(_) => append_startup_probe("webview2 diagnostics timed out after 3s; continuing startup"),
+        }
+    }
+    // A missing/damaged WebView2 runtime is the #1 cause of "the window never
+    // appears" on enterprise Windows machines, and it used to be misdiagnosed as a
+    // security product blocking WebView2 (the compatibility ladder then retried for
+    // minutes). Detect it before Tauri tries to create the window and show one
+    // clear, actionable message instead.
+    #[cfg(target_os = "windows")]
+    {
+        // Diagnostic escape hatch: a user who wants the AV compatibility ladder to
+        // run even though the WebView2 runtime is missing/damaged can force it.
+        // This makes no difference on a healthy runtime but lets support reproduce
+        // "try everything" behaviour on a broken machine.
+        let force_compat_on_broken_runtime =
+            std::env::var_os("DBX_TRY_COMPAT_ON_BROKEN_WEBVIEW2").is_some_and(|value| value == "1");
+        match webview2_runtime_health {
+            webview2_preflight::WebView2RuntimeHealth::Missing if !force_compat_on_broken_runtime => {
+                startup_recovery::handle_missing_webview2_runtime();
+                return;
+            }
+            webview2_preflight::WebView2RuntimeHealth::RegisteredButDamaged if !force_compat_on_broken_runtime => {
+                startup_recovery::handle_damaged_webview2_runtime(
+                    webview2_preflight::collect_diagnostics().runtime_version.as_deref(),
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // Profile-specific pre-Tauri work (scan delay, WebView2 warm-up preflight).
+    // This must run before `Builder::default().build()` because wry reads the
+    // WebView2 environment variables during window creation.
+    startup_recovery::run_profile_pre_tauri_hooks();
     #[cfg(target_os = "linux")]
     apply_linux_webkit_rendering_workarounds();
 
@@ -1799,7 +1936,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
@@ -1837,19 +1973,23 @@ pub fn run() {
         })
         .setup(move |app| {
             let setup_start = Instant::now();
-            #[cfg(target_os = "linux")]
-            create_linux_main_window(app)?;
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
             append_startup_probe(format!("setup entered after {:?}", startup_begin.elapsed()));
-            window_state_guard::restore_main_window_state(app.handle());
+            #[cfg(not(target_os = "linux"))]
+            {
+                window_state_guard::restore_main_window_state(app.handle());
 
-            if should_show_main_window_before_setup_tasks() {
-                prepare_main_window_for_display(app.handle());
-                show_main_window(app.handle());
-                append_startup_probe(format!(
-                    "early main window show requested; {}",
-                    main_window_probe_state(app.handle())
-                ));
+                if should_show_main_window_before_setup_tasks() {
+                    prepare_main_window_for_display(app.handle());
+                    show_main_window(app.handle());
+                    append_startup_probe(format!(
+                        "early main window show requested; {}",
+                        main_window_probe_state(app.handle())
+                    ));
+                    startup_recovery::report_window_visibility_probe(startup_recovery::probe_main_window_visible(
+                        app.handle(),
+                    ));
+                }
             }
 
             append_startup_probe("resolving app data dir");
@@ -1901,6 +2041,22 @@ pub fn run() {
             let migration_gate = Arc::new(migration_gate::MigrationGate::new(migration_ready));
             app.manage(migration_gate.clone());
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
+            #[cfg(target_os = "linux")]
+            {
+                // Transparency must be chosen before creating the native window. Read the saved
+                // preference first so a disabled frame is never briefly shown during startup.
+                create_linux_main_window(app, desktop_settings.linux_floating_frame_enabled)?;
+                window_state_guard::restore_main_window_state(app.handle());
+
+                if should_show_main_window_before_setup_tasks() {
+                    prepare_main_window_for_display(app.handle());
+                    show_main_window(app.handle());
+                    append_startup_probe(format!(
+                        "early main window show requested; {}",
+                        main_window_probe_state(app.handle())
+                    ));
+                }
+            }
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
@@ -1970,6 +2126,7 @@ pub fn run() {
             dbx_core::db::sqlite_worker::enable_sqlite_ssh_runtime(env!("CARGO_PKG_VERSION"));
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
+            state.set_honor_fixed_ssh_local_ports(true);
             let oidc_app_handle = app.handle().clone();
             state.set_mongo_oidc_browser_opener(Arc::new(move |url| {
                 oidc_app_handle
@@ -2062,6 +2219,9 @@ pub fn run() {
                 append_startup_probe(format!(
                     "final main window show requested; {}",
                     main_window_probe_state(app.handle())
+                ));
+                startup_recovery::report_window_visibility_probe(startup_recovery::probe_main_window_visible(
+                    app.handle(),
                 ));
             }
             #[cfg(any(windows, target_os = "linux"))]
@@ -2906,6 +3066,7 @@ pub fn run() {
             commands::mcp::install_native_mcp_server,
             commands::mcp::uninstall_mcp_server,
             commands::mcp::uninstall_npm_mcp_server,
+            commands::app_relaunch::relaunch_app,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
             commands::update::get_system_proxy_url,
@@ -2973,6 +3134,7 @@ pub fn run() {
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
             commands::tunnel_profiles::test_tunnel_profile,
+            commands::tunnel_profiles::list_ssh_agent_identities,
         ])))
         .build(tauri::generate_context!())
         .inspect(|app| {

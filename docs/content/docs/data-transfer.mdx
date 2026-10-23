@@ -135,6 +135,8 @@ A multi-table task does not discard the entire queue after the first table failu
 
 As a result, a finished task does not necessarily mean every table succeeded. Check the terminal state, failure list, target row counts, and key fields.
 
+Oracle and OceanBase Oracle standalone routine transfers also read back the exact object, full definition, and compiler result. An acknowledged DDL with an `INVALID` object, failed readback, or mismatched definition does not count as a successful transfer. Errors retain compiler coordinates or the verification failure. Existing targets are still skipped; new routines do not use `OR REPLACE` to overwrite a competing name.
+
 ## Database Coverage
 
 DBX filters source and target connections through the driver capability manifest. The implementation includes SQL-to-SQL, MongoDB-to-MongoDB, and selected MongoDB/SQL conversion paths. Not every connectable database supports Data Transfer.

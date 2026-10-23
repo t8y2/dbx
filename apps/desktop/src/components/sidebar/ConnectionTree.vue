@@ -66,7 +66,7 @@ import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } fro
 import { createSidebarTableSearchDebouncer, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
 import TreeItem from "./TreeItem.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
-import { showSidebarStickyProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
+import { isSidebarProductionContainer, showSidebarRowProductionBadge, showSidebarStickyProductionBadge } from "@/lib/sidebar/sidebarProductionBadge";
 import { resolvePlainStickyContainerIndex } from "@/lib/sidebar/sidebarStickyProductionContext";
 import ActiveConnectionFilterButton from "./ActiveConnectionFilterButton.vue";
 import SidebarListOptionsIcon from "./SidebarListOptionsIcon.vue";
@@ -96,7 +96,9 @@ import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDdlViewDialog, SidebarElasticsearchIndexMetadataDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
-import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { sidebarTreeDisplayLabel, sidebarTreeSecondaryValue } from "@/lib/sidebar/sidebarTreeLabel";
+import { canTreeNodePin, sidebarPinnedActionSlotWidthPx, alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { sidebarHorizontalWheelDelta } from "@/lib/sidebar/sidebarScrollbar";
 import { formatSidebarObjectStorage, sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
 import { createSidebarLayoutMonitor, type SidebarExpandedConnectionInfo } from "@/lib/sidebar/sidebarLayoutMonitor";
@@ -794,8 +796,28 @@ const sidebarTableNameDisplayTypes = new Set<TreeNodeType>(["table", "view", "ma
 const sidebarStorageDisplayTypes = new Set<TreeNodeType>(["database", "table", "materialized_view"]);
 
 function sidebarCommentLabel(node: TreeNode): string {
-  const label = sidebarTableNameDisplayTypes.has(node.type) ? sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes) : node.label;
+  const label = sidebarTableNameDisplayTypes.has(node.type) ? sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes) : sidebarTreeDisplayLabel(node, t, node.connectionId ? effectiveDatabaseTypeForConnection(store.getConfig(node.connectionId)) : undefined);
   return node.valid === false ? `${label} · INVALID` : label;
+}
+
+// Shared by the aligned comment column and the full horizontal content width.
+// Pin controls are reserved separately so unpinned siblings stay aligned too.
+const sidebarTreeLeadingWidthItems = computed(() =>
+  flatNodes.value.map(({ id, depth, node }) => {
+    const config = node.connectionId ? store.getConfig(node.connectionId) : undefined;
+    const badges: string[] = [];
+    if (node.type === "column" && node.meta) badges.push(t((node.meta as ColumnInfo).is_nullable ? "structureEditor.nullable" : "structureEditor.notNull"));
+    if (["database", "redis-db", "mongo-db"].includes(node.type) && node.connectionId && typeof node.database === "string" && store.isDefaultDatabase(node.connectionId, node.database)) badges.push(t("editor.defaultDatabase"));
+    if (node.type === "schema" && node.connectionId && node.schema && store.isDefaultSchema(node.connectionId, node.schema)) badges.push(t("editor.defaultSchema"));
+    if (showSidebarRowProductionBadge(node, config) && isSidebarProductionContainer(node)) badges.push("PROD");
+    const secondary = sidebarTreeSecondaryValue(node, t);
+    const leadingExtraWidth = (secondary && node.type === "elasticsearch-index" ? 16 : 0) + (node.type === "oracle-db-links" ? 26 : 0);
+    return { id, depth, node, label: sidebarCommentLabel(node), badges, secondary, leadingExtraWidth };
+  }),
+);
+
+function measureSidebarTreeLeadingWidth(item: (typeof sidebarTreeLeadingWidthItems.value)[number], context: CanvasRenderingContext2D): number {
+  return context.measureText(item.label).width + item.leadingExtraWidth + item.badges.reduce((width, badge) => width + context.measureText(badge).width + 24, 0) + (item.secondary ? context.measureText(item.secondary).width + 8 : 0);
 }
 
 function measureSidebarCommentLabelWidths() {
@@ -814,12 +836,14 @@ function measureSidebarCommentLabelWidths() {
   const notNullBadgeWidth = context.measureText(t("structureEditor.notNull")).width + badgePaddingAndGapWidth;
   context.font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
   sidebarCommentLabelWidths.value = alignedSidebarCommentLabelWidths(
-    flatNodes.value.map(({ id, depth, node }) => ({
-      id,
-      depth,
-      alignable: isSidebarCommentAlignableNode(node),
-      hasComment: !!sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes),
-      labelWidth: context.measureText(sidebarCommentLabel(node)).width + (node.type === "column" && node.meta ? ((node.meta as ColumnInfo).is_nullable ? nullableBadgeWidth : notNullBadgeWidth) : 0),
+    sidebarTreeLeadingWidthItems.value.map((item) => ({
+      id: item.id,
+      depth: item.depth,
+      alignable: isSidebarCommentAlignableNode(item.node),
+      hasComment: !!sidebarTreeNodeComment(item.node, settingsStore.editorSettings.sidebarShowConnectionNotes),
+      labelWidth: settingsStore.editorSettings.sidebarAllowHorizontalScroll
+        ? measureSidebarTreeLeadingWidth(item, context)
+        : context.measureText(item.label).width + (item.node.type === "column" && item.node.meta ? ((item.node.meta as ColumnInfo).is_nullable ? nullableBadgeWidth : notNullBadgeWidth) : 0),
     })),
   );
 }
@@ -833,19 +857,38 @@ function scheduleSidebarCommentLabelMeasure() {
   sidebarCommentMeasureFrame = window.requestAnimationFrame(measureSidebarCommentLabelWidths);
 }
 
-function sidebarNodeHasTrailingMetadata(node: TreeNode): boolean {
-  const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
-  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes)) return true;
-  return (mode === "size" || mode === "comment-and-size") && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
-}
-
+// Describe every expanded row, including those outside the virtual viewport.
+// Keep text measurement independent of mounted TreeItems so scrolling cannot
+// change the horizontal range or truncate a newly materialized row.
 const sidebarTreeNaturalWidthItems = computed(() =>
-  flatNodes.value.map(({ depth, node }) => ({
-    depth,
-    label: sidebarCommentLabel(node),
-    usesNaturalWidth: usesFullWidthTreeLabel(node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll, sidebarNodeHasTrailingMetadata(node)),
-    trailingWidth: node.pinned || store.isTreeNodePinned(node) ? 20 : 0,
-  })),
+  sidebarTreeLeadingWidthItems.value.map((item) => {
+    const { depth, node } = item;
+    const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
+    const comment = mode.startsWith("comment-") ? (sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes) ?? undefined) : undefined;
+    const config = node.connectionId ? store.getConfig(node.connectionId) : undefined;
+    const badges = [...item.badges];
+    const leadingExtraWidth = item.leadingExtraWidth + (node.pinned || store.isTreeNodePinned(node) ? sidebarPinnedActionSlotWidthPx : 0);
+    let trailingWidth = showSidebarRowProductionBadge(node, config) && !isSidebarProductionContainer(node) ? 24 : 0;
+    // Reserve status/control slots regardless of transient connected/loading
+    // state, avoiding horizontal jumps when a connection changes status.
+    if (node.type === "database") trailingWidth += 14;
+    if (node.type === "connection") {
+      trailingWidth += 38;
+      if (config?.read_only) badges.push(t("connection.readOnlyBadge"));
+    }
+    return {
+      ...item,
+      depth,
+      usesNaturalWidth: usesFullWidthTreeLabel(node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll),
+      comment,
+      rightAlignedComment: mode === "comment-right",
+      trailingText: (mode === "size" || mode === "comment-and-size") && sidebarStorageDisplayTypes.has(node.type) ? formatSidebarObjectStorage(node.sizeBytes) : undefined,
+      trailingWidth,
+      leadingExtraWidth,
+      badges,
+      alignedWidth: comment && mode === "comment-aligned" && node.type !== "connection" ? (sidebarCommentLabelWidths.value.get(node.id) ?? 0) + (canTreeNodePin(node.type) ? sidebarPinnedActionSlotWidthPx : 0) : 0,
+    };
+  }),
 );
 
 function measureSidebarTreeContentWidth() {
@@ -859,7 +902,15 @@ function measureSidebarTreeContentWidth() {
   if (!context) return;
   const style = window.getComputedStyle(rootRef.value);
   context.font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-  sidebarTreeContentWidth.value = sidebarTreeNaturalContentWidth(sidebarTreeNaturalWidthItems.value, (text) => context.measureText(text).width, settingsStore.editorSettings.sidebarIndent);
+  sidebarTreeContentWidth.value = sidebarTreeNaturalContentWidth(
+    sidebarTreeNaturalWidthItems.value.map((item) => ({
+      ...item,
+      leadingWidth: Math.max(item.alignedWidth, measureSidebarTreeLeadingWidth(item, context)),
+    })),
+    (text) => context.measureText(text).width,
+    settingsStore.editorSettings.sidebarIndent,
+  );
+  syncStickyRowHorizontalPosition();
   void nextTick(scheduleSidebarScrollMetricsUpdate);
 }
 
@@ -874,8 +925,9 @@ function scheduleSidebarTreeContentWidthMeasure() {
 
 watch(
   [
-    flatNodes,
+    sidebarTreeLeadingWidthItems,
     locale,
+    () => settingsStore.editorSettings.sidebarAllowHorizontalScroll,
     () => settingsStore.editorSettings.sidebarObjectInfoMode,
     () => settingsStore.editorSettings.sidebarShowConnectionNotes,
     () => settingsStore.editorSettings.sidebarHiddenTablePrefixes,
@@ -1005,6 +1057,7 @@ watch(
 const stickyScrollTop = ref(0);
 const plainStickyContainerIndex = ref(-1);
 const sidebarScrollMetrics = ref({ scrollTop: 0, scrollLeft: 0, clientHeight: 0, clientWidth: 0, scrollHeight: 0, scrollWidth: 0 });
+const stickyRowRef = ref<HTMLElement | null>(null);
 const isScrollingSidebar = ref(false);
 const isDraggingSidebarScrollbar = ref(false);
 const isDraggingSidebarHorizontalScrollbar = ref(false);
@@ -1018,6 +1071,7 @@ function updateSidebarScrollMetrics() {
   const scroller = currentTreeScroller();
   if (!scroller) {
     sidebarScrollMetrics.value = { scrollTop: 0, scrollLeft: 0, clientHeight: 0, clientWidth: 0, scrollHeight: 0, scrollWidth: 0 };
+    syncStickyRowHorizontalPosition(null);
     return;
   }
 
@@ -1035,8 +1089,9 @@ function updateSidebarScrollMetrics() {
     clientHeight: scroller.clientHeight,
     clientWidth: scroller.clientWidth,
     scrollHeight: scroller.scrollHeight,
-    scrollWidth: Math.max(scroller.scrollWidth, sidebarTreeContentWidth.value),
+    scrollWidth: scroller.scrollWidth,
   };
+  syncStickyRowHorizontalPosition(scroller);
 }
 
 function scheduleSidebarScrollMetricsUpdate() {
@@ -1050,6 +1105,31 @@ function onTreeScroll() {
   sidebarScrollingTimer = window.setTimeout(() => {
     isScrollingSidebar.value = false;
   }, 700);
+  syncStickyRowHorizontalPosition();
+  scheduleSidebarScrollMetricsUpdate();
+}
+
+function onTreeWheel(event: WheelEvent) {
+  const scroller = currentTreeScroller();
+  if (!scroller || !settingsStore.editorSettings.sidebarAllowHorizontalScroll || !event.shiftKey) return;
+  if (event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable=true]")) return;
+  const delta = sidebarHorizontalWheelDelta({
+    enabled: true,
+    shiftKey: event.shiftKey,
+    deltaX: event.deltaX,
+    deltaY: event.deltaY,
+    deltaMode: event.deltaMode,
+    lineHeight: sidebarTreeRowHeight.value,
+    scrollLeft: scroller.scrollLeft,
+    clientWidth: scroller.clientWidth,
+    scrollWidth: scroller.scrollWidth,
+  });
+  if (delta === 0) return;
+  const previous = scroller.scrollLeft;
+  scroller.scrollLeft += delta;
+  if (scroller.scrollLeft === previous) return;
+  syncStickyRowHorizontalPosition(scroller);
+  event.preventDefault();
   scheduleSidebarScrollMetricsUpdate();
 }
 
@@ -1142,6 +1222,28 @@ const stickyTableSearchScope = computed(() => {
   return scope;
 });
 const stickyTableSearchNode = computed(() => stickyTableSearchScope.value?.item ?? null);
+
+function syncStickyRowHorizontalPosition(scroller = currentTreeScroller()) {
+  const row = stickyRowRef.value;
+  if (!row) return;
+
+  if (!settingsStore.editorSettings.sidebarAllowHorizontalScroll || !scroller) {
+    row.style.removeProperty("width");
+    row.style.removeProperty("transform");
+    return;
+  }
+
+  row.style.width = `${Math.max(scroller.clientWidth, sidebarTreeContentWidth.value)}px`;
+  row.style.transform = `translate3d(${-scroller.scrollLeft}px, 0, 0)`;
+}
+
+watch(
+  [stickyNode, useVirtualTree, treeScrollerRef, plainTreeScrollerRef],
+  () => {
+    void nextTick(() => syncStickyRowHorizontalPosition());
+  },
+  { flush: "post", immediate: true },
+);
 const stickyHeaderHeight = computed(() => sidebarTreeRowHeight.value * (stickyTableSearchNode.value ? 2 : 1));
 
 const stickyHeaderStyle = computed<CSSProperties>(() => {
@@ -1241,6 +1343,7 @@ watch(
     void nextTick(() => {
       const scroller = currentTreeScroller();
       if (!enabled && scroller) scroller.scrollLeft = 0;
+      syncStickyRowHorizontalPosition(scroller);
       scheduleSidebarScrollMetricsUpdate();
     }),
   { flush: "post" },
@@ -1350,6 +1453,7 @@ function setSidebarHorizontalScrollFromPointer(clientX: number, offset: number) 
 
   const thumbLeft = Math.min(maxThumbLeft, Math.max(0, clientX - rect.left - offset));
   scroller.scrollLeft = (thumbLeft / maxThumbLeft) * maxScrollLeft;
+  syncStickyRowHorizontalPosition(scroller);
   updateSidebarScrollMetrics();
 }
 
@@ -2778,6 +2882,7 @@ defineExpose({
           :class="sidebarTreeOverflowClass"
           :style="sidebarTreeScrollerStyle"
           @click="clearSidebarSelection"
+          @wheel="onTreeWheel"
           :items="flatNodes"
           :item-size="sidebarTreeRowHeight"
           :buffer="SIDEBAR_TREE_SCROLL_BUFFER"
@@ -2803,15 +2908,17 @@ defineExpose({
           </template>
         </RecycleScroller>
         <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5]" :style="stickyHeaderStyle">
-          <TreeItem
-            :node="stickyNode.node"
-            :depth="stickyNode.depth"
-            :reorder-disabled="true"
-            :reference-drag-disabled="true"
-            :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
-            :is-sticky-context="stickyProductionContext"
-            @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-          />
+          <div ref="stickyRowRef">
+            <TreeItem
+              :node="stickyNode.node"
+              :depth="stickyNode.depth"
+              :reorder-disabled="true"
+              :reference-drag-disabled="true"
+              :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+              :is-sticky-context="stickyProductionContext"
+              @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
+            />
+          </div>
           <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
         </div>
         <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ height: `${sidebarTreeRowHeight}px` }">
@@ -2837,7 +2944,7 @@ defineExpose({
         </div>
       </div>
       <div v-else-if="flatNodes.length > 0" ref="treeScrollShellRef" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
-        <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" :style="sidebarTreeScrollerStyle" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
+        <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" :style="sidebarTreeScrollerStyle" @click="clearSidebarSelection" @wheel="onTreeWheel" @scroll.passive="onTreeScroll">
           <div class="connection-tree-content">
             <TreeItem
               v-for="item in flatNodes"
@@ -2856,15 +2963,17 @@ defineExpose({
           </div>
         </div>
         <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5]" :style="stickyHeaderStyle">
-          <TreeItem
-            :node="stickyNode.node"
-            :depth="stickyNode.depth"
-            :reorder-disabled="true"
-            :reference-drag-disabled="true"
-            :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
-            :is-sticky-context="stickyProductionContext"
-            @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-          />
+          <div ref="stickyRowRef">
+            <TreeItem
+              :node="stickyNode.node"
+              :depth="stickyNode.depth"
+              :reorder-disabled="true"
+              :reference-drag-disabled="true"
+              :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+              :is-sticky-context="stickyProductionContext"
+              @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
+            />
+          </div>
           <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
         </div>
         <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ height: `${sidebarTreeRowHeight}px` }">
@@ -3057,16 +3166,33 @@ defineExpose({
      overlap the next row. Pin every materialized row to the fixed height and clip
      any overflow instead of letting the layout drift. */
   height: var(--sidebar-tree-row-height, 28px);
-  overflow: hidden;
+  overflow: clip;
 }
 
 .connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.vue-recycle-scroller__item-view) {
   width: max-content;
+  /* Viewport-sized controls move within this row when scrolling horizontally.
+     Keep the clipping wrapper as wide as the content so it cannot cut them
+     off, and let ordinary row backgrounds cover the full scrollable width. */
+  min-width: max(100%, var(--sidebar-tree-content-width));
 }
 
 .connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.connection-tree-content),
 .connection-tree-scroller.sidebar-tree-horizontal-scroll > .connection-tree-content {
   min-width: max(100%, var(--sidebar-tree-content-width));
+}
+
+.connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.tree-table-search-control),
+.connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.tree-row-viewport) {
+  /* These rows may scroll with the tree, but their connection tint must span
+     the entire horizontal content range so no white strip appears at the
+     right edge after scrolling. */
+  width: max(100%, var(--sidebar-tree-content-width));
+}
+
+.connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.tree-table-search-control__content) {
+  width: 100cqw;
+  min-width: 100cqw;
 }
 
 .connection-tree-scroll-shell--horizontal-overflow .connection-tree-scroller {

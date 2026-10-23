@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
+import { markRowIdLocatorUnsupported, resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
 import type { DataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import type { QueryTab, TreeNode } from "@/types/database";
 
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   dataTabReuseMode: "same-table" as DataTabReuseMode,
   openDataTabsNextToActive: false,
   metadataGeneration: 0,
+  includeSyntheticRowId: false,
   ensureConnected: vi.fn(),
   warmConnection: vi.fn(),
   executeTabSql: vi.fn(),
@@ -135,12 +137,13 @@ vi.mock("@/lib/backend/debugLog", () => ({ appendDebugLog: vi.fn(), isDebugLoggi
 vi.mock("@/lib/sidebar/treeNodeContext", () => ({ hasTreeNodeDatabaseContext: () => true }));
 vi.mock("@/lib/table/tableSelectSql", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/table/tableSelectSql")>()), buildTableSelectSql: mocks.buildTableSelectSql }));
 vi.mock("@/lib/table/tableEditing", () => ({
+  DBX_ROWID_COLUMN: "__DBX_ROWID",
   physicalTablePrimaryKeys: (columns: Array<{ name: string; is_primary_key: boolean }>, indexes: Array<{ columns: string[]; is_primary: boolean }> = []) => {
     const columnPrimaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
     return columnPrimaryKeys.length > 0 ? columnPrimaryKeys : (indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? []);
   },
   usesSyntheticRowIdKey: () => false,
-  shouldIncludeSyntheticRowId: () => false,
+  shouldIncludeSyntheticRowId: () => mocks.includeSyntheticRowId,
 }));
 vi.mock("@/lib/table/tableOpenPageLimit", () => ({ tableOpenPageLimit: () => 100 }));
 vi.mock("@/lib/tabs/dataTabActivation", () => ({ canActivateExistingDataTableTab: () => false }));
@@ -175,10 +178,18 @@ describe("useSidebarDataOpenRuntime", () => {
     mocks.dataTabReuseMode = "same-table";
     mocks.openDataTabsNextToActive = false;
     mocks.metadataGeneration = 0;
+    mocks.includeSyntheticRowId = false;
+    resetRowIdLocatorStateForTests();
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM users");
-    mocks.executeTabSql.mockImplementation(async () => {
+    mocks.executeTabSql.mockImplementation(async (tabId: string) => {
       mocks.callOrder.push("query");
+      const tab = mocks.tabs.find((candidate) => candidate.id === tabId);
+      if (tab) {
+        tab.isExecuting = false;
+        tab.executionId = undefined;
+      }
+      return true;
     });
     mocks.loadTableMetadata.mockImplementation(async () => {
       mocks.callOrder.push("metadata");
@@ -261,6 +272,230 @@ describe("useSidebarDataOpenRuntime", () => {
       catalog: undefined,
       clientSessionId: createdTab.id,
     });
+  });
+
+  it("does not let a stale row-id fallback overwrite a newer navigation", async () => {
+    mocks.databaseType = "postgres";
+    mocks.includeSyntheticRowId = true;
+    mocks.loadTableMetadata.mockResolvedValue({
+      metadata: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        database: "app",
+        columns: [{ name: "value", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
+        indexes: [],
+        primaryKeys: [],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    });
+    const locatorSql = 'SELECT tableoid::text AS "__DBX_ROWID", * FROM public.users';
+    const fallbackSql = "SELECT * FROM public.users";
+    let releaseFallbackSql!: (sql: string) => void;
+    mocks.buildTableSelectSql.mockResolvedValueOnce(locatorSql).mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseFallbackSql = resolve;
+      }),
+    );
+    mocks.executeTabSql.mockImplementationOnce(async (tabId: string, sql: string) => {
+      const tab = mocks.tabs.find((candidate) => candidate.id === tabId)!;
+      tab.lastExecutedSql = sql;
+      tab.result = { columns: ["Error"], rows: [["column tableoid does not exist"]], affected_rows: 0, execution_time_ms: 1, execution_error: true } as any;
+      tab.resultViewGeneration = "failed-locator";
+      tab.isExecuting = false;
+      tab.executionId = undefined;
+      return true;
+    });
+
+    let current = true;
+    const request = {
+      isCurrent: () => current,
+      signal: new AbortController().signal,
+      registerCancel: () => {},
+    };
+    const open = useSidebarDataOpenRuntime().openData(tableNode, request);
+    await vi.waitFor(() => expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(2));
+    const tab = mocks.tabs[0]!;
+    current = false;
+    tab.sql = "SELECT 'newer'";
+    tab.lastExecutedSql = "SELECT 'newer'";
+    tab.result = { columns: ["newer"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } as any;
+    tab.resultViewGeneration = "newer-result";
+
+    releaseFallbackSql(fallbackSql);
+    await open;
+
+    expect(tab.sql).toBe("SELECT 'newer'");
+    expect(tab.result?.columns).toEqual(["newer"]);
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(false);
+  });
+
+  it("does not start a row-id fallback when the failed execution was superseded before publishing", async () => {
+    mocks.databaseType = "postgres";
+    mocks.includeSyntheticRowId = true;
+    const locatorSql = 'SELECT tableoid::text AS "__DBX_ROWID", * FROM public.users';
+    mocks.buildTableSelectSql.mockResolvedValue(locatorSql);
+    let releaseFailedExecution!: (published: boolean) => void;
+    mocks.executeTabSql.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseFailedExecution = resolve;
+      }),
+    );
+    let current = true;
+    const request = {
+      isCurrent: () => current,
+      signal: new AbortController().signal,
+      registerCancel: () => {},
+    };
+
+    const open = useSidebarDataOpenRuntime().openData(tableNode, request);
+    await vi.waitFor(() => expect(mocks.executeTabSql).toHaveBeenCalledTimes(1));
+    const tab = mocks.tabs[0]!;
+    current = false;
+    tab.sql = "SELECT 'newer'";
+    tab.result = { columns: ["newer"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } as any;
+    tab.resultViewGeneration = "newer-result";
+    tab.isExecuting = false;
+    tab.executionId = undefined;
+    releaseFailedExecution(false);
+    await open;
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(1);
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
+    expect(tab.sql).toBe("SELECT 'newer'");
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(false);
+  });
+
+  it("still lands preparation failures while the flow owns the tab", async () => {
+    mocks.ensureConnected.mockRejectedValue(new Error("connection refused"));
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.setErrorResult).toHaveBeenCalledTimes(1);
+    expect(mocks.setErrorResult).toHaveBeenCalledWith("tab-1", expect.any(Error));
+  });
+
+  it("does not land a late ensure-connected failure over a newer execution on the same tab", async () => {
+    let rejectEnsureConnected!: (error: unknown) => void;
+    mocks.ensureConnected.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectEnsureConnected = reject;
+        }),
+    );
+
+    const open = useSidebarDataOpenRuntime().openData(tableNode);
+    await vi.waitFor(() => expect(mocks.ensureConnected).toHaveBeenCalledTimes(1));
+    const tab = mocks.tabs[0]!;
+    // 同页签的手动执行接管：替换 executionId 并进入执行态，导航代次不变
+    tab.executionId = "newer-execution";
+    tab.isExecuting = true;
+
+    rejectEnsureConnected(new Error("old preparation failed"));
+    await open;
+
+    expect(mocks.setErrorResult).not.toHaveBeenCalled();
+    expect(tab.executionId).toBe("newer-execution");
+    expect(tab.isExecuting).toBe(true);
+  });
+
+  it("does not land a late first-SQL-build failure over a newer execution on the same tab", async () => {
+    let rejectBuildOpenSql!: (error: unknown) => void;
+    mocks.buildTableSelectSql.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectBuildOpenSql = reject;
+        }),
+    );
+
+    const open = useSidebarDataOpenRuntime().openData(tableNode);
+    await vi.waitFor(() => expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(1));
+    const tab = mocks.tabs[0]!;
+    tab.executionId = "newer-execution";
+    tab.isExecuting = true;
+
+    rejectBuildOpenSql(new Error("old preparation failed"));
+    await open;
+
+    expect(mocks.setErrorResult).not.toHaveBeenCalled();
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(1);
+    expect(tab.executionId).toBe("newer-execution");
+    expect(tab.isExecuting).toBe(true);
+  });
+
+  it("retries an already-issued row-id query after another request caches the unsupported capability", async () => {
+    mocks.databaseType = "postgres";
+    mocks.includeSyntheticRowId = true;
+    const locatorSql = 'SELECT tableoid::text AS "__DBX_ROWID", * FROM public.users';
+    const fallbackSql = "SELECT * FROM public.users";
+    mocks.buildTableSelectSql.mockResolvedValueOnce(locatorSql).mockResolvedValueOnce(fallbackSql);
+    let releaseLocatorFailure!: () => void;
+    mocks.executeTabSql
+      .mockImplementationOnce(
+        (tabId: string) =>
+          new Promise<boolean>((resolve) => {
+            releaseLocatorFailure = () => {
+              const tab = mocks.tabs.find((candidate) => candidate.id === tabId)!;
+              tab.result = { columns: ["Error"], rows: [["column tableoid does not exist"]], affected_rows: 0, execution_time_ms: 1, execution_error: true } as any;
+              tab.resultViewGeneration = "failed-locator";
+              tab.isExecuting = false;
+              tab.executionId = undefined;
+              resolve(true);
+            };
+          }),
+      )
+      .mockImplementationOnce(async (tabId: string) => {
+        const tab = mocks.tabs.find((candidate) => candidate.id === tabId)!;
+        tab.result = { columns: ["value"], rows: [["ok"]], affected_rows: 0, execution_time_ms: 1 } as any;
+        tab.resultViewGeneration = "fallback-result";
+        tab.isExecuting = false;
+        tab.executionId = undefined;
+        return true;
+      });
+
+    const open = useSidebarDataOpenRuntime().openData(tableNode);
+    await vi.waitFor(() => expect(mocks.executeTabSql).toHaveBeenCalledTimes(1));
+    markRowIdLocatorUnsupported("connection-1");
+    releaseLocatorFailure();
+    await open;
+
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(2);
+    expect(mocks.executeTabSql).toHaveBeenLastCalledWith("tab-1", fallbackSql, expect.any(Object));
+    expect(mocks.tabs[0]?.result?.columns).toEqual(["value"]);
+  });
+
+  it("applies the default sort to a successful row-id fallback result", async () => {
+    mocks.databaseType = "postgres";
+    mocks.includeSyntheticRowId = true;
+    mocks.tableOpenSortMode = "local";
+    const locatorSql = 'SELECT tableoid::text AS "__DBX_ROWID", * FROM public.users';
+    const fallbackSql = "SELECT * FROM public.users";
+    mocks.buildTableSelectSql.mockResolvedValueOnce(locatorSql).mockResolvedValueOnce(fallbackSql);
+    mocks.executeTabSql
+      .mockImplementationOnce(async (tabId: string) => {
+        const tab = mocks.tabs.find((candidate) => candidate.id === tabId)!;
+        tab.result = { columns: ["Error"], rows: [["column tableoid does not exist"]], affected_rows: 0, execution_time_ms: 1, execution_error: true } as any;
+        tab.resultViewGeneration = "failed-locator";
+        tab.isExecuting = false;
+        tab.executionId = undefined;
+        return true;
+      })
+      .mockImplementationOnce(async (tabId: string) => {
+        const tab = mocks.tabs.find((candidate) => candidate.id === tabId)!;
+        tab.result = { columns: ["id"], rows: [[2], [1]], affected_rows: 0, execution_time_ms: 1 } as any;
+        tab.resultViewGeneration = "fallback-result";
+        tab.isExecuting = false;
+        tab.executionId = undefined;
+        return true;
+      });
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.tabs[0]?.sql).toBe(fallbackSql);
+    expect(mocks.sortTabResultLocally).toHaveBeenCalledWith("tab-1", "id", 0, "asc");
   });
 
   it("keeps adjacent placement for every tab created in always-new mode", async () => {

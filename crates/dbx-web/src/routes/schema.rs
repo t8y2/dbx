@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::error::AppError;
 use crate::state::WebState;
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::Json;
 use dbx_core::connection::AppState;
 use serde::de::DeserializeOwned;
@@ -845,6 +846,152 @@ pub async fn list_functions(
         .await
         .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+#[derive(Deserialize)]
+pub struct RoutineSnapshotQuery {
+    #[serde(flatten)]
+    scope: SchemaQuery,
+    selected_routines: Option<String>,
+}
+
+pub async fn load_schema_diff_routines(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<RoutineSnapshotQuery>,
+) -> Result<Json<dbx_core::schema::oracle_routines::RoutineSnapshot>, AppError> {
+    let selected_routines = query
+        .selected_routines
+        .as_deref()
+        .map(serde_json::from_str::<Vec<String>>)
+        .transpose()
+        .map_err(|error| AppError::from(format!("Invalid selected routine names: {error}")))?;
+    let q = query.scope;
+    let snapshot = dbx_core::schema::oracle_routines::load_selected_schema_diff_routines_core(
+        &state.app,
+        &q.connection_id,
+        q.database.as_deref().unwrap_or(""),
+        q.schema.as_deref().unwrap_or(""),
+        selected_routines.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(snapshot))
+}
+
+pub async fn prepare_oracle_routine_save(
+    State(state): State<Arc<WebState>>,
+    Json(input): Json<dbx_core::schema::oracle_routines::OracleRoutineSaveInput>,
+) -> Result<Json<dbx_core::schema::oracle_routines::RoutineOperationRecord>, AppError> {
+    dbx_core::schema::oracle_routines::prepare_oracle_routine_save_core(&state.app, input)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+pub async fn prepare_oracle_routine_plan(
+    State(state): State<Arc<WebState>>,
+    Json(input): Json<dbx_core::schema::oracle_routines::OracleRoutinePlanInput>,
+) -> Result<Json<dbx_core::schema::oracle_routines::OracleRoutinePlan>, AppError> {
+    dbx_core::schema::oracle_routines::prepare_oracle_routine_plan_core(&state.app, input)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineRecoveryRequest {
+    operation_id: String,
+}
+
+pub async fn prepare_oracle_routine_recovery(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<RoutineRecoveryRequest>,
+) -> Result<Json<dbx_core::schema::oracle_routines::OracleRoutinePlan>, AppError> {
+    dbx_core::schema::oracle_routines::prepare_oracle_routine_recovery_core(&state.app, &request.operation_id)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteRoutineOperationRequest {
+    operation_id: String,
+    approved_sql: String,
+}
+
+pub async fn execute_oracle_routine_operation(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(request): Json<ExecuteRoutineOperationRequest>,
+) -> Result<Json<dbx_core::schema::oracle_routines::RoutineOperationRecord>, AppError> {
+    let original = state
+        .app
+        .routine_operations
+        .observe(&request.operation_id)
+        .operation
+        .ok_or_else(|| AppError::from("Original routine operation is unavailable; do not replay"))?;
+    let database = super::mcp_policy::ensure_sql(
+        &state,
+        &headers,
+        &original.target.connection_id,
+        &original.target.database,
+        &request.approved_sql,
+        false,
+    )
+    .await?;
+    if database != original.target.database {
+        return Err(AppError::from("Routine operation cannot switch its approved target database"));
+    }
+    dbx_core::schema::oracle_routines::execute_oracle_routine_operation_core(
+        state.app.clone(),
+        request.operation_id,
+        request.approved_sql,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+pub struct RoutineOperationQuery {
+    operation_id: String,
+    #[serde(default)]
+    refresh_readback: bool,
+}
+
+pub async fn observe_oracle_routine_operation(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<RoutineOperationQuery>,
+) -> Json<dbx_core::schema::oracle_routines::RoutineOperationObservation> {
+    Json(
+        dbx_core::schema::oracle_routines::observe_oracle_routine_operation_core(
+            &state.app,
+            &query.operation_id,
+            query.refresh_readback,
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineOperationReferences {
+    retain_operation_ids: Vec<String>,
+    release_operation_ids: Vec<String>,
+}
+
+pub async fn update_oracle_routine_operation_references(
+    State(state): State<Arc<WebState>>,
+    Json(input): Json<RoutineOperationReferences>,
+) -> Result<Json<()>, AppError> {
+    state
+        .app
+        .routine_operations
+        .update_references(&input.retain_operation_ids, &input.release_operation_ids)
+        .map_err(AppError::from)?;
+    Ok(Json(()))
 }
 
 #[derive(Deserialize)]

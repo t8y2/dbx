@@ -3174,6 +3174,20 @@ fn generate_mysql_foreign_key_alter_statements(
     statements
 }
 
+/// Single `setval` statement that moves the sequence behind `column` on `full_table`
+/// (already identifier-quoted) past the column's current maximum. `MAX(...::bigint)`
+/// keeps the expression type-safe for non-integer sequence-backed columns, and the
+/// statement is a no-op when `pg_get_serial_sequence` returns NULL for an unowned
+/// sequence.
+pub(crate) fn postgres_sequence_sync_statement(full_table: &str, column: &str) -> String {
+    let quoted_column = quote_identifier(column, &DatabaseType::Postgres);
+    format!(
+        "SELECT setval(pg_get_serial_sequence({}, {})::regclass, GREATEST(COALESCE(MAX({quoted_column}::bigint), 0), 1), MAX({quoted_column}::bigint) IS NOT NULL) FROM {full_table}",
+        quote_string_literal(full_table),
+        quote_string_literal(column)
+    )
+}
+
 /// `setval` statements that move a PostgreSQL sequence or identity column past the
 /// values already in the table.
 ///
@@ -3189,14 +3203,7 @@ fn generate_postgres_sequence_sync_sql(columns: &[db::ColumnInfo], table: &str, 
                 || is_postgres_identity_extra(column.extra.as_deref())
                 || (column.is_primary_key && column_is_auto_increment(column))
         })
-        .map(|column| {
-            let quoted_column = quote_identifier(&column.name, &DatabaseType::Postgres);
-            format!(
-                "SELECT setval(pg_get_serial_sequence({}, {})::regclass, GREATEST(COALESCE(MAX({quoted_column}::bigint), 0), 1), MAX({quoted_column}::bigint) IS NOT NULL) FROM {full_table}",
-                quote_string_literal(&full_table),
-                quote_string_literal(&column.name)
-            )
-        })
+        .map(|column| postgres_sequence_sync_statement(&full_table, &column.name))
         .collect()
 }
 
@@ -9651,6 +9658,37 @@ where
     if matches!(request.content, TransferContent::DataOnly) {
         return Ok(TransferObjectOutcome::default());
     }
+    let routine_context = crate::schema::oracle_routines::capture_routine_transfer_context(
+        state,
+        &request.source_connection_id,
+        &request.target_connection_id,
+    )
+    .await?;
+    transfer_schema_objects_with_routine_context(
+        state,
+        request,
+        source_pool_key,
+        target_pool_key,
+        routine_context.as_ref(),
+        progress_callback,
+    )
+    .await
+}
+
+pub(crate) async fn transfer_schema_objects_with_routine_context<F>(
+    state: &AppState,
+    request: &TransferRequest,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    routine_context: Option<&crate::schema::oracle_routines::RoutineTransferContext>,
+    progress_callback: F,
+) -> Result<TransferObjectOutcome, String>
+where
+    F: FnMut(TransferProgress),
+{
+    if matches!(request.content, TransferContent::DataOnly) {
+        return Ok(TransferObjectOutcome::default());
+    }
     let source_db_type = get_db_type(state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(state, &request.target_connection_id).await?;
     if !should_transfer_schema_objects(&source_db_type, &target_db_type, request) {
@@ -9697,6 +9735,7 @@ where
                 &target_db_type,
                 source_pool_key,
                 target_pool_key,
+                routine_context,
                 progress_callback,
             )
             .await
@@ -9968,6 +10007,7 @@ async fn transfer_oracle_schema_objects<F>(
     target_db_type: &DatabaseType,
     source_pool_key: &str,
     target_pool_key: &str,
+    routine_context: Option<&crate::schema::oracle_routines::RoutineTransferContext>,
     mut progress_callback: F,
 ) -> Result<TransferObjectOutcome, String>
 where
@@ -10004,6 +10044,47 @@ where
             if exists {
                 outcome.skipped.push(format!("{kind:?}:{name}"));
                 progress(&mut outcome, TransferStatus::Running, None);
+                continue;
+            }
+            if let Some(context) =
+                routine_context.filter(|_| matches!(kind, TransferObjectKind::Procedure | TransferObjectKind::Function))
+            {
+                let identity = crate::schema::oracle_routines::RoutineIdentity {
+                    owner: source_schema.clone(),
+                    name: name.clone(),
+                    kind: if kind == TransferObjectKind::Procedure {
+                        db::ObjectSourceKind::Procedure
+                    } else {
+                        db::ObjectSourceKind::Function
+                    },
+                };
+                let result = crate::schema::oracle_routines::transfer_oracle_routine_core(
+                    state,
+                    context,
+                    crate::schema::oracle_routines::RoutineTransferInput {
+                        source_connection_id: request.source_connection_id.clone(),
+                        source_database: request.source_database.clone(),
+                        identity,
+                        target_connection_id: request.target_connection_id.clone(),
+                        target_database: request.target_database.clone(),
+                        target_owner: target_schema.clone(),
+                    },
+                )
+                .await;
+                match result {
+                    Ok(operation) if operation.verified() => {
+                        outcome.transferred.push(format!("{kind:?}:{name}"));
+                        progress(&mut outcome, TransferStatus::Running, None);
+                    }
+                    result => {
+                        let error = match result {
+                            Ok(operation) => operation.failure_message(),
+                            Err(error) => error,
+                        };
+                        outcome.failed.push(format!("{kind:?}:{name}"));
+                        progress(&mut outcome, TransferStatus::Error, Some(error));
+                    }
+                }
                 continue;
             }
             let query = oracle_object_source_query(&kind, &source_schema, &name)?;

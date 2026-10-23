@@ -6,12 +6,14 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.Clob;
 import java.sql.DatabaseMetaData;
@@ -1350,6 +1352,66 @@ final class DbxJdbcPluginTest {
 
         assertEquals("45", properties.getProperty("loginTimeout"));
         assertFalse(properties.containsKey("connectTimeout"));
+    }
+
+    @Test
+    void duckDbConnectTimeoutDoesNotInjectUnsupportedProperties() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("applyConnectTimeout", JsonNode.class, Properties.class);
+        method.setAccessible(true);
+        int previousTimeout = DriverManager.getLoginTimeout();
+        try {
+            for (String url : List.of("jdbc:duckdb:", "jdbc:duckdb:/tmp/example.duckdb", "JDBC:DUCKDB:")) {
+                JsonNode connection = MAPPER.createObjectNode()
+                    .put("connection_string", url)
+                    .put("connect_timeout_secs", 45);
+                Properties properties = new Properties();
+                properties.setProperty("duckdb_read_only", "true");
+                method.invoke(null, connection, properties);
+                assertEquals("true", properties.getProperty("duckdb_read_only"));
+                assertFalse(properties.containsKey("loginTimeout"), url);
+                assertFalse(properties.containsKey("connectTimeout"), url);
+                assertEquals(45, DriverManager.getLoginTimeout());
+            }
+        } finally {
+            DriverManager.setLoginTimeout(previousTimeout);
+        }
+    }
+
+    @Test
+    void duckDbInMemoryConnectionExecutesQueries() throws Exception {
+        JsonNode response = request("executeQuery", """
+            {
+              "connection": {
+                "connection_string": "jdbc:duckdb:",
+                "connect_timeout_secs": 45
+              },
+              "sql": "SELECT 42 AS answer"
+            }
+            """);
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(42, response.path("result").path("rows").path(0).path(0).asInt());
+    }
+
+    @Test
+    void duckDbFileConnectionPersistsDataAcrossReconnects(@TempDir Path directory) throws Exception {
+        ObjectNode connection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:duckdb:" + directory.resolve("example.duckdb"))
+            .put("connect_timeout_secs", 45);
+        for (String sql : List.of("CREATE TABLE example (id INTEGER)", "INSERT INTO example VALUES (42)")) {
+            ObjectNode requestParams = MAPPER.createObjectNode();
+            requestParams.set("connection", connection);
+            requestParams.put("sql", sql);
+            JsonNode response = request("executeQuery", requestParams.toString());
+            assertFalse(response.has("error"), response.toString());
+        }
+        JsonNode closed = request("close", MAPPER.createObjectNode().set("connection", connection).toString());
+        assertFalse(closed.has("error"), closed.toString());
+        ObjectNode params = MAPPER.createObjectNode();
+        params.set("connection", connection);
+        params.put("sql", "SELECT id FROM example");
+        JsonNode response = request("executeQuery", params.toString());
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(42, response.path("result").path("rows").path(0).path(0).asInt());
     }
 
     @Test

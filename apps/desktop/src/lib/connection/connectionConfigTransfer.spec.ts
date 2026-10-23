@@ -93,6 +93,18 @@ describe("connectionConfigTransfer", () => {
     expect(imported.connections[0]).toMatchObject({ id: "imported-id", sidebar_auto_load_all_tables: true });
   });
 
+  it("keeps the fixed SSH local port through snapshot, plaintext scrub, and import", () => {
+    const source = conn("tunnelled", "Tunnelled", { transport_layers: [{ type: "ssh", id: "layer", host: "bastion", port: 22, user: "root", password: "ssh-password", local_port: 4059 }] });
+    const snapshot = snapshotConnectionsForExport([source], { connectTimeoutSecs: () => 7, queryTimeoutSecs: () => 12 });
+    const scrubbed = scrubConnectionForPlaintextExport(snapshot[0]);
+    const serialized = JSON.parse(JSON.stringify(buildConnectionConfigBundle([scrubbed], null, [])));
+    const imported = prepareConnectionConfigImport(parseConnectionConfigObject(serialized), [], [], () => "imported-id");
+
+    expect(snapshot[0].transport_layers?.[0]).toMatchObject({ local_port: 4059 });
+    expect(scrubbed.transport_layers?.[0]).toMatchObject({ local_port: 4059, password: "" });
+    expect(imported.connections[0].transport_layers?.[0]).toMatchObject({ local_port: 4059, host: "bastion" });
+  });
+
   it("keeps stable ids and removes secrets from plaintext exports", () => {
     const exported = scrubConnectionForPlaintextExport(
       conn("stable", "A", {

@@ -129,6 +129,9 @@ importers:
       '@vueuse/core':
         specifier: ^14.2.1
         version: 14.4.0(vue@3.5.44(typescript@6.0.3))
+      acorn:
+        specifier: ^8.17.0
+        version: 8.19.0
       cbor-x:
         specifier: ^1.6.4
         version: 1.6.6

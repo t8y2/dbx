@@ -1672,6 +1672,12 @@ impl Storage {
         self.path.parent().unwrap_or_else(|| Path::new("."))
     }
 
+    /// Path of the configuration database (`dbx.db`). The MCP connection guard
+    /// uses it to refuse connections that would open DBX's own state.
+    pub fn storage_db_path(&self) -> &Path {
+        &self.path
+    }
+
     /// Hash logical rows so changes still in SQLite's WAL and same-size
     /// replacement JSON files invalidate the cached migration scan.
     async fn migration_source_fingerprint(&self) -> Result<String, String> {
@@ -7062,6 +7068,10 @@ impl Storage {
 
     pub async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = config.canonicalized();
+        // #9108: an MCP-added SQLite/DuckDB connection pointing at dbx.db would
+        // let the agent rewrite the very policy that constrains it. Reject
+        // before anything is persisted.
+        crate::persistence::mcp_target_guard::ensure_mcp_target_allowed(self.storage_db_path(), &config)?;
         let codec = self.secret_codec_for_write(connection_config_has_inline_secrets(&config)).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
@@ -7083,6 +7093,7 @@ impl Storage {
         let copy_id = copy_id.to_string();
         let copied_id = copy_id.clone();
         let copy_name = copy_name.to_string();
+        let config_db_path = self.storage_db_path().to_path_buf();
         let codec = self.secret_codec(false)?;
         self.with_conn(move |conn| {
             let tx =
@@ -7110,6 +7121,9 @@ impl Storage {
             let mut copy: ConnectionConfig = serde_json::from_str(&source_json).map_err(|error| error.to_string())?;
             copy.id = copy_id.clone();
             copy.name = copy_name;
+            // #9108: duplicating must not become a way around the add-side guard
+            // (e.g. an agent re-creating a config-database connection it found).
+            crate::persistence::mcp_target_guard::ensure_mcp_target_allowed(&config_db_path, &copy)?;
             let copy_json = serde_json::to_string(&copy).map_err(|error| error.to_string())?;
             tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![copy_id, copy_json])
                 .map_err(|error| error.to_string())?;
@@ -13241,6 +13255,54 @@ mod tests {
         assert!(after_plain_save.iter().any(|config| config.id == kept.id));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    fn sqlite_connection_at(id: &str, path: &std::path::Path) -> ConnectionConfig {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id,
+            "db_type": "sqlite",
+            "host": path.to_string_lossy(),
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": null,
+        }))
+        .expect("sqlite connection config")
+    }
+
+    #[tokio::test]
+    async fn mcp_connection_mutations_reject_the_config_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let dbx_db = directory.path().join("dbx.db");
+        let storage = crate::persistence::test_storage::open(&dbx_db).await.unwrap();
+
+        // Opening the configuration database itself (or its sidecars) would let
+        // an agent rewrite app_settings / read stored secrets (#9108).
+        let error = storage.add_connection_for_mcp(sqlite_connection_at("mcp-config-db", &dbx_db)).await.unwrap_err();
+        assert!(error.starts_with("CONFIG_DB_PATH_FORBIDDEN:"), "{error}");
+        assert!(storage.load_connections().await.unwrap().is_empty());
+
+        // The desktop save path stays unrestricted, but duplicating such a
+        // connection through MCP is still refused.
+        storage.save_connections(&[sqlite_connection_at("desktop-config-db", &dbx_db)]).await.unwrap();
+        let error =
+            storage.duplicate_connection_for_mcp("desktop-config-db", "mcp-copy", "mcp-copy").await.unwrap_err();
+        assert!(error.starts_with("CONFIG_DB_PATH_FORBIDDEN:"), "{error}");
+
+        // Other databases stored next to dbx.db keep working through both routes.
+        let sibling = directory.path().join("query.db");
+        let added = storage.add_connection_for_mcp(sqlite_connection_at("mcp-sibling", &sibling)).await.unwrap();
+        assert_eq!(added.id, "mcp-sibling");
+        let copy =
+            storage.duplicate_connection_for_mcp("mcp-sibling", "mcp-sibling-copy", "mcp-sibling-copy").await.unwrap();
+        assert_eq!(copy.id, "mcp-sibling-copy");
+
+        // So do targets outside the data directory.
+        let other = tempfile::tempdir().unwrap();
+        let target = other.path().join("app.db");
+        let added = storage.add_connection_for_mcp(sqlite_connection_at("mcp-outside", &target)).await.unwrap();
+        assert_eq!(added.id, "mcp-outside");
     }
 
     #[tokio::test]

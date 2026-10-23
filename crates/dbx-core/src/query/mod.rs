@@ -2506,6 +2506,27 @@ fn postgres_preview_fallback_retry_sql(options: &QueryExecutionOptions, error: &
     external_driver_preview_fallback_sql(sql)
 }
 
+/// MySQL-compatible servers that are not actually MySQL (for example HighGo's
+/// MySQL protocol) do not have a `left(json, integer)` overload. The generated
+/// table-data preview wraps JSON columns in `LEFT(...)`, so the preview fails
+/// even though the table itself is readable. Retry once without the generated
+/// wrappers and let the existing large-value markers truncate client-side.
+fn preview_missing_left_function_fallback_sql(
+    options: &QueryExecutionOptions,
+    error: &str,
+    sql: &str,
+) -> Option<String> {
+    if !options.table_data_preview || !is_preview_missing_left_function_error(error) {
+        return None;
+    }
+    external_driver_preview_fallback_sql(sql)
+}
+
+fn is_preview_missing_left_function_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("function left(") && normalized.contains("does not exist")
+}
+
 /// Dispatches one statement on a native PostgreSQL pool according to the
 /// connection's execution mode and schema context.
 #[allow(clippy::too_many_arguments)]
@@ -3020,6 +3041,28 @@ async fn execute_sql_statement_with_options_typed_inner(
     let with_sql_context = |result: Result<db::QueryResult, QueryExecutionError>| {
         result.map_err(|error| error.with_omitted_sql_context(sql))
     };
+
+    if let Err(error) = &result {
+        if let Some(fallback_sql) = preview_missing_left_function_fallback_sql(&options, &error.to_string(), sql) {
+            log::warn!(
+                "[query] table data preview failed because the server has no left() overload; retrying without generated left() wrappers"
+            );
+            return with_sql_context(
+                do_execute_typed(
+                    state,
+                    &pool_key,
+                    mysql_dialect,
+                    Some(database),
+                    &fallback_sql,
+                    schema,
+                    cancel_token.clone(),
+                    options.clone(),
+                    &mut None,
+                )
+                .await,
+            );
+        }
+    }
 
     let action = result.as_ref().err().map(|error| query_execution_error_action(db_type, sql, error));
     if let Some(initial_error) = result.as_ref().err() {
@@ -10919,6 +10962,31 @@ for line in sys.stdin:
         assert!(postgres_preview_fallback_retry_sql(&options, error, "SELECT left(value, 10) FROM t").is_none());
         assert!(postgres_preview_fallback_retry_sql(&options, "ERROR: syntax error at or near \"left\"", sql).is_none());
         assert!(postgres_preview_fallback_retry_sql(&QueryExecutionOptions::default(), error, sql).is_none());
+    }
+
+    #[test]
+    fn preview_missing_left_function_retry_rewrites_generated_mysql_previews() {
+        let options = QueryExecutionOptions { table_data_preview: true, ..Default::default() };
+        let sql = concat!(
+            "SELECT `id`, LEFT(`Words`, 101) AS `Words`, ",
+            "CONCAT('T:100:', LENGTH(`Words`)) AS `__DBX_LARGE_VALUE_BYTES_T_1` FROM `vocab` LIMIT 100"
+        );
+        let error = "Server error: `ERROR 32900 (HY000): function left(json, integer) does not exist'";
+
+        assert_eq!(
+            preview_missing_left_function_fallback_sql(&options, error, sql).as_deref(),
+            Some(
+                "SELECT `id`, `Words` AS `Words`, CONCAT('T:100:', LENGTH(`Words`)) AS `__DBX_LARGE_VALUE_BYTES_T_1` FROM `vocab` LIMIT 100"
+            )
+        );
+
+        // User SQL without the generated marker is never rewritten, unrelated
+        // errors never trigger a retry, and the data-grid flag is required.
+        assert!(
+            preview_missing_left_function_fallback_sql(&options, error, "SELECT LEFT(Words, 100) FROM vocab").is_none()
+        );
+        assert!(preview_missing_left_function_fallback_sql(&options, "ERROR: syntax error", sql).is_none());
+        assert!(preview_missing_left_function_fallback_sql(&QueryExecutionOptions::default(), error, sql).is_none());
     }
 
     #[cfg(unix)]

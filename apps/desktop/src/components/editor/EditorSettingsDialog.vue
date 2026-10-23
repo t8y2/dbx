@@ -274,6 +274,7 @@ import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES, tableColumnTemplateRowsToSettings } from "@/lib/table/tableColumnTemplates";
 import {
   isModeDependentSubstitutionDatabase,
+  isValidSqlVariableCustomPattern,
   normalizeSqlVariableSyntaxOverrides,
   resolveSqlVariableSyntaxToggles,
   SQL_VARIABLE_SYNTAX_DATABASE_TYPES,
@@ -876,6 +877,7 @@ const editTableColumnTemplateRows = ref<TableColumnTemplateGridRow[]>(tableColum
 const editTableColumnTemplateDatabaseType = ref<DatabaseType>(TABLE_COLUMN_TEMPLATE_DATABASE_TYPES[0] ?? "mysql");
 const editSqlVariableSubstitutionEnabled = ref(settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
 const editSqlVariableSyntaxOverrides = ref<SqlVariableSyntaxOverrides>(normalizeSqlVariableSyntaxOverrides(settingsStore.editorSettings.sqlVariableSyntaxOverrides));
+const editSqlVariableCustomSyntax = ref(settingsStore.editorSettings.sqlVariableCustomSyntax);
 const editSqlVariableSyntaxDatabaseType = ref<DatabaseType>(SQL_VARIABLE_SYNTAX_DATABASE_TYPES[0] ?? "mysql");
 
 function updateTableOpenPageSizeDraft(value: string | number) {
@@ -961,6 +963,7 @@ function sqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles): boolean {
 function setSqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles, value: boolean) {
   editSqlVariableSyntaxOverrides.value = updateSqlVariableSyntaxToggle(editSqlVariableSyntaxOverrides.value, editSqlVariableSyntaxDatabaseType.value, key, value, currentSqlVariableSyntaxCompatibilityMode.value);
 }
+const sqlVariableCustomSyntaxValid = computed(() => isValidSqlVariableCustomPattern(editSqlVariableCustomSyntax.value));
 const tableColumnTemplateSectionRef = ref<HTMLElement | null>(null);
 const draggedTableColumnTemplateRowId = ref<string | null>(null);
 let tableColumnTemplatePointerDragCleanup: (() => void) | null = null;
@@ -1349,6 +1352,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sqlShortcuts: editSqlShortcuts.value,
     sqlVariableSubstitutionEnabled: editSqlVariableSubstitutionEnabled.value,
     sqlVariableSyntaxOverrides: editSqlVariableSyntaxOverrides.value,
+    sqlVariableCustomSyntax: editSqlVariableCustomSyntax.value.trim(),
     clickTableNavigationTarget: editClickTableNavigationTarget.value,
     objectBrowserAutoOpenDetailPanel: editObjectBrowserAutoOpenDetailPanel.value,
   };
@@ -2050,6 +2054,7 @@ function syncEditorSettingsDraftFromStore() {
   editSqlShortcuts.value = mergeDefaultSqlShortcuts(settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut));
   editSqlVariableSubstitutionEnabled.value = settingsStore.editorSettings.sqlVariableSubstitutionEnabled;
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(settingsStore.editorSettings.sqlVariableSyntaxOverrides);
+  editSqlVariableCustomSyntax.value = settingsStore.editorSettings.sqlVariableCustomSyntax;
   editClickTableNavigationTarget.value = settingsStore.editorSettings.clickTableNavigationTarget;
   editObjectBrowserAutoOpenDetailPanel.value = settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel;
   editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
@@ -2223,6 +2228,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sqlShortcuts: editSqlShortcuts,
   sqlVariableSubstitutionEnabled: editSqlVariableSubstitutionEnabled,
   sqlVariableSyntaxOverrides: editSqlVariableSyntaxOverrides,
+  sqlVariableCustomSyntax: editSqlVariableCustomSyntax,
   continueOnErrorOnBatch: editContinueOnErrorOnBatch,
   clickTableNavigationTarget: editClickTableNavigationTarget,
   objectBrowserAutoOpenDetailPanel: editObjectBrowserAutoOpenDetailPanel,
@@ -2713,6 +2719,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editClickTableNavigationTarget.value = DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
     editSqlVariableSubstitutionEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled;
     editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
+    editSqlVariableCustomSyntax.value = DEFAULT_EDITOR_SETTINGS.sqlVariableCustomSyntax;
   } else if (tab === "formatter") {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
     sqlFormatterConfigValid.value = true;
@@ -2906,6 +2913,7 @@ function resetAllDefaults() {
   editAiSqlApplyTargetMode.value = DEFAULT_EDITOR_SETTINGS.aiSqlApplyTargetMode;
   editSqlVariableSubstitutionEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled;
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
+  editSqlVariableCustomSyntax.value = DEFAULT_EDITOR_SETTINGS.sqlVariableCustomSyntax;
   editWelcomePageMode.value = DEFAULT_EDITOR_SETTINGS.welcomePageMode;
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editWebLogoPosition.value = DEFAULT_EDITOR_SETTINGS.webLogoPosition;
@@ -8318,6 +8326,18 @@ onUnmounted(() => {
                       @update:model-value="(value) => setSqlVariableSyntaxToggle(key, value as boolean)"
                     />
                   </div>
+                </div>
+                <div data-settings-search-id="editor-sql-variable-custom-syntax" :class="['settings-item space-y-1 rounded-md border bg-muted/20 px-3 py-2', { 'opacity-50': !editSqlVariableSubstitutionEnabled }, settingsSearchTargetClass('editor-sql-variable-custom-syntax')]">
+                  <Label for="sql-variable-custom-syntax" class="text-xs">
+                    {{ t("settings.sqlVariableCustomSyntax") }}
+                  </Label>
+                  <Input id="sql-variable-custom-syntax" v-model="editSqlVariableCustomSyntax" :placeholder="t('settings.sqlVariableCustomSyntaxPlaceholder')" :disabled="!editSqlVariableSubstitutionEnabled" class="h-8 font-mono text-xs" spellcheck="false" />
+                  <p v-if="!sqlVariableCustomSyntaxValid" class="text-xs text-destructive">
+                    {{ t("settings.sqlVariableCustomSyntaxInvalid") }}
+                  </p>
+                  <p v-else class="text-xs text-muted-foreground">
+                    {{ t("settings.sqlVariableCustomSyntaxDescription") }}
+                  </p>
                 </div>
               </div>
 

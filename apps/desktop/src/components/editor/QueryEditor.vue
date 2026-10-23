@@ -267,7 +267,8 @@ function sqlStatementParameterOptions() {
   return {
     databaseType: kingbaseSqlType.value ?? props.databaseType,
     compatibilityMode,
-    enabledSyntaxes: enabledSqlParameterSyntaxes(toggles),
+    enabledSyntaxes: enabledSqlParameterSyntaxes(toggles, settingsStore.editorSettings.sqlVariableCustomSyntax),
+    customPattern: settingsStore.editorSettings.sqlVariableCustomSyntax,
   };
 }
 const { isDark, themePalette, activeCustomUiColors } = useTheme();

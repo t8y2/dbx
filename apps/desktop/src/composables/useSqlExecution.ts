@@ -199,6 +199,7 @@ export function useSqlExecution(deps: {
   const sqlParameterNames = ref<SqlParameterDescriptor[]>([]);
   const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
   const sqlParameterEnabledSyntaxes = ref<SqlParameterSyntax[]>([]);
+  const sqlParameterCustomPattern = ref("");
   const pendingSourceOffset = ref<number | undefined>();
   const pendingDangerKind = ref<"sql" | "redis">("sql");
   const pendingDangerSourceOffset = ref<number | undefined>();
@@ -429,9 +430,10 @@ export function useSqlExecution(deps: {
     const tab = resolveExecutionTab(options.tabId);
     const compatibilityMode = databaseType === "opengauss" ? (tab ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : undefined) : databaseType === "kingbase" ? connection?.database_info?.compatibilityMode : undefined;
     const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled, compatibilityMode);
-    const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
+    const customPattern = settingsStore.editorSettings.sqlVariableCustomSyntax;
+    const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles, customPattern);
     const parameterDatabaseType = kingbaseSqlDatabaseType(connection) ?? databaseType;
-    const parameters = extractSqlParameterDescriptors(sql, { databaseType: parameterDatabaseType, compatibilityMode, enabledSyntaxes });
+    const parameters = extractSqlParameterDescriptors(sql, { databaseType: parameterDatabaseType, compatibilityMode, enabledSyntaxes, customPattern });
     if (!parameters.length) {
       return false;
     }
@@ -439,6 +441,7 @@ export function useSqlExecution(deps: {
     sqlParameterNames.value = parameters;
     sqlParameterDatabaseType.value = parameterDatabaseType;
     sqlParameterEnabledSyntaxes.value = enabledSyntaxes;
+    sqlParameterCustomPattern.value = customPattern;
     pendingSourceOffset.value = sourceOffset;
     pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
     pendingSqlParameterEditorViewportRequestId.value = options.editorViewportRequestId;
@@ -1054,6 +1057,7 @@ export function useSqlExecution(deps: {
     sqlParameterNames.value = [];
     sqlParameterDatabaseType.value = undefined;
     sqlParameterEnabledSyntaxes.value = [];
+    sqlParameterCustomPattern.value = "";
     const sourceOffset = pendingSourceOffset.value;
     pendingSourceOffset.value = undefined;
     pendingOpenInNewResultTab.value = false;
@@ -1089,6 +1093,7 @@ export function useSqlExecution(deps: {
     sqlParameterNames.value = [];
     sqlParameterDatabaseType.value = undefined;
     sqlParameterEnabledSyntaxes.value = [];
+    sqlParameterCustomPattern.value = "";
     pendingSourceOffset.value = undefined;
     pendingOpenInNewResultTab.value = false;
     pendingSqlParameterEditorViewportRequestId.value = undefined;
@@ -1132,6 +1137,7 @@ export function useSqlExecution(deps: {
     sqlParameterNames,
     sqlParameterDatabaseType,
     sqlParameterEnabledSyntaxes,
+    sqlParameterCustomPattern,
     onSqlParametersConfirm,
     prepareMultiExecute,
     executeTargetSql,

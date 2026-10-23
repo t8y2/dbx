@@ -1,6 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import { collectSqlDatabaseLinkStarts } from "@/lib/sql/sqlDatabaseLinks";
-import { isOracleSubstitutionDatabase } from "@/lib/sql/sqlVariableSyntax";
+import { isOracleSubstitutionDatabase, sqlVariableCustomRegex } from "@/lib/sql/sqlVariableSyntax";
 
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
@@ -9,7 +9,7 @@ export interface SqlParameterInput {
   value: string;
 }
 
-export type SqlParameterSyntax = "positional" | "named" | "shell" | "mybatis" | "sqlserver" | "substitution";
+export type SqlParameterSyntax = "positional" | "named" | "shell" | "mybatis" | "sqlserver" | "substitution" | "custom";
 
 export interface SqlParameterDescriptor {
   key: string;
@@ -61,6 +61,8 @@ export interface SqlParameterOptions {
   compatibilityMode?: string;
   // Which placeholder syntaxes are recognized. Undefined enables all of them.
   enabledSyntaxes?: readonly SqlParameterSyntax[];
+  /** Template (`$P{name}`) or raw regex (`(?<name>…)`) for the `custom` syntax. */
+  customPattern?: string;
 }
 
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*$/u;
@@ -389,6 +391,9 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     return true;
   };
+  // ponytail: a non-empty custom pattern is the on/off switch for the `custom`
+  // syntax; placeholders inside quoted strings/comments are not matched.
+  const customRegex = isSyntaxEnabled("custom") ? sqlVariableCustomRegex(options?.customPattern) : null;
   const databaseLinkStarts = isSyntaxEnabled("sqlserver") ? collectSqlDatabaseLinkStarts(sql, databaseType) : new Set<number>();
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql, databaseType) : new Set<number>();
   const duckDbStructFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") && databaseType === "duckdb" ? collectDuckDbStructFieldSeparators(sql) : new Set<number>();
@@ -410,6 +415,17 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
 
     const ch = sql[i];
     const next = sql[i + 1];
+
+    if (customRegex) {
+      customRegex.lastIndex = i;
+      const match = customRegex.exec(sql);
+      const name = match?.groups?.name;
+      if (match && name && PARAMETER_NAME_RE.test(name)) {
+        occurrences.push({ key: name, name, syntax: "custom", token: match[0], start: i, end: i + match[0].length });
+        i += match[0].length;
+        continue;
+      }
+    }
 
     if (ch === "<" && isSyntaxEnabled("mybatis")) {
       const foreach = readMyBatisForeachAt(sql, i, databaseType);

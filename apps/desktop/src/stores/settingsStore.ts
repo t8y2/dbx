@@ -1241,6 +1241,7 @@ export interface EditorSettings {
   objectBrowserAutoOpenDetailPanel: boolean;
   sqlVariableSubstitutionEnabled: boolean;
   sqlVariableSyntaxOverrides: SqlVariableSyntaxOverrides;
+  sqlVariableCustomSyntax: string;
   continueOnErrorOnBatch: boolean;
   showTableDdlHoverPreview: boolean;
   tableHoverLookupMode: TableHoverLookupMode;
@@ -1588,6 +1589,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   objectBrowserAutoOpenDetailPanel: true,
   sqlVariableSubstitutionEnabled: true,
   sqlVariableSyntaxOverrides: {},
+  sqlVariableCustomSyntax: "",
   continueOnErrorOnBatch: false,
   showTableDdlHoverPreview: true,
   tableHoverLookupMode: "fallback",
@@ -2318,6 +2320,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     objectBrowserAutoOpenDetailPanel: typeof settings.objectBrowserAutoOpenDetailPanel === "boolean" ? settings.objectBrowserAutoOpenDetailPanel : DEFAULT_EDITOR_SETTINGS.objectBrowserAutoOpenDetailPanel,
     sqlVariableSubstitutionEnabled: typeof settings.sqlVariableSubstitutionEnabled === "boolean" ? settings.sqlVariableSubstitutionEnabled : DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled,
     sqlVariableSyntaxOverrides: normalizeSqlVariableSyntaxOverrides(settings.sqlVariableSyntaxOverrides),
+    sqlVariableCustomSyntax: typeof settings.sqlVariableCustomSyntax === "string" ? settings.sqlVariableCustomSyntax : DEFAULT_EDITOR_SETTINGS.sqlVariableCustomSyntax,
     continueOnErrorOnBatch: settings.continueOnErrorOnBatch === true,
     showTableDdlHoverPreview: typeof settings.showTableDdlHoverPreview === "boolean" ? settings.showTableDdlHoverPreview : DEFAULT_EDITOR_SETTINGS.showTableDdlHoverPreview,
     tableHoverLookupMode: normalizeTableHoverLookupMode(settings.tableHoverLookupMode, DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode),
@@ -3213,6 +3216,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.objectBrowserAutoOpenDetailPanel !== undefined) editorSettings.value.objectBrowserAutoOpenDetailPanel = partial.objectBrowserAutoOpenDetailPanel === true;
     if (partial.sqlVariableSubstitutionEnabled !== undefined) editorSettings.value.sqlVariableSubstitutionEnabled = partial.sqlVariableSubstitutionEnabled === true;
     if (partial.sqlVariableSyntaxOverrides !== undefined) editorSettings.value.sqlVariableSyntaxOverrides = normalizeSqlVariableSyntaxOverrides(partial.sqlVariableSyntaxOverrides);
+    if (partial.sqlVariableCustomSyntax !== undefined) editorSettings.value.sqlVariableCustomSyntax = partial.sqlVariableCustomSyntax.trim();
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     if (partial.showTableDdlHoverPreview !== undefined) editorSettings.value.showTableDdlHoverPreview = partial.showTableDdlHoverPreview === true;
     if (partial.tableHoverLookupMode !== undefined) editorSettings.value.tableHoverLookupMode = normalizeTableHoverLookupMode(partial.tableHoverLookupMode, DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode);

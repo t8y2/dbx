@@ -181,6 +181,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tableHoverLookupMode",
     "sqlVariableSubstitutionEnabled",
     "sqlVariableSyntaxOverrides",
+    "sqlVariableCustomSyntax",
   ],
   formatter: ["sqlFormatter"],
   navigation: [

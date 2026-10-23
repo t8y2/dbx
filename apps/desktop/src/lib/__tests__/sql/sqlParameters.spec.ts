@@ -1573,6 +1573,33 @@ describe("enabledSyntaxes option", () => {
   });
 });
 
+describe("custom placeholder pattern", () => {
+  const customOptions = { enabledSyntaxes: ["custom"], customPattern: "$P{name}" } as const;
+
+  it("extracts placeholders that follow the template pattern", () => {
+    expect(extractSqlParameterDescriptors("select * from emp where empno = $P{NAMA_VARIABEL}", customOptions)).toEqual([{ key: "NAMA_VARIABEL", name: "NAMA_VARIABEL", syntax: "custom", token: "$P{NAMA_VARIABEL}" }]);
+  });
+
+  it("substitutes the matched placeholders and leaves other tokens alone", () => {
+    const sql = "select $P{A}, :named, $P{B}";
+    expect(substituteSqlParameters(sql, { A: { kind: "number", value: "1" }, B: { kind: "string", value: "x" } }, customOptions)).toBe("select 1, :named, 'x'");
+  });
+
+  it("treats the pattern as a template so regex characters are literal", () => {
+    expect(extractSqlParameters("select $P{x} from t", { enabledSyntaxes: ["custom"], customPattern: "$P{name}" })).toEqual(["x"]);
+    expect(extractSqlParameters("select $Q{x} from t", { enabledSyntaxes: ["custom"], customPattern: "$P{name}" })).toEqual([]);
+  });
+
+  it("accepts a raw regex that exposes a name group", () => {
+    expect(extractSqlParameters("select $P{a} and $P{b}", { enabledSyntaxes: ["custom"], customPattern: String.raw`\$P\{(?<name>[\p{L}_][\p{L}\p{N}_]*)\}` })).toEqual(["a", "b"]);
+  });
+
+  it("is off when the pattern is empty or the syntax is not enabled", () => {
+    expect(extractSqlParameters("select $P{x}", { enabledSyntaxes: ["custom"], customPattern: "  " })).toEqual([]);
+    expect(extractSqlParameters("select $P{x}", { enabledSyntaxes: ["named"], customPattern: "$P{name}" })).toEqual([]);
+  });
+});
+
 describe("Oracle substitution variables", () => {
   const oracleOptions = { databaseType: "oracle" as const };
 

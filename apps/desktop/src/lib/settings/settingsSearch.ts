@@ -223,6 +223,13 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordTexts: SQL_VARIABLE_SYNTAX_KEYS.map((key) => SQL_VARIABLE_SYNTAX_TOKENS[key]),
   },
   {
+    id: "editor-sql-variable-custom-syntax",
+    category: "editor",
+    titleKey: "settings.sqlVariableCustomSyntax",
+    descriptionKey: "settings.sqlVariableCustomSyntaxDescription",
+    targetId: "editor-sql-variable-custom-syntax",
+  },
+  {
     id: "editor-saved-sql-target",
     category: "editor",
     titleKey: "settings.savedSqlOpenTarget",

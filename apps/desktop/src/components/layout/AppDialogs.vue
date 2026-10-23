@@ -53,6 +53,7 @@ const props = defineProps<{
   sqlParameterNames: SqlParameterDescriptor[];
   sqlParameterDatabaseType?: DatabaseType;
   sqlParameterEnabledSyntaxes?: SqlParameterSyntax[];
+  sqlParameterCustomPattern?: string;
 }>();
 
 const emit = defineEmits<{
@@ -231,6 +232,7 @@ watch(
     :parameters="sqlParameterNames"
     :database-type="sqlParameterDatabaseType"
     :enabled-syntaxes="sqlParameterEnabledSyntaxes"
+    :custom-pattern="sqlParameterCustomPattern"
     @update:open="emit('update:showSqlParameterDialog', $event)"
     @execute="emit('sqlParametersConfirm', $event)"
   />

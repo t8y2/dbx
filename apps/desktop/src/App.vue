@@ -1081,6 +1081,7 @@ const {
   sqlParameterNames,
   sqlParameterDatabaseType,
   sqlParameterEnabledSyntaxes,
+  sqlParameterCustomPattern,
   onSqlParametersConfirm,
   prepareMultiExecute,
   executeTargetSql,
@@ -5741,6 +5742,7 @@ onUnmounted(() => {
           :sql-parameter-names="sqlParameterNames"
           :sql-parameter-database-type="sqlParameterDatabaseType"
           :sql-parameter-enabled-syntaxes="sqlParameterEnabledSyntaxes"
+          :sql-parameter-custom-pattern="sqlParameterCustomPattern"
           @update:show-connection-dialog="setConnectionDialogOpen"
           @update:show-danger-dialog="showDangerDialog = $event"
           @update:suppress-danger-confirm="suppressDangerConfirm = $event"

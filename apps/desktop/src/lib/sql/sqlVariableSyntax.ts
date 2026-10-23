@@ -128,8 +128,45 @@ export function resolveSqlVariableSyntaxToggles(overrides: SqlVariableSyntaxOver
 }
 
 /** Derive the enabled placeholder parameter syntaxes (excludes `atSet`). */
-export function enabledSqlParameterSyntaxes(toggles: SqlVariableSyntaxToggles): SqlParameterSyntax[] {
-  return PARAMETER_SYNTAX_KEYS.filter((key) => toggles[key]);
+export function enabledSqlParameterSyntaxes(toggles: SqlVariableSyntaxToggles, customPattern?: string): SqlParameterSyntax[] {
+  const syntaxes: SqlParameterSyntax[] = PARAMETER_SYNTAX_KEYS.filter((key) => toggles[key]);
+  if (sqlVariableCustomRegex(customPattern)) syntaxes.push("custom");
+  return syntaxes;
+}
+
+// Custom placeholder syntax. The pattern is either a template where the literal
+// text `name` marks the variable slot (`$P{name}` matches `$P{NAMA_VARIABEL}`) or
+// a raw regex that exposes the name through a `(?<name>…)` group. An empty
+// pattern means the syntax is off.
+const CUSTOM_SYNTAX_NAME_SLOT = "name";
+const CUSTOM_SYNTAX_NAME_GROUP = "(?<name>";
+const CUSTOM_SYNTAX_NAME_EXPR = String.raw`[\p{L}_][\p{L}\p{N}_]*`;
+const REGEX_SPECIAL_RE = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * Compile a custom placeholder pattern into a sticky regex, or null when the
+ * pattern is empty or invalid. Callers reset `lastIndex` before each `exec`.
+ */
+export function sqlVariableCustomRegex(pattern: string | undefined): RegExp | null {
+  const source = pattern?.trim();
+  if (!source) return null;
+  let body = source;
+  if (!source.includes(CUSTOM_SYNTAX_NAME_GROUP)) {
+    const slot = source.indexOf(CUSTOM_SYNTAX_NAME_SLOT);
+    if (slot === -1) return null;
+    const literal = (text: string) => text.replace(REGEX_SPECIAL_RE, "\\$&");
+    body = `${literal(source.slice(0, slot))}${CUSTOM_SYNTAX_NAME_GROUP}${CUSTOM_SYNTAX_NAME_EXPR})${literal(source.slice(slot + CUSTOM_SYNTAX_NAME_SLOT.length))}`;
+  }
+  try {
+    return new RegExp(body, "uy");
+  } catch {
+    return null;
+  }
+}
+
+/** An empty pattern means "custom syntax off"; anything else must compile. */
+export function isValidSqlVariableCustomPattern(pattern: string): boolean {
+  return !pattern.trim() || sqlVariableCustomRegex(pattern) !== null;
 }
 
 /**

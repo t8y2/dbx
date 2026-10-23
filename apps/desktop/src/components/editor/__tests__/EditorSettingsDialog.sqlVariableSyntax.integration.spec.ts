@@ -397,4 +397,66 @@ describe("EditorSettingsDialog SQL variable syntax integration", () => {
     expect(execution.showSqlParameterDialog.value).toBe(false);
     expect(executeCurrentSql).toHaveBeenCalledWith(tab.sql, expect.anything());
   });
+
+  it("persists a custom placeholder pattern and prompts for $P{NAME} placeholders", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+
+    const settingsStore = useSettingsStore();
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+
+    settingsStore.editorSettings = { ...DEFAULT_EDITOR_SETTINGS };
+    settingsStore.desktopSettings = { ...DEFAULT_DESKTOP_SETTINGS };
+
+    const conn = connection("conn-pg", "postgres");
+    connectionStore.connections = [conn];
+    connectionStore.activeConnectionId = conn.id;
+    const tab = queryTab("tab-custom", conn.id, "postgres", "SELECT * FROM t WHERE id = $P{ID_VAR}");
+    queryStore.tabs = [tab];
+    queryStore.activeTabId = tab.id;
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(EditorSettingsDialog, { variant: "page", open: true, initialTab: "editor", "onUpdate:open": () => undefined }),
+      }),
+    );
+    app.use(pinia);
+    app.mount(host);
+    mountedApps.push({ app, host });
+    await settle();
+
+    const patternInput = host.querySelector<HTMLInputElement>("#sql-variable-custom-syntax");
+    expect(patternInput).toBeTruthy();
+    patternInput!.value = "$P{name}";
+    patternInput!.dispatchEvent(new Event("input"));
+    await settle();
+
+    const applyBtn = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "settings.apply");
+    expect(applyBtn).toBeTruthy();
+    applyBtn!.click();
+    await settle();
+
+    expect(settingsStore.editorSettings.sqlVariableCustomSyntax).toBe("$P{name}");
+
+    const activeTab = ref<QueryTab | undefined>(tab);
+    const activeConnection = ref<ConnectionConfig | undefined>(conn);
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    vi.spyOn(queryStore, "executeCurrentSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => tab.sql),
+      activeOutputView,
+    });
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+    expect(execution.sqlParameterNames.value).toEqual([{ key: "ID_VAR", name: "ID_VAR", syntax: "custom", token: "$P{ID_VAR}" }]);
+    expect(execution.sqlParameterCustomPattern.value).toBe("$P{name}");
+  });
 });

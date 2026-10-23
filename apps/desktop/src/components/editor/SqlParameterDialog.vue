@@ -27,6 +27,7 @@ const props = defineProps<{
   parameters: SqlParameterDescriptor[];
   databaseType?: DatabaseType;
   enabledSyntaxes?: SqlParameterSyntax[];
+  customPattern?: string;
 }>();
 
 const emit = defineEmits<{
@@ -49,13 +50,14 @@ const syntaxLabels: Record<SqlParameterSyntax, string> = {
   mybatis: "#{name}",
   sqlserver: "@name",
   substitution: "&name",
+  custom: "custom",
 };
 
 function syntaxLabel(parameter: SqlParameterDescriptor): string {
   return parameter.collection ? "<foreach>" : syntaxLabels[parameter.syntax];
 }
 
-const resolvedSql = computed(() => substituteSqlParameters(props.sql, values.value, { databaseType: props.databaseType, enabledSyntaxes: props.enabledSyntaxes }));
+const resolvedSql = computed(() => substituteSqlParameters(props.sql, values.value, { databaseType: props.databaseType, enabledSyntaxes: props.enabledSyntaxes, customPattern: props.customPattern }));
 const highlightedSql = computed(() => highlight(resolvedSql.value));
 
 watch(

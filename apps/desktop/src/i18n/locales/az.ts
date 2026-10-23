@@ -1640,6 +1640,7 @@ export default withEnglishFallback({
       replaceAll: "Hamısını əvəz et",
       searchFailed: "Axtarış uğursuz oldu və ya vaxtı bitdi. İfadəni sadələşdirib yenidən cəhd edin.",
       caseSensitive: "Böyük və kiçik hərflərə həssas",
+      wholeWord: "Tam söz uyğunluğu",
       regex: "Müntəzəm ifadə",
       collapseReplace: "Əvəzetməni yığ",
       expandReplace: "Əvəzetməni genişləndir",

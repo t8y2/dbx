@@ -2275,6 +2275,7 @@ export default withEnglishFallback({
       replace: "แทนที่",
       replaceAll: "แทนที่ทั้งหมด",
       caseSensitive: "คำนึงถึงตัวพิมพ์เล็กใหญ่",
+      wholeWord: "ตรงทั้งคำ",
       regex: "Regular Expression",
       collapseReplace: "ยุบการแทนที่",
       expandReplace: "ขยายการแทนที่",

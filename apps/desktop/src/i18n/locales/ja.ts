@@ -2070,6 +2070,7 @@ export default withEnglishFallback({
       replaceAll: "すべて置換",
       searchFailed: "検索に失敗したかタイムアウトしました。式を簡略化して再試行してください。",
       caseSensitive: "大文字/小文字を区別",
+      wholeWord: "単語単位で検索",
       regex: "正規表現",
       collapseReplace: "置換を折りたたむ",
       expandReplace: "置換を展開",

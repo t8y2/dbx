@@ -2051,6 +2051,7 @@ export default withEnglishFallback({
       replaceAll: "Sostituisci Tutto",
       searchFailed: "Ricerca non riuscita o scaduta. Semplifica l’espressione e riprova.",
       caseSensitive: "Maiuscole/Minuscole",
+      wholeWord: "Parola intera",
       regex: "Espressione regolare",
       collapseReplace: "Comprimi sostituzione",
       expandReplace: "Espandi sostituzione",

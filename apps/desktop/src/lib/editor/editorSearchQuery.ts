@@ -6,6 +6,8 @@ export interface EditorSearchQueryOptions {
   replace?: string;
   caseSensitive: boolean;
   useRegex: boolean;
+  /** Match whole words only. Ignored in regex mode; use `\b` there instead. */
+  wholeWord?: boolean;
 }
 
 export function createEditorSearchQuery(options: EditorSearchQueryOptions): SearchQuery {
@@ -15,6 +17,10 @@ export function createEditorSearchQuery(options: EditorSearchQueryOptions): Sear
     caseSensitive: options.caseSensitive,
     regexp: options.useRegex,
     literal: !options.useRegex,
+    // CodeMirror can combine whole-word with regex, but mainstream find panels
+    // (VS Code, Eclipse/DBeaver) disable the toggle in regex mode. Enforce the
+    // same contract here so every caller and every panel state agrees.
+    wholeWord: Boolean(options.wholeWord) && !options.useRegex,
   });
 }
 

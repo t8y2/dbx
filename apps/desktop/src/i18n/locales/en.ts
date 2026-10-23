@@ -2317,6 +2317,7 @@ export default {
       replaceAll: "Replace All",
       searchFailed: "Search failed or timed out. Simplify the expression and try again.",
       caseSensitive: "Case sensitive",
+      wholeWord: "Match whole word",
       regex: "Regular expression",
       collapseReplace: "Collapse replace",
       expandReplace: "Expand replace",

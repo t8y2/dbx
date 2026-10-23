@@ -1638,6 +1638,7 @@ export default withEnglishFallback({
       replaceAll: "Tümünü Değiştir",
       searchFailed: "Arama başarısız oldu veya zaman aşımına uğradı. İfadeyi basitleştirip tekrar deneyin.",
       caseSensitive: "Büyük/küçük harfe duyarlı",
+      wholeWord: "Tam kelime eşleşmesi",
       regex: "Düzenli ifade",
       collapseReplace: "Değiştirmeyi daralt",
       expandReplace: "Değiştirmeyi genişlet",

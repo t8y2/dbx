@@ -75,4 +75,35 @@ describe("editorSearchQuery", () => {
     expect(dispatch).toHaveBeenCalledOnce();
     expect(dispatch.mock.calls[0]?.[0].changes).toHaveLength(1001);
   });
+
+  describe("whole-word matching (#13287)", () => {
+    const doc = "id user_id order_id identity valid";
+
+    function collect(search: string, options: { caseSensitive?: boolean; useRegex?: boolean; wholeWord?: boolean } = {}) {
+      const state = EditorState.create({ doc });
+      const query = createEditorSearchQuery({ search, caseSensitive: options.caseSensitive ?? false, useRegex: options.useRegex ?? false, wholeWord: options.wholeWord });
+      return collectEditorSearchMatches(query, state, 0, state.doc.length).map((match) => state.sliceDoc(match.from, match.to));
+    }
+
+    it("matches every substring when the option is omitted", () => {
+      expect(collect("id")).toEqual(["id", "id", "id", "id", "id"]);
+    });
+
+    it("matches only standalone words when enabled", () => {
+      expect(collect("id", { wholeWord: true })).toEqual(["id"]);
+    });
+
+    it("combines with case sensitivity", () => {
+      const state = EditorState.create({ doc: "Id id ID user_id" });
+      const collectFrom = (caseSensitive: boolean) => collectEditorSearchMatches(createEditorSearchQuery({ search: "id", caseSensitive, useRegex: false, wholeWord: true }), state, 0, state.doc.length).map((match) => state.sliceDoc(match.from, match.to));
+
+      expect(collectFrom(true)).toEqual(["id"]);
+      expect(collectFrom(false)).toEqual(["Id", "id", "ID"]);
+    });
+
+    it("is ignored in regex mode so the toggle cannot change regex results", () => {
+      expect(collect("id", { useRegex: true, wholeWord: true })).toEqual(collect("id", { useRegex: true }));
+      expect(collect("id", { useRegex: true, wholeWord: true })).toHaveLength(5);
+    });
+  });
 });

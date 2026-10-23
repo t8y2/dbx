@@ -1951,6 +1951,7 @@ export default withEnglishFallback({
       replace: "Zastąp",
       replaceAll: "Zamień wszystkie",
       caseSensitive: "Uwzględniaj wielkość liter",
+      wholeWord: "Dopasuj całe słowo",
       regex: "Wyrażenie regularne",
       collapseReplace: "Zwiń pole zamiany",
       expandReplace: "Rozwiń pole zamiany",

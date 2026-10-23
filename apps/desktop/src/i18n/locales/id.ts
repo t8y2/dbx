@@ -1908,6 +1908,7 @@ export default withEnglishFallback({
       replaceAll: "Ganti Semua",
       searchFailed: "Pencarian gagal atau kehabisan waktu. Sederhanakan ekspresi dan coba lagi.",
       caseSensitive: "Case sensitive",
+      wholeWord: "Cocokkan kata utuh",
       regex: "Ekspresi reguler",
       collapseReplace: "Ciutkan ganti",
       expandReplace: "Perluas ganti",

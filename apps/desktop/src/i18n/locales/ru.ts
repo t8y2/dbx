@@ -2079,6 +2079,7 @@ export default withEnglishFallback({
       replaceAll: "Заменить всё",
       searchFailed: "Поиск не выполнен или превышено время ожидания. Упростите выражение и повторите попытку.",
       caseSensitive: "Учитывать регистр",
+      wholeWord: "Только слово целиком",
       regex: "Регулярное выражение",
       collapseReplace: "Свернуть замену",
       expandReplace: "Развернуть замену",

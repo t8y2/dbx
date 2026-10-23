@@ -351,7 +351,13 @@ describe("sqlCompletion keyword snippets", () => {
         databaseType,
         tables: [{ name: "orders" }, { name: "users" }],
         columnsByTable: new Map([
-          ["orders", [{ name: "user_id", table: "orders" }]],
+          [
+            "orders",
+            [
+              { name: "user_id", table: "orders" },
+              { name: "warehouse_id", table: "orders" },
+            ],
+          ],
           ["users", [{ name: "id", table: "users" }]],
         ]),
         objects,
@@ -376,6 +382,28 @@ describe("sqlCompletion keyword snippets", () => {
       const items = rankedItems("SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_", "mysql");
 
       expect(items[0]?.label).toBe("user_id");
+    });
+
+    it.each([
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id GROUP BY w", "orders.warehouse_id"],
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id ORDER BY w", "orders.warehouse_id"],
+    ])("keeps the typed column first after a later clause boundary for %s", (sql, expected) => {
+      for (const databaseType of ["mysql", "postgres", "sqlserver"] as const) {
+        const items = rankedItems(sql, databaseType);
+        expect(items[0]?.label, `${databaseType} ${sql}`).toBe(expected);
+      }
+    });
+
+    it.each([
+      ["... LIMIT 10 w", "SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id LIMIT 10 w", "SELECT * FROM orders LIMIT 10 w"],
+      ["... UNION w", "SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id UNION w", "SELECT * FROM orders UNION w"],
+    ])("ranks the same items with and without a preceding join predicate for %s", (_label, withJoin, withoutJoin) => {
+      for (const databaseType of ["mysql", "postgres", "sqlserver"] as const) {
+        const joined = rankedItems(withJoin, databaseType);
+        const plain = rankedItems(withoutJoin, databaseType);
+        expect(joined[0]?.label, `${databaseType} ${withJoin}`).toBe(plain[0]?.label);
+        expect(joined[0]?.type, `${databaseType} ${withJoin}`).toBe(plain[0]?.type);
+      }
     });
   });
 });

@@ -54,7 +54,6 @@ import ConnectionDetailContent from "@/components/connection/ConnectionDetailCon
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import EnvironmentBadge from "@/components/common/EnvironmentBadge.vue";
-import { connectionEnvironmentPreset } from "@/lib/connection/connectionEnvironment";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -1777,9 +1776,9 @@ function onKeydown(event: KeyboardEvent) {
             >{{ trailingComment }}</span
           >
         </div>
-        <!-- Fixed slot before the status dot: the badge pops in after the config
-             loads without shifting the dot, and badges align down the column. -->
-        <span v-if="node.type === 'connection'" class="inline-flex w-10 shrink-0 items-center justify-end">
+        <!-- Fixed slot before the status dot, rendered only for connections that
+             actually set an environment so other rows do not reserve the space. -->
+        <span v-if="node.type === 'connection' && connectionStore.getConfig(node.connectionId ?? '')?.environment" class="inline-flex w-10 shrink-0 items-center justify-end">
           <EnvironmentBadge :environment="connectionStore.getConfig(node.connectionId ?? '')?.environment" />
         </span>
         <span v-if="node.type === 'connection' && node.connectionId" class="w-1.5 h-1.5 rounded-full shrink-0" :class="connectionStore.connectedIds.has(node.connectionId) ? 'bg-green-500' : ''" />

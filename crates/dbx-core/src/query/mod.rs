@@ -9187,6 +9187,7 @@ for line in sys.stdin:
 
     pub(super) fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
         ConnectionConfig {
+            environment: None,
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
             docs_notes_path: None,
@@ -12521,6 +12522,7 @@ done
     #[test]
     fn external_driver_query_params_include_database_and_schema_context() {
         let config = ConnectionConfig {
+            environment: None,
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
             docs_notes_path: None,

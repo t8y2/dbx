@@ -12568,6 +12568,7 @@ mod tests {
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
+            environment: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: dbx_types::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: dbx_types::models::connection::default_query_timeout_secs(),

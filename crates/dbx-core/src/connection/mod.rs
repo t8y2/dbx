@@ -8304,6 +8304,7 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.read_only = false;
         config.is_production = false;
         config.production_databases.clear();
+        config.environment = None;
         config.database_info = None;
 
         if config.db_type == DatabaseType::Nacos {
@@ -9054,6 +9055,7 @@ mod tests {
 
     pub(super) fn mysql_config(database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            environment: None,
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
             docs_notes_path: None,
@@ -9276,6 +9278,19 @@ mod tests {
         updated.external_config.as_mut().unwrap()["auth"]["username"] = serde_json::json!("user-b");
 
         assert!(!connection_configs_session_credentials_compatible(&initial, &updated));
+    }
+
+    #[test]
+    fn session_credentials_survive_environment_label_updates() {
+        // The environment badge is display-only; changing it must not drop the
+        // transient session password of a no-save connection.
+        let mut initial = mysql_config(None);
+        initial.save_password = false;
+
+        let mut updated = initial.clone();
+        updated.environment = Some("production".to_string());
+
+        assert!(connection_configs_session_credentials_compatible(&initial, &updated));
     }
 
     #[cfg(feature = "mq-admin")]
@@ -12719,6 +12734,7 @@ sleep 30
     /// live database. `connect_timeout_secs` is 1 so a failing probe resolves fast.
     fn keepalive_test_config(id: &str, interval_secs: u64) -> ConnectionConfig {
         ConnectionConfig {
+            environment: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: id.to_string(),

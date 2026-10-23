@@ -12846,6 +12846,7 @@ mod tests {
 
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
+            environment: None,
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
             docs_notes_path: None,
@@ -12930,6 +12931,7 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            environment: None,
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
             docs_notes_path: None,

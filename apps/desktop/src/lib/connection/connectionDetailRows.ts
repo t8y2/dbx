@@ -74,7 +74,13 @@ export function connectionDetailRows(config: ConnectionConfig, translate: (key: 
 
   return [
     { label: translate("connection.name"), value: clean(config.name) },
-    { label: translate("connection.environment"), value: (() => { const preset = connectionEnvironmentPreset(config.environment); return preset ? translate(preset.labelKey) : ""; })() },
+    {
+      label: translate("connection.environment"),
+      value: (() => {
+        const preset = connectionEnvironmentPreset(config.environment);
+        return preset ? translate(preset.labelKey) : "";
+      })(),
+    },
     { label: "URL", value: connectionDetailUrl(config), multiline: true },
     ...(hostValues.length > 0 ? [{ label: hostLabel, value: hostValues[0]!, values: hostValues }] : [{ label: hostLabel, value: hostValue, multiline: isLocalFileConnection(config) }]),
     { label: "Port", value: Number(config.port) > 0 ? String(config.port) : "" },

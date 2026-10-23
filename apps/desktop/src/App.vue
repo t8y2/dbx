@@ -231,6 +231,7 @@ import { useBackgroundImage } from "@/composables/useBackgroundImage";
 import ExternalSqlFileChangeDialog from "@/components/editor/ExternalSqlFileChangeDialog.vue";
 import { resolveWindowContext } from "@/lib/app/windowContext";
 import { openDetachedTabWindow } from "@/lib/app/detachedTabWindow";
+import { DETACH_TAB_REQUEST_EVENT, type DetachTabRequestDetail } from "@/lib/tabs/detachedTableOpen";
 import { FLOATING_OPEN_FILESYSTEM_EVENT, FLOATING_OPEN_WORKBENCH_EVENT, type FloatingOpenFilesystemPayload, type FloatingOpenWorkbenchPayload } from "@/lib/plugins/pluginFloatingWindow";
 import { OPEN_PLUGIN_AI_CONVERSATION, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
@@ -931,6 +932,15 @@ async function detachTab(tab: QueryTab, position?: { x: number; y: number }) {
     await api.deleteDetachedTabHandoff(tab.id).catch(() => {});
     toast(error?.message || String(error), 5000);
   }
+}
+
+// #13308: table tabs opened while "open tables in a detached window" is on ask
+// to be detached once their first load settles.
+function handleDetachTabRequest(event: Event) {
+  const detail = (event as CustomEvent<DetachTabRequestDetail>).detail;
+  if (!detail?.tabId) return;
+  const tab = queryStore.tabs.find((entry) => entry.id === detail.tabId);
+  if (tab) void detachTab(tab);
 }
 
 watch(
@@ -5184,6 +5194,7 @@ onMounted(async () => {
   window.addEventListener("keydown", handleTabSwitcherKeydownCapture, true);
   window.addEventListener("keydown", handleAuxiliarySearchKeydownCapture, true);
   window.addEventListener("keydown", handleKeydown);
+  window.addEventListener(DETACH_TAB_REQUEST_EVENT, handleDetachTabRequest as EventListener);
   window.addEventListener(DBX_VIM_ACTION_EVENT, handleVimDbxAppAction);
   window.addEventListener("keyup", handleKeyup, true);
   window.addEventListener("blur", handleTabSwitcherWindowBlur);

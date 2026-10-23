@@ -2,6 +2,7 @@ import { nextTick } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { requestDetachedTableOpen } from "@/lib/tabs/detachedTableOpen";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import type { TreeNode } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
@@ -263,6 +264,11 @@ export function useSidebarDataOpenRuntime() {
     })();
     openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });
     logPhase("tab-created", { tabId });
+    // #13308: with the detached-open setting on, the freshly opened table moves
+    // into its own window once the first load settles.
+    if (settingsStore.editorSettings.openTablesInDetachedWindow) {
+      requestDetachedTableOpen(() => queryStore.tabs.find((entry) => entry.id === tabId));
+    }
     warmTabSessionPool(tabId);
     // 接管该 tab：登记本次导航代次，作废在途的 openTableTarget/openData 旧代次
     // ——旧导航即使目标身份相同（同表不同 whereInput）也不得再落地

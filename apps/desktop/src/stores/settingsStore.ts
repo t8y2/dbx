@@ -1180,6 +1180,7 @@ export interface EditorSettings {
   rememberedConnectionDatabases: Record<string, RememberedConnectionDatabase>;
   dataTabReuseMode: DataTabReuseMode;
   openDataTabsNextToActive: boolean;
+  openTablesInDetachedWindow: boolean;
   prefillNewQueryWithSelect: boolean;
   generateSqlIncludeDatabaseName: boolean;
   generateSqlQuoteIdentifiers: boolean;
@@ -1533,6 +1534,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   rememberedConnectionDatabases: {},
   dataTabReuseMode: DEFAULT_DATA_TAB_REUSE_MODE,
   openDataTabsNextToActive: false,
+  openTablesInDetachedWindow: false,
   prefillNewQueryWithSelect: true,
   generateSqlIncludeDatabaseName: false,
   generateSqlQuoteIdentifiers: true,
@@ -2243,6 +2245,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       ).reuseDataTab,
     ),
     openDataTabsNextToActive: typeof settings.openDataTabsNextToActive === "boolean" ? settings.openDataTabsNextToActive : DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive,
+    openTablesInDetachedWindow: typeof settings.openTablesInDetachedWindow === "boolean" ? settings.openTablesInDetachedWindow : DEFAULT_EDITOR_SETTINGS.openTablesInDetachedWindow,
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     generateSqlIncludeDatabaseName: settings.generateSqlIncludeDatabaseName === true,
     generateSqlQuoteIdentifiers: typeof settings.generateSqlQuoteIdentifiers === "boolean" ? settings.generateSqlQuoteIdentifiers : DEFAULT_EDITOR_SETTINGS.generateSqlQuoteIdentifiers,
@@ -3146,6 +3149,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.rememberedConnectionDatabases !== undefined) editorSettings.value.rememberedConnectionDatabases = normalizeRememberedConnectionDatabases(partial.rememberedConnectionDatabases);
     if (partial.dataTabReuseMode !== undefined) editorSettings.value.dataTabReuseMode = normalizeDataTabReuseMode(partial.dataTabReuseMode);
     if (partial.openDataTabsNextToActive !== undefined) editorSettings.value.openDataTabsNextToActive = partial.openDataTabsNextToActive === true;
+    if (partial.openTablesInDetachedWindow !== undefined) editorSettings.value.openTablesInDetachedWindow = partial.openTablesInDetachedWindow === true;
     if (partial.prefillNewQueryWithSelect !== undefined) editorSettings.value.prefillNewQueryWithSelect = partial.prefillNewQueryWithSelect;
     if (partial.generateSqlIncludeDatabaseName !== undefined) editorSettings.value.generateSqlIncludeDatabaseName = partial.generateSqlIncludeDatabaseName === true;
     if (partial.generateSqlQuoteIdentifiers !== undefined) editorSettings.value.generateSqlQuoteIdentifiers = partial.generateSqlQuoteIdentifiers === true;

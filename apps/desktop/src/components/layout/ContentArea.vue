@@ -1789,8 +1789,9 @@ function dispatchBeforeResultTabSwitch() {
 }
 
 /**
- * 点击结果标签：切换显示的同时固定该结果（issue #9975）。
- * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来。
+ * 点击结果标签：切换显示的同时切换固定状态（issue #9975、#13306）。
+ * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来；
+ * 点击已固定的结果则直接取消固定，无需再打开右键菜单。
  */
 async function selectResultRunFromTab(runId: string) {
   if (!(await selectResultRun(runId))) return;

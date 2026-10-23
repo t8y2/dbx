@@ -103,6 +103,9 @@ pub(super) async fn build_structure_preview(
 
     // Same order and same foreign key metadata the create pass uses.
     let (tables, known_foreign_keys) = sorted_source_tables_with_foreign_keys(state, request).await;
+    // Same column quoting the create pass uses; the keyword probe is a read-only SELECT.
+    let gaussdb_keywords = transfer_gaussdb_keywords(state, request, target_db_type, target_pool_key).await;
+    let column_quoting = TransferColumnQuoting::new(request.quote_target_column_names, gaussdb_keywords.as_deref());
 
     let mut sections: Vec<String> = Vec::new();
     if let Some(plan) = &xugu_plan {
@@ -168,6 +171,7 @@ pub(super) async fn build_structure_preview(
             &known_foreign_keys,
             pg_compat_transfer,
             index_if_not_exists,
+            column_quoting,
         )
         .await?;
         deferred_fk_alters.extend(planned.deferred_fk_alters);
@@ -386,6 +390,7 @@ async fn plan_table_structure(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pg_compat_transfer: bool,
     index_if_not_exists: bool,
+    quoting: TransferColumnQuoting<'_>,
 ) -> Result<PlannedTableStructure, String> {
     let preserves_target_table_name = target_table == table && request.preserves_column_names();
     let columns = source_transfer_columns(state, request, table, source_pool_key).await?;
@@ -415,6 +420,7 @@ async fn plan_table_structure(
         &columns,
         table_comment.as_deref(),
         known_foreign_keys,
+        quoting,
     )
     .await?;
     let ddl = if pg_compat_transfer && !owned_sequences.owned_sequences.is_empty() {
@@ -453,7 +459,7 @@ async fn plan_table_structure(
         &request.target_schema,
         target_db_type,
         table_comment.as_deref(),
-        request.quote_target_column_names,
+        quoting,
     );
     operations.extend(comment_operations(
         &target_columns,
@@ -785,7 +791,7 @@ mod tests {
             "reporting",
             &DatabaseType::Postgres,
             Some("order records"),
-            true,
+            TransferColumnQuoting::QUOTED,
         );
         let comment_operations =
             comment_operations(&columns, "orders", "orders", &DatabaseType::Postgres, Some("order records"));

@@ -2501,7 +2501,10 @@ fn derived_table_alias(database_type: Option<DatabaseType>, name: &str) -> Strin
         // pass the static double-quote default. Either quote the agent may
         // report (`"` natively, backtick in M mode) leaves a simple-lower
         // alias bare, so the choice does not change the emitted SQL here.
-        return quote_gaussdb_jdbc_identifier(name, "\"");
+        // Pass the real database type so a GaussDB-only reserved word (e.g.
+        // `rownum`, which plain PostgreSQL does not reserve) still gets quoted
+        // should one ever be used as a wrapper alias (t8y2/dbx#6283).
+        return quote_gaussdb_jdbc_identifier(name, "\"", database_type);
     }
     quote_table_identifier(database_type, name)
 }
@@ -5862,6 +5865,17 @@ WHERE u.id = picked.id;
                 Some(format!("SELECT COUNT(*) AS dbx_total_rows FROM ({sql}) dbx_count;")),
                 "{database_type:?}"
             );
+        }
+    }
+
+    #[test]
+    fn gaussdb_derived_table_alias_quotes_gaussdb_only_reserved_words() {
+        // t8y2/dbx#6283: the alias helper passes the real database type, so a
+        // word GaussDB reserves but PostgreSQL does not (`rownum`) would still
+        // be quoted, while DBX's own simple-lower aliases stay bare.
+        for database_type in [DatabaseType::Gaussdb, DatabaseType::OpenGauss] {
+            assert_eq!(derived_table_alias(Some(database_type), "dbx_count"), "dbx_count");
+            assert_eq!(derived_table_alias(Some(database_type), "rownum"), "\"rownum\"");
         }
     }
 

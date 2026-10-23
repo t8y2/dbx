@@ -115,7 +115,7 @@ fn iris_transfer_limits_and_unsupported_upsert_keep_existing_policies() {
             None,
             limits,
             false,
-            true,
+            TransferColumnQuoting::QUOTED,
         )
         .unwrap();
         assert_eq!(batches.len(), expected_batches);
@@ -129,7 +129,7 @@ fn iris_transfer_limits_and_unsupported_upsert_keep_existing_policies() {
         None,
         limits.with_hard_sql_bytes(Some(1)),
         false,
-        true,
+        TransferColumnQuoting::QUOTED,
     )
     .unwrap_err()
     .contains("exceeds the 1 byte hard limit"));

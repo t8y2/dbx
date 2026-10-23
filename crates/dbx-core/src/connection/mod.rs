@@ -416,6 +416,31 @@ pub struct SalesforceCurrentUser {
     pub org_name: String,
 }
 
+/// How long a transient probe failure suppresses further probes, so a
+/// multi-table transfer against a server that times out does not pay the
+/// connection timeout once per table.
+const GAUSSDB_KEYWORDS_RETRY_BACKOFF: Duration = Duration::from_secs(60);
+
+#[derive(Clone)]
+enum GaussdbReservedKeywordsOutcome {
+    Available(Arc<HashSet<String>>),
+    /// The probe ran and deterministically found nothing usable (SQL-level
+    /// error, or an empty result) — cached because retrying it produces the
+    /// identical outcome every time for this server.
+    NotSupported,
+    /// A transient failure; probing is skipped until the deadline passes.
+    RetryAfter(Instant),
+}
+
+/// A cached outcome is bound to the pool publication it was probed on, so an
+/// entry written by a probe that raced a pool removal or reconnect is never
+/// served for the replacement pool.
+#[derive(Clone)]
+struct GaussdbReservedKeywordsCacheEntry {
+    publication: PoolPublication,
+    outcome: GaussdbReservedKeywordsOutcome,
+}
+
 pub struct AppState {
     connections: Arc<RwLock<ConnectionPoolRegistry>>,
     task_supervisor: TaskSupervisor,
@@ -445,6 +470,13 @@ pub struct AppState {
     /// PostgreSQL TLS cancel context, keyed by pool_key.
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    /// Live GaussDB/openGauss `pg_get_keywords()` reserved-word catalog, keyed
+    /// by pool_key. Populated lazily on first use per target connection
+    /// (t8y2/dbx#6283 follow-up) so identifier quoting during data transfer
+    /// reflects the actual server version instead of a hand-diffed static
+    /// list that can drift across GaussDB/openGauss releases (e.g. `maxvalue`
+    /// is reserved on openGauss 5.0 but not on current openGauss).
+    gaussdb_reserved_keywords_cache: Arc<RwLock<HashMap<String, GaussdbReservedKeywordsCacheEntry>>>,
     /// Pool keys whose tab-scoped MySQL connection holds a transaction the user
     /// opened explicitly and DBX deliberately kept open
     /// (`preserve_explicit_transaction`). Keeping it here — not on the driver
@@ -705,6 +737,7 @@ struct PoolRoutingControl {
     connections: Arc<RwLock<ConnectionPoolRegistry>>,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    gaussdb_reserved_keywords_cache: Arc<RwLock<HashMap<String, GaussdbReservedKeywordsCacheEntry>>>,
     /// The same set as [`AppState::mysql_preserved_transactions`]. Every detach
     /// path (including `ClientSessionPoolCleanupGuard`'s `Drop`, which never
     /// reaches `AppState`) has to clear the marker together with the pool:
@@ -868,10 +901,12 @@ impl PoolRoutingControl {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut gaussdb_keywords = self.gaussdb_reserved_keywords_cache.write().await;
             let mut preserved = self.mysql_preserved_transactions.write().await;
             for (key, _) in &removed {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                gaussdb_keywords.remove(key);
                 preserved.remove(key);
             }
         }
@@ -1693,6 +1728,7 @@ impl AppState {
             connections: self.connections.clone(),
             pool_activity: self.pool_activity.clone(),
             postgres_cancel_contexts: self.postgres_cancel_contexts.clone(),
+            gaussdb_reserved_keywords_cache: self.gaussdb_reserved_keywords_cache.clone(),
             mysql_preserved_transactions: self.mysql_preserved_transactions.clone(),
             task_supervisor: self.task_supervisor.clone(),
         }
@@ -1868,6 +1904,7 @@ impl AppState {
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             honor_fixed_ssh_local_ports: AtomicBool::new(false),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
+            gaussdb_reserved_keywords_cache: Arc::new(RwLock::new(HashMap::new())),
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             sqlserver_transaction_ends: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -5057,6 +5094,7 @@ impl AppState {
         };
 
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.gaussdb_reserved_keywords_cache.write().await.remove(pool_key);
         routing.close_pool_with_timeout(pool_key.to_string(), removed).await;
         true
     }
@@ -5134,6 +5172,7 @@ impl AppState {
             self.stop_keepalive_task(&pool_key).await;
             self.pool_activity.write().await.remove(&pool_key);
             self.postgres_cancel_contexts.write().await.remove(&pool_key);
+            self.gaussdb_reserved_keywords_cache.write().await.remove(&pool_key);
             let removed = self.connections.write().await.remove(&pool_key);
             if let Some(pool) = removed {
                 self.pool_routing_control().close_pool_with_timeout(pool_key.clone(), pool).await;
@@ -5348,6 +5387,7 @@ impl AppState {
         self.stop_keepalive_task(&pool_key).await;
         self.pool_activity.write().await.remove(&pool_key);
         self.postgres_cancel_contexts.write().await.remove(&pool_key);
+        self.gaussdb_reserved_keywords_cache.write().await.remove(&pool_key);
         self.mysql_preserved_transactions.write().await.remove(&pool_key);
         let removed = self.update_connection_pools(|connections| connections.remove(&pool_key)).await;
         Ok(removed.map(|pool| (pool_key, pool)))
@@ -5371,6 +5411,7 @@ impl AppState {
         self.stop_keepalive_task(pool_key).await;
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.gaussdb_reserved_keywords_cache.write().await.remove(pool_key);
         self.mysql_preserved_transactions.write().await.remove(pool_key);
         let removed = self.connections.write().await.remove(pool_key);
         if let Some(pool) = removed {
@@ -5440,6 +5481,7 @@ impl AppState {
 
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.gaussdb_reserved_keywords_cache.write().await.remove(pool_key);
         match close_reclaimed_agent_pool(pool).await {
             Ok(()) => true,
             Err((PoolKind::Agent(client), error)) if should_replace_agent_runtime(&error) => {
@@ -5535,9 +5577,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut gaussdb_keywords = self.gaussdb_reserved_keywords_cache.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                gaussdb_keywords.remove(key);
             }
         }
         let mut conns = self.connections.write().await;
@@ -5680,6 +5724,61 @@ impl AppState {
             }
             None => Ok(None),
         }
+    }
+
+    /// Live GaussDB/openGauss reserved-keyword catalog for `pool_key`, queried
+    /// once via `pg_get_keywords()` and cached thereafter (t8y2/dbx#6283
+    /// follow-up), so data-transfer identifier quoting reflects the actual
+    /// target server version instead of a static list that can drift across
+    /// releases. Callers must only invoke this for targets already known to
+    /// be `DatabaseType::Gaussdb | DatabaseType::OpenGauss` — this method
+    /// itself only requires `pool_key` to resolve to `PoolKind::Postgres`
+    /// (the native pg-wire driver those types use); it does not re-check
+    /// db_type. JDBC/Agent/ExternalDriver GaussDB pool kinds are out of scope
+    /// and always fall back to `None` (the caller's static-list fallback).
+    ///
+    /// A deterministic outcome (the query ran and either failed or came back
+    /// empty — e.g. permission denied on `pg_get_keywords()`, or an engine
+    /// that doesn't have it) is cached for the pool's lifetime, so a
+    /// multi-table transfer job against a server that will never answer
+    /// doesn't re-pay a connection checkout + query round trip per table. A
+    /// transient failure (couldn't check out a connection, or the probe timed
+    /// out) is only remembered for `GAUSSDB_KEYWORDS_RETRY_BACKOFF`, then
+    /// probed again. Entries are tied to the pool publication they were
+    /// probed on, so a probe racing a reconnect cannot leak into the new pool.
+    pub async fn gaussdb_reserved_keywords(&self, pool_key: &str) -> Option<Arc<HashSet<String>>> {
+        let Some(PoolPublicationSnapshot { pool: PoolKind::Postgres(pool), publication }) =
+            self.connections.read().await.snapshot(pool_key)
+        else {
+            return None;
+        };
+        if let Some(entry) = self.gaussdb_reserved_keywords_cache.read().await.get(pool_key) {
+            if entry.publication.is_same(&publication) {
+                match &entry.outcome {
+                    GaussdbReservedKeywordsOutcome::Available(words) => return Some(words.clone()),
+                    GaussdbReservedKeywordsOutcome::NotSupported => return None,
+                    GaussdbReservedKeywordsOutcome::RetryAfter(deadline) if Instant::now() < *deadline => return None,
+                    GaussdbReservedKeywordsOutcome::RetryAfter(_) => {}
+                }
+            }
+        }
+        let (outcome, words) = match db::postgres::gaussdb_reserved_keywords(&pool).await {
+            db::postgres::GaussdbReservedKeywordsProbe::Available(words) => {
+                let words = Arc::new(words);
+                (GaussdbReservedKeywordsOutcome::Available(words.clone()), Some(words))
+            }
+            db::postgres::GaussdbReservedKeywordsProbe::NotSupported => {
+                (GaussdbReservedKeywordsOutcome::NotSupported, None)
+            }
+            db::postgres::GaussdbReservedKeywordsProbe::Retryable => {
+                (GaussdbReservedKeywordsOutcome::RetryAfter(Instant::now() + GAUSSDB_KEYWORDS_RETRY_BACKOFF), None)
+            }
+        };
+        self.gaussdb_reserved_keywords_cache
+            .write()
+            .await
+            .insert(pool_key.to_string(), GaussdbReservedKeywordsCacheEntry { publication, outcome });
+        words
     }
 
     pub async fn connection_database_info(
@@ -6472,6 +6571,7 @@ impl AppState {
         self.pool_activity.write().await.clear();
         self.session_credentials.clear_pool_owners();
         self.postgres_cancel_contexts.write().await.clear();
+        self.gaussdb_reserved_keywords_cache.write().await.clear();
         self.draining_pools.lock().unwrap_or_else(|error| error.into_inner()).clear();
         self.metadata_gates.lock().await.clear();
         self.connections.write().await.drain().collect()
@@ -6510,9 +6610,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut gaussdb_keywords = self.gaussdb_reserved_keywords_cache.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                gaussdb_keywords.remove(key);
             }
         }
         self.session_credentials.remove_pool_owners(&keys_to_remove);
@@ -6543,9 +6645,11 @@ impl AppState {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut gaussdb_keywords = self.gaussdb_reserved_keywords_cache.write().await;
             for key in &keys_to_remove {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                gaussdb_keywords.remove(key);
             }
         }
         let mut conns = self.connections.write().await;
@@ -7850,8 +7954,9 @@ mod tests {
         redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
         sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id,
         transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
-        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        validate_connection_url_params, validate_h2_database_path, AppState, GaussdbReservedKeywordsOutcome, MysqlMode,
+        PoolKind, TxnConnection, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
+        PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -8936,6 +9041,139 @@ mod tests {
 
     fn agent_pool_stub() -> PoolKind {
         PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub())
+    }
+
+    /// Answers a Postgres startup handshake and the two independent
+    /// best-effort connection-identity queries every physical connection gets
+    /// (`NoticeCapturingConnect::connect` once per connection, then
+    /// `checkout_postgres_client`'s `resolve_postgres_client_key` once per
+    /// first checkout of that connection) with SQLSTATE errors, since both
+    /// are ignored by the client.
+    async fn answer_gaussdb_handshake_and_identity_queries(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn error_response(code: &str, message: &str) -> Vec<u8> {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(b"SERROR\0");
+            payload.push(b'C');
+            payload.extend_from_slice(code.as_bytes());
+            payload.push(0);
+            payload.push(b'M');
+            payload.extend_from_slice(message.as_bytes());
+            payload.extend_from_slice(b"\0\0");
+            let mut response = vec![b'E'];
+            response.extend_from_slice(&u32::try_from(payload.len() + 4).unwrap().to_be_bytes());
+            response.extend_from_slice(&payload);
+            response.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+            response
+        }
+
+        let startup_len = socket.read_u32().await.unwrap();
+        assert!(startup_len >= 8);
+        let mut startup = vec![0_u8; startup_len as usize - 4];
+        socket.read_exact(&mut startup).await.unwrap();
+        assert_eq!(&startup[..4], &[0, 3, 0, 0]);
+        socket
+            .write_all(&[
+                b'R', 0, 0, 0, 8, 0, 0, 0, 0, // AuthenticationOk
+                b'K', 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 2, // BackendKeyData
+                b'Z', 0, 0, 0, 5, b'I', // ReadyForQuery
+            ])
+            .await
+            .unwrap();
+
+        let mut request = [0_u8; 1024];
+        for _ in 0..2 {
+            let read = socket.read(&mut request).await.unwrap();
+            assert!(read > 0, "client should issue a best-effort identity query");
+            socket.write_all(&error_response("0A000", "identity probe unavailable")).await.unwrap();
+        }
+    }
+
+    /// First physical connection dies before answering the reserved-keywords
+    /// probe query (transient failure, must not be cached); the pool then
+    /// opens a second physical connection whose probe answer is a
+    /// deterministic SQLSTATE (must be cached).
+    async fn serve_gaussdb_probe_retryable_then_not_supported(listener: tokio::net::TcpListener) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut socket, _) = listener.accept().await.unwrap();
+        answer_gaussdb_handshake_and_identity_queries(&mut socket).await;
+        let mut request = [0_u8; 1024];
+        let read = socket.read(&mut request).await.unwrap();
+        assert!(read > 0, "client should issue the reserved-keywords probe query");
+        drop(socket); // connection dies mid-query with no server-side response
+
+        let (mut socket, _) = listener.accept().await.unwrap();
+        answer_gaussdb_handshake_and_identity_queries(&mut socket).await;
+        let read = socket.read(&mut request).await.unwrap();
+        assert!(read > 0, "client should issue the reserved-keywords probe query on the new connection");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"SERROR\0");
+        payload.extend_from_slice(b"C42501\0");
+        payload.push(b'M');
+        payload.extend_from_slice(b"permission denied for function pg_get_keywords\0");
+        payload.push(0);
+        let mut response = vec![b'E'];
+        response.extend_from_slice(&u32::try_from(payload.len() + 4).unwrap().to_be_bytes());
+        response.extend_from_slice(&payload);
+        response.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+        socket.write_all(&response).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn app_state_backs_off_retryable_gaussdb_probe_and_caches_the_next_deterministic_one() {
+        let (state, dir) = test_app_state().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(serve_gaussdb_probe_retryable_then_not_supported(listener));
+        let url = format!("postgres://postgres@127.0.0.1:{port}/postgres?sslmode=disable");
+        let pool = db::postgres::connect(&url, Duration::from_secs(2)).await.unwrap();
+        let pool_key = "gaussdb-conn";
+        state.connections.write().await.insert(pool_key.to_string(), PoolKind::Postgres(pool.clone()));
+
+        // First probe: the connection dies mid-query. A transient failure is
+        // only remembered for a backoff window, never as a final outcome.
+        assert!(state.gaussdb_reserved_keywords(pool_key).await.is_none());
+        assert!(
+            matches!(
+                state.gaussdb_reserved_keywords_cache.read().await.get(pool_key).map(|entry| entry.outcome.clone()),
+                Some(GaussdbReservedKeywordsOutcome::RetryAfter(_))
+            ),
+            "a transient (Retryable) probe failure must only back off"
+        );
+
+        // Within the backoff window no further probe runs (the mock server
+        // would fail its accept-count assertions if one did).
+        assert!(state.gaussdb_reserved_keywords(pool_key).await.is_none());
+
+        // Once the backoff expires the probe runs again; this time a fresh
+        // physical connection answers deterministically, which is cached.
+        state.gaussdb_reserved_keywords_cache.write().await.get_mut(pool_key).unwrap().outcome =
+            GaussdbReservedKeywordsOutcome::RetryAfter(Instant::now() - Duration::from_secs(1));
+        assert!(state.gaussdb_reserved_keywords(pool_key).await.is_none());
+        assert!(
+            matches!(
+                state.gaussdb_reserved_keywords_cache.read().await.get(pool_key).map(|entry| entry.outcome.clone()),
+                Some(GaussdbReservedKeywordsOutcome::NotSupported)
+            ),
+            "a deterministic (NotSupported) probe outcome must be cached"
+        );
+        server.await.unwrap();
+
+        // Re-publishing the pool under the same key (reconnect) invalidates
+        // the cached outcome: the stale entry must not be served, and the
+        // now-unreachable server turns the re-probe into a backoff.
+        state.connections.write().await.insert(pool_key.to_string(), PoolKind::Postgres(pool));
+        assert!(state.gaussdb_reserved_keywords(pool_key).await.is_none());
+        assert!(
+            matches!(
+                state.gaussdb_reserved_keywords_cache.read().await.get(pool_key).map(|entry| entry.outcome.clone()),
+                Some(GaussdbReservedKeywordsOutcome::RetryAfter(_))
+            ),
+            "an entry from a previous publication must not be reused"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

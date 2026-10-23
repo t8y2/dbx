@@ -32,6 +32,7 @@ pub(super) async fn prepare_table_ddl(
     columns: &[db::ColumnInfo],
     table_comment: Option<&str>,
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
+    quoting: TransferColumnQuoting<'_>,
 ) -> Result<PreparedTableDdl, String> {
     let rebuild = request.drop_target_before_create;
     // Every column reference below (CREATE TABLE, keys) uses the target-side names.
@@ -88,7 +89,7 @@ pub(super) async fn prepare_table_ddl(
         source_driver_profile.as_deref(),
         target_driver_profile.as_deref(),
         target_table == table && request.preserves_column_names(),
-    ) && (request.quote_target_column_names
+    ) && (quoting.quote_target_column_names
         || !matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss));
 
     // A rebuild recreates the source structure exactly. When the structure comes from
@@ -139,7 +140,7 @@ pub(super) async fn prepare_table_ddl(
                             source_db_type,
                             table_comment,
                             request.target_catalog.as_deref(),
-                            request.quote_target_column_names,
+                            quoting,
                         ),
                         false,
                     )
@@ -185,7 +186,7 @@ pub(super) async fn prepare_table_ddl(
                         source_db_type,
                         table_comment,
                         request.target_catalog.as_deref(),
-                        request.quote_target_column_names,
+                        quoting,
                     ),
                     false,
                 ),
@@ -203,7 +204,7 @@ pub(super) async fn prepare_table_ddl(
                 source_db_type,
                 table_comment,
                 request.target_catalog.as_deref(),
-                request.quote_target_column_names,
+                quoting,
             )
         } else if let Some(rewritten) = rewrite_transfer_source_table_ddl(
             &source_ddl,
@@ -238,7 +239,7 @@ pub(super) async fn prepare_table_ddl(
                 source_db_type,
                 table_comment,
                 request.target_catalog.as_deref(),
-                request.quote_target_column_names,
+                quoting,
             )
         }
     } else {
@@ -251,7 +252,7 @@ pub(super) async fn prepare_table_ddl(
             source_db_type,
             table_comment,
             request.target_catalog.as_deref(),
-            request.quote_target_column_names,
+            quoting,
         )
     };
 
@@ -348,6 +349,7 @@ mod tests {
             &columns,
             None,
             &HashMap::new(),
+            TransferColumnQuoting::QUOTED,
         )
         .await
         .unwrap();
@@ -387,6 +389,7 @@ mod tests {
             &columns(),
             None,
             &HashMap::new(),
+            TransferColumnQuoting::QUOTED,
         )
         .await
         .expect_err("a rebuild cannot discard foreign keys when source metadata is unavailable");
@@ -408,6 +411,7 @@ mod tests {
             &columns(),
             None,
             &HashMap::new(),
+            TransferColumnQuoting::QUOTED,
         )
         .await
         .unwrap();
@@ -429,6 +433,7 @@ mod tests {
             &columns(),
             None,
             &HashMap::new(),
+            TransferColumnQuoting::QUOTED,
         )
         .await
         .unwrap_err();
@@ -463,6 +468,7 @@ mod tests {
             &columns(),
             None,
             &known,
+            TransferColumnQuoting::QUOTED,
         )
         .await
         .unwrap();
@@ -491,6 +497,7 @@ mod tests {
                 columns,
                 None,
                 &HashMap::from([("child".into(), Vec::new())]),
+                TransferColumnQuoting::QUOTED,
             )
             .await;
             assert!(result.is_err(), "incomplete source metadata must fail before any target DDL: {result:?}");

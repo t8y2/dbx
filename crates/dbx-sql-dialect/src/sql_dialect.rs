@@ -41,7 +41,7 @@ pub use identifiers::{
 };
 pub use identifiers::{
     parse_sqlserver_linked_schema_ref, qualified_transfer_table, quote_gaussdb_jdbc_identifier, quote_iris_identifier,
-    quote_transfer_identifier, transfer_column_identifier,
+    quote_transfer_identifier, transfer_column_identifier, TransferColumnQuoting,
 };
 pub use table_select::{
     build_count_table_sql, build_iris_table_select_sql, build_table_data_select_sql,

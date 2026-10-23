@@ -2098,6 +2098,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "Adicionar próxima ocorrência",
       selectAllSelectionOccurrences: "Selecionar todas as ocorrências",
       selectCurrentStatement: "Selecionar a instrução atual",
+      copyCurrentStatement: "Copiar a instrução atual",
       expandSelectStar: "Expandir * em colunas",
       expandSelectStarUnavailable: "Não foi possível carregar as colunas desta tabela",
       findReplace: "Localizar/substituir",

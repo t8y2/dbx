@@ -1924,6 +1924,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "Dodaj następne wystąpienie",
       selectAllSelectionOccurrences: "Zaznacz wszystkie wystąpienia",
       selectCurrentStatement: "Zaznacz bieżącą instrukcję",
+      copyCurrentStatement: "Kopiuj bieżącą instrukcję",
       expandSelectStar: "Rozwiń * do listy kolumn",
       expandSelectStarUnavailable: "Nie można wczytać kolumn tej tabeli",
       findReplace: "Znajdź i zamień",

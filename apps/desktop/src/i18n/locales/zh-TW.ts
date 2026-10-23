@@ -2098,6 +2098,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "增加下一個選取詞",
       selectAllSelectionOccurrences: "選取所有選取詞",
       selectCurrentStatement: "選取目前語句",
+      copyCurrentStatement: "複製當前語句",
       expandSelectStar: "將 * 展開為欄位",
       expandSelectStarUnavailable: "無法讀取此資料表的欄位資訊",
       findReplace: "查找/取代",

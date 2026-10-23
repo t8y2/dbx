@@ -2347,6 +2347,7 @@ export default {
       addNextSelectionOccurrence: "Add next occurrence",
       selectAllSelectionOccurrences: "Select all occurrences",
       selectCurrentStatement: "Select current statement",
+      copyCurrentStatement: "Copy current statement",
       expandSelectStar: "Expand * to columns",
       expandSelectStarUnavailable: "Unable to load columns for this table",
       findReplace: "Find/Replace",

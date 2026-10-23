@@ -2269,6 +2269,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "เพิ่มรายการที่พบถัดไป",
       selectAllSelectionOccurrences: "เลือกทุกตำแหน่งที่พบ",
       selectCurrentStatement: "เลือก Statement ปัจจุบัน",
+      copyCurrentStatement: "คัดลอกคำสั่งปัจจุบัน",
       expandSelectStar: "ขยาย * เป็นคอลัมน์",
       expandSelectStarUnavailable: "โหลดคอลัมน์สำหรับตารางนี้ไม่สำเร็จ",
       findReplace: "ค้นหา/แทนที่",

@@ -2097,6 +2097,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "Aggiungi occorrenza successiva",
       selectAllSelectionOccurrences: "Seleziona tutte le occorrenze",
       selectCurrentStatement: "Seleziona l'istruzione corrente",
+      copyCurrentStatement: "Copia l’istruzione corrente",
       expandSelectStar: "Espandi * in colonne",
       expandSelectStarUnavailable: "Impossibile caricare le colonne di questa tabella",
       findReplace: "Trova/Sostituisci",

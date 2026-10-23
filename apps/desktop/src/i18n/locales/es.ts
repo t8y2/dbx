@@ -2188,6 +2188,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "Añadir siguiente coincidencia",
       selectAllSelectionOccurrences: "Seleccionar todas las coincidencias",
       selectCurrentStatement: "Seleccionar la sentencia actual",
+      copyCurrentStatement: "Copiar la instrucción actual",
       expandSelectStar: "Expandir * a columnas",
       expandSelectStarUnavailable: "No se pudieron cargar las columnas de esta tabla",
       findReplace: "Buscar/Reemplazar",

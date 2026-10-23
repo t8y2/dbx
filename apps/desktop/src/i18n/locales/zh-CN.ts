@@ -2280,6 +2280,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "增加下一个选中词",
       selectAllSelectionOccurrences: "选中所有选中词",
       selectCurrentStatement: "选中当前语句",
+      copyCurrentStatement: "复制当前语句",
       expandSelectStar: "将 * 展开为字段",
       expandSelectStarUnavailable: "无法读取该表的字段信息",
       findReplace: "查找/替换",

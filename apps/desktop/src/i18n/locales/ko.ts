@@ -2029,6 +2029,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "다음 일치 항목 선택 추가",
       selectAllSelectionOccurrences: "모든 일치 항목 선택",
       selectCurrentStatement: "현재 문 선택",
+      copyCurrentStatement: "현재 문 복사",
       expandSelectStar: "*을(를) 열로 확장",
       expandSelectStarUnavailable: "이 테이블의 열을 불러올 수 없습니다",
       findReplace: "찾기/바꾸기",

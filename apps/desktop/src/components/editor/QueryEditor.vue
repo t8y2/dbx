@@ -1269,6 +1269,23 @@ function selectCurrentStatementFromContextMenu(): void {
 }
 
 /**
+ * 复制光标所在的当前可执行语句（与「选中当前语句」共用同一套范围计算），
+ * 方便在不选中、不执行的前提下把当前语句带走（issue #13261）。
+ */
+async function copyCurrentStatementFromContextMenu(): Promise<void> {
+  const currentView = view.value;
+  if (!currentView) return;
+  const range = executableStatementRangeAtPosition(currentView, currentView.state.selection.main.head);
+  if (!range || range.from === range.to) return;
+  try {
+    await copyToClipboard(currentView.state.sliceDoc(range.from, range.to));
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+/**
  * Move the caret between executable statements without changing the document.
  * Reuses the same statement ranges as 「执行当前语句」/「选中当前语句」 so the
  * navigation boundaries always match what execution would run.
@@ -1310,6 +1327,7 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   openFindReplaceFromContextMenu,
   deleteEmptyLines,
   selectCurrentStatementFromContextMenu,
+  copyCurrentStatementFromContextMenu,
   selectAllSqlFromContextMenu,
   emitContextObjectAction,
   openCodeSnapshot,

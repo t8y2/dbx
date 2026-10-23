@@ -2109,6 +2109,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "Добавить следующее вхождение",
       selectAllSelectionOccurrences: "Выбрать все вхождения",
       selectCurrentStatement: "Выделить текущую инструкцию",
+      copyCurrentStatement: "Копировать текущий оператор",
       expandSelectStar: "Раскрыть * в столбцы",
       expandSelectStarUnavailable: "Не удалось загрузить столбцы этой таблицы",
       findReplace: "Найти/Заменить",

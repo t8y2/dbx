@@ -2116,6 +2116,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "次の出現箇所を選択に追加",
       selectAllSelectionOccurrences: "すべての出現箇所を選択",
       selectCurrentStatement: "現在のステートメントを選択",
+      copyCurrentStatement: "現在のステートメントをコピー",
       expandSelectStar: "* を列に展開",
       expandSelectStarUnavailable: "このテーブルの列を読み込めません",
       findReplace: "検索/置換",

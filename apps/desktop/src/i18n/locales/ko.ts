@@ -7254,6 +7254,8 @@ export default withEnglishFallback({
     completedWithErrors: "실행 완료: 성공 {succeeded}개, 실패 {failed}개",
   },
   sqlFileTree: {
+    recentFiles: "최근에 연 파일",
+    clearRecentFiles: "최근 파일 지우기",
     folderNameInvalid: "경로가 아닌 폴더 이름 하나를 입력하세요.",
     folderNameExcluded: "이 폴더 이름은 SQL 파일 패널에서 제외됩니다.",
     folderDepthExceeded: "최대 폴더 깊이에 도달했습니다.",

@@ -10259,6 +10259,8 @@ export default withEnglishFallback({
     actionSuccess: "「{name}」の{action}が完了しました。",
   },
   sqlFileTree: {
+    recentFiles: "最近開いたファイル",
+    clearRecentFiles: "最近のファイルをクリア",
     folderNameInvalid: "パスではなく単一のフォルダー名を入力してください。",
     folderNameExcluded: "このフォルダー名は SQL ファイルパネルの表示対象外です。",
     folderDepthExceeded: "フォルダーの最大階層に達しました。",

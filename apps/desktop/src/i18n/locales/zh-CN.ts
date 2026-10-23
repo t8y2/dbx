@@ -8442,6 +8442,8 @@ export default withEnglishFallback({
     activeFileNotFound: "未找到当前文件，请检查文件是否存在或被文件筛选隐藏",
     title: "SQL 文件",
     storageHelp: "此处列出通过「打开文件夹」打开的磁盘文件，默认显示 .sql 和 .ddl 文件，可通过过滤设置调整；编辑后直接保存回原文件。",
+    recentFiles: "最近打开",
+    clearRecentFiles: "清空最近文件",
     openFolder: "打开文件夹",
     closePanel: "关闭",
     loading: "加载中...",

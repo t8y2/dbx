@@ -10229,6 +10229,8 @@ export default withEnglishFallback({
     actionSuccess: "已完成對「{name}」的{action}。",
   },
   sqlFileTree: {
+    recentFiles: "最近開啟",
+    clearRecentFiles: "清空最近檔案",
     folderNameInvalid: "請輸入單一資料夾名稱，不能包含路徑。",
     folderNameExcluded: "此資料夾名稱被 SQL 檔案面板排除。",
     folderDepthExceeded: "已達到資料夾最大層級。",

@@ -25,6 +25,8 @@ import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFile
 import { filterAndSortSqlFileEntries, getSqlFileSortOrder, saveSqlFileSortOrder, type SqlFileSortOrder } from "@/lib/sql/sqlFileTreeFilter";
 import { orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
 import { getSqlFileOpenMode, saveSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
+import { clearRecentSqlFiles, getRecentSqlFiles, relocateRecentSqlFiles } from "@/lib/sql/recentSqlFiles";
+import { sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 
 const emit = defineEmits<{
   close: [];
@@ -35,6 +37,7 @@ const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
+const isDesktopRuntime = isTauriRuntime();
 
 interface FolderState {
   path: string;
@@ -46,6 +49,7 @@ interface FolderState {
 }
 
 const folders = ref<FolderState[]>([]);
+const recentFiles = ref(getRecentSqlFiles());
 const fileTree = ref<HTMLElement | null>(null);
 const locatingFile = ref(false);
 const currentFilePath = computed(() => {
@@ -99,6 +103,17 @@ const showRenameDialog = ref(false);
 const showRenameFolderDialog = ref(false);
 const showDeleteDialog = ref(false);
 const showDeleteFolderDialog = ref(false);
+
+function refreshRecentFiles() {
+  recentFiles.value = getRecentSqlFiles();
+}
+
+function clearRecentFiles() {
+  clearRecentSqlFiles();
+  refreshRecentFiles();
+}
+
+watch(() => [queryStore.activeTabId, queryStore.tabs.map((tab) => tab.externalSqlPath)], refreshRecentFiles, { deep: true });
 
 const selectedKeys = ref<Set<string>>(new Set());
 const activeKey = ref<string | null>(null);
@@ -823,6 +838,8 @@ async function renameSqlFolder() {
     const nextPath = await api.renameSqlFolderInFolder(target.folderPath, target.entry.path, fileNameInput.value.trim());
     queryStore.relocateExternalSqlFolderPath(target.entry.path, nextPath);
     moveExternalSqlFolderTargets(target.entry.path, nextPath);
+    relocateRecentSqlFiles(target.entry.path, nextPath, true);
+    refreshRecentFiles();
     updateFolderPaths(target.entry.path, nextPath);
     showRenameFolderDialog.value = false;
     await refreshMutationFolders();
@@ -844,6 +861,8 @@ async function renameSqlFile() {
     queryStore.relocateExternalSqlFilePath(target.entry.path, nextPath);
     moveExternalSqlFileTarget(target.entry.path, nextPath);
     remapSelectionPaths((path) => (normalizeExternalSqlPath(path) === normalizeExternalSqlPath(target.entry.path) ? nextPath : path));
+    relocateRecentSqlFiles(target.entry.path, nextPath);
+    refreshRecentFiles();
     showRenameDialog.value = false;
     await reloadFolderAfterMutation(target.folderPath);
     toast(t("sqlFileTree.fileRenamed"), 1500);
@@ -1114,6 +1133,20 @@ function clearContextTarget() {
             onContextMenu($event);
           "
         >
+          <div v-if="isDesktopRuntime && recentFiles.length > 0" class="border-b px-2 py-1.5">
+            <div class="flex items-center gap-1 px-1 pb-1 text-[11px] font-medium text-muted-foreground">
+              <span class="flex-1">{{ t("sqlFileTree.recentFiles") }}</span>
+              <Button variant="ghost" size="icon" class="h-5 w-5" :aria-label="t('sqlFileTree.clearRecentFiles')" :title="t('sqlFileTree.clearRecentFiles')" @click="clearRecentFiles">
+                <Trash2 class="h-3 w-3" />
+              </Button>
+            </div>
+            <button v-for="path in recentFiles" :key="path" type="button" data-recent-sql-file class="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground" :title="path" @click="openFile(path)">
+              <FileCode class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span class="truncate">{{ sqlFileTitleFromPath(path) }}</span>
+              <span class="truncate text-[10px] text-muted-foreground/70">{{ path }}</span>
+            </button>
+          </div>
+
           <div v-if="folders.length === 0" class="flex-1 flex flex-col items-center justify-center gap-2 p-4 text-xs text-muted-foreground">
             <FolderOpen class="h-8 w-8 text-muted-foreground/40" />
             <span>{{ t("sqlFileTree.noFolder") }}</span>

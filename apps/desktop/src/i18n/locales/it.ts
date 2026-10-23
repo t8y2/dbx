@@ -10223,6 +10223,8 @@ export default withEnglishFallback({
     actionSuccess: '{action} completato per "{name}".',
   },
   sqlFileTree: {
+    recentFiles: "Aperti di recente",
+    clearRecentFiles: "Cancella file recenti",
     folderNameInvalid: "Inserisci un solo nome di cartella, non un percorso.",
     folderNameExcluded: "Questo nome di cartella è escluso dal browser di file SQL.",
     folderDepthExceeded: "È stata raggiunta la profondità massima delle cartelle.",

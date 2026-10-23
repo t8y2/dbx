@@ -10219,6 +10219,8 @@ export default withEnglishFallback({
     actionSuccess: '{action} concluído para "{name}".',
   },
   sqlFileTree: {
+    recentFiles: "Abertos recentemente",
+    clearRecentFiles: "Limpar arquivos recentes",
     folderNameInvalid: "Digite um único nome de pasta, não um caminho.",
     folderNameExcluded: "Este nome de pasta é excluído do navegador de arquivos SQL.",
     folderDepthExceeded: "A profundidade máxima de pastas foi atingida.",

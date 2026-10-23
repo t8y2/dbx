@@ -2123,6 +2123,7 @@ pub fn run() {
             } else {
                 AppState::new_with_plugin_dir_and_app_version(storage, plugin_dir, env!("CARGO_PKG_VERSION"))
             };
+            state.set_desktop_process_identity_authentication_enabled(true);
             dbx_core::db::sqlite_worker::enable_sqlite_ssh_runtime(env!("CARGO_PKG_VERSION"));
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);

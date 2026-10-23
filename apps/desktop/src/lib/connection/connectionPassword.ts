@@ -1,6 +1,7 @@
 import type { ConnectionConfig, PluginFormField, PluginFormFieldValue } from "@/types/database";
 import { isSavedCredential } from "@/lib/security/passwordViewer";
 import { pluginFieldIsRequired } from "@/lib/plugins/pluginFieldConditions";
+import { sqlServerUsesWindowsAuthentication } from "@/lib/connection/sqlServerAuthentication";
 
 type PasswordAuthenticationConfig = Pick<ConnectionConfig, "db_type" | "driver_profile" | "url_params">;
 
@@ -18,6 +19,9 @@ function hiveServerUrlParams(urlParams?: string): Map<string, string> {
 }
 
 export function connectionUsesPasswordlessAuthentication(config: PasswordAuthenticationConfig): boolean {
+  // Keep imported Windows configurations passwordless too: unsupported platforms/drivers
+  // must report the auth-mode error, not ask for an unrelated SQL login password.
+  if (sqlServerUsesWindowsAuthentication(config)) return true;
   const profile = config.driver_profile || config.db_type;
   const isImpala = config.db_type === "impala" || profile === "impala";
   const isKyuubi = config.db_type === "kyuubi" || profile === "kyuubi";

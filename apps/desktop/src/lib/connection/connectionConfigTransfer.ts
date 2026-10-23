@@ -1,6 +1,7 @@
 import type { ConnectionConfig, SidebarLayout, TunnelProfile } from "@/types/database";
 import { filterSidebarLayoutByConnectionIds as filterLayoutByConnectionIds, remapSidebarLayoutConnectionIds } from "@/lib/sidebar/sidebarLayout";
 import { buildOracleTnsConnectionString, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
+import { parseSqlServerJdbcParams } from "@/lib/connection/sqlServerLegacyCompatibility";
 
 export type ConnectionExportProtection = { mode: "encrypted"; passphrase: string } | { mode: "plaintext" };
 
@@ -65,7 +66,7 @@ export function snapshotConnectionsForExport(connections: ConnectionConfig[], op
 export function scrubConnectionForPlaintextExport(connection: ConnectionConfig): ConnectionConfig {
   const scrubbed: ConnectionConfig = JSON.parse(JSON.stringify(connection)) as ConnectionConfig;
   scrubbed.password = "";
-  scrubbed.url_params = scrubUrlParams(scrubbed.url_params);
+  scrubbed.url_params = scrubUrlParams(scrubbed.url_params, scrubbed.db_type === "sqlserver");
   scrubbed.init_script = undefined;
   // An Oracle TNS connection keeps its alias and the TNS_ADMIN directory that
   // resolves it in `connection_string`. Blanking it drops the directory, so a
@@ -120,18 +121,24 @@ function scrubExternalConfig(value: unknown): unknown {
   return output;
 }
 
-function scrubUrlParams(value: string | undefined): string | undefined {
+function scrubUrlParams(value: string | undefined, sqlServer = false): string | undefined {
   if (typeof value !== "string") return value;
-  return value
-    .split("&")
-    .map((part) => {
-      const separator = part.indexOf("=");
-      if (separator < 0) return part;
-      const key = part.slice(0, separator);
-      const normalized = key.trim().toLowerCase().replace(/[_-]/g, "");
-      return /password|passphrase|secret|token|apikey|privatekey|clientsecret/.test(normalized) ? key + "=" : part;
-    })
-    .join("&");
+  const scrubPart = (part: string): string => {
+    const separator = part.indexOf("=");
+    if (separator < 0) return part;
+    const key = part.slice(0, separator);
+    const normalized = key.trim().toLowerCase().replace(/[_-]/g, "");
+    const secret = /password|passphrase|secret|token|apikey|privatekey|clientsecret/.test(normalized) || (sqlServer && key.trim().toLowerCase() === "pwd");
+    return secret ? key + "=" : part;
+  };
+  if (sqlServer) {
+    const parsed = parseSqlServerJdbcParams(value);
+    // An unclosed value can hide later credentials, so omit malformed parameters.
+    if (parsed.unterminatedValue) return undefined;
+    const prefix = value.trim().startsWith("?") ? "?" : "";
+    return prefix + parsed.parts.map((part) => `${part.separator}${scrubPart(part.value)}`).join("");
+  }
+  return value.split("&").map(scrubPart).join("&");
 }
 
 /**

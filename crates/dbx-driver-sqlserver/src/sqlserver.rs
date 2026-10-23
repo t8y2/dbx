@@ -358,6 +358,8 @@ pub async fn connect(
 /// When `encrypt=false` / `sqlserverEncryption=disabled` is present, skip the
 /// `EncryptionLevel::Required` attempt so non-TLS servers are not blocked for a
 /// full connect timeout before the Off/NotSupported fallbacks run.
+/// `sqlserverAuth=windows` uses the current Windows account for every attempt;
+/// otherwise authentication continues to use the supplied SQL Server credentials.
 pub async fn connect_with_port_explicit(
     host: &str,
     port: u16,
@@ -368,19 +370,28 @@ pub async fn connect_with_port_explicit(
     url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
+    let authentication = sqlserver_authentication_mode(url_params)?.auth_method(user, pass)?;
     if sqlserver_native_encryption_disabled(url_params) {
         let skipped = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled".to_string();
-        return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
+        return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, &authentication, database, timeout)
             .await
             .map_err(|fallback_errors| sqlserver_connect_failure_message(&skipped, &fallback_errors));
     }
 
-    match try_connect(host, port, port_explicit, user, pass, database, tiberius::EncryptionLevel::Required, timeout)
-        .await
+    match try_connect(
+        host,
+        port,
+        port_explicit,
+        &authentication,
+        database,
+        tiberius::EncryptionLevel::Required,
+        timeout,
+    )
+    .await
     {
         Ok(client) => Ok(client),
         Err(encrypted_error) => {
-            try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
+            try_connect_legacy_sqlserver_encryption(host, port, port_explicit, &authentication, database, timeout)
                 .await
                 .map_err(|fallback_errors| sqlserver_connect_failure_message(&encrypted_error, &fallback_errors))
         }
@@ -474,20 +485,125 @@ async fn try_connect_legacy_sqlserver_encryption(
     host: &str,
     port: u16,
     port_explicit: bool,
-    user: &str,
-    pass: &str,
+    authentication: &AuthMethod,
     database: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, Vec<(&'static str, String)>> {
     let mut errors = Vec::new();
     for (label, encryption) in SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS {
-        match try_connect(host, port, port_explicit, user, pass, database, encryption, timeout).await {
+        match try_connect(host, port, port_explicit, authentication, database, encryption, timeout).await {
             Ok(client) => return Ok(client),
             Err(error) => errors.push((label, error)),
         }
     }
 
     Err(errors)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SqlServerAuthenticationMode {
+    SqlServer,
+    Windows,
+}
+
+const SQLSERVER_WINDOWS_AUTH_PLATFORM_ERROR: &str =
+    "SQL Server Windows authentication requires DBX to run on Windows and uses the current Windows account.";
+
+impl SqlServerAuthenticationMode {
+    fn auth_method(self, user: &str, pass: &str) -> Result<AuthMethod, String> {
+        match self {
+            Self::SqlServer => Ok(AuthMethod::sql_server(user, pass)),
+            Self::Windows => {
+                #[cfg(windows)]
+                {
+                    Ok(AuthMethod::Integrated)
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(SQLSERVER_WINDOWS_AUTH_PLATFORM_ERROR.to_string())
+                }
+            }
+        }
+    }
+}
+
+/// Split query-style and JDBC-style parameters without treating separators inside
+/// braced JDBC values (including escaped `}}`) as separate options.
+fn sqlserver_authentication_param_parts(params: &str) -> Result<Vec<&str>, String> {
+    let source = params.trim();
+    let source = source.strip_prefix('?').unwrap_or(source);
+    let bytes = source.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    let mut in_braces = false;
+    while index < bytes.len() {
+        if in_braces {
+            if bytes[index] == b'}' && bytes.get(index + 1) == Some(&b'}') {
+                index += 1;
+            } else if bytes[index] == b'}' {
+                in_braces = false;
+            }
+        } else if bytes[index] == b'{' {
+            in_braces = true;
+        } else if matches!(bytes[index], b'&' | b';') {
+            parts.push(&source[start..index]);
+            start = index + 1;
+        }
+        index += 1;
+    }
+    if in_braces {
+        return Err("Unterminated braced value in SQL Server URL parameters.".to_string());
+    }
+    parts.push(&source[start..]);
+    Ok(parts)
+}
+
+fn sqlserver_authentication_mode(url_params: Option<&str>) -> Result<SqlServerAuthenticationMode, String> {
+    let mut mode = None;
+    for part in sqlserver_authentication_param_parts(url_params.unwrap_or_default())? {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        if !key.trim().eq_ignore_ascii_case("sqlserverAuth") {
+            continue;
+        }
+        let value = value.trim();
+        let value = value.strip_prefix('{').and_then(|value| value.strip_suffix('}')).unwrap_or(value).trim();
+        let next = if value.eq_ignore_ascii_case("sql") {
+            SqlServerAuthenticationMode::SqlServer
+        } else if value.eq_ignore_ascii_case("windows") {
+            SqlServerAuthenticationMode::Windows
+        } else {
+            return Err("Unsupported SQL Server authentication mode. Use sqlserverAuth=sql or sqlserverAuth=windows."
+                .to_string());
+        };
+        if mode.is_some_and(|mode| mode != next) {
+            return Err("Conflicting sqlserverAuth parameters; specify a single authentication mode.".to_string());
+        }
+        mode = Some(next);
+    }
+    Ok(mode.unwrap_or(SqlServerAuthenticationMode::SqlServer))
+}
+
+/// Validate DBX's authentication option before selecting a native or legacy driver.
+/// JDBC's existing `integratedSecurity` option is intentionally left to that driver.
+pub fn validate_sqlserver_authentication(url_params: Option<&str>, driver_profile: Option<&str>) -> Result<(), String> {
+    if sqlserver_authentication_mode(url_params)? == SqlServerAuthenticationMode::Windows {
+        if driver_profile.is_some_and(|profile| profile.trim().eq_ignore_ascii_case(SQLSERVER_LEGACY_DRIVER_PROFILE)) {
+            return Err(
+                "SQL Server Windows authentication requires the native SQL Server driver; disable legacy compatibility mode."
+                    .to_string(),
+            );
+        }
+        if !cfg!(windows) {
+            return Err(SQLSERVER_WINDOWS_AUTH_PLATFORM_ERROR.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Whether DBX's native authentication option requests the current Windows process identity.
+pub fn sqlserver_uses_windows_authentication(url_params: Option<&str>) -> Result<bool, String> {
+    Ok(sqlserver_authentication_mode(url_params)? == SqlServerAuthenticationMode::Windows)
 }
 
 pub fn sqlserver_native_encryption_disabled(url_params: Option<&str>) -> bool {
@@ -512,8 +628,7 @@ async fn try_connect(
     host: &str,
     port: u16,
     port_explicit: bool,
-    user: &str,
-    pass: &str,
+    authentication: &AuthMethod,
     database: Option<&str>,
     encryption: tiberius::EncryptionLevel,
     timeout: Duration,
@@ -535,7 +650,7 @@ async fn try_connect(
         } else {
             config.port(current_port);
         }
-        config.authentication(AuthMethod::sql_server(user, pass));
+        config.authentication(authentication.clone());
         if let Some(db) = database {
             config.database(db);
         }
@@ -4562,7 +4677,7 @@ mod tests {
     use chrono::NaiveDate;
     use std::time::Duration;
     use std::{borrow::Cow, time::Instant};
-    use tiberius::{Column, ColumnData, ColumnType, IntoSql};
+    use tiberius::{AuthMethod, Column, ColumnData, ColumnType, IntoSql};
 
     #[test]
     fn sqlserver_query_transport_detects_synapse_engine_editions() {
@@ -5016,6 +5131,89 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_authentication_defaults_to_existing_sql_credentials() {
+        use super::SqlServerAuthenticationMode as Mode;
+        for params in [None, Some(""), Some("applicationName=dbx"), Some("integratedSecurity=true")] {
+            assert_eq!(super::sqlserver_authentication_mode(params).unwrap(), Mode::SqlServer);
+        }
+        assert_eq!(Mode::SqlServer.auth_method("alice", "secret").unwrap(), AuthMethod::sql_server("alice", "secret"));
+    }
+
+    #[test]
+    fn sqlserver_authentication_accepts_query_and_jdbc_options() {
+        use super::SqlServerAuthenticationMode as Mode;
+        for params in [
+            "sqlserverAuth=windows",
+            "?SQLSERVERAUTH = WiNdOwS &applicationName=dbx",
+            "applicationName=dbx; sqlserverAuth = { windows }",
+            "sqlserverAuth=windows;SQLSERVERAUTH=WINDOWS",
+        ] {
+            assert_eq!(super::sqlserver_authentication_mode(Some(params)).unwrap(), Mode::Windows, "{params}");
+        }
+        assert_eq!(super::sqlserver_authentication_mode(Some("sqlserverAuth=SQL")).unwrap(), Mode::SqlServer);
+    }
+
+    #[test]
+    fn sqlserver_authentication_does_not_read_options_from_braced_values() {
+        use super::SqlServerAuthenticationMode as Mode;
+        for params in [
+            "applicationName={reports;sqlserverAuth=windows}",
+            "?applicationName={reports&sqlserverAuth=windows}&encrypt=false",
+            "applicationName={reports}};sqlserverAuth=windows};sqlserverAuth=sql",
+            "applicationName={报表;sqlserverAuth=windows};sqlserverAuth={sql}",
+        ] {
+            assert_eq!(super::sqlserver_authentication_mode(Some(params)).unwrap(), Mode::SqlServer, "{params}");
+        }
+        assert_eq!(
+            super::sqlserver_authentication_mode(Some(
+                "applicationName={reports;sqlserverAuth=sql};sqlserverAuth=windows"
+            ))
+            .unwrap(),
+            Mode::Windows
+        );
+    }
+
+    #[test]
+    fn sqlserver_authentication_rejects_invalid_or_conflicting_options() {
+        for params in ["sqlserverAuth=", "sqlserverAuth", "sqlserverAuth=kerberos", "sqlserverAuth={sql;windows}"] {
+            let error = super::sqlserver_authentication_mode(Some(params)).unwrap_err();
+            assert!(error.contains("Unsupported SQL Server authentication mode"), "{params}: {error}");
+        }
+        for params in ["sqlserverAuth=sql;sqlserverAuth=windows", "?sqlserverAuth=windows&SQLSERVERAUTH=sql"] {
+            let error = super::sqlserver_authentication_mode(Some(params)).unwrap_err();
+            assert!(error.contains("Conflicting sqlserverAuth"), "{params}: {error}");
+        }
+        assert!(super::sqlserver_authentication_mode(Some("applicationName={reports;sqlserverAuth=windows")).is_err());
+    }
+
+    #[test]
+    fn sqlserver_authentication_validates_driver_and_platform_before_connecting() {
+        use super::SqlServerAuthenticationMode as Mode;
+        for params in [None, Some("sqlserverAuth=sql"), Some("integratedSecurity=true")] {
+            assert!(super::validate_sqlserver_authentication(params, Some("sqlserver-legacy")).is_ok());
+        }
+        let params = Some("sqlserverAuth=windows");
+        let error = super::validate_sqlserver_authentication(params, Some("sqlserver-legacy")).unwrap_err();
+        assert!(error.contains("native SQL Server driver"));
+        #[cfg(windows)]
+        {
+            assert!(super::validate_sqlserver_authentication(params, None).is_ok());
+            assert_eq!(Mode::Windows.auth_method("ignored-user", "ignored-password").unwrap(), AuthMethod::Integrated);
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                super::validate_sqlserver_authentication(params, None).unwrap_err(),
+                super::SQLSERVER_WINDOWS_AUTH_PLATFORM_ERROR
+            );
+            assert_eq!(
+                Mode::Windows.auth_method("ignored-user", "ignored-password").unwrap_err(),
+                super::SQLSERVER_WINDOWS_AUTH_PLATFORM_ERROR
+            );
+        }
+    }
+
+    #[test]
     fn sqlserver_legacy_encryption_modes_cover_jdbc_and_no_encryption_fallback() {
         assert_eq!(super::SQLSERVER_LEGACY_ENCRYPTION_LEVEL, tiberius::EncryptionLevel::Off);
         assert_eq!(super::SQLSERVER_UNSUPPORTED_ENCRYPTION_LEVEL, tiberius::EncryptionLevel::NotSupported);
@@ -5298,8 +5496,7 @@ mod tests {
             "127.0.0.1",
             hop1_port,
             true,
-            "sa",
-            "password",
+            &AuthMethod::sql_server("sa", "password"),
             None,
             tiberius::EncryptionLevel::NotSupported,
             Duration::from_secs(3),
@@ -5359,8 +5556,7 @@ mod tests {
             "127.0.0.1",
             port1,
             true,
-            "sa",
-            "password",
+            &AuthMethod::sql_server("sa", "password"),
             None,
             tiberius::EncryptionLevel::NotSupported,
             Duration::from_secs(3),
@@ -5401,8 +5597,7 @@ mod tests {
             "127.0.0.1",
             hop1_port,
             true,
-            "sa",
-            "password",
+            &AuthMethod::sql_server("sa", "password"),
             None,
             tiberius::EncryptionLevel::NotSupported,
             Duration::from_secs(3),

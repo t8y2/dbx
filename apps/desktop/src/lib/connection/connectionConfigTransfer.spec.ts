@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ConnectionConfig, SidebarLayout, TunnelProfile } from "@/types/database";
 import { buildConnectionConfigBundle, parseConnectionConfigObject, prepareConnectionConfigImport, scrubConnectionForPlaintextExport, scrubTunnelProfileForPlaintextExport, selectConnectionConfigBundle, snapshotConnectionsForExport } from "./connectionConfigTransfer";
+import { sqlServerAuthentication } from "./sqlServerAuthentication";
 
 function conn(id: string, name: string, extras: Partial<ConnectionConfig> = {}): ConnectionConfig {
   return {
@@ -136,6 +137,39 @@ describe("connectionConfigTransfer", () => {
     expect(JSON.stringify(exported)).not.toContain("api-key-secret");
     expect(JSON.stringify(exported)).not.toContain("nested-api-key");
     expect(JSON.stringify(exported)).not.toContain("basic-password");
+  });
+
+  it.each([
+    ["password=old-password;encrypt=false;sqlserverAuth=windows", "password=;encrypt=false;sqlserverAuth=windows"],
+    ["PWD={old-password;secret&value};encrypt=false;sqlserverAuth=windows", "PWD=;encrypt=false;sqlserverAuth=windows"],
+    ["?PASSWORD={old-password;secret&sqlserverAuth=sql}}tail};applicationName={DBX; Client}&sqlserverAuth=windows", "?PASSWORD=;applicationName={DBX; Client}&sqlserverAuth=windows"],
+    ["applicationName={DBX}}; Client};sqlserverAuth=windows;accessToken=old-token", "applicationName={DBX}}; Client};sqlserverAuth=windows;accessToken="],
+  ])("preserves Windows authentication through plaintext export and import while redacting JDBC credentials: %s", (params, expected) => {
+    const source = conn("windows", "Windows SQL Server", { db_type: "sqlserver", driver_profile: "sqlserver", password: "old-sql-password", save_password: false, url_params: params });
+    const exported = scrubConnectionForPlaintextExport(source);
+    const serialized = JSON.stringify(buildConnectionConfigBundle([exported], null, []));
+    const parsed = parseConnectionConfigObject(JSON.parse(serialized));
+    const imported = prepareConnectionConfigImport(parsed, [], [], () => "imported-windows");
+
+    expect(exported.url_params).toBe(expected);
+    expect(imported.connections[0]).toMatchObject({ id: "imported-windows", driver_profile: "sqlserver", password: "", save_password: false, url_params: expected });
+    expect(sqlServerAuthentication(imported.connections[0].url_params)).toBe("windows");
+    expect(serialized).not.toMatch(/old-password|old-sql-password|old-token|secret&/);
+    expect(source.url_params).toBe(params);
+    expect(source.password).toBe("old-sql-password");
+  });
+
+  it.each(["applicationName={reports&password=export-secret", "?applicationName={reports;PWD=export-secret", "sqlserverAuth=windows;applicationName={reports}};accessToken=export-secret"])("omits malformed SQL Server parameters from plaintext exports: %s", (params) => {
+    const parsed = parseConnectionConfigObject([conn("malformed", "SQL Server", { db_type: "sqlserver", url_params: params })]);
+    const source = prepareConnectionConfigImport(parsed, [], [], () => "imported-malformed").connections[0];
+    const exported = scrubConnectionForPlaintextExport(source);
+    const serialized = JSON.stringify(buildConnectionConfigBundle([exported], null, []));
+
+    expect(exported.url_params).toBeUndefined();
+    expect(serialized).not.toContain("export-secret");
+    expect(JSON.parse(serialized).connections[0]).not.toHaveProperty("url_params");
+    expect(source.url_params).toBe(params);
+    expect(source.password).toBe("secret");
   });
 
   it("parses legacy arrays and dbx-config payloads without inventing a layout", () => {

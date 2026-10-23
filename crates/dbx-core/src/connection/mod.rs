@@ -56,6 +56,8 @@ pub const GAUSSDB_M_JDBC_DRIVER_PROFILE: &str = "gaussdb-m";
 pub const GAUSSDB_M_JDBC_DRIVER_CLASS: &str = "com.huawei.gaussdb.jdbc.Driver";
 const SQLSERVER_LEGACY_DRIVER_INSTALL_HINT: &str =
     "Install the SQL Server legacy compatibility component from Driver Manager, or open the connection settings and enable SQL Server legacy compatibility mode again.";
+const DESKTOP_PROCESS_IDENTITY_AUTHENTICATION_REQUIRED: &str =
+    "SQL Server Windows authentication is only available in the Windows desktop app; this runtime cannot use the host process identity.";
 const DEFAULT_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const ACCESS_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
@@ -435,6 +437,7 @@ pub struct AppState {
     pub plugin_host: PluginHost,
     pub agent_manager: crate::agent_manager::AgentManager,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
+    desktop_process_identity_authentication: AtomicBool,
     duckdb_worker_process_isolation: AtomicBool,
     duckdb_worker_max_processes: AtomicUsize,
     /// PostgreSQL TLS cancel context, keyed by pool_key.
@@ -1798,6 +1801,7 @@ impl AppState {
                 app_version,
             ),
             nacos_registry: crate::nacos::NacosAdminRegistry::new(),
+            desktop_process_identity_authentication: AtomicBool::new(false),
             duckdb_worker_process_isolation: AtomicBool::new(false),
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
@@ -1901,6 +1905,36 @@ impl AppState {
             Ok(None) => JDBC_PLUGIN_NOT_INSTALLED.to_string(),
             Err(err) => format!("Failed to inspect JDBC plugin: {err}"),
         }
+    }
+
+    /// Desktop startup may enable authentication as its own process identity.
+    /// Standalone Web/MCP/core runtimes keep this disabled; a Web session is not
+    /// authorization to use the account running the service. Set before use.
+    pub fn set_desktop_process_identity_authentication_enabled(&self, enabled: bool) {
+        self.desktop_process_identity_authentication.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check runtime capabilities as well as URL options before opening any transport.
+    pub fn validate_connection_runtime_options(&self, config: &ConnectionConfig) -> Result<(), String> {
+        if config.db_type == DatabaseType::SqlServer {
+            self.validate_sqlserver_runtime_authentication(config)
+        } else {
+            validate_connection_url_params(config)
+        }
+    }
+
+    fn validate_sqlserver_runtime_authentication(&self, config: &ConnectionConfig) -> Result<(), String> {
+        let config = config.canonicalized();
+        db::sqlserver::validate_sqlserver_authentication(
+            config.url_params.as_deref(),
+            config.driver_profile.as_deref(),
+        )?;
+        if db::sqlserver::sqlserver_uses_windows_authentication(config.url_params.as_deref())?
+            && !self.desktop_process_identity_authentication.load(Ordering::Relaxed)
+        {
+            return Err(DESKTOP_PROCESS_IDENTITY_AUTHENTICATION_REQUIRED.to_string());
+        }
+        Ok(())
     }
 
     pub fn set_duckdb_worker_process_isolation_enabled(&self, enabled: bool) {
@@ -2060,6 +2094,7 @@ impl AppState {
         port: u16,
         connect_timeout: Duration,
     ) -> Result<ConnectionTestResult, String> {
+        self.validate_sqlserver_runtime_authentication(config)?;
         if sqlserver_uses_legacy_driver(config) {
             let legacy_config = sqlserver_legacy_agent_config(config);
             let connect_params =
@@ -2105,6 +2140,7 @@ impl AppState {
         port: u16,
         connect_timeout: Duration,
     ) -> Result<PoolKind, String> {
+        self.validate_sqlserver_runtime_authentication(config)?;
         if sqlserver_uses_legacy_driver(config) {
             let legacy_config = sqlserver_legacy_agent_config(config);
             let connect_params =
@@ -2806,7 +2842,7 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
-        validate_connection_url_params(&config)?;
+        self.validate_connection_runtime_options(&config)?;
         let validate_existing_pool = should_validate_existing_pool_before_reuse(config.db_type);
         let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
 
@@ -3772,6 +3808,9 @@ impl AppState {
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<ConnectionEndpoint, String> {
+        if config.db_type == DatabaseType::SqlServer {
+            self.validate_connection_runtime_options(config)?;
+        }
         let transport_layers = self.resolved_transport_layers(config).await?;
         let transport_summary = transport_layers
             .iter()
@@ -7584,7 +7623,15 @@ fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionCon
     }
 }
 
+/// Validate connection options before opening a transport or probing an endpoint.
 fn validate_connection_url_params(config: &ConnectionConfig) -> Result<(), String> {
+    if config.db_type == DatabaseType::SqlServer {
+        let config = config.canonicalized();
+        return db::sqlserver::validate_sqlserver_authentication(
+            config.url_params.as_deref(),
+            config.driver_profile.as_deref(),
+        );
+    }
     let normalized = native_postgres_url_config(config);
     normalized.as_ref().unwrap_or(config).validate_native_url_params()
 }
@@ -9699,6 +9746,99 @@ sleep 30
             validate_connection_url_params(&config).unwrap_err(),
             "Unsupported value for PostgreSQL stringtype parameter: text. Expected 'unspecified' or 'varchar'."
         );
+    }
+
+    #[test]
+    fn sqlserver_url_validation_preserves_sql_authentication_and_rejects_windows_legacy() {
+        let mut config = mysql_config(Some("tempdb"));
+        config.db_type = DatabaseType::SqlServer;
+        for profile in [None, Some("sqlserver"), Some("sqlserver-legacy")] {
+            config.driver_profile = profile.map(str::to_owned);
+            for params in [None, Some("sqlserverAuth=sql"), Some("applicationName=dbx;integratedSecurity=true")] {
+                config.url_params = params.map(str::to_owned);
+                assert!(validate_connection_url_params(&config).is_ok());
+            }
+        }
+
+        config.url_params = Some("sqlserverAuth=windows".to_owned());
+        assert!(validate_connection_url_params(&config).unwrap_err().contains("native SQL Server driver"));
+        config.driver_profile = Some("sqlserver".to_owned());
+        config.url_params = Some("sqlserverAuth=windows;sqlserverEncryption=disabled".to_owned());
+        assert!(validate_connection_url_params(&config).unwrap_err().contains("native SQL Server driver"));
+    }
+
+    #[tokio::test]
+    async fn sqlserver_authentication_rejected_before_pool_endpoint_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.path().join("plugins"));
+        let mut config = mysql_config(Some("tempdb"));
+        config.db_type = DatabaseType::SqlServer;
+        // Without early authentication validation this fails with an endpoint error.
+        config.host.clear();
+        config.port = 0;
+        let mut cases = vec![
+            ("sqlserver-legacy", "sqlserverAuth=windows", "native SQL Server driver"),
+            ("sqlserver", "sqlserverAuth=unsupported", "Unsupported SQL Server authentication mode"),
+        ];
+        if !cfg!(windows) {
+            cases.push(("sqlserver", "sqlserverAuth=windows", "requires DBX to run on Windows"));
+        }
+        for (profile, params, expected) in cases {
+            config.driver_profile = Some(profile.to_owned());
+            config.url_params = Some(params.to_owned());
+            state.configs.write().await.insert(config.id.clone(), config.clone());
+            let error = state.get_or_create_pool(&config.id, Some("tempdb")).await.unwrap_err();
+            assert!(error.contains(expected), "unexpected error before endpoint resolution: {error}");
+            assert!(state.pool_handle(&config.id).await.is_none());
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn sqlserver_windows_authentication_requires_explicit_desktop_process_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let desktop = AppState::new_with_plugin_dir(storage.clone(), dir.path().join("plugins"));
+        let mut config = mysql_config(Some("tempdb"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver".to_owned());
+        config.url_params = Some("sqlserverAuth=windows".to_owned());
+        config.host.clear();
+        config.port = 0;
+        let expected = super::DESKTOP_PROCESS_IDENTITY_AUTHENTICATION_REQUIRED;
+
+        assert_eq!(desktop.validate_connection_runtime_options(&config).unwrap_err(), expected);
+        assert_eq!(desktop.connection_host_port(&config.id, &config).await.unwrap_err(), expected);
+        assert_eq!(
+            desktop
+                .test_sqlserver_connection_with_info(&config, "", 0, Duration::ZERO)
+                .await
+                .err()
+                .expect("direct connection tests must enforce the runtime capability"),
+            expected
+        );
+        assert_eq!(
+            desktop
+                .connect_sqlserver_pool(&config, "", 0, Duration::ZERO)
+                .await
+                .err()
+                .expect("direct pool creation must enforce the runtime capability"),
+            expected
+        );
+        desktop.configs.write().await.insert(config.id.clone(), config.clone());
+        assert_eq!(desktop.get_or_create_pool(&config.id, Some("tempdb")).await.unwrap_err(), expected);
+        assert!(desktop.pool_handle(&config.id).await.is_none());
+
+        desktop.set_desktop_process_identity_authentication_enabled(true);
+        assert!(desktop.validate_connection_runtime_options(&config).is_ok());
+
+        // Enabling the desktop instance must not enable a separate Web/core runtime,
+        // even if both instances load the same storage and connection configuration.
+        let web = AppState::new_with_plugin_dir(storage, dir.path().join("plugins"));
+        assert_eq!(web.validate_connection_runtime_options(&config).unwrap_err(), expected);
+        config.url_params = Some("sqlserverAuth=sql".to_owned());
+        assert!(web.validate_connection_runtime_options(&config).is_ok());
     }
 
     #[test]

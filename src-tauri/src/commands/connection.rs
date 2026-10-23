@@ -338,6 +338,41 @@ mod tests {
         assert_eq!(state.configs.read().await.len(), 0);
     }
 
+    #[tokio::test]
+    async fn sqlserver_authentication_rejected_before_desktop_endpoint_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, dir.path().join("plugins")));
+        let app = tauri::test::mock_builder()
+            .manage(state.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let mut config = mongodb_config();
+        config.db_type = DatabaseType::SqlServer;
+        // Authentication errors must take precedence over this invalid endpoint.
+        config.host.clear();
+        config.port = 0;
+        let mut cases = vec![
+            ("sqlserver-legacy", "sqlserverAuth=windows", "native SQL Server driver"),
+            ("sqlserver", "sqlserverAuth=unsupported", "Unsupported SQL Server authentication mode"),
+        ];
+        if cfg!(windows) {
+            cases.push(("sqlserver", "sqlserverAuth=windows", "only available in the Windows desktop app"));
+        } else {
+            cases.push(("sqlserver", "sqlserverAuth=windows", "requires DBX to run on Windows"));
+        }
+        for (profile, params, expected) in cases {
+            config.driver_profile = Some(profile.to_owned());
+            config.url_params = Some(params.to_owned());
+            let error = test_connection_with_info_inner(&state, config.clone()).await.unwrap_err();
+            assert!(error.contains(expected), "unexpected test-connection error: {error}");
+            let error = connect_db(app.state::<Arc<AppState>>(), config.clone(), None).await.unwrap_err();
+            assert!(error.contains(expected), "unexpected connect error: {error}");
+        }
+        assert!(state.configs.read().await.is_empty());
+        assert!(state.pool_handle(&config.id).await.is_none());
+    }
+
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -1462,6 +1497,9 @@ async fn test_connection_with_info_impl(
     } else {
         config
     };
+    if config.db_type == DatabaseType::SqlServer {
+        state.validate_connection_runtime_options(&config)?;
+    }
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
@@ -2100,6 +2138,9 @@ async fn connect_db_inner(
     client_attempt: Option<u64>,
 ) -> Result<String, String> {
     let mut config = config.canonicalized();
+    if config.db_type == DatabaseType::SqlServer {
+        state.validate_connection_runtime_options(&config)?;
+    }
     dbx_core::query::plugin_plan::invalidate_gaussdb_dws_product_version(&mut config);
     if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_remote_worker_requested(&config) {
         db::sqlite::validate_persistent_attachments(

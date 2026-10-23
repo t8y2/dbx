@@ -137,6 +137,7 @@ import { pluginFieldIsRequired, pluginFieldIsVisible } from "@/lib/plugins/plugi
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
+import { setSqlServerAuthentication, sqlServerAuthentication, sqlServerUsesWindowsAuthentication, type SqlServerAuthentication } from "@/lib/connection/sqlServerAuthentication";
 import { parseSqlServerHostPort } from "@/lib/sqlserver/sqlServerHostPort";
 import { normalizeNacosConsoleUrl, normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
@@ -2571,6 +2572,7 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
 
 async function setSqlServerDriverMode(mode: "auto" | "legacy") {
   if (form.value.db_type !== "sqlserver") return;
+  if (mode === "legacy" && sqlServerUsesWindowsAuthentication(form.value)) return;
   // The connection test may still be using the previous compatibility mode.
   resetTestState();
   if (mode === "auto") {
@@ -4375,6 +4377,22 @@ const agentInstallProgressLabel = computed(() => {
 });
 const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || !!agentInstallError.value);
 const sqlServerDriverMode = computed<"auto" | "legacy">(() => (sqlServerUsesLegacyCompatibility(form.value) ? "legacy" : "auto"));
+const sqlServerAuthMode = computed(() => sqlServerAuthentication(form.value.url_params));
+const sqlServerWindowsAuthSelected = computed(() => sqlServerUsesWindowsAuthentication(form.value));
+const sqlServerWindowsAuthAvailable = isDesktop && isWindows();
+const sqlServerAuthError = computed(() => {
+  if (form.value.db_type !== "sqlserver") return "";
+  if (sqlServerAuthMode.value === "invalid") return t("connection.sqlServerAuthInvalid");
+  if (!sqlServerWindowsAuthSelected.value) return "";
+  if (!sqlServerWindowsAuthAvailable) return t("connection.sqlServerWindowsAuthUnsupported");
+  if (sqlServerDriverMode.value === "legacy") return t("connection.sqlServerWindowsAuthNativeOnly");
+  return "";
+});
+function setSqlServerAuthMode(mode: SqlServerAuthentication) {
+  if (mode === "windows" && (!sqlServerWindowsAuthAvailable || sqlServerDriverMode.value === "legacy")) return;
+  form.value.url_params = setSqlServerAuthentication(form.value.url_params, mode);
+  resetTestState();
+}
 const shouldUseWideConnectionDialog = computed(
   () => dialogStep.value === "config" && (canChooseVisibleDatabases.value || canChooseVisibleNacosNamespaces.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value) || (selectedPluginProvider.value?.contribution.fields.length ?? 0) >= 6),
 );
@@ -5223,6 +5241,12 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.password = config.password.trim();
     config.database = undefined;
   } else if (config.db_type === "sqlserver") {
+    if (sqlServerAuthError.value) throw new Error(sqlServerAuthError.value);
+    if (sqlServerUsesWindowsAuthentication(config)) {
+      config.username = "";
+      config.password = "";
+      config.save_password = false;
+    }
     const parsed = parseSqlServerHostPort(config.host, config.port);
     config.host = parsed.host;
     if (parsed.portExplicit && parsed.port !== undefined) {
@@ -9347,7 +9371,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelSmallClass">{{ t("connection.driverMode") }}</Label>
                       <div class="col-span-3 flex items-center gap-2">
                         <Button size="sm" :variant="sqlServerDriverMode === 'legacy' ? 'outline' : 'default'" :disabled="agentInstallRunning" @click="setSqlServerDriverMode('auto')">{{ t("connection.mongoDriverAuto") }}</Button>
-                        <Button size="sm" :variant="sqlServerDriverMode === 'legacy' ? 'default' : 'outline'" :disabled="agentInstallRunning" @click="setSqlServerDriverMode('legacy')">{{ t("connection.mongoDriverLegacy") }}</Button>
+                        <Button size="sm" :variant="sqlServerDriverMode === 'legacy' ? 'default' : 'outline'" :disabled="agentInstallRunning || sqlServerWindowsAuthSelected" @click="setSqlServerDriverMode('legacy')">{{ t("connection.mongoDriverLegacy") }}</Button>
                         <Tooltip>
                           <TooltipTrigger as-child>
                             <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
@@ -9451,17 +9475,33 @@ function openExternalUrl(url: string) {
                       <Input v-model="form.informix_server" class="col-span-3" placeholder="ol_informix1170" />
                     </div>
 
-                    <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="form.db_type === 'sqlserver'" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.sqlServerAuthentication") }}</Label>
+                      <div class="col-span-3 space-y-2">
+                        <div class="flex flex-wrap gap-2" role="group" :aria-label="t('connection.sqlServerAuthentication')">
+                          <Button size="sm" :variant="sqlServerAuthMode === 'sql' ? 'default' : 'outline'" :aria-pressed="sqlServerAuthMode === 'sql'" @click="setSqlServerAuthMode('sql')">{{ t("connection.sqlServerAuthSql") }}</Button>
+                          <Button size="sm" :variant="sqlServerAuthMode === 'windows' ? 'default' : 'outline'" :aria-pressed="sqlServerAuthMode === 'windows'" :disabled="!sqlServerWindowsAuthAvailable || sqlServerDriverMode === 'legacy'" @click="setSqlServerAuthMode('windows')">{{
+                            t("connection.sqlServerAuthWindows")
+                          }}</Button>
+                        </div>
+                        <p v-if="sqlServerWindowsAuthSelected" class="text-xs text-muted-foreground">{{ t("connection.sqlServerWindowsAuthHint") }}</p>
+                        <p v-if="sqlServerAuthError" role="alert" class="text-xs text-destructive">{{ sqlServerAuthError }}</p>
+                        <p v-else-if="!sqlServerWindowsAuthAvailable" class="text-xs text-muted-foreground">{{ t("connection.sqlServerWindowsAuthUnsupported") }}</p>
+                        <p v-else-if="sqlServerDriverMode === 'legacy'" class="text-xs text-muted-foreground">{{ t("connection.sqlServerWindowsAuthNativeOnly") }}</p>
+                      </div>
+                    </div>
+
+                    <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner' && !sqlServerWindowsAuthSelected" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                       <Input v-model="form.username" class="col-span-3" />
                     </div>
 
-                    <div v-if="form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="form.db_type !== 'spanner' && !sqlServerWindowsAuthSelected" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ form.db_type === "meilisearch" ? t("connection.mqAuthApiKey") : t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
 
-                    <SavePasswordCheckbox v-if="form.db_type !== 'spanner'" v-model="form.save_password" />
+                    <SavePasswordCheckbox v-if="form.db_type !== 'spanner' && !sqlServerWindowsAuthSelected" v-model="form.save_password" />
 
                     <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'solr' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
@@ -11169,10 +11209,10 @@ function openExternalUrl(url: string) {
               <ListFilter v-else class="mr-1.5 h-4 w-4" />
               {{ visibleSchemaSummary }}
             </Button>
-            <Button variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving" @click="testConnection">
+            <Button variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving || !!sqlServerAuthError" @click="testConnection">
               {{ isTesting ? t("connection.testing") : t("connection.test") }}
             </Button>
-            <Button class="shrink-0" @click="save()" :disabled="isSaving || isTestingSshTunnel || !hasRequiredConnectionTarget">
+            <Button class="shrink-0" @click="save()" :disabled="isSaving || isTestingSshTunnel || !hasRequiredConnectionTarget || !!sqlServerAuthError">
               {{ isSaving ? t("common.loading") : editingId || isJdbcConnection ? t("connection.save") : t("connection.saveAndConnect") }}
             </Button>
           </template>

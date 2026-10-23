@@ -115,4 +115,29 @@ describe("connectionStore SQL Server legacy compatibility", () => {
     expect(connectDb).toHaveBeenCalledOnce();
     expect(installAgent).not.toHaveBeenCalled();
   });
+
+  it.each(["connect", "reconnect"])("rejects imported Windows + legacy authentication before looking up or installing drivers on %s", async (operation) => {
+    const connectDb = vi.fn();
+    const installAgent = vi.fn();
+    const isAgentInstalled = vi.fn().mockResolvedValue(false);
+    const config = {
+      ...sqlServerNativeConnectionWithDisabledEncryption(),
+      driver_profile: "sqlserver-legacy",
+      url_params: "sqlserverAuth=windows",
+      password: "",
+      save_password: false,
+    };
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@/lib/backend/api", () => ({ connectDb, installAgent, isAgentInstalled, listInstalledAgents: vi.fn().mockResolvedValue([]) }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections.push(config);
+
+    const attempt = operation === "connect" ? store.connect(config) : store.ensureConnected(config.id, { forceReconnect: true, allowPasswordPrompt: false });
+    await expect(attempt).rejects.toThrow(/Windows/);
+    expect(isAgentInstalled).not.toHaveBeenCalled();
+    expect(installAgent).not.toHaveBeenCalled();
+    expect(connectDb).not.toHaveBeenCalled();
+  });
 });

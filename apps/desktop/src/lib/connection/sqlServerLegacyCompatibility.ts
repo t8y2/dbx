@@ -36,7 +36,11 @@ interface SqlServerJdbcParamPart {
   value: string;
 }
 
-function splitSqlServerJdbcParams(params: string | undefined): SqlServerJdbcParamPart[] {
+export function splitSqlServerJdbcParams(params: string | undefined): SqlServerJdbcParamPart[] {
+  return parseSqlServerJdbcParams(params).parts;
+}
+
+export function parseSqlServerJdbcParams(params: string | undefined): { parts: SqlServerJdbcParamPart[]; unterminatedValue: boolean } {
   const source = (params || "").trim().replace(/^\?/, "");
   const parts: SqlServerJdbcParamPart[] = [];
   let separator: SqlServerJdbcParamPart["separator"] = "";
@@ -62,7 +66,7 @@ function splitSqlServerJdbcParams(params: string | undefined): SqlServerJdbcPara
   }
 
   parts.push({ separator, value: source.slice(start) });
-  return parts;
+  return { parts, unterminatedValue: inBraces };
 }
 
 function isSqlServerLegacyCompatibilityPart(part: string): boolean {

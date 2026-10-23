@@ -17,6 +17,17 @@ function connection(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig
 }
 
 describe("connection password prompting", () => {
+  it.each(["sqlserver", "sqlserver-legacy"])("never asks for a SQL password for Windows authentication, including unsupported imported profiles (%s)", (driver_profile) => {
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "sqlserver", driver_profile, url_params: "sqlserverAuth=windows" }))).toBe(false);
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "sqlserver", driver_profile, url_params: "sqlserverAuth=windows", password: "__DBX_SAVED_CREDENTIAL__:ref" }))).toBe(false);
+  });
+
+  it("keeps SQL Server password prompting for old connections and SQL authentication", () => {
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "sqlserver" }))).toBe(true);
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "sqlserver", url_params: "sqlserverAuth=sql" }))).toBe(true);
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "sqlserver", url_params: "integratedSecurity=true" }))).toBe(true);
+  });
+
   it("treats Impala's default and explicit NOSASL modes as passwordless", () => {
     expect(connectionUsesPasswordlessAuthentication(connection())).toBe(true);
     expect(connectionUsesPasswordlessAuthentication(connection({ url_params: "transportMode=binary;auth=noSasl" }))).toBe(true);

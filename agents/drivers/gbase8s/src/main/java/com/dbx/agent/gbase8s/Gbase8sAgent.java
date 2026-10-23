@@ -609,35 +609,98 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         String table,
         boolean mysqlCompatMode
     ) {
+        // sysdefaults is the canonical catalog for column defaults (referenced
+        // through syscolumns.coldefault) and covers literal, USER/CURRENT/TODAY
+        // and NULL defaults; sysdefaultsexpr only exposes compiled expression
+        // defaults, which is why tables whose defaults are plain literals came
+        // back empty before (issue #13220). Query both and keep the first value
+        // per column; either source failing leaves the other usable.
+        Map<String, String> defaults = new LinkedHashMap<>();
+        loadColumnDefaultsFromSource(
+            defaults,
+            conn,
+            owner,
+            table,
+            mysqlCompatMode,
+            """
+                SELECT c.colname, %s AS column_default, d.class AS default_class
+                FROM systables t
+                JOIN syscolumns c ON t.tabid = c.tabid
+                JOIN sysdefaults d ON d.tabid = c.tabid AND d.colno = c.colno AND d.seqno = c.coldefault
+                WHERE t.tabname = ? AND d.type = 'T'
+                """.formatted(mysqlCompatMode ? "d.`default`" : "d.default").stripIndent().trim(),
+            true
+        );
+        loadColumnDefaultsFromSource(
+            defaults,
+            conn,
+            owner,
+            table,
+            mysqlCompatMode,
+            """
+                SELECT c.colname, %s AS column_default
+                FROM systables t
+                JOIN syscolumns c ON t.tabid = c.tabid
+                JOIN sysdefaultsexpr e ON c.tabid = e.tabid AND c.colno = e.colno
+                WHERE t.tabname = ? AND e.type = 'T'
+                """.formatted(mysqlCompatMode ? "e.`default`" : "e.default").stripIndent().trim(),
+            false
+        );
+        return defaults;
+    }
+
+    private static void loadColumnDefaultsFromSource(
+        Map<String, String> defaults,
+        Connection conn,
+        String owner,
+        String table,
+        boolean mysqlCompatMode,
+        String sqlText,
+        boolean hasDefaultClass
+    ) {
         List<Object> args = new ArrayList<>();
         args.add(table);
-        StringBuilder sql = new StringBuilder("""
-            SELECT c.colname, %s AS column_default
-            FROM systables t
-            JOIN syscolumns c ON t.tabid = c.tabid
-            JOIN sysdefaultsexpr e ON c.tabid = e.tabid AND c.colno = e.colno
-            WHERE t.tabname = ? AND e.type = 'T'
-            """.formatted(mysqlCompatMode ? "e.`default`" : "e.default").stripIndent().trim());
+        StringBuilder sql = new StringBuilder(sqlText);
         if (!owner.isEmpty()) {
             sql.append(" AND t.owner = ?");
             args.add(owner);
         }
 
-        Map<String, String> defaults = new LinkedHashMap<>();
         try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
             bind(stmt, args);
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     String value = sanitizeColumnDefault(rs.getString("column_default"));
+                    if (value == null && hasDefaultClass) {
+                        // sysdefaults stores keyword defaults with a NULL value
+                        // and the class marker instead; surface the DEFAULT
+                        // clause keyword the class stands for.
+                        value = defaultClassKeyword(rs.getString("default_class"));
+                    }
                     if (value != null) {
-                        defaults.put(trim(rs.getString("colname")), value);
+                        defaults.putIfAbsent(trim(rs.getString("colname")), value);
                     }
                 }
             }
         } catch (SQLException ignored) {
-            return Collections.emptyMap();
+            // Either catalog failing (older servers may lack the view) leaves
+            // whatever the other source contributed in place.
         }
-        return defaults;
+    }
+
+    /** The Informix DEFAULT clause keyword a sysdefaults.class marker stands for. */
+    static String defaultClassKeyword(String defaultClass) {
+        if (defaultClass == null) {
+            return null;
+        }
+        return switch (defaultClass) {
+            case "U" -> "USER";
+            case "C" -> "CURRENT";
+            case "T" -> "TODAY";
+            case "S" -> "SITENAME";
+            case "N" -> "NULL";
+            default -> null;
+        };
     }
 
     public static String sanitizeColumnDefault(String value) {

@@ -2232,6 +2232,7 @@ async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
           database: node.database,
           schema: node.schema,
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          defaultSchema: config?.default_schema,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           tableName: node.label,

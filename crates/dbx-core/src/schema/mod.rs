@@ -3587,6 +3587,15 @@ mod tests {
     }
 
     #[test]
+    fn object_types_request_triggers_only_for_explicit_trigger_requests() {
+        assert!(crate::schema::object_types_request_triggers(Some(&["TRIGGER".to_string()])));
+        assert!(crate::schema::object_types_request_triggers(Some(&["TABLE".to_string(), "trigger".to_string()])));
+        assert!(!crate::schema::object_types_request_triggers(Some(&["TABLE".to_string()])));
+        assert!(!crate::schema::object_types_request_triggers(Some(&[])));
+        assert!(!crate::schema::object_types_request_triggers(None));
+    }
+
+    #[test]
     fn with_agent_pg_sequence_objects_merges_without_duplicating() {
         let objects = vec![test_object_info("dbx9016_serial", "TABLE"), test_object_info("dbx9016_seq", "SEQUENCE")];
         let sequences =
@@ -7520,7 +7529,7 @@ async fn list_objects_once(
                 is_oracle && filter.is_some_and(|filter| !filter.trim().is_empty());
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
             let fallback_config = db_config.clone();
-            if is_oracle && !use_oracle_agent_paging {
+            if is_oracle && (!use_oracle_agent_paging || object_types_request_triggers(object_types)) {
                 return oracle_agent_list_objects(agent_client, database, schema, timeout_duration)
                     .await
                     .map(unpaged_object_list);
@@ -10227,6 +10236,10 @@ fn object_types_include_sequences(object_types: Option<&[String]>) -> bool {
     object_types.is_none_or(|types| types.iter().any(|t| t.eq_ignore_ascii_case("SEQUENCE")))
 }
 
+fn object_types_request_triggers(object_types: Option<&[String]>) -> bool {
+    object_types.is_some_and(|types| types.iter().any(|t| t.eq_ignore_ascii_case("TRIGGER")))
+}
+
 fn object_types_include_routines(object_types: Option<&[String]>) -> bool {
     object_types
         .is_none_or(|types| types.iter().any(|t| matches!(t.to_ascii_uppercase().as_str(), "PROCEDURE" | "FUNCTION")))
@@ -11702,8 +11715,8 @@ pub fn oracle_list_objects_sql(schema: &str) -> String {
     format!(
         "SELECT object_name, CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE object_type END AS object_type, owner \
          FROM all_objects \
-         WHERE owner = {} AND object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY') \
-         ORDER BY CASE object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 WHEN 'SEQUENCE' THEN 4 WHEN 'PACKAGE' THEN 5 ELSE 6 END, object_name",
+         WHERE owner = {} AND object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY') \
+         ORDER BY CASE object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 WHEN 'TRIGGER' THEN 4 WHEN 'SEQUENCE' THEN 5 WHEN 'PACKAGE' THEN 6 ELSE 7 END, object_name",
         oracle_owner_filter(schema)
     )
 }
@@ -12865,6 +12878,10 @@ mod object_source_tests {
             oracle_object_source_sql("HR", "ORDER_SEQ", &ObjectSourceKind::Sequence),
             "SELECT DBMS_METADATA.GET_DDL('SEQUENCE', 'ORDER_SEQ', 'HR') FROM DUAL"
         );
+        assert_eq!(
+            oracle_object_source_sql("HR", "EMP_AUDIT", &ObjectSourceKind::Trigger),
+            "SELECT DBMS_METADATA.GET_DDL('TRIGGER', 'EMP_AUDIT', 'HR') FROM DUAL"
+        );
         assert_eq!(oracle_object_source_sql("HR", "NIGHTLY_JOB", &ObjectSourceKind::Job), "");
     }
 
@@ -12874,6 +12891,7 @@ mod object_source_tests {
 
         assert!(sql.contains("'PACKAGE'"));
         assert!(sql.contains("'PACKAGE BODY'"));
+        assert!(sql.contains("'TRIGGER'"));
         assert!(sql.contains("'SEQUENCE'"));
         assert!(sql.contains("CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'"));
         assert!(sql.contains("owner = 'HR'"));

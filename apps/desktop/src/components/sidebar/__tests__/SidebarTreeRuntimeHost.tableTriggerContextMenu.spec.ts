@@ -77,6 +77,13 @@ describe("Table trigger context menu", () => {
     expect(items).toContain(tr("contextMenu.changeOpenMode"));
   });
 
+  it("exposes view, edit, and drop actions for Oracle database-level triggers", async () => {
+    const host = await mountHost("oracle");
+    const items = labels(host.buildContextMenu(node("trigger", "TR_CONN")));
+
+    expect(items).toEqual(expect.arrayContaining([tr("contextMenu.viewSource"), tr("contextMenu.editObject"), tr("contextMenu.dropTrigger")]));
+  });
+
   it("offers Copy Qualified Name for MySQL routines without schema metadata", async () => {
     const host = await mountHost("mysql");
     const routineNode: TreeNode = { ...node("procedure", "rebuild"), schema: undefined };

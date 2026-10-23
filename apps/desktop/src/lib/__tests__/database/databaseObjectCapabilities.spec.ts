@@ -43,7 +43,8 @@ describe("databaseObjectCapabilities", () => {
   it("exposes Oracle sequences through the existing grouped object path", () => {
     const oracleObjects = sidebarObjectKindsForDatabase("oracle");
 
-    expect(oracleObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"]);
+    expect(oracleObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"]);
+    expect(databaseObjectCapabilities("oracle").sourceReadable).toContain("TRIGGER");
     expect(databaseObjectCapabilities("oracle").sourceReadable).toContain("SEQUENCE");
     expect(
       buildObjectGroupPlaceholderNodes({
@@ -53,7 +54,7 @@ describe("databaseObjectCapabilities", () => {
         schema: "HR",
         objectTypes: oracleObjects,
       }).map((node) => node.type),
-    ).toContain("group-sequences");
+    ).toEqual(expect.arrayContaining(["group-triggers", "group-sequences"]));
   });
 
   it("expands package members only for implemented database paths", () => {

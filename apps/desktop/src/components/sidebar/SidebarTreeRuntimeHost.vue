@@ -2882,11 +2882,12 @@ function dropObjectSqlOptions(): DropObjectSqlOptions | null {
 }
 
 function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | null {
-  if (node.type !== "view" && node.type !== "materialized_view" && node.type !== "procedure" && node.type !== "function" && node.type !== "event") return null;
+  const databaseTrigger = node.type === "trigger" && !node.tableName;
+  if (node.type !== "view" && node.type !== "materialized_view" && node.type !== "procedure" && node.type !== "function" && node.type !== "event" && !databaseTrigger) return null;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
   return {
     databaseType: tableStructureDatabaseTypeForNode(node),
-    objectType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : node.type === "function" ? "FUNCTION" : "EVENT",
+    objectType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : node.type === "function" ? "FUNCTION" : node.type === "trigger" ? "TRIGGER" : "EVENT",
     schema: connectionTableSqlSchema(config, node.schema),
     name: node.objectName || node.label,
     signature: node.signature,
@@ -2947,6 +2948,7 @@ function dropObjectMenuLabel(): string {
   if (activeNode.value.type === "materialized_view") return t("contextMenu.dropView");
   if (activeNode.value.type === "procedure") return t("contextMenu.dropProcedure");
   if (activeNode.value.type === "function") return t("contextMenu.dropFunction");
+  if (activeNode.value.type === "trigger") return t("contextMenu.dropTrigger");
   if (activeNode.value.type === "event") return t("contextMenu.dropObject");
   return t("contextMenu.dropObject");
 }
@@ -2956,6 +2958,7 @@ function dropObjectConfirmTitle(): string {
   if (activeNode.value.type === "materialized_view") return t("contextMenu.confirmDropViewTitle");
   if (activeNode.value.type === "procedure") return t("contextMenu.confirmDropProcedureTitle");
   if (activeNode.value.type === "function") return t("contextMenu.confirmDropFunctionTitle");
+  if (activeNode.value.type === "trigger") return t("contextMenu.confirmDropTriggerTitle");
   return t("contextMenu.confirmDropObjectTitle");
 }
 
@@ -3241,7 +3244,7 @@ function canDropTreeNode(node: TreeNode): boolean {
   if (["neo4j", "nebula"].includes(databaseTypeForNode(node) || "")) return false;
   if (isSqlServerLinkedNode(node)) return false;
   if (node.type === "table") return !!node.connectionId && !!node.database;
-  if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function" || node.type === "event") {
+  if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function" || node.type === "event" || (node.type === "trigger" && !node.tableName)) {
     return !!node.connectionId && !!node.database && !!dropObjectSqlOptionsForNode(node);
   }
   if (canDropMongoIndexNode(node)) return true;
@@ -3586,7 +3589,7 @@ function requestDropSelectedNode(): boolean {
     dropTable();
     return true;
   }
-  if (activeNode.value.type === "view" || activeNode.value.type === "procedure" || activeNode.value.type === "function") {
+  if (activeNode.value.type === "view" || activeNode.value.type === "procedure" || activeNode.value.type === "function" || (activeNode.value.type === "trigger" && !activeNode.value.tableName)) {
     requestDropObject();
     return true;
   }
@@ -4273,7 +4276,17 @@ async function confirmDropObject() {
     const sql = dropObjectPreviewSql.value || (await buildDropObjectSql(options));
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     const msgKey =
-      node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "materialized_view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : node.type === "function" ? "contextMenu.dropFunctionSuccess" : "contextMenu.dropEventSuccess";
+      node.type === "view"
+        ? "contextMenu.dropViewSuccess"
+        : node.type === "materialized_view"
+          ? "contextMenu.dropViewSuccess"
+          : node.type === "procedure"
+            ? "contextMenu.dropProcedureSuccess"
+            : node.type === "function"
+              ? "contextMenu.dropFunctionSuccess"
+              : node.type === "trigger"
+                ? "contextMenu.dropTableChildObjectSuccess"
+                : "contextMenu.dropEventSuccess";
     toast(t(msgKey, { name: node.label }), 3000);
     closeDroppedTableObjectTabsForNode(node);
     // Refresh the parent object list so group badges and children stay in sync.
@@ -7674,6 +7687,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   if (node.type === "index" || node.type === "fkey" || (node.type === "trigger" && !!node.tableName)) {
     items.push(node.type === "trigger" || node.type === "index" ? copyNameMenuItem() : { label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     if (node.type === "trigger") {
+      if (databaseTypeForNode(node) === "oracle") {
+        items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
+      }
       items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
       items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
       const toggleItems = triggerToggleMenuItems(node);
@@ -7801,6 +7817,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   }
 
   if (node.type === "trigger" || node.type === "package" || node.type === "package-body") {
+    const databaseType = databaseTypeForNode(node);
     if ((databaseTypeForNode(node) === "oracle" || databaseTypeForNode(node) === "oceanbase-oracle") && (node.type === "package" || node.type === "package-body")) {
       items.push({ label: t("objects.packageSaveAsTitle"), action: () => openPackageSaveAsDialog(node), icon: CopyPlus });
     }
@@ -7811,6 +7828,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ sidebarActionId: "contextMenu.editObject", label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
     }
     items.push({ sidebarActionId: "contextMenu.viewSource", label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (node.type === "trigger" && databaseType === "oracle") {
+      items.push({ sidebarActionId: "contextMenu.editObject", label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
+    }
     if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
       items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
     }
@@ -7830,6 +7850,16 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     items.push(copyNameMenuItem());
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+    if (node.type === "trigger" && !node.tableName && databaseType === "oracle") {
+      items.push({ label: "", separator: true });
+      items.push({
+        label: deleteMenuLabel(t("contextMenu.dropTrigger")),
+        action: deleteMenuAction(requestDropObject),
+        icon: Trash2,
+        shortcut: shortcutDelete,
+        variant: "destructive" as const,
+      });
+    }
     return true;
   }
 

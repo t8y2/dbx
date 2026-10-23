@@ -14,6 +14,7 @@ pub enum DatabaseObjectType {
     MaterializedView,
     Procedure,
     Function,
+    Trigger,
     Event,
 }
 
@@ -1315,6 +1316,7 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
         DatabaseObjectType::MaterializedView => "MATERIALIZED VIEW",
         DatabaseObjectType::Procedure => "PROCEDURE",
         DatabaseObjectType::Function => "FUNCTION",
+        DatabaseObjectType::Trigger => "TRIGGER",
         DatabaseObjectType::Event => "EVENT",
     }
 }
@@ -2285,6 +2287,17 @@ mod tests {
                 identifier_quote: None,
             }),
             "DROP FUNCTION \"public\".\"calc\"(integer, integer);"
+        );
+        assert_eq!(
+            build_drop_object_sql(DropObjectSqlOptions {
+                database_type: Some(DatabaseType::Oracle),
+                object_type: DatabaseObjectType::Trigger,
+                schema: Some("HR".to_string()),
+                name: "EMP_AUDIT".to_string(),
+                signature: None,
+                identifier_quote: None,
+            }),
+            "DROP TRIGGER \"HR\".\"EMP_AUDIT\";"
         );
         assert_eq!(
             build_drop_database_sql(DatabaseNameSqlOptions {

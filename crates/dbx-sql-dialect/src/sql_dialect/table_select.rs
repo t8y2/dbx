@@ -4,7 +4,9 @@ use super::capabilities::{
     firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, uses_postgres_ctid, uses_xugu_row_id,
     TablePaginationStrategy,
 };
-use super::identifier_unquote::{can_unquote_identifier, unquote_qualified_table_reference};
+use super::identifier_unquote::{
+    can_unquote_identifier, dialect_supports_unquoted_execution, unquote_qualified_table_reference,
+};
 use super::identifiers::{
     normalize_where_input, parse_sqlserver_linked_schema_ref, qualified_table_name, qualified_table_name_with_catalog,
     quote_gaussdb_jdbc_identifier, quote_iris_identifier, quote_table_identifier,
@@ -195,10 +197,12 @@ fn build_large_value_preview_items(options: &TableDataSelectSqlOptions) -> Optio
         let alias_kind = large_value_marker_alias_kind(kind, data_type);
         let marker_name =
             format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{}", column_index + source_index_offset);
-        // The marker alias stays quoted even with the quote-identifiers opt-out:
-        // its lowercase underscore-prefixed spelling never satisfies
-        // can_unquote's first-character rule, so the client's column-name
-        // matching keeps working (pinned by tests).
+        // The marker alias stays quoted even with the quote-identifiers
+        // opt-out: can_unquote_identifier rejects every `__DBX_`-prefixed
+        // synthetic name outright — only the case-folding branches would
+        // reject the lowercase spelling on their own, the MySQL-family
+        // fallback would not — so the client's column-name matching keeps
+        // working (pinned by tests).
         let marker_alias = quote_table_identifier(database_type, &marker_name);
         let (preview, marker_kind) = match database_type {
             Some(DatabaseType::Mysql) if kind == LargeValuePreviewKind::Binary => {
@@ -294,9 +298,18 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
 }
 
 pub fn build_table_data_select_sql_with_database(
-    options: TableDataSelectSqlOptions,
+    mut options: TableDataSelectSqlOptions,
     include_database_name: bool,
 ) -> String {
+    // The execution-surface opt-out is bounded to dialects whose unquoted
+    // spellings are proven safe to execute (#12878 review): the shared
+    // fallback reserved-word table is a PostgreSQL∪MySQL merge and knows
+    // nothing about T-SQL's `TOP` or Db2's fold-to-uppercase, so for every
+    // other dialect the data view keeps the historical always-quoted SQL
+    // instead of executing an unverified bare identifier.
+    if !options.quote_identifiers && !dialect_supports_unquoted_execution(options.database_type) {
+        options.quote_identifiers = true;
+    }
     let database_type = options.database_type;
     let schema = table_data_schema(database_type, options.driver_profile.as_deref(), options.schema.as_deref());
     let limit = options.limit.unwrap_or(100);
@@ -1769,5 +1782,58 @@ mod tests {
         )
         .unwrap();
         assert!(!opted_out.quote_identifiers);
+    }
+
+    #[test]
+    fn table_data_select_quote_opt_out_only_bares_verified_dialects() {
+        // #12878 review: the fallback reserved-word table is a PostgreSQL∪MySQL
+        // merge, so SQL Server's `TOP` and Db2's fold-to-uppercase must keep
+        // their quotes in executed SQL — the data view reverts to the
+        // historical always-quoted form outside the verified-dialect list.
+        let mut sqlserver = opts(DatabaseType::SqlServer, None, None, "docs");
+        sqlserver.columns = vec!["TOP".to_string(), "PERCENT".to_string(), "name".to_string()];
+        sqlserver.quote_identifiers = false;
+        let sql = build_table_data_select_sql(sqlserver);
+        assert!(sql.contains("[TOP], [PERCENT], [name]"), "{sql}");
+
+        let mut db2 = opts(DatabaseType::Db2, None, None, "USERS");
+        db2.columns = vec!["MyCol".to_string()];
+        db2.order_by = Some("MyCol".to_string());
+        db2.offset = Some(10);
+        db2.quote_identifiers = false;
+        let sql = build_table_data_select_sql(db2);
+        assert!(sql.contains("SELECT \"MyCol\" FROM (SELECT dbx_t.\"MyCol\""), "{sql}");
+    }
+
+    #[test]
+    fn table_data_select_quote_opt_out_covers_the_mysql_family_member() {
+        // MySQL rides the fallback branch with exactly the fold semantics it
+        // was written for, so it stays inside the verified list: the preview
+        // projection goes bare while the reserved word and the marker alias
+        // keep their backticks.
+        let mut options = opts(DatabaseType::Mysql, None, Some("db_9"), "users");
+        options.identifier_quote = Some("`".to_string());
+        options.primary_keys = vec!["id".to_string()];
+        options.columns = vec!["id".to_string(), "payload".to_string()];
+        options.column_types = vec!["int".to_string(), "text".to_string()];
+        options.large_value_preview_size = Some(100);
+        options.quote_identifiers = false;
+        let sql = build_table_data_select_sql_with_database(options, true);
+        assert!(sql.contains("LEFT(payload, 101) AS payload"), "{sql}");
+        assert!(sql.contains("AS `__DBX_LARGE_VALUE_BYTES_T_1`"), "{sql}");
+        assert!(sql.contains("FROM db_9.users"), "{sql}");
+    }
+
+    #[test]
+    fn can_unquote_rejects_dbx_synthetic_prefixes_on_every_dialect() {
+        // Only the case-folding branches reject the lowercase spelling on
+        // their own; the MySQL-family fallback would bare it. The explicit
+        // prefix rejection covers all dialects (#12878 review).
+        for name in ["__DBX_ROWID", "__dbx_large_value_bytes_t_0"] {
+            assert!(!can_unquote_identifier(name, Some(DatabaseType::Mysql), None), "{name}");
+            assert!(!can_unquote_identifier(name, Some(DatabaseType::Oracle), None), "{name}");
+        }
+        // Ordinary lowercase names on MySQL keep their fallback behavior.
+        assert!(can_unquote_identifier("events", Some(DatabaseType::Mysql), None));
     }
 }

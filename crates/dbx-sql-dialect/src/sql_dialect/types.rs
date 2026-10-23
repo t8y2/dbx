@@ -5,6 +5,11 @@ use crate::models::connection::DatabaseType;
 pub const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
 pub const DBX_NEO4J_ELEMENT_ID_COLUMN: &str = "__DBX_ELEMENT_ID";
 pub const DBX_TDENGINE_TBNAME_COLUMN: &str = "tbname";
+/// Prefix shared by every synthetic identifier the grid injects into
+/// generated SQL (`__DBX_ROWID`, `__DBX_LARGE_VALUE_BYTES_*`). These keep
+/// their quotes regardless of the quote-identifiers opt-out — clients match
+/// them by exact column name.
+pub const DBX_IDENTIFIER_PREFIX: &str = "__DBX_";
 
 fn default_quote_identifiers() -> bool {
     true

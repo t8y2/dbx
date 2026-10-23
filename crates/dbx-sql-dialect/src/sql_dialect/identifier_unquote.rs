@@ -1,4 +1,5 @@
 use super::table_select::quote_table_data_identifier;
+use super::types::DBX_IDENTIFIER_PREFIX;
 use crate::models::connection::DatabaseType;
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -10,10 +11,16 @@ use std::sync::OnceLock;
 /// (copy extractors and the data-view SELECT). A name only sheds its quotes
 /// when the unquoted spelling still resolves to the same object: Oracle and
 /// Dameng fold unquoted names to uppercase, PostgreSQL folds to lowercase,
-/// and every dialect keeps its reserved words quoted. Synthetic marker
-/// aliases (lowercase, underscore-prefixed) fail the first-character rule on
-/// the case-folding dialects and therefore always stay quoted.
+/// and every dialect keeps its reserved words quoted.
 pub fn can_unquote_identifier(name: &str, database_type: Option<DatabaseType>, identifier_quote: Option<&str>) -> bool {
+    // Defense in depth for the grid's synthetic columns (`__DBX_ROWID`,
+    // `__DBX_LARGE_VALUE_BYTES_*`): only the case-folding branches happen to
+    // reject their lowercase spelling — the MySQL-family fallback would bare
+    // them, and clients match these columns by exact name. Reject the prefix
+    // outright on every dialect (#12878 review).
+    if name.to_ascii_uppercase().starts_with(DBX_IDENTIFIER_PREFIX) {
+        return false;
+    }
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -45,6 +52,38 @@ pub fn can_unquote_identifier(name: &str, database_type: Option<DatabaseType>, i
             simple(first) && chars.all(|ch| simple(ch) || ch.is_ascii_digit()) && !mysql_reserved(&lower)
         }
     }
+}
+
+/// Dialects whose [`can_unquote_identifier`] rules are trusted for SQL the
+/// app executes directly (the data-view SELECT). Each of them has a
+/// dialect-specific branch — Oracle family, Dameng, the PostgreSQL family
+/// (including JDBC, whose reported quote string selects between the
+/// PostgreSQL and MySQL rules) — or, for MySQL itself, rides the shared
+/// fallback with exactly the fold semantics that fallback was written for:
+/// unquoted identifiers keep their spelling and compare case-insensitively.
+///
+/// Every other dialect keeps the historical always-quoted execution SQL.
+/// The fallback reserved-word table is a PostgreSQL∪MySQL merge that knows
+/// nothing about e.g. T-SQL's `TOP`/`PERCENT` or Db2's fold-to-uppercase, so
+/// a bare identifier it approved could be a syntax error — or a silently
+/// different column — in SQL the user never reviews (#12878 review). A new
+/// dialect opts in by growing its own verified branch in
+/// [`can_unquote_identifier`] and joining this list.
+pub fn dialect_supports_unquoted_execution(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Oracle
+                | DatabaseType::OceanbaseOracle
+                | DatabaseType::Dameng
+                | DatabaseType::Postgres
+                | DatabaseType::Gaussdb
+                | DatabaseType::OpenGauss
+                | DatabaseType::Kingbase
+                | DatabaseType::Jdbc
+                | DatabaseType::Mysql
+        )
+    )
 }
 
 /// Renders one identifier for generated data SQL, honoring the

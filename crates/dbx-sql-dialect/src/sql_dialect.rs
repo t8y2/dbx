@@ -37,7 +37,8 @@ pub use descriptor::{
     CAP_REORDER_COLUMN, CAP_TEMPORARY_TABLE, CAP_TRANSACTIONAL_DDL, CAP_TRUNCATE_TABLE,
 };
 pub use identifier_unquote::{
-    can_unquote_identifier, table_data_identifier_or_bare, unquote_qualified_table_reference,
+    can_unquote_identifier, dialect_supports_unquoted_execution, table_data_identifier_or_bare,
+    unquote_qualified_table_reference,
 };
 pub use identifiers::{
     normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,

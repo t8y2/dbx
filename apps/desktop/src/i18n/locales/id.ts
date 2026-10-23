@@ -8990,7 +8990,8 @@ export default withEnglishFallback({
     generateSqlIncludeDatabaseName: "Sertakan nama database dalam SQL yang dihasilkan",
     generateSqlIncludeDatabaseNameDescription: "Jika didukung oleh database, SQL tabel yang dihasilkan menggunakan nama berkualifikasi (database.schema.table pada SQL Server) alih-alih hanya nama tabel.",
     generateSqlQuoteIdentifiers: "Beri tanda kutip pada identifier di SQL yang dihasilkan",
-    generateSqlQuoteIdentifiersDescription: "Jika dinonaktifkan, referensi tabel kueri baru menghilangkan tanda kutip khusus dialek. Kata yang dicadangkan, karakter khusus, dan nama case-sensitive mungkin memerlukan tanda kutip agar dapat berjalan.",
+    generateSqlQuoteIdentifiersDescription:
+      "Jika dinonaktifkan, SQL yang dihasilkan — kueri baru, SQL yang disalin, dan SQL tampilan data — menghilangkan tanda kutip khusus dialek yang opsional. Kata yang dicadangkan, karakter khusus, dan nama case-sensitive mungkin memerlukan tanda kutip agar dapat berjalan.",
     formatSqlOnSqlFileSave: "Format SQL saat menyimpan file SQL",
     formatSqlOnSqlFileSaveDescription: "Secara otomatis memformat SQL saat menyimpan file SQL, termasuk file pustaka SQL tersimpan dan kueri yang disimpan sebagai file .sql.",
     clickTableNavigationTarget: "Ctrl+Klik Tabel Membuka DDL",

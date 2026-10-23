@@ -4,13 +4,13 @@ use super::{
     DATA_GRID_EXTRACTOR_MAX_OUTPUT_BYTES,
 };
 use crate::data_grid_sql::{
-    build_column_predicate, build_data_grid_copy_insert_statement_with_formatters,
-    build_data_grid_copy_insert_statements_with_formatters, build_data_grid_copy_update_statements, column_info_for,
-    data_grid_delete_sql, data_grid_generated_table_name, data_grid_statement, format_grid_copy_insert_sql_literal,
-    format_grid_sql_literal_with_identifier_quote, is_auto_generated_column, is_grid_insert_omitted_column,
-    is_non_identity_generated_column, is_primary_key_column, supports_relational_copy_predicates, DataGridColumnInfo,
-    DataGridCopyInsertMode, DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions,
-    DataGridPrimaryKeyMode, DataGridTableMeta,
+    build_column_predicate_with_reference_formatter, build_data_grid_copy_insert_statement_with_formatters,
+    build_data_grid_copy_insert_statements_with_formatters, build_data_grid_copy_update_statements_with_formatters,
+    column_info_for, data_grid_delete_sql, data_grid_generated_table_name, data_grid_statement,
+    format_grid_copy_insert_sql_literal, format_grid_sql_literal_with_identifier_quote, is_auto_generated_column,
+    is_grid_insert_omitted_column, is_non_identity_generated_column, is_primary_key_column,
+    supports_relational_copy_predicates, DataGridColumnInfo, DataGridCopyInsertMode,
+    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridPrimaryKeyMode, DataGridTableMeta,
 };
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::uses_single_row_insert_statements;
@@ -22,6 +22,24 @@ use std::io::Write;
 
 #[path = "sql_identifiers.rs"]
 mod identifiers;
+
+/// Shared reference formatter for every SQL copy extractor: identifiers keep
+/// their quoted form unless the extractor options opted out, in which case
+/// only names that resolve identically without quotes (per the dialect's
+/// can-unquote rules) go bare.
+fn sql_reference_formatter<'a>(context: &'a ExtractContext<'_>) -> impl Fn(String) -> String + 'a {
+    move |reference| {
+        if context.request.options.sql.quote_identifiers {
+            reference
+        } else {
+            identifiers::unquote_optional_identifiers(
+                reference,
+                context.request.database_type,
+                context.request.identifier_quote.as_deref(),
+            )
+        }
+    }
+}
 
 pub(super) fn write_sql_in_list(
     context: &ExtractContext<'_>,
@@ -87,17 +105,7 @@ pub(super) fn write_sql_inserts(
             include_database_name: context.request.options.sql.include_database_name,
             insert_mode: context.request.options.sql.insert_mode,
         },
-        |reference| {
-            if context.request.options.sql.quote_identifiers {
-                reference
-            } else {
-                identifiers::unquote_optional_identifiers(
-                    reference,
-                    context.request.database_type,
-                    context.request.identifier_quote.as_deref(),
-                )
-            }
-        },
+        sql_reference_formatter(context),
         |value, database_type, info, identifier_quote| {
             if context.request.options.sql.temporal_format == DataGridTemporalFormat::String {
                 if let Some(literal) = portable_temporal_literal(value, database_type, info) {
@@ -191,15 +199,18 @@ pub(super) fn write_sql_updates(
             "Select at least one writable non-primary-key column for SQL Updates.",
         ));
     }
-    let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
-        database_type: context.request.database_type,
-        identifier_quote: context.request.identifier_quote.clone(),
-        table_meta: table_meta.clone(),
-        columns: data.columns,
-        source_columns: Some(data.source_columns),
-        rows: data.rows,
-        include_database_name: context.request.options.sql.include_database_name,
-    });
+    let statements = build_data_grid_copy_update_statements_with_formatters(
+        DataGridCopyUpdateStatementOptions {
+            database_type: context.request.database_type,
+            identifier_quote: context.request.identifier_quote.clone(),
+            table_meta: table_meta.clone(),
+            columns: data.columns,
+            source_columns: Some(data.source_columns),
+            rows: data.rows,
+            include_database_name: context.request.options.sql.include_database_name,
+        },
+        sql_reference_formatter(context),
+    );
     if statements.len() != context.request.rows.len() {
         return Err(DataGridExtractError::new(
             DataGridExtractErrorCode::NullPrimaryKey,
@@ -280,17 +291,7 @@ pub(super) fn write_sql_deletes_inserts(
             include_database_name: context.request.options.sql.include_database_name,
             insert_mode: context.request.options.sql.insert_mode,
         },
-        |reference| {
-            if context.request.options.sql.quote_identifiers {
-                reference
-            } else {
-                identifiers::unquote_optional_identifiers(
-                    reference,
-                    context.request.database_type,
-                    context.request.identifier_quote.as_deref(),
-                )
-            }
-        },
+        sql_reference_formatter(context),
         |value, database_type, info, identifier_quote| {
             if context.request.options.sql.temporal_format == DataGridTemporalFormat::String {
                 if let Some(literal) = portable_temporal_literal(value, database_type, info) {
@@ -316,15 +317,7 @@ pub(super) fn write_sql_deletes_inserts(
         context.request.identifier_quote.as_deref(),
         context.request.options.sql.include_database_name,
     );
-    let table = if context.request.options.sql.quote_identifiers {
-        table
-    } else {
-        identifiers::unquote_optional_identifiers(
-            table,
-            context.request.database_type,
-            context.request.identifier_quote.as_deref(),
-        )
-    };
+    let table = sql_reference_formatter(context)(table);
 
     let column_info = table_meta.columns.as_deref().unwrap_or(&[]);
     let primary_key_info: Vec<Option<&DataGridColumnInfo>> =
@@ -341,12 +334,20 @@ pub(super) fn write_sql_deletes_inserts(
                 .map(|(pk_index, (pk_name, src_idx))| {
                     let val = row.get(*src_idx).unwrap_or(&Value::Null);
                     let info = primary_key_info[pk_index];
-                    let quote = if context.request.options.sql.quote_identifiers {
-                        context.request.identifier_quote.as_deref()
-                    } else {
-                        None
-                    };
-                    build_column_predicate(context.request.database_type, pk_name, val, info, false, quote)
+                    // The reference formatter sheds quotes on the identifier
+                    // when (and only when) the bare name resolves the same;
+                    // dropping `identifier_quote` itself (the old `quote=None`
+                    // trick) silently kept Oracle/MySQL identifiers quoted
+                    // because their quoting never consulted the argument.
+                    build_column_predicate_with_reference_formatter(
+                        context.request.database_type,
+                        pk_name,
+                        val,
+                        info,
+                        false,
+                        context.request.identifier_quote.as_deref(),
+                        sql_reference_formatter(context),
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join(" AND ");
@@ -592,13 +593,14 @@ pub(super) fn write_where_clause(
             let source_name = column.source_name.as_deref().unwrap_or(&column.display_name);
             // Reuse the UPDATE predicate builder so NULL -> IS NULL, MySQL BINARY,
             // and MySQL JSON CAST(...) stay consistent with copy-as-UPDATE.
-            let predicate = build_column_predicate(
+            let predicate = build_column_predicate_with_reference_formatter(
                 context.request.database_type,
                 source_name,
                 value,
                 context.selected_column_info[column_index],
                 true,
                 context.request.identifier_quote.as_deref(),
+                sql_reference_formatter(context),
             );
             write_bytes(output, predicate.as_bytes())?;
         }
@@ -646,6 +648,7 @@ pub(super) fn write_sql_select(
         context.request.identifier_quote.as_deref(),
         context.request.options.sql.include_database_name,
     );
+    let table = sql_reference_formatter(context)(table);
 
     if context.request.selection_kind == super::DataGridSelectionKind::Cells {
         // A cell-selection SELECT reuses the WHERE-clause predicate builder so a
@@ -705,13 +708,14 @@ pub(super) fn write_sql_select(
             .unwrap_or_default()
             .iter()
             .find(|info| normalized_name_eq(&info.name, source_name));
-        predicates.push(build_column_predicate(
+        predicates.push(build_column_predicate_with_reference_formatter(
             context.request.database_type,
             source_name,
             value,
             column_info,
             true,
             context.request.identifier_quote.as_deref(),
+            sql_reference_formatter(context),
         ));
     }
     write_bytes(output, format!("SELECT * FROM {table} WHERE {};", predicates.join(" AND ")).as_bytes())

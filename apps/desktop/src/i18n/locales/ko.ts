@@ -3177,6 +3177,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "현재 페이지 SQL 복사",
     copyActualExecutionSql: "실제 실행 SQL 복사",
     pageProbeDescription: "이 페이지에는 최대 {count}행이 표시되며, 다음 페이지가 있는지 판단하기 위해 최대 1행을 추가로 읽습니다.",
+    copyExtractorQuoteIdentifiersHint: "현재 적용되지 않음: 편집기 설정 「SQL 생성 시 식별자에 따옴표 추가」가 꺼져 있어, 복사된 SQL에는 생략 가능한 따옴표가 일괄적으로 포함되지 않습니다.",
   },
   exportProgress: {
     streamingUnsupported: "이 쿼리는 스트리밍 내보내기를 지원하지 않습니다. 쿼리를 단순화하거나 지원되는 드라이버를 사용하세요.",
@@ -8814,7 +8815,7 @@ export default withEnglishFallback({
     generateSqlIncludeDatabaseName: "생성된 SQL에 데이터베이스 이름 포함",
     generateSqlIncludeDatabaseNameDescription: "데이터베이스가 지원하는 경우 생성된 테이블 SQL에서 테이블 이름만이 아니라 database.table을 사용합니다.",
     generateSqlQuoteIdentifiers: "생성된 SQL에서 식별자 인용",
-    generateSqlQuoteIdentifiersDescription: "끄면 새 쿼리의 테이블 참조에서 데이터베이스 방언별 인용을 생략합니다. 예약어, 특수 문자 또는 대소문자 구분 이름에는 인용이 필요할 수 있습니다.",
+    generateSqlQuoteIdentifiersDescription: "끄면 새 쿼리, 복사한 SQL, 데이터 뷰 SQL에서 생략 가능한 데이터베이스 방언 인용을 생략합니다. 예약어, 특수 문자 또는 대소문자 구분 이름에는 인용이 필요할 수 있습니다.",
     formatSqlOnSqlFileSave: "SQL 파일 저장 시 SQL 서식 지정",
     formatSqlOnSqlFileSaveDescription: "SQL 파일을 저장할 때 SQL을 자동으로 서식 지정합니다. SQL 라이브러리에 저장된 파일과 새 쿼리를 .sql 파일로 저장하는 경우도 포함합니다.",
     sqlVariableSyntax: "SQL 변수 및 자리표시자 치환",

@@ -278,6 +278,9 @@ fn sql_insert_policy_contract_rejects_unknown_modes_and_invalid_boolean_types() 
 
 #[test]
 fn insert_policies_do_not_change_other_extractors_or_column_errors() {
+    // SqlUpdates / WhereClause / SqlSelect / SqlDeletesInserts intentionally
+    // react to `quoteIdentifiers` (see sql_copy_extractors_quote_opt_out_*),
+    // so only the value-oriented extractors stay byte-identical here.
     for extractor in [
         DataGridExtractorId::Csv,
         DataGridExtractorId::Tsv,
@@ -286,9 +289,7 @@ fn insert_policies_do_not_change_other_extractors_or_column_errors() {
         DataGridExtractorId::Markdown,
         DataGridExtractorId::Html,
         DataGridExtractorId::Xml,
-        DataGridExtractorId::SqlUpdates,
         DataGridExtractorId::SqlInList,
-        DataGridExtractorId::WhereClause,
     ] {
         let mut request = temporal_insert_request();
         request.extractor = extractor;
@@ -305,6 +306,100 @@ fn insert_policies_do_not_change_other_extractors_or_column_errors() {
         info.extra = Some("VIRTUAL GENERATED".into());
     }
     assert_eq!(extract_data_grid_selection(request).unwrap_err().code, DataGridExtractErrorCode::NoWritableColumns);
+}
+
+/// Oracle fixture whose identifiers are all safe to bare (uppercase, no
+/// reserved words) except `Mixed` and `ORDER` — one needs its quotes for
+/// case, the other is a reserved word.
+fn oracle_unquote_request(extractor: DataGridExtractorId) -> DataGridExtractRequest {
+    let mut request = request(extractor);
+    request.database_type = Some(DatabaseType::Oracle);
+    request.columns = vec![column("ID", 0), column("NAME", 1), column("Mixed", 2), column("ORDER", 3)];
+    request.selected_column_indexes = vec![0, 1, 2, 3];
+    request.rows = vec![vec![json!(7), json!("Ada"), json!(1), json!(2)]];
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("APP".into()),
+        table_name: "EVENTS".into(),
+        primary_keys: vec!["ID".into()],
+        columns: Some(
+            [("ID", "NUMBER"), ("NAME", "VARCHAR2"), ("Mixed", "NUMBER"), ("ORDER", "NUMBER")]
+                .into_iter()
+                .map(|(name, data_type)| DataGridColumnInfo {
+                    name: name.into(),
+                    data_type: data_type.into(),
+                    is_nullable: true,
+                    is_primary_key: name == "ID",
+                    column_default: None,
+                    extra: None,
+                })
+                .collect(),
+        ),
+    });
+    request
+}
+
+#[test]
+fn sql_copy_extractors_quote_opt_out_strips_only_safe_identifiers() {
+    // UPDATE: table, SET column, and WHERE predicate all go bare; the mixed-case
+    // column keeps its quotes because bare `Mixed` would fold to MIXED and stop
+    // matching, and `ORDER` stays quoted as an Oracle reserved word.
+    let mut request = oracle_unquote_request(DataGridExtractorId::SqlUpdates);
+    assert_eq!(
+        extract_data_grid_selection(request.clone()).unwrap().text,
+        "UPDATE \"APP\".\"EVENTS\" SET \"NAME\" = 'Ada', \"Mixed\" = 1, \"ORDER\" = 2 WHERE \"ID\" = 7;"
+    );
+    request.options.sql.quote_identifiers = false;
+    assert_eq!(
+        extract_data_grid_selection(request.clone()).unwrap().text,
+        "UPDATE APP.EVENTS SET NAME = 'Ada', \"Mixed\" = 1, \"ORDER\" = 2 WHERE ID = 7;"
+    );
+
+    // WHERE clause: predicate identifiers follow the switch.
+    let mut request = oracle_unquote_request(DataGridExtractorId::WhereClause);
+    request.rows = vec![vec![json!(7), json!("Ada")]];
+    request.selected_column_indexes = vec![0, 1];
+    assert_eq!(extract_data_grid_selection(request.clone()).unwrap().text, "\"ID\" = 7 AND \"NAME\" = 'Ada'");
+    request.options.sql.quote_identifiers = false;
+    assert_eq!(extract_data_grid_selection(request).unwrap().text, "ID = 7 AND NAME = 'Ada'");
+}
+
+#[test]
+fn sql_copy_select_quote_opt_out_applies_to_table_and_predicates() {
+    // Single-row SELECT: table name and predicates shed quotes together.
+    let mut request = oracle_unquote_request(DataGridExtractorId::SqlSelect);
+    request.selection_kind = DataGridSelectionKind::Rows;
+    assert_eq!(
+        extract_data_grid_selection(request.clone()).unwrap().text,
+        "SELECT * FROM \"APP\".\"EVENTS\" WHERE \"ID\" = 7;"
+    );
+    request.options.sql.quote_identifiers = false;
+    assert_eq!(extract_data_grid_selection(request).unwrap().text, "SELECT * FROM APP.EVENTS WHERE ID = 7;");
+
+    // Cell selection goes through the same WHERE-clause builder.
+    let mut request = oracle_unquote_request(DataGridExtractorId::SqlSelect);
+    request.options.sql.quote_identifiers = false;
+    request.rows = vec![vec![json!(7), json!("Ada")]];
+    request.selected_column_indexes = vec![0, 1];
+    assert_eq!(
+        extract_data_grid_selection(request).unwrap().text,
+        "SELECT * FROM APP.EVENTS WHERE ID = 7 AND NAME = 'Ada';"
+    );
+}
+
+#[test]
+fn deletes_inserts_quote_opt_out_now_unquotes_oracle_delete_predicates() {
+    // Regression for #12878: the old `quote=None` trick left Oracle DELETE
+    // predicates quoted (`"ID" = 7`) even with the opt-out, because Oracle's
+    // quoting never consulted the passed quote. The shared reference
+    // formatter now strips them like every other surface.
+    let mut request = oracle_unquote_request(DataGridExtractorId::SqlDeletesInserts);
+    request.options.sql.quote_identifiers = false;
+    assert_eq!(
+        extract_data_grid_selection(request).unwrap().text,
+        "DELETE FROM APP.EVENTS WHERE ID = 7;\nINSERT INTO APP.EVENTS (ID, NAME, \"Mixed\", \"ORDER\") VALUES (7, 'Ada', 1, 2);"
+    );
 }
 
 #[test]

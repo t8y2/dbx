@@ -485,6 +485,18 @@ pub fn supports_relational_copy_predicates(database_type: Option<DatabaseType>) 
 }
 
 pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStatementOptions) -> Vec<String> {
+    build_data_grid_copy_update_statements_with_formatters(options, |reference| reference)
+}
+
+/// Copy-extractor variant of [`build_data_grid_copy_update_statements`]:
+/// every rendered identifier — table, SET column, and WHERE predicate —
+/// passes through `format_reference`, mirroring the INSERT
+/// `_with_formatters` hook so the `quote_identifiers` opt-out covers UPDATE
+/// the same way it already covers INSERT.
+pub fn build_data_grid_copy_update_statements_with_formatters(
+    options: DataGridCopyUpdateStatementOptions,
+    format_reference: impl Fn(String) -> String,
+) -> Vec<String> {
     if !supports_relational_copy_predicates(options.database_type) {
         return Vec::new();
     }
@@ -545,6 +557,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
         options.identifier_quote.as_deref(),
         options.include_database_name,
     );
+    let table = format_reference(table);
     let mut statements = Vec::new();
     for row in &options.rows {
         if primary_key_indexes.iter().any(|index| row.get(*index).unwrap_or(&Value::Null).is_null()) {
@@ -555,7 +568,11 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
             .map(|(column, index, info)| {
                 format!(
                     "{} = {}",
-                    data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()),
+                    format_reference(data_grid_identifier(
+                        options.database_type,
+                        column,
+                        options.identifier_quote.as_deref()
+                    )),
                     format_grid_assignment_sql_literal(
                         row.get(*index).unwrap_or(&Value::Null),
                         options.database_type,
@@ -573,13 +590,14 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
             .iter()
             .enumerate()
             .map(|(index, primary_key)| {
-                build_column_predicate(
+                build_column_predicate_with_reference_formatter(
                     options.database_type,
                     primary_key,
                     row.get(primary_key_indexes[index]).unwrap_or(&Value::Null),
                     primary_key_info[index],
                     false,
                     options.identifier_quote.as_deref(),
+                    &format_reference,
                 )
             })
             .collect::<Vec<_>>()
@@ -3815,6 +3833,31 @@ pub fn build_column_predicate(
     .0
 }
 
+/// Copy-extractor variant of [`build_column_predicate`]: the rendered
+/// identifier passes through `format_reference` so the `quote_identifiers`
+/// opt-out can shed quotes the same way the INSERT/UPDATE statements do,
+/// while literals and predicate shapes stay byte-identical.
+pub fn build_column_predicate_with_reference_formatter(
+    database_type: Option<DatabaseType>,
+    column: &str,
+    value: &Value,
+    column_info: Option<&DataGridColumnInfo>,
+    use_binary_text_comparison: bool,
+    identifier_quote: Option<&str>,
+    format_reference: impl Fn(String) -> String,
+) -> String {
+    build_column_predicate_with_plain_formatted(
+        database_type,
+        column,
+        value,
+        column_info,
+        use_binary_text_comparison,
+        identifier_quote,
+        format_reference,
+    )
+    .0
+}
+
 /// Renders one key predicate and, alongside it, the structured
 /// `` (identifier, literal) `` pair when the rendering is the plain
 /// `column = literal` equality. The pair is a *claim* about the text returned
@@ -3828,7 +3871,27 @@ fn build_column_predicate_with_plain(
     use_binary_text_comparison: bool,
     identifier_quote: Option<&str>,
 ) -> (String, Option<MysqlPlainEquality>) {
-    let ident = predicate_ident(database_type, column, identifier_quote);
+    build_column_predicate_with_plain_formatted(
+        database_type,
+        column,
+        value,
+        column_info,
+        use_binary_text_comparison,
+        identifier_quote,
+        |reference| reference,
+    )
+}
+
+fn build_column_predicate_with_plain_formatted(
+    database_type: Option<DatabaseType>,
+    column: &str,
+    value: &Value,
+    column_info: Option<&DataGridColumnInfo>,
+    use_binary_text_comparison: bool,
+    identifier_quote: Option<&str>,
+    format_reference: impl Fn(String) -> String,
+) -> (String, Option<MysqlPlainEquality>) {
+    let ident = format_reference(predicate_ident(database_type, column, identifier_quote));
     if value.is_null() {
         return (format!("{ident} IS NULL"), None);
     }

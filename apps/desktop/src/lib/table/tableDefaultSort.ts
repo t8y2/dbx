@@ -1,13 +1,18 @@
 import type { DatabaseType, QueryTab } from "@/types/database";
 import type { EditorSettings } from "@/stores/settingsStore";
 import { databaseSortSupportedForDatabase } from "@/lib/dataGrid/dataGridSort";
-import { quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { quoteTableDataIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/tableSelectSql";
 
-export function resolveTableDefaultSort(settings: Pick<EditorSettings, "tableOpenSortMode" | "tableDatabaseSortDirection" | "tableLocalSortDirection">, databaseType: DatabaseType | undefined, physicalPrimaryKeys: string[], identifierQuote?: string) {
+type TableDefaultSortSettings = Pick<EditorSettings, "tableOpenSortMode" | "tableDatabaseSortDirection" | "tableLocalSortDirection"> & Pick<Partial<EditorSettings>, "generateSqlQuoteIdentifiers">;
+
+export function resolveTableDefaultSort(settings: TableDefaultSortSettings, databaseType: DatabaseType | undefined, physicalPrimaryKeys: string[], identifierQuote?: string) {
   const mode = settings.tableOpenSortMode ?? "none";
   const direction = (mode === "local" ? settings.tableLocalSortDirection : settings.tableDatabaseSortDirection) ?? "asc";
   const columns = databaseType === "influxdb" || databaseType === "influxdb3" ? [] : physicalPrimaryKeys;
-  const orderBy = mode === "database" && columns.length && databaseSortSupportedForDatabase(databaseType) ? columns.map((column) => `${databaseType === "neo4j" ? "n." : ""}${quoteTableDataIdentifier(databaseType, column, identifierQuote)} ${direction.toUpperCase()}`).join(", ") : undefined;
+  // The default ORDER BY shares the editor's quote-identifiers switch (#12878)
+  // so the executed data-view SQL and the status bar stay consistent.
+  const quoteColumn = (column: string) => (settings.generateSqlQuoteIdentifiers === false ? quoteTableIdentifierIfNeeded(databaseType, column, identifierQuote) : quoteTableDataIdentifier(databaseType, column, identifierQuote));
+  const orderBy = mode === "database" && columns.length && databaseSortSupportedForDatabase(databaseType) ? columns.map((column) => `${databaseType === "neo4j" ? "n." : ""}${quoteColumn(column)} ${direction.toUpperCase()}`).join(", ") : undefined;
   return { mode, direction, columns, orderBy };
 }
 

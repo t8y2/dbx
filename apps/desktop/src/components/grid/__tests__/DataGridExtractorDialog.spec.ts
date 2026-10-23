@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
+import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, normalizeDataGridExtractorOptions, type DataGridCopyPreference, type DataGridExtractPreview } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => (key === "grid.copyExtractorAdvancedOptions" ? "Advanced options" : key === "grid.copyExtractorVisibleFormats" ? "Visible formats" : key) }) }));
 vi.mock("@/components/ui/dialog", () => {
@@ -58,7 +60,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function mountDialog(preview = vi.fn(async () => result("initial")), open = false, preference: DataGridCopyPreference = "sql-inserts") {
+function mountDialog(preview = vi.fn(async () => result("initial")), open = false, preference: DataGridCopyPreference = "sql-inserts", pinia?: ReturnType<typeof createPinia>) {
   const props = reactive({
     open,
     preference,
@@ -75,6 +77,7 @@ function mountDialog(preview = vi.fn(async () => result("initial")), open = fals
   const host = document.createElement("div");
   document.body.appendChild(host);
   const app = createApp({ render: () => h(DataGridExtractorDialog, { ...props, visibleItems: DATA_GRID_COPY_EXTRACTOR_IDS.map((value) => ({ value, label: value })), onSave: save }) });
+  if (pinia) app.use(pinia);
   app.mount(host);
   mounted.push({ app, host });
   return { props, host, save, preview, copy: props.copy };
@@ -186,6 +189,25 @@ describe("extractor draft preview", () => {
     const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("common.save"))!;
     button.click();
     expect(save).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ sql: expect.objectContaining({ includeDatabaseName: false }) }) }));
+  });
+
+  it("shows the quote checkbox for SQL updates and the master-switch hint (#12878)", async () => {
+    const { props, host } = mountDialog();
+    props.preference = "sql-updates";
+    props.items = [{ value: "sql-updates", label: "UPDATE" }];
+    props.open = true;
+    await expandPreview(host);
+    expect(host.textContent).toContain("grid.copyExtractorQuoteIdentifiers");
+    // 主开关默认开启：勾选框生效，无压制提示。
+    expect(host.textContent).not.toContain("grid.copyExtractorQuoteIdentifiersHint");
+
+    // 主开关关闭：勾选框仍在，但提示说明它已被编辑器全局设置接管。
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useSettingsStore().updateEditorSettings({ generateSqlQuoteIdentifiers: false });
+    const overridden = mountDialog(undefined, true, "sql-updates", pinia);
+    expect(overridden.host.textContent).toContain("grid.copyExtractorQuoteIdentifiers");
+    expect(overridden.host.textContent).toContain("grid.copyExtractorQuoteIdentifiersHint");
   });
 
   it("previews unsaved quote and temporal options without mutating saved settings", async () => {

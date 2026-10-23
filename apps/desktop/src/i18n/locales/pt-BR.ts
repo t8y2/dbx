@@ -3223,6 +3223,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Copiar SQL da página atual",
     copyActualExecutionSql: "Copiar SQL de execução real",
     pageProbeDescription: "Esta página exibe no máximo {count} linhas, com leitura adicional de no máximo 1 linha para determinar se há uma próxima página.",
+    copyExtractorQuoteIdentifiersHint: 'Atualmente sem efeito: a configuração do editor "Adicionar aspas aos identificadores ao gerar SQL" está desativada; o SQL copiado nunca inclui aspas que podem ser omitidas.',
   },
   exportProgress: {
     streamingUnsupported: "A exportação em streaming não é compatível com esta consulta. Simplifique-a ou use um driver compatível.",
@@ -8655,7 +8656,7 @@ export default withEnglishFallback({
     generateSqlIncludeDatabaseName: "Incluir nome do banco de dados no SQL gerado",
     generateSqlIncludeDatabaseNameDescription: "Quando compatível com o banco de dados, o SQL de tabela gerado usa banco.tabela em vez de somente o nome da tabela.",
     generateSqlQuoteIdentifiers: "Usar aspas em identificadores no SQL gerado",
-    generateSqlQuoteIdentifiersDescription: "Quando desativado, as referências de tabela em novas consultas omitem as aspas específicas do dialeto. Palavras reservadas, caracteres especiais e nomes sensíveis a maiúsculas podem exigir aspas.",
+    generateSqlQuoteIdentifiersDescription: "Quando desativado, o SQL gerado — novas consultas, SQL copiado e o SQL da visualização de dados — omite as aspas opcionais específicas do dialeto. Palavras reservadas, caracteres especiais e nomes sensíveis a maiúsculas podem exigir aspas.",
     formatSqlOnSqlFileSave: "Formatar SQL ao salvar arquivos SQL",
     formatSqlOnSqlFileSaveDescription: "Formata automaticamente o SQL ao salvar um arquivo SQL, incluindo arquivos salvos na biblioteca SQL e consultas salvas como arquivos .sql.",
     clickTableNavigationTarget: "Ctrl+Clique abre DDL da tabela",

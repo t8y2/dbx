@@ -146,6 +146,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       primaryKeys,
       ...tableDataLargeValuePreviewOptions(effectiveDbType, realColumns ?? [], primaryKeys, previewPageSize ?? limit),
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       includeRowId: useRowId,
       limit,
       injectDefaultTimeSeriesWhere: true,

@@ -8180,7 +8180,7 @@ export default withEnglishFallback({
     generateSqlIncludeDatabaseName: "Yaradılan SQL-ə verilənlər bazasının adını daxil et",
     generateSqlIncludeDatabaseNameDescription: "Verilənlər bazası dəstəklədikdə yaradılan cədvəl SQL-i yalnız cədvəl adı əvəzinə database.table istifadə edir.",
     generateSqlQuoteIdentifiers: "Yaradılan SQL-də identifikatorları dırnağa al",
-    generateSqlQuoteIdentifiersDescription: "Deaktiv olduqda yeni sorğudakı cədvəl istinadlarında dialektə xas dırnaqlar buraxılır. Ehtiyat sözlərin, xüsusi simvolların və hərf registrinə həssas adların işləməsi üçün dırnaqlar tələb oluna bilər.",
+    generateSqlQuoteIdentifiersDescription: "Deaktiv olduqda yaradılan SQL — yeni sorğular, kopyalanan SQL və məlumat görünüşü SQL-i — dialektə xas istəyə bağlı dırnaqları buraxır. Ehtiyat sözlərin, xüsusi simvolların və hərf registrinə həssas adların işləməsi üçün dırnaqlar tələb oluna bilər.",
     formatSqlOnSqlFileSave: "SQL fayllarını yadda saxlayarkən SQL-i formatla",
     formatSqlOnSqlFileSaveDescription: "Yadda saxlanılmış SQL kitabxanası faylları və .sql faylları kimi saxlanılan sorğular daxil olmaqla SQL faylını yadda saxlayarkən SQL-i avtomatik formatla.",
     clickTableNavigationTarget: "Cədvələ Ctrl+klik DDL-i açır",

@@ -3223,6 +3223,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Copia SQL della pagina corrente",
     copyActualExecutionSql: "Copia SQL effettivamente eseguito",
     pageProbeDescription: "Questa pagina mostra al massimo {count} righe; viene letta al massimo 1 riga aggiuntiva per determinare se esiste una pagina successiva.",
+    copyExtractorQuoteIdentifiersHint: "Al momento non ha effetto: l'impostazione dell'editor «Aggiungi virgolette agli identificatori durante la generazione di SQL» è disattivata; il SQL copiato non include mai le virgolette che è possibile omettere.",
   },
   exportProgress: {
     streamingUnsupported: "L'esportazione in streaming non è supportata per questa query. Semplificala o usa un driver supportato.",
@@ -8657,7 +8658,7 @@ export default withEnglishFallback({
     generateSqlIncludeDatabaseName: "Includi il nome del database nell'SQL generato",
     generateSqlIncludeDatabaseNameDescription: "Quando supportato dal database, l'SQL della tabella generato usa database.tabella anziché solo il nome della tabella.",
     generateSqlQuoteIdentifiers: "Racchiudi gli identificatori nell'SQL generato",
-    generateSqlQuoteIdentifiersDescription: "Se disattivato, i riferimenti alle tabelle nelle nuove query omettono le virgolette del dialetto. Parole riservate, caratteri speciali e nomi sensibili alle maiuscole potrebbero richiederle.",
+    generateSqlQuoteIdentifiersDescription: "Se disattivato, l'SQL generato — nuove query, SQL copiato e SQL della vista dati — omette le virgolette opzionali del dialetto. Parole riservate, caratteri speciali e nomi sensibili alle maiuscole potrebbero richiederle.",
     formatSqlOnSqlFileSave: "Formatta SQL durante il salvataggio dei file SQL",
     formatSqlOnSqlFileSaveDescription: "Formatta automaticamente l'SQL durante il salvataggio di un file SQL, inclusi i file salvati nella libreria SQL e le query salvate come file .sql.",
     clickTableNavigationTarget: "Ctrl+Clic apre DDL tabella",

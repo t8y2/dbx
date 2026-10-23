@@ -8078,7 +8078,7 @@ export default withEnglishFallback({
     generateSqlIncludeDatabaseName: "Üretilen SQL'e veritabanı adını dâhil et",
     generateSqlIncludeDatabaseNameDescription: "Veritabanı destekliyorsa üretilen tablo SQL'i yalnızca tablo adı yerine veritabanı.tablo biçimini kullanır.",
     generateSqlQuoteIdentifiers: "Üretilen SQL'de tanımlayıcıları tırnakla",
-    generateSqlQuoteIdentifiersDescription: "Devre dışı bırakıldığında yeni sorgulardaki tablo başvuruları lehçeye özgü tırnakları kullanmaz. Ayrılmış sözcükler, özel karakterler ve büyük/küçük harfe duyarlı adlar tırnak gerektirebilir.",
+    generateSqlQuoteIdentifiersDescription: "Devre dışı bırakıldığında üretilen SQL — yeni sorgular, kopyalanan SQL ve veri görünümü SQL'i — isteğe bağlı lehçeye özgü tırnakları kullanmaz. Ayrılmış sözcükler, özel karakterler ve büyük/küçük harfe duyarlı adlar tırnak gerektirebilir.",
     formatSqlOnSqlFileSave: "SQL dosyalarını kaydederken SQL'i biçimlendir",
     formatSqlOnSqlFileSaveDescription: "Bir SQL dosyası kaydedilirken SQL'i otomatik biçimlendir; kayıtlı SQL kitaplığı dosyaları ve .sql olarak kaydedilen sorgular dâhil.",
     clickTableNavigationTarget: "Ctrl+Tıklama Tabloda DDL Açar",

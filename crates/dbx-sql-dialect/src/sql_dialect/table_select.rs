@@ -4,6 +4,9 @@ use super::capabilities::{
     firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, uses_postgres_ctid, uses_xugu_row_id,
     TablePaginationStrategy,
 };
+use super::identifier_unquote::{
+    can_unquote_identifier, dialect_supports_unquoted_execution, unquote_qualified_table_reference,
+};
 use super::identifiers::{
     normalize_where_input, parse_sqlserver_linked_schema_ref, qualified_table_name, qualified_table_name_with_catalog,
     quote_gaussdb_jdbc_identifier, quote_iris_identifier, quote_table_identifier,
@@ -128,11 +131,19 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
     let mut projections = Vec::with_capacity(options.columns.len() * 2);
     let mut marker_count = 0;
     for (column_index, (column, data_type)) in options.columns.iter().zip(&options.column_types).enumerate() {
-        let quoted = if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
-            quote_table_data_identifier(database_type, column, options.identifier_quote.as_deref())
-        } else {
-            quote_table_identifier(database_type, column)
-        };
+        let quoted = projection_or_bare(
+            database_type,
+            column,
+            options.identifier_quote.as_deref(),
+            options.quote_identifiers,
+            || {
+                if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
+                    quote_table_data_identifier(database_type, column, options.identifier_quote.as_deref())
+                } else {
+                    quote_table_identifier(database_type, column)
+                }
+            },
+        );
         let kind = (!protected.contains(&column.to_ascii_lowercase()))
             .then(|| large_value_preview_kind(database_type, data_type, preview_size))
             .flatten();
@@ -142,6 +153,12 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
         };
 
         let alias_kind = large_value_marker_alias_kind(kind, data_type);
+        // The marker alias stays quoted even with the quote-identifiers
+        // opt-out: can_unquote_identifier rejects every `__DBX_`-prefixed
+        // synthetic name outright — only the case-folding branches would
+        // reject the lowercase spelling on their own, the MySQL-family
+        // fallback would not — so the client's column-name matching keeps
+        // working (pinned by tests).
         let marker_alias = quote_table_identifier(
             database_type,
             &format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{column_index}"),
@@ -220,9 +237,18 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
 }
 
 pub fn build_table_data_select_sql_with_database(
-    options: TableDataSelectSqlOptions,
+    mut options: TableDataSelectSqlOptions,
     include_database_name: bool,
 ) -> String {
+    // The execution-surface opt-out is bounded to dialects whose unquoted
+    // spellings are proven safe to execute (#12878 review): the shared
+    // fallback reserved-word table is a PostgreSQL∪MySQL merge and knows
+    // nothing about T-SQL's `TOP` or Db2's fold-to-uppercase, so for every
+    // other dialect the data view keeps the historical always-quoted SQL
+    // instead of executing an unverified bare identifier.
+    if !options.quote_identifiers && !dialect_supports_unquoted_execution(options.database_type) {
+        options.quote_identifiers = true;
+    }
     let database_type = options.database_type;
     let schema = table_data_schema(database_type, options.driver_profile.as_deref(), options.schema.as_deref());
     let limit = options.limit.unwrap_or(100);
@@ -278,6 +304,14 @@ pub fn build_table_data_select_sql_with_database(
             &options.table_name,
         )
     };
+    // The quote-identifiers opt-out strips quotes the dialect rules prove
+    // safe, segment by segment, across every table-name shape above.
+    let table = unquote_qualified_table_reference(
+        &table,
+        database_type,
+        options.identifier_quote.as_deref(),
+        options.quote_identifiers,
+    );
     let predicate = normalize_where_input(options.where_input.as_deref());
     // Time-series engines like InfluxDB scan every shard when no time
     // predicate is given, which turns the sidebar quick-open ("show me
@@ -336,7 +370,12 @@ pub fn build_table_data_select_sql_with_database(
         } else {
             format!(
                 "ROWID AS \"{DBX_ROWID_COLUMN}\", {}",
-                quoted_table_columns_or_star(database_type, &options.columns)
+                quoted_table_columns_or_star(
+                    database_type,
+                    &options.columns,
+                    options.identifier_quote.as_deref(),
+                    options.quote_identifiers,
+                )
             )
         }
     } else {
@@ -345,9 +384,15 @@ pub fn build_table_data_select_sql_with_database(
             &options.columns,
             tdengine_should_include_tbname(database_type, options.table_type.as_deref()),
             options.identifier_quote.as_deref(),
+            options.quote_identifiers,
         )
     };
-    let rownum_select_columns = quoted_table_columns_or_star(database_type, &options.columns);
+    let rownum_select_columns = quoted_table_columns_or_star(
+        database_type,
+        &options.columns,
+        options.identifier_quote.as_deref(),
+        options.quote_identifiers,
+    );
     let page_select_columns = if include_oracle_row_id {
         if options.columns.is_empty() {
             "*".to_string()
@@ -359,7 +404,15 @@ pub fn build_table_data_select_sql_with_database(
                 .columns
                 .iter()
                 .filter(|column| !column.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
-                .map(|column| quote_table_identifier(database_type, column))
+                .map(|column| {
+                    projection_or_bare(
+                        database_type,
+                        column,
+                        options.identifier_quote.as_deref(),
+                        options.quote_identifiers,
+                        || quote_table_identifier(database_type, column),
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             if rest.is_empty() {
@@ -397,6 +450,8 @@ pub fn build_table_data_select_sql_with_database(
                 &options.columns,
                 limit,
                 options.offset.unwrap_or(0),
+                options.identifier_quote.as_deref(),
+                options.quote_identifiers,
             )
         }
         TablePaginationStrategy::Db2FetchFirst | TablePaginationStrategy::FetchFirst => {
@@ -436,6 +491,8 @@ pub fn build_table_data_select_sql_with_database(
                 .driver_profile
                 .as_deref()
                 .is_some_and(|profile| profile.trim().eq_ignore_ascii_case("sqlserver-legacy")),
+            options.identifier_quote.as_deref(),
+            options.quote_identifiers,
         ),
         TablePaginationStrategy::QuestDbLimit => build_questdb_table_select_sql(
             &table_alias,
@@ -444,6 +501,8 @@ pub fn build_table_data_select_sql_with_database(
             &options.columns,
             limit,
             options.offset.unwrap_or(0),
+            options.identifier_quote.as_deref(),
+            options.quote_identifiers,
         ),
         TablePaginationStrategy::AgentMaxRows => {
             format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order};")
@@ -650,7 +709,7 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
     } else {
         qualified_table_name(database_type, options.schema, options.table_name)
     };
-    let select_columns = quoted_table_columns_or_star(database_type, options.columns);
+    let select_columns = quoted_table_columns_or_star(database_type, options.columns, None, true);
     let order_by = if options.order_columns.is_empty() {
         String::new()
     } else {
@@ -715,7 +774,31 @@ fn informix_row_limit_clause(limit: usize, offset: usize) -> String {
     }
 }
 
-fn quoted_table_columns_or_star(database_type: Option<DatabaseType>, columns: &[String]) -> String {
+/// Applies the quote-identifiers opt-out to one projection identifier: bare
+/// when the dialect's can-unquote rules allow it, otherwise the caller's
+/// historical quoted form (passed as a closure so each call site preserves
+/// its exact quoting path — several deliberately ignore the connection
+/// quote).
+fn projection_or_bare(
+    database_type: Option<DatabaseType>,
+    name: &str,
+    identifier_quote: Option<&str>,
+    quote_identifiers: bool,
+    quoted: impl FnOnce() -> String,
+) -> String {
+    if !quote_identifiers && can_unquote_identifier(name, database_type, identifier_quote) {
+        name.to_string()
+    } else {
+        quoted()
+    }
+}
+
+fn quoted_table_columns_or_star(
+    database_type: Option<DatabaseType>,
+    columns: &[String],
+    identifier_quote: Option<&str>,
+    quote_identifiers: bool,
+) -> String {
     if columns.is_empty() {
         return "*".to_string();
     }
@@ -728,7 +811,9 @@ fn quoted_table_columns_or_star(database_type: Option<DatabaseType>, columns: &[
                 // variable, so ordinary names must stay unquoted.
                 quote_iris_identifier(column, None)
             } else {
-                quote_table_identifier(database_type, column)
+                projection_or_bare(database_type, column, identifier_quote, quote_identifiers, || {
+                    quote_table_identifier(database_type, column)
+                })
             }
         })
         .collect::<Vec<_>>()
@@ -799,6 +884,7 @@ pub(super) fn build_select_columns(
     columns: &[String],
     include_tdengine_tbname: bool,
     identifier_quote: Option<&str>,
+    quote_identifiers: bool,
 ) -> String {
     if columns.is_empty() {
         if database_type == Some(DatabaseType::Tdengine) && include_tdengine_tbname {
@@ -828,7 +914,9 @@ pub(super) fn build_select_columns(
                 if is_tdengine_tbname(database_type, column) {
                     DBX_TDENGINE_TBNAME_COLUMN.to_string()
                 } else {
-                    let ident = quote_table_identifier(database_type, column);
+                    let ident = projection_or_bare(database_type, column, identifier_quote, quote_identifiers, || {
+                        quote_table_identifier(database_type, column)
+                    });
                     format!("{ident} AS {ident}")
                 }
             })
@@ -856,9 +944,13 @@ pub(super) fn build_select_columns(
         .iter()
         .map(|column| {
             let ident = if database_type == Some(DatabaseType::Kyuubi) {
-                quote_table_data_identifier(database_type, column, identifier_quote)
+                projection_or_bare(database_type, column, identifier_quote, quote_identifiers, || {
+                    quote_table_data_identifier(database_type, column, identifier_quote)
+                })
             } else {
-                quote_table_identifier(database_type, column)
+                projection_or_bare(database_type, column, identifier_quote, quote_identifiers, || {
+                    quote_table_identifier(database_type, column)
+                })
             };
             if database_type == Some(DatabaseType::Hive) {
                 format!("{ident} AS {ident}")
@@ -878,13 +970,19 @@ pub(super) fn build_sqlserver_table_select_sql(
     limit: usize,
     offset: usize,
     legacy_compatible: bool,
+    identifier_quote: Option<&str>,
+    quote_identifiers: bool,
 ) -> String {
     let columns_sql = if columns.is_empty() {
         "*".to_string()
     } else {
         columns
             .iter()
-            .map(|column| quote_table_identifier(Some(DatabaseType::SqlServer), column))
+            .map(|column| {
+                projection_or_bare(Some(DatabaseType::SqlServer), column, identifier_quote, quote_identifiers, || {
+                    quote_table_identifier(Some(DatabaseType::SqlServer), column)
+                })
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -911,24 +1009,23 @@ pub(super) fn build_db2_table_select_page_sql(
     columns: &[String],
     limit: usize,
     offset: usize,
+    identifier_quote: Option<&str>,
+    quote_identifiers: bool,
 ) -> String {
+    let quote_column = |column: &String| {
+        projection_or_bare(Some(DatabaseType::Db2), column, identifier_quote, quote_identifiers, || {
+            quote_table_identifier(Some(DatabaseType::Db2), column)
+        })
+    };
     let columns_sql = if columns.is_empty() {
         "*".to_string()
     } else {
-        columns
-            .iter()
-            .map(|column| quote_table_identifier(Some(DatabaseType::Db2), column))
-            .collect::<Vec<_>>()
-            .join(", ")
+        columns.iter().map(&quote_column).collect::<Vec<_>>().join(", ")
     };
     let inner_columns = if columns.is_empty() {
         "dbx_t.*".to_string()
     } else {
-        columns
-            .iter()
-            .map(|column| format!("dbx_t.{}", quote_table_identifier(Some(DatabaseType::Db2), column)))
-            .collect::<Vec<_>>()
-            .join(", ")
+        columns.iter().map(|column| format!("dbx_t.{}", quote_column(column))).collect::<Vec<_>>().join(", ")
     };
     let order = order_by.map(|order_by| format!("ORDER BY {order_by}")).unwrap_or_default();
     let row_number = quote_table_identifier(Some(DatabaseType::Db2), "__dbx_row_num");
@@ -1088,13 +1185,19 @@ pub(super) fn build_questdb_table_select_sql(
     columns: &[String],
     limit: usize,
     offset: usize,
+    identifier_quote: Option<&str>,
+    quote_identifiers: bool,
 ) -> String {
     let columns_sql = if columns.is_empty() {
         "*".to_string()
     } else {
         columns
             .iter()
-            .map(|column| quote_table_identifier(Some(DatabaseType::Questdb), column))
+            .map(|column| {
+                projection_or_bare(Some(DatabaseType::Questdb), column, identifier_quote, quote_identifiers, || {
+                    quote_table_identifier(Some(DatabaseType::Questdb), column)
+                })
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -1135,6 +1238,7 @@ mod tests {
             offset: None,
             use_driver_row_offset: false,
             where_input: None,
+            quote_identifiers: true,
             inject_default_time_series_where: false,
             include_row_id: false,
         }
@@ -1520,5 +1624,112 @@ mod tests {
         options.include_row_id = true;
 
         assert_eq!(build_table_data_select_sql(options), "SELECT Id FROM Account LIMIT 10");
+    }
+
+    #[test]
+    fn table_data_select_quote_opt_out_bares_safe_oracle_identifiers() {
+        // The data-tab status SQL for an Oracle sidebar open (#12878): with the
+        // opt-out, schema, table, and every uppercase projection shed their
+        // quotes; mixed-case names and Oracle reserved words keep theirs.
+        let mut options = opts(DatabaseType::Oracle, None, None, "SP_EC_API_LOG");
+        options.schema = Some("GSPUSH".to_string());
+        options.columns = vec!["ID".to_string(), "API_TYPE".to_string(), "SYSTEM_FROM".to_string()];
+        options.limit = Some(100);
+        assert_eq!(
+            build_table_data_select_sql(options.clone()),
+            "SELECT \"ID\", \"API_TYPE\", \"SYSTEM_FROM\" FROM (SELECT \"ID\", \"API_TYPE\", \"SYSTEM_FROM\" FROM \"GSPUSH\".\"SP_EC_API_LOG\") WHERE ROWNUM <= 100"
+        );
+        options.quote_identifiers = false;
+        assert_eq!(
+            build_table_data_select_sql(options.clone()),
+            "SELECT ID, API_TYPE, SYSTEM_FROM FROM (SELECT ID, API_TYPE, SYSTEM_FROM FROM GSPUSH.SP_EC_API_LOG) WHERE ROWNUM <= 100"
+        );
+        options.columns = vec!["Mixed".to_string(), "ORDER".to_string()];
+        assert_eq!(
+            build_table_data_select_sql(options),
+            "SELECT \"Mixed\", \"ORDER\" FROM (SELECT \"Mixed\", \"ORDER\" FROM GSPUSH.SP_EC_API_LOG) WHERE ROWNUM <= 100"
+        );
+    }
+
+    #[test]
+    fn table_data_select_quote_opt_out_keeps_large_value_markers_quoted() {
+        // The large-value preview markers are internal plumbing the client
+        // matches by column name; they must stay quoted even when the user
+        // opted out of identifier quotes.
+        let mut options = opts(DatabaseType::Postgres, None, None, "events");
+        options.primary_keys = vec!["id".to_string()];
+        options.columns = vec!["id".to_string(), "payload".to_string()];
+        options.column_types = vec!["int4".to_string(), "text".to_string()];
+        options.large_value_preview_size = Some(100);
+        options.quote_identifiers = false;
+        let sql = build_table_data_select_sql(options);
+        assert!(sql.contains("left(payload, 101) AS payload"), "{sql}");
+        assert!(sql.contains("AS \"__DBX_LARGE_VALUE_BYTES_T_1\""), "{sql}");
+        assert!(sql.contains("FROM events"), "{sql}");
+    }
+
+    #[test]
+    fn table_data_select_quote_identifiers_defaults_to_true_for_older_agents() {
+        let legacy: TableDataSelectSqlOptions =
+            serde_json::from_value(serde_json::json!({"databaseType": "oracle", "tableName": "T"})).unwrap();
+        assert!(legacy.quote_identifiers);
+        let opted_out: TableDataSelectSqlOptions = serde_json::from_value(
+            serde_json::json!({"databaseType": "oracle", "tableName": "T", "quoteIdentifiers": false}),
+        )
+        .unwrap();
+        assert!(!opted_out.quote_identifiers);
+    }
+
+    #[test]
+    fn table_data_select_quote_opt_out_only_bares_verified_dialects() {
+        // #12878 review: the fallback reserved-word table is a PostgreSQL∪MySQL
+        // merge, so SQL Server's `TOP` and Db2's fold-to-uppercase must keep
+        // their quotes in executed SQL — the data view reverts to the
+        // historical always-quoted form outside the verified-dialect list.
+        let mut sqlserver = opts(DatabaseType::SqlServer, None, None, "docs");
+        sqlserver.columns = vec!["TOP".to_string(), "PERCENT".to_string(), "name".to_string()];
+        sqlserver.quote_identifiers = false;
+        let sql = build_table_data_select_sql(sqlserver);
+        assert!(sql.contains("[TOP], [PERCENT], [name]"), "{sql}");
+
+        let mut db2 = opts(DatabaseType::Db2, None, None, "USERS");
+        db2.columns = vec!["MyCol".to_string()];
+        db2.order_by = Some("MyCol".to_string());
+        db2.offset = Some(10);
+        db2.quote_identifiers = false;
+        let sql = build_table_data_select_sql(db2);
+        assert!(sql.contains("SELECT \"MyCol\" FROM (SELECT dbx_t.\"MyCol\""), "{sql}");
+    }
+
+    #[test]
+    fn table_data_select_quote_opt_out_covers_the_mysql_family_member() {
+        // MySQL rides the fallback branch with exactly the fold semantics it
+        // was written for, so it stays inside the verified list: the preview
+        // projection goes bare while the reserved word and the marker alias
+        // keep their backticks.
+        let mut options = opts(DatabaseType::Mysql, None, Some("db_9"), "users");
+        options.identifier_quote = Some("`".to_string());
+        options.primary_keys = vec!["id".to_string()];
+        options.columns = vec!["id".to_string(), "payload".to_string()];
+        options.column_types = vec!["int".to_string(), "text".to_string()];
+        options.large_value_preview_size = Some(100);
+        options.quote_identifiers = false;
+        let sql = build_table_data_select_sql_with_database(options, true);
+        assert!(sql.contains("LEFT(payload, 101) AS payload"), "{sql}");
+        assert!(sql.contains("AS `__DBX_LARGE_VALUE_BYTES_T_1`"), "{sql}");
+        assert!(sql.contains("FROM db_9.users"), "{sql}");
+    }
+
+    #[test]
+    fn can_unquote_rejects_dbx_synthetic_prefixes_on_every_dialect() {
+        // Only the case-folding branches reject the lowercase spelling on
+        // their own; the MySQL-family fallback would bare it. The explicit
+        // prefix rejection covers all dialects (#12878 review).
+        for name in ["__DBX_ROWID", "__dbx_large_value_bytes_t_0"] {
+            assert!(!can_unquote_identifier(name, Some(DatabaseType::Mysql), None), "{name}");
+            assert!(!can_unquote_identifier(name, Some(DatabaseType::Oracle), None), "{name}");
+        }
+        // Ordinary lowercase names on MySQL keep their fallback behavior.
+        assert!(can_unquote_identifier("events", Some(DatabaseType::Mysql), None));
     }
 }

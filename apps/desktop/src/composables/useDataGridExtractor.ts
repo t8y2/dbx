@@ -303,7 +303,14 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // 「包含数据库名称」：复制/导出 SQL 时，提取器自身的勾选框与编辑器全局设置
     // （`generateSqlIncludeDatabaseName`）任一开启都保留库名/模式名；后者还会影响
     // 保存 SQL、侧栏导出等其它路径，因此这里取“或”，不覆盖全局偏好。
-    const extractorOptionValues = normalizeDataGridExtractorOptions(extractorOptions);
+    let extractorOptionValues = normalizeDataGridExtractorOptions(extractorOptions);
+    // 「主开关联动」(#12878)：编辑器全局设置 `generateSqlQuoteIdentifiers` 关闭时，
+    // 复制出的 SQL 与其它生成面一样一律不加引号（这里取“与”，主开关是上界）；
+    // 开启时保留复制配置对话框里的细调勾选。
+    const settingsQuoteIdentifiers = getActivePinia() ? useSettingsStore().editorSettings.generateSqlQuoteIdentifiers : true;
+    if (settingsQuoteIdentifiers !== extractorOptionValues.sql.quoteIdentifiers) {
+      extractorOptionValues = { ...extractorOptionValues, sql: { ...extractorOptionValues.sql, quoteIdentifiers: settingsQuoteIdentifiers && extractorOptionValues.sql.quoteIdentifiers } };
+    }
     const effectiveTableMeta = options.tableMeta.value
       ? {
           ...options.tableMeta.value,

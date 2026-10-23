@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { getActivePinia } from "pinia";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +44,11 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+// #12878: the editor's master switch is an upper bound on this checkbox — when
+// it is off, copied SQL never carries optional quotes, so the checkbox has no
+// effect and the hint says so. Guarded for pinia-less test mounts.
+const settingsStore = getActivePinia() ? useSettingsStore() : undefined;
+const quoteIdentifiersOverridden = computed(() => !!settingsStore && !settingsStore.editorSettings.generateSqlQuoteIdentifiers);
 const formatRadioGroupName = `grid-copy-format-${useId()}`;
 const selectedFormat = ref<DataGridCopyPreference>(props.preference);
 const draftDefaultPreference = ref<DataGridCopyPreference>(props.preference);
@@ -459,8 +466,11 @@ function handleFormatKeydown(event: KeyboardEvent, itemIndex: number) {
                 </Select>
               </div>
               <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.includeDatabaseName" @change="updateSql('includeDatabaseName', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorIncludeDatabaseName") }}</label>
-              <div v-if="draftExtractor === 'sql-inserts' || draftExtractor === 'sql-deletes-inserts'" class="space-y-1.5">
+              <div class="space-y-1.5">
                 <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.quoteIdentifiers" @change="updateSql('quoteIdentifiers', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorQuoteIdentifiers") }}</label>
+                <p v-if="quoteIdentifiersOverridden" class="text-xs text-muted-foreground">{{ t("grid.copyExtractorQuoteIdentifiersHint") }}</p>
+              </div>
+              <div v-if="draftExtractor === 'sql-inserts' || draftExtractor === 'sql-deletes-inserts'" class="space-y-1.5">
                 <Label>{{ t("grid.copyExtractorTemporalFormat") }}</Label>
                 <Select :model-value="draftOptions.sql.temporalFormat" @update:model-value="updateSql('temporalFormat', $event as DataGridExtractorOptions['sql']['temporalFormat'])">
                   <SelectTrigger><SelectValue /></SelectTrigger>

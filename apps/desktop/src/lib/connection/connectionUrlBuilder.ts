@@ -1,3 +1,4 @@
+import { elasticsearchAuthTypeFromConfig } from "@/lib/connection/elasticsearchKibanaProxy";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
 import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
@@ -23,7 +24,7 @@ export type ConnectionUrlCopyFormat = "url" | "urlWithPassword" | "jdbcUrl" | "j
 /** Formats whose output embeds the stored password; callers should confirm before copying. */
 export const CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS: ReadonlySet<ConnectionUrlCopyFormat> = new Set(["urlWithPassword", "jdbcUrlWithCredentials", "dsnWithPassword"]);
 
-export type ConnectionUrlCopyConfig = Pick<ConnectionConfig, "db_type" | "host" | "port" | "username" | "password" | "database" | "url_params" | "ssl" | "connection_string"> & Partial<Pick<ConnectionConfig, "driver_profile" | "oracle_connection_type">>;
+export type ConnectionUrlCopyConfig = Pick<ConnectionConfig, "db_type" | "host" | "port" | "username" | "password" | "database" | "url_params" | "ssl" | "connection_string"> & Partial<Pick<ConnectionConfig, "driver_profile" | "oracle_connection_type" | "external_config">>;
 
 export interface ConnectionUrlCopyOptions {
   /** Overrides `config.database` (e.g. the database tree node that was right-clicked). */
@@ -292,7 +293,8 @@ function buildStandardUrl(config: ConnectionUrlCopyConfig, options: ConnectionUr
 
   const database = effectiveDatabase(config, options);
   const encode = scheme === "oceanbase" ? encodeOceanBaseUrlCredential : config.db_type === "oracle" ? encodeOracleUrlCredential : encodeCredential;
-  const userInfo = buildUserInfo(config, options.includePassword, encode, scheme === "oceanbase" ? encodeOceanBaseUrlUsername : encode);
+  const usesApiKey = config.db_type === "elasticsearch" && elasticsearchAuthTypeFromConfig(config.external_config) === "apiKey";
+  const userInfo = usesApiKey ? "" : buildUserInfo(config, options.includePassword, encode, scheme === "oceanbase" ? encodeOceanBaseUrlUsername : encode);
   const hostPart = formatHostForUrl(host);
   const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
   const path = database ? `/${encodeURIComponent(database)}` : "";

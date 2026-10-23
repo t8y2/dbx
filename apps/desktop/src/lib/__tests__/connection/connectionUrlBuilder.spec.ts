@@ -429,3 +429,12 @@ describe("buildConnectionUrlCopy host:port, DSN and psql", () => {
     expect(buildConnectionUrlCopy(config({ db_type: "mysql", port: 3306 }), "dsnWithPassword")).toBeNull();
   });
 });
+
+describe("Elasticsearch API key connection URL copies", () => {
+  it("copies only the endpoint and never represents an API key as Basic-auth userinfo", () => {
+    const search = config({ db_type: "elasticsearch", host: "search.example.com", port: 9243, ssl: true, database: "", username: "stale-user", password: "synthetic-api-key", external_config: { authType: "apiKey" } });
+    expect(buildConnectionUrlCopy(search, "url")).toBe("https://search.example.com:9243");
+    expect(buildConnectionUrlCopy(search, "urlWithPassword")).toBe("https://search.example.com:9243");
+    expect(connectionUrlCopyFormats(search)).toEqual(["url", "hostPort"]);
+  });
+});

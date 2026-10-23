@@ -110,6 +110,16 @@ RabbitMQ 等服务可能同时有业务端口和管理 API 端口；自定义 AM
 
 DBX 可以解析许多常见 DSN/URL，但不同数据库版本和云厂商参数差异很大。连接测试成功后仍应检查实际数据库、Schema、SSL 和权限范围。
 
+### Elasticsearch API Key 认证
+
+![Elasticsearch API Key authentication](/screenshots/elasticsearch-api-key.png)
+
+在连接表单中选择 **认证 → API Key**，把编码后的 Elasticsearch API Key（`Base64(id:api_key)`）粘贴到隐藏显示的 **API Key** 输入框。只填编码值，不要加 `ApiKey ` 前缀；DBX 会为每次请求添加 `Authorization: ApiKey …` 请求头。此模式不使用用户名，直连和 Kibana 代理连接均使用所选认证方式。
+
+API Key 复用现有的加密密码存储，并遵循 **保存密码** 设置（取消勾选则仅在当前会话使用）。已有连接继续使用 Basic 用户名/密码认证；切换认证方式会清空凭据输入框，以便输入新凭据。
+
+CLI/MCP 配置中，将 `external_config.authType` 设为 `"apiKey"`，编码后的 Key 填入 `password`；不要把密钥放入 URL 参数或 `external_config`。
+
 ## 本地测试环境
 
 仓库提供 ClickHouse、MariaDB、MongoDB、MySQL、PostgreSQL 和 Redis 的固定 Docker Compose 测试环境，适合验证连接、驱动行为和回归。详见 [数据库测试实验室](/cn/docs/database-lab)。

@@ -187,6 +187,8 @@ import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudfla
 import { hasSpannerResourcePath, isSpannerConnection, normalizeSpannerConnection } from "@/lib/connection/spannerResourcePath";
 import {
   buildElasticsearchExternalConfig,
+  elasticsearchAuthTypeFromConfig,
+  type ElasticsearchAuthType,
   elasticsearchConnectionModeFromConfig,
   elasticsearchConnectivityCheckDisabledFromConfig,
   elasticsearchConnectivityCheckPathFromConfig,
@@ -490,6 +492,7 @@ function resetCassandraTlsFields(externalConfig: unknown) {
   Object.assign(cassandraTls, cassandraTlsConfigFromExternalConfig(externalConfig));
 }
 
+const elasticsearchAuthType = ref<ElasticsearchAuthType>("basic");
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
 const elasticsearchKibanaBasePath = ref("");
 const elasticsearchConnectivityCheckPath = ref("");
@@ -499,7 +502,15 @@ const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, num
   direct: 9200,
   kibana: 5601,
 });
+function switchElasticsearchAuthType(authType: ElasticsearchAuthType) {
+  if (authType === elasticsearchAuthType.value) return;
+  elasticsearchAuthType.value = authType;
+  form.value.password = "";
+  resetTestState();
+}
+
 function resetElasticsearchProxyFields(externalConfig?: unknown) {
+  elasticsearchAuthType.value = elasticsearchAuthTypeFromConfig(externalConfig);
   const mode = elasticsearchConnectionModeFromConfig(externalConfig);
   elasticsearchConnectionMode.value = mode;
   elasticsearchKibanaBasePath.value = elasticsearchKibanaBasePathFromConfig(externalConfig);
@@ -5217,7 +5228,11 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       config.external_config = { ...existing, auth };
     }
   } else if (config.db_type === "elasticsearch") {
-    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value, elasticsearchConnectivityCheckDisabled.value);
+    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value, elasticsearchIndexGroupingPattern.value, elasticsearchConnectivityCheckDisabled.value, elasticsearchAuthType.value);
+    if (elasticsearchAuthType.value === "apiKey") {
+      config.username = "";
+      config.password = config.password.trim();
+    }
   } else if (config.db_type === "meilisearch") {
     config.username = "";
     config.password = config.password.trim();
@@ -9451,14 +9466,22 @@ function openExternalUrl(url: string) {
                       <Input v-model="form.informix_server" class="col-span-3" placeholder="ol_informix1170" />
                     </div>
 
-                    <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqAuth") }}</Label>
+                      <div class="col-span-3 flex items-center gap-2">
+                        <Button type="button" size="sm" :variant="elasticsearchAuthType === 'basic' ? 'default' : 'outline'" :aria-pressed="elasticsearchAuthType === 'basic'" @click="switchElasticsearchAuthType('basic')">{{ t("connection.mqAuthBasic") }}</Button>
+                        <Button type="button" size="sm" :variant="elasticsearchAuthType === 'apiKey' ? 'default' : 'outline'" :aria-pressed="elasticsearchAuthType === 'apiKey'" @click="switchElasticsearchAuthType('apiKey')">{{ t("connection.mqAuthApiKey") }}</Button>
+                      </div>
+                    </div>
+
+                    <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner' && !(form.db_type === 'elasticsearch' && elasticsearchAuthType === 'apiKey')" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                       <Input v-model="form.username" class="col-span-3" />
                     </div>
 
                     <div v-if="form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">{{ form.db_type === "meilisearch" ? t("connection.mqAuthApiKey") : t("connection.password") }}</Label>
-                      <PasswordInput v-model="form.password" class="col-span-3" />
+                      <Label :class="connectionLabelClass">{{ form.db_type === "meilisearch" || (form.db_type === "elasticsearch" && elasticsearchAuthType === "apiKey") ? t("connection.mqAuthApiKey") : t("connection.password") }}</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" :placeholder="form.db_type === 'elasticsearch' && elasticsearchAuthType === 'apiKey' ? 'Base64(id:api_key)' : undefined" />
                     </div>
 
                     <SavePasswordCheckbox v-if="form.db_type !== 'spanner'" v-model="form.save_password" />

@@ -110,6 +110,16 @@ Services such as RabbitMQ may expose separate business and management ports. A c
 
 DBX parses many common DSNs and URLs, but parameters vary by version and cloud vendor. After a successful connection test, still verify the actual database, schema, SSL, and privilege scope.
 
+### Elasticsearch API Key Authentication
+
+![Elasticsearch API Key authentication](/screenshots/elasticsearch-api-key.png)
+
+In the connection form, choose **Auth → API Key** and paste the encoded Elasticsearch API key (`Base64(id:api_key)`) into the masked **API Key** field. Paste only the encoded value, without the `ApiKey ` prefix; DBX adds the `Authorization: ApiKey …` header to every request. Username is not used in this mode. Both direct and Kibana proxy connections use the selected authentication method.
+
+API keys use the existing encrypted password storage and follow **Save password** (uncheck it for session-only credentials). Existing connections continue to use Basic username/password authentication. Switching authentication methods clears the credential field so you can enter the new credential.
+
+For CLI/MCP configurations, set `external_config.authType` to `"apiKey"` and put the encoded key in `password`; do not put the key in URL parameters or `external_config`.
+
 ## Local Test Environments
 
 The repository includes pinned Docker Compose labs for ClickHouse, MariaDB, MongoDB, MySQL, PostgreSQL, and Redis. Use [Database Test Lab](/en/docs/database-lab) for connection, driver, and regression testing.

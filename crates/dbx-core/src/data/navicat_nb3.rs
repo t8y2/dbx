@@ -289,11 +289,8 @@ fn split_value_tuples(dialect: Nb3Dialect, tail: &str) -> Option<Vec<&str>> {
     let mut scanner = TupleScanner::new(dialect);
     let mut pos = 0;
     let mut tuples = Vec::new();
-    loop {
-        match scanner.next(bytes, &mut pos).ok()? {
-            TupleScan::Tuple { start, end } => tuples.push(&tail[start..end]),
-            TupleScan::Incomplete => break,
-        }
+    while let TupleScan::Tuple { start, end } = scanner.next(bytes, &mut pos).ok()? {
+        tuples.push(&tail[start..end]);
     }
     (scanner.is_between_tuples() && !tuples.is_empty()).then_some(tuples)
 }

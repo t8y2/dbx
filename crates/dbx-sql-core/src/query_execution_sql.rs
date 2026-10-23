@@ -234,6 +234,11 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
         }
+        // openGauss descends from PostgreSQL 9.2 and has no FORMAT JSON output,
+        // so the plan is generated as plain `EXPLAIN <statement>` text (#13055).
+        DatabaseType::OpenGauss => {
+            EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
+        }
         DatabaseType::Questdb => {
             EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
         }
@@ -2226,6 +2231,7 @@ mod tests {
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
+            (DatabaseType::OpenGauss, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Questdb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1", Text, DriverNative),
             (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1", Text, DriverNative),

@@ -898,6 +898,7 @@ mod tests {
                 start_position: Some(PeekStartPosition::Offset),
                 partition: Some(2),
                 offset: Some(17),
+                timestamp: None,
             },
         );
 
@@ -979,7 +980,7 @@ mod tests {
             &cfg,
             &topic_ref(),
             20,
-            PeekMessagesOptions { start_position: None, partition: None, offset: Some(17) },
+            PeekMessagesOptions { start_position: None, partition: None, offset: Some(17), timestamp: None },
         );
 
         assert!(params.get("startPosition").is_none());

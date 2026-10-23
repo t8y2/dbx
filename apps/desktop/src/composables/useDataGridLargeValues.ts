@@ -4,6 +4,7 @@ import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { buildDataGridContextFilterCondition } from "@/lib/dataGrid/dataGridSql";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { materializeLargeValueSnapshot, waitForLargeValueSnapshot } from "@/lib/dataGrid/largeValueSnapshot";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
@@ -349,7 +350,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
       limit: requests.size,
       offset: 0,
-      includeRowId: shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
+      includeRowId: shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !rowIdLocatorUnsupported(options.connectionId.value),
     });
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
     const connection = options.getConnectionConfig(options.connectionId.value!);
@@ -521,7 +522,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
       limit: requests.length,
       offset: 0,
-      includeRowId: shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
+      includeRowId: shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !rowIdLocatorUnsupported(options.connectionId.value),
     });
     const connection = options.connectionId.value ? options.getConnectionConfig(options.connectionId.value!) : undefined;
     const results = await api.executeMulti(options.connectionId.value!, options.executionDatabase.value, sql, undefined, options.uuid(), {

@@ -1457,6 +1457,43 @@ fn explicit_table_data_order_is_preserved() {
 }
 
 #[test]
+fn greenplum_servers_do_not_receive_the_system_column_locator() {
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "ao_table".to_string(),
+        table_type: Some("TABLE".to_string()),
+        columns: vec!["id".to_string()],
+        limit: Some(20),
+        include_row_id: true,
+        ..Default::default()
+    };
+
+    // Greenplum reports itself through version(); its segments reject
+    // tableoid/ctid/xmin with "cannot retrieve a system column" (#13227).
+    let greenplum = build_table_data_select_sql(TableDataSelectSqlOptions {
+        server_version: Some("PostgreSQL 9.4.24 (Greenplum Database 6.18.2 build commit:4b1c8322)".to_string()),
+        ..base.clone()
+    });
+    assert_eq!(greenplum, "SELECT * FROM \"public\".\"ao_table\" LIMIT 20;");
+
+    // Cloudberry's version carries the same Greenplum lineage.
+    let cloudberry = build_table_data_select_sql(TableDataSelectSqlOptions {
+        server_version: Some("Cloudberry Database 1.1.0 (based on Greenplum Database 6)".to_string()),
+        ..base.clone()
+    });
+    assert_eq!(cloudberry, "SELECT * FROM \"public\".\"ao_table\" LIMIT 20;");
+
+    // Plain PostgreSQL and unknown versions keep the locator.
+    assert!(build_table_data_select_sql(base.clone()).contains("\"__DBX_ROWID\""));
+    assert!(build_table_data_select_sql(TableDataSelectSqlOptions {
+        server_version: Some("PostgreSQL 16.3".to_string()),
+        ..base
+    })
+    .contains("\"__DBX_ROWID\""));
+}
+
+#[test]
 fn selects_hidden_postgres_tuple_identity_only_for_known_unkeyed_base_tables() {
     let base = TableDataSelectSqlOptions {
         database_type: Some(DatabaseType::Postgres),

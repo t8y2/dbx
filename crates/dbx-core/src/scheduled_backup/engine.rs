@@ -330,7 +330,11 @@ impl BackupService {
                         &job.time_zone,
                         false,
                     )?;
-                    let extension = if job.config.output_compression == "gzip" { "sql.gz" } else { "sql" };
+                    let extension = match job.config.output_compression.as_str() {
+                        "gzip" => "sql.gz",
+                        "nb3" => "nb3",
+                        _ => "sql",
+                    };
                     let path = output.join(format!("{name}.{extension}"));
                     check_output_ancestors(&path, Path::new(&job.config.destination_directory))?;
                     if path.try_exists().map_err(|e| e.to_string())? {
@@ -366,10 +370,10 @@ impl BackupService {
                         preserve_original_language: false,
                         fail_on_error: true,
                         prevent_overwrite: true,
-                        output_compression: if job.config.output_compression == "gzip" {
-                            DatabaseExportOutputCompression::Gzip
-                        } else {
-                            DatabaseExportOutputCompression::None
+                        output_compression: match job.config.output_compression.as_str() {
+                            "gzip" => DatabaseExportOutputCompression::Gzip,
+                            "nb3" => DatabaseExportOutputCompression::Nb3,
+                            _ => DatabaseExportOutputCompression::None,
                         },
                         insert_dialect: Default::default(),
                         insert_mode: Default::default(),

@@ -63,6 +63,7 @@ pub use data::docs;
 pub use data::export_runtime;
 pub use data::mongodb_dump;
 pub use data::mongodb_import_export;
+pub use data::navicat_nb3;
 pub use dbx_drivers::mongo_oidc;
 pub use dbx_drivers::mongo_shell;
 pub use dbx_drivers::salesforce_oauth;

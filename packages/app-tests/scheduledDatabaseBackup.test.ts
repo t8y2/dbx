@@ -140,6 +140,14 @@ test("backup file names retain the target suffix without an implicit run suffix"
   assert.equal(path, "C:\\backups\\before-migration__app.sql.gz");
 });
 
+test("Navicat backups use the .nb3 suffix and survive schedule normalization", () => {
+  const path = databaseBackupFilePath("/backups", "Nightly", "app", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd", "nb3", "before-migration");
+
+  assert.equal(path, "/backups/before-migration__app.nb3");
+  assert.equal(normalizeDatabaseBackupSchedule({ ...schedule(), outputCompression: "nb3" })?.outputCompression, "nb3");
+  assert.equal(normalizeDatabaseBackupSchedule({ ...schedule(), outputCompression: "zip" })?.outputCompression, "none");
+});
+
 test("scheduled runs render a user-defined relative directory template", () => {
   const directory = databaseBackupRunDirectory("C:\\backups", "archives/{schedule}/{date}/{timestamp}-{runId}", "Nightly: prod", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd");
 

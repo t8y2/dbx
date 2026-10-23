@@ -15,7 +15,8 @@ For a backup that should run only once, use **Back up now** in Settings instead 
 | --- | --- |
 | Databases | MySQL and PostgreSQL |
 | Platform | DBX Desktop |
-| Output | The default template creates one directory per scheduled run, containing one `.sql` file per database/schema target; directory and file-name templates can be customized |
+| Output | The default template creates one directory per scheduled run, containing one file per database/schema target; directory and file-name templates can be customized |
+| Format | Plain SQL (`.sql`), gzip-compressed SQL (`.sql.gz`), or a Navicat backup archive (`.nb3`) |
 | Frequency | Every N hours, daily at a time, or weekly on a weekday and time |
 | Contents | Table structure, data, database objects, and optional `DROP TABLE IF EXISTS` |
 | Table scope | All, include by pattern, or exclude by pattern |
@@ -130,7 +131,7 @@ For MySQL-compatible connections, restore individual tables from a single `.sql`
 
 Selected-table mode restores table structure, indexes, and data, excluding views, routines, triggers, and events. Database context in the dump still applies; tables without an explicit database use the destination chosen in the dialog. Existing foreign keys or triggers can affect the restore. Choose **All contents** for a complete restore. Statements whose scope cannot be determined cause selective restore to fail before execution.
 
-Generated `.sql` files can be imported through [SQL File Execution](/en/docs/sql-file). Regularly verify in an isolated environment that:
+Generated `.sql`, `.sql.gz`, and `.nb3` files can be imported through [SQL File Execution](/en/docs/sql-file). Regularly verify in an isolated environment that:
 
 - The complete file can be read and executed
 - Schema, indexes, objects, and row counts are correct
@@ -138,6 +139,27 @@ Generated `.sql` files can be imported through [SQL File Execution](/en/docs/sql
 - The application can connect to the restored database
 
 A successful backup run means file generation completed; it does not prove restore readiness.
+
+## Backups Created Outside DBX
+
+The backup page also works with `.sql`, `.sql.gz`, and `.nb3` files that DBX did not create, such as Navicat backups:
+
+- **Restore from file** picks any backup file and opens it in SQL File Execution. Nothing is added to the history.
+- **Import backup** (DBX Desktop) adds one or more files to **Backup history**, labelled **Imported**, so they can be restored later with **Restore**. A Navicat `.nb3` entry shows its source database and schema and the time the backup was taken.
+
+DBX never deletes imported files. Deleting an imported entry only removes it from the history, and retention never applies to imported entries. The same file cannot be imported twice.
+
+## Navicat Backups (.nb3)
+
+Choose **Navicat backup (.nb3)** as the backup format to write the archive layout Navicat uses for MySQL and PostgreSQL: a tar archive with a `meta.json` index, gzipped per-object metadata (DDL, indexes, constraints, triggers), and gzipped row chunks, each protected by a SHA-1 checksum.
+
+DBX also restores `.nb3` files, including archives created by Navicat. Open the file in [SQL File Execution](/en/docs/sql-file) or click **Restore** in backup history. DBX turns the archive into a restore script that:
+
+1. Drops the archived tables, views, and sequences (`DROP ... IF EXISTS`; PostgreSQL uses `CASCADE`)
+2. Creates sequences, routines, and tables, then loads the rows in batched `INSERT` statements
+3. Adds indexes, constraints, sequence values, views, and triggers
+
+<Callout type="warn">Restoring an `.nb3` file replaces the archived objects in the destination. Restore into an empty or disposable database first. Encrypted Navicat backups are not supported, and an archive can only be restored into the same database engine that produced it.</Callout>
 
 ## Scheduled Backup vs. Database Export
 

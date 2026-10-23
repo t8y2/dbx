@@ -672,7 +672,7 @@ async function selectFile() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: true,
-      filters: [{ name: "SQL package", extensions: ["sql", "gz", "zip"] }],
+      filters: [{ name: "SQL package", extensions: ["sql", "gz", "zip", "nb3"] }],
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length > 0) {
@@ -1018,7 +1018,7 @@ watch(
           </div>
 
           <div class="flex items-center gap-2">
-            <input ref="fileInput" type="file" accept=".sql,.sql.gz,.zip,text/sql,application/gzip,application/zip" multiple class="hidden" @change="handleFileInputChange" />
+            <input ref="fileInput" type="file" accept=".sql,.sql.gz,.zip,.nb3,text/sql,application/gzip,application/zip" multiple class="hidden" @change="handleFileInputChange" />
             <Input v-if="isDesktopRuntime" v-model="pathInput" :disabled="executionLocked" class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" @keydown.enter="commitPathInputOnEnter" @blur="commitPathInput" />
             <Input v-else :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="executionLocked || selectingFile" @click="selectFile">

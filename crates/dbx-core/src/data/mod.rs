@@ -9,6 +9,7 @@ pub mod export_runtime;
 pub mod grid_clipboard_guard;
 pub mod mongodb_dump;
 pub mod mongodb_import_export;
+pub mod navicat_nb3;
 pub mod query_result_export;
 mod sample_pairing;
 pub mod script_generator;

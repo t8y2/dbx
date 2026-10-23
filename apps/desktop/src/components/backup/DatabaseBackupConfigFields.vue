@@ -238,11 +238,16 @@ watch(
     </div>
 
     <div class="space-y-2">
-      <Label>{{ t("databaseBackup.compression") }}</Label>
-      <label class="flex items-center gap-2 text-sm">
-        <input :checked="draft.outputCompression === 'gzip'" type="checkbox" class="h-4 w-4 accent-primary" @change="draft.outputCompression = ($event.target as HTMLInputElement).checked ? 'gzip' : 'none'" />
-        {{ t("databaseBackup.compressionGzip") }}
-      </label>
+      <Label>{{ t("databaseBackup.backupFormat") }}</Label>
+      <Select v-model="draft.outputCompression">
+        <SelectTrigger data-backup-output-format class="w-full sm:w-65"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="none">{{ t("databaseBackup.formatSql") }}</SelectItem>
+          <SelectItem value="gzip">{{ t("databaseBackup.compressionGzip") }}</SelectItem>
+          <SelectItem value="nb3">{{ t("databaseBackup.formatNb3") }}</SelectItem>
+        </SelectContent>
+      </Select>
+      <p v-if="draft.outputCompression === 'nb3'" data-backup-nb3-hint class="text-xs text-muted-foreground">{{ t("databaseBackup.formatNb3Hint") }}</p>
     </div>
 
     <div v-if="multipleConnectionsSelected" data-backup-multi-connection-hint class="rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">

@@ -6366,7 +6366,7 @@ export interface DatabaseExportRequest {
   preserveOriginalLanguage?: boolean;
   failOnError?: boolean;
   preventOverwrite?: boolean;
-  outputCompression?: "none" | "gzip";
+  outputCompression?: "none" | "gzip" | "nb3";
   insertDialect?: SqlInsertDialect;
   insertMode?: "batch" | "single";
   snapshotSessionId?: string;

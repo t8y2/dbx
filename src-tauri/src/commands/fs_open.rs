@@ -106,8 +106,9 @@ fn validate_database_backup_file(raw: &str, allowed_roots: &[PathBuf]) -> Result
     }
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
     let lower_file_name = file_name.to_ascii_lowercase();
-    if !(lower_file_name.ends_with(".sql") || lower_file_name.ends_with(".sql.gz")) {
-        return Err(format!("backup file must use the .sql or .sql.gz extension: {expanded}"));
+    if !(lower_file_name.ends_with(".sql") || lower_file_name.ends_with(".sql.gz") || lower_file_name.ends_with(".nb3"))
+    {
+        return Err(format!("backup file must use the .sql, .sql.gz or .nb3 extension: {expanded}"));
     }
     if file_name.chars().any(char::is_control) {
         return Err(format!("backup file name contains control characters: {expanded}"));

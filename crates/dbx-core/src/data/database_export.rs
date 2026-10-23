@@ -76,6 +76,8 @@ pub enum DatabaseExportOutputCompression {
     #[default]
     None,
     Gzip,
+    /// Navicat `.nb3` backup archive (MySQL and PostgreSQL only).
+    Nb3,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +179,7 @@ enum DatabaseExportWriter {
     Plain(BufWriter<std::fs::File>),
     Gzip(Box<GzEncoder<BufWriter<std::fs::File>>>),
     SplitZip(Box<crate::export_split_zip::SplitZipExportWriter>),
+    Nb3(Box<crate::navicat_nb3::Nb3ExportWriter>),
 }
 
 impl DatabaseExportWriter {
@@ -185,6 +188,7 @@ impl DatabaseExportWriter {
             Self::Plain(writer) => writer.write_all(unit),
             Self::Gzip(writer) => writer.write_all(unit),
             Self::SplitZip(writer) => writer.write_sql_unit(unit),
+            Self::Nb3(writer) => writer.write_all(unit),
         }
     }
 }
@@ -195,6 +199,7 @@ impl Write for DatabaseExportWriter {
             Self::Plain(writer) => writer.write(buffer),
             Self::Gzip(writer) => writer.write(buffer),
             Self::SplitZip(writer) => writer.write(buffer),
+            Self::Nb3(writer) => writer.write(buffer),
         }
     }
 
@@ -209,6 +214,7 @@ impl Write for DatabaseExportWriter {
             Self::Plain(writer) => writer.flush(),
             Self::Gzip(writer) => writer.flush(),
             Self::SplitZip(writer) => writer.flush(),
+            Self::Nb3(writer) => writer.flush(),
         }
     }
 }
@@ -224,6 +230,7 @@ impl DatabaseExportWriter {
                 .and_then(|mut output| output.flush())
                 .map_err(|error| format!("Failed to finalize export file: {error}")),
             Self::SplitZip(writer) => writer.finish(source_file_name),
+            Self::Nb3(writer) => writer.finish(),
         }
     }
 }
@@ -3791,6 +3798,20 @@ async fn create_database_export_writer(
         }
         return Ok(DatabaseExportWriter::SplitZip(Box::new(writer)));
     }
+    // Reject unsupported connections before the destination is created or truncated.
+    let nb3_database_type = if request.output_compression == DatabaseExportOutputCompression::Nb3 {
+        let db_type = state
+            .configs
+            .read()
+            .await
+            .get(&request.connection_id)
+            .map(|config| config.db_type)
+            .ok_or_else(|| format!("Connection config not found: {}", request.connection_id))?;
+        crate::navicat_nb3::ensure_supported_database_type(db_type)?;
+        Some(db_type)
+    } else {
+        None
+    };
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -3834,6 +3855,20 @@ async fn create_database_export_writer(
         DatabaseExportOutputCompression::None => DatabaseExportWriter::Plain(BufWriter::new(file)),
         DatabaseExportOutputCompression::Gzip => {
             DatabaseExportWriter::Gzip(Box::new(GzEncoder::new(BufWriter::new(file), Compression::default())))
+        }
+        DatabaseExportOutputCompression::Nb3 => {
+            let db_type = nb3_database_type.expect("Navicat backup database type is validated before opening");
+            let writer = crate::navicat_nb3::Nb3ExportWriter::new(
+                file,
+                export_destination_parent_dir(&request.file_path),
+                db_type,
+                &request.database,
+                &request.schema,
+            )
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&request.file_path);
+            })?;
+            DatabaseExportWriter::Nb3(Box::new(writer))
         }
     })
 }

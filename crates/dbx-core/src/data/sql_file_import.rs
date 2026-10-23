@@ -1359,6 +1359,8 @@ pub(crate) struct SqlFileStreamDecoder {
 enum SqlFileByteReader {
     Plain(BufReader<tokio::fs::File>, Option<Arc<AtomicU64>>),
     Gzip(Arc<Mutex<flate2::read::GzDecoder<SqlFileCountingReader<std::io::BufReader<std::fs::File>>>>>),
+    /// Navicat `.nb3` archive rendered as a restore script.
+    Nb3(Arc<Mutex<crate::navicat_nb3::Nb3SqlReader>>),
 }
 
 impl SqlFileByteReader {
@@ -1367,6 +1369,13 @@ impl SqlFileByteReader {
     }
 
     async fn open_with_progress(file_path: &Path, bytes_read: Option<Arc<AtomicU64>>) -> Result<Self, String> {
+        if crate::navicat_nb3::is_nb3_path(file_path) {
+            let path = file_path.to_path_buf();
+            let reader = tokio::task::spawn_blocking(move || crate::navicat_nb3::Nb3SqlReader::open(&path, bytes_read))
+                .await
+                .map_err(|error| format!("Failed to open Navicat backup: {error}"))??;
+            return Ok(Self::Nb3(Arc::new(Mutex::new(reader))));
+        }
         if is_gzip_sql_file_path(file_path) {
             let path = file_path.to_path_buf();
             let reader = tokio::task::spawn_blocking(move || {
@@ -1394,24 +1403,29 @@ impl SqlFileByteReader {
                 }
                 Ok(read)
             }
-            Self::Gzip(reader) => {
-                let reader = reader.clone();
-                let capacity = buffer.len();
-                let (chunk, read) = tokio::task::spawn_blocking(move || {
-                    let mut chunk = vec![0; capacity];
-                    let mut reader =
-                        reader.lock().map_err(|_| "Compressed SQL reader lock was poisoned".to_string())?;
-                    let read =
-                        reader.read(&mut chunk).map_err(|error| format!("Failed to decompress SQL file: {error}"))?;
-                    Ok::<_, String>((chunk, read))
-                })
-                .await
-                .map_err(|error| format!("Failed to read compressed SQL file: {error}"))??;
-                buffer[..read].copy_from_slice(&chunk[..read]);
-                Ok(read)
-            }
+            Self::Gzip(reader) => read_blocking_sql_source(reader.clone(), buffer, "compressed SQL file").await,
+            Self::Nb3(reader) => read_blocking_sql_source(reader.clone(), buffer, "Navicat backup").await,
         }
     }
+}
+
+/// Reads a synchronous decoder off the async worker threads.
+async fn read_blocking_sql_source<R: StdRead + Send + 'static>(
+    reader: Arc<Mutex<R>>,
+    buffer: &mut [u8],
+    label: &'static str,
+) -> Result<usize, String> {
+    let capacity = buffer.len();
+    let (chunk, read) = tokio::task::spawn_blocking(move || {
+        let mut chunk = vec![0; capacity];
+        let mut reader = reader.lock().map_err(|_| format!("Reader lock for {label} was poisoned"))?;
+        let read = reader.read(&mut chunk).map_err(|error| format!("Failed to read {label}: {error}"))?;
+        Ok::<_, String>((chunk, read))
+    })
+    .await
+    .map_err(|error| format!("Failed to read {label}: {error}"))??;
+    buffer[..read].copy_from_slice(&chunk[..read]);
+    Ok(read)
 }
 
 /// 嗅探文件开头的字节序标记，存在时返回 BOM 对应的编码与长度。

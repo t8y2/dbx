@@ -48,6 +48,8 @@ pub async fn start_database_export(
         "zip"
     } else if req.output_compression == DatabaseExportOutputCompression::Gzip {
         "sql.gz"
+    } else if req.output_compression == DatabaseExportOutputCompression::Nb3 {
+        "nb3"
     } else {
         "sql"
     };
@@ -180,6 +182,8 @@ pub async fn database_export_download(
         "application/zip"
     } else if export_file.format == "sql.gz" {
         "application/gzip"
+    } else if export_file.format == "nb3" {
+        "application/x-tar"
     } else {
         "application/sql; charset=utf-8"
     };

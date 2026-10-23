@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   deleteSchedule: vi.fn(),
   deleteRun: vi.fn(),
   deleteRuns: vi.fn(),
+  importBackupFiles: vi.fn(),
   renameRun: vi.fn(),
   runSchedule: vi.fn(),
   runOneShot: vi.fn(),
@@ -75,6 +76,7 @@ vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
     deleteSchedule: mocks.deleteSchedule,
     deleteRun: mocks.deleteRun,
     deleteRuns: mocks.deleteRuns,
+    importBackupFiles: mocks.importBackupFiles,
     renameRun: mocks.renameRun,
     runSchedule: mocks.runSchedule,
     runOneShot: mocks.runOneShot,
@@ -154,6 +156,9 @@ function destinationInput(): HTMLInputElement {
   return input;
 }
 
+// The backup format select precedes the table scope select in the config fields.
+const TABLE_SCOPE_SELECT = 1;
+
 async function selectDialogOption(triggerIndex: number, optionText: string) {
   const trigger = currentDialog().querySelectorAll<HTMLButtonElement>('[data-slot="select-trigger"]')[triggerIndex];
   if (!trigger) throw new Error(`Select trigger not found: ${triggerIndex}`);
@@ -167,7 +172,7 @@ async function selectDialogOption(triggerIndex: number, optionText: string) {
 }
 
 async function setTablePattern(pattern: string) {
-  await selectDialogOption(0, String(i18n.global.t("databaseBackup.includeTables")));
+  await selectDialogOption(TABLE_SCOPE_SELECT, String(i18n.global.t("databaseBackup.includeTables")));
   const input = currentDialog().querySelector<HTMLInputElement>(`input[placeholder="${String(i18n.global.t("databaseBackup.tablePatternsPlaceholder"))}"]`);
   if (!input) throw new Error("Table pattern input not found");
   input.value = pattern;
@@ -252,7 +257,9 @@ async function showDatabaseOptions() {
 }
 
 function buttonWithText(text: string): HTMLButtonElement {
-  const button = Array.from(document.body.querySelectorAll("button")).find((item) => item.textContent?.includes(text));
+  // Prefer an exact label so "Restore" does not match "Restore from file".
+  const buttons = Array.from(document.body.querySelectorAll("button"));
+  const button = buttons.find((item) => item.textContent?.trim() === text) ?? buttons.find((item) => item.textContent?.includes(text));
   if (!button) throw new Error(`Button not found: ${text}`);
   return button;
 }
@@ -346,6 +353,7 @@ afterEach(() => {
   mocks.saveSchedule.mockClear();
   mocks.deleteRun.mockClear();
   mocks.deleteRuns.mockClear();
+  mocks.importBackupFiles.mockReset();
   mocks.renameRun.mockReset();
   mocks.cancelRun.mockClear();
   mocks.runSchedule.mockReset();
@@ -379,6 +387,57 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(mocks.sqlFileSource).toEqual({ connectionId: "mysql-1", database: "app", ...(desktop ? { filePath: "/backups/backup.sql" } : { preview }) });
     if (desktop) expect(mocks.prepareDatabaseBackupRestore).not.toHaveBeenCalled();
     else expect(mocks.prepareDatabaseBackupRestore).toHaveBeenCalledWith("restore-run", 0);
+  });
+
+  it("imports outside backup files into the history and restores any file without importing it", async () => {
+    mocks.openDirectory.mockResolvedValueOnce(["/downloads/shop.nb3", "/downloads/old.sql.gz"]);
+    mocks.importBackupFiles.mockResolvedValue([{ id: "imported-1" }, { id: "imported-2" }]);
+    await mountSettings();
+
+    document.body.querySelector<HTMLButtonElement>("[data-backup-import]")!.click();
+    await flush();
+    expect(mocks.openDirectory).toHaveBeenCalledWith(expect.objectContaining({ multiple: true }));
+    expect(mocks.importBackupFiles).toHaveBeenCalledWith(["/downloads/shop.nb3", "/downloads/old.sql.gz"]);
+    expect(mocks.toast).toHaveBeenCalledWith(String(i18n.global.t("databaseBackup.backupsImported", { count: 2 })), 2500);
+
+    mocks.openDirectory.mockResolvedValueOnce("/downloads/navicat.nb3");
+    document.body.querySelector<HTMLButtonElement>("[data-backup-restore-from-file]")!.click();
+    await flush();
+    expect(mocks.sqlFileSource).toEqual({ connectionId: "", database: "", filePath: "/downloads/navicat.nb3" });
+    expect(mocks.importBackupFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the uploading SQL file dialog to restore from a file on the web, where import is unavailable", async () => {
+    mocks.desktop = false;
+    await mountSettings();
+
+    expect(document.body.querySelector("[data-backup-import]")).toBeNull();
+    document.body.querySelector<HTMLButtonElement>("[data-backup-restore-from-file]")!.click();
+    await flush();
+    expect(mocks.openDirectory).not.toHaveBeenCalled();
+    expect(mocks.sqlFileSource).toEqual({ connectionId: "", database: "" });
+  });
+
+  it("labels imported backups and says deleting them keeps the files", async () => {
+    mocks.runs.push({
+      id: "imported-run",
+      scheduleName: "shop.nb3",
+      connectionId: "",
+      connectionName: "",
+      trigger: "manual",
+      source: "imported",
+      status: "success",
+      startedAt: "2026-09-08T02:00:00.000Z",
+      files: [{ database: "shop", schema: "sales", displayName: "shop.sales", filePath: "/downloads/shop.nb3" }],
+    });
+    await mountSettings();
+
+    expect(document.body.textContent).toContain(String(i18n.global.t("databaseBackup.importedTrigger")));
+    expect(document.body.textContent).toContain(String(i18n.global.t("databaseBackup.externalFile")));
+    expect(document.body.textContent).not.toContain(String(i18n.global.t("databaseBackup.missingConnection")));
+    buttonWithTitle(String(i18n.global.t("databaseBackup.deleteBackup"))).click();
+    await flush();
+    expect(currentDialog().querySelector("[data-backup-delete-message]")?.textContent).toBe(String(i18n.global.t("databaseBackup.deleteImportedConfirm", { count: 1 })));
   });
 
   it("shows a backup display name and saves edits through the rename dialog", async () => {
@@ -705,7 +764,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     database.checked = true;
     database.dispatchEvent(new Event("change", { bubbles: true }));
     await flush();
-    await selectDialogOption(0, String(i18n.global.t("databaseBackup.exactTables")));
+    await selectDialogOption(TABLE_SCOPE_SELECT, String(i18n.global.t("databaseBackup.exactTables")));
     await flush();
     const start = Array.from(currentDialog().querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent?.trim() === String(i18n.global.t("databaseBackup.startBackup")))!;
     expect(start.disabled).toBe(true);
@@ -824,7 +883,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     const database = Array.from(currentDialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).find((item) => item.parentElement?.textContent?.trim() === "app")!;
     database.checked = true;
     database.dispatchEvent(new Event("change", { bubbles: true }));
-    await selectDialogOption(0, String(i18n.global.t("databaseBackup.exactTables")));
+    await selectDialogOption(TABLE_SCOPE_SELECT, String(i18n.global.t("databaseBackup.exactTables")));
     await flush();
     expect(currentDialog().querySelector("[data-backup-table-selector]")).not.toBeNull();
 
@@ -835,7 +894,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(currentDialog().querySelector("[data-backup-database-search]")).toBeNull();
     expect(currentDialog().querySelector("[data-backup-table-selector]")).toBeNull();
     expect(startBackupButton().disabled).toBe(false);
-    const trigger = currentDialog().querySelectorAll<HTMLButtonElement>('[data-slot="select-trigger"]')[0]!;
+    const trigger = currentDialog().querySelectorAll<HTMLButtonElement>('[data-slot="select-trigger"]')[TABLE_SCOPE_SELECT]!;
     trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
     await flush();
     const options = Array.from(document.body.querySelectorAll<HTMLElement>('[role="option"]')).map((item) => item.textContent?.trim());

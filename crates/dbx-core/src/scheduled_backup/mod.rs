@@ -7,7 +7,7 @@ mod store;
 mod tests;
 
 pub use models::{BackupConfig, BackupFile, BackupRun, BackupSchedule, BackupTableTarget, Migration, RunRequest};
-pub use service::{BackupCommand, BackupService};
+pub use service::{BackupCommand, BackupService, IMPORTED_SOURCE};
 pub use store::{BackupSnapshot, BackupStore};
 
 /// Metadata and export command chains nest very large async futures - a single

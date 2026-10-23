@@ -240,6 +240,7 @@ const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugi
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
 const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/SqlLibraryPanel.vue"));
 const SqlFilePanel = defineAsyncComponent(() => import("@/components/layout/SqlFilePanel.vue"));
+const FunctionDictionaryPanel = defineAsyncComponent(() => import("@/components/layout/FunctionDictionaryPanel.vue"));
 const DriverStorePage = defineAsyncComponent(() => import("@/components/config/DriverStoreDialog.vue"));
 const PluginCenterPage = defineAsyncComponent(() => import("@/components/plugins/PluginContributionsPanel.vue"));
 const PluginBottomDock = defineAsyncComponent(() => import("@/components/plugins/PluginBottomDock.vue"));
@@ -485,23 +486,43 @@ const isHistoryPanelMaximized = ref(false);
 const isZenMode = ref(false);
 const showSqlLibraryPanel = ref(safeLocalStorageGet("dbx-sql-library-open") === "true");
 const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
+const showFunctionDictionaryPanel = ref(safeLocalStorageGet("dbx-function-dictionary-open") === "true");
 const rightSidebarPanelRefs: Record<RightSidebarPanelId, typeof showAiPanel> = {
   ai: showAiPanel,
   history: showHistory,
   sqlLibrary: showSqlLibraryPanel,
   sqlFile: showSqlFilePanel,
+  functionDictionary: showFunctionDictionaryPanel,
 };
 const rightSidebarPanelStorageKeys: Partial<Record<RightSidebarPanelId, string>> = {
   ai: "dbx-ai-panel-open",
   sqlLibrary: "dbx-sql-library-open",
   sqlFile: "dbx-sql-file-panel-open",
+  functionDictionary: "dbx-function-dictionary-open",
 };
 let lastOpenedRightSidebarPanel = RIGHT_SIDEBAR_PANEL_IDS.find((panelId) => rightSidebarPanelRefs[panelId].value);
 const sidebarOpen = ref(safeLocalStorageGet("dbx-sidebar-open") !== "false");
 const aiPanelReady = ref(false);
 void loadUiTuning();
-const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, tabBarWidth, tabBarCollapsed, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize, startLeftTabBarResize, startRightTabBarResize, setTabBarCollapsed } =
-  usePanelResize();
+const {
+  sidebarWidth,
+  aiPanelWidth,
+  historyWidth,
+  sqlLibraryWidth,
+  sqlFilePanelWidth,
+  functionDictionaryWidth,
+  tabBarWidth,
+  tabBarCollapsed,
+  startSidebarResize,
+  startAiPanelResize,
+  startHistoryResize,
+  startSqlLibraryResize,
+  startSqlFilePanelResize,
+  startFunctionDictionaryResize,
+  startLeftTabBarResize,
+  startRightTabBarResize,
+  setTabBarCollapsed,
+} = usePanelResize();
 const aiAssistantRef = ref<AiAssistantHandle | null>(null);
 provide(OPEN_PLUGIN_AI_CONVERSATION, (request) => {
   openAiPanel();
@@ -5302,6 +5323,7 @@ onUnmounted(() => {
           :show-sql-library="showSqlLibraryPanel"
           :sql-library-save-feedback-id="sqlLibrarySaveFeedbackId"
           :show-sql-file-panel="showSqlFilePanel"
+          :show-function-dictionary="showFunctionDictionaryPanel"
           :show-driver-store="showDriverStore"
           :show-plugin-center="showPluginCenter"
           :show-settings-page="showSettingsPage"
@@ -5327,6 +5349,7 @@ onUnmounted(() => {
           @toggle-history="toggleRightSidebarPanel('history')"
           @toggle-sql-library="toggleRightSidebarPanel('sqlLibrary')"
           @toggle-sql-file-panel="toggleRightSidebarPanel('sqlFile')"
+          @toggle-function-dictionary="toggleRightSidebarPanel('functionDictionary')"
           @open-github="openGitHub"
           @open-settings="openSettings(showMcpSettingsUpdateBadge ? 'mcp' : 'appearance')"
           @open-driver-store="openDriverStorePage"
@@ -5735,6 +5758,17 @@ onUnmounted(() => {
             <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlFilePanelResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlFilePanel @close="closeRightSidebarPanel('sqlFile')" />
+            </div>
+          </div>
+          <div
+            v-if="!isDetachedWindowContext && showFunctionDictionaryPanel"
+            v-show="!isSpecialPageActive && !isAiPanelMaximized && !isHistoryPanelMaximized && !isZenMode"
+            :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate dbx-panel bg-background'"
+            :style="{ width: functionDictionaryWidth + 'px' }"
+          >
+            <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startFunctionDictionaryResize" />
+            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
+              <FunctionDictionaryPanel :connection="activeConnection" @close="closeRightSidebarPanel('functionDictionary')" />
             </div>
           </div>
           <PluginShortcutBar v-if="!isDetachedWindowContext && !isZenMode && settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position.startsWith('right-')" :position="settingsStore.editorSettings.pluginShortcuts.position" />

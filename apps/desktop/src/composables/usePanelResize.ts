@@ -63,6 +63,7 @@ export function usePanelResize() {
   const historyWidth = ref(restoredHistoryPanelWidth());
   const sqlLibraryWidth = ref(restoredPanelWidth("dbx-sql-library-width", 288));
   const sqlFilePanelWidth = ref(restoredPanelWidth("dbx-sql-file-panel-width", 288));
+  const functionDictionaryWidth = ref(restoredPanelWidth("dbx-function-dictionary-width", 340));
   const tabBarWidth = ref(restoredPanelWidth("dbx-tab-bar-width", 240));
   const tabBarCollapsed = ref(safeLocalStorageGet("dbx-tab-bar-collapsed") === "true");
 
@@ -141,6 +142,7 @@ export function usePanelResize() {
   const startHistoryResize = startPanelResize(historyWidth, "dbx-history-width", "left", availableHistoryPanelMaxWidth);
   const startSqlLibraryResize = startPanelResize(sqlLibraryWidth, "dbx-sql-library-width", "left");
   const startSqlFilePanelResize = startPanelResize(sqlFilePanelWidth, "dbx-sql-file-panel-width", "left");
+  const startFunctionDictionaryResize = startPanelResize(functionDictionaryWidth, "dbx-function-dictionary-width", "left");
   const startLeftTabBarResize = startPanelResize(tabBarWidth, "dbx-tab-bar-width", "right");
   const startRightTabBarResize = startPanelResize(tabBarWidth, "dbx-tab-bar-width", "left");
 
@@ -155,6 +157,7 @@ export function usePanelResize() {
     historyWidth,
     sqlLibraryWidth,
     sqlFilePanelWidth,
+    functionDictionaryWidth,
     tabBarWidth,
     tabBarCollapsed,
     startSidebarResize,
@@ -162,6 +165,7 @@ export function usePanelResize() {
     startHistoryResize,
     startSqlLibraryResize,
     startSqlFilePanelResize,
+    startFunctionDictionaryResize,
     startLeftTabBarResize,
     startRightTabBarResize,
     setTabBarCollapsed,

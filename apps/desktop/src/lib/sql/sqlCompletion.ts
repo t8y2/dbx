@@ -6491,6 +6491,17 @@ function activeFunctionDescriptions(databaseType?: DatabaseType): Map<string, st
   return databaseType === "doris" || databaseType === "starrocks" ? DORIS_FUNCTION_DESCRIPTIONS : EMPTY_FUNCTION_DESCRIPTIONS;
 }
 
+/**
+ * Read-only view of the function signatures backing SQL function completion, for
+ * the function dictionary panel. Returns null for dialects without a dedicated
+ * signature table — the generic common-function fallback is completion sugar and
+ * not a dictionary worth browsing on its own.
+ */
+export function getSqlFunctionSignatureEntries(databaseType?: DatabaseType, driverProfile?: string): Array<{ name: string; parameters: string[] }> | null {
+  if (!databaseType || !DATABASE_FUNCTION_SIGNATURES[databaseType]) return null;
+  return Array.from(activeFunctionSignatures(databaseType, driverProfile).entries()).map(([name, parameters]) => ({ name, parameters }));
+}
+
 function formatFunctionSignatureApply(definition: ClickHouseFunctionDefinition, omitOpeningParen: boolean, includeParams = true): string {
   if (omitOpeningParen) return definition.name;
   const signature = definition.signatures[definition.preferredSignature ?? 0];

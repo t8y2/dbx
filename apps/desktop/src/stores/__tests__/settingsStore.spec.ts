@@ -919,6 +919,7 @@ describe("right sidebar panel transitions", () => {
     history: false,
     sqlLibrary: false,
     sqlFile: false,
+    functionDictionary: false,
     ...overrides,
   });
 

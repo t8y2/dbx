@@ -2,7 +2,34 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, LogOut, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints, RefreshCw } from "@lucide/vue";
+import {
+  ChevronsRight,
+  DatabaseZap,
+  FilePlus2,
+  Moon,
+  Sun,
+  SunMoon,
+  History,
+  Bot,
+  ArrowLeftRight,
+  FileCode,
+  BookMarked,
+  BookOpenText,
+  GitCompareArrows,
+  TableProperties,
+  Settings,
+  LogOut,
+  CloudDownload,
+  Package,
+  PlugZap,
+  FileDown,
+  FolderTree,
+  Pin,
+  PinOff,
+  CalendarClock,
+  Waypoints,
+  RefreshCw,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
@@ -40,6 +67,7 @@ const props = defineProps<{
   showSqlLibrary: boolean;
   sqlLibrarySaveFeedbackId: number;
   showSqlFilePanel: boolean;
+  showFunctionDictionary: boolean;
   showDriverStore: boolean;
   showPluginCenter: boolean;
   showSettingsPage: boolean;
@@ -68,6 +96,7 @@ const emit = defineEmits<{
   "toggle-history": [];
   "toggle-sql-library": [];
   "toggle-sql-file-panel": [];
+  "toggle-function-dictionary": [];
   "open-github": [];
   "open-settings": [];
   "open-driver-store": [];
@@ -257,6 +286,15 @@ const collapsibleRightItemDefs = computed(() => {
       label: t("sqlFileTree.title"),
       icon: FolderTree,
       action: () => emit("toggle-sql-file-panel"),
+      disabled: false,
+    });
+  }
+  if (toolbarItems.value.functionDictionary) {
+    items.push({
+      key: "functionDictionary",
+      label: t("functionDictionary.title"),
+      icon: BookOpenText,
+      action: () => emit("toggle-function-dictionary"),
       disabled: false,
     });
   }
@@ -765,6 +803,23 @@ const toolbarStyle = computed(() => {
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("sqlFileTree.title") }}</TooltipContent>
+      </Tooltip>
+
+      <Tooltip v-if="toolbarItems.functionDictionary">
+        <TooltipTrigger as-child>
+          <Button
+            v-show="isRightItemVisible('functionDictionary')"
+            variant="ghost"
+            size="icon"
+            class="toolbar-action-button relative h-8 w-8 shrink-0"
+            :class="{ 'toolbar-action-button--active bg-accent': showFunctionDictionary }"
+            :aria-label="t('functionDictionary.title')"
+            @click="emit('toggle-function-dictionary')"
+          >
+            <BookOpenText class="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("functionDictionary.title") }}</TooltipContent>
       </Tooltip>
 
       <Tooltip v-if="toolbarItems.history">

@@ -64,7 +64,7 @@ export interface SettingsSearchRoute {
 
 export type Translate = (key: string) => string;
 
-type ToolbarVisibilityItemKey = "immediateSync" | "dataTransfer" | "driverManager" | "pluginCenter" | "sqlFile" | "schemaDiff" | "dataCompare" | "checkUpdates" | "sqlLibrary" | "sqlFileTree" | "history" | "ai" | "theme" | "github" | "alwaysOnTop";
+type ToolbarVisibilityItemKey = "immediateSync" | "dataTransfer" | "driverManager" | "pluginCenter" | "sqlFile" | "schemaDiff" | "dataCompare" | "checkUpdates" | "sqlLibrary" | "sqlFileTree" | "functionDictionary" | "history" | "ai" | "theme" | "github" | "alwaysOnTop";
 
 export type ToolbarVisibilityItem = ({ key: ToolbarVisibilityItemKey; titleKey: string; title?: never } | { key: ToolbarVisibilityItemKey; title: string; titleKey?: never }) & {
   /** The matching toolbar button can only exist in the desktop app, so the Web build hides the switch. */
@@ -86,6 +86,7 @@ export const TOOLBAR_VISIBILITY_ITEMS: readonly ToolbarVisibilityItem[] = [
   { key: "checkUpdates", titleKey: "updates.check" },
   { key: "sqlLibrary", titleKey: "sqlLibrary.title" },
   { key: "sqlFileTree", titleKey: "sqlFileTree.title" },
+  { key: "functionDictionary", titleKey: "functionDictionary.title" },
   { key: "history", titleKey: "history.title" },
   { key: "ai", title: "AI" },
   { key: "theme", titleKey: "toolbar.theme" },

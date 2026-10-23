@@ -28,6 +28,10 @@ const MANIFEST_NAME: &str = "meta.json";
 const RECORD_SEPARATOR: &[u8] = b"\x1e\n";
 const METADATA_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const DATA_CHUNK_MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// Upper bound for a single row tuple while it is still being decompressed. The
+/// row stream only retains the unfinished tuple between reads, so without this
+/// cap a crafted gzip member that never closes a tuple grows memory without limit.
+const ROW_TUPLE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const EXPORT_SPLIT_THRESHOLD_BYTES: usize = 64 * 1024;
 const RESTORE_INSERT_MAX_ROWS: usize = 1000;
 const RESTORE_INSERT_MAX_BYTES: usize = 1024 * 1024;
@@ -335,9 +339,12 @@ fn read_archive_member(file: &mut File, name: &str, member: ArchiveMember, check
 fn gunzip(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut decoded = Vec::new();
     MultiGzDecoder::new(bytes)
-        .take(METADATA_MAX_BYTES)
+        .take(METADATA_MAX_BYTES + 1)
         .read_to_end(&mut decoded)
         .map_err(|error| format!("Failed to decompress {name} from Navicat backup: {error}"))?;
+    if decoded.len() as u64 > METADATA_MAX_BYTES {
+        return Err(format!("Navicat backup member {name} exceeds the {METADATA_MAX_BYTES}-byte metadata limit"));
+    }
     Ok(decoded)
 }
 
@@ -636,6 +643,7 @@ pub struct Nb3SqlReader {
     bytes_read: Option<Arc<AtomicU64>>,
     consumed: Arc<AtomicU64>,
     file_size: u64,
+    max_pending_row_bytes: usize,
 }
 
 impl Nb3SqlReader {
@@ -652,6 +660,7 @@ impl Nb3SqlReader {
             bytes_read,
             consumed: Arc::new(AtomicU64::new(0)),
             file_size,
+            max_pending_row_bytes: ROW_TUPLE_MAX_BYTES,
         })
     }
 
@@ -733,6 +742,7 @@ impl Nb3SqlReader {
     }
 
     fn next_tuple(&mut self) -> std::io::Result<Option<String>> {
+        let max_pending_row_bytes = self.max_pending_row_bytes;
         loop {
             let opened_chunk = {
                 let stream = self.rows.as_mut().expect("row stream is active");
@@ -791,6 +801,11 @@ impl Nb3SqlReader {
                 stream.eof = true;
             } else {
                 stream.buffer.extend_from_slice(&chunk[..read]);
+                if stream.buffer.len() > max_pending_row_bytes {
+                    return Err(io_error(format!(
+                        "Navicat backup data chunk {name} contains a row larger than {max_pending_row_bytes} bytes"
+                    )));
+                }
             }
         }
     }
@@ -1890,6 +1905,34 @@ mod tests {
         append_member(&mut builder, MANIFEST_NAME, manifest.len() as u64, manifest.as_slice()).unwrap();
         builder.into_inner().unwrap();
         assert!(Nb3SqlReader::open(&encrypted, None).err().unwrap().contains("Encrypted"));
+    }
+
+    #[test]
+    fn rejects_rows_that_exceed_the_pending_tuple_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("huge-row.nb3");
+        let wide_row = format!("('{}')", "x".repeat(8 * 1024));
+        navicat_archive(
+            &path,
+            "MYSQL",
+            &[(
+                serde_json::json!({
+                    "MetaVersion": "30101", "Name": "t", "Type": "Table", "DDL": "CREATE TABLE `t` (`v` text)",
+                    "SubDDL": [], "AutoIncrement": "", "Fields": ["v"], "TriggerDDL": [], "IndexDDL": []
+                }),
+                vec![wide_row.as_str()],
+            )],
+        );
+        // The real limit is far above any legitimate row; lower it so the test does not
+        // have to build a multi-megabyte archive to exercise the guard.
+        let mut reader = Nb3SqlReader::open(&path, None).unwrap();
+        reader.max_pending_row_bytes = 1024;
+        let mut script = String::new();
+        let error = reader.read_to_string(&mut script).unwrap_err();
+        assert!(error.to_string().contains("larger than 1024 bytes"), "{error}");
+
+        // The same archive restores normally under the default limit.
+        assert!(restore_script(&path).unwrap().contains("INSERT INTO"));
     }
 
     /// Renders real Navicat archives listed in `DBX_NB3_SAMPLES` (path-separated):

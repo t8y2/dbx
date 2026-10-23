@@ -1,12 +1,12 @@
 module github.com/t8y2/dbx/agents/drivers/oracle-go
 
-go 1.20
+go 1.26.0
 
 require github.com/sijms/go-ora/v2 v2.9.0
 
 require (
 	github.com/godror/godror v0.51.5
-	golang.org/x/text v0.22.0
+	golang.org/x/text v0.43.0
 )
 
 require (

@@ -126,6 +126,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "rememberConnectionDatabaseOnDelete",
   "dataTabReuseMode",
   "openDataTabsNextToActive",
+  "openTablesInDetachedWindow",
   "prefillNewQueryWithSelect",
   "openQueryOnConnectionOpen",
   "generateSqlIncludeDatabaseName",

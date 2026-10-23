@@ -358,6 +358,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   },
   { id: "navigation-reuse-data-tab", category: "navigation", titleKey: "settings.reuseDataTab", descriptionKey: "settings.reuseDataTabDescription", targetId: "navigation" },
   { id: "navigation-open-data-tabs-next-to-active", category: "navigation", titleKey: "settings.openDataTabsNextToActive", descriptionKey: "settings.openDataTabsNextToActiveDescription", targetId: "navigation" },
+  { id: "navigation-open-tables-in-detached-window", category: "navigation", titleKey: "settings.openTablesInDetachedWindow", descriptionKey: "settings.openTablesInDetachedWindowDescription", targetId: "navigation" },
   { id: "navigation-object-display", category: "navigation", titleKey: "settings.sidebarObjectDisplay", targetId: "navigation" },
   {
     id: "navigation-object-info",

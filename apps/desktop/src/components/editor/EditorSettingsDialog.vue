@@ -993,6 +993,7 @@ function clearRememberedConnectionDatabases() {
 }
 const editDataTabReuseMode = ref<DataTabReuseMode>(settingsStore.editorSettings.dataTabReuseMode);
 const editOpenDataTabsNextToActive = ref(settingsStore.editorSettings.openDataTabsNextToActive);
+const editOpenTablesInDetachedWindow = ref(settingsStore.editorSettings.openTablesInDetachedWindow);
 const editPrefillNewQueryWithSelect = ref(settingsStore.editorSettings.prefillNewQueryWithSelect);
 const editOpenQueryOnConnectionOpen = ref(settingsStore.editorSettings.openQueryOnConnectionOpen);
 const editGenerateSqlIncludeDatabaseName = ref(settingsStore.editorSettings.generateSqlIncludeDatabaseName);
@@ -1302,6 +1303,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     rememberConnectionDatabaseOnDelete: editRememberConnectionDatabaseOnDelete.value,
     dataTabReuseMode: editDataTabReuseMode.value,
     openDataTabsNextToActive: editOpenDataTabsNextToActive.value,
+    openTablesInDetachedWindow: editOpenTablesInDetachedWindow.value,
     prefillNewQueryWithSelect: editPrefillNewQueryWithSelect.value,
     openQueryOnConnectionOpen: editOpenQueryOnConnectionOpen.value,
     generateSqlIncludeDatabaseName: editGenerateSqlIncludeDatabaseName.value,
@@ -2004,6 +2006,7 @@ function syncEditorSettingsDraftFromStore() {
   editRememberConnectionDatabaseOnDelete.value = settingsStore.editorSettings.rememberConnectionDatabaseOnDelete;
   editDataTabReuseMode.value = settingsStore.editorSettings.dataTabReuseMode;
   editOpenDataTabsNextToActive.value = settingsStore.editorSettings.openDataTabsNextToActive;
+  editOpenTablesInDetachedWindow.value = settingsStore.editorSettings.openTablesInDetachedWindow;
   editPrefillNewQueryWithSelect.value = settingsStore.editorSettings.prefillNewQueryWithSelect;
   editOpenQueryOnConnectionOpen.value = settingsStore.editorSettings.openQueryOnConnectionOpen;
   editGenerateSqlIncludeDatabaseName.value = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
@@ -2176,6 +2179,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   rememberConnectionDatabaseOnDelete: editRememberConnectionDatabaseOnDelete,
   dataTabReuseMode: editDataTabReuseMode,
   openDataTabsNextToActive: editOpenDataTabsNextToActive,
+  openTablesInDetachedWindow: editOpenTablesInDetachedWindow,
   prefillNewQueryWithSelect: editPrefillNewQueryWithSelect,
   openQueryOnConnectionOpen: editOpenQueryOnConnectionOpen,
   generateSqlIncludeDatabaseName: editGenerateSqlIncludeDatabaseName,
@@ -2758,6 +2762,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editRememberConnectionDatabaseOnDelete.value = DEFAULT_EDITOR_SETTINGS.rememberConnectionDatabaseOnDelete;
     editDataTabReuseMode.value = DEFAULT_EDITOR_SETTINGS.dataTabReuseMode;
     editOpenDataTabsNextToActive.value = DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive;
+    editOpenTablesInDetachedWindow.value = DEFAULT_EDITOR_SETTINGS.openTablesInDetachedWindow;
     editPrefillNewQueryWithSelect.value = DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect;
     editOpenQueryOnConnectionOpen.value = DEFAULT_EDITOR_SETTINGS.openQueryOnConnectionOpen;
     editGenerateSqlIncludeDatabaseName.value = DEFAULT_EDITOR_SETTINGS.generateSqlIncludeDatabaseName;
@@ -2980,6 +2985,7 @@ function resetAllDefaults() {
   editRememberConnectionDatabaseOnDelete.value = DEFAULT_EDITOR_SETTINGS.rememberConnectionDatabaseOnDelete;
   editDataTabReuseMode.value = DEFAULT_EDITOR_SETTINGS.dataTabReuseMode;
   editOpenDataTabsNextToActive.value = DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive;
+  editOpenTablesInDetachedWindow.value = DEFAULT_EDITOR_SETTINGS.openTablesInDetachedWindow;
   editPrefillNewQueryWithSelect.value = DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect;
   editOpenQueryOnConnectionOpen.value = DEFAULT_EDITOR_SETTINGS.openQueryOnConnectionOpen;
   editGenerateSqlIncludeDatabaseName.value = DEFAULT_EDITOR_SETTINGS.generateSqlIncludeDatabaseName;
@@ -9119,6 +9125,15 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="open-data-tabs-next-to-active" v-model="editOpenDataTabsNextToActive" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="open-tables-in-detached-window">{{ t("settings.openTablesInDetachedWindow") }}</Label>
+                  <HelpTooltip :label="t('settings.openTablesInDetachedWindow')">
+                    {{ t("settings.openTablesInDetachedWindowDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="open-tables-in-detached-window" v-model="editOpenTablesInDetachedWindow" />
               </div>
               <div class="space-y-2">
                 <Label>{{ t("settings.sidebarObjectDisplay") }}</Label>

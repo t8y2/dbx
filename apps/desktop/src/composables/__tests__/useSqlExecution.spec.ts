@@ -181,8 +181,12 @@ describe("useSqlExecution", () => {
     expect(execute).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
   });
 
-  it("executes a MySQL procedure with a compact outer label without opening the parameter dialog (#13242)", async () => {
-    const sql = "DROP PROCEDURE IF EXISTS p;\nCREATE DEFINER=`root`@`127.0.0.1` PROCEDURE p(IN in_username VARCHAR(200))\nrun:BEGIN IF in_username = '' THEN LEAVE run; END IF; SELECT in_username; END;";
+  it.each([
+    ["BEGIN", "DROP PROCEDURE IF EXISTS p;\nCREATE DEFINER=`root`@`127.0.0.1` PROCEDURE p(IN in_username VARCHAR(200))\nrun:BEGIN IF in_username = '' THEN LEAVE run; END IF; SELECT in_username; END;"],
+    ["LOOP", "CREATE PROCEDURE p() lbl:LOOP LEAVE lbl; END LOOP lbl;"],
+    ["WHILE", "CREATE PROCEDURE p() lbl:WHILE FALSE DO SELECT 1; END WHILE lbl;"],
+    ["REPEAT", "CREATE PROCEDURE p() lbl:REPEAT LEAVE lbl; UNTIL TRUE END REPEAT lbl;"],
+  ])("executes a MySQL procedure with a compact outer %s label without opening the parameter dialog (#13242)", async (_kind, sql) => {
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
     useSettingsStore().editorSettings.confirmDangerousSqlExecution = false;

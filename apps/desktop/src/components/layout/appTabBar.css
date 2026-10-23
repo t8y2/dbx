@@ -1084,8 +1084,8 @@
 /* Without semantic grouping there is no group color to distinguish the
  * active item, so give the selected vertical tab a stronger neutral state. */
 .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[data-active-tab="true"] {
-  background-color: var(--app-tab-background, color-mix(in srgb, var(--foreground) 16%, var(--background)));
-  border-color: var(--app-tab-active-border, color-mix(in srgb, var(--foreground) 32%, var(--border)));
+  background-color: var(--app-tab-background, color-mix(in srgb, var(--foreground) 20%, var(--background)));
+  border-color: var(--app-tab-active-border, color-mix(in srgb, var(--foreground) 38%, var(--border)));
   box-shadow:
     inset 3px 0 0 var(--app-tab-active-accent, var(--ring)),
     inset 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent),
@@ -1101,8 +1101,8 @@
  * background and border over the same tokens. The composite box-shadow stays
  * out — losing it is cosmetic, and a partial shadow list is all-or-nothing. */
 html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[data-active-tab="true"] {
-  background-color: var(--app-tab-background, rgba(var(--dbx-foreground-rgb), 0.16)) !important;
-  border-color: var(--app-tab-active-border, rgba(var(--dbx-foreground-rgb), 0.32)) !important;
+  background-color: var(--app-tab-background, rgba(var(--dbx-foreground-rgb), 0.2)) !important;
+  border-color: var(--app-tab-active-border, rgba(var(--dbx-foreground-rgb), 0.38)) !important;
 }
 
 .vertical-tab-layout .app-tab-scroll > * {

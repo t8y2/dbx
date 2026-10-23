@@ -288,7 +288,9 @@ const hasHorizontalFixedRows = computed(() => !isVerticalLayout.value && !isTwoR
 const tabBarClass = computed(() => [
   isClassicLayout.value ? "classic-tab-layout" : "separated-tab-layout",
   isVerticalLayout.value
-    ? `vertical-tab-layout h-full w-60 flex-col bg-background ${settingsStore.editorSettings.tabPlacement === "right" ? "border-l" : "border-r"}`
+    ? // Same rail tone as the classic top bar (issue #13236): a background-colored
+      // rail made active and inactive pills hard to tell apart.
+      `vertical-tab-layout h-full w-60 flex-col bg-muted ${settingsStore.editorSettings.tabPlacement === "right" ? "border-l" : "border-r"}`
     : isClassicLayout.value
       ? "bg-muted"
       : `bg-background ${settingsStore.editorSettings.tabPlacement === "bottom" ? "border-t" : "border-b"}`,

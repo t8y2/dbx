@@ -933,6 +933,8 @@ describe("EditorGroupTabBar special page navigation", () => {
       expect(store.activeTabId).toBe(tabId);
       const vertical = placement === "left" || placement === "right";
       expect(host.querySelector(".app-tab-bar")?.classList.contains("vertical-tab-layout")).toBe(vertical);
+      // The vertical rail keeps the classic top bar's muted tone (#13236).
+      expect(host.querySelector(".app-tab-bar")?.classList.contains("bg-muted")).toBe(vertical || layout === "classic");
       const special = host.querySelector<HTMLElement>("[data-settings-page-tab]")!;
       expect(special.classList.contains("h-8")).toBe(vertical);
       expect(special.style.boxShadow).toBe(vertical ? "" : layout === "classic" ? "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)" : "");

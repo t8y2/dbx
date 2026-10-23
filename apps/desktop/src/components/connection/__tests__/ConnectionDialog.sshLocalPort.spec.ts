@@ -240,6 +240,32 @@ describe("ConnectionDialog SSH fixed local port", () => {
   });
 
   it.each([
+    ["NaN", Number.NaN],
+    ["text", "abc"],
+  ])("saves no port for a saved non-numeric %s value instead of failing validation", async (_name, saved) => {
+    await mountDialog(tunnelled([sshLayer("bastion", { local_port: saved as number })]));
+
+    await save();
+
+    expect(document.body.textContent).not.toContain("Local port must be between 1 and 65535");
+    const layer = savedLayers()[0] as SshTunnelConfig;
+    expect(layer.local_port).toBeUndefined();
+    expect("local_port" in JSON.parse(JSON.stringify(layer))).toBe(false);
+  });
+
+  it("saves no port when the field emits a non-numeric value", async () => {
+    await mountDialog(tunnelled([sshLayer("bastion", { local_port: 4059 })]));
+    // A number input sanitizes text to "", so the raw string only reaches the handler through a text input.
+    localPortInput()!.type = "text";
+
+    await typeLocalPort("abc");
+    await save();
+
+    expect(document.body.textContent).not.toContain("Local port must be between 1 and 65535");
+    expect((savedLayers()[0] as SshTunnelConfig).local_port).toBeUndefined();
+  });
+
+  it.each([
     ["70000", "70000"],
     ["0", "0"],
     ["4059.5", "4059.5"],

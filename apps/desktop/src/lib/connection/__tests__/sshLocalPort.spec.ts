@@ -15,17 +15,20 @@ const CASES: { name: string; value: unknown; normalized: number | undefined; sta
   { name: "zero", value: 0, normalized: undefined, state: "invalid", editable: 0 },
   { name: "zero string", value: "0", normalized: undefined, state: "invalid", editable: 0 },
   { name: "negative", value: -1, normalized: undefined, state: "invalid", editable: -1 },
-  { name: "negative string", value: "-1", normalized: undefined, state: "invalid", editable: Number.NaN },
+  { name: "negative string", value: "-1", normalized: undefined, state: "invalid", editable: -1 },
   { name: "above range", value: 65536, normalized: undefined, state: "invalid", editable: 65536 },
   { name: "far above range", value: 70000, normalized: undefined, state: "invalid", editable: 70000 },
   { name: "above range string", value: "70000", normalized: undefined, state: "invalid", editable: 70000 },
   { name: "fraction", value: 4059.5, normalized: undefined, state: "invalid", editable: 4059.5 },
-  { name: "fraction string", value: "4059.5", normalized: undefined, state: "invalid", editable: Number.NaN },
-  { name: "NaN", value: Number.NaN, normalized: undefined, state: "invalid", editable: Number.NaN },
-  { name: "Infinity", value: Number.POSITIVE_INFINITY, normalized: undefined, state: "invalid", editable: Number.POSITIVE_INFINITY },
-  { name: "hex string", value: "0x10", normalized: undefined, state: "invalid", editable: Number.NaN },
-  { name: "text", value: "abc", normalized: undefined, state: "invalid", editable: Number.NaN },
-  { name: "boolean", value: true, normalized: undefined, state: "invalid", editable: Number.NaN },
+  { name: "fraction string", value: "4059.5", normalized: undefined, state: "invalid", editable: 4059.5 },
+  { name: "NaN", value: Number.NaN, normalized: undefined, state: "invalid", editable: undefined },
+  { name: "Infinity", value: Number.POSITIVE_INFINITY, normalized: undefined, state: "invalid", editable: undefined },
+  { name: "hex string", value: "0x10", normalized: undefined, state: "invalid", editable: undefined },
+  { name: "exponent string", value: "1e3", normalized: undefined, state: "invalid", editable: 1000 },
+  { name: "explicit plus string", value: "+4059", normalized: undefined, state: "invalid", editable: undefined },
+  { name: "text", value: "abc", normalized: undefined, state: "invalid", editable: undefined },
+  { name: "number followed by text", value: "4059abc", normalized: undefined, state: "invalid", editable: undefined },
+  { name: "boolean", value: true, normalized: undefined, state: "invalid", editable: undefined },
 ];
 
 describe("ssh local port helpers", () => {
@@ -37,13 +40,14 @@ describe("ssh local port helpers", () => {
     expect(sshLocalPortState(value)).toBe(state);
   });
 
-  it.each(CASES)("keeps $name reportable in the form", ({ value, editable }) => {
+  it.each(CASES)("maps $name to the form value", ({ value, editable }) => {
     expect(editableSshLocalPort(value)).toBe(editable);
   });
 
-  it("keeps an out-of-range value classified as invalid after the form round trip", () => {
+  it("keeps out-of-range and fractional values invalid after the form round trip, and non-numbers unset", () => {
     expect(sshLocalPortState(editableSshLocalPort("70000"))).toBe("invalid");
-    expect(sshLocalPortState(editableSshLocalPort("abc"))).toBe("invalid");
+    expect(sshLocalPortState(editableSshLocalPort("4059.5"))).toBe("invalid");
+    expect(sshLocalPortState(editableSshLocalPort("abc"))).toBe("unset");
     expect(sshLocalPortState(editableSshLocalPort(""))).toBe("unset");
   });
 });

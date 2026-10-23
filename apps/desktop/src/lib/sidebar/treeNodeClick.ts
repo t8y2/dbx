@@ -1,4 +1,4 @@
-import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
+import type { DatabaseType, ObjectBrowserFilter, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { supportsConnectionQueryActions } from "@/lib/database/databaseFeatureSupport";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
@@ -101,6 +101,24 @@ const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-packages",
   "group-types",
 ]);
+const objectBrowserGroupFilters: Partial<Record<TreeNodeType, ObjectBrowserFilter>> = {
+  "group-tables": "tables",
+  "group-views": "views",
+  "group-materialized-views": "materializedViews",
+  "group-procedures": "procedures",
+  "group-functions": "functions",
+  "group-triggers": "triggers",
+  "group-events": "events",
+  "group-sequences": "sequences",
+  "group-packages": "packages",
+  "group-types": "types",
+};
+
+export function objectBrowserFilterForTreeNode(node: Pick<TreeNode, "type" | "tableName">): ObjectBrowserFilter | undefined {
+  // Table-level trigger groups belong to the table, not the database browser.
+  return node.tableName ? undefined : objectBrowserGroupFilters[node.type];
+}
+
 const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {

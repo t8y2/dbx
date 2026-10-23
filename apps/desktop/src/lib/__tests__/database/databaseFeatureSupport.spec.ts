@@ -86,6 +86,11 @@ describe("connection database browser", () => {
 });
 
 describe("object browser tree nodes", () => {
+  it.each(["postgres", "oracle", "dameng", "mysql", "sqlserver"] as const)("opens %s databases and schemas in the object browser", (dbType) => {
+    expect(supportsObjectBrowserTreeNode(dbType, "database")).toBe(true);
+    expect(supportsObjectBrowserTreeNode(dbType, "schema")).toBe(true);
+  });
+
   it("opens MongoDB object browser from mongo-db nodes without the SQL database list", () => {
     expect(supportsObjectBrowser("mongodb")).toBe(true);
     expect(supportsObjectBrowserTreeNode("mongodb", "mongo-db")).toBe(true);

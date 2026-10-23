@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isDirectNavigationTreeNode,
   isRepeatableNavigationTreeNode,
+  objectBrowserFilterForTreeNode,
   objectSourceKindForTreeNode,
   objectSourceTargetForTreeNode,
   shouldActivateTreeNodeOnSingleClick,
@@ -13,6 +14,26 @@ import {
 } from "@/lib/sidebar/treeNodeClick";
 
 describe("treeNodeClick", () => {
+  it("maps database object groups without treating table children as database navigation", () => {
+    for (const [type, filter] of [
+      ["group-tables", "tables"],
+      ["group-views", "views"],
+      ["group-materialized-views", "materializedViews"],
+      ["group-procedures", "procedures"],
+      ["group-functions", "functions"],
+      ["group-triggers", "triggers"],
+      ["group-events", "events"],
+      ["group-sequences", "sequences"],
+      ["group-packages", "packages"],
+      ["group-types", "types"],
+    ] as const) {
+      expect(objectBrowserFilterForTreeNode({ type })).toBe(filter);
+    }
+    expect(objectBrowserFilterForTreeNode({ type: "group-triggers", tableName: "orders" })).toBeUndefined();
+    expect(objectBrowserFilterForTreeNode({ type: "group-columns", tableName: "orders" })).toBeUndefined();
+    expect(objectBrowserFilterForTreeNode({ type: "database" })).toBeUndefined();
+  });
+
   it("opens DynamoDB tables in the document browser on single or double activation", () => {
     expect(treeNodeRowAction("dynamodb-table", false, "single", "dynamodb")).toBe("toggle");
     expect(treeNodeRowDoubleClickAction("dynamodb-table", false, "double", false, "dynamodb")).toBe("toggle");

@@ -4,7 +4,7 @@ import { createApp, defineComponent, h, nextTick, reactive, ref, type App } from
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
-import type { ConnectionConfig, ObjectBrowserViewMode } from "@/types/database";
+import type { ConnectionConfig, ObjectBrowserFilter, ObjectBrowserViewMode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   listObjects: vi.fn(),
@@ -182,6 +182,50 @@ it("reflows compact rows immediately when changing width and keeps names and row
   } finally {
     widthSpy.mockRestore();
   }
+});
+
+it("switches a mounted browser between sidebar categories, including empty ones", async () => {
+  const filter = ref<ObjectBrowserFilter>("all");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp({
+    setup: () => () => h(ObjectBrowser, { connection, database: "browser_database", schema: "browser_schema", selectedObjectFilter: filter.value }),
+  });
+  mountedApps.push({ app, host });
+  app.mount(host);
+  await vi.waitFor(() => expect(host.querySelector('[title="orders"]')).not.toBeNull());
+  expect(host.querySelector('[title="recent_orders"]')).not.toBeNull();
+
+  filter.value = "views";
+  await nextTick();
+  expect(host.querySelector('[title="recent_orders"]')).not.toBeNull();
+  expect(host.querySelector('[title="orders"]')).toBeNull();
+  expect(host.querySelector('[title="refresh_orders"]')).toBeNull();
+
+  filter.value = "functions";
+  await nextTick();
+  expect(host.querySelector('[title="recent_orders"]')).toBeNull();
+  expect(host.querySelector('[title="orders"]')).toBeNull();
+  expect(host.textContent).toContain("objects.functions");
+
+  filter.value = "tables";
+  await nextTick();
+  expect(host.querySelector('[title="orders"]')).not.toBeNull();
+  expect(host.querySelector('[title="recent_orders"]')).toBeNull();
+  expect(mocks.listObjects).toHaveBeenCalledOnce();
+});
+
+it.each(["views", "functions"] as const)("honors the initial %s category even when empty", async (filter) => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp({
+    setup: () => () => h(ObjectBrowser, { connection, database: "browser_database", schema: "browser_schema", selectedObjectFilter: filter }),
+  });
+  mountedApps.push({ app, host });
+  app.mount(host);
+  await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledOnce());
+  await vi.waitFor(() => expect(host.querySelector('[title="recent_orders"]') !== null).toBe(filter === "views"));
+  expect(host.querySelector('[title="orders"]')).toBeNull();
 });
 
 describe.each(["list", "grid", "compact"] as const)("ObjectBrowser locate in sidebar (%s)", (viewMode) => {

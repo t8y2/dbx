@@ -1522,7 +1522,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarSearchOpenedDatabasesOnly: true,
   autoSelectActiveSidebarNode: false,
   sidebarPinDefaultDatabase: true,
-  sidebarBrowseObjectsOnDatabaseActivation: false,
+  sidebarBrowseObjectsOnDatabaseActivation: true,
   openQueryOnConnectionOpen: false,
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   openTabsRestoreMode: "all",

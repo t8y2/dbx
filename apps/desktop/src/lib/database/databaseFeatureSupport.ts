@@ -250,7 +250,6 @@ export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, 
   if (!supportsObjectBrowser(dbType)) return false;
   if (dbType === "mongodb") return nodeType === "mongo-db";
   if (nodeType === "database" && usesDatabaseObjectTreeMode(dbType)) return true;
-  if (nodeType === "database" && isSchemaAware(dbType) && dbType !== "sqlserver") return false;
   return nodeType === "database" || nodeType === "schema" || nodeType === "object-browser";
 }
 

@@ -99,9 +99,61 @@ afterEach(() => {
   connectionStore.getConfig.mockReturnValue({ db_type: "mysql", name: "connection" });
   connectionStore.getEtcdAccessCapabilities.mockReturnValue({ admin: true, writable: true, writePermissions: null });
   connectionStore.loadTables.mockResolvedValue(undefined);
+  connectionStore.ensureConnected.mockResolvedValue(undefined);
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
+  it("does not reactivate an older category after a newer connection check finishes", async () => {
+    const tables: TreeNode = { id: "mysql:app:tables", label: "Tables", type: "group-tables", connectionId: "mysql", database: "app", isExpanded: true };
+    const views: TreeNode = { ...tables, id: "mysql:app:views", label: "Views", type: "group-views" };
+    let finishConnection!: () => void;
+    connectionStore.ensureConnected.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishConnection = resolve;
+        }),
+    );
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: tables, depth: 0 }) });
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowClick(tables, 1);
+    host.value?.handleRowClick(views, 1);
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledWith("mysql", "app", undefined, undefined, undefined, false, "views", undefined));
+    finishConnection();
+    await nextTick();
+    expect(queryStore.openObjectBrowser).toHaveBeenCalledOnce();
+  });
+
+  it.each(["single", "double"] as const)("opens and expands category rows on a single click in %s activation mode", async (activation) => {
+    const node: TreeNode = { id: "mysql:app:views", label: "Views", type: "group-views", connectionId: "mysql", database: "app", schema: "public", catalog: "external", isExpanded: false };
+    settingsStore.editorSettings.sidebarActivation = activation;
+    connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(false);
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node, depth: 0 }) });
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowClick(node, 1);
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledWith("mysql", "app", "public", "external", undefined, false, "views", undefined));
+    expect(node.isExpanded).toBe(true);
+    expect(connectionStore.loadObjectGroupChildren).toHaveBeenCalledOnce();
+
+    host.value?.handleRowClick(node, 2);
+    host.value?.handleRowDoubleClick(node, new MouseEvent("dblclick"));
+    await nextTick();
+    expect(queryStore.openObjectBrowser).toHaveBeenCalledTimes(2);
+    expect(node.isExpanded).toBe(true);
+    expect(queryStore.createTab).not.toHaveBeenCalled();
+  });
+
   it.each(["single", "double"] as const)("focuses object search when %s-click activation opens a database", async (activation) => {
     const database: TreeNode = {
       id: "mysql:dbx_test",

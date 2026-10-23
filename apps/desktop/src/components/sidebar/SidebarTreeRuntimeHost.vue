@@ -156,6 +156,7 @@ import {
   isDirectNavigationTreeNode,
   isDocumentBrowserTreeNode,
   isRepeatableNavigationTreeNode,
+  objectBrowserFilterForTreeNode,
   objectSourceTargetForTreeNode,
   shouldOpenQueryOnTreeNodeActivation,
   shouldRunTreeNodeRowAction,
@@ -1262,9 +1263,10 @@ function runRowClickAction(clickDetail: number) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (node.type === "group-events") {
-    beginNavigationRequest();
+  if (canBrowseObjectGroup.value) {
+    const requestId = beginNavigationRequest();
     void openObjectBrowser();
+    if (canExpand.value && !node.isExpanded) void toggle(requestId);
     return;
   }
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation, currentDatabaseType(), settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation, canOpenObjectBrowser.value);
@@ -1280,7 +1282,7 @@ function runRowClickAction(clickDetail: number) {
   // the connection's query page. It must stay behind the activation gate
   // above so "double" activation keeps single clicks inert, and it must not
   // return early: the native row action (expand, browse objects) still runs.
-  if (shouldOpenQueryOnActivation(node)) {
+  if (action !== "open-object-browser" && action !== "open-object-browser-and-expand" && shouldOpenQueryOnActivation(node)) {
     void newQuery({ reuseQueryTabByScope: true });
   }
   if (action === "open-data") {
@@ -1721,7 +1723,7 @@ function onDoubleClick(event: MouseEvent) {
   // the query page opens here once. In single-click activation mode the first
   // click of the sequence already opened it, and the trailing dblclick must
   // keep its native gestures (for example the connection database browser).
-  if (settingsStore.editorSettings.sidebarActivation === "double" && shouldOpenQueryOnActivation(activeNode.value)) {
+  if (settingsStore.editorSettings.sidebarActivation === "double" && !(canOpenObjectBrowser.value && settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation) && shouldOpenQueryOnActivation(activeNode.value)) {
     beginNavigationRequest();
     void newQuery({ reuseQueryTabByScope: true });
   }
@@ -1731,11 +1733,7 @@ function onDoubleClick(event: MouseEvent) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (activeNode.value.type === "group-events") {
-    beginNavigationRequest();
-    void openObjectBrowser();
-    return;
-  }
+  if (canBrowseObjectGroup.value) return;
   const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value, settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
   // Most trailing dblclick events are intentionally inert in single-click
   // mode, but field and index rows have an explicit editor action.
@@ -1952,14 +1950,16 @@ async function confirmDeleteSavedSqlFile() {
 
 async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean | "create" = false, focusSearch = false) {
   const node = activeNode.value;
+  const requestId = latestNavigationRequestId;
   if (!node.connectionId) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
+    if (!isCurrentNavigationRequest(requestId)) return;
     connectionStore.activeConnectionId = node.connectionId;
 
     const eventName = openEventEditor === true && node.type === "event" ? node.objectName || node.label : undefined;
     const eventCreateRequestId = openEventEditor === "create" && node.type === "group-events" ? ++mysqlEventCreateRequestSeq : undefined;
-    const objectFilter = node.type === "event" || node.type === "group-events" ? "events" : undefined;
+    const objectFilter = node.type === "event" ? "events" : objectBrowserFilterForTreeNode(node);
 
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
@@ -1974,6 +1974,7 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
       return;
     }
     const options = await getDatabaseOptions(node.connectionId);
+    if (!isCurrentNavigationRequest(requestId)) return;
     const database = resolveDefaultDatabase(connection, options);
     if (database) {
       const tabId = queryStore.openObjectBrowser(node.connectionId, database, undefined, undefined, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
@@ -5826,6 +5827,10 @@ const canOpenDatabaseSearch = computed(() => {
 
 const canOpenObjectBrowser = computed(() => {
   return supportsObjectBrowserTreeNode(rawDatabaseType(), activeNode.value.type);
+});
+
+const canBrowseObjectGroup = computed(() => {
+  return objectBrowserFilterForTreeNode(activeNode.value) !== undefined && supportsObjectBrowserTreeNode(rawDatabaseType(), "object-browser");
 });
 
 const canOpenConnectionDatabaseBrowser = computed(() => {

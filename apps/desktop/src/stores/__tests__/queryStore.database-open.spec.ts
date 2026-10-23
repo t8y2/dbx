@@ -109,6 +109,41 @@ describe("queryStore database open state", () => {
     expect(tab?.objectBrowser?.viewport).toBeUndefined();
   });
 
+  it("reactivates the same scoped object browser and applies category filters", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.openObjectBrowser("pg-1", "app", "public");
+    store.updateObjectBrowserFilter(tabId, "tables");
+    store.updateObjectBrowserViewport(tabId, { scrollTop: 340, viewMode: "list" });
+    store.createTab("pg-1", "app", "query");
+
+    expect(store.openObjectBrowser("pg-1", "app", "public", undefined, undefined, false, "views")).toBe(tabId);
+    expect(store.activeTabId).toBe(tabId);
+    expect(store.tabs.find((tab) => tab.id === tabId)?.objectBrowser).toMatchObject({ filter: "views", initialObjectFilter: "views" });
+    expect(store.tabs.find((tab) => tab.id === tabId)?.objectBrowser?.viewport).toBeUndefined();
+    expect(store.openObjectBrowser("pg-1", "app", "public")).toBe(tabId);
+    expect(store.tabs.find((tab) => tab.id === tabId)?.objectBrowser?.filter).toBe("views");
+    expect(store.tabs.filter((tab) => tab.mode === "objects")).toHaveLength(1);
+
+    expect(store.openObjectBrowser("pg-1", "app", "archive")).not.toBe(tabId);
+    expect(store.openObjectBrowser("pg-1", "other", "public")).not.toBe(tabId);
+    expect(store.openObjectBrowser("pg-2", "app", "public")).not.toBe(tabId);
+    expect(store.openObjectBrowser("pg-1", "app", "public", "external")).not.toBe(tabId);
+  });
+
+  it("clears event editor requests when navigating to another category", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.openObjectBrowser("mysql-1", "app", undefined, undefined, "nightly", false, "events");
+    store.openObjectBrowser("mysql-1", "app", undefined, undefined, undefined, false, "tables");
+    expect(store.tabs.find((tab) => tab.id === tabId)?.objectBrowser).toMatchObject({
+      filter: "tables",
+      eventName: undefined,
+      eventOpenRequestId: undefined,
+      eventCreateRequestId: undefined,
+    });
+  });
+
   it("keeps external catalog object browsers isolated", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

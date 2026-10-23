@@ -220,7 +220,7 @@ const props = defineProps<{
   initialEventOpenRequestId?: number;
   /** 显式"新建事件"请求号：每次菜单点击递增，用于打开/重新进入 CREATE 编辑器 */
   initialEventCreateRequestId?: number;
-  initialObjectFilter?: "tables" | "events";
+  initialObjectFilter?: ObjectFilter;
   selectedObjectFilter?: ObjectFilter;
   initialSearchQuery?: string;
   viewport?: ObjectBrowserViewport;
@@ -260,7 +260,7 @@ let objectBrowserUnmounted = false;
 const rows = ref<ObjectBrowserRow[]>([]);
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
-const objectFilter = ref<ObjectFilter>(props.connection.db_type === "oceanbase-oracle" ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all");
+const objectFilter = ref<ObjectFilter>(props.selectedObjectFilter ?? props.initialObjectFilter ?? (props.connection.db_type === "oceanbase-oracle" ? "tables" : "all"));
 const userHasSelectedFilter = ref(false);
 const sortKey = ref<ObjectBrowserSortKey>("name");
 const sortDirection = ref<ObjectBrowserSortDirection>("asc");
@@ -552,10 +552,10 @@ const objectFilters = computed<ObjectFilter[]>(() =>
           ["types", objectCounts.value.types],
         ] as Array<[ObjectFilter, number]>
       )
-        .filter(([filter, count]) => filter === "all" || count > 0)
+        .filter(([filter, count]) => filter === "all" || filter === objectFilter.value || count > 0)
         .map(([filter]) => filter),
 );
-const showObjectFilter = computed(() => objectFilters.value.length > 2);
+const showObjectFilter = computed(() => objectFilters.value.length > 2 || (objectFilter.value !== "all" && objectCounts.value[objectFilter.value] === 0));
 // A scope that holds a single object kind makes "全部 14" and "表 14" the same number, so the
 // strip is dropped as redundant — which used to drop the only object count the toolbar could
 // show at all (t8y2/dbx#11624, the common MySQL "tables only" database). Keep that one kind's
@@ -4133,7 +4133,7 @@ function openInitialEventIfNeeded() {
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
   const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
-  if (!usesServerObjectPaging.value && !userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
+  if (!usesServerObjectPaging.value && !userHasSelectedFilter.value && (props.selectedObjectFilter !== undefined || props.initialObjectFilter !== undefined || objectCounts.value[preferredFilter] > 0)) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
     preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
@@ -4394,7 +4394,7 @@ function onSchemaChange(value: any) {
   selectedSchema.value = typeof value === "string" && value ? value : undefined;
   emit("schemaChange", selectedSchema.value);
   userHasSelectedFilter.value = false;
-  objectFilter.value = usesServerObjectPaging.value ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all";
+  objectFilter.value = props.selectedObjectFilter ?? props.initialObjectFilter ?? (usesServerObjectPaging.value ? "tables" : "all");
   void loadObjects();
 }
 
@@ -4437,6 +4437,16 @@ function selectObjectFilter(filter: ObjectFilter) {
   emit("filterChange", filter);
   if (usesServerObjectPaging.value) void loadObjects();
 }
+
+watch(
+  () => props.selectedObjectFilter,
+  (filter) => {
+    if (filter !== undefined && filter !== objectFilter.value) {
+      closeSidePanel();
+      selectObjectFilter(filter);
+    }
+  },
+);
 
 function getSearchInput(): HTMLInputElement | null {
   return rootRef.value?.querySelector<HTMLInputElement>("[data-object-search-input]") ?? null;
@@ -4509,7 +4519,7 @@ watch(
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
-    objectFilter.value = usesServerObjectPaging.value ? (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables") : "all";
+    objectFilter.value = props.selectedObjectFilter ?? props.initialObjectFilter ?? (usesServerObjectPaging.value ? "tables" : "all");
     clearTableSelection();
     selectedRowId.value = null;
     // Close side panel and invalidate any pending source/table-info requests

@@ -98,3 +98,71 @@ it.each([
   await vi.waitFor(() => expect(container.textContent).toContain("TARGET_TABLE"));
   expect(api.listObjects.mock.calls.at(-1)?.slice(0, 3)).toEqual([connection.id, expectedDatabase, dbType === "mysql" ? "node_database" : "APP_OWNER"]);
 });
+
+it("links database and category clicks to one active object page with isolated databases", async () => {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const connection = { id: "linked-mysql", name: "MySQL", db_type: "mysql", database: "app", transport_layers: [] } as unknown as ConnectionConfig;
+  const store = useConnectionStore();
+  store.connections = [connection];
+  store.connectedIds.add(connection.id);
+  const queries = useQueryStore();
+  const database: TreeNode = { id: "linked-mysql:app", label: "app", type: "database", connectionId: connection.id, database: "app", isExpanded: true };
+  const tables: TreeNode = { ...database, id: `${database.id}:tables`, type: "group-tables", label: "Tables" };
+  const views: TreeNode = { ...database, id: `${database.id}:views`, type: "group-views", label: "Views" };
+  api.listObjects.mockResolvedValue([
+    { name: "linked_table", object_type: "TABLE" },
+    { name: "linked_view", object_type: "VIEW" },
+  ]);
+  const runtime = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+  const container = document.createElement("div");
+  document.body.append(container);
+  const app = createApp({
+    setup: () => () => {
+      const tab = queries.tabs.find((item) => item.id === queries.activeTabId);
+      return h("div", [
+        h(SidebarTreeRuntimeHost, { ref: runtime, node: database, depth: 0 }),
+        tab?.mode === "objects"
+          ? h(ObjectBrowser, {
+              key: tab.id,
+              connection,
+              database: tab.database,
+              selectedObjectFilter: tab.objectBrowser?.filter,
+              onFilterChange: (filter) => queries.updateObjectBrowserFilter(tab.id, filter),
+            })
+          : null,
+      ]);
+    },
+  });
+  app.use(pinia);
+  app.use(i18n);
+  app.mount(container);
+  mounted.push({ app, container });
+  await nextTick();
+
+  runtime.value?.handleRowClick(database, 1);
+  await vi.waitFor(() => expect(container.querySelector('[title="linked_table"]')).not.toBeNull());
+  const tabId = queries.activeTabId;
+  runtime.value?.handleRowClick(views, 1);
+  await vi.waitFor(() => {
+    expect(container.querySelector('[title="linked_view"]')).not.toBeNull();
+    expect(container.querySelector('[title="linked_table"]')).toBeNull();
+  });
+  expect(queries.activeTabId).toBe(tabId);
+
+  runtime.value?.handleRowClick(tables, 1);
+  await vi.waitFor(() => {
+    expect(container.querySelector('[title="linked_table"]')).not.toBeNull();
+    expect(container.querySelector('[title="linked_view"]')).toBeNull();
+  });
+  expect(queries.tabs.filter((tab) => tab.mode === "objects")).toHaveLength(1);
+
+  queries.createTab(connection.id, "app", "Query");
+  runtime.value?.handleRowClick(database, 1);
+  await vi.waitFor(() => expect(queries.activeTabId).toBe(tabId));
+
+  const otherDatabase: TreeNode = { ...database, id: "linked-mysql:other", label: "other", database: "other" };
+  runtime.value?.handleRowClick(otherDatabase, 1);
+  await vi.waitFor(() => expect(queries.tabs.find((tab) => tab.id === queries.activeTabId)?.database).toBe("other"));
+  expect(queries.activeTabId).not.toBe(tabId);
+});

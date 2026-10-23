@@ -287,6 +287,7 @@ Virtual-scrolled table that handles large result sets. Inline editing, SQL previ
 ### Schema Tools
 
 - **Schema browser** — databases, schemas, tables, columns, indexes, foreign keys, triggers, with sidebar search & pin
+- **Linked object browsing** — activating a database or schema opens or reuses its object browser by default; clicking an object category reuses that page and selects the corresponding list. Database activation follows the sidebar's single/double-click preference. Disable "Browse objects when activating database nodes" to opt out.
 - **Object browser** — grouped procedures, functions, views, and source editing where supported
 - **Table structure editor** — reviewable column and index changes for supported engines
 - **ER diagram** — visualize table relationships

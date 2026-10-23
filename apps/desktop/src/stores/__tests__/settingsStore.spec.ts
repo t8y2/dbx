@@ -31,6 +31,12 @@ import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("enables database browsing by default while preserving an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation).toBe(true);
+    expect(normalizeEditorSettings({}).sidebarBrowseObjectsOnDatabaseActivation).toBe(true);
+    expect(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: false }).sidebarBrowseObjectsOnDatabaseActivation).toBe(false);
+  });
+
   it("preserves the compact object browser view and rejects unknown modes", () => {
     expect(normalizeEditorSettings({ objectBrowserViewMode: "compact" }).objectBrowserViewMode).toBe("compact");
     expect(normalizeEditorSettings({ objectBrowserViewMode: "unknown" as any }).objectBrowserViewMode).toBe(DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode);

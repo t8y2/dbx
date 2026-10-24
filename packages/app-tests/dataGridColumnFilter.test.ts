@@ -128,7 +128,7 @@ test("parses typed structured IN values without losing large integers", () => {
 });
 
 test("hides list and range modes for unsupported dialects", () => {
-  for (const databaseType of ["cassandra", "influxdb", "jdbc"] as const) {
+  for (const databaseType of ["cassandra", "jdbc"] as const) {
     assert.equal(filterModeIsSupportedForDatabase("in", databaseType), false);
     assert.equal(filterModeIsSupportedForDatabase("not-in", databaseType), false);
     assert.equal(filterModeIsSupportedForDatabase("between", databaseType), false);
@@ -137,6 +137,12 @@ test("hides list and range modes for unsupported dialects", () => {
   assert.equal(filterModeIsSupportedForDatabase("between", "postgres"), true);
   assert.equal(filterModeIsSupportedForDatabase("is-null", "influxdb"), true);
   assert.equal(filterModeIsSupportedForDatabase("is-blank", "influxdb"), true);
+});
+
+test("keeps list and range modes for influxdb via predicate expansion", () => {
+  for (const mode of ["in", "not-in", "between", "not-between"] as const) {
+    assert.equal(filterModeIsSupportedForDatabase(mode, "influxdb"), true);
+  }
 });
 
 test("requires usable values for structured list and range filters", () => {

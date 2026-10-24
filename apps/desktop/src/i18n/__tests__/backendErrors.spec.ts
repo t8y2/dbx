@@ -6,6 +6,7 @@ import { BackendErrorException, formatError, normalizeBackendError, sanitizeBack
 import az from "@/i18n/locales/az";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
+import fr from "@/i18n/locales/fr";
 import id from "@/i18n/locales/id";
 import it from "@/i18n/locales/it";
 import ja from "@/i18n/locales/ja";
@@ -27,6 +28,7 @@ const LOCALES = {
   ja,
   ko,
   "pt-BR": ptBR,
+  fr,
   ru,
   th,
   tr,

@@ -4721,6 +4721,7 @@ export default withEnglishFallback({
     copyPasswordConfirmTitle: "複製含密碼的連線資訊",
     copyPasswordConfirmMessage: "複製的內容將包含明文密碼，任何能存取剪貼簿的程式或使用者都可以看到。是否繼續？",
     copyPasswordConfirmAction: "繼續複製",
+    copyPasswordText: "密碼（原文）",
   },
   visibleDatabases: {
     title: "顯示資料庫",

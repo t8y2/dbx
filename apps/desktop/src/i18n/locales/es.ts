@@ -4901,6 +4901,7 @@ export default withEnglishFallback({
     copyPasswordConfirmTitle: "Copiar con contraseña",
     copyPasswordConfirmMessage: "El texto copiado contendrá la contraseña guardada en texto sin formato. ¿Continuar?",
     copyPasswordConfirmAction: "Copiar",
+    copyPasswordText: "Contraseña (texto original)",
   },
   visibleDatabases: {
     title: "Bases de datos visibles",

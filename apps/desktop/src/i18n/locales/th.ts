@@ -5027,6 +5027,7 @@ export default withEnglishFallback({
     disableTrigger: "ปิดใช้งานทริกเกอร์",
     enableTriggerSuccess: 'เปิดใช้งานทริกเกอร์ "{name}" แล้ว',
     disableTriggerSuccess: 'ปิดใช้งานทริกเกอร์ "{name}" แล้ว',
+    copyPasswordText: "รหัสผ่าน (ข้อความต้นฉบับ)",
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",

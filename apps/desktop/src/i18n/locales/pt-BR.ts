@@ -4722,6 +4722,7 @@ export default withEnglishFallback({
     disableTrigger: "Desativar trigger",
     enableTriggerSuccess: 'Trigger "{name}" ativado',
     disableTriggerSuccess: 'Trigger "{name}" desativado',
+    copyPasswordText: "Senha (texto original)",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

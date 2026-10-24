@@ -4722,6 +4722,7 @@ export default withEnglishFallback({
     disableTrigger: "Disabilita trigger",
     enableTriggerSuccess: "Trigger «{name}» abilitato",
     disableTriggerSuccess: "Trigger «{name}» disabilitato",
+    copyPasswordText: "Password (testo originale)",
   },
   visibleDatabases: {
     title: "Database Visibili",

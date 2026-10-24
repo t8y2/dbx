@@ -4745,6 +4745,7 @@ export default withEnglishFallback({
     disableTrigger: "トリガーを無効化",
     enableTriggerSuccess: "トリガー「{name}」を有効化しました",
     disableTriggerSuccess: "トリガー「{name}」を無効化しました",
+    copyPasswordText: "パスワード（原文）",
   },
   visibleDatabases: {
     title: "表示するデータベース",

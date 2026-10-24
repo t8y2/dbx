@@ -4703,6 +4703,7 @@ export default withEnglishFallback({
     copyDsn: "DSN（key=value）",
     copyDsnWithPassword: "DSN（含密码）",
     copyPsqlCommand: "psql 命令",
+    copyPasswordText: "密码（原文）",
     copyPasswordConfirmTitle: "复制含密码的连接信息",
     copyPasswordConfirmMessage: "复制的内容将包含明文密码，任何能读取剪贴板的程序或用户都可以看到。是否继续？",
     copyPasswordConfirmAction: "继续复制",

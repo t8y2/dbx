@@ -2797,6 +2797,7 @@ const CONNECTION_URL_COPY_LABEL_KEYS: Record<ConnectionUrlCopyFormat, string> = 
   dsn: "contextMenu.copyDsn",
   dsnWithPassword: "contextMenu.copyDsnWithPassword",
   psqlCommand: "contextMenu.copyPsqlCommand",
+  password: "contextMenu.copyPasswordText",
 };
 
 /**

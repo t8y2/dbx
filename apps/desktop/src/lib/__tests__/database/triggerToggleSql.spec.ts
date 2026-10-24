@@ -2,6 +2,31 @@ import { describe, expect, it } from "vitest";
 import { buildTriggerToggleSql, supportsTriggerToggle } from "@/lib/database/triggerToggleSql";
 
 describe("triggerToggleSql", () => {
+  describe("exact Oracle-family actions", () => {
+    it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("%s preserves raw trigger owner/name independently of a parent", (databaseType) => {
+      expect(buildTriggerToggleSql({ databaseType, schema: " Owner ", triggerName: ' Tr"ig ', tableName: "must-not-appear", enabled: false, identityMode: "exact", scope: "VIEW" })).toBe('ALTER TRIGGER " Owner "." Tr""ig " DISABLE;');
+    });
+
+    it.each(["SCHEMA", "DATABASE", "TIMER"] as const)("DM %s toggles only the selected native event trigger", (scope) => {
+      expect(buildTriggerToggleSql({ databaseType: "dameng", schema: " O'wner ", triggerName: " Tr'ig ", enabled: false, identityMode: "exact", scope })).toBe("SP_ENABLE_EVT_TRIGGER(' O''wner ', ' Tr''ig ', 0);");
+      expect(buildTriggerToggleSql({ databaseType: "dameng", schema: " O'wner ", triggerName: " Tr'ig ", enabled: true, identityMode: "exact", scope })).toBe("SP_ENABLE_EVT_TRIGGER(' O''wner ', ' Tr''ig ', 1);");
+    });
+
+    it("does not fall back to a legacy or unknown-scope write when exact prerequisites are missing", () => {
+      const options = { databaseType: "oracle", schema: "APP", triggerName: "T", enabled: true, identityMode: "exact", scope: "TABLE" } as const;
+      expect(buildTriggerToggleSql({ ...options, schema: undefined })).toBeNull();
+      expect(buildTriggerToggleSql({ ...options, triggerName: "T\0" })).toBeNull();
+      expect(buildTriggerToggleSql({ ...options, scope: "UNKNOWN" })).toBeNull();
+      expect(buildTriggerToggleSql({ ...options, databaseType: "oceanbase-oracle", scope: "SCHEMA" })).toBeNull();
+      expect(buildTriggerToggleSql({ ...options, databaseType: "postgres", tableName: "ORDERS" })).toBeNull();
+    });
+
+    it("keeps default callers' original trim, optional owner and native DM behavior", () => {
+      expect(buildTriggerToggleSql({ databaseType: "dameng", schema: " APP ", triggerName: " T ", enabled: false })).toBe('ALTER TRIGGER "APP"."T" DISABLE;');
+      expect(buildTriggerToggleSql({ databaseType: "oracle", triggerName: " T ", enabled: true })).toBe('ALTER TRIGGER "T" ENABLE;');
+    });
+  });
+
   describe("supportsTriggerToggle", () => {
     it("returns true for supported database types", () => {
       expect(supportsTriggerToggle("sqlserver")).toBe(true);

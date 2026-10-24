@@ -2762,7 +2762,7 @@ fn external_driver_preview_fallback_sql(sql: &str) -> Option<String> {
     Some(format!("{}{}{}", &sql[..select_end], rewritten_projection, &sql[from_start..]))
 }
 
-fn is_external_driver_method_unsupported(error: &str, method: &str) -> bool {
+pub(crate) fn is_external_driver_method_unsupported(error: &str, method: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
     let method = method.to_ascii_lowercase();
     normalized.contains(&method)

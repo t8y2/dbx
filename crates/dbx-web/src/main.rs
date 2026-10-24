@@ -916,6 +916,7 @@ async fn serve() -> Result<(), String> {
             "/query/validate-oracle-executable-object-source",
             post(routes::query::validate_oracle_executable_object_source),
         )
+        .route("/query/prepare-oracle-trigger-sql", post(routes::query::prepare_oracle_trigger_sql))
         .route(
             "/query/fingerprint-oracle-routine-object-source",
             post(routes::query::fingerprint_oracle_routine_object_source),

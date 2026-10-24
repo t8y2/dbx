@@ -93,6 +93,7 @@ pub(super) async fn enrich(
                 source: trigger.statement.clone().unwrap(),
                 editable: None,
                 routine_parameters: None,
+                trigger: None,
             }
         };
         if source.name != trigger.name

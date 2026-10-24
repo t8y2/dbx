@@ -2579,6 +2579,7 @@ pub fn run() {
             commands::query::build_copy_table_data_sql,
             commands::query::build_executable_object_source_statements,
             commands::query::validate_oracle_executable_object_source,
+            commands::query::prepare_oracle_trigger_sql,
             commands::query::fingerprint_oracle_routine_object_source,
             commands::query::build_executable_object_source_sql,
             commands::query::build_editable_object_source,

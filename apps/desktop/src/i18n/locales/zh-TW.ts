@@ -67,6 +67,27 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oracleTrigger: {
+    errorPositionUnavailable: "原始碼已開啟，但無法核實錯誤位置，請依原行列檢查。",
+    reconcileStructure: "核對已執行變更",
+    reconcileConfirm: "重新讀取目前資料表結構，保留預期修改並核對已執行步驟，不重播舊 SQL。繼續嗎？",
+    editFullSource: "編輯完整原始碼",
+    refreshDraft: "重新讀取此觸發器",
+    refreshDraftConfirm: "重新讀取將捨棄此觸發器的結構化草稿，其他資料表結構草稿會保留。繼續嗎？",
+    discardSourceConfirm: "要捨棄尚未儲存的原始碼修改嗎？",
+    scope: "觸發範圍",
+    parentOwner: "所屬資料表／檢視 Schema",
+    parentName: "所屬資料表／檢視",
+    scopeOwner: "事件範圍 Schema",
+    obSchemaUnsupported: "目前 OB 版本不提供 Schema 觸發器範本（已測試範本遭拒絕）。",
+    obDatabaseUnknown: "DATABASE 觸發器能力尚未核實。",
+    nonAtomic: "多條 DDL 分別提交。建立後到停用前可能短暫啟用；失敗會停止後續步驟，不自動重試。",
+    unknown: "未知",
+    verifyReadOnly: "唯讀核實",
+    reloadBaseline: "保留草稿，重新讀取完整觸發器後再預覽。",
+    runFullDefinition: "此觸發器分頁僅可執行本物件的完整定義。其他 SQL 請使用一般查詢分頁。",
+    executionSchema: "執行綱要",
+  },
   objectRelations: {
     title: "關係",
     foreignKeys: "外鍵參照",

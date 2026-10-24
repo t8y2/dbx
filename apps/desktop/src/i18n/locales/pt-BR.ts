@@ -66,6 +66,27 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oracleTrigger: {
+    errorPositionUnavailable: "Código-fonte aberto. Não foi possível verificar a posição do erro; confira a linha e a coluna indicadas.",
+    reconcileStructure: "Reconciliar alterações aplicadas",
+    reconcileConfirm: "Reler a estrutura atual, manter as edições desejadas e reconciliar as etapas concluídas sem repetir o SQL anterior?",
+    editFullSource: "Editar código-fonte completo",
+    refreshDraft: "Recarregar este gatilho",
+    refreshDraftConfirm: "Recarregar e descartar apenas o rascunho estruturado deste gatilho? Os outros rascunhos da estrutura da tabela serão mantidos.",
+    discardSourceConfirm: "Descartar as alterações não salvas deste código-fonte?",
+    scope: "Escopo do gatilho",
+    parentOwner: "Esquema da tabela/visão",
+    parentName: "Tabela/visão associada",
+    scopeOwner: "Esquema dos eventos",
+    obSchemaUnsupported: "Esta versão do OB não oferece um modelo de gatilho Schema: o modelo testado foi rejeitado.",
+    obDatabaseUnknown: "O suporte a gatilhos DATABASE não foi verificado.",
+    nonAtomic: "As instruções DDL são confirmadas separadamente. O gatilho pode ficar ativo entre a criação e a desativação. Uma falha interrompe as etapas seguintes; não há novas tentativas automáticas.",
+    unknown: "Desconhecido",
+    verifyReadOnly: "Verificar sem gravar",
+    reloadBaseline: "Mantenha o rascunho e recarregue a definição completa do gatilho antes de gerar outra prévia.",
+    runFullDefinition: "Esta aba só pode executar a definição completa deste gatilho. Use uma aba de consulta comum para outros SQL.",
+    executionSchema: "Esquema de execução",
+  },
   objectRelations: {
     title: "Relações",
     foreignKeys: "Chaves estrangeiras",

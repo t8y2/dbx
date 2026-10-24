@@ -1144,7 +1144,7 @@ fn is_identifier_continue_char(ch: char) -> bool {
 }
 
 /// Whether the text before a quote ends in an Oracle `q`/`nq` introducer token.
-fn ends_with_oracle_q_quote_prefix(text: &str) -> bool {
+pub(crate) fn ends_with_oracle_q_quote_prefix(text: &str) -> bool {
     let mut chars = text.chars().rev();
     if !matches!(chars.next(), Some('q' | 'Q')) {
         return false;
@@ -1172,7 +1172,7 @@ fn oracle_q_quote_closer(opening: char) -> Option<char> {
 
 /// Byte index just past the closing quote of the `q'...'` literal whose opening
 /// quote sits at `quote_index`, or `None` when the literal is not well formed.
-fn oracle_q_quote_end(sql: &str, quote_index: usize) -> Option<usize> {
+pub(crate) fn oracle_q_quote_end(sql: &str, quote_index: usize) -> Option<usize> {
     let opening = next_char_at(sql, quote_index + 1)?;
     let closer = oracle_q_quote_closer(opening)?;
     let content_start = quote_index + 1 + opening.len_utf8();

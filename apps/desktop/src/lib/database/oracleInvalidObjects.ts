@@ -1,4 +1,4 @@
-import type { DatabaseType, ObjectSourceKind, QueryResult } from "@/types/database";
+import type { DatabaseType, ObjectSourceKind, OracleTriggerMetadata, QueryResult } from "@/types/database";
 
 export type OracleInvalidObject = {
   owner: string;
@@ -22,6 +22,10 @@ export type OracleInvalidObjectsPageQuery = (sql: string, maxRows: number) => Pr
 const ORACLE_COMPILE_TYPES = new Set(["VIEW", "MATERIALIZED VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "PACKAGE BODY", "TYPE", "TYPE BODY", "SYNONYM"]);
 
 const OCEANBASE_COMPILE_TYPES = new Set(["PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY"]);
+
+export interface OracleCompileOptions {
+  triggerProfile?: Pick<OracleTriggerMetadata, "contractVersion" | "identityMode" | "engine" | "engineVersion">;
+}
 
 export function oracleInvalidObjectSourceKind(objectType: string): ObjectSourceKind | null {
   const kind = objectType.trim().toUpperCase().replaceAll(" ", "_");
@@ -118,16 +122,20 @@ export function buildOracleObjectStatusSql(owner: string, object: OracleInvalidO
   return `SELECT TO_CHAR(OBJECT_ID) AS OBJECT_ID, TO_CHAR(LAST_DDL_TIME, 'YYYY-MM-DD HH24:MI:SS') AS LAST_DDL_TIME, STATUS FROM ALL_OBJECTS WHERE OWNER = ${quoteOracleLiteral(owner)} AND OBJECT_NAME = ${quoteOracleLiteral(object.name)} AND OBJECT_TYPE = ${quoteOracleLiteral(object.type)}`;
 }
 
-export function oracleCompileUnsupportedReason(dbType: DatabaseType, objectType: string): "unsupported-type" | "unsupported-on-engine" | null {
+export function oracleCompileUnsupportedReason(dbType: DatabaseType, objectType: string, options?: OracleCompileOptions): "unsupported-type" | "unsupported-on-engine" | null {
   const type = objectType.toUpperCase();
   if (!ORACLE_COMPILE_TYPES.has(type)) return "unsupported-type";
-  if (dbType === "oceanbase-oracle" && !OCEANBASE_COMPILE_TYPES.has(type)) return "unsupported-on-engine";
+  if (dbType === "oceanbase-oracle" && !OCEANBASE_COMPILE_TYPES.has(type)) {
+    const profile = options?.triggerProfile;
+    if (type === "TRIGGER" && profile?.contractVersion === 1 && profile.identityMode === "exact" && profile.engine === "oceanbase-oracle" && /(?:^|[^0-9])4\.2\.5\.7(?:[^0-9]|$)/.test(profile.engineVersion ?? "")) return null;
+    return "unsupported-on-engine";
+  }
   return null;
 }
 
-export function buildOracleCompileSql(dbType: DatabaseType, owner: string, object: Pick<OracleInvalidObject, "name" | "type">): string {
+export function buildOracleCompileSql(dbType: DatabaseType, owner: string, object: Pick<OracleInvalidObject, "name" | "type">, options?: OracleCompileOptions): string {
   const type = object.type.toUpperCase();
-  if (oracleCompileUnsupportedReason(dbType, type)) throw new Error("Unsupported Oracle object compile type");
+  if (oracleCompileUnsupportedReason(dbType, type, options)) throw new Error("Unsupported Oracle object compile type");
   const qualified = `${quoteOracleIdentifier(owner)}.${quoteOracleIdentifier(object.name)}`;
   if (type === "SYNONYM") return `ALTER ${owner === "PUBLIC" ? "PUBLIC " : ""}SYNONYM ${owner === "PUBLIC" ? quoteOracleIdentifier(object.name) : qualified} COMPILE`;
   if (type === "MATERIALIZED VIEW") return `ALTER MATERIALIZED VIEW ${qualified} COMPILE`;

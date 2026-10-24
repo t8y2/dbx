@@ -315,6 +315,7 @@ pub async fn list_triggers(client: &TursoClient, _schema: &str, table: &str) -> 
                 valid: None,
                 comment: None,
                 created_at: None,
+                oracle_metadata: None,
                 statement: value_as_string(row.get(1)),
             }
         })
@@ -358,6 +359,7 @@ pub async fn object_source(
         source,
         editable: None,
         routine_parameters: None,
+        trigger: None,
     })
 }
 

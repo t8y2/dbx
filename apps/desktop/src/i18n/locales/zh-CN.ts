@@ -11,6 +11,27 @@ import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpZhCN as damengDump } from "./damengDump";
 
 export default withEnglishFallback({
+  oracleTrigger: {
+    errorPositionUnavailable: "源码已打开，但无法核实错误位置，请按原行列检查。",
+    reconcileStructure: "核对已执行改动",
+    reconcileConfirm: "重新读取当前表结构，保留期望修改并核对已执行步骤，不重放旧 SQL。继续吗？",
+    editFullSource: "编辑完整源码",
+    refreshDraft: "重读此触发器",
+    refreshDraftConfirm: "重读将放弃此触发器的结构化草稿，其他表结构草稿保留。继续吗？",
+    discardSourceConfirm: "放弃尚未保存的源码修改吗？",
+    scope: "触发范围",
+    parentOwner: "所属表／视图 Schema",
+    parentName: "所属表／视图",
+    scopeOwner: "事件范围 Schema",
+    obSchemaUnsupported: "当前 OB 版本不提供 Schema 触发器模板（已测试模板被拒绝）。",
+    obDatabaseUnknown: "DATABASE 触发器能力未核实。",
+    nonAtomic: "多条 DDL 分别提交。创建后到停用前可能短暂启用；失败会停止后续步骤，不自动重试。",
+    unknown: "未知",
+    verifyReadOnly: "只读核实",
+    reloadBaseline: "保留草稿，重新读取完整触发器后再预览。",
+    runFullDefinition: "此触发器标签仅可运行本对象的完整定义。其他 SQL 请使用普通查询标签。",
+    executionSchema: "执行模式",
+  },
   objectRelations: {
     title: "关系",
     foreignKeys: "外键引用",

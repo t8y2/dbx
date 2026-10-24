@@ -2687,6 +2687,7 @@ pub async fn list_triggers(pool: &SqliteHandle, schema: &str, table: &str) -> Re
                     valid: None,
                     comment: None,
                     created_at: None,
+                    oracle_metadata: None,
                     statement: if sql_text.is_empty() { None } else { Some(sql_text) },
                 }
             })
@@ -2732,6 +2733,7 @@ pub async fn list_triggers(pool: &SqliteHandle, schema: &str, table: &str) -> Re
                         valid: None,
                         comment: None,
                         created_at: None,
+                        oracle_metadata: None,
                         statement: sql_text,
                     })
                 })

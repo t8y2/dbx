@@ -10598,6 +10598,7 @@ async fn get_postgres_schema_object_sources_for_transfer(
             source,
             editable: None,
             routine_parameters: None,
+            trigger: None,
         });
     }
     for row in execute_on_pool(state, pool_key, &routines_sql).await?.rows {
@@ -10618,6 +10619,7 @@ async fn get_postgres_schema_object_sources_for_transfer(
             source,
             editable: None,
             routine_parameters: None,
+            trigger: None,
         });
     }
 
@@ -17232,6 +17234,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                     source: "SELECT 1".into(),
                     editable: None,
                     routine_parameters: None,
+                    trigger: None,
                 },
                 db::ObjectSource {
                     name: "v2".into(),
@@ -17240,6 +17243,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                     source: "SELECT 2".into(),
                     editable: None,
                     routine_parameters: None,
+                    trigger: None,
                 },
             ];
             let selection =

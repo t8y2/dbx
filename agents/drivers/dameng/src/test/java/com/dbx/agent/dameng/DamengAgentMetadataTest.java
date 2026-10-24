@@ -5,6 +5,12 @@ import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataReadOptions;
+import com.dbx.agent.AgentRpcTestSupport;
+import com.dbx.agent.AgentProtocol;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
@@ -23,6 +29,7 @@ import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -32,6 +39,69 @@ import java.util.Collections;
 import java.util.List;
 
 class DamengAgentMetadataTest {
+    @Test
+    void exactTriggerSourceRpcRetainsLongDdlAndIndependentErrors() {
+        DamengAgent agent = new DamengAgent();
+        List<String> calls = new ArrayList<>();
+        String ddl = "CREATE TRIGGER \" Owner \".\" Trigger \" BEFORE INSERT ON \" Parent Owner \".\" Parent \" FOR EACH ROW BEGIN /* " + "中文😀".repeat(12_000) + " */ NULL; END;";
+        TestSupport.setPrivateConnection(agent, exactTriggerConnection(calls, "TABLE", ddl, null));
+        JsonObject request = new JsonObject();
+        request.addProperty("id", 1);
+        request.addProperty("method", AgentProtocol.METHOD_GET_OBJECT_SOURCE);
+        request.add("params", JsonParser.parseString("{\"schema\":\" Owner \",\"name\":\" Trigger \",\"object_type\":\"TRIGGER\",\"identity_mode\":\"exact\"}"));
+        JsonObject response = JsonParser.parseString(AgentRpcTestSupport.handleRequest(agent, request.toString())).getAsJsonObject();
+        Assertions.assertFalse(response.has("error"), response.toString());
+        ObjectSource source = new Gson().fromJson(response.get("result"), ObjectSource.class);
+        Assertions.assertEquals(ddl, source.getSource());
+        Assertions.assertEquals("dm", source.getTrigger().getOracle_metadata().engine());
+        Assertions.assertEquals("9007199254740993", source.getTrigger().getOracle_metadata().objectId());
+        Assertions.assertFalse(source.getTrigger().getEnabled());
+        Assertions.assertFalse(source.getTrigger().getValid());
+        Assertions.assertTrue(source.getTrigger().getOracle_metadata().definition().complete());
+        Assertions.assertEquals("Missing procedure", source.getTrigger().getOracle_metadata().errors().get(0).text());
+        Assertions.assertTrue(calls.contains("bind:1= Owner "), calls.toString());
+        Assertions.assertTrue(calls.contains("bind:2= Trigger "), calls.toString());
+    }
+
+    @Test
+    void exactTriggerDiscoveryPreservesNonTableScopesAndPagesBeforeEnrichment() {
+        for (String scope : List.of("TABLE", "VIEW", "SCHEMA", "DATABASE", "TIMER")) {
+            DamengAgent agent = new DamengAgent();
+            List<String> calls = new ArrayList<>();
+            TestSupport.setPrivateConnection(agent, exactTriggerConnection(calls, scope, "", null));
+            ObjectInfo object = agent.listObjects(" Owner ", new MetadataListConstraints("trig", 1, 2, List.of("TRIGGER")), MetadataReadOptions.EXACT).get(0);
+            Assertions.assertEquals(scope, object.getTrigger().getOracle_metadata().scope());
+            if (List.of("TABLE", "VIEW").contains(scope)) Assertions.assertEquals(" Parent Owner ", object.getParent_schema());
+            else {
+                Assertions.assertNull(object.getParent_name());
+                Assertions.assertNull(object.getParent_schema());
+                Assertions.assertNull(object.getTrigger().getOracle_metadata().parent());
+            }
+            Assertions.assertTrue(calls.get(0).contains("UPPER(o.OBJECT_NAME)"), calls.toString());
+            Assertions.assertTrue(calls.get(0).contains("o.OBJECT_TYPE IN"), calls.toString());
+            Assertions.assertTrue(calls.contains("bind:1= Owner "), calls.toString());
+            Assertions.assertNull(object.getTrigger().getStatement());
+        }
+    }
+
+    @Test
+    void exactBodyOnlyAndDeniedSourceRemainVisibleButIncomplete() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, exactTriggerConnection(new ArrayList<>(), "TABLE", "", new SQLException("ORA-01031: insufficient privileges", "42501", 1031)));
+        ObjectSource source = agent.getObjectSource(" Owner ", " Trigger ", "TRIGGER", MetadataReadOptions.EXACT);
+        Assertions.assertEquals("BEGIN NULL; END;", source.getSource());
+        Assertions.assertFalse(source.getTrigger().getOracle_metadata().definition().complete());
+        Assertions.assertEquals("denied", source.getTrigger().getOracle_metadata().reads().get("definition").state());
+    }
+
+    @Test
+    void exactRequestDoesNotTurnLegacyDm6MetadataIntoANewContract() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, legacyMetadataConnection(new ArrayList<>()));
+        setLegacyJdbcMetadata(agent, true);
+        Assertions.assertTrue(agent.listTriggers("APP", "USERS", MetadataReadOptions.EXACT).isEmpty());
+    }
+
     @Test
     void detectsLegacyDamengMetadataFromDatabaseVersion() {
         Assertions.assertTrue(DamengAgent.usesLegacyJdbcMetadata(versionConnection(6, "6.0.2.79")));
@@ -3528,12 +3598,47 @@ class DamengAgentMetadataTest {
                 }
                 return column + 1;
             }
-            if ("getString".equals(name) && args[0] instanceof Integer columnIndex) {
+            if (("getString".equals(name) || "getObject".equals(name)) && args[0] instanceof Integer columnIndex) {
                 List<String> row = rows.get(index[0]);
                 return columnIndex - 1 < row.size() ? row.get(columnIndex - 1) : null;
             }
+            if ("getLong".equals(name)) return Long.parseLong(rows.get(index[0]).get((Integer) args[0] - 1));
+            if ("getMetaData".equals(name)) return proxy(ResultSetMetaData.class, (metadataMethod, values) -> switch (metadataMethod.getName()) {
+                case "getColumnCount" -> columns.size();
+                case "getColumnLabel" -> columns.get((Integer) values[0] - 1);
+                default -> defaultValue(metadataMethod.getReturnType());
+            });
             if ("close".equals(name)) {
                 return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection exactTriggerConnection(List<String> calls, String scope, String ddl, SQLException sourceError) {
+        List<String> columns = List.of("OWNER", "TRIGGER_NAME", "TRIGGERING_EVENT", "TRIGGER_TYPE", "STATUS", "TABLE_OWNER", "TABLE_NAME", "BASE_OBJECT_TYPE", "TRIGGER_BODY", "DBX_TRIGGER_OBJECT_MARKER", "OWNER", "OBJECT_NAME", "OBJECT_ID", "LAST_DDL_TIME", "STATUS");
+        List<List<String>> rows = List.of(Arrays.asList(" Owner ", " Trigger ", scope.equals("TIMER") ? "TIMER" : "INSERT", "BEFORE EACH ROW", "DISABLED", " Parent Owner ",
+            List.of("TABLE", "VIEW").contains(scope) ? " Parent " : null, scope.equals("TIMER") ? "DATABASE" : scope, "BEGIN NULL; END;", " Trigger ", " Owner ", " Trigger ", "9007199254740993", "2026-10-21 08:00:00", "INVALID"));
+        return proxy(Connection.class, (method, args) -> {
+            if (method.getName().equals("getMetaData")) return proxy(DatabaseMetaData.class, (metadataMethod, values) ->
+                metadataMethod.getName().equals("getDatabaseProductVersion") ? "8.1.5" : defaultValue(metadataMethod.getReturnType()));
+            if (method.getName().equals("prepareStatement")) {
+                String sql = (String) args[0]; calls.add(sql);
+                return proxy(PreparedStatement.class, (statementMethod, values) -> {
+                    if (statementMethod.getName().equals("setString")) { calls.add("bind:" + values[0] + "=" + values[1]); return null; }
+                    if (statementMethod.getName().equals("executeQuery")) {
+                        if (sql.contains("FROM ALL_TRIGGERS")) return triggerMetadataResultSet(columns, rows);
+                        if (sql.contains("DBMS_METADATA.GET_DDL")) {
+                            if (sourceError != null) throw sourceError;
+                            return metadataResultSet(List.of(List.of(new LongText(ddl, ddl.substring(0, Math.min(64, ddl.length()))))));
+                        }
+                        if (sql.contains("FROM ALL_ERRORS")) return triggerMetadataResultSet(List.of("SEQUENCE", "LINE", "POSITION", "TEXT", "ATTRIBUTE"), List.of(List.of("1", "4", "7", "Missing procedure", "ERROR")));
+                        if (sql.contains("FROM ALL_SOURCE")) return metadataResultSet(List.of());
+                        if (sql.contains("FROM ALL_OBJECTS o")) return metadataResultSet(List.of(List.of(" Trigger ", "TRIGGER", "")));
+                        throw new AssertionError("Unexpected exact trigger query: " + sql);
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
             }
             return defaultValue(method.getReturnType());
         });

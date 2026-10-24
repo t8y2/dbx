@@ -65,6 +65,27 @@ const consul = {
 };
 
 export default {
+  oracleTrigger: {
+    errorPositionUnavailable: "Source opened. The error location could not be verified; check the reported line and column.",
+    reconcileStructure: "Reconcile applied changes",
+    reconcileConfirm: "Reread the current table structure, keep the desired edits, and reconcile completed steps without replaying old SQL?",
+    editFullSource: "Edit full source",
+    refreshDraft: "Reload this trigger",
+    refreshDraftConfirm: "Reload and discard only this trigger's structured draft? Other table structure drafts will be kept.",
+    discardSourceConfirm: "Discard unsaved changes to this source?",
+    scope: "Trigger scope",
+    parentOwner: "Owning table/view schema",
+    parentName: "Owning table/view",
+    scopeOwner: "Event scope schema",
+    obSchemaUnsupported: "No Schema trigger template is offered for this OB version: the tested template was rejected.",
+    obDatabaseUnknown: "DATABASE trigger capability has not been verified.",
+    nonAtomic: "DDL statements commit separately. The trigger may be enabled between creation and disablement. Failure stops later steps; nothing is retried automatically.",
+    unknown: "Unknown",
+    verifyReadOnly: "Verify without writing",
+    reloadBaseline: "Keep the draft and reload the complete trigger before previewing again.",
+    runFullDefinition: "This trigger tab can run only this object's complete definition. Use a normal query tab for other SQL.",
+    executionSchema: "Execution schema",
+  },
   objectRelations: {
     title: "Relations",
     foreignKeys: "Foreign keys",

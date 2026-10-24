@@ -15,7 +15,12 @@ const source = parse(readFileSync("apps/desktop/src/components/sidebar/Connectio
 const script = ts.createSourceFile("ConnectionTree.ts", source, ts.ScriptTarget.Latest, true);
 const statements = script.statements.filter((statement) => {
   if (ts.isFunctionDeclaration(statement)) return ["loadGlobalRemoteSearchResults", "isGlobalTableIndexParent", "discoverGlobalSearchChildren"].includes(statement.name?.text ?? "");
-  return ts.isVariableStatement(statement) && statement.declarationList.declarations.some((declaration) => ["globalSearchContext", "{ results: remoteSearchResults, isLoading: isRemoteSearchLoading }"].includes(declaration.name.getText(script)));
+  return (
+    ts.isVariableStatement(statement) &&
+    statement.declarationList.declarations.some((declaration) =>
+      ts.isIdentifier(declaration.name) ? declaration.name.text === "globalSearchContext" : ts.isObjectBindingPattern(declaration.name) && declaration.name.elements.some((element) => ts.isIdentifier(element.name) && element.name.text === "remoteSearchResults"),
+    )
+  );
 });
 const compiled = ts.transpileModule(statements.map((statement) => statement.getText(script)).join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 const cleanups: Array<() => void> = [];

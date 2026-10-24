@@ -241,7 +241,8 @@ describe("schema index browsing and draft navigation", () => {
     expect(host.querySelector('[title="ORDINARY"]')).not.toBeNull();
     expect(host.querySelector('[title="LEGACY_WRONG"]')).toBeNull();
     expect(host.querySelector('[title=" Ix(a) "]')).toBeNull();
-    expect(mocks.listObjects.mock.calls.every((call) => !call[10] && !call[3]?.includes("INDEX"))).toBe(true);
+    expect(mocks.listObjects.mock.calls.every((call) => call[10] !== true && !call[3]?.includes("INDEX"))).toBe(true);
+    expect(mocks.listObjects.mock.calls[0][10]).toEqual({ identityMode: "exact" });
   });
 
   it("loads indexes only after choosing the dedicated bounded exact filter", async () => {

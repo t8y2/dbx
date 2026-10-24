@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { canViewDatabaseObjectDependencies, databaseDependencyProviderFor } from "@/lib/database/databaseObjectDependencies";
+import type { TreeNode, TriggerInfo } from "@/types/database";
 
 const node = (overrides: Record<string, unknown> = {}) => ({
   type: "table" as const,
@@ -10,6 +11,27 @@ const node = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("database dependency providers", () => {
+  it("limits DM dependency support to the exact trigger adapter and preserves its raw owner/name", () => {
+    const trigger: TriggerInfo = { name: " Tr'ig ", event: "INSERT", timing: "BEFORE", oracle_metadata: { contractVersion: 1, identityMode: "exact", engine: "dm", engineVersion: "8.1.3", owner: " Owner ", name: " Tr'ig ", scope: "TABLE", reads: {} } };
+    const item: TreeNode = { id: "t", type: "trigger", label: "display label", schema: " Owner ", objectName: trigger.name, meta: trigger };
+    const provider = databaseDependencyProviderFor("dameng");
+    expect(provider).not.toBeNull();
+    expect(provider!.supports(item)).toBe(true);
+    expect(provider!.buildQuery(item)).toContain("d.NAME = ' Tr''ig '");
+    expect(provider!.buildQuery(item)).toContain("d.TYPE = 'TRIGGER'");
+    expect(provider!.targetLabel?.(item)).toMatchObject({ name: " Owner . Tr'ig " });
+    for (const changed of [
+      { ...item, meta: undefined },
+      { ...item, schema: "Other" },
+      { ...item, type: "procedure" as const },
+    ]) {
+      expect(provider!.supports(changed)).toBe(false);
+      expect(provider!.buildQuery(changed)).toBeNull();
+    }
+    trigger.oracle_metadata!.engineVersion = "6.0";
+    expect(provider!.supports(item)).toBe(false);
+  });
+
   it("resolves only providers registered for the requested database", () => {
     expect(databaseDependencyProviderFor("xugu")?.databaseType).toBe("xugu");
     expect(databaseDependencyProviderFor("oracle")?.databaseType).toBe("oracle");

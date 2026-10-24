@@ -693,6 +693,7 @@ fn trigger(name: &str, timing: &str, event: &str, statement: &str) -> EditableSt
     EditableStructureTrigger {
         id: name.to_string(),
         name: name.to_string(),
+        oracle_exact: None,
         timing: timing.to_string(),
         event: event.to_string(),
         statement: statement.to_string(),

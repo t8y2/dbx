@@ -8,6 +8,27 @@ import { meilisearchManagementRu } from "./meilisearchManagement";
 
 // Russian locale. Entries omitted here fall back to English at runtime.
 export default withEnglishFallback({
+  oracleTrigger: {
+    errorPositionUnavailable: "Исходный код открыт. Не удалось проверить позицию ошибки; проверьте указанные строку и столбец.",
+    reconcileStructure: "Сверить применённые изменения",
+    reconcileConfirm: "Перечитать текущую структуру таблицы, сохранить желаемые правки и сверить выполненные шаги без повторного запуска прежнего SQL?",
+    editFullSource: "Изменить полный исходный код",
+    refreshDraft: "Перечитать этот триггер",
+    refreshDraftConfirm: "Перечитать триггер и отменить только его структурированный черновик? Остальные черновики структуры таблицы будут сохранены.",
+    discardSourceConfirm: "Отменить несохранённые изменения этого исходного кода?",
+    scope: "Область триггера",
+    parentOwner: "Схема таблицы/представления",
+    parentName: "Таблица/представление",
+    scopeOwner: "Схема событий",
+    obSchemaUnsupported: "Для этой версии OB шаблон триггера Schema не предлагается: проверенный шаблон был отклонён.",
+    obDatabaseUnknown: "Поддержка триггеров DATABASE не проверена.",
+    nonAtomic: "Операторы DDL фиксируются отдельно. Между созданием и отключением триггер может быть включён. Ошибка останавливает последующие шаги; автоматических повторов нет.",
+    unknown: "Неизвестно",
+    verifyReadOnly: "Проверить без записи",
+    reloadBaseline: "Сохраните черновик и загрузите полное определение триггера перед новым предпросмотром.",
+    runFullDefinition: "На этой вкладке можно выполнить только полное определение данного триггера. Для другого SQL используйте обычную вкладку запроса.",
+    executionSchema: "Схема выполнения",
+  },
   objectRelations: {
     title: "Связи",
     foreignKeys: "Внешние ключи",

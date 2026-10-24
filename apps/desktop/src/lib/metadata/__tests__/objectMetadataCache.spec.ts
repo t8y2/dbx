@@ -134,6 +134,24 @@ describe("objectMetadataCache", () => {
     expect(viewLoader).toHaveBeenCalledTimes(1);
   });
 
+  it("separates exact trigger snapshots without changing other facet keys and invalidates both modes together", async () => {
+    const exactRequest = { ...request, oracleTriggerContract: 1 as const };
+    const oldLoader = vi.fn().mockResolvedValue(["legacy-body"]);
+    const exactLoader = vi.fn().mockResolvedValue(["exact-metadata"]);
+    expect((await loadObjectMetadataFacet(request, "triggers", oldLoader)).value).toEqual(["legacy-body"]);
+    expect((await loadObjectMetadataFacet(exactRequest, "triggers", exactLoader)).value).toEqual(["exact-metadata"]);
+    expect(exactLoader).toHaveBeenCalledTimes(1);
+    const columns = vi.fn().mockResolvedValue(["column"]);
+    await loadObjectMetadataFacet(request, "columns", columns);
+    await loadObjectMetadataFacet(exactRequest, "columns", columns);
+    expect(columns).toHaveBeenCalledTimes(1);
+    await invalidateObjectMetadataCache(request);
+    await loadObjectMetadataFacet(exactRequest, "triggers", exactLoader);
+    await loadObjectMetadataFacet(request, "triggers", oldLoader);
+    expect(exactLoader).toHaveBeenCalledTimes(2);
+    expect(oldLoader).toHaveBeenCalledTimes(2);
+  });
+
   it("persists a remote facet and force bypasses disk", async () => {
     mocks.loadSchemaCache.mockResolvedValue({ version: 1, cachedAt: new Date().toISOString(), value: ["old"] });
     const loader = vi.fn().mockResolvedValue(["new"]);

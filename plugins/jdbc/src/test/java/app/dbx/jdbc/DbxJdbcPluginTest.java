@@ -67,6 +67,221 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void exactTriggerMethodsDispatchBothSpellingsWithoutTrimmingIdentity() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = triggerMetadataDriver(calls, "Oracle", false);
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-trigger:test\"}";
+        try {
+            for (String method : List.of("listTriggers", "list_triggers")) {
+                JsonNode response = request(method, "{\"connection\":" + connection + ",\"schema\":\" Parent Owner \",\"table\":\" Parent \",\"identity_mode\":\"exact\"}");
+                assertFalse(response.has("error"), response.toString());
+                JsonNode trigger = response.path("result").path(0);
+                assertEquals(" Trigger ", trigger.path("name").asText());
+                assertEquals(" Owner ", trigger.path("oracle_metadata").path("owner").asText());
+                assertEquals(" Parent Owner ", trigger.path("oracle_metadata").path("parent").path("owner").asText());
+                assertFalse(trigger.path("enabled").asBoolean());
+                assertFalse(trigger.path("valid").asBoolean());
+            }
+            assertTrue(calls.contains("bind:1= Parent Owner "), calls.toString());
+            assertTrue(calls.contains("bind:2= Parent "), calls.toString());
+        } finally { closeAndDeregister(connection, driver); }
+    }
+
+    @Test
+    void exactJdbcTriggerSourceRetainsLongClobAndMetadataStateAppendix() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = triggerMetadataDriver(calls, "OceanBase", false);
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-trigger:test\"}";
+        try {
+            JsonNode response = request("getObjectSource", "{\"connection\":" + connection + ",\"schema\":\" Owner \",\"name\":\" Trigger \",\"object_type\":\"TRIGGER\",\"identity_mode\":\"exact\"}");
+            assertFalse(response.has("error"), response.toString());
+            JsonNode source = response.path("result");
+            assertEquals(triggerExport(), source.path("source").asText());
+            JsonNode metadata = source.path("trigger").path("oracle_metadata");
+            assertEquals("oceanbase-oracle", metadata.path("engine").asText());
+            assertEquals("9007199254740993", metadata.path("objectId").asText());
+            assertEquals("DBMS_METADATA", metadata.path("definition").path("origin").asText());
+            assertTrue(metadata.path("definition").path("complete").asBoolean());
+            assertEquals("Missing procedure", metadata.path("errors").path(0).path("text").asText());
+            assertTrue(calls.contains("bind:2= Trigger "), calls.toString());
+            assertTrue(calls.contains("bind:3= Owner "), calls.toString());
+        } finally { closeAndDeregister(connection, driver); }
+    }
+
+    @Test
+    void exactJdbcDiscoveryFiltersBeforePagingAndOnlyThenLoadsSummaries() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = triggerMetadataDriver(calls, "Oracle", false);
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-trigger:test\"}";
+        try {
+            JsonNode response = request("listObjects", "{\"connection\":" + connection + ",\"schema\":\" Owner \",\"object_types\":[\"TRIGGER\"],\"filter\":\"trig\",\"limit\":1,\"offset\":2,\"identity_mode\":\"exact\"}");
+            assertFalse(response.has("error"), response.toString());
+            JsonNode object = response.path("result").path(0);
+            assertEquals(" Trigger ", object.path("name").asText());
+            assertEquals(" Parent Owner ", object.path("parent_schema").asText());
+            String query = calls.stream().filter(call -> call.contains("FROM ALL_OBJECTS o")).findFirst().orElseThrow();
+            assertTrue(query.contains("UPPER(o.OBJECT_NAME) LIKE ?"));
+            assertTrue(query.contains("ROWNUM <= ?"));
+            assertTrue(query.indexOf("UPPER(o.OBJECT_NAME)") < query.indexOf("ORDER BY"));
+            assertTrue(calls.contains("bind:5=3"), calls.toString());
+            assertTrue(calls.contains("bind:6=2"), calls.toString());
+            assertFalse(calls.stream().anyMatch(call -> call.contains("ALL_SOURCE")), calls.toString());
+        } finally { closeAndDeregister(connection, driver); }
+    }
+
+    @Test
+    void exactJdbcMixedAndDefaultPagesKeepTypesAlongsideTriggers() throws Exception {
+        try (Connection connection = DriverManager.getConnection("jdbc:h2:mem:trigger_type_pages;MODE=Oracle", "sa", "")) {
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE ALL_OBJECTS (OWNER VARCHAR, OBJECT_NAME VARCHAR, OBJECT_TYPE VARCHAR, OBJECT_ID BIGINT, STATUS VARCHAR)");
+                statement.execute("CREATE TABLE ALL_TAB_COMMENTS (OWNER VARCHAR, TABLE_NAME VARCHAR, COMMENTS VARCHAR)");
+                statement.execute("CREATE TABLE ALL_TRIGGERS (OWNER VARCHAR, TRIGGER_NAME VARCHAR, TRIGGERING_EVENT VARCHAR, TRIGGER_TYPE VARCHAR, STATUS VARCHAR, TABLE_OWNER VARCHAR, TABLE_NAME VARCHAR, BASE_OBJECT_TYPE VARCHAR, WHEN_CLAUSE VARCHAR)");
+                statement.execute("INSERT INTO ALL_OBJECTS VALUES (' Owner ',' A Trigger ','TRIGGER',1,'VALID'),(' Owner ',' B Type ','TYPE',2,'VALID'),(' Owner ',' C Body ','TYPE BODY',3,'VALID'),('OWNER',' Wrong Owner ','TYPE',4,'VALID')");
+            }
+            OracleTriggerMetadataReader reader = new OracleTriggerMetadataReader(connection, new OracleTriggerMetadataReader.Profile("oracle", "19"));
+            for (boolean explicit : List.of(true, false)) {
+                List<String> types = explicit ? List.of("TRIGGER", "TYPE", "TYPE_BODY") : null;
+                JsonNode first = reader.listObjects(" Owner ", null, 2, 0, types);
+                assertEquals(2, first.size());
+                assertEquals("TRIGGER", first.path(0).path("object_type").asText());
+                assertEquals(" Owner ", first.path(0).path("trigger").path("oracle_metadata").path("owner").asText());
+                assertEquals("TYPE", first.path(1).path("object_type").asText());
+                assertEquals(" B Type ", first.path(1).path("name").asText());
+                assertFalse(first.path(1).has("trigger"));
+                JsonNode next = reader.listObjects(" Owner ", null, 2, 2, types);
+                assertEquals(1, next.size());
+                assertEquals("TYPE_BODY", next.path(0).path("object_type").asText());
+                assertEquals(" C Body ", next.path(0).path("name").asText());
+                assertEquals(" Owner ", next.path(0).path("schema").asText());
+                assertFalse(next.path(0).has("trigger"));
+            }
+        }
+    }
+
+    @Test
+    void exactJdbcSourceDetectsConcurrentSameNameReplacement() throws Exception {
+        Driver driver = triggerMetadataDriver(new ArrayList<>(), "Oracle", true);
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-trigger:test\"}";
+        try {
+            JsonNode response = request("get_object_source", "{\"connection\":" + connection + ",\"schema\":\" Owner \",\"name\":\" Trigger \",\"object_type\":\"TRIGGER\",\"identity_mode\":\"exact\"}");
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(triggerExport(), response.path("result").path("source").asText());
+            JsonNode metadata = response.path("result").path("trigger").path("oracle_metadata");
+            assertFalse(metadata.path("definition").path("complete").asBoolean());
+            assertEquals("incomplete", metadata.path("reads").path("identity").path("state").asText());
+        } finally { closeAndDeregister(connection, driver); }
+    }
+
+    @Test
+    void compatibilityLabelDoesNotAuthorizeExactOracleTriggerMetadata() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = triggerMetadataDriver(calls, "Oracle-compatible YashanDB", false);
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-trigger:test\",\"name\":\"Oracle\"}";
+        try {
+            JsonNode response = request("listTriggers", "{\"connection\":" + connection + ",\"schema\":\"APP\",\"table\":\"T\",\"identity_mode\":\"exact\"}");
+            assertTrue(response.has("error"), response.toString());
+            assertFalse(calls.stream().anyMatch(call -> call.contains("ALL_TRIGGERS")), calls.toString());
+        } finally { closeAndDeregister(connection, driver); }
+    }
+
+    @Test
+    void exactDmJdbcProfileUsesTheConnectedVersionAndNativeDefinition() throws Exception {
+        Driver driver = triggerMetadataDriver(new ArrayList<>(), "DM DBMS", false);
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-trigger:test\"}";
+        try {
+            JsonNode response = request("getObjectSource", "{\"connection\":" + connection + ",\"schema\":\" Owner \",\"name\":\" Trigger \",\"object_type\":\"TRIGGER\",\"identity_mode\":\"exact\"}");
+            assertFalse(response.has("error"), response.toString());
+            JsonNode metadata = response.path("result").path("trigger").path("oracle_metadata");
+            assertEquals("dm", metadata.path("engine").asText());
+            assertEquals("8.1.5", metadata.path("engineVersion").asText());
+            assertEquals(triggerExport(), response.path("result").path("source").asText());
+            assertEquals("", response.path("result").path("trigger").path("event").asText());
+            assertEquals("", response.path("result").path("trigger").path("timing").asText());
+        } finally { closeAndDeregister(connection, driver); }
+    }
+
+    @Test
+    void dmJdbcTimerRetainsTheRawDatabaseScopeAndHasNoParent() throws Exception {
+        try (Connection connection = triggerMetadataConnection(new ArrayList<>(), "DM DBMS", false, false, "Missing procedure", true)) {
+            JsonNode result = new OracleTriggerMetadataReader(connection, OracleTriggerMetadataReader.profile(connection)).source(" Owner ", " Trigger ");
+            JsonNode metadata = result.path("trigger").path("oracle_metadata");
+            assertEquals("TIMER", metadata.path("scope").asText());
+            assertEquals("DATABASE", metadata.path("scopeType").asText());
+            assertFalse(metadata.has("parent"));
+            assertFalse(metadata.has("scopeOwner"));
+            assertTrue(result.path("source").asText().contains("AFTER TIMER ON DATABASE"));
+        }
+    }
+
+    @Test
+    void exactJdbcVisibleEmptyReadIsExplicitAndAQueryFailureCannotBecomeAbsence() throws Exception {
+        try (Connection connection = DriverManager.getConnection("jdbc:h2:mem:trigger_empty;MODE=Oracle", "sa", "")) {
+            connection.createStatement().execute("CREATE TABLE ALL_TRIGGERS (OWNER VARCHAR, TRIGGER_NAME VARCHAR, TRIGGERING_EVENT VARCHAR, TRIGGER_TYPE VARCHAR, STATUS VARCHAR, TABLE_OWNER VARCHAR, TABLE_NAME VARCHAR, BASE_OBJECT_TYPE VARCHAR, WHEN_CLAUSE VARCHAR, TRIGGER_BODY CLOB)");
+            connection.createStatement().execute("CREATE TABLE ALL_OBJECTS (OWNER VARCHAR, OBJECT_NAME VARCHAR, OBJECT_TYPE VARCHAR, OBJECT_ID BIGINT, STATUS VARCHAR)");
+            OracleTriggerMetadataReader reader = new OracleTriggerMetadataReader(connection, new OracleTriggerMetadataReader.Profile("oracle", "19"));
+            JsonNode result = reader.source(" Owner ", " Trigger ");
+            assertEquals("empty", result.path("trigger").path("oracle_metadata").path("reads").path("identity").path("state").asText());
+            assertEquals(" Owner ", result.path("schema").asText());
+            assertEquals(" Trigger ", result.path("name").asText());
+            connection.createStatement().execute("DROP TABLE ALL_TRIGGERS");
+            org.junit.jupiter.api.Assertions.assertThrows(SQLException.class, () -> reader.source(" Owner ", " Trigger "));
+        }
+    }
+
+    @Test
+    void jdbcDictionaryLineGapCannotBecomeACompleteReplacementBaseline() throws Exception {
+        try (Connection connection = DriverManager.getConnection("jdbc:h2:mem:trigger_gap;MODE=Oracle;NON_KEYWORDS=LINE", "sa", "")) {
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE ALL_TRIGGERS (OWNER VARCHAR, TRIGGER_NAME VARCHAR, TRIGGERING_EVENT VARCHAR, TRIGGER_TYPE VARCHAR, STATUS VARCHAR, TABLE_OWNER VARCHAR, TABLE_NAME VARCHAR, BASE_OBJECT_TYPE VARCHAR, WHEN_CLAUSE VARCHAR, TRIGGER_BODY CLOB)");
+                statement.execute("CREATE TABLE ALL_OBJECTS (OWNER VARCHAR, OBJECT_NAME VARCHAR, OBJECT_TYPE VARCHAR, OBJECT_ID BIGINT, STATUS VARCHAR)");
+                statement.execute("CREATE TABLE ALL_SOURCE (OWNER VARCHAR,NAME VARCHAR,TYPE VARCHAR,LINE INT,TEXT CLOB)");
+                statement.execute("INSERT INTO ALL_TRIGGERS VALUES ('APP','T','INSERT','BEFORE EACH ROW','DISABLED','DATA','ORDERS','TABLE',NULL,'BEGIN NULL; END;')");
+                statement.execute("INSERT INTO ALL_OBJECTS VALUES ('APP','T','TRIGGER',1,'INVALID')");
+                statement.execute("INSERT INTO ALL_SOURCE VALUES ('APP','T','TRIGGER',1,'TRIGGER APP.T BEFORE INSERT ON DATA.ORDERS BEGIN NULL; END;'),('APP','T','TRIGGER',3,' -- lost dictionary line')");
+            }
+            JsonNode result = new OracleTriggerMetadataReader(connection, new OracleTriggerMetadataReader.Profile("oracle", "19")).source("APP", "T");
+            assertFalse(result.path("trigger").path("oracle_metadata").path("definition").path("complete").asBoolean());
+            assertEquals("BEGIN NULL; END;", result.path("source").asText());
+        }
+    }
+
+    @Test
+    void unreadableJdbcCompilationErrorsStayUnknownRatherThanEmpty() throws Exception {
+        Driver driver = triggerMetadataDriver(new ArrayList<>(), "Oracle", false, true);
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-trigger:test\"}";
+        try {
+            JsonNode response = request("getObjectSource", "{\"connection\":" + connection + ",\"schema\":\" Owner \",\"name\":\" Trigger \",\"object_type\":\"TRIGGER\",\"identity_mode\":\"exact\"}");
+            assertFalse(response.has("error"), response.toString());
+            JsonNode metadata = response.path("result").path("trigger").path("oracle_metadata");
+            assertTrue(metadata.path("definition").path("complete").asBoolean());
+            assertTrue(metadata.path("errors").isNull());
+            assertEquals("denied", metadata.path("reads").path("errors").path("state").asText());
+        } finally { closeAndDeregister(connection, driver); }
+    }
+
+    @Test
+    void nullJdbcCompilationErrorTextDoesNotBreakTheSharedSourceContract() throws Exception {
+        Driver driver = triggerMetadataDriver(new ArrayList<>(), "Oracle", false, false, null);
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-trigger:test\"}";
+        try {
+            JsonNode response = request("getObjectSource", "{\"connection\":" + connection + ",\"schema\":\" Owner \",\"name\":\" Trigger \",\"object_type\":\"TRIGGER\",\"identity_mode\":\"exact\"}");
+            assertFalse(response.has("error"), response.toString());
+            JsonNode metadata = response.path("result").path("trigger").path("oracle_metadata");
+            assertTrue(metadata.path("definition").path("complete").asBoolean());
+            assertTrue(metadata.path("errors").isNull());
+            assertEquals("error", metadata.path("reads").path("errors").path("state").asText());
+        } finally { closeAndDeregister(connection, driver); }
+    }
+
+    @Test
     void jdbcProtocolExplicitlyAdvertisesExactMetadataAndRejectsUnconfirmedDialects() throws Exception {
         JsonNode protocol = request("jdbcSessionProtocol", "{}").path("result");
         assertEquals(2, protocol.path("version").asInt());
@@ -4591,13 +4806,16 @@ final class DbxJdbcPluginTest {
                 private int index = -1;
 
                 @Override
-                public Object invoke(Object proxy, Method method, Object[] args) {
+                public Object invoke(Object proxy, Method method, Object[] args) throws SQLException {
                     return switch (method.getName()) {
                         case "next" -> ++index < rows.length;
                         case "getString" -> stringValue(columns, rows[index], args[0]);
                         case "getInt" -> ((Number) columnValue(columns, rows[index], args[0])).intValue();
+                        case "getLong" -> ((Number) columnValue(columns, rows[index], args[0])).longValue();
                         case "getBoolean" -> booleanValue(columns, rows[index], args[0]);
                         case "getObject" -> columnValue(columns, rows[index], args[0]);
+                        case "getMetaData" -> resultSetMeta(columns);
+                        case "getCharacterStream" -> columnValue(columns, rows[index], args[0]) instanceof Clob clob ? clob.getCharacterStream() : null;
                         case "close" -> null;
                         default -> defaultValue(method.getReturnType());
                     };
@@ -4632,6 +4850,73 @@ final class DbxJdbcPluginTest {
     private static String stringValue(String[] columns, Object[] row, Object key) {
         Object value = columnValue(columns, row, key);
         return value == null ? null : String.valueOf(value);
+    }
+
+    private static String triggerExport() {
+        return "CREATE TRIGGER \" Owner \".\" Trigger \" BEFORE INSERT ON \" Parent Owner \".\" Parent \" FOR EACH ROW BEGIN /* "
+            + "中文😀".repeat(12_000) + " */ NULL; END;\nALTER TRIGGER \" Owner \".\" Trigger \" DISABLE;";
+    }
+
+    private static Driver triggerMetadataDriver(List<String> calls, String product, boolean recreate) {
+        return triggerMetadataDriver(calls, product, recreate, false);
+    }
+
+    private static Driver triggerMetadataDriver(List<String> calls, String product, boolean recreate, boolean denyErrors) {
+        return triggerMetadataDriver(calls, product, recreate, denyErrors, "Missing procedure");
+    }
+
+    private static Driver triggerMetadataDriver(List<String> calls, String product, boolean recreate, boolean denyErrors, String errorText) {
+        return (Driver) Proxy.newProxyInstance(DbxJdbcPluginTest.class.getClassLoader(), new Class<?>[]{Driver.class}, (driver, method, args) -> switch (method.getName()) {
+            case "acceptsURL" -> ((String) args[0]).startsWith("jdbc:dbx-trigger:");
+            case "connect" -> ((String) args[0]).startsWith("jdbc:dbx-trigger:") ? triggerMetadataConnection(calls, product, recreate, denyErrors, errorText) : null;
+            case "getPropertyInfo" -> new DriverPropertyInfo[0];
+            case "getParentLogger" -> java.util.logging.Logger.getGlobal();
+            default -> defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection triggerMetadataConnection(List<String> calls, String product, boolean recreate, boolean denyErrors, String errorText) {
+        return triggerMetadataConnection(calls, product, recreate, denyErrors, errorText, false);
+    }
+
+    private static Connection triggerMetadataConnection(List<String> calls, String product, boolean recreate, boolean denyErrors, String errorText, boolean timer) {
+        int[] metadataReads = {0};
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(DbxJdbcPluginTest.class.getClassLoader(), new Class<?>[]{DatabaseMetaData.class}, (p, method, args) -> switch (method.getName()) {
+            case "getDatabaseProductName" -> product;
+            case "getDatabaseProductVersion" -> product.equals("OceanBase") ? "4.2.5.7" : product.equals("DM DBMS") ? "8.1.5" : "19.0.0";
+            case "getDatabaseMajorVersion" -> product.equals("DM DBMS") ? 8 : 19;
+            case "getURL" -> product.equals("DM DBMS") ? "jdbc:dm://fixture" : "jdbc:dbx-trigger:test";
+            default -> defaultValue(method.getReturnType());
+        });
+        return (Connection) Proxy.newProxyInstance(DbxJdbcPluginTest.class.getClassLoader(), new Class<?>[]{Connection.class}, (p, method, args) -> switch (method.getName()) {
+            case "getMetaData" -> metadata;
+            case "isValid", "getAutoCommit" -> true;
+            case "isClosed" -> false;
+            case "prepareStatement" -> {
+                String sql = (String) args[0]; calls.add(sql);
+                yield Proxy.newProxyInstance(DbxJdbcPluginTest.class.getClassLoader(), new Class<?>[]{PreparedStatement.class}, (statement, m, values) -> {
+                    if (m.getName().equals("setString") || m.getName().equals("setObject")) { calls.add("bind:" + values[0] + "=" + values[1]); return null; }
+                    if (m.getName().equals("executeQuery")) {
+                        if (sql.contains("SYS_CONTEXT")) return rowsResultSet(new String[]{"CURRENT_SCHEMA"}, new Object[][]{{"APP"}});
+                        if (sql.contains("FROM ALL_TRIGGERS")) {
+                            metadataReads[0]++;
+                            return rowsResultSet(new String[]{"OWNER", "TRIGGER_NAME", "TRIGGERING_EVENT", "TRIGGER_TYPE", "STATUS", "TABLE_OWNER", "TABLE_NAME", "BASE_OBJECT_TYPE", "TRIGGER_BODY", "DBX_TRIGGER_OBJECT_MARKER", "OWNER", "OBJECT_NAME", "OBJECT_ID", "LAST_DDL_TIME", "STATUS"},
+                                new Object[][]{{" Owner ", " Trigger ", timer ? "TIMER" : product.equals("DM DBMS") ? null : "INSERT", product.equals("DM DBMS") ? null : "BEFORE EACH ROW", "DISABLED", " Parent Owner ", timer ? null : " Parent ", timer ? "DATABASE" : "TABLE", "BEGIN NULL; END;", " Trigger ", " Owner ", " Trigger ", recreate && metadataReads[0] > 1 ? "99" : "9007199254740993", "2026-10-21 08:00:00", "INVALID"}});
+                        }
+                        if (sql.contains("FROM ALL_OBJECTS o")) return rowsResultSet(new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS"}, new Object[][]{{" Trigger ", "TRIGGER", null}});
+                        if (sql.contains("ALL_SOURCE")) return rowsResultSet(new String[]{"TEXT"}, new Object[0][]);
+                        if (sql.contains("DBMS_METADATA.GET_DDL")) return rowsResultSet(new String[]{"DDL"}, new Object[][]{{new javax.sql.rowset.serial.SerialClob((timer ? "CREATE TRIGGER \" Owner \".\" Trigger \" AFTER TIMER ON DATABASE FOR EACH 1 DAY FOR EACH 1 MINUTE BEGIN NULL; END;" : triggerExport()).toCharArray())}});
+                        if (sql.contains("ALL_ERRORS")) {
+                            if (denyErrors) throw new SQLException("ORA-01031: insufficient privileges", "42501", 1031);
+                            return rowsResultSet(new String[]{"SEQUENCE", "LINE", "POSITION", "TEXT", "ATTRIBUTE"}, new Object[][]{{1, 4, 7, errorText, "ERROR"}});
+                        }
+                        throw new AssertionError("Unexpected trigger query: " + sql);
+                    }
+                    return defaultValue(m.getReturnType());
+                });
+            }
+            default -> defaultValue(method.getReturnType());
+        });
     }
 
     private static boolean booleanValue(String[] columns, Object[] row, Object key) {

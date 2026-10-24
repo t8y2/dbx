@@ -1913,6 +1913,57 @@ fn oracle_object_statistics_query_plan(schema: &str) -> Vec<ObjectStatisticsAtte
     ]
 }
 
+fn oceanbase_oracle_object_statistics_sql(schema: &str) -> String {
+    format!(
+        r#"WITH locations AS (
+  SELECT DISTINCT DATABASE_NAME, TABLE_NAME, TABLE_ID, TABLE_TYPE,
+         DATA_TABLE_ID, TABLET_ID, LS_ID, SVR_IP, SVR_PORT, ROLE
+  FROM SYS.DBA_OB_TABLE_LOCATIONS WHERE DATABASE_NAME = {owner}
+), base_tables AS (
+  SELECT DISTINCT DATABASE_NAME, TABLE_NAME, TABLE_ID FROM locations
+  WHERE TABLE_TYPE = 'USER TABLE'
+), owned_tablets AS (
+  SELECT b.DATABASE_NAME, b.TABLE_NAME, l.TABLET_ID,
+         MAX(CASE WHEN l.ROLE = 'LEADER' THEN l.LS_ID END) AS LS_ID,
+         MAX(CASE WHEN l.ROLE = 'LEADER' THEN l.SVR_IP END) AS SVR_IP,
+         MAX(CASE WHEN l.ROLE = 'LEADER' THEN l.SVR_PORT END) AS SVR_PORT,
+         SUM(CASE WHEN l.ROLE = 'LEADER' THEN 1 ELSE 0 END) AS LEADER_COUNT
+  FROM base_tables b JOIN locations l
+    ON l.DATABASE_NAME = b.DATABASE_NAME
+   AND (l.TABLE_ID = b.TABLE_ID OR (l.DATA_TABLE_ID = b.TABLE_ID
+        AND l.TABLE_TYPE IN ('INDEX', 'LOB AUX TABLE')))
+  GROUP BY b.DATABASE_NAME, b.TABLE_NAME, l.TABLET_ID
+), tablet_sizes AS (
+  SELECT o.DATABASE_NAME, o.TABLE_NAME, o.TABLET_ID,
+         CASE WHEN o.LEADER_COUNT = 1 AND COUNT(r.TABLET_ID) = 1
+                   AND COUNT(r.REQUIRED_SIZE) = 1
+              THEN MAX(r.REQUIRED_SIZE) ELSE NULL END AS TABLET_BYTES
+  FROM owned_tablets o LEFT JOIN SYS.DBA_OB_TABLET_REPLICAS r
+    ON r.TABLET_ID = o.TABLET_ID AND r.LS_ID = o.LS_ID
+   AND r.SVR_IP = o.SVR_IP AND r.SVR_PORT = o.SVR_PORT
+  GROUP BY o.DATABASE_NAME, o.TABLE_NAME, o.TABLET_ID, o.LEADER_COUNT
+), sizes AS (
+  SELECT DATABASE_NAME, TABLE_NAME,
+         CASE WHEN COUNT(*) = COUNT(TABLET_BYTES)
+              THEN SUM(TABLET_BYTES) ELSE NULL END AS TOTAL_BYTES
+  FROM tablet_sizes GROUP BY DATABASE_NAME, TABLE_NAME
+)
+SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, s.TOTAL_BYTES
+FROM ALL_TABLES t
+LEFT JOIN sizes s ON s.DATABASE_NAME = t.OWNER AND s.TABLE_NAME = t.TABLE_NAME
+WHERE t.OWNER = {owner} AND t.NESTED = 'NO'
+ORDER BY t.TABLE_NAME"#,
+        owner = oracle_owner_filter(schema),
+    )
+}
+
+fn oceanbase_oracle_object_statistics_query_plan(schema: &str) -> Vec<ObjectStatisticsAttempt> {
+    vec![
+        ("tablet-replicas", oceanbase_oracle_object_statistics_sql(schema), true),
+        ("rows-only", oracle_object_statistics_rows_only_sql(schema), true),
+    ]
+}
+
 fn dameng_object_statistics_query_plan(schema: &str) -> Vec<ObjectStatisticsAttempt> {
     vec![
         ("table-used-pages", dameng_object_statistics_sql(schema), true),
@@ -2216,11 +2267,18 @@ async fn agent_list_object_statistics(
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ExternalDriverStatisticsDialect {
     Oracle,
+    OceanbaseOracle,
     Dameng,
     Kingbase,
 }
 
 fn external_driver_statistics_dialect(config: &ConnectionConfig) -> Option<ExternalDriverStatisticsDialect> {
+    if config.db_type == DatabaseType::OceanbaseOracle
+        || crate::models::connection::jdbc_dialect_hint(config)
+            == Some(crate::models::connection::JdbcDialectHint::OceanbaseOracle)
+    {
+        return Some(ExternalDriverStatisticsDialect::OceanbaseOracle);
+    }
     // `is_oracle_external_driver_config` (added alongside the JDBC Oracle DDL
     // fix) checks both the `jdbc:oracle:` URL prefix and the driver class, so
     // it recognises more real-world configs than a URL-only sniff would.
@@ -2250,6 +2308,7 @@ fn external_driver_statistics_query_plan(
 ) -> Vec<ObjectStatisticsAttempt> {
     match dialect {
         ExternalDriverStatisticsDialect::Oracle => oracle_object_statistics_query_plan(schema),
+        ExternalDriverStatisticsDialect::OceanbaseOracle => oceanbase_oracle_object_statistics_query_plan(schema),
         ExternalDriverStatisticsDialect::Dameng => dameng_object_statistics_query_plan(schema),
         ExternalDriverStatisticsDialect::Kingbase => kingbase::object_statistics_query_plan(schema),
     }
@@ -2258,6 +2317,7 @@ fn external_driver_statistics_query_plan(
 fn external_driver_statistics_vendor(dialect: ExternalDriverStatisticsDialect) -> &'static str {
     match dialect {
         ExternalDriverStatisticsDialect::Oracle => "Oracle",
+        ExternalDriverStatisticsDialect::OceanbaseOracle => "OceanBase Oracle",
         ExternalDriverStatisticsDialect::Dameng => "Dameng",
         ExternalDriverStatisticsDialect::Kingbase => "Kingbase",
     }
@@ -4300,6 +4360,12 @@ done
     #[test]
     fn external_driver_statistics_dialect_matches_jdbc_url_vendor() {
         let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.connection_string = Some(" JDBC:OceanBase:Oracle://localhost:2881/test ".to_string());
+        assert_eq!(external_driver_statistics_dialect(&config), Some(ExternalDriverStatisticsDialect::OceanbaseOracle));
+        config.connection_string = Some("jdbc:oceanbase:mysql://localhost:2881/test".to_string());
+        assert_eq!(external_driver_statistics_dialect(&config), None);
+        config.connection_string = Some("jdbc:oceanbase://localhost:2881/test".to_string());
+        assert_eq!(external_driver_statistics_dialect(&config), None);
         config.connection_string = Some(" JDBC:Oracle:thin:@127.0.0.1:1521:XE ".to_string());
         assert_eq!(external_driver_statistics_dialect(&config), Some(ExternalDriverStatisticsDialect::Oracle));
 
@@ -6511,6 +6577,65 @@ done
     }
 
     #[test]
+    fn oceanbase_statistics_sql_requires_complete_unique_tablet_sizes() {
+        for (case, mutation, expected) in [
+            ("normal", "", Some(10_i64)),
+            ("zero", "UPDATE SYS.DBA_OB_TABLET_REPLICAS SET REQUIRED_SIZE=0", Some(0)),
+            ("missing-leader", "INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS VALUES ('APP','T',1,'USER TABLE',0,2,1,'host',2882,'FOLLOWER')", None),
+            ("multiple-leaders", "INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS VALUES ('APP','T',1,'USER TABLE',0,1,2,'host2',2882,'LEADER')", None),
+            ("duplicate-location", "INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS SELECT * FROM SYS.DBA_OB_TABLE_LOCATIONS", Some(10)),
+            ("missing-replica", "DELETE FROM SYS.DBA_OB_TABLET_REPLICAS", None),
+            ("duplicate-replica", "INSERT INTO SYS.DBA_OB_TABLET_REPLICAS SELECT * FROM SYS.DBA_OB_TABLET_REPLICAS", None),
+            ("null-size", "UPDATE SYS.DBA_OB_TABLET_REPLICAS SET REQUIRED_SIZE=NULL", None),
+            ("index-and-lob", "INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS VALUES ('APP','I',2,'INDEX',1,2,1,'host',2882,'LEADER'),('APP','L',3,'LOB AUX TABLE',1,3,1,'host',2882,'LEADER'); INSERT INTO SYS.DBA_OB_TABLET_REPLICAS VALUES (2,1,'host',2882,20),(3,1,'host',2882,30)", Some(60)),
+        ] {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "ATTACH DATABASE ':memory:' AS SYS;
+                 CREATE TABLE ALL_TABLES(TABLE_NAME TEXT,OWNER TEXT,NUM_ROWS INTEGER,NESTED TEXT);
+                 INSERT INTO ALL_TABLES VALUES ('T','APP',31,'NO');
+                 CREATE TABLE SYS.DBA_OB_TABLE_LOCATIONS(DATABASE_NAME TEXT,TABLE_NAME TEXT,TABLE_ID INTEGER,TABLE_TYPE TEXT,DATA_TABLE_ID INTEGER,TABLET_ID INTEGER,LS_ID INTEGER,SVR_IP TEXT,SVR_PORT INTEGER,ROLE TEXT);
+                 INSERT INTO SYS.DBA_OB_TABLE_LOCATIONS VALUES ('APP','T',1,'USER TABLE',0,1,1,'host',2882,'LEADER');
+                 CREATE TABLE SYS.DBA_OB_TABLET_REPLICAS(TABLET_ID INTEGER,LS_ID INTEGER,SVR_IP TEXT,SVR_PORT INTEGER,REQUIRED_SIZE INTEGER);
+                 INSERT INTO SYS.DBA_OB_TABLET_REPLICAS VALUES (1,1,'host',2882,10);",
+            ).unwrap();
+            conn.execute_batch(mutation).unwrap();
+            let actual: (i64, Option<i64>) = conn.query_row(
+                &super::oceanbase_oracle_object_statistics_sql("APP"),
+                [],
+                |row| Ok((row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            assert_eq!(actual, (31, expected), "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn oceanbase_statistics_preserves_rows_when_capacity_is_unavailable() {
+        let stats = super::object_statistics_from_query_plan(
+            "OceanBase Oracle",
+            "APP",
+            super::oceanbase_oracle_object_statistics_query_plan("APP"),
+            |sql| async move {
+                if sql.contains("DBA_OB_TABLET_REPLICAS") {
+                    Err("insufficient privilege".to_string())
+                } else {
+                    Ok(statistics_query_result(vec![vec![
+                        serde_json::json!("T"),
+                        serde_json::json!("APP"),
+                        serde_json::json!(31),
+                        serde_json::Value::Null,
+                    ]]))
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].estimated_rows, Some(31));
+        assert_eq!(stats[0].total_bytes, None);
+    }
+
+    #[test]
     fn dameng_object_statistics_sql_uses_bounded_table_size_function() {
         let sql = dameng_object_statistics_sql("app's");
         assert!(sql.contains("TABLE_USED_PAGES(t.OWNER, t.TABLE_NAME) * PAGE"));
@@ -7424,6 +7549,22 @@ async fn list_object_statistics_once(
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
             return crate::mongo_ops::mongo_agent_list_object_statistics(&client, database).await;
         }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
+            let timeout_duration = agent_metadata_timeout(db_config.as_ref());
+            return object_statistics_from_query_plan(
+                "OceanBase Oracle",
+                schema,
+                oceanbase_oracle_object_statistics_query_plan(schema),
+                |sql| {
+                    let client = client.clone();
+                    async move {
+                        let mut client = client.lock().await;
+                        agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await
+                    }
+                },
+            )
+            .await;
+        }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
             return oracle_agent_list_object_statistics(
                 client,
@@ -7476,7 +7617,15 @@ async fn list_object_statistics_once(
     let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
     match &pool {
         PoolKind::Mysql(p, mode) => {
-            if *mode == MysqlMode::OceanBaseOracle || db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
+            if *mode == MysqlMode::OceanBaseOracle {
+                object_statistics_from_query_plan(
+                    "OceanBase Oracle",
+                    schema,
+                    oceanbase_oracle_object_statistics_query_plan(schema),
+                    |sql| async move { db::mysql::execute_query(p, &sql, true).await },
+                )
+                .await
+            } else if db_config.as_ref().is_some_and(db::manticoresearch::is_config) {
                 Ok(vec![])
             } else {
                 let include_mysql_details = db_config.as_ref().is_some_and(|config| {

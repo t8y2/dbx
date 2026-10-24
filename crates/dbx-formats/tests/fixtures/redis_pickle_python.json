@@ -1,0 +1,326 @@
+[
+  {
+    "name": "protocol-0",
+    "pickle": "KGRwMApWc3RhdHVzCnAxClZTVUNDRVNTCnAyCnNWcmVzdWx0CnAzCihscDQKSTEKYVZoZWxsbwpwNQphTmFJMDEKYUkwMAphc1ZsYXJnZQpwNgpMMTI2NzY1MDYwMDIyODIyOTQwMTQ5NjcwMzIwNTM3NkwKc1ZuZWdhdGl2ZQpwNwpMLTEyNjc2NTA2MDAyMjgyMjk0MDE0OTY3MDMyMDUzNzZMCnNWYnl0ZXMKcDgKY19jb2RlY3MKZW5jb2RlCnA5CihW/1x1MDAwMApwMTAKVmxhdGluMQpwMTEKdHAxMgpScDEzCnNWdGV4dF9ieXRlcwpwMTQKZzkKKFZoZWxsbwpwMTUKZzExCnRwMTYKUnAxNwpzVmRhdGV0aW1lCnAxOApjZGF0ZXRpbWUKZGF0ZXRpbWUKcDE5CihnOQooVgfoBhgMIjgB4kAKcDIwCmcxMQp0cDIxClJwMjIKdHAyMwpScDI0CnNWdXVpZApwMjUKY2NvcHlfcmVnCl9yZWNvbnN0cnVjdG9yCnAyNgooY3V1aWQKVVVJRApwMjcKY19fYnVpbHRpbl9fCm9iamVjdApwMjgKTnRwMjkKUnAzMAooZHAzMQpWaW50CnAzMgpMMjQxOTc4NTcxNjEwMTE3MTUxNjIxNzE4Mzk2MzY5ODg3NzgxMDRMCnNicy4=",
+    "expected": {
+      "status": "SUCCESS",
+      "result": [
+        1,
+        "hello",
+        null,
+        true,
+        false
+      ],
+      "large": "1267650600228229401496703205376",
+      "negative": "-1267650600228229401496703205376",
+      "bytes": {
+        "$bytes": "/wA="
+      },
+      "text_bytes": "hello",
+      "datetime": "2024-06-24T12:34:56.123456",
+      "uuid": "12345678-1234-5678-1234-567812345678"
+    }
+  },
+  {
+    "name": "protocol-1",
+    "pickle": "fXEAKFgGAAAAc3RhdHVzcQFYBwAAAFNVQ0NFU1NxAlgGAAAAcmVzdWx0cQNdcQQoSwFYBQAAAGhlbGxvcQVOSTAxCkkwMAplWAUAAABsYXJnZXEGTDEyNjc2NTA2MDAyMjgyMjk0MDE0OTY3MDMyMDUzNzZMClgIAAAAbmVnYXRpdmVxB0wtMTI2NzY1MDYwMDIyODIyOTQwMTQ5NjcwMzIwNTM3NkwKWAUAAABieXRlc3EIY19jb2RlY3MKZW5jb2RlCnEJKFgDAAAAw78AcQpYBgAAAGxhdGluMXELdHEMUnENWAoAAAB0ZXh0X2J5dGVzcQ5oCShYBQAAAGhlbGxvcQ9oC3RxEFJxEVgIAAAAZGF0ZXRpbWVxEmNkYXRldGltZQpkYXRldGltZQpxEyhoCShYDAAAAAfDqAYYDCI4AcOiQHEUaAt0cRVScRZ0cRdScRhYBAAAAHV1aWRxGWNjb3B5X3JlZwpfcmVjb25zdHJ1Y3RvcgpxGihjdXVpZApVVUlECnEbY19fYnVpbHRpbl9fCm9iamVjdApxHE50cR1ScR59cR9YAwAAAGludHEgTDI0MTk3ODU3MTYxMDExNzE1MTYyMTcxODM5NjM2OTg4Nzc4MTA0TApzYnUu",
+    "expected": {
+      "status": "SUCCESS",
+      "result": [
+        1,
+        "hello",
+        null,
+        true,
+        false
+      ],
+      "large": "1267650600228229401496703205376",
+      "negative": "-1267650600228229401496703205376",
+      "bytes": {
+        "$bytes": "/wA="
+      },
+      "text_bytes": "hello",
+      "datetime": "2024-06-24T12:34:56.123456",
+      "uuid": "12345678-1234-5678-1234-567812345678"
+    }
+  },
+  {
+    "name": "protocol-2",
+    "pickle": "gAJ9cQAoWAYAAABzdGF0dXNxAVgHAAAAU1VDQ0VTU3ECWAYAAAByZXN1bHRxA11xBChLAVgFAAAAaGVsbG9xBU6IiWVYBQAAAGxhcmdlcQaKDQAAAAAAAAAAAAAAABBYCAAAAG5lZ2F0aXZlcQeKDQAAAAAAAAAAAAAAAPBYBQAAAGJ5dGVzcQhjX2NvZGVjcwplbmNvZGUKcQlYAwAAAMO/AHEKWAYAAABsYXRpbjFxC4ZxDFJxDVgKAAAAdGV4dF9ieXRlc3EOaAlYBQAAAGhlbGxvcQ9oC4ZxEFJxEVgIAAAAZGF0ZXRpbWVxEmNkYXRldGltZQpkYXRldGltZQpxE2gJWAwAAAAHw6gGGAwiOAHDokBxFGgLhnEVUnEWhXEXUnEYWAQAAAB1dWlkcRljdXVpZApVVUlECnEaKYFxG31xHFgDAAAAaW50cR2KEHhWNBJ4VjQSeFY0EnhWNBJzYnUu",
+    "expected": {
+      "status": "SUCCESS",
+      "result": [
+        1,
+        "hello",
+        null,
+        true,
+        false
+      ],
+      "large": "1267650600228229401496703205376",
+      "negative": "-1267650600228229401496703205376",
+      "bytes": {
+        "$bytes": "/wA="
+      },
+      "text_bytes": "hello",
+      "datetime": "2024-06-24T12:34:56.123456",
+      "uuid": "12345678-1234-5678-1234-567812345678"
+    }
+  },
+  {
+    "name": "protocol-3",
+    "pickle": "gAN9cQAoWAYAAABzdGF0dXNxAVgHAAAAU1VDQ0VTU3ECWAYAAAByZXN1bHRxA11xBChLAVgFAAAAaGVsbG9xBU6IiWVYBQAAAGxhcmdlcQaKDQAAAAAAAAAAAAAAABBYCAAAAG5lZ2F0aXZlcQeKDQAAAAAAAAAAAAAAAPBYBQAAAGJ5dGVzcQhDAv8AcQlYCgAAAHRleHRfYnl0ZXNxCkMFaGVsbG9xC1gIAAAAZGF0ZXRpbWVxDGNkYXRldGltZQpkYXRldGltZQpxDUMKB+gGGAwiOAHiQHEOhXEPUnEQWAQAAAB1dWlkcRFjdXVpZApVVUlECnESKYFxE31xFFgDAAAAaW50cRWKEHhWNBJ4VjQSeFY0EnhWNBJzYnUu",
+    "expected": {
+      "status": "SUCCESS",
+      "result": [
+        1,
+        "hello",
+        null,
+        true,
+        false
+      ],
+      "large": "1267650600228229401496703205376",
+      "negative": "-1267650600228229401496703205376",
+      "bytes": {
+        "$bytes": "/wA="
+      },
+      "text_bytes": "hello",
+      "datetime": "2024-06-24T12:34:56.123456",
+      "uuid": "12345678-1234-5678-1234-567812345678"
+    }
+  },
+  {
+    "name": "protocol-4",
+    "pickle": "gASV4QAAAAAAAAB9lCiMBnN0YXR1c5SMB1NVQ0NFU1OUjAZyZXN1bHSUXZQoSwGMBWhlbGxvlE6IiWWMBWxhcmdllIoNAAAAAAAAAAAAAAAAEIwIbmVnYXRpdmWUig0AAAAAAAAAAAAAAADwjAVieXRlc5RDAv8AlIwKdGV4dF9ieXRlc5RDBWhlbGxvlIwIZGF0ZXRpbWWUaAyMCGRhdGV0aW1llJOUQwoH6AYYDCI4AeJAlIWUUpSMBHV1aWSUaBKMBFVVSUSUk5QpgZR9lIwDaW50lIoQeFY0EnhWNBJ4VjQSeFY0EnNidS4=",
+    "expected": {
+      "status": "SUCCESS",
+      "result": [
+        1,
+        "hello",
+        null,
+        true,
+        false
+      ],
+      "large": "1267650600228229401496703205376",
+      "negative": "-1267650600228229401496703205376",
+      "bytes": {
+        "$bytes": "/wA="
+      },
+      "text_bytes": "hello",
+      "datetime": "2024-06-24T12:34:56.123456",
+      "uuid": "12345678-1234-5678-1234-567812345678"
+    }
+  },
+  {
+    "name": "protocol-5",
+    "pickle": "gAWV4QAAAAAAAAB9lCiMBnN0YXR1c5SMB1NVQ0NFU1OUjAZyZXN1bHSUXZQoSwGMBWhlbGxvlE6IiWWMBWxhcmdllIoNAAAAAAAAAAAAAAAAEIwIbmVnYXRpdmWUig0AAAAAAAAAAAAAAADwjAVieXRlc5RDAv8AlIwKdGV4dF9ieXRlc5RDBWhlbGxvlIwIZGF0ZXRpbWWUaAyMCGRhdGV0aW1llJOUQwoH6AYYDCI4AeJAlIWUUpSMBHV1aWSUaBKMBFVVSUSUk5QpgZR9lIwDaW50lIoQeFY0EnhWNBJ4VjQSeFY0EnNidS4=",
+    "expected": {
+      "status": "SUCCESS",
+      "result": [
+        1,
+        "hello",
+        null,
+        true,
+        false
+      ],
+      "large": "1267650600228229401496703205376",
+      "negative": "-1267650600228229401496703205376",
+      "bytes": {
+        "$bytes": "/wA="
+      },
+      "text_bytes": "hello",
+      "datetime": "2024-06-24T12:34:56.123456",
+      "uuid": "12345678-1234-5678-1234-567812345678"
+    }
+  },
+  {
+    "name": "additional-0",
+    "pickle": "KGRwMApWZGF0ZQpwMQpjZGF0ZXRpbWUKZGF0ZQpwMgooY19jb2RlY3MKZW5jb2RlCnAzCihWB+gGGApwNApWbGF0aW4xCnA1CnRwNgpScDcKdHA4ClJwOQpzVnRpbWUKcDEwCmNkYXRldGltZQp0aW1lCnAxMQooZzMKKFYMIjgB4kAKcDEyCmc1CnRwMTMKUnAxNAp0cDE1ClJwMTYKc1ZzZXRzCnAxNwpjX19idWlsdGluX18Kc2V0CnAxOAooKGxwMTkKSTEKYUkyCmF0cDIwClJwMjEKc1Zmcm96ZW4KcDIyCmNfX2J1aWx0aW5fXwpmcm96ZW5zZXQKcDIzCigobHAyNApJMwphSTQKYXRwMjUKUnAyNgpzLg==",
+    "expected": {
+      "date": "2024-06-24",
+      "time": "12:34:56.123456",
+      "sets": [
+        1,
+        2
+      ],
+      "frozen": [
+        3,
+        4
+      ]
+    }
+  },
+  {
+    "name": "additional-1",
+    "pickle": "fXEAKFgEAAAAZGF0ZXEBY2RhdGV0aW1lCmRhdGUKcQIoY19jb2RlY3MKZW5jb2RlCnEDKFgFAAAAB8OoBhhxBFgGAAAAbGF0aW4xcQV0cQZScQd0cQhScQlYBAAAAHRpbWVxCmNkYXRldGltZQp0aW1lCnELKGgDKFgHAAAADCI4AcOiQHEMaAV0cQ1ScQ50cQ9ScRBYBAAAAHNldHNxEWNfX2J1aWx0aW5fXwpzZXQKcRIoXXETKEsBSwJldHEUUnEVWAYAAABmcm96ZW5xFmNfX2J1aWx0aW5fXwpmcm96ZW5zZXQKcRcoXXEYKEsDSwRldHEZUnEadS4=",
+    "expected": {
+      "date": "2024-06-24",
+      "time": "12:34:56.123456",
+      "sets": [
+        1,
+        2
+      ],
+      "frozen": [
+        3,
+        4
+      ]
+    }
+  },
+  {
+    "name": "additional-2",
+    "pickle": "gAJ9cQAoWAQAAABkYXRlcQFjZGF0ZXRpbWUKZGF0ZQpxAmNfY29kZWNzCmVuY29kZQpxA1gFAAAAB8OoBhhxBFgGAAAAbGF0aW4xcQWGcQZScQeFcQhScQlYBAAAAHRpbWVxCmNkYXRldGltZQp0aW1lCnELaANYBwAAAAwiOAHDokBxDGgFhnENUnEOhXEPUnEQWAQAAABzZXRzcRFjX19idWlsdGluX18Kc2V0CnESXXETKEsBSwJlhXEUUnEVWAYAAABmcm96ZW5xFmNfX2J1aWx0aW5fXwpmcm96ZW5zZXQKcRddcRgoSwNLBGWFcRlScRp1Lg==",
+    "expected": {
+      "date": "2024-06-24",
+      "time": "12:34:56.123456",
+      "sets": [
+        1,
+        2
+      ],
+      "frozen": [
+        3,
+        4
+      ]
+    }
+  },
+  {
+    "name": "additional-3",
+    "pickle": "gAN9cQAoWAQAAABkYXRlcQFjZGF0ZXRpbWUKZGF0ZQpxAkMEB+gGGHEDhXEEUnEFWAQAAAB0aW1lcQZjZGF0ZXRpbWUKdGltZQpxB0MGDCI4AeJAcQiFcQlScQpYBAAAAHNldHNxC2NidWlsdGlucwpzZXQKcQxdcQ0oSwFLAmWFcQ5ScQ9YBgAAAGZyb3plbnEQY2J1aWx0aW5zCmZyb3plbnNldApxEV1xEihLA0sEZYVxE1JxFHUu",
+    "expected": {
+      "date": "2024-06-24",
+      "time": "12:34:56.123456",
+      "sets": [
+        1,
+        2
+      ],
+      "frozen": [
+        3,
+        4
+      ]
+    }
+  },
+  {
+    "name": "additional-4",
+    "pickle": "gASVaQAAAAAAAAB9lCiMBGRhdGWUjAhkYXRldGltZZSMBGRhdGWUk5RDBAfoBhiUhZRSlIwEdGltZZRoAowEdGltZZSTlEMGDCI4AeJAlIWUUpSMBHNldHOUj5QoSwFLApCMBmZyb3plbpQoSwNLBJGUdS4=",
+    "expected": {
+      "date": "2024-06-24",
+      "time": "12:34:56.123456",
+      "sets": [
+        1,
+        2
+      ],
+      "frozen": [
+        3,
+        4
+      ]
+    }
+  },
+  {
+    "name": "additional-5",
+    "pickle": "gAWVaQAAAAAAAAB9lCiMBGRhdGWUjAhkYXRldGltZZSMBGRhdGWUk5RDBAfoBhiUhZRSlIwEdGltZZRoAowEdGltZZSTlEMGDCI4AeJAlIWUUpSMBHNldHOUj5QoSwFLApCMBmZyb3plbpQoSwNLBJGUdS4=",
+    "expected": {
+      "date": "2024-06-24",
+      "time": "12:34:56.123456",
+      "sets": [
+        1,
+        2
+      ],
+      "frozen": [
+        3,
+        4
+      ]
+    }
+  },
+  {
+    "name": "escapes-and-bytearray-0",
+    "pickle": "KGRwMApWdW5pY29kZQpwMQpWc25vdyBcdTI2MDMgLyByb2NrZXQgXFUwMDAxZjY4MCAvIFx1MDA1Y3UwMDQxIC8gbGluZVx1MDAwYWVuZApwMgpzVmJ5dGVhcnJheQpwMwpjX19idWlsdGluX18KYnl0ZWFycmF5CnA0CihjX2NvZGVjcwplbmNvZGUKcDUKKFZoZWxsbwpwNgpWbGF0aW4xCnA3CnRwOApScDkKdHAxMApScDExCnNWZW1wdHlfYnl0ZXMKcDEyCmNfX2J1aWx0aW5fXwpieXRlcwpwMTMKKHRScDE0CnNWZmxvYXQKcDE1CkYtMy4xMjUKc1Z0dXBsZQpwMTYKKEkxCkkyCkkzCnRwMTcKc1ZuZWdhdGl2ZQpwMTgKTC05MjIzMzcyMDM2ODU0Nzc1ODA4TApzLg==",
+    "expected": {
+      "unicode": "snow \u2603 / rocket \ud83d\ude80 / \\u0041 / line\nend",
+      "bytearray": "hello",
+      "empty_bytes": "",
+      "float": -3.125,
+      "tuple": [
+        1,
+        2,
+        3
+      ],
+      "negative": "-9223372036854775808"
+    }
+  },
+  {
+    "name": "escapes-and-bytearray-1",
+    "pickle": "fXEAKFgHAAAAdW5pY29kZXEBWCoAAABzbm93IOKYgyAvIHJvY2tldCDwn5qAIC8gXHUwMDQxIC8gbGluZQplbmRxAlgJAAAAYnl0ZWFycmF5cQNjX19idWlsdGluX18KYnl0ZWFycmF5CnEEKGNfY29kZWNzCmVuY29kZQpxBShYBQAAAGhlbGxvcQZYBgAAAGxhdGluMXEHdHEIUnEJdHEKUnELWAsAAABlbXB0eV9ieXRlc3EMY19fYnVpbHRpbl9fCmJ5dGVzCnENKVJxDlgFAAAAZmxvYXRxD0fACQAAAAAAAFgFAAAAdHVwbGVxEChLAUsCSwN0cRFYCAAAAG5lZ2F0aXZlcRJMLTkyMjMzNzIwMzY4NTQ3NzU4MDhMCnUu",
+    "expected": {
+      "unicode": "snow \u2603 / rocket \ud83d\ude80 / \\u0041 / line\nend",
+      "bytearray": "hello",
+      "empty_bytes": "",
+      "float": -3.125,
+      "tuple": [
+        1,
+        2,
+        3
+      ],
+      "negative": "-9223372036854775808"
+    }
+  },
+  {
+    "name": "escapes-and-bytearray-2",
+    "pickle": "gAJ9cQAoWAcAAAB1bmljb2RlcQFYKgAAAHNub3cg4piDIC8gcm9ja2V0IPCfmoAgLyBcdTAwNDEgLyBsaW5lCmVuZHECWAkAAABieXRlYXJyYXlxA2NfX2J1aWx0aW5fXwpieXRlYXJyYXkKcQRjX2NvZGVjcwplbmNvZGUKcQVYBQAAAGhlbGxvcQZYBgAAAGxhdGluMXEHhnEIUnEJhXEKUnELWAsAAABlbXB0eV9ieXRlc3EMY19fYnVpbHRpbl9fCmJ5dGVzCnENKVJxDlgFAAAAZmxvYXRxD0fACQAAAAAAAFgFAAAAdHVwbGVxEEsBSwJLA4dxEVgIAAAAbmVnYXRpdmVxEooIAAAAAAAAAIB1Lg==",
+    "expected": {
+      "unicode": "snow \u2603 / rocket \ud83d\ude80 / \\u0041 / line\nend",
+      "bytearray": "hello",
+      "empty_bytes": "",
+      "float": -3.125,
+      "tuple": [
+        1,
+        2,
+        3
+      ],
+      "negative": "-9223372036854775808"
+    }
+  },
+  {
+    "name": "escapes-and-bytearray-3",
+    "pickle": "gAN9cQAoWAcAAAB1bmljb2RlcQFYKgAAAHNub3cg4piDIC8gcm9ja2V0IPCfmoAgLyBcdTAwNDEgLyBsaW5lCmVuZHECWAkAAABieXRlYXJyYXlxA2NidWlsdGlucwpieXRlYXJyYXkKcQRDBWhlbGxvcQWFcQZScQdYCwAAAGVtcHR5X2J5dGVzcQhDAHEJWAUAAABmbG9hdHEKR8AJAAAAAAAAWAUAAAB0dXBsZXELSwFLAksDh3EMWAgAAABuZWdhdGl2ZXENiggAAAAAAAAAgHUu",
+    "expected": {
+      "unicode": "snow \u2603 / rocket \ud83d\ude80 / \\u0041 / line\nend",
+      "bytearray": "hello",
+      "empty_bytes": "",
+      "float": -3.125,
+      "tuple": [
+        1,
+        2,
+        3
+      ],
+      "negative": "-9223372036854775808"
+    }
+  },
+  {
+    "name": "escapes-and-bytearray-4",
+    "pickle": "gASVtAAAAAAAAAB9lCiMB3VuaWNvZGWUjCpzbm93IOKYgyAvIHJvY2tldCDwn5qAIC8gXHUwMDQxIC8gbGluZQplbmSUjAlieXRlYXJyYXmUjAhidWlsdGluc5SMCWJ5dGVhcnJheZSTlEMFaGVsbG+UhZRSlIwLZW1wdHlfYnl0ZXOUQwCUjAVmbG9hdJRHwAkAAAAAAACMBXR1cGxllEsBSwJLA4eUjAhuZWdhdGl2ZZSKCAAAAAAAAACAdS4=",
+    "expected": {
+      "unicode": "snow \u2603 / rocket \ud83d\ude80 / \\u0041 / line\nend",
+      "bytearray": "hello",
+      "empty_bytes": "",
+      "float": -3.125,
+      "tuple": [
+        1,
+        2,
+        3
+      ],
+      "negative": "-9223372036854775808"
+    }
+  },
+  {
+    "name": "escapes-and-bytearray-5",
+    "pickle": "gAWVngAAAAAAAAB9lCiMB3VuaWNvZGWUjCpzbm93IOKYgyAvIHJvY2tldCDwn5qAIC8gXHUwMDQxIC8gbGluZQplbmSUjAlieXRlYXJyYXmUlgUAAAAAAAAAaGVsbG+UjAtlbXB0eV9ieXRlc5RDAJSMBWZsb2F0lEfACQAAAAAAAIwFdHVwbGWUSwFLAksDh5SMCG5lZ2F0aXZllIoIAAAAAAAAAIB1Lg==",
+    "expected": {
+      "unicode": "snow \u2603 / rocket \ud83d\ude80 / \\u0041 / line\nend",
+      "bytearray": "hello",
+      "empty_bytes": "",
+      "float": -3.125,
+      "tuple": [
+        1,
+        2,
+        3
+      ],
+      "negative": "-9223372036854775808"
+    }
+  }
+]

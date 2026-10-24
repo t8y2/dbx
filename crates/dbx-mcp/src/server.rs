@@ -258,6 +258,8 @@ pub struct RemoveConnectionRequest {
     pub connection_id: Option<String>,
 }
 
+pub use crate::redis_decode::{RedisDecode, RedisDecompress};
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteRedisCommandRequest {
     #[serde(flatten)]
@@ -267,6 +269,16 @@ pub struct ExecuteRedisCommandRequest {
     pub db: Option<u32>,
     #[schemars(description = "Redis command to execute, for example GET mykey or INFO")]
     pub command: String,
+    #[schemars(
+        description = "Optional value codec: auto, java-serialized, msgpack, pickle, php-serialize, protobuf. Auto detects Java, framed Pickle, PHP and MessagePack containers, and can decompress gzip/zlib. Protobuf requires explicit selection. Malformed, unsupported or over-budget values retain original text."
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub decode: Option<RedisDecode>,
+    #[schemars(
+        description = "Optional decompression: auto (gzip/zlib), gzip, zlib, deflate. Raw deflate requires explicit selection. Can be used alone or before decode; corrupt/oversized data retains original text."
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub decompress: Option<RedisDecompress>,
 }
 
 #[derive(Debug, Default, serde::Serialize, Deserialize, schemars::JsonSchema)]
@@ -2474,7 +2486,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_redis_command",
-        description = "Execute a Redis command on a Redis connection. Use the db argument to select a logical database instead of sending SELECT. Use SCAN rather than KEYS when enumerating keys.",
+        description = "Execute a Redis command on a Redis connection. Use the db argument to select a logical database instead of sending SELECT. Use SCAN rather than KEYS when enumerating keys. Set decode to auto, java-serialized, msgpack, pickle, php-serialize or protobuf for structured JSON. Set decompress to auto, gzip, zlib or deflate to decompress values. Protobuf and raw deflate require explicit selection. Omit both options for raw output.",
         annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
     )]
     async fn execute_redis_command(
@@ -2558,7 +2570,13 @@ impl DbxMcpServer {
             )
             .await
         {
-            Ok(result) => text(format_redis_result(&result)),
+            Ok(mut result) => {
+                if request.decode.is_some() || request.decompress.is_some() {
+                    result.value =
+                        crate::redis_decode::decode_redis_result(&result.value, request.decode, request.decompress);
+                }
+                text(format_redis_result(&result))
+            }
             Err(error) => backend_tool_error("REDIS_COMMAND_ERROR", error),
         }
     }
@@ -5634,6 +5652,7 @@ mod tests {
     type RecordedPluginToolCalls = std::sync::Mutex<Vec<(String, String, Option<String>, serde_json::Value)>>;
 
     struct FakeBackend {
+        redis_result: Option<RedisCommandResult>,
         connections: Vec<ConnectionConfig>,
         policy: McpGlobalPolicy,
         recorded_arguments: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
@@ -5661,6 +5680,7 @@ mod tests {
     impl Default for FakeBackend {
         fn default() -> Self {
             Self {
+                redis_result: None,
                 connections: Vec::new(),
                 policy: McpGlobalPolicy::default(),
                 recorded_arguments: std::sync::Mutex::new(Vec::new()),
@@ -5805,6 +5825,17 @@ mod tests {
 
     #[async_trait]
     impl DbxBackend for FakeBackend {
+        async fn execute_redis_command(
+            &self,
+            _connection: &ConnectionConfig,
+            _database: u32,
+            _command: &str,
+            _skip_safety_check: bool,
+        ) -> Result<RedisCommandResult, String> {
+            self.recorded_arguments.lock().unwrap().push(("redis".into(), json!(_command)));
+            self.redis_result.clone().ok_or_else(|| "No Redis fixture".into())
+        }
+
         async fn approve_high_risk_sql(
             &self,
             _connection_id: &str,
@@ -6965,7 +6996,7 @@ mod tests {
             ("dbx_execute_and_show", &["database"]),
             ("dbx_add_connection", &["port", "database", "driver_profile"]),
             ("dbx_remove_connection", &["connection_id", "connection_name"]),
-            ("dbx_execute_redis_command", &["db"]),
+            ("dbx_execute_redis_command", &["db", "decode", "decompress"]),
             ("dbx_get_schema_context", &["database", "schema", "max_tables"]),
         ];
         #[cfg(feature = "mq-admin")]
@@ -7190,6 +7221,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redis_decoding_is_opt_in_and_preserves_default_output() {
+        let raw = r"\xac\xed\x00\x05t\x00\x08sometext";
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("redis", "redis", "redis", "0")],
+            redis_result: Some(RedisCommandResult {
+                command: "GET".into(),
+                safety: RedisCommandSafety::Allowed,
+                value: json!(raw),
+            }),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        for codec in [None, Some("auto"), Some("java-serialized")] {
+            let mut request = json!({"connection_id":"redis","db":0,"command":"GET cache"});
+            if let Some(codec) = codec {
+                request["decode"] = json!(codec);
+            }
+            let request: ExecuteRedisCommandRequest = serde_json::from_value(request).unwrap();
+            let result = server.execute_redis_command(Parameters(request)).await;
+            assert!(!result.is_error.unwrap_or(false), "{}", result_text(&result));
+            let output = result_text(&result);
+            if codec.is_none() {
+                assert_eq!(output, format!("Command: GET\nSafety: allowed\n\n{raw}"));
+            } else {
+                let decoded: serde_json::Value = serde_json::from_str(output.split_once("\n\n").unwrap().1).unwrap();
+                assert_eq!(decoded, json!({"codec":"java-serialized","value":"sometext"}));
+            }
+        }
+    }
+
+    #[test]
+    fn redis_decode_rejects_unknown_codecs() {
+        for codec in ["unknown", "", "execute-python"] {
+            assert!(serde_json::from_value::<ExecuteRedisCommandRequest>(json!({"command":"GET key","decode":codec}))
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn redis_request_accepts_all_codec_and_compression_modes() {
+        for codec in ["auto", "java-serialized", "msgpack", "pickle", "php-serialize", "protobuf"] {
+            for algorithm in ["auto", "gzip", "zlib", "deflate"] {
+                let request: ExecuteRedisCommandRequest =
+                    serde_json::from_value(json!({"command":"GET key", "decode":codec, "decompress":algorithm}))
+                        .unwrap();
+                assert!(request.decode.is_some() && request.decompress.is_some());
+            }
+        }
+        assert!(serde_json::from_value::<ExecuteRedisCommandRequest>(
+            json!({"command":"GET key", "decompress":"unknown"})
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn redis_decode_does_not_bypass_write_protection() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("redis", "redis", "redis", "0")],
+            policy: McpGlobalPolicy { read_only: true, ..Default::default() },
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let request = serde_json::from_value(
+            json!({"connection_id":"redis","command":"SET key value","decode":"auto","decompress":"gzip"}),
+        )
+        .unwrap();
+        let result = server.execute_redis_command(Parameters(request)).await;
+        assert!(result_text(&result).contains("MCP_READ_ONLY"), "{}", result_text(&result));
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn redis_select_is_rejected_even_with_high_risk_access() {
         let redis = connection("redis", "redis", "redis", "0");
         let backend = Arc::new(FakeBackend {
@@ -7209,6 +7312,8 @@ mod tests {
                 selector: ConnectionSelector { connection_name: None, connection_id: Some("redis".to_string()) },
                 db: Some(8),
                 command: "SELECT 8".to_string(),
+                decode: None,
+                decompress: None,
             }))
             .await;
 

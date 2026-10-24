@@ -19,7 +19,7 @@
     "esbuild": "^0.28.0",
     "jsdom": "^26.1.0",
     "lucide-vue-next": "^0.577.0",
-    "oxfmt": "^0.73.0",
+    "oxfmt": "^0.74.0",
     "oxlint": "^1.68.0",
     "semver": "^7.7.2",
     "tailwindcss": "^4.1.13",

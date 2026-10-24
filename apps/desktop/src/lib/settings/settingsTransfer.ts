@@ -147,6 +147,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showLineNumbers",
     "showCurrentStatementFrame",
     "showInsertValueHints",
+    "showConnectionGroupPath",
     "autoAliasTables",
     "tableCompletionSchemaQualification",
     "insertSpaceAfterCompletion",

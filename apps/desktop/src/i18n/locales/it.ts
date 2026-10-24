@@ -9510,6 +9510,8 @@ export default withEnglishFallback({
     linuxFloatingFrame: "Effetto di trasparenza della finestra",
     linuxFloatingFrameDescription: "Abilita automaticamente i bordi trasparenti sui desktop supportati. Può essere disattivato se la finestra sfarfalla; ha effetto dopo l'applicazione e il riavvio di DBX. Le impostazioni delle variabili d'ambiente hanno la precedenza.",
     shortcutExecuteAllSql: "Esegui tutto il SQL",
+    showConnectionGroupPath: "Mostra il percorso completo del gruppo per le connessioni query",
+    showConnectionGroupPathDescription: "Se attivato, il selettore di connessione nell'angolo in alto a destra della pagina query mostrerà il percorso completo del gruppo prima del nome della connessione; se disattivato, mostrerà solo il nome della connessione.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

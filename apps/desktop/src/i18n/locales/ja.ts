@@ -9547,6 +9547,8 @@ export default withEnglishFallback({
     linuxFloatingFrame: "ウィンドウの透明効果",
     linuxFloatingFrameDescription: "サポートされているデスクトップで透明な枠線を自動的に有効にします。ウィンドウがちらつく場合は無効にでき、適用して DBX を再起動すると反映されます。環境変数の設定が優先されます。",
     shortcutExecuteAllSql: "すべての SQL を実行",
+    showConnectionGroupPath: "クエリ接続の完全なグループパスを表示",
+    showConnectionGroupPathDescription: "有効にすると、クエリページ右上の接続セレクターで接続名の前に完全なグループパスが表示されます。無効にすると接続名のみが表示されます。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

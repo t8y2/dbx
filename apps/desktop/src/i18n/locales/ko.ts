@@ -9615,6 +9615,8 @@ export default withEnglishFallback({
     linuxFloatingFrame: "창 투명 효과",
     linuxFloatingFrameDescription: "지원되는 데스크톱에서 투명 테두리를 자동으로 활성화합니다. 창이 깜박이면 끌 수 있으며, 적용하고 DBX를 다시 시작한 후 적용됩니다. 환경 변수 설정이 우선합니다.",
     shortcutExecuteAllSql: "모든 SQL 실행",
+    showConnectionGroupPath: "쿼리 연결의 전체 그룹 경로 표시",
+    showConnectionGroupPathDescription: "활성화하면 쿼리 페이지 오른쪽 위의 연결 선택기에서 연결 이름 앞에 전체 그룹 경로를 표시합니다. 비활성화하면 연결 이름만 표시합니다.",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

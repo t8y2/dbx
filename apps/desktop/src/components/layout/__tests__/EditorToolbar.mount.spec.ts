@@ -50,7 +50,36 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
 vi.mock("@/components/connection/ConnectionTreeSelect.vue", () => ({
   default: {
     name: "ConnectionTreeSelectStub",
-    template: `<div />`,
+    emits: ["update:open"],
+    props: {
+      connections: { type: Array, default: () => [] },
+      modelValue: { type: String, default: "" },
+    },
+    data() {
+      return { open: false };
+    },
+    computed: {
+      selectedLabel() {
+        return this.connections.find((connection: { id: string }) => connection.id === this.modelValue)?.name || this.modelValue;
+      },
+    },
+    methods: {
+      toggleOpen() {
+        this.open = !this.open;
+        this.$emit("update:open", this.open);
+      },
+    },
+    template: `<div data-test="connection-selector"><button type="button" data-test="toggle-connection-picker" @click="toggleOpen" /><slot name="trigger-label" :label="selectedLabel" /></div>`,
+  },
+}));
+
+vi.mock("@/components/ui/LightTooltip.vue", () => ({
+  default: {
+    name: "LightTooltipStub",
+    props: {
+      disabled: { type: Boolean, default: false },
+    },
+    template: `<div data-test="connection-tooltip" :data-disabled="String(disabled)"><slot /><slot name="content" /></div>`,
   },
 }));
 
@@ -745,6 +774,100 @@ describe("EditorToolbar mount contract", () => {
     expect(tooltips.some((text) => text.includes("toolbar.explainPlan (") && text.includes("E)"))).toBe(true);
     expect(tooltips.some((text) => text.includes("toolbar.formatSql (") && text.includes("F)"))).toBe(true);
     expect(tooltips.some((text) => text.includes("toolbar.saveSql (") && text.includes("S)"))).toBe(true);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("renders the active connection group path and sanitized detail preview", async () => {
+    const connectionStore = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.showConnectionGroupPath = true;
+    const connection = {
+      id: "conn-grouped",
+      name: "orders",
+      db_type: "postgres",
+      host: "db.example.com",
+      port: 5432,
+      database: "app",
+      username: "alice",
+      password: "secret",
+      connection_string: "postgres://alice:secret@db.example.com:5432/app",
+      color: "",
+    } as never;
+    connectionStore.connections = [connection];
+    connectionStore.sidebarLayout = {
+      groups: [
+        { id: "group-prod", name: "Production", collapsed: false },
+        { id: "group-orders", name: "Orders", collapsed: false },
+      ],
+      order: [
+        {
+          type: "group",
+          id: "group-prod",
+          children: [{ type: "group", id: "group-orders", children: [{ type: "connection", id: connection.id }] }],
+        },
+      ],
+    };
+
+    const host = createHost();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-grouped",
+        title: "SQL",
+        connectionId: connection.id,
+        database: "app",
+        sql: "SELECT 1",
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig(connection.id),
+      executableSql: "SELECT 1",
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      txnSessionId: undefined,
+      txnAutoRolledBack: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    const groupPath = host.querySelector<HTMLElement>("[data-connection-group-path]");
+    expect(groupPath?.textContent).toContain("Production / Orders /");
+    expect(groupPath?.classList.contains("min-w-0")).toBe(true);
+    expect(groupPath?.classList.contains("flex-1")).toBe(false);
+    expect(groupPath?.classList.contains("max-w-[50%]")).toBe(true);
+    expect(groupPath?.classList.contains("shrink")).toBe(true);
+    expect(groupPath?.classList.contains("truncate")).toBe(true);
+    const connectionName = groupPath?.nextElementSibling;
+    expect(connectionName?.classList.contains("shrink")).toBe(true);
+    expect(connectionName?.classList.contains("flex-1")).toBe(false);
+    expect(host.textContent).toContain("orders");
+    expect(host.textContent).toContain("postgres://alice:***@db.example.com:5432/app");
+    expect(host.textContent).not.toContain("postgres://alice:secret@db.example.com:5432/app");
+
+    settingsStore.editorSettings.showConnectionGroupPath = false;
+    await nextTick();
+    expect(host.querySelector("[data-connection-group-path]")).toBeNull();
+    expect(host.textContent).toContain("orders");
+
+    const tooltip = host.querySelector<HTMLElement>('[data-test="connection-tooltip"]');
+    const pickerToggle = host.querySelector<HTMLButtonElement>('[data-test="toggle-connection-picker"]');
+    expect(tooltip?.dataset.disabled).toBe("false");
+    pickerToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(tooltip?.dataset.disabled).toBe("true");
+    pickerToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(tooltip?.dataset.disabled).toBe("false");
 
     app.unmount();
     host.remove();

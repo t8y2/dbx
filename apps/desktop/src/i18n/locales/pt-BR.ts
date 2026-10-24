@@ -9507,6 +9507,8 @@ export default withEnglishFallback({
     linuxFloatingFrame: "Efeito de transparência da janela",
     linuxFloatingFrameDescription: "Ativa automaticamente bordas transparentes em desktops compatíveis. Pode ser desativado se a janela piscar; entra em vigor após aplicar e reiniciar o DBX. As configurações de variáveis de ambiente têm prioridade.",
     shortcutExecuteAllSql: "Executar todo o SQL",
+    showConnectionGroupPath: "Mostrar caminho completo do grupo da conexão de consulta",
+    showConnectionGroupPathDescription: "Quando ativado, o seletor de conexão no canto superior direito da página de consulta exibirá o caminho completo do grupo antes do nome da conexão; quando desativado, exibirá apenas o nome da conexão.",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

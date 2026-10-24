@@ -29,6 +29,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showLineNumbers",
   "showCurrentStatementFrame",
   "showInsertValueHints",
+  "showConnectionGroupPath",
   "autoAliasTables",
   "tableCompletionSchemaQualification",
   "insertSpaceAfterCompletion",

@@ -10136,6 +10136,8 @@ export default {
     showCurrentStatementFrameDescription: "When enabled, the SQL editor draws an outline around the current executable statement; when disabled, the outline is hidden.",
     showInsertValueHints: "Show INSERT value column hints",
     showInsertValueHintsDescription: "When enabled, the SQL editor shows column-name hints next to each value or SELECT projection in INSERT ... VALUES and INSERT ... SELECT clauses.",
+    showConnectionGroupPath: "Show full query connection group path",
+    showConnectionGroupPathDescription: "When enabled, the query toolbar connection picker shows the full group path before the connection name; when disabled, it shows only the connection name.",
     previewStatementRunButton: "Preview statement run button",
     wordWrap: "Word wrap",
     wordWrapDescription: "Wrap long lines within the editor width",

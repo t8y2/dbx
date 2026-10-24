@@ -31,6 +31,13 @@ import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("defaults query connection group paths to hidden and validates the toggle", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath).toBe(false);
+    expect(normalizeEditorSettings({}).showConnectionGroupPath).toBe(false);
+    expect(normalizeEditorSettings({ showConnectionGroupPath: true }).showConnectionGroupPath).toBe(true);
+    expect(normalizeEditorSettings({ showConnectionGroupPath: "true" as any }).showConnectionGroupPath).toBe(false);
+  });
+
   it("preserves the compact object browser view and rejects unknown modes", () => {
     expect(normalizeEditorSettings({ objectBrowserViewMode: "compact" }).objectBrowserViewMode).toBe("compact");
     expect(normalizeEditorSettings({ objectBrowserViewMode: "unknown" as any }).objectBrowserViewMode).toBe(DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode);

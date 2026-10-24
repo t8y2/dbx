@@ -263,6 +263,7 @@ const activeConnectionGroupPath = computed(() => {
   if (!connection) return "";
   return findConnectionGroupPath(connectionStore.sidebarLayout, connection.id)?.join(" / ") || "";
 });
+const visibleConnectionGroupPath = computed(() => (settingsStore.editorSettings.showConnectionGroupPath ? activeConnectionGroupPath.value : ""));
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 // Salesforce identity badge. A Salesforce tab talks to one live org and every grid
 // save is a real REST write, so the signed-in user stays visible next to the
@@ -597,6 +598,7 @@ async function changeCatalog(selectedCatalog: string) {
 }
 
 const connectionPickerRef = ref<InstanceType<typeof ConnectionTreeSelect> | null>(null);
+const connectionPickerOpen = ref(false);
 const databasePickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 const schemaPickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 
@@ -1001,7 +1003,7 @@ defineExpose({
     <div class="flex shrink-0 items-center gap-2">
       <div class="flex shrink-0 items-center gap-1" :class="{ 'connection-required-prompt': connectionRequiredVisible }">
         <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
-        <LightTooltip text="" :disabled="!activeConnectionDetailRows.length" side="bottom" :side-offset="6" :delay="250" :close-delay="80" surface="popover">
+        <LightTooltip text="" :disabled="connectionPickerOpen || !activeConnectionDetailRows.length" side="bottom" :side-offset="6" :delay="250" :close-delay="80" surface="popover">
           <ConnectionTreeSelect
             ref="connectionPickerRef"
             :model-value="activeConnectionValue"
@@ -1011,16 +1013,17 @@ defineExpose({
             :search-placeholder="t('editor.searchConnection')"
             :empty-text="t('grid.noSearchResults')"
             :hide-title="activeConnectionDetailRows.length > 0"
-            trigger-class="font-medium text-foreground"
+            trigger-class="max-w-[min(28rem,36vw)] font-medium text-foreground"
             trigger-icon-class="h-3 w-3"
             list-class="w-96 max-w-[calc(100vw-2rem)]"
             @update:model-value="(connectionId) => emit('changeConnection', connectionId)"
+            @update:open="(open: boolean) => (connectionPickerOpen = open)"
           >
             <template #trigger-label="{ label }">
               <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
                 <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
-                <span v-if="activeConnectionGroupPath" class="shrink-0 text-muted-foreground">{{ activeConnectionGroupPath }} /</span>
-                <span class="truncate">{{ label }}</span>
+                <span v-if="visibleConnectionGroupPath" data-connection-group-path class="min-w-0 max-w-[50%] shrink truncate text-muted-foreground">{{ visibleConnectionGroupPath }} /</span>
+                <span :class="visibleConnectionGroupPath ? 'min-w-0 shrink truncate' : 'min-w-0 flex-1 truncate'">{{ label }}</span>
                 <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
               </div>
               <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>

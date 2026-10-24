@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
-import { Lock, Loader2, ShieldCheck } from "@lucide/vue";
+import { Lock, Loader2, ShieldCheck, LogIn } from "@lucide/vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import { apiUrl } from "@/lib/common/webPath";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { startOidcLogin, type OidcInfo } from "@/lib/startup/startupAuthentication";
 
 const props = withDefaults(
   defineProps<{
     setupMode?: boolean;
+    oidc?: OidcInfo;
   }>(),
   { setupMode: false },
 );
@@ -23,8 +25,12 @@ const confirmPassword = ref("");
 const error = ref("");
 const loading = ref(false);
 
-// The auth routes report failures as `{"error": "..."}`, so unwrap that before
-// translating; anything else is treated as a plain-text message.
+const showPasswordForm = computed(() => {
+  if (props.setupMode) return true;
+  if (props.oidc?.enabled && props.oidc?.password_disabled) return false;
+  return true;
+});
+
 async function readAuthError(res: Response): Promise<string> {
   const text = (await res.text()).trim();
   if (!text) return t("auth.loginFailed");
@@ -79,25 +85,45 @@ async function submit() {
         </div>
       </div>
 
-      <form class="space-y-4" @submit.prevent="submit" autocomplete="off">
-        <div v-if="setupMode" class="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-          <ShieldCheck class="w-4 h-4" />
-          <span>{{ t("auth.setupTitle") }}</span>
+      <div class="space-y-4">
+        <!-- OIDC / SSO Login Button -->
+        <div v-if="oidc?.enabled" class="space-y-4">
+          <Button type="button" variant="default" class="w-full h-11 text-sm font-medium gap-2 bg-blue-600 hover:bg-blue-700 text-white" @click="startOidcLogin">
+            <LogIn class="w-4 h-4" />
+            <span>{{ oidc.button_label || "Sign in with SSO" }}</span>
+          </Button>
+
+          <div v-if="showPasswordForm" class="relative flex items-center justify-center">
+            <div class="absolute inset-0 flex items-center">
+              <span class="w-full border-t border-border" />
+            </div>
+            <div class="relative bg-background px-3 text-xs uppercase text-muted-foreground">
+              {{ t("auth.or") || "or" }}
+            </div>
+          </div>
         </div>
-        <div class="relative">
-          <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <PasswordInput v-model="password" :placeholder="setupMode ? t('auth.newPassword') : t('auth.enterPassword')" inputClass="pl-10 h-11" autocomplete="off" autofocus />
-        </div>
-        <div v-if="setupMode" class="relative">
-          <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <PasswordInput v-model="confirmPassword" :placeholder="t('auth.confirmPassword')" inputClass="pl-10 h-11" autocomplete="off" />
-        </div>
-        <p v-if="error" class="text-sm text-destructive text-center">{{ error }}</p>
-        <Button type="submit" class="w-full h-11 text-sm font-medium" :disabled="loading || !password || (setupMode && !confirmPassword)">
-          <Loader2 v-if="loading" class="w-4 h-4 animate-spin mr-2" />
-          {{ loading ? t("auth.processing") : setupMode ? t("auth.setPassword") : t("auth.login") }}
-        </Button>
-      </form>
+
+        <!-- Password Form -->
+        <form v-if="showPasswordForm" class="space-y-4" @submit.prevent="submit" autocomplete="off">
+          <div v-if="setupMode" class="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+            <ShieldCheck class="w-4 h-4" />
+            <span>{{ t("auth.setupTitle") }}</span>
+          </div>
+          <div class="relative">
+            <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <PasswordInput v-model="password" :placeholder="setupMode ? t('auth.newPassword') : t('auth.enterPassword')" inputClass="pl-10 h-11" autocomplete="off" autofocus />
+          </div>
+          <div v-if="setupMode" class="relative">
+            <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <PasswordInput v-model="confirmPassword" :placeholder="t('auth.confirmPassword')" inputClass="pl-10 h-11" autocomplete="off" />
+          </div>
+          <p v-if="error" class="text-sm text-destructive text-center">{{ error }}</p>
+          <Button type="submit" :variant="oidc?.enabled ? 'outline' : 'default'" class="w-full h-11 text-sm font-medium" :disabled="loading || !password || (setupMode && !confirmPassword)">
+            <Loader2 v-if="loading" class="w-4 h-4 animate-spin mr-2" />
+            {{ loading ? t("auth.processing") : setupMode ? t("auth.setPassword") : t("auth.login") }}
+          </Button>
+        </form>
+      </div>
 
       <p class="text-center text-xs text-muted-foreground/50">Powered by DBX</p>
     </div>

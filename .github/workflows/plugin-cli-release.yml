@@ -43,14 +43,14 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.22.x"
+          go-version: "1.27.x"
           cache: false
 
       - name: Validate release branch and versions
@@ -329,7 +329,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - name: Publish platform package
@@ -357,7 +357,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - name: Prepare development runtime build dependencies
@@ -412,14 +412,14 @@ jobs:
     steps:
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           registry-url: https://registry.npmjs.org
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.22.x"
+          go-version: "1.27.x"
           cache: false
 
       - name: Install from npm and package every template

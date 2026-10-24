@@ -6210,6 +6210,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "執行日誌",
+      tableStarted: "開始傳輸資料表 {table}（{index}/{total}）",
+      completed: "傳輸完成：共 {total} 張資料表，失敗 {failed} 張",
+      failed: "傳輸失敗：{error}",
+      cancelled: "傳輸已取消（處理到第 {index}/{total} 張資料表）",
+    },
     title: "資料傳輸",
     content: "傳輸內容",
     contentStructureAndData: "結構和資料",
@@ -7612,6 +7619,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "關閉視窗",
     closeActionPromptDescription: "請選擇點擊關閉按鈕時的行為。之後可在「設定 → 外觀」中修改。",
     closeActionQuit: "退出程式",
+    closeWithBackgroundTasksTitle: "背景工作仍在執行",
+    closeWithBackgroundTasksDescription: "退出 DBX 會中斷 {count} 個正在執行的背景工作（如資料傳輸、匯出）。你也可以取消退出並等待工作完成。",
+    closeWithBackgroundTasksQuit: "退出並中斷工作",
     closeActionMinimize: "最小化到系統匣",
     updateNotificationsEnabled: "啟用更新提醒",
     updateNotificationsEnabledDescription: "自動檢查應用程式和元件更新並顯示提醒；是否自動安裝由更新頁面中的各項開關控制。",

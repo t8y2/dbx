@@ -8686,6 +8686,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "บันทึกการทำงาน",
+      tableStarted: "กำลังถ่ายโอนตาราง {table} ({index}/{total})",
+      completed: "การถ่ายโอนเสร็จสิ้น: ทั้งหมด {total} ตาราง ล้มเหลว {failed} ตาราง",
+      failed: "การถ่ายโอนล้มเหลว: {error}",
+      cancelled: "ยกเลิกการถ่ายโอนแล้ว (หยุดที่ตาราง {index}/{total})",
+    },
     title: "ถ่ายโอนข้อมูล",
     content: "เนื้อหาที่ถ่ายโอน",
     contentStructureAndData: "โครงสร้างและข้อมูล",
@@ -10245,6 +10252,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "ปิดหน้าต่าง",
     closeActionPromptDescription: "เลือกสิ่งที่จะเกิดขึ้นเมื่อคลิกปุ่มปิด คุณเปลี่ยนได้ภายหลังที่ Settings > Appearance",
     closeActionQuit: "ออกจาก DBX",
+    closeWithBackgroundTasksTitle: "มีงานเบื้องหลังกำลังทำงาน",
+    closeWithBackgroundTasksDescription: "การออกจาก DBX จะหยุดงานเบื้องหลังที่กำลังทำงาน {count} รายการ (เช่น การถ่ายโอนข้อมูล การส่งออก) คุณสามารถยกเลิกและรอจนงานเสร็จได้",
+    closeWithBackgroundTasksQuit: "ออกและหยุดงาน",
     closeActionMinimize: "ย่อไปยัง Tray",
     updateNotificationsEnabled: "เปิดใช้การแจ้งเตือนการอัปเดต",
     updateNotificationsEnabledDescription: "ตรวจสอบการอัปเดตแอปพลิเคชันและคอมโพเนนต์โดยอัตโนมัติและแสดงการแจ้งเตือน หน้าการอัปเดตควบคุมว่าจะติดตั้งแต่ละหมวดหมู่อัตโนมัติหรือไม่",

@@ -7027,6 +7027,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "Dziennik wykonywania",
+      tableStarted: "Przesyłanie tabeli {table} ({index}/{total})",
+      completed: "Transfer zakończony: tabel {total}, nieudane {failed}",
+      failed: "Transfer nie powiódł się: {error}",
+      cancelled: "Transfer anulowany (zatrzymano na tabeli {index}/{total})",
+    },
     title: "Aktualizacja zabezpieczeń danych",
     content: "Zawartość transferu",
     contentStructureAndData: "Struktura i dane",
@@ -8513,6 +8520,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "Zamknij okno",
     closeActionPromptDescription: "Wybierz, co ma się stać po kliknięciu przycisku zamknięcia. Możesz to zmienić później w Ustawienia > Wygląd.",
     closeActionQuit: "Wyjdź z DBX",
+    closeWithBackgroundTasksTitle: "Zadania w tle są uruchomione",
+    closeWithBackgroundTasksDescription: "Wyjście z DBX przerwie {count} działające zadanie(a) w tle (np. transfer danych, eksport). Możesz też anulować i poczekać na ich zakończenie.",
+    closeWithBackgroundTasksQuit: "Zakończ i przerwij zadania",
     closeActionMinimize: "Minimalizuj do zasobnika",
     updateNotificationsEnabled: "Włącz przypomnienia o aktualizacjach",
     updateNotificationsEnabledDescription: "Automatycznie sprawdzaj aktualizacje aplikacji i komponentów oraz wyświetlaj powiadomienia. Strona aktualizacji kontroluje, czy poszczególne kategorie instalują się automatycznie.",

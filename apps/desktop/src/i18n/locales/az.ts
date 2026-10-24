@@ -6320,6 +6320,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "İcra jurnalı",
+      tableStarted: "{table} cədvəli ötürülür ({index}/{total})",
+      completed: "Ötürülmə tamamlandı: {total} cədvəl, {failed} uğursuz",
+      failed: "Ötürülmə uğursuz oldu: {error}",
+      cancelled: "Ötürülmə ləğv edildi ({index}/{total} cədvəldə dayandırıldı)",
+    },
     title: "Məlumatların köçürülməsi",
     content: "Köçürülən məzmun",
     contentStructureAndData: "Struktur və məlumatlar",
@@ -7695,6 +7702,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "Pəncərəni bağla",
     closeActionPromptDescription: "Bağlama düyməsinə kliklədikdə nə baş verəcəyini seçin. Bunu daha sonra Parametrlər > Görünüş bölməsində dəyişə bilərsiniz.",
     closeActionQuit: "DBX-dən çıx",
+    closeWithBackgroundTasksTitle: "Fon tapşırıqları işləyir",
+    closeWithBackgroundTasksDescription: "DBX-dən çıxmaq {count} işlək fon tapşırığını (məlumat ötürülməsi, ixrac və s.) kəsəcək. Çıxışı ləğv edib tapşırıqların bitməsini də gözləyə bilərsiniz.",
+    closeWithBackgroundTasksQuit: "Çıx və tapşırıqları kəs",
     closeActionMinimize: "Sistem treyinə kiçilt",
     updateNotificationsEnabled: "Yeniləmə xatırlatmalarını aktiv et",
     updateNotificationsEnabledDescription: "Tətbiq və komponent yeniləmələrini avtomatik yoxlayır və xatırlatmalar göstərir. Hər kateqoriyanın avtomatik quraşdırılıb-quraşdırılmayacağı yeniləmə səhifəsindən idarə olunur.",

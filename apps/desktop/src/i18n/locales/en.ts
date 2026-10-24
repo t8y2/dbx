@@ -8080,6 +8080,13 @@ export default {
     },
   },
   transfer: {
+    log: {
+      title: "Execution log",
+      tableStarted: "Transferring table {table} ({index}/{total})",
+      completed: "Transfer finished: {total} table(s), {failed} failed",
+      failed: "Transfer failed: {error}",
+      cancelled: "Transfer cancelled (stopped at table {index}/{total})",
+    },
     title: "Data Transfer",
     content: "Transfer content",
     contentStructureAndData: "Structure and data",
@@ -9645,6 +9652,9 @@ export default {
     closeActionPromptTitle: "Close window",
     closeActionPromptDescription: "Choose what happens when you click the close button. You can change this later in Settings > Appearance.",
     closeActionQuit: "Quit DBX",
+    closeWithBackgroundTasksTitle: "Background tasks are running",
+    closeWithBackgroundTasksDescription: "Quitting DBX will interrupt {count} running background task(s) such as data transfer or export. You can also cancel and wait for them to finish.",
+    closeWithBackgroundTasksQuit: "Quit and interrupt tasks",
     closeActionMinimize: "Minimize to tray",
     updateNotificationsEnabled: "Enable update reminders",
     updateNotificationsEnabledDescription: "Automatically check for application and component updates and show reminders. The update page controls whether each category installs automatically.",

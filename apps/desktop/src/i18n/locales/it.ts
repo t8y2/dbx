@@ -6881,6 +6881,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "Log di esecuzione",
+      tableStarted: "Trasferimento della tabella {table} ({index}/{total})",
+      completed: "Trasferimento completato: {total} tabella/e, {failed} non riuscite",
+      failed: "Trasferimento non riuscito: {error}",
+      cancelled: "Trasferimento annullato (fermato alla tabella {index}/{total})",
+    },
     title: "Trasferimento Dati",
     content: "Contenuto del trasferimento",
     contentStructureAndData: "Struttura e dati",
@@ -8263,6 +8270,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "Chiudi finestra",
     closeActionPromptDescription: "Scegli cosa succede quando clicchi il pulsante di chiusura. Puoi modificarlo in seguito in Impostazioni → Aspetto.",
     closeActionQuit: "Esci da DBX",
+    closeWithBackgroundTasksTitle: "Attività in background in esecuzione",
+    closeWithBackgroundTasksDescription: "Uscendo da DBX verranno interrotte {count} attività in background in esecuzione (come trasferimento dati ed esportazione). Puoi anche annullare e attendere il completamento.",
+    closeWithBackgroundTasksQuit: "Esci e interrompi le attività",
     closeActionMinimize: "Riduci a icona",
     updateNotificationsEnabled: "Abilita promemoria aggiornamenti",
     updateNotificationsEnabledDescription: "Controlla automaticamente gli aggiornamenti dell'app e dei componenti e mostra promemoria. La pagina Aggiornamenti determina se ogni categoria viene installata automaticamente.",

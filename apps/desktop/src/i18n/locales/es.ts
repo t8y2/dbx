@@ -7067,6 +7067,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "Registro de ejecución",
+      tableStarted: "Transfiriendo tabla {table} ({index}/{total})",
+      completed: "Transferencia finalizada: {total} tabla(s), {failed} con error",
+      failed: "Error de transferencia: {error}",
+      cancelled: "Transferencia cancelada (detenida en la tabla {index}/{total})",
+    },
     title: "Transferencia de datos",
     content: "Contenido de la transferencia",
     contentStructureAndData: "Estructura y datos",
@@ -8484,6 +8491,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "Cerrar ventana",
     closeActionPromptDescription: "Elige qué ocurre al pulsar el botón de cerrar. Puedes cambiarlo después en Ajustes → Apariencia.",
     closeActionQuit: "Salir de DBX",
+    closeWithBackgroundTasksTitle: "Hay tareas en segundo plano en ejecución",
+    closeWithBackgroundTasksDescription: "Salir de DBX interrumpirá {count} tarea(s) en segundo plano en ejecución (transferencia de datos, exportación, etc.). También puede cancelar y esperar a que terminen.",
+    closeWithBackgroundTasksQuit: "Salir e interrumpir tareas",
     closeActionMinimize: "Minimizar a la bandeja",
     updateNotificationsEnabled: "Activar recordatorios de actualización",
     updateNotificationsEnabledDescription: "Comprueba automáticamente las actualizaciones de la aplicación y los componentes y muestra recordatorios. La página de actualizaciones controla si cada categoría se instala automáticamente.",

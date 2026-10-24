@@ -6919,6 +6919,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "실행 로그",
+      tableStarted: "테이블 {table} 전송 중({index}/{total})",
+      completed: "전송 완료: 총 {total}개 테이블, {failed}개 실패",
+      failed: "전송 실패: {error}",
+      cancelled: "전송이 취소되었습니다({index}/{total} 테이블에서 중지)",
+    },
     title: "데이터 이전",
     content: "전송 내용",
     contentStructureAndData: "구조 및 데이터",
@@ -8397,6 +8404,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "창 닫기",
     closeActionPromptDescription: "닫기 버튼을 클릭할 때 수행할 작업을 선택하세요. 설정 > 모양에서 나중에 변경할 수 있습니다.",
     closeActionQuit: "DBX 종료",
+    closeWithBackgroundTasksTitle: "백그라운드 작업이 실행 중입니다",
+    closeWithBackgroundTasksDescription: "DBX를 종료하면 실행 중인 {count}개의 백그라운드 작업(데이터 전송, 내보내기 등)이 중단됩니다. 취소하고 작업이 끝날 때까지 기다릴 수도 있습니다.",
+    closeWithBackgroundTasksQuit: "종료하고 작업 중단",
     closeActionMinimize: "트레이로 최소화",
     updateNotificationsEnabled: "업데이트 알림 활성화",
     updateNotificationsEnabledDescription: "앱과 구성 요소 업데이트를 자동으로 확인하고 알림을 표시합니다. 각 범주의 자동 설치 여부는 업데이트 페이지에서 관리합니다.",

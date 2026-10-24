@@ -6901,6 +6901,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "実行ログ",
+      tableStarted: "テーブル {table} を転送中（{index}/{total}）",
+      completed: "転送完了：{total} テーブル、失敗 {failed} 件",
+      failed: "転送に失敗しました：{error}",
+      cancelled: "転送をキャンセルしました（{index}/{total} テーブル目で停止）",
+    },
     title: "データ転送",
     content: "転送内容",
     contentStructureAndData: "構造とデータ",
@@ -8291,6 +8298,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "ウィンドウを閉じる",
     closeActionPromptDescription: "閉じるボタンの動作を選択してください。後から「設定 → 外観」で変更できます。",
     closeActionQuit: "DBXを終了",
+    closeWithBackgroundTasksTitle: "バックグラウンドタスクが実行中です",
+    closeWithBackgroundTasksDescription: "DBX を終了すると実行中の {count} 個のバックグラウンドタスク（データ転送・エクスポートなど）が中断されます。キャンセルして完了を待つこともできます。",
+    closeWithBackgroundTasksQuit: "終了してタスクを中断",
     closeActionMinimize: "トレイに最小化",
     updateNotificationsEnabled: "アップデート通知を有効にする",
     updateNotificationsEnabledDescription: "アプリとコンポーネントの更新を自動確認し、通知を表示します。各カテゴリを自動インストールするかどうかは更新ページで管理します。",

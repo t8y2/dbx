@@ -8048,6 +8048,13 @@ export default withEnglishFallback({
   },
   transfer: {
     title: "数据传输",
+    log: {
+      title: "执行日志",
+      tableStarted: "开始传输表 {table}（{index}/{total}）",
+      completed: "传输完成：共 {total} 张表，失败 {failed} 张",
+      failed: "传输失败：{error}",
+      cancelled: "传输已取消（处理到第 {index}/{total} 张表）",
+    },
     content: "传输内容",
     contentStructureAndData: "结构和数据",
     contentStructureOnly: "仅结构",
@@ -9613,6 +9620,9 @@ export default withEnglishFallback({
     closeActionPromptDescription: "请选择点击关闭按钮时的行为。之后可在「设置 → 外观」中修改。",
     closeActionQuit: "退出程序",
     closeActionMinimize: "最小化到托盘",
+    closeWithBackgroundTasksTitle: "后台任务仍在运行",
+    closeWithBackgroundTasksDescription: "退出 DBX 会中断 {count} 个正在运行的后台任务（如数据传输、导出）。你也可以取消退出并等待任务完成。",
+    closeWithBackgroundTasksQuit: "退出并中断任务",
     updateNotificationsEnabled: "启用更新提醒",
     updateNotificationsEnabledDescription: "自动检查应用和组件更新并显示更新提醒；是否自动安装由升级页中的各项开关控制。",
     autoDownloadUpdates: "自动下载应用更新",

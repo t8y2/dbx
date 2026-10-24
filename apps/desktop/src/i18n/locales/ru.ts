@@ -8345,6 +8345,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "Журнал выполнения",
+      tableStarted: "Передача таблицы {table} ({index}/{total})",
+      completed: "Передача завершена: таблиц {total}, с ошибками {failed}",
+      failed: "Ошибка передачи: {error}",
+      cancelled: "Передача отменена (остановлена на таблице {index}/{total})",
+    },
     title: "Перенос данных",
     content: "Содержимое переноса",
     contentStructureAndData: "Структура и данные",
@@ -9847,6 +9854,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "Закрытие окна",
     closeActionPromptDescription: "Выберите, что происходит при нажатии кнопки закрытия. Это можно изменить позже в разделе «Настройки > Внешний вид».",
     closeActionQuit: "Завершить DBX",
+    closeWithBackgroundTasksTitle: "Выполняются фоновые задачи",
+    closeWithBackgroundTasksDescription: "Выход из DBX прервёт {count} выполняемых фоновых задач (передача данных, экспорт и т.д.). Можно отменить выход и дождаться их завершения.",
+    closeWithBackgroundTasksQuit: "Выйти и прервать задачи",
     closeActionMinimize: "Свернуть в трей",
     updateNotificationsEnabled: "Включить напоминания об обновлениях",
     updateNotificationsEnabledDescription: "Автоматически проверять обновления приложения и компонентов и показывать напоминания. Страница обновлений определяет, устанавливается ли каждая категория автоматически.",

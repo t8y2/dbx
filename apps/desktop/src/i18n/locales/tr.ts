@@ -6212,6 +6212,13 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    log: {
+      title: "Yürütme günlüğü",
+      tableStarted: "{table} tablosu aktarılıyor ({index}/{total})",
+      completed: "Aktarım tamamlandı: {total} tablo, {failed} başarısız",
+      failed: "Aktarım başarısız: {error}",
+      cancelled: "Aktarım iptal edildi ({index}/{total} tabloda durduruldu)",
+    },
     title: "Veri Aktarımı",
     content: "Aktarım içeriği",
     contentStructureAndData: "Yapı ve veri",
@@ -7576,6 +7583,9 @@ export default withEnglishFallback({
     closeActionPromptTitle: "Pencereyi kapat",
     closeActionPromptDescription: "Kapatma düğmesine tıkladığınızda ne olacağını seçin. Bunu daha sonra Ayarlar > Görünüm bölümünden değiştirebilirsiniz.",
     closeActionQuit: "DBX'ten çık",
+    closeWithBackgroundTasksTitle: "Arka plan görevleri çalışıyor",
+    closeWithBackgroundTasksDescription: "DBX'ten çıkmak {count} çalışan arka plan görevini (veri aktarımı, dışa aktarma vb.) kesintiye uğratacak. Çıkışı iptal edip görevlerin bitmesini de bekleyebilirsiniz.",
+    closeWithBackgroundTasksQuit: "Çık ve görevleri kes",
     closeActionMinimize: "Tepsiye küçült",
     updateNotificationsEnabled: "Güncelleme anımsatıcılarını etkinleştir",
     updateNotificationsEnabledDescription: "Uygulama ve bileşen güncellemelerini otomatik denetler ve anımsatıcıları gösterir. Her kategorinin otomatik kurulup kurulmayacağı güncelleme sayfasından yönetilir.",

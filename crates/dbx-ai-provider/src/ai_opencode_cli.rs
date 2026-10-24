@@ -116,9 +116,12 @@ pub fn resolve_opencode_version_fast(config: &AiConfig) -> OpenCodeVersion {
     OpenCodeVersion::V1
 }
 
-pub fn is_unrecognized_pure_flag(message: &str) -> bool {
+/// Flags only V1 accepts. An "unrecognized" error mentioning either one means
+/// the resolved version was wrong and model discovery must retry as V2.
+pub fn is_unrecognized_v1_only_flag(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.contains("--pure")
+    let mentions_v1_only_flag = lower.contains("--pure") || lower.contains("--verbose");
+    mentions_v1_only_flag
         && (lower.contains("unrecognized") || lower.contains("unknown") || lower.contains("unexpected"))
 }
 
@@ -338,9 +341,13 @@ pub fn resolved_models_command_for_version(
     version: OpenCodeVersion,
 ) -> Result<OpenCodeCommandSpec, String> {
     let mut command = resolve_opencode_command(config)?;
-    command.args.extend(["models".to_string(), "--verbose".to_string()]);
+    command.args.push("models".to_string());
+    // V1's `models --verbose` prints one JSON record per model, which
+    // parse_opencode_models depends on; OpenCode V2 rejects the flag
+    // (#13351) and its plain `models` output is already the JSON shape
+    // the parser accepts.
     if version == OpenCodeVersion::V1 {
-        command.args.push("--pure".to_string());
+        command.args.extend(["--verbose".to_string(), "--pure".to_string()]);
     }
     Ok(command)
 }
@@ -390,7 +397,7 @@ pub async fn list_opencode_models(config: &AiConfig) -> Result<Vec<AiModelInfo>,
 
     if !output.status.success() {
         let err_output = combined_output(&output.stderr, &output.stdout);
-        if version == OpenCodeVersion::V1 && is_unrecognized_pure_flag(&err_output) {
+        if version == OpenCodeVersion::V1 && is_unrecognized_v1_only_flag(&err_output) {
             let program = opencode_program(config);
             record_opencode_version_v2(&program).await;
             version = OpenCodeVersion::V2;
@@ -601,7 +608,7 @@ pub async fn run_opencode_agent(
     .await;
 
     let result = match run_res {
-        Err(err) if version == OpenCodeVersion::V1 && is_unrecognized_pure_flag(&err) => {
+        Err(err) if version == OpenCodeVersion::V1 && is_unrecognized_v1_only_flag(&err) => {
             let program = opencode_program(config);
             record_opencode_version_v2(&program).await;
             let v2_command = resolved_run_command_for_version(config, OpenCodeVersion::V2)?;
@@ -751,14 +758,14 @@ mod tests {
     }
 
     #[test]
-    fn models_command_omits_pure_flag_for_v2() {
+    fn models_command_omits_v1_only_flags_for_v2() {
         let mut config = config("default");
         config.opencode_cli_version = Some("v2".to_string());
 
         let command = resolved_models_command(&config).unwrap();
 
         assert_eq!(command.program, "opencode");
-        assert_eq!(command.args, ["models", "--verbose"]);
+        assert_eq!(command.args, ["models"]);
     }
 
     #[test]
@@ -784,12 +791,15 @@ mod tests {
     }
 
     #[test]
-    fn detects_unrecognized_pure_flag_error() {
-        assert!(is_unrecognized_pure_flag("Unrecognized flag: --pure in command opencode run"));
-        assert!(is_unrecognized_pure_flag("error: unknown flag: --pure"));
-        assert!(is_unrecognized_pure_flag("ERROR\n  Unrecognized flag: --pure"));
-        assert!(!is_unrecognized_pure_flag("connection failed"));
-        assert!(!is_unrecognized_pure_flag("unknown model"));
+    fn detects_unrecognized_v1_only_flag_error() {
+        assert!(is_unrecognized_v1_only_flag("Unrecognized flag: --pure in command opencode run"));
+        assert!(is_unrecognized_v1_only_flag("error: unknown flag: --pure"));
+        assert!(is_unrecognized_v1_only_flag("ERROR\n  Unrecognized flag: --pure"));
+        assert!(is_unrecognized_v1_only_flag("error: unknown flag: --verbose"));
+        assert!(is_unrecognized_v1_only_flag("Unrecognized flag: --verbose in command opencode models"));
+        assert!(!is_unrecognized_v1_only_flag("connection failed"));
+        assert!(!is_unrecognized_v1_only_flag("unknown model"));
+        assert!(!is_unrecognized_v1_only_flag("error: unknown flag: --model"));
     }
 
     #[test]
@@ -862,6 +872,22 @@ mod tests {
             ["none", "low", "high", "future"]
         );
         assert!(models[2].effort_capability.is_none());
+    }
+
+    #[test]
+    fn parses_v2_plain_models_output() {
+        let stdout = concat!(
+            "{\"id\":\"gpt-5.4\",\"providerID\":\"openai\",\"name\":\"GPT-5.4\",\"variants\":{\"low\":{},\"high\":{}}}\n",
+            "{\"id\":\"model\",\"providerID\":\"custom\",\"name\":\"Custom\"}\n"
+        );
+
+        let models = parse_opencode_models(stdout).unwrap();
+
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "openai/gpt-5.4", "custom/model"]
+        );
+        assert_eq!(models[1].display_name.as_deref(), Some("GPT-5.4"));
     }
 
     #[test]

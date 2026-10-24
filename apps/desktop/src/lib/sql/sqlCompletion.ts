@@ -2116,6 +2116,14 @@ class SqlCompletionProvider {
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table", this.input.functionCompletionIncludeParams));
       }
+      // SQL Server table-valued functions are relation sources used directly in
+      // FROM/JOIN (`FROM dbo.Split(@csv)`), so they belong in the table
+      // candidate set alongside tables and views (#13131). Scalar functions
+      // stay in the routine context only.
+      if (this.databaseType === "sqlserver") {
+        const tableValuedFunctions = (this.input.objects ?? []).filter((object) => object.type === "function").map((object) => ({ name: object.name, schema: object.schema, type: "function" as const, detail: object.signature ?? "FUNCTION" }));
+        this.items.push(...buildTableItems(context, tableValuedFunctions, this.dialect, false, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect));
+      }
       if (isOracleLikeDatabase(this.databaseType)) {
         this.items.push(...buildOracleTableFunctionItems(context.prefix, this.input.keywordCase, this.input.functionCase, this.input.functionCompletionIncludeParams));
       }

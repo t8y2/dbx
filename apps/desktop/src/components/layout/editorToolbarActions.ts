@@ -34,6 +34,7 @@ export interface EditorToolbarActions {
   toolbarExecute(source: "pointer" | "keyboard", tabId: string): void;
   toolbarExecuteAll(source: "pointer" | "keyboard", tabId: string): void;
   toolbarExecuteInNewResultTab(source: "pointer" | "keyboard", tabId: string): void;
+  toolbarExecuteMongoScript(source: "pointer" | "keyboard", tabId: string): void;
   cancelExecution(tabId: string): void;
   explain(tabId: string): void;
   formatSql(tabId: string): void;
@@ -88,6 +89,7 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
     toolbarExecute: noop,
     toolbarExecuteAll: noop,
     toolbarExecuteInNewResultTab: noop,
+    toolbarExecuteMongoScript: noop,
     cancelExecution: noop,
     explain: noop,
     formatSql: noop,

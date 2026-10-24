@@ -10,6 +10,35 @@ pub fn mongo_parse_shell_command(source: String) -> Result<dbx_core::mongo_shell
     dbx_core::mongo_shell::parse(&source)
 }
 
+/// Whether this build can run MongoDB scripts, so the UI only offers the action when it works.
+#[tauri::command]
+pub fn mongo_script_available() -> bool {
+    dbx_core::mongo_script::RUNTIME_AVAILABLE
+}
+
+#[tauri::command]
+pub async fn mongo_execute_script(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    source: String,
+    options: Option<dbx_core::mongo_script::MongoScriptOptions>,
+    execution_id: Option<String>,
+) -> Result<dbx_core::types::QueryResult, String> {
+    // The script observes cancellation itself so it can report the operations that completed.
+    let registered =
+        execution_id.as_ref().filter(|id| !id.trim().is_empty()).map(|id| state.running_queries.register(id.clone()));
+    dbx_core::mongo_script::execute_mongo_script_core(
+        state.inner().clone(),
+        &connection_id,
+        &database,
+        &source,
+        options.unwrap_or_default(),
+        registered.as_ref().map(|query| query.token()),
+    )
+    .await
+}
+
 async fn run_cancellable<T, F>(state: &Arc<AppState>, execution_id: Option<String>, future: F) -> Result<T, String>
 where
     F: Future<Output = Result<T, String>>,

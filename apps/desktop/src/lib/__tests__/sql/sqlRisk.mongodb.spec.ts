@@ -24,6 +24,14 @@ describe("MongoDB shell statement risk", () => {
     }
   });
 
+  it("never classifies a JavaScript script as a read", () => {
+    for (const sql of ["(function () { return db.users.find({}).toArray(); })()", "var rows = db.users.find({}).toArray(); rows.forEach(function (d) { db.users.deleteOne({ _id: d._id }); });"]) {
+      const risk = classifySqlRisk(sql, { dialect: "mongodb" });
+      expect(risk.risk, sql).toBe("unknown");
+      expect(risk.firstKeyword, sql).toBe("script");
+    }
+  });
+
   it.each(["", '"queryPlanner"', '"executionStats"', '"allPlansExecution"'])("treats find explain(%s) as read-only without hiding batch writes", (verbosity) => {
     const explain = `db.demo.find({}).explain(${verbosity})`;
     expect(classifySqlRisk(explain, { dialect: "mongodb" }).risk).toBe("read");

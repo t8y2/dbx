@@ -1,6 +1,7 @@
 import { classifyElasticsearchRequestRisk, classifyElasticsearchSourceRisk, type ElasticsearchRequestRisk } from "@/lib/elasticsearch/elasticsearchRequestRisk";
 import { classifySolrRequestRisk, classifySolrSourceRisk } from "@/lib/solr/solrRequestRisk";
 import { classifyCouchDbRequestRisk, classifyCouchDbSourceRisk, type CouchDbRequestRisk } from "@/lib/couchdb/couchdbRequestRisk";
+import { looksLikeMongoScript } from "@/lib/mongo/mongoScript";
 import { mongoAggregateWriteStage, splitMongoCommandRanges, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { isCouchDbDatabaseType, isElasticsearchCompatibleDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 import { isProvenReadOnlyCypher } from "./cypherReadOnly";
@@ -208,7 +209,9 @@ const MONGO_DDL_KINDS = new Set<MongoCommand["kind"]>(["createIndex", "dropIndex
 function mongoShellStatements(sql: string, dialect: DatabaseType | string | undefined): SqlRiskStatementAssessment[] | null {
   if (dialect !== "mongodb") return null;
   const commands = splitMongoCommandRanges(sql);
-  if (!commands.length) return null;
+  // JavaScript the structured parser rejects runs in the script runtime, where
+  // individual db.* calls are invisible here. Treat it as unknown (not read).
+  if (!commands.length) return looksLikeMongoScript(sql) ? [{ risk: "unknown", firstKeyword: "script" }] : null;
 
   return commands.map(({ command }) => ({
     risk: mongoCommandRisk(command),

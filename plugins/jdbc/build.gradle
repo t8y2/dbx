@@ -17,7 +17,7 @@ repositories {
 }
 
 def mavenResolverVersion = '2.0.24'
-def mavenCoreVersion = '4.0.0-rc-5'
+def mavenCoreVersion = '4.0.0-rc-7'
 
 dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.4'

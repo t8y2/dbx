@@ -10137,6 +10137,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "การเปิดแผง Sidebar ขวาจะปิดแผงอื่น ปิดตัวเลือกนี้เพื่ออนุญาตหลายแผง",
     uiScale: "มาตราส่วน UI",
     uiScaleDescription: "ปรับขนาด UI ทั้งหมดสำหรับจอภาพ High-DPI การเปลี่ยนแปลงมีผลทันทีและคืนค่าเมื่อเปิดครั้งถัดไป",
+    fontSmoothing: "การเกลาฟอนต์",
+    fontSmoothingDescription: "ใช้การเกลาฟอนต์แบบ macOS (anti-aliasing) อาจดูบางหรือเบลือบนบางจอ",
     theme: "ธีม",
     cornerStyle: "รูปแบบมุม",
     backgroundImage: "รูปภาพพื้นหลัง",

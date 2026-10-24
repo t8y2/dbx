@@ -975,6 +975,8 @@ export interface EditorSettings {
   aiFontFamily: string;
   aiFontSize: number;
   uiScale: number;
+  /** macOS-style font smoothing (antialiased + grayscale); off keeps the platform default. */
+  fontSmoothing: boolean;
   theme: EditorTheme;
   backgroundImage: BackgroundImageSettings;
   customThemeColors: CustomThemeColors;
@@ -1364,6 +1366,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   aiFontFamily: AI_CONVERSATION_FONT_FAMILY_DEFAULT,
   aiFontSize: AI_CONVERSATION_FONT_SIZE_DEFAULT,
   uiScale: 1,
+  fontSmoothing: false,
   theme: "app",
   backgroundImage: defaultBackgroundImageSettings(),
   customThemeColors: { ...DEFAULT_CUSTOM_THEME_COLORS },
@@ -2037,6 +2040,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     aiFontFamily: normalizeAiConversationFontFamily(settings.aiFontFamily),
     aiFontSize: normalizeAiConversationFontSize(settings.aiFontSize),
     uiScale: normalizeUiScale(settings.uiScale),
+    fontSmoothing: settings.fontSmoothing === true,
     theme: settings.theme && EDITOR_THEME_VALUES.has(settings.theme) ? settings.theme : DEFAULT_EDITOR_SETTINGS.theme,
     customThemeColors: {
       ...DEFAULT_CUSTOM_THEME_COLORS,
@@ -2944,6 +2948,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.aiFontFamily !== undefined) editorSettings.value.aiFontFamily = normalizeAiConversationFontFamily(partial.aiFontFamily);
     if (partial.aiFontSize !== undefined) editorSettings.value.aiFontSize = normalizeAiConversationFontSize(partial.aiFontSize);
     if (partial.uiScale !== undefined) editorSettings.value.uiScale = normalizeUiScale(partial.uiScale);
+    if (partial.fontSmoothing !== undefined) editorSettings.value.fontSmoothing = partial.fontSmoothing === true;
     if (partial.backgroundImage !== undefined) editorSettings.value.backgroundImage = normalizeBackgroundImageSettings(partial.backgroundImage);
     if (partial.theme !== undefined) editorSettings.value.theme = partial.theme;
     if (partial.customThemeColors !== undefined) {

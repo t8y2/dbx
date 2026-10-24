@@ -9498,6 +9498,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "打开一个右侧面板时关闭其他面板。关闭此选项可同时显示多个面板。",
     uiScale: "界面缩放",
     uiScaleDescription: "按比例缩放整个桌面端界面，适合高清屏；修改后立即生效，并在下次启动时恢复。",
+    fontSmoothing: "字体平滑",
+    fontSmoothingDescription: "启用 macOS 风格的字体平滑渲染（抗锯齿）。部分屏幕上可能显得偏细或发虚。",
     theme: "主题",
     cornerStyle: "圆角样式",
     backgroundImage: "背景图片",

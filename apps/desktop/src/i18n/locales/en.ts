@@ -9531,6 +9531,8 @@ export default {
     exclusiveRightSidebarPanelsDescription: "Opening a right sidebar panel closes the others. Disable this to allow multiple panels.",
     uiScale: "UI Scale",
     uiScaleDescription: "Scale the entire desktop UI for high-DPI displays. Changes apply immediately and are restored on next launch.",
+    fontSmoothing: "Smooth fonts",
+    fontSmoothingDescription: "Apply macOS-style font smoothing (antialiased rendering). May look thin or blurry on some displays.",
     theme: "Theme",
     cornerStyle: "Corner style",
     backgroundImage: "Background image",

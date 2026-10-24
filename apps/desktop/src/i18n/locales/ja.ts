@@ -8192,6 +8192,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "右サイドバーのパネルを開くと他のパネルを閉じます。複数表示するには無効にします。",
     uiScale: "UIスケール",
     uiScaleDescription: "高DPIディスプレイ向けにデスクトップUI全体をスケーリングします。変更は即座に適用され、次回起動時に復元されます。",
+    fontSmoothing: "フォントスムージング",
+    fontSmoothingDescription: "macOS 風のフォントスムージング（アンチエイリアス）を適用します。環境によっては細くぼやけて見えることがあります。",
     theme: "テーマ",
     cornerStyle: "角の丸み",
     backgroundImage: "背景画像",

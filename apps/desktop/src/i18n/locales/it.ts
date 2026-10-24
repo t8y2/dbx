@@ -8164,6 +8164,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "L'apertura di un pannello laterale destro chiude gli altri. Disattiva per consentire più pannelli.",
     uiScale: "Scala UI",
     uiScaleDescription: "Scala l'intera interfaccia utente desktop per display ad alta densità (High-DPI). Le modifiche si applicano immediatamente e vengono ripristinate al prossimo avvio.",
+    fontSmoothing: "Smussamento caratteri",
+    fontSmoothingDescription: "Applica lo smussamento dei caratteri in stile macOS (antialiasing). Può apparire sottile o sfocato su alcuni schermi.",
     theme: "Tema",
     cornerStyle: "Stile degli angoli",
     backgroundImage: "Immagine di sfondo",

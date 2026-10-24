@@ -729,6 +729,7 @@ const aiTypographySaving = ref(false);
 const editTableFontFamily = ref(settingsStore.editorSettings.tableFontFamily);
 const editUiFontFamily = ref(settingsStore.editorSettings.uiFontFamily);
 const editUiScale = ref(settingsStore.editorSettings.uiScale);
+const editFontSmoothing = ref(settingsStore.editorSettings.fontSmoothing);
 const editTheme = ref(settingsStore.editorSettings.theme);
 const editBackgroundImage = ref<BackgroundImageSettings>(cloneBackgroundImageDraft(settingsStore.editorSettings.backgroundImage));
 const backgroundImageTransparencyPercent = computed(() => Math.round((1 - editBackgroundImage.value.opacity) * 100));
@@ -1189,6 +1190,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     tableFontFamily: editTableFontFamily.value,
     uiFontFamily: editUiFontFamily.value,
     uiScale: editUiScale.value,
+    fontSmoothing: editFontSmoothing.value,
     theme: editTheme.value,
     backgroundImage: editBackgroundImage.value,
     customThemes: editCustomThemes.value,
@@ -1888,6 +1890,7 @@ function syncEditorSettingsDraftFromStore() {
   editTableFontFamily.value = settingsStore.editorSettings.tableFontFamily;
   editUiFontFamily.value = settingsStore.editorSettings.uiFontFamily;
   editUiScale.value = settingsStore.editorSettings.uiScale;
+  editFontSmoothing.value = settingsStore.editorSettings.fontSmoothing;
   editTheme.value = settingsStore.editorSettings.theme;
   editBackgroundImage.value = cloneBackgroundImageDraft(settingsStore.editorSettings.backgroundImage);
   pendingBackgroundImageCleanup = null;
@@ -2070,6 +2073,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   tableFontFamily: editTableFontFamily,
   uiFontFamily: editUiFontFamily,
   uiScale: editUiScale,
+  fontSmoothing: editFontSmoothing,
   theme: editTheme,
   backgroundImage: editBackgroundImage,
   customThemes: editCustomThemes,
@@ -2720,6 +2724,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editTableFontFamily.value = DEFAULT_EDITOR_SETTINGS.tableFontFamily;
     editUiFontFamily.value = DEFAULT_EDITOR_SETTINGS.uiFontFamily;
     editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
+    editFontSmoothing.value = DEFAULT_EDITOR_SETTINGS.fontSmoothing;
+    editFontSmoothing.value = DEFAULT_EDITOR_SETTINGS.fontSmoothing;
     editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
     editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
     editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
@@ -2868,6 +2874,7 @@ function resetAllDefaults() {
   editTableFontFamily.value = DEFAULT_EDITOR_SETTINGS.tableFontFamily;
   editUiFontFamily.value = DEFAULT_EDITOR_SETTINGS.uiFontFamily;
   editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
+  editFontSmoothing.value = DEFAULT_EDITOR_SETTINGS.fontSmoothing;
   editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
   editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
@@ -8525,6 +8532,16 @@ onUnmounted(() => {
                     </div>
                   </div>
                 </template>
+              </div>
+
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="font-smoothing">{{ t("settings.fontSmoothing") }}</Label>
+                  <HelpTooltip :label="t('settings.fontSmoothing')">
+                    {{ t("settings.fontSmoothingDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="font-smoothing" v-model="editFontSmoothing" />
               </div>
 
               <div class="grid gap-3 md:grid-cols-2">

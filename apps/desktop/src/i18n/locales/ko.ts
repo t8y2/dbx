@@ -2775,6 +2775,8 @@ export default withEnglishFallback({
     invertColumnVisibility: "반전",
     resetColumnOrder: "순서 초기화",
     showAllColumns: "모두 표시",
+    showSelectedColumns: "선택 항목 표시",
+    showSelectedColumnsHint: "현재 검색과 일치하는 필드만 표시합니다.",
     viewOptions: "보기 옵션",
     resultRunDisplayMode: "결과 탭",
     resultRunDisplayList: "목록",

@@ -2640,6 +2640,8 @@ export default withEnglishFallback({
     invertColumnVisibility: "Odwróć widoczność",
     resetColumnOrder: "Przywróć kolejność",
     showAllColumns: "Pokaż wszystko",
+    showSelectedColumns: "Pokaż wybrane",
+    showSelectedColumnsHint: "Pokaż tylko pola pasujące do bieżącego wyszukiwania.",
     viewOptions: "Opcje widoku",
     resultRunDisplayMode: "Karty wyników",
     resultRunDisplayList: "Lista",

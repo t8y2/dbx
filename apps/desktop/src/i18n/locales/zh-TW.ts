@@ -2673,6 +2673,8 @@ export default withEnglishFallback({
     invertColumnVisibility: "反選",
     resetColumnOrder: "重設順序",
     showAllColumns: "顯示全部",
+    showSelectedColumns: "顯示選中",
+    showSelectedColumnsHint: "僅顯示目前搜尋符合的欄位。",
     viewOptions: "檢視選項",
     resultRunDisplayMode: "結果標籤",
     resultRunDisplayList: "清單",

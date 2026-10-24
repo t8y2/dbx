@@ -3076,6 +3076,8 @@ export default withEnglishFallback({
     invertColumnVisibility: "反选",
     resetColumnOrder: "重置顺序",
     showAllColumns: "显示全部",
+    showSelectedColumns: "显示选中",
+    showSelectedColumnsHint: "仅显示当前搜索匹配的字段。",
     viewOptions: "视图选项",
     resultRunDisplayMode: "结果标签",
     resultRunDisplayList: "列表",

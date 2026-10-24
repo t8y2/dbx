@@ -2686,6 +2686,8 @@ export default withEnglishFallback({
     invertColumnVisibility: "反転",
     resetColumnOrder: "順序をリセット",
     showAllColumns: "すべて表示",
+    showSelectedColumns: "選択項目を表示",
+    showSelectedColumnsHint: "現在の検索に一致するフィールドのみを表示します。",
     viewOptions: "表示オプション",
     resultRunDisplayMode: "実行結果",
     resultRunDisplayList: "リスト",

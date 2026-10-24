@@ -134,6 +134,7 @@ const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/Vec
 const HBaseBrowser = defineAsyncComponent(() => import("@/components/hbase/HBaseBrowser.vue"));
 const ElasticsearchJsonResponsePanel = defineAsyncComponent(() => import("@/components/common/ElasticsearchJsonResponsePanel.vue"));
 const ElasticsearchProfilePanel = defineAsyncComponent(() => import("@/components/common/ElasticsearchProfilePanel.vue"));
+const ElasticsearchResultSplitView = defineAsyncComponent(() => import("@/components/elasticsearch/ElasticsearchResultSplitView.vue"));
 const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdminConsole.vue"));
 const MqttAdminConsole = defineAsyncComponent(() => import("@/components/mqtt/MqttAdminConsole.vue"));
 const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAdminConsole.vue"));
@@ -195,6 +196,7 @@ import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect
 import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
 import { supportsTableImport } from "@/lib/database/databaseFeatureSupport";
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
+import { elasticsearchDocumentHits } from "@/lib/elasticsearch/elasticsearchDocumentHits";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
 import { elasticsearchProfileBodyForResult, parseElasticsearchProfile } from "@/lib/elasticsearch/elasticsearchProfile";
 import * as api from "@/lib/backend/api";
@@ -361,6 +363,7 @@ const columnInfoError = ref<string | undefined>(undefined);
 const dataGridRef = ref<DataGridHandle>();
 const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
 const elasticsearchJsonResponsePanelRef = ref<ElasticsearchJsonResponsePanelHandle>();
+const elasticsearchResultSplitViewRef = ref<{ focusSearch: () => boolean }>();
 const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean>; focusSearch: () => boolean }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
@@ -808,14 +811,32 @@ const canShowProfile = computed(() => {
   const body = activeElasticsearchProfileBody.value;
   return body !== null && parseElasticsearchProfile(body) !== null;
 });
-/** Toggle between the _source table and the raw JSON panel for Elasticsearch REST results. */
-const showElasticsearchRawJson = ref(false);
+/**
+ * Elasticsearch results that carry documents can be read three ways: the
+ * Kibana-style document split view (default), the _source table, and the raw
+ * JSON response. Other databases never take part in this switch.
+ */
+type ElasticsearchResultView = "documents" | "table" | "json";
+const elasticsearchResultView = ref<ElasticsearchResultView>("documents");
+const showElasticsearchRawJson = computed(() => elasticsearchResultView.value === "json");
 watch(
   () => props.activeTab.result?.elasticsearch_raw_body,
   () => {
-    showElasticsearchRawJson.value = false;
+    // Every new response starts on the document view, like Kibana does.
+    elasticsearchResultView.value = "documents";
   },
 );
+/** Search hits backing the split view; empty for every non-Elasticsearch result. */
+const activeElasticsearchDocuments = computed(() => {
+  if (activeEffectiveDatabaseType.value !== "elasticsearch" && activeEffectiveDatabaseType.value !== "easysearch") return [];
+  return elasticsearchDocumentHits(props.activeTab.result?.elasticsearch_raw_body, props.activeTab.result);
+});
+/**
+ * Kibana-style split view. Both gates must hold — an Elasticsearch-family
+ * connection AND documents in the result — so relational results keep going
+ * straight to DataGrid with no behavioural change.
+ */
+const showElasticsearchDocumentSplit = computed(() => elasticsearchResultView.value === "documents" && activeElasticsearchDocuments.value.length > 0 && !activeElasticsearchJsonResponse.value);
 const resultArchiveExporting = ref(false);
 const queryResultTransferOpen = ref(false);
 const queryResultTransferSourceTabId = ref<string>();
@@ -1519,6 +1540,7 @@ function onHandleCloseColumnPanel() {
 
 function focusSearch(target: Element | null = null): boolean {
   if (elasticsearchJsonResponsePanelRef.value?.focusSearch()) return true;
+  if (elasticsearchResultSplitViewRef.value?.focusSearch()) return true;
   if (props.activeTab.mode === "mongo") return documentBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
@@ -1594,7 +1616,7 @@ function refreshData(): boolean {
     reloadUnavailableDataTab();
     return true;
   }
-  if (activeElasticsearchJsonResponse.value) {
+  if (activeElasticsearchJsonResponse.value || showElasticsearchDocumentSplit.value) {
     // Match DataGrid's toolbar refresh intent so multi-result runs are
     // refreshed as a group instead of replacing them with the active result.
     emit("reload", props.activeTab.id, activeResultSql.value, undefined, undefined, undefined, undefined, undefined, "refresh");
@@ -1884,7 +1906,7 @@ function resumeBatchExecution(action: BatchSqlRecoveryAction) {
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
-  if (target.closest("[data-grid-root], [data-elasticsearch-json-response-root]")) return refreshData();
+  if (target.closest("[data-grid-root], [data-elasticsearch-json-response-root], [data-elasticsearch-documents-root]")) return refreshData();
   if (canReloadUnavailableDataTab(props.activeTab)) return refreshData();
   return false;
 }
@@ -2340,7 +2362,7 @@ defineExpose({
                 />
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
-                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
+                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && !showElasticsearchDocumentSplit">
                   <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" />
                   <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
                     <Button
@@ -2373,7 +2395,7 @@ defineExpose({
                     </Button>
                   </LightTooltip>
                 </template>
-                <Popover v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse" v-model:open="dataGridViewOptionsOpen">
+                <Popover v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchDocumentSplit" v-model:open="dataGridViewOptionsOpen">
                   <PopoverTrigger as-child>
                     <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                       <Wrench class="h-4 w-4" />
@@ -2856,7 +2878,18 @@ defineExpose({
 
             <template v-else>
               <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
-              <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
+              <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="elasticsearchResultView = 'table'" />
+              <ElasticsearchResultSplitView
+                v-else-if="showElasticsearchDocumentSplit"
+                ref="elasticsearchResultSplitViewRef"
+                class="flex-1 min-h-0"
+                :documents="activeElasticsearchDocuments"
+                :loading="activeResultIsLoading"
+                :can-paginate="!!activeTab.resultPageSql && !activeTab.isExecuting"
+                :page-offset="activeTab.resultPageOffset ?? 0"
+                :page-limit="activeTab.resultPageLimit ?? 0"
+                @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy, appendResult)"
+              />
               <DataGrid
                 v-else-if="activeTab.result && hasTabularResult && (!activeTab.isExecuting || !isQueryExecutionErrorResult(activeTab.result))"
                 ref="dataGridRef"
@@ -2962,16 +2995,36 @@ defineExpose({
                     @select-result-mode="setRedisResultViewMode"
                   />
                   <template v-if="activeElasticsearchRawBody">
-                    <div class="mx-1 h-4 w-px bg-border" />
-                    <button
-                      type="button"
-                      class="inline-flex h-5 shrink-0 items-center rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
-                      :class="showElasticsearchRawJson ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
-                      :aria-pressed="showElasticsearchRawJson"
-                      @click="showElasticsearchRawJson = !showElasticsearchRawJson"
-                    >
-                      {{ showElasticsearchRawJson ? t("tabs.tableData") : t("redis.jsonView") }}
-                    </button>
+                    <div class="mx-1 h-4 w-px shrink-0 bg-border" />
+                    <div class="inline-flex h-6 shrink-0 items-center rounded-md border bg-muted/40 p-0.5" role="group" :aria-label="t('esResult.viewSwitch')">
+                      <button
+                        type="button"
+                        class="h-5 rounded-[3px] px-2 text-xs leading-none transition-colors"
+                        :class="elasticsearchResultView === 'documents' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                        :aria-pressed="elasticsearchResultView === 'documents'"
+                        @click="elasticsearchResultView = 'documents'"
+                      >
+                        {{ t("esResult.documentsTab") }}
+                      </button>
+                      <button
+                        type="button"
+                        class="h-5 rounded-[3px] px-2 text-xs leading-none transition-colors"
+                        :class="elasticsearchResultView === 'table' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                        :aria-pressed="elasticsearchResultView === 'table'"
+                        @click="elasticsearchResultView = 'table'"
+                      >
+                        {{ t("tabs.tableData") }}
+                      </button>
+                      <button
+                        type="button"
+                        class="h-5 rounded-[3px] px-2 text-xs leading-none transition-colors"
+                        :class="elasticsearchResultView === 'json' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                        :aria-pressed="elasticsearchResultView === 'json'"
+                        @click="elasticsearchResultView = 'json'"
+                      >
+                        {{ t("redis.jsonView") }}
+                      </button>
+                    </div>
                   </template>
                   <template v-else-if="canShowProfile">
                     <div class="mx-1 h-4 w-px bg-border" />

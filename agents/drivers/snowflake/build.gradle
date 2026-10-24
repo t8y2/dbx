@@ -1,6 +1,6 @@
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'net.snowflake:snowflake-jdbc:3.22.0'
+    implementation 'net.snowflake:snowflake-jdbc:3.28.0'
 }
 
 tasks.named('shadowJar') {

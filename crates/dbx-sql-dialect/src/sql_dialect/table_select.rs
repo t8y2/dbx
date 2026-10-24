@@ -1028,15 +1028,20 @@ pub(super) fn build_db2_table_select_page_sql(
     )
 }
 
+/// Whether a plain-PostgreSQL connection's reported server version identifies
+/// a Greenplum-lineage engine whose segments cannot retrieve system columns.
+/// Covers both Greenplum and its Cloudberry fork, whose `version()` reports
+/// `PostgreSQL 14.4 (Cloudberry Database ...)` without the "greenplum" word.
+fn is_greenplum_server(server_version: Option<&str>) -> bool {
+    server_version.is_some_and(|version| {
+        let version = version.to_ascii_lowercase();
+        version.contains("greenplum") || version.contains("cloudberry")
+    })
+}
+
 /// Neo4j 5.0 replaced `id()` with `elementId()`, and servers before that only know `id()`, so the
 /// generated Cypher has to pick the spelling the connected server accepts. An unknown version keeps
 /// `elementId()`, which is what every caller without connection metadata got before.
-/// Whether a plain-PostgreSQL connection's reported server version identifies
-/// a Greenplum-lineage engine whose segments cannot retrieve system columns.
-fn is_greenplum_server(server_version: Option<&str>) -> bool {
-    server_version.is_some_and(|version| version.to_ascii_lowercase().contains("greenplum"))
-}
-
 pub fn neo4j_element_id_function(server_version: Option<&str>) -> &'static str {
     match neo4j_major_version(server_version) {
         Some(major) if major < NEO4J_ELEMENT_ID_MIN_MAJOR_VERSION => NEO4J_LEGACY_ELEMENT_ID_FUNCTION,

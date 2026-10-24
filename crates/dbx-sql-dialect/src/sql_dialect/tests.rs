@@ -1477,9 +1477,9 @@ fn greenplum_servers_do_not_receive_the_system_column_locator() {
     });
     assert_eq!(greenplum, "SELECT * FROM \"public\".\"ao_table\" LIMIT 20;");
 
-    // Cloudberry's version carries the same Greenplum lineage.
+    // Real Cloudberry `version()` never contains the "greenplum" word.
     let cloudberry = build_table_data_select_sql(TableDataSelectSqlOptions {
-        server_version: Some("Cloudberry Database 1.1.0 (based on Greenplum Database 6)".to_string()),
+        server_version: Some("PostgreSQL 14.4 (Cloudberry Database 1.6.0 build 6f2c4a1)".to_string()),
         ..base.clone()
     });
     assert_eq!(cloudberry, "SELECT * FROM \"public\".\"ao_table\" LIMIT 20;");

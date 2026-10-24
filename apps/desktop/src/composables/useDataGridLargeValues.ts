@@ -350,7 +350,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
       limit: requests.size,
       offset: 0,
-      includeRowId: shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(options.connectionId.value && rowIdLocatorUnsupported(options.connectionId.value)),
+      includeRowId: shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(options.connectionId.value ? rowIdLocatorUnsupported(options.connectionId.value) : false),
     });
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
     const connection = options.getConnectionConfig(options.connectionId.value!);
@@ -522,7 +522,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
       limit: requests.length,
       offset: 0,
-      includeRowId: shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(options.connectionId.value && rowIdLocatorUnsupported(options.connectionId.value)),
+      includeRowId: shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(options.connectionId.value ? rowIdLocatorUnsupported(options.connectionId.value) : false),
     });
     const connection = options.connectionId.value ? options.getConnectionConfig(options.connectionId.value!) : undefined;
     const results = await api.executeMulti(options.connectionId.value!, options.executionDatabase.value, sql, undefined, options.uuid(), {

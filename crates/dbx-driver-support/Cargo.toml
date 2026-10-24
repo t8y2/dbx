@@ -13,15 +13,15 @@ test-support = ["dbx-platform/test-support"]
 dbx-platform = { path = "../dbx-platform" }
 dbx-types = { path = "../dbx-types", default-features = false }
 bytes = "1"
-base64 = "0.22"
+base64 = "0.23"
 glob = "0.3"
 log = "0.4"
 portpicker = "0.1.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset", "socks"] }
-russh = "0.60"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-tls", "charset", "socks"] }
+russh = "0.64"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
-sqlparser = { version = "0.62.0", features = ["visitor"] }
+sqlparser = { version = "0.63.0", features = ["visitor"] }
 tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4"] }

@@ -40,7 +40,10 @@ describe("connectionStore sidebar table storage", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listInstalledAgents: vi.fn().mockResolvedValue([]),
-      listObjects: vi.fn().mockResolvedValue([]),
+      listObjects: vi.fn().mockResolvedValue([
+        { name: "EXISTING_TABLE", schema: "APP", object_type: "TABLE" },
+        { name: "NEW_TABLE", schema: "APP", object_type: "TABLE" },
+      ]),
       listObjectStatistics,
       listTables,
       loadSchemaCache: vi.fn().mockResolvedValue(null),

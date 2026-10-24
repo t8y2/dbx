@@ -216,6 +216,34 @@ GET /api/schema/columns?connection_id=CONNECTION_ID&database=app&schema=&table=u
 Cookie: dbx_session=...
 ```
 
+### 读取 Oracle 系触发器
+
+不需要先知道所属表，可按触发器类型发现对象。精确适配器先筛选，再分页：
+
+```http
+GET /api/schema/objects?connection_id=CONNECTION_ID&database=demo&schema=APP&object_types=TRIGGER&filter=audit&limit=100&offset=0&identity_mode=exact
+```
+
+所属对象入口使用真实 parent owner/name；返回的触发器 owner 可以不同：
+
+```http
+GET /api/schema/triggers?connection_id=CONNECTION_ID&database=demo&schema=DATA&table=ORDERS&identity_mode=exact
+```
+
+完整定义使用触发器自身的 owner/name。此路由的 `table` 参数是源码对象名，不是父表：
+
+```http
+GET /api/schema/object-source?connection_id=CONNECTION_ID&database=demo&schema=APP&table=AUDIT_ORDERS&object_type=TRIGGER&identity_mode=exact
+```
+
+三项接口均接受可选 `identity_mode=exact` 和 `catalog`。省略模式时保持旧读取合同；精确模式保留原始 owner/name，空格、引号等字符应 URL 编码，不应 trim 或转换大小写。`catalog` 透传给实际 provider，不替代 `schema`。
+
+对象和源码响应可包含 `trigger.oracle_metadata`，所属对象列表各项直接包含 `oracle_metadata`。版本 1 提供已核实的 engine、原始身份、作用域、独立 parent、字符串 object ID 及逐字段 `reads` 状态。`enabled` 是启用状态，`valid` 是独立读取的对象有效性；Schema/Database 作用域不填假父表。
+
+exact 源码查询成功且零行时，返回 `reads.identity.state="empty"`，保留已核实的引擎和原始目标。这只表示当前可见范围内无匹配对象，不推断全库不存在；查询失败和旧 provider 缺契约不能产生该证明。新建仍使用不带 REPLACE 的 CREATE。
+
+源码元数据另含来源、格式、完整性及带行列的编译错误。缺失或 null 错误列表表示未知，不是成功读到零错误。不完整或失败的读取不能作为替换基线；保留草稿，补齐字典访问或更新 provider 后重读。旧 Agent/插件仍可按旧模式使用，但缺少新元数据时不能证明 exact 身份。`DBMS_METADATA` 可能附带同目标的状态语句；导出原文和单定义保存内容分别处理。
+
 其他常用 Schema 路由包括：
 
 - `/api/schema/databases`
@@ -256,6 +284,14 @@ Content-Type: application/json
 | `/api/query/execute-batch` | 执行语句列表 |
 | `/api/query/cancel` | 取消正在执行的查询 |
 | `/api/query/build-table-select-sql` | 生成表浏览 SQL |
+
+### 准备 Oracle 系触发器的单个定义
+
+`POST /api/query/prepare-oracle-trigger-sql` 的请求体为 `{ "input": ... }`。input 包含 `databaseType`（`oracle`、`oceanbase-oracle` 或 `dameng`）、原始 `owner`/`name`、`source` 和 `purpose`（`inspect`、`create` 或 `replace`）。返回单个规范化 `definition`、解析后的 `header`，以及独立的内联/导出启用状态。`comparisonSource` 仅用于读回比较：规范化已确认的声明包装，保留头部其余内容、正文、注释及字符串换行；执行时使用 `definition`。该接口只准备 SQL；核对当前对象、权限和并发变化后，沿正常查询接口执行。
+
+创建和替换还需传入已核实的 `binding`：`scope` 为 `TABLE`、`VIEW`、`SCHEMA`、`DATABASE` 或 `TIMER`；适用时带真实 parent `owner`/`name`，Oracle 容器作用域另带已核实的 `pluggable`。省略的 ON 限定只从该绑定补全。替换还需传入期望保全的 `enabled`。新建生成不带 OR REPLACE 的 CREATE；Oracle/已验证 OB 将状态保全在定义内，DM 返回的 `requiresStateRestore` 表示需要另行预览和核实原生状态步骤。`allowExportAppendix` 仅用于查看可信元数据导出；写入用途拒绝该选项及额外 SQL。
+
+`structuredEditable` 表示完整定义的头部能否由时机、事件和正文表单无损表达。值为 false 或缺失时，结构修改须使用完整源码入口；只有 `TRIGGER_BODY` 不能证明可以安全重建定义。
 
 ## Redis API
 

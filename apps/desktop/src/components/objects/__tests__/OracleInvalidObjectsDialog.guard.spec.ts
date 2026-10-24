@@ -15,7 +15,7 @@ vi.mock("@/lib/backend/api", () => ({
   unlockConnectionWrites: mocks.unlock,
   lockConnectionWrites: mocks.lock,
 }));
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string, values?: Record<string, unknown>) => (values ? `${key}:${Object.values(values).join(",")}` : key) }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string, values?: Record<string, unknown>) => (values ? `${key}:${Object.values(values).join(",")}` : key) }) }));
 
 function passthrough(tag: string) {
   return defineComponent({

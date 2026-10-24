@@ -9,6 +9,11 @@ use crate::sql::{oracle_plsql_block_is_complete, split_sql_statements_for_databa
 use crate::types::ObjectSourceKind;
 
 mod oracle_indexes;
+mod oracle_trigger;
+pub use oracle_trigger::{
+    prepare_oracle_trigger_sql, OracleTriggerSqlBinding, OracleTriggerSqlHeader, OracleTriggerSqlInput,
+    OracleTriggerSqlPurpose, PreparedOracleTriggerSql,
+};
 mod oracle_routines;
 pub use oracle_indexes::{
     extract_oracle_table_triggers, oracle_index_ddl_sources, oracle_table_created_index_identities,
@@ -617,6 +622,9 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
 }
 
 pub fn validate_oracle_executable_object_source(input: OracleObjectSourceValidationInput) -> Result<(), String> {
+    if input.object_type == ObjectSourceKind::Trigger {
+        return oracle_trigger::validate(input);
+    }
     if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
         || !matches!(
             input.object_type,

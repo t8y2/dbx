@@ -10378,6 +10378,7 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
             valid: None,
             comment: None,
             created_at: None,
+            oracle_metadata: None,
             statement: None,
         })
         .collect())

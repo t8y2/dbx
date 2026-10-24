@@ -65,6 +65,27 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oracleTrigger: {
+    errorPositionUnavailable: "Sorgente aperto. Impossibile verificare la posizione dell'errore; controllare la riga e la colonna indicate.",
+    reconcileStructure: "Riconcilia le modifiche applicate",
+    reconcileConfirm: "Rileggere la struttura attuale, conservare le modifiche desiderate e riconciliare i passaggi completati senza rieseguire il vecchio SQL?",
+    editFullSource: "Modifica sorgente completo",
+    refreshDraft: "Ricarica questo trigger",
+    refreshDraftConfirm: "Ricaricare scartando solo la bozza strutturata di questo trigger? Le altre bozze della struttura della tabella verranno conservate.",
+    discardSourceConfirm: "Scartare le modifiche non salvate a questo sorgente?",
+    scope: "Ambito del trigger",
+    parentOwner: "Schema della tabella/vista",
+    parentName: "Tabella/vista associata",
+    scopeOwner: "Schema degli eventi",
+    obSchemaUnsupported: "Questa versione di OB non offre un modello di trigger Schema: il modello provato è stato rifiutato.",
+    obDatabaseUnknown: "Il supporto dei trigger DATABASE non è stato verificato.",
+    nonAtomic: "Le istruzioni DDL vengono confermate separatamente. Il trigger può essere attivo tra la creazione e la disattivazione. Un errore interrompe i passaggi successivi, senza tentativi automatici.",
+    unknown: "Sconosciuto",
+    verifyReadOnly: "Verifica senza scrivere",
+    reloadBaseline: "Conserva la bozza e ricarica il trigger completo prima di visualizzare una nuova anteprima.",
+    runFullDefinition: "Questa scheda può eseguire solo la definizione completa del trigger. Usa una normale scheda di query per altro SQL.",
+    executionSchema: "Schema di esecuzione",
+  },
   objectRelations: {
     title: "Relazioni",
     foreignKeys: "Chiavi esterne",

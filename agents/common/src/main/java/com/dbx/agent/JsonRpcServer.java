@@ -253,6 +253,8 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_LIST_OBJECTS.equals(method)) {
             switchCatalog(params);
+            MetadataReadOptions options = metadataReadOptions(params);
+            if (options.exact()) return agent.listObjects(params.get("schema").getAsString(), metadataListConstraints(params), options);
             return agent.listObjects(params.get("schema").getAsString(), metadataListConstraints(params));
         }
         if (AgentProtocol.METHOD_LIST_DATA_TYPES.equals(method)) {
@@ -265,13 +267,16 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_GET_OBJECT_SOURCE.equals(method)) {
             switchCatalog(params);
+            MetadataReadOptions options = metadataReadOptions(params);
             boolean includeOrigin = params.has("include_source_origin") && params.get("include_source_origin").getAsBoolean();
             String schema = params.get("schema").getAsString();
             String name = params.get("name").getAsString();
             String objectType = params.get("object_type").getAsString();
-            ObjectSource source = includeOrigin
-                ? agent.getObjectSourceWithOrigin(schema, name, objectType)
-                : agent.getObjectSource(schema, name, objectType);
+            ObjectSource source = options.exact()
+                ? agent.getObjectSource(schema, name, objectType, options)
+                : includeOrigin
+                    ? agent.getObjectSourceWithOrigin(schema, name, objectType)
+                    : agent.getObjectSource(schema, name, objectType);
             if (includeOrigin) {
                 JsonObject result = gson.toJsonTree(source).getAsJsonObject();
                 if (source.getSourceOrigin() != null) {
@@ -303,6 +308,8 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_LIST_TRIGGERS.equals(method)) {
             switchCatalog(params);
+            MetadataReadOptions options = metadataReadOptions(params);
+            if (options.exact()) return agent.listTriggers(params.get("schema").getAsString(), params.get("table").getAsString(), options);
             return agent.listTriggers(params.get("schema").getAsString(), params.get("table").getAsString());
         }
         if (AgentProtocol.METHOD_LIST_CONSTRAINTS.equals(method)) {
@@ -667,6 +674,15 @@ public final class JsonRpcServer {
             stringListOrNull(params, "object_types"),
             booleanOrDefault(params, "exact_identity", false)
         );
+    }
+
+    private static MetadataReadOptions metadataReadOptions(JsonObject params) {
+        String mode = stringOrNull(params, "identity_mode");
+        String alias = stringOrNull(params, "identityMode");
+        if (mode != null && alias != null && !mode.equals(alias)) {
+            throw new IllegalArgumentException("Conflicting metadata identity modes");
+        }
+        return MetadataReadOptions.fromIdentityMode(mode != null ? mode : alias);
     }
 
     private static int intOrDefault(JsonObject object, String key, int defaultValue) {

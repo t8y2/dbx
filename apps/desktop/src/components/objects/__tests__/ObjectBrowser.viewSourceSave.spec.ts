@@ -87,7 +87,7 @@ vi.mock("@/components/objects/OracleInvalidObjectsDialog.vue", async () => {
   return {
     default: defineComponent({
       props: { open: Boolean },
-      emits: ["update:open", "open-source", "compile-finished"],
+      emits: ["update:open", "open-source", "compile-finished", "trigger-result"],
       setup(props, { emit }) {
         return () =>
           props.open
@@ -341,9 +341,11 @@ describe("ObjectBrowser view source save", () => {
       if (prefix === ddlPrefix) await new Promise<void>((resolve) => (release = resolve));
     });
     const { host } = await mountOracleBrowserWithSchema();
-    const scope = { connectionId: oracleConnection.id, database: "ORCL", schema: "APP_A", exactIdentity: true };
+    const scope = { connectionId: oracleConnection.id, database: "ORCL", schema: "APP_A", oracleTriggerContract: 1 as const, exactIdentity: true };
     expect(getCachedObjectBrowserRows(scope)).toBeDefined();
+    expect(getCachedObjectBrowserRows({ connectionId: oracleConnection.id, database: "ORCL", schema: "APP_A" })).toBeUndefined();
     expect(getCachedObjectBrowserRows({ ...scope, exactIdentity: false })).toBeUndefined();
+    expect(getCachedObjectBrowserRows({ ...scope, oracleTriggerContract: undefined })).toBeUndefined();
     const listCalls = mocks.listObjects.mock.calls.length;
     [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("processList.oracleInvalidObjects.title"))?.click();
     await nextTick();

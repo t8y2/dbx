@@ -483,16 +483,19 @@ type metadataListConstraints struct {
 	Limit         int
 	Offset        int
 	ObjectTypes   []string
+	Exact         bool
 	ExactIdentity bool
 }
 
 type objectInfo struct {
-	Name         string  `json:"name"`
-	ObjectType   string  `json:"object_type"`
-	Schema       string  `json:"schema"`
-	Comment      *string `json:"comment"`
-	ParentSchema *string `json:"parent_schema,omitempty"`
-	ParentName   *string `json:"parent_name,omitempty"`
+	Name         string       `json:"name"`
+	ObjectType   string       `json:"object_type"`
+	Schema       string       `json:"schema"`
+	Comment      *string      `json:"comment"`
+	Valid        *bool        `json:"valid,omitempty"`
+	ParentSchema *string      `json:"parent_schema,omitempty"`
+	ParentName   *string      `json:"parent_name,omitempty"`
+	Trigger      *triggerInfo `json:"trigger,omitempty"`
 }
 
 type columnInfo struct {
@@ -554,11 +557,14 @@ type foreignKeyInfo struct {
 }
 
 type triggerInfo struct {
-	Name      string  `json:"name"`
-	Event     string  `json:"event"`
-	Timing    string  `json:"timing"`
-	Statement *string `json:"statement,omitempty"`
-	Enabled   *bool   `json:"enabled,omitempty"`
+	Name           string                 `json:"name"`
+	Event          string                 `json:"event"`
+	Timing         string                 `json:"timing"`
+	Statement      *string                `json:"statement,omitempty"`
+	Enabled        *bool                  `json:"enabled,omitempty"`
+	Valid          *bool                  `json:"valid,omitempty"`
+	Condition      *string                `json:"condition,omitempty"`
+	OracleMetadata *oracleTriggerMetadata `json:"oracle_metadata,omitempty"`
 }
 
 // constraintInfo represents primary key, unique, and check constraints for a
@@ -968,7 +974,13 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return result, false, err
 	case "list_objects":
 		schema := stringParam(params, "schema")
-		result, err := s.listObjects(schema, metadataListConstraintsFromParams(params))
+		exact, err := exactMetadataReadParam(params)
+		if err != nil {
+			return nil, false, err
+		}
+		constraints := metadataListConstraintsFromParams(params)
+		constraints.Exact = exact
+		result, err := s.listObjects(schema, constraints)
 		return result, false, err
 	case "completion_assistant_search_v1":
 		var request completionAssistantRequest
@@ -991,6 +1003,14 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		schema := stringParam(params, "schema")
 		name := stringParam(params, "name")
 		objectType := stringParam(params, "object_type")
+		exact, err := exactMetadataReadParam(params)
+		if err != nil {
+			return nil, false, err
+		}
+		if exact && strings.EqualFold(objectType, "TRIGGER") {
+			source, err := s.getExactTriggerSource(schema, name)
+			return source, false, err
+		}
 		source, err := s.getObjectSource(schema, name, objectType)
 		if err == nil && boolParam(params, "include_source_origin") {
 			switch strings.ToUpper(objectType) {
@@ -1054,6 +1074,14 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "list_triggers":
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
+		exact, err := exactMetadataReadParam(params)
+		if err != nil {
+			return nil, false, err
+		}
+		if exact {
+			result, err := s.listExactTriggers(schema, table)
+			return result, false, err
+		}
 		result, err := s.listTriggersWithIdentity(schema, table, boolParam(params, "exact_identity"))
 		return result, false, err
 	case "get_explain_info":
@@ -1912,6 +1940,9 @@ SELECT o.OBJECT_NAME,
        CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :4 AND o.OBJECT_TYPE IN ('TYPE', 'TYPE BODY')`
+	if constraints.Exact {
+		baseSQL = strings.Replace(baseSQL, "'PACKAGE BODY', 'INDEX')", "'PACKAGE BODY', 'INDEX', 'TRIGGER')", 1)
+	}
 	return oracleConstrainedMetadataListQuery(
 		baseSQL,
 		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME",
@@ -1923,8 +1954,12 @@ WHERE o.OWNER = :4 AND o.OBJECT_TYPE IN ('TYPE', 'TYPE BODY')`
 }
 
 func oracleListSessionUserObjectsQuery(constraints metadataListConstraints) oracleMetadataListQuery {
+	baseSQL := oracleListObjectsSessionUserBaseSQL
+	if constraints.Exact {
+		baseSQL = strings.Replace(baseSQL, "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY')", "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY', 'TRIGGER')", 1)
+	}
 	return oracleConstrainedMetadataListQuery(
-		oracleListObjectsSessionUserBaseSQL,
+		baseSQL,
 		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME",
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
@@ -2047,7 +2082,7 @@ func (s *server) listTables(schema string, constraints metadataListConstraints) 
 
 func (s *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
 	rawTypeOwner := schema
-	schema, err := s.metadataSchema(schema, constraints.ExactIdentity)
+	schema, err := s.metadataSchema(schema, constraints.Exact || constraints.ExactIdentity)
 	if err != nil {
 		return nil, err
 	}
@@ -2055,13 +2090,13 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		rawTypeOwner = schema
 	}
 	query := oracleListObjectsQueryWithTypeOwner(schema, rawTypeOwner, constraints)
-	useSessionUser := rawTypeOwner == schema && s.metadataSchemaIsSessionUser(schema, constraints.ExactIdentity)
+	useSessionUser := !constraints.Exact && rawTypeOwner == schema && s.metadataSchemaIsSessionUser(schema, constraints.ExactIdentity)
 	if useSessionUser {
 		query = oracleListSessionUserObjectsQuery(constraints)
 	}
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
-		if isOraclePGALimitError(err) && !constraints.ExactIdentity && !metadataIncludesIndexes(constraints.ObjectTypes) {
+		if isOraclePGALimitError(err) && !constraints.Exact && !constraints.ExactIdentity && !metadataIncludesIndexes(constraints.ObjectTypes) {
 			return []objectInfo{}, nil
 		}
 		return nil, err
@@ -2079,7 +2114,14 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		}
 		result = append(result, item)
 	}
-	return emptyIfNil(result), rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.closeRows(rows)
+	if constraints.Exact {
+		s.enrichExactTriggerObjects(result, schema)
+	}
+	return emptyIfNil(result), nil
 }
 
 func metadataIncludesIndexes(objectTypes []string) bool {

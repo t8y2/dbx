@@ -183,6 +183,7 @@ import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { DatabaseStructureSearchSql, DatabaseStructureSearchSqlOptions } from "@/lib/database/databaseStructureSearch";
 import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput, FingerprintOracleRoutineObjectSourceInput, RewriteOracleRoutineReferencesInput, ValidateOracleExecutableObjectSourceInput } from "@/lib/table/objectSourceEditor";
+import type { OracleTriggerSqlInput, PreparedOracleTriggerSql } from "@/lib/database/oracleTriggerSql";
 import type { OracleTableReferenceRewriteInput, OracleViewRenameSource, OracleViewRenameSourceInput, OracleViewRenameSourceReview } from "@/types/database";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
@@ -1877,8 +1878,9 @@ export async function listObjects(
   catalog?: string,
   tableNameFilter?: import("@/types/database").TableNameFilter,
   executionId?: string,
-  exactIdentity?: boolean,
+  options?: boolean | import("@/types/database").MetadataReadOptions,
 ): Promise<ObjectInfo[]> {
+  const readOptions = typeof options === "object" ? options : undefined;
   return invoke("list_objects", {
     connectionId,
     database,
@@ -1887,10 +1889,11 @@ export async function listObjects(
     filter,
     limit,
     offset,
-    catalog,
+    catalog: readOptions?.catalog ?? catalog,
     tableNameFilter,
     executionId,
-    ...(exactIdentity ? { exactIdentity: true } : {}),
+    ...(readOptions?.identityMode ? { identityMode: readOptions.identityMode } : {}),
+    ...(options === true ? { exactIdentity: true } : {}),
   });
 }
 
@@ -1906,7 +1909,7 @@ export async function completionAssistantSearch(request: CompletionAssistantRequ
   return invoke("completion_assistant_search", { request });
 }
 
-export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string): Promise<ObjectSource> {
+export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string, options?: import("@/types/database").MetadataReadOptions): Promise<ObjectSource> {
   return invoke("get_object_source", {
     connectionId,
     database,
@@ -1915,6 +1918,8 @@ export async function getObjectSource(connectionId: string, database: string, sc
     objectType,
     signature,
     relationName,
+    ...(options?.identityMode ? { identityMode: options.identityMode } : {}),
+    ...(options?.catalog !== undefined ? { catalog: options.catalog } : {}),
   });
 }
 
@@ -2508,6 +2513,10 @@ export async function validateOracleExecutableObjectSource(input: ValidateOracle
   return invoke("validate_oracle_executable_object_source", { input });
 }
 
+export async function prepareOracleTriggerSql(input: OracleTriggerSqlInput): Promise<PreparedOracleTriggerSql> {
+  return invoke("prepare_oracle_trigger_sql", { input });
+}
+
 export async function fingerprintOracleRoutineObjectSource(input: FingerprintOracleRoutineObjectSourceInput): Promise<string> {
   return invoke("fingerprint_oracle_routine_object_source", { input });
 }
@@ -2749,14 +2758,16 @@ export async function listForeignKeysForDatabase(connectionId: string, database:
   return invoke("list_foreign_keys_for_database", { connectionId, database, schema, catalog, executionId });
 }
 
-export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<TriggerInfo[]> {
+export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string, options?: boolean | import("@/types/database").MetadataReadOptions): Promise<TriggerInfo[]> {
+  const readOptions = typeof options === "object" ? options : undefined;
   return invoke("list_triggers", {
     connectionId,
     database,
     schema,
     table,
-    catalog,
-    ...(exactIdentity ? { exactIdentity: true } : {}),
+    catalog: readOptions?.catalog ?? catalog,
+    ...(readOptions?.identityMode ? { identityMode: readOptions.identityMode } : {}),
+    ...(options === true ? { exactIdentity: true } : {}),
   });
 }
 

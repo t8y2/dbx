@@ -880,7 +880,16 @@ public final class DbxJdbcPlugin {
                 nonNegativeInt(params, "offset", 0),
                 optionalStringList(params, "object_types"), exactIdentity
             );
-            case "listObjects", "list_objects" -> listObjects(
+            case "listObjects", "list_objects" -> exactMetadataRead(params) ? listTriggerObjects(
+                connection,
+                database,
+                triggerMetadataText(params, "schema", false),
+                optionalText(params, "filter"),
+                nonNegativeInt(params, "limit", 0),
+                nonNegativeInt(params, "offset", 0),
+                optionalStringList(params, "object_types"),
+                true
+            ) : listObjects(
                 connection,
                 database,
                 metadataText(params, "schema", exactIdentity),
@@ -889,6 +898,8 @@ public final class DbxJdbcPlugin {
                 nonNegativeInt(params, "offset", 0),
                 optionalStringList(params, "object_types"), exactIdentity
             );
+            case "listTriggers", "list_triggers" -> listTriggers(connection,
+                triggerMetadataText(params, "schema", false), triggerMetadataText(params, "table", true), exactMetadataRead(params));
             case "listIndexes", "list_indexes" -> listIndexes(
                 connection,
                 database,
@@ -896,7 +907,14 @@ public final class DbxJdbcPlugin {
                 metadataText(params, "table", exactIdentity), exactIdentity
             );
             case "listDataTypes", "list_data_types" -> listDataTypes(connection, database);
-            case "getObjectSource", "get_object_source" -> getObjectSource(
+            case "getObjectSource", "get_object_source" -> exactMetadataRead(params) ? getTriggerObjectSource(
+                connection,
+                database,
+                triggerMetadataText(params, "schema", false),
+                triggerMetadataText(params, "name", true),
+                requireText(params, "object_type"),
+                true
+            ) : getObjectSource(
                 connection,
                 database,
                 metadataText(params, "schema", exactIdentity),
@@ -2907,6 +2925,27 @@ public final class DbxJdbcPlugin {
             appendTables(result, meta, null, schemaPattern, types, filter, limit, offset);
         }
         return result;
+    }
+
+    private static JsonNode listTriggerObjects(JsonNode connection, String database, String schema, String filter,
+                                        int limit, int offset, List<String> objectTypes, boolean exact) throws SQLException {
+        if (!exact) return listObjects(connection, database, schema, filter, limit, offset, objectTypes, false);
+        Connection conn = openConnection(connection);
+        OracleTriggerMetadataReader.Profile profile = OracleTriggerMetadataReader.profile(conn);
+        if (profile == null) throw new SQLFeatureNotSupportedException("Exact Oracle-family trigger metadata is unavailable for the connected product");
+        return new OracleTriggerMetadataReader(conn, profile).listObjects(schema, filter, limit, offset, objectTypes);
+    }
+
+    private static JsonNode listTriggers(JsonNode connection, String schema, String table, boolean exact) throws SQLException {
+        Connection conn = openConnection(connection);
+        OracleTriggerMetadataReader.Profile profile = OracleTriggerMetadataReader.profile(conn);
+        if (profile == null) {
+            if (exact) throw new SQLFeatureNotSupportedException("Exact Oracle-family trigger metadata is unavailable for the connected product");
+            return MAPPER.createArrayNode();
+        }
+        ArrayNode triggers = new OracleTriggerMetadataReader(conn, profile).listTriggers(exact ? schema : oracleEffectiveSchema(conn, schema), table);
+        if (!exact) triggers.forEach(trigger -> ((ObjectNode) trigger).remove("oracle_metadata"));
+        return triggers;
     }
 
     private static JsonNode listObjects(
@@ -5311,6 +5350,15 @@ public final class DbxJdbcPlugin {
         return result;
     }
 
+    private static JsonNode getTriggerObjectSource(JsonNode connection, String database, String schema, String name, String objectType, boolean exact)
+        throws SQLException {
+        if (!exact || !"TRIGGER".equalsIgnoreCase(objectType)) return getObjectSource(connection, database, schema, name, objectType, false);
+        Connection conn = openConnection(connection);
+        OracleTriggerMetadataReader.Profile profile = OracleTriggerMetadataReader.profile(conn);
+        if (profile == null) throw new SQLFeatureNotSupportedException("Exact Oracle-family trigger metadata is unavailable for the connected product");
+        return new OracleTriggerMetadataReader(conn, profile).source(schema, name);
+    }
+
     private static JsonNode getObjectSource(JsonNode connection, String database, String schema, String name, String objectType)
         throws SQLException {
         return getObjectSource(connection, database, schema, name, objectType, false);
@@ -6303,6 +6351,27 @@ public final class DbxJdbcPlugin {
         } else {
             node.putNull(field);
         }
+    }
+
+    private static boolean exactMetadataRead(JsonNode params) {
+        JsonNode mode = params.get("identity_mode"), alias = params.get("identityMode");
+        if (mode == null || mode.isNull()) mode = alias;
+        if (mode == null || mode.isNull()) return false;
+        if (!mode.isTextual() || !mode.asText().equals("exact") || alias != null && !alias.isNull() && !mode.equals(alias)) {
+            throw new IllegalArgumentException("Unsupported or conflicting metadata identity mode");
+        }
+        return true;
+    }
+
+    private static String triggerMetadataText(JsonNode params, String field, boolean required) {
+        if (!exactMetadataRead(params)) return required ? requireText(params, field) : optionalText(params, field);
+        JsonNode value = params.get(field);
+        if (value == null || value.isNull()) {
+            if (required) throw new IllegalArgumentException(field + " is required.");
+            return null;
+        }
+        if (!value.isTextual() || required && value.asText().isEmpty()) throw new IllegalArgumentException(field + " must be a non-empty string.");
+        return value.asText();
     }
 
     private static String requireText(JsonNode node, String field) {

@@ -2530,10 +2530,7 @@ impl DbxMcpServer {
         if safety == RedisCommandSafety::Blocked && !permissions.allow_dangerous {
             return tool_error(
                 "REDIS_COMMAND_BLOCKED",
-                format!(
-                    "Dangerous Redis command \"{}\" is disabled in DBX MCP settings.",
-                    cmd_name
-                ),
+                format!("Dangerous Redis command \"{}\" is disabled in DBX MCP settings.", cmd_name),
             );
         }
         if safety != RedisCommandSafety::Allowed && !permissions.allow_writes {

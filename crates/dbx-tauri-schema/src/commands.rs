@@ -282,6 +282,7 @@ pub async fn list_objects(
     catalog: Option<String>,
     table_name_filter: Option<dbx_core::schema::TableNameFilter>,
     execution_id: Option<String>,
+    identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
     exact_identity: Option<bool>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let app = Arc::clone(state.inner());
@@ -334,7 +335,7 @@ pub async fn list_objects(
                 })
                 .collect());
         }
-        dbx_core::schema::list_objects_core(
+        dbx_core::schema::list_objects_core_with_options(
             &operation_app,
             &connection_id,
             &database,
@@ -344,6 +345,7 @@ pub async fn list_objects(
             offset,
             object_types.as_deref(),
             table_name_filter.as_ref(),
+            &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
         )
         .await
     })
@@ -388,8 +390,10 @@ pub async fn get_object_source(
     object_type: db::ObjectSourceKind,
     signature: Option<String>,
     relation_name: Option<String>,
+    identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
+    catalog: Option<String>,
 ) -> Result<db::ObjectSource, String> {
-    dbx_core::schema::get_object_source_core(
+    dbx_core::schema::get_object_source_core_with_options(
         &state,
         &connection_id,
         &database,
@@ -398,6 +402,7 @@ pub async fn get_object_source(
         object_type,
         signature.as_deref(),
         relation_name.as_deref(),
+        &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
     )
     .await
 }
@@ -648,6 +653,7 @@ pub async fn list_triggers(
     schema: String,
     table: String,
     catalog: Option<String>,
+    identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
     exact_identity: Option<bool>,
 ) -> Result<Vec<db::TriggerInfo>, String> {
     if exact_identity.unwrap_or(false) {
@@ -657,7 +663,15 @@ pub async fn list_triggers(
         return dbx_core::schema::list_doris_catalog_triggers_core(&state, &connection_id, &catalog, &database, &table)
             .await;
     }
-    dbx_core::schema::list_triggers_core(&state, &connection_id, &database, &schema, &table).await
+    dbx_core::schema::list_triggers_core_with_options(
+        &state,
+        &connection_id,
+        &database,
+        &schema,
+        &table,
+        &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
+    )
+    .await
 }
 
 #[tauri::command]

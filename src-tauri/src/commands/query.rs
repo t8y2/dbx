@@ -925,6 +925,13 @@ pub fn validate_oracle_executable_object_source(
 }
 
 #[tauri::command]
+pub fn prepare_oracle_trigger_sql(
+    input: dbx_core::object_source_sql::OracleTriggerSqlInput,
+) -> Result<dbx_core::object_source_sql::PreparedOracleTriggerSql, String> {
+    dbx_core::object_source_sql::prepare_oracle_trigger_sql(input)
+}
+
+#[tauri::command]
 pub fn fingerprint_oracle_routine_object_source(
     input: dbx_core::object_source_sql::EditableObjectSourceSqlInput,
 ) -> Result<String, String> {
@@ -995,13 +1002,13 @@ pub fn build_table_structure_change_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
     starrocks: Option<dbx_core::table_structure_sql::StarRocksAlterOptions>,
     mysql_table_charset: Option<dbx_core::table_structure_sql::MysqlTableCharsetChange>,
-) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlPlan, String> {
     let table_charset = mysql_table_charset
         .map(|change| dbx_core::table_structure_sql::build_mysql_table_charset_change_sql(&options, change));
-    let mut result = dbx_core::table_structure_sql::build_table_structure_change_sql_with_context(options, starrocks);
+    let mut result = dbx_core::table_structure_sql::build_table_structure_change_sql_plan(options, starrocks);
     if let Some(extra) = table_charset {
-        result.statements.extend(extra.statements);
-        result.warnings.extend(extra.warnings);
+        result.sql.statements.extend(extra.statements);
+        result.sql.warnings.extend(extra.warnings);
     }
     Ok(result)
 }
@@ -1047,8 +1054,8 @@ pub fn build_create_table_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
     server_version: Option<String>,
     dialect_options: Option<dbx_core::table_structure_sql::CreateTableDialectOptions>,
-) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
-    Ok(dbx_core::table_structure_sql::build_create_table_sql_with_dialect_options(
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlPlan, String> {
+    Ok(dbx_core::table_structure_sql::build_create_table_sql_plan_with_dialect_options(
         options,
         server_version.as_deref(),
         dialect_options.unwrap_or_default(),

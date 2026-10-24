@@ -2320,6 +2320,30 @@ impl AgentDriverClient {
         object_types: Option<&[String]>,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.list_objects_with_options(
+            database,
+            schema,
+            filter,
+            limit,
+            offset,
+            object_types,
+            &Default::default(),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn list_objects_with_options<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        filter: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        object_types: Option<&[String]>,
+        options: &dbx_types::oracle_trigger::MetadataReadOptions,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
         let mut params = agent_schema_params(database, schema);
         if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
             params["filter"] = serde_json::json!(filter);
@@ -2334,6 +2358,7 @@ impl AgentDriverClient {
             params["object_types"] = serde_json::json!(object_types);
             params["objectTypes"] = serde_json::json!(object_types);
         }
+        options.apply_to(&mut params);
         self.call_method_with_timeout(AgentMethod::ListObjects, params, timeout_duration).await
     }
 
@@ -2417,6 +2442,27 @@ impl AgentDriverClient {
         .await
     }
 
+    pub async fn get_object_source_with_options<T: DeserializeOwned + Send + 'static, K: Serialize>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &K,
+        signature: Option<&str>,
+        relation_name: Option<&str>,
+        options: &dbx_types::oracle_trigger::MetadataReadOptions,
+        include_source_origin: bool,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let mut params =
+            agent_object_source_params_with_identity(database, schema, name, object_type, signature, relation_name);
+        options.apply_to(&mut params);
+        if include_source_origin {
+            params["include_source_origin"] = serde_json::json!(true);
+        }
+        self.call_method_with_timeout(AgentMethod::GetObjectSource, params, timeout_duration).await
+    }
+
     pub async fn get_object_source_with_origin<T: DeserializeOwned + Send + 'static, K: Serialize>(
         &mut self,
         database: &str,
@@ -2427,10 +2473,18 @@ impl AgentDriverClient {
         relation_name: Option<&str>,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        let mut params =
-            agent_object_source_params_with_identity(database, schema, name, object_type, signature, relation_name);
-        params["include_source_origin"] = serde_json::json!(true);
-        self.call_method_with_timeout(AgentMethod::GetObjectSource, params, timeout_duration).await
+        self.get_object_source_with_options(
+            database,
+            schema,
+            name,
+            object_type,
+            signature,
+            relation_name,
+            &dbx_types::oracle_trigger::MetadataReadOptions::default(),
+            true,
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn get_columns<T: DeserializeOwned + Send + 'static>(
@@ -2527,12 +2581,20 @@ impl AgentDriverClient {
         table: &str,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method_with_timeout(
-            AgentMethod::ListTriggers,
-            agent_schema_table_params(database, schema, table),
-            timeout_duration,
-        )
-        .await
+        self.list_triggers_with_options(database, schema, table, &Default::default(), timeout_duration).await
+    }
+
+    pub async fn list_triggers_with_options<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        options: &dbx_types::oracle_trigger::MetadataReadOptions,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let mut params = agent_schema_table_params(database, schema, table);
+        options.apply_to(&mut params);
+        self.call_method_with_timeout(AgentMethod::ListTriggers, params, timeout_duration).await
     }
 
     pub async fn list_constraints<T: DeserializeOwned + Send + 'static>(

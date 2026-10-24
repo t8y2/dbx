@@ -112,7 +112,8 @@ describe("ObjectBrowser with a slow schema list", () => {
 
     await vi.waitFor(() => expect(host.textContent).toContain("TEST2026"));
     // Schema index metadata is read only in the dedicated paged filter.
-    expect(mocks.listObjects).toHaveBeenCalledWith("dameng-slow-schemas", "TEST", "TEST", expect.arrayContaining(["TABLE", "VIEW"]), undefined, undefined, undefined, undefined);
+    expect(mocks.listObjects).toHaveBeenCalledWith("dameng-slow-schemas", "TEST", "TEST", expect.arrayContaining(["TABLE", "VIEW", "TRIGGER"]), undefined, undefined, undefined, undefined, undefined, undefined, { identityMode: "exact" });
+    expect(mocks.listObjects.mock.calls[0][3]).not.toContain("INDEX");
     expect(mocks.listObjects).toHaveBeenCalledTimes(1);
     expect(mocks.listSchemas).toHaveBeenCalledWith("dameng-slow-schemas", "TEST");
     expect(host.textContent).not.toContain("objects.empty");

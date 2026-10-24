@@ -56,7 +56,7 @@ function passthrough(tag: string): Component {
   });
 }
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string, values?: Record<string, unknown>) => (values === undefined ? key : `${key}:${Object.values(values).join(",")}`) }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string, values?: Record<string, unknown>) => (values === undefined ? key : `${key}:${Object.values(values).join(",")}`) }) }));
 vi.mock("@lucide/vue", () => {
   const Icon = passthrough("span");
   return { AlertTriangle: Icon, CheckIcon: Icon, ChevronDown: Icon, Circle: Icon, CircleHelp: Icon, CircleMinus: Icon, CircleX: Icon, Clock: Icon, Loader2: Icon, RefreshCw: Icon, Wrench: Icon };

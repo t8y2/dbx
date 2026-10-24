@@ -3583,6 +3583,7 @@ pub async fn list_triggers(
             valid: None,
             comment: None,
             created_at: None,
+            oracle_metadata: None,
             statement: row.get::<&str, _>(3).map(str::to_string),
         })
         .collect())

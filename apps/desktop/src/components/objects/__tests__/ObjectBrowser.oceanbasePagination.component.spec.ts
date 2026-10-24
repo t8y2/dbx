@@ -6,14 +6,15 @@ import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import type { ConnectionConfig, ObjectBrowserFilter, ObjectInfo } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({ listObjects: vi.fn(), listSchemas: vi.fn(), listSchemaIndexes: vi.fn().mockResolvedValue([]) }));
+const mocks = vi.hoisted(() => ({ listObjects: vi.fn(), listSchemas: vi.fn(), getObjectSource: vi.fn(), listSchemaIndexes: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/backend/api", () => ({
   listObjects: (...args: unknown[]) => (args[10] === true ? mocks.listSchemaIndexes(...args) : mocks.listObjects(...args)),
   listSchemas: (...args: unknown[]) => mocks.listSchemas(...args),
+  getObjectSource: (...args: unknown[]) => mocks.getObjectSource(...args),
   listObjectStatistics: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({ getConfig: () => connection, ensureConnected: vi.fn().mockResolvedValue(undefined), orderByPinnedTreeNodes: (rows: unknown[]) => rows }),
+  useConnectionStore: () => ({ getConfig: () => connection, connectedIds: new Set([connection.id]), connectionStateRevision: () => 0, ensureConnected: vi.fn().mockResolvedValue(undefined), orderByPinnedTreeNodes: (rows: unknown[]) => rows }),
 }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/stores/settingsStore", () => ({
@@ -40,7 +41,7 @@ vi.mock("vue-virtual-scroller", () => ({
 }));
 vi.mock("@/components/ui/searchable-select", () => ({ SearchableSelect: { render: () => null } }));
 vi.mock("@/components/ui/ToolbarOverflowMenu.vue", () => ({ default: { render: () => null } }));
-vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
+vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: defineComponent({ props: { modelValue: String }, setup: (props) => () => h("pre", { "data-source-text": "" }, props.modelValue) }) }));
 vi.mock("@/components/editor/DangerConfirmDialog.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/objects/ProcedureExecutionDialog.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/objects/CustomTypeInfoPanel.vue", () => ({ default: { render: () => null } }));
@@ -52,6 +53,8 @@ const object = (name: string, schema = "APP"): ObjectInfo => ({ name, schema, ob
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.listObjects.mockReset();
+  mocks.getObjectSource.mockReset();
   mocks.listSchemas.mockReset().mockResolvedValue(["APP", "OTHER"]);
   invalidateObjectBrowserRowsCache({});
 });
@@ -63,17 +66,19 @@ afterEach(() => {
   invalidateObjectBrowserRowsCache({});
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
-async function mountBrowser(selectedObjectFilter: ObjectBrowserFilter | null = "all") {
+async function mountBrowser(selectedObjectFilter: ObjectBrowserFilter | null = "all", catalog?: string, config = connection) {
   const schema = ref("APP");
+  const selectedCatalog = ref(catalog);
   const host = document.createElement("div");
   document.body.append(host);
-  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: "APP", schema: schema.value, selectedObjectFilter: selectedObjectFilter ?? undefined }) });
+  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection: config, database: "APP", schema: schema.value, catalog: selectedCatalog.value, selectedObjectFilter: selectedObjectFilter ?? undefined }) });
   mountedApps.push({ app, host });
   app.mount(host);
   await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalled());
-  return { host, schema };
+  return { host, schema, catalog: selectedCatalog };
 }
 
 async function searchObjects(host: HTMLElement, query: string) {
@@ -84,6 +89,210 @@ async function searchObjects(host: HTMLElement, query: string) {
 }
 
 describe("OceanBase Oracle object pagination (#11418)", () => {
+  const triggerObject = (name: string, id = name): ObjectInfo => ({
+    name,
+    schema: " Raw Owner ",
+    object_type: "TRIGGER",
+    trigger: { name, timing: "BEFORE", event: "UPDATE", oracle_metadata: { contractVersion: 1, identityMode: "exact", engine: "oracle", owner: " Raw Owner ", name, objectId: id, scope: "SCHEMA", scopeOwner: " Raw Owner ", reads: { identity: { state: "available" } } } },
+  });
+
+  it.each(["oracle", "dameng", "jdbc"] as const)("starts explicit %s trigger discovery with bounded exact pages", async (db_type) => {
+    const config = { ...connection, db_type, ...(db_type === "jdbc" ? { driver_profile: "oracle", database_info: { productName: "Oracle" } } : {}) } as ConnectionConfig;
+    mocks.listObjects.mockResolvedValue([triggerObject(' Tr"g ')]);
+    const { host } = await mountBrowser("triggers", " Catalog ", config);
+    await vi.waitFor(() => expect(host.querySelector("[title=' Tr\"g ']")).not.toBeNull());
+    expect(mocks.listObjects).toHaveBeenNthCalledWith(1, config.id, "APP", "APP", ["TRIGGER"], undefined, 3, 0, " Catalog ", undefined, undefined, { identityMode: "exact", catalog: " Catalog " });
+  });
+
+  it("reloads the legacy all list after leaving native trigger paging", async () => {
+    mocks.listObjects.mockResolvedValueOnce([triggerObject("ONLY_TRIGGER")]).mockResolvedValueOnce([object("LEGACY_TABLE"), triggerObject("ONLY_TRIGGER")]);
+    const { host } = await mountBrowser("triggers", undefined, { ...connection, db_type: "oracle" });
+    await vi.waitFor(() => expect(host.querySelector('[title="ONLY_TRIGGER"]')).not.toBeNull());
+    [...host.querySelectorAll("button")].find((button) => button.textContent?.trim() === "objects.all")!.click();
+    await vi.waitFor(() => expect(host.querySelector('[title="LEGACY_TABLE"]')).not.toBeNull());
+    expect(mocks.listObjects.mock.calls[1]?.[3]).not.toContain("INDEX");
+    expect(mocks.listObjects.mock.calls[1]?.[3]).toContain("TRIGGER");
+    expect(mocks.listObjects.mock.calls[1]?.slice(4, 8)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(mocks.listObjects.mock.calls[1]?.[10]).toEqual({ identityMode: "exact" });
+  });
+
+  it.each(["oracle", "dameng"] as const)("preserves the %s default full-list read and offers trigger discovery even when empty", async (db_type) => {
+    mocks.listObjects.mockResolvedValueOnce([object("LEGACY_TABLE")]).mockResolvedValueOnce([]);
+    const { host } = await mountBrowser(null, undefined, { ...connection, db_type });
+    await vi.waitFor(() => expect(host.querySelector('[title="LEGACY_TABLE"]')).not.toBeNull());
+    expect(mocks.listObjects.mock.calls[0]?.[3]).not.toContain("INDEX");
+    expect(mocks.listObjects.mock.calls[0]?.[3]).toContain("TRIGGER");
+    expect(mocks.listObjects.mock.calls[0]?.slice(4, 7)).toEqual([undefined, undefined, undefined]);
+    expect(mocks.listObjects.mock.calls[0]?.[10]).toEqual({ identityMode: "exact" });
+    const triggers = [...host.querySelectorAll("button")].find((button) => button.textContent?.trim().startsWith("tree.triggers"));
+    expect(triggers).toBeDefined();
+    triggers!.click();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    expect(mocks.listObjects.mock.calls[1]?.slice(3, 7)).toEqual([["TRIGGER"], undefined, 3, 0]);
+    await vi.waitFor(() => expect([...host.querySelectorAll("button")].some((button) => button.textContent?.trim() === "contextMenu.createTrigger")).toBe(true));
+  });
+
+  it("discards a delayed native trigger page after returning to legacy all", async () => {
+    let resolve!: (objects: ObjectInfo[]) => void;
+    mocks.listObjects
+      .mockResolvedValueOnce([triggerObject("A"), triggerObject("B"), triggerObject("C")])
+      .mockReturnValueOnce(
+        new Promise<ObjectInfo[]>((done) => {
+          resolve = done;
+        }),
+      )
+      .mockResolvedValueOnce([object("LEGACY_TABLE")]);
+    const { host } = await mountBrowser("triggers", undefined, { ...connection, db_type: "oracle" });
+    await vi.waitFor(() => expect(host.querySelector("[data-object-load-more]")).not.toBeNull());
+    host.querySelector<HTMLButtonElement>("[data-object-load-more]")!.click();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    [...host.querySelectorAll("button")].find((button) => button.textContent?.trim() === "objects.all")!.click();
+    await vi.waitFor(() => expect(host.querySelector('[title="LEGACY_TABLE"]')).not.toBeNull());
+    resolve([triggerObject("C")]);
+    await nextTick();
+    expect(host.querySelector('[title="C"]')).toBeNull();
+    expect(host.querySelector('[title="LEGACY_TABLE"]')).not.toBeNull();
+    expect(host.querySelector("[data-object-load-more]")).toBeNull();
+  });
+
+  it("reloads the exact trigger list when only the catalog changes and ignores its old page", async () => {
+    let resolve!: (objects: ObjectInfo[]) => void;
+    mocks.listObjects
+      .mockResolvedValueOnce([triggerObject("A"), triggerObject("B"), triggerObject("C")])
+      .mockReturnValueOnce(
+        new Promise<ObjectInfo[]>((done) => {
+          resolve = done;
+        }),
+      )
+      .mockResolvedValueOnce([triggerObject("NEW_CATALOG")]);
+    const { host, catalog } = await mountBrowser("triggers", " Old Catalog ");
+    await vi.waitFor(() => expect(host.querySelector("[data-object-load-more]")).not.toBeNull());
+    host.querySelector<HTMLButtonElement>("[data-object-load-more]")!.click();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    catalog.value = " New Catalog ";
+    await vi.waitFor(() => expect(host.querySelector('[title="NEW_CATALOG"]')).not.toBeNull());
+    expect(mocks.listObjects.mock.calls[2]?.[7]).toBe(" New Catalog ");
+    expect(mocks.listObjects.mock.calls[2]?.[10]).toEqual({ identityMode: "exact", catalog: " New Catalog " });
+    resolve([triggerObject("C")]);
+    await nextTick();
+    expect(host.querySelector('[title="C"]')).toBeNull();
+  });
+
+  it("keeps the old window and retries read-only after a drift reread fails", async () => {
+    mocks.listObjects
+      .mockResolvedValueOnce([triggerObject("A"), triggerObject("B"), triggerObject("C")])
+      .mockResolvedValueOnce([triggerObject("CHANGED")])
+      .mockRejectedValueOnce(new Error("window reread denied"))
+      .mockResolvedValueOnce([triggerObject("C")]);
+    const { host } = await mountBrowser("triggers");
+    await vi.waitFor(() => expect(host.querySelector("[data-object-load-more]")).not.toBeNull());
+    host.querySelector<HTMLButtonElement>("[data-object-load-more]")!.click();
+    await vi.waitFor(() => expect(host.textContent).toContain("window reread denied"));
+    expect(host.querySelector('[title="A"]')).not.toBeNull();
+    expect(host.querySelector('[title="B"]')).not.toBeNull();
+    expect(host.querySelector('[title="CHANGED"]')).toBeNull();
+    host.querySelector<HTMLButtonElement>("[data-object-load-more]")!.click();
+    await vi.waitFor(() => expect(host.querySelector('[title="C"]')).not.toBeNull());
+    expect(mocks.listObjects.mock.calls[3]?.slice(5, 7)).toEqual([3, 2]);
+    expect(host.textContent).not.toContain("window reread denied");
+  });
+
+  it.each(["object-id", "quoted-name", "empty"])("replaces a shifted trigger page window instead of appending (%s)", async (change) => {
+    const a = triggerObject("A"),
+      b = triggerObject("B"),
+      peek = triggerObject(' Quoted"Name ', "9007199254740993");
+    const changed = triggerObject(change === "quoted-name" ? ' quoted"Name ' : peek.name, change === "object-id" ? "9007199254740994" : peek.trigger!.oracle_metadata!.objectId!);
+    mocks.listObjects
+      .mockResolvedValueOnce([a, b, peek])
+      .mockResolvedValueOnce(change === "empty" ? [] : [changed])
+      .mockResolvedValueOnce(change === "empty" ? [a] : [a, b, changed]);
+    const { host } = await mountBrowser("triggers");
+    await vi.waitFor(() => expect(host.querySelector("[data-object-load-more]")).not.toBeNull());
+    host.querySelector<HTMLButtonElement>("[data-object-load-more]")!.click();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(3));
+    expect(mocks.listObjects.mock.calls[2]?.slice(5, 7)).toEqual([5, 0]);
+    await vi.waitFor(() => expect(host.querySelector("[data-object-load-more]")).toBeNull());
+    expect(host.querySelector('[title="A"]')).not.toBeNull();
+    expect(host.querySelector('[title="B"]') !== null).toBe(change !== "empty");
+  });
+
+  it("keeps the visible paged list while refreshing and after refresh failure", async () => {
+    let reject!: (error: Error) => void;
+    mocks.listObjects.mockResolvedValueOnce([object("KEEP_VISIBLE")]).mockReturnValueOnce(
+      new Promise((_resolve, fail) => {
+        reject = fail;
+      }),
+    );
+    const { host } = await mountBrowser();
+    await vi.waitFor(() => expect(host.querySelector('[title="KEEP_VISIBLE"]')).not.toBeNull());
+    host.querySelector<HTMLButtonElement>('[title^="grid.refresh"]')!.click();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    expect(host.querySelector('[title="KEEP_VISIBLE"]')).not.toBeNull();
+    reject(new Error("refresh permission denied"));
+    await vi.waitFor(() => expect(host.textContent).toContain("refresh permission denied"));
+    expect(host.querySelector('[title="KEEP_VISIBLE"]')).not.toBeNull();
+  });
+
+  it("opens the existing source editor to create the first trigger from an empty trigger filter", async () => {
+    mocks.listObjects.mockResolvedValue([]);
+    const { host } = await mountBrowser("triggers", "Catalog");
+    const create = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "contextMenu.createTrigger");
+    expect(create).toBeDefined();
+    create!.click();
+    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>("[data-trigger-create-name]")?.value).toBe("TRG_NEW"));
+    expect(document.querySelector<HTMLInputElement>("[data-trigger-create-owner]")?.value).toBe("APP");
+    expect(mocks.getObjectSource).not.toHaveBeenCalled();
+  });
+
+  it("opens a raw cross-owner trigger with exact source options from the existing object row", async () => {
+    const trigger = {
+      name: " Trigger ",
+      event: "UPDATE",
+      timing: "BEFORE",
+      enabled: true,
+      valid: false,
+      oracle_metadata: {
+        contractVersion: 1,
+        identityMode: "exact",
+        engine: "oceanbase-oracle",
+        owner: " Trigger Owner ",
+        name: " Trigger ",
+        scope: "VIEW",
+        objectId: "9007199254740993",
+        parent: { owner: " Parent Owner ", name: " Parent ", objectType: "VIEW" },
+        reads: { identity: { state: "available" } },
+      },
+    };
+    const source = 'TRIGGER " Trigger " BEFORE UPDATE ON " Parent Owner "." Parent " BEGIN /* ' + "中文😀".repeat(12_000) + " */ NULL; END;";
+    mocks.listObjects.mockResolvedValue([{ name: trigger.name, schema: " Trigger Owner ", object_type: "TRIGGER", trigger }]);
+    mocks.getObjectSource.mockResolvedValue({ name: trigger.name, schema: " Trigger Owner ", object_type: "TRIGGER", source, trigger });
+    const { host } = await mountBrowser("triggers", " Catalog ");
+    await vi.waitFor(() => expect(host.querySelector('[title=" Trigger "]')).not.toBeNull());
+    const row = host.querySelector('[title=" Trigger "]')!.closest(".grid")!;
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    await vi.waitFor(() => expect(mocks.getObjectSource).toHaveBeenCalled());
+    expect(mocks.listObjects.mock.calls[0][10]).toEqual({ identityMode: "exact", catalog: " Catalog " });
+    expect(mocks.getObjectSource).toHaveBeenCalledWith(connection.id, "APP", " Trigger Owner ", " Trigger ", "TRIGGER", undefined, undefined, { identityMode: "exact", catalog: " Catalog " });
+    await vi.waitFor(() => expect(host.querySelector("[data-source-text]")?.textContent).toBe(source));
+    expect(Array.from(host.querySelectorAll("button")).some((button) => button.textContent?.trim() === "tree.triggers")).toBe(true);
+    mocks.getObjectSource.mockRejectedValue(new Error("metadata temporarily offline"));
+    const discard = vi.fn(() => false);
+    vi.stubGlobal("confirm", discard);
+    const refresh = host.querySelector<HTMLButtonElement>('[aria-label="structureEditor.refresh"]')!;
+    refresh.click();
+    await vi.waitFor(() => expect(host.textContent).toContain("metadata temporarily offline"));
+    refresh.click();
+    await vi.waitFor(() => expect(mocks.getObjectSource).toHaveBeenCalledTimes(3));
+    await nextTick();
+    await vi.waitFor(() => expect(refresh.disabled).toBe(false));
+    expect(discard).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(host.querySelector("[data-source-text]")?.textContent === source).toBe(true));
+    Array.from(host.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "objects.saveSource")!
+      .click();
+    await vi.waitFor(() => expect(host.textContent?.includes("oracleTrigger.reloadBaseline")).toBe(true));
+  });
+
   it("ends local waiting when the object request never returns", async () => {
     vi.useFakeTimers();
     mocks.listObjects.mockReturnValue(new Promise(() => undefined));
@@ -132,7 +341,7 @@ describe("OceanBase Oracle object pagination (#11418)", () => {
     mocks.listObjects.mockResolvedValueOnce([object("O11418_10"), object("O11418_2"), object("O11418_3")]).mockResolvedValueOnce([object("O11418_3")]);
     const { host } = await mountBrowser();
     await vi.waitFor(() => expect(host.querySelector('[title="O11418_10"]')).not.toBeNull());
-    expect(mocks.listObjects).toHaveBeenNthCalledWith(1, connection.id, "APP", "APP", expect.not.arrayContaining(["INDEX"]), undefined, 3, 0, undefined);
+    expect(mocks.listObjects).toHaveBeenNthCalledWith(1, connection.id, "APP", "APP", expect.not.arrayContaining(["INDEX"]), undefined, 3, 0, undefined, undefined, undefined, { identityMode: "exact" });
     expect(host.querySelector('[title="O11418_3"]')).toBeNull();
     expect(Array.from(host.querySelectorAll('[title^="O11418_"]')).map((el) => el.getAttribute("title"))).toEqual(["O11418_10", "O11418_2"]);
 
@@ -140,7 +349,7 @@ describe("OceanBase Oracle object pagination (#11418)", () => {
     expect(more).not.toBeNull();
     more!.click();
     await vi.waitFor(() => expect(host.querySelector('[title="O11418_3"]')).not.toBeNull());
-    expect(mocks.listObjects).toHaveBeenNthCalledWith(2, connection.id, "APP", "APP", expect.not.arrayContaining(["INDEX"]), undefined, 3, 2, undefined);
+    expect(mocks.listObjects).toHaveBeenNthCalledWith(2, connection.id, "APP", "APP", expect.not.arrayContaining(["INDEX"]), undefined, 3, 2, undefined, undefined, undefined, { identityMode: "exact" });
     expect(host.querySelector("[data-object-load-more]")).toBeNull();
   });
 
@@ -153,7 +362,7 @@ describe("OceanBase Oracle object pagination (#11418)", () => {
     await searchObjects(host, "needle");
     await vi.waitFor(() => expect(host.querySelector('[title="O11418_LATE_VIEW"]')).not.toBeNull());
     expect(host.querySelector('[title="O11418_1"]')).toBeNull();
-    expect(mocks.listObjects).toHaveBeenNthCalledWith(2, connection.id, "APP", "APP", expect.not.arrayContaining(["INDEX"]), "needle", 3, 0, undefined);
+    expect(mocks.listObjects).toHaveBeenNthCalledWith(2, connection.id, "APP", "APP", expect.not.arrayContaining(["INDEX"]), "needle", 3, 0, undefined, undefined, undefined, { identityMode: "exact" });
 
     const views = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.trim() === "objects.views");
     expect(views).toBeDefined();
@@ -213,12 +422,16 @@ describe("OceanBase Oracle object pagination (#11418)", () => {
   });
 
   it("renders an empty final page without retaining a load-more action", async () => {
-    mocks.listObjects.mockResolvedValueOnce([object("O11418_1"), object("O11418_2"), object("O11418_3")]).mockResolvedValueOnce([]);
+    mocks.listObjects
+      .mockResolvedValueOnce([object("O11418_1"), object("O11418_2"), object("O11418_3")])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([object("O11418_1"), object("O11418_2")]);
     const { host } = await mountBrowser();
     await vi.waitFor(() => expect(host.querySelector("[data-object-load-more]")).not.toBeNull());
     host.querySelector<HTMLButtonElement>("[data-object-load-more]")!.click();
     await vi.waitFor(() => expect(host.querySelector("[data-object-load-more]")).toBeNull());
     expect(host.querySelector('[title="O11418_1"]')).not.toBeNull();
     expect(host.querySelector('[title="O11418_2"]')).not.toBeNull();
+    expect(mocks.listObjects.mock.calls.at(-1)?.slice(5, 7)).toEqual([5, 0]);
   });
 });

@@ -3870,6 +3870,7 @@ type oracleViewSourceQueryStep struct {
 	nextPanicText    string
 	columnsPanicText string
 	columnsPanicCall int
+	nextError        error
 }
 
 type oracleViewSourceDriver struct {
@@ -3937,6 +3938,7 @@ func (c *oracleViewSourceConn) QueryContext(
 		nextPanicText:    step.nextPanicText,
 		columnsPanicText: step.columnsPanicText,
 		columnsPanicCall: step.columnsPanicCall,
+		nextError:        step.nextError,
 	}, nil
 }
 
@@ -3975,6 +3977,7 @@ type oracleViewSourceRows struct {
 	columnsPanicText string
 	columnsPanicCall int
 	columnsCalls     int
+	nextError        error
 }
 
 func (r *oracleViewSourceRows) Columns() []string {
@@ -3997,6 +4000,9 @@ func (r *oracleViewSourceRows) Next(dest []driver.Value) error {
 		return r.nextErr
 	}
 	if r.next >= len(r.values) {
+		if r.nextError != nil {
+			return r.nextError
+		}
 		return io.EOF
 	}
 	copy(dest, r.values[r.next])

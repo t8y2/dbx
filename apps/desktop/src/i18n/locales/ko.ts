@@ -65,6 +65,27 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oracleTrigger: {
+    errorPositionUnavailable: "소스를 열었습니다. 오류 위치를 확인할 수 없으므로 표시된 행과 열을 확인하세요.",
+    reconcileStructure: "적용된 변경 사항 대조",
+    reconcileConfirm: "현재 테이블 구조를 다시 읽고 원하는 수정 사항을 유지하며 완료된 단계를 대조할까요? 이전 SQL은 다시 실행하지 않습니다.",
+    editFullSource: "전체 소스 편집",
+    refreshDraft: "이 트리거 다시 읽기",
+    refreshDraftConfirm: "이 트리거의 구조화된 초안만 버리고 다시 읽으시겠습니까? 다른 테이블 구조 초안은 유지됩니다.",
+    discardSourceConfirm: "이 소스의 저장하지 않은 변경 사항을 버리시겠습니까?",
+    scope: "트리거 범위",
+    parentOwner: "소유 테이블/뷰 스키마",
+    parentName: "소유 테이블/뷰",
+    scopeOwner: "이벤트 대상 스키마",
+    obSchemaUnsupported: "이 OB 버전에서는 테스트한 템플릿이 거부되어 Schema 트리거 템플릿을 제공하지 않습니다.",
+    obDatabaseUnknown: "DATABASE 트리거 지원 여부는 확인되지 않았습니다.",
+    nonAtomic: "DDL 문은 각각 커밋됩니다. 생성부터 비활성화까지 트리거가 잠시 활성화될 수 있습니다. 실패하면 후속 단계가 중단되며 자동 재시도하지 않습니다.",
+    unknown: "알 수 없음",
+    verifyReadOnly: "읽기 전용으로 확인",
+    reloadBaseline: "초안을 유지하고 트리거 전체 정의를 다시 읽은 후 미리 보기를 생성하세요.",
+    runFullDefinition: "이 탭에서는 해당 트리거의 전체 정의만 실행할 수 있습니다. 다른 SQL은 일반 쿼리 탭을 사용하세요.",
+    executionSchema: "실행 스키마",
+  },
   objectRelations: {
     title: "관계",
     foreignKeys: "외래 키",

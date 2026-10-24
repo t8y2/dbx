@@ -372,6 +372,7 @@ pub async fn list_triggers(
                 valid: None,
                 comment: None,
                 created_at: None,
+                oracle_metadata: None,
                 statement,
             }
         })
@@ -415,6 +416,7 @@ pub async fn object_source(
         source,
         editable: None,
         routine_parameters: None,
+        trigger: None,
     })
 }
 

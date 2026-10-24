@@ -1,22 +1,28 @@
 use super::dialect::{database_label, StructureDialect};
-use super::types::{EditableStructureTrigger, TableStructureSqlOptions, TriggerInfo};
-use super::util::{clean, qualified_new_table, qualified_table, quote_ident, quote_new_ident};
+use super::types::{EditableStructureTrigger, OracleTriggerStructureOperation, TableStructureSqlOptions, TriggerInfo};
+use super::util::{clean, created_identifier_name, qualified_new_table, qualified_table, quote_ident, quote_new_ident};
+use crate::models::connection::DatabaseType;
+use dbx_sql_core::object_source_sql::{
+    prepare_oracle_trigger_sql, OracleTriggerSqlBinding, OracleTriggerSqlInput, OracleTriggerSqlPurpose,
+};
 
 pub(super) fn build_trigger_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
-    build_trigger_sql_with_mode(options, warnings, false)
+    build_trigger_sql_with_operations(options, warnings, false, 0, None)
 }
 
 pub(super) fn build_trigger_sql_for_new_table(
     options: &TableStructureSqlOptions,
     warnings: &mut Vec<String>,
 ) -> Vec<String> {
-    build_trigger_sql_with_mode(options, warnings, true)
+    build_trigger_sql_with_operations(options, warnings, true, 0, None)
 }
 
-fn build_trigger_sql_with_mode(
+pub(super) fn build_trigger_sql_with_operations(
     options: &TableStructureSqlOptions,
     warnings: &mut Vec<String>,
     for_new_table: bool,
+    statement_offset: usize,
+    mut operations: Option<&mut Vec<OracleTriggerStructureOperation>>,
 ) -> Vec<String> {
     if options.triggers.is_empty() {
         return Vec::new();
@@ -42,6 +48,22 @@ fn build_trigger_sql_with_mode(
     let mut statements = Vec::new();
 
     for trigger in &options.triggers {
+        if trigger.oracle_exact.is_some() {
+            match build_exact_trigger_operations(options, dialect, &table, trigger, for_new_table) {
+                Ok(groups) => {
+                    for (mut operation, sql) in groups {
+                        operation.statement_index = statement_offset + statements.len();
+                        operation.statement_count = sql.len();
+                        if let Some(operations) = operations.as_deref_mut() {
+                            operations.push(operation);
+                        }
+                        statements.extend(sql);
+                    }
+                }
+                Err(error) => warnings.push(error),
+            }
+            continue;
+        }
         if trigger.marked_for_drop {
             if let Some(original) = &trigger.original {
                 statements.push(drop_trigger_sql(dialect, options.schema.as_deref(), &original.name));
@@ -131,6 +153,142 @@ fn build_trigger_sql_with_mode(
     }
 
     statements
+}
+
+fn build_exact_trigger_operations(
+    options: &TableStructureSqlOptions,
+    dialect: StructureDialect,
+    table: &str,
+    trigger: &EditableStructureTrigger,
+    for_new_table: bool,
+) -> Result<Vec<(OracleTriggerStructureOperation, Vec<String>)>, String> {
+    let context = trigger.oracle_exact.as_ref().unwrap();
+    let database_type = options.database_type.ok_or("Select the trigger engine")?;
+    if !matches!(database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+        || context.owner.is_empty()
+        || !matches!(context.parent_type.as_str(), "TABLE" | "VIEW")
+    {
+        return Err("Verify the exact trigger owner and parent type before generating structured SQL".into());
+    }
+    let operation = |action: &str, name: &str, enabled: Option<bool>| OracleTriggerStructureOperation {
+        draft_id: trigger.id.clone(),
+        action: action.into(),
+        owner: context.owner.clone(),
+        name: name.into(),
+        statement_index: 0,
+        statement_count: 0,
+        enabled,
+    };
+    let original = trigger.original.as_ref();
+    if trigger.marked_for_drop {
+        return Ok(original
+            .map(|original| {
+                vec![(
+                    operation("delete", &original.name, None),
+                    vec![drop_trigger_sql(dialect, Some(&context.owner), &original.name)],
+                )]
+            })
+            .unwrap_or_default());
+    }
+    let body_changed = original.is_none_or(|original| {
+        trigger.name != original.name
+            || normalize_keyword(&trigger.timing) != normalize_keyword(&original.timing)
+            || normalize_keyword(&trigger.event) != normalize_keyword(&original.event)
+            || normalize_statement(&trigger.statement)
+                != normalize_statement(original.statement.as_deref().unwrap_or(""))
+    });
+    if !body_changed {
+        if let (Some(original), Some(enabled)) = (original, trigger.enabled) {
+            if original.enabled != Some(enabled) {
+                let state = if enabled { "ENABLE" } else { "DISABLE" };
+                return Ok(vec![(
+                    operation(if enabled { "enable" } else { "disable" }, &original.name, Some(enabled)),
+                    vec![format!(
+                        "ALTER TRIGGER {} {state};",
+                        qualified_trigger_object_name(dialect, Some(&context.owner), &original.name)
+                    )],
+                )]);
+            }
+        }
+        return Ok(Vec::new());
+    }
+    if original
+        .is_some_and(|original| !is_structured_oracle_trigger_source(original) || has_trigger_condition(original))
+    {
+        return Err(format!(
+            "Editing existing trigger \"{}\" requires its complete source definition.",
+            original.unwrap().name
+        ));
+    }
+    let requested_name = if let Some(original) = original.filter(|original| original.name == trigger.name) {
+        original.name.clone()
+    } else {
+        clean(&trigger.name)
+    };
+    if requested_name.is_empty() {
+        return Err("Trigger name is required".into());
+    }
+    let name = if for_new_table {
+        created_identifier_name(options.database_type, dialect, &requested_name)
+    } else {
+        requested_name
+    };
+    let parent_owner =
+        options.schema.as_ref().filter(|owner| !owner.is_empty()).ok_or("Select the exact parent owner")?;
+    let parent_name = if for_new_table {
+        created_identifier_name(options.database_type, dialect, &options.table_name)
+    } else {
+        options.table_name.clone()
+    };
+    let mut warnings = Vec::new();
+    let source = create_oracle_trigger_sql(
+        options.database_type,
+        dialect,
+        Some(&context.owner),
+        table,
+        &name,
+        &normalize_keyword(&trigger.timing),
+        &clean(&trigger.event),
+        &clean(&trigger.statement),
+        &mut warnings,
+        for_new_table,
+    )
+    .ok_or_else(|| warnings.join("\n"))?;
+    let renamed = original.is_some_and(|original| original.name != name);
+    let replacing = original.is_some() && !renamed;
+    let enabled = trigger.enabled.or_else(|| original.and_then(|original| original.enabled));
+    let prepared = prepare_oracle_trigger_sql(OracleTriggerSqlInput {
+        database_type,
+        owner: context.owner.clone(),
+        name: name.clone(),
+        source,
+        purpose: if replacing { OracleTriggerSqlPurpose::Replace } else { OracleTriggerSqlPurpose::Create },
+        binding: Some(OracleTriggerSqlBinding {
+            scope: context.parent_type.clone(),
+            owner: Some(parent_owner.clone()),
+            name: Some(parent_name),
+            pluggable: false,
+        }),
+        enabled,
+        allow_export_appendix: false,
+    })?;
+    let mut groups = Vec::new();
+    if renamed {
+        let original_name = &original.unwrap().name;
+        groups.push((
+            operation("delete", original_name, None),
+            vec![drop_trigger_sql(dialect, Some(&context.owner), original_name)],
+        ));
+    }
+    let mut statements = vec![prepared.definition];
+    if prepared.requires_state_restore {
+        statements.push(format!(
+            "ALTER TRIGGER {} DISABLE;",
+            qualified_trigger_object_name(dialect, Some(&context.owner), &name)
+        ));
+    }
+    groups.push((operation(if replacing { "replace" } else { "create" }, &name, enabled.or(Some(true))), statements));
+    Ok(groups)
 }
 
 fn qualified_trigger_object_name(dialect: StructureDialect, schema: Option<&str>, name: &str) -> String {

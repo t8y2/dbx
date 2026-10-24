@@ -66,6 +66,27 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oracleTrigger: {
+    errorPositionUnavailable: "ソースを開きました。エラー位置を確認できないため、表示された行と列を確認してください。",
+    reconcileStructure: "実行済みの変更を照合",
+    reconcileConfirm: "現在のテーブル構造を再読み込みし、編集内容を保持して実行済みの手順を照合しますか？ 以前の SQL は再実行しません。",
+    editFullSource: "完全なソースを編集",
+    refreshDraft: "このトリガーを再読み込み",
+    refreshDraftConfirm: "このトリガーの構造化編集の下書きだけを破棄して再読み込みしますか？他のテーブル構造の下書きは保持されます。",
+    discardSourceConfirm: "このソースの未保存の変更を破棄しますか？",
+    scope: "トリガーのスコープ",
+    parentOwner: "所属テーブル／ビューのスキーマ",
+    parentName: "所属テーブル／ビュー",
+    scopeOwner: "イベント対象スキーマ",
+    obSchemaUnsupported: "この OB バージョンでは、検証したテンプレートが拒否されたため Schema トリガーのテンプレートを提供しません。",
+    obDatabaseUnknown: "DATABASE トリガーの対応状況は未確認です。",
+    nonAtomic: "DDL は個別にコミットされます。作成から無効化までの間、トリガーが一時的に有効になる場合があります。失敗すると後続の手順は停止し、自動再試行はしません。",
+    unknown: "不明",
+    verifyReadOnly: "読み取りのみで確認",
+    reloadBaseline: "下書きを保持したままトリガーの完全な定義を再読み込みし、再度プレビューしてください。",
+    runFullDefinition: "このタブでは、このトリガーの完全な定義のみ実行できます。他の SQL は通常のクエリタブで実行してください。",
+    executionSchema: "実行スキーマ",
+  },
   objectRelations: {
     title: "関連",
     foreignKeys: "外部キー",

@@ -1,4 +1,5 @@
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, OracleTriggerMetadata } from "@/types/database";
+import { quoteOracleLiteral } from "@/lib/database/oracleInvalidObjects";
 
 export interface TriggerToggleSqlOptions {
   databaseType?: DatabaseType;
@@ -6,6 +7,8 @@ export interface TriggerToggleSqlOptions {
   tableName?: string;
   triggerName: string;
   enabled: boolean;
+  identityMode?: "exact";
+  scope?: OracleTriggerMetadata["scope"];
 }
 
 const SUPPORTED_TRIGGER_TOGGLE_DATABASES = new Set<DatabaseType>(["sqlserver", "oracle", "oceanbase-oracle", "dameng", "postgres", "kingbase", "opengauss", "vastbase", "highgo", "uxdb", "gaussdb", "kwdb", "xugu", "firebird"]);
@@ -25,6 +28,15 @@ function quoteDouble(name: string): string {
 
 export function buildTriggerToggleSql(options: TriggerToggleSqlOptions): string | null {
   const { databaseType, schema, tableName, triggerName, enabled } = options;
+  if (options.identityMode === "exact") {
+    if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && databaseType !== "dameng") return null;
+    if (!schema?.length || !triggerName.length || schema.includes("\0") || triggerName.includes("\0")) return null;
+    const relation = options.scope === "TABLE" || options.scope === "VIEW";
+    const event = options.scope === "SCHEMA" || options.scope === "DATABASE" || options.scope === "TIMER";
+    if ((!relation && !event) || (databaseType === "oceanbase-oracle" && !relation) || (databaseType === "oracle" && options.scope === "TIMER")) return null;
+    if (databaseType === "dameng" && event) return `SP_ENABLE_EVT_TRIGGER(${quoteOracleLiteral(schema)}, ${quoteOracleLiteral(triggerName)}, ${enabled ? 1 : 0});`;
+    return `ALTER TRIGGER ${quoteDouble(schema)}.${quoteDouble(triggerName)} ${enabled ? "ENABLE" : "DISABLE"};`;
+  }
   const cleanTrigger = triggerName.trim();
   if (!cleanTrigger || !databaseType || !supportsTriggerToggle(databaseType)) return null;
 

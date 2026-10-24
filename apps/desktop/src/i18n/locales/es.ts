@@ -67,6 +67,27 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  oracleTrigger: {
+    errorPositionUnavailable: "Código fuente abierto. No se pudo verificar la ubicación del error; consulte la línea y la columna indicadas.",
+    reconcileStructure: "Reconciliar cambios aplicados",
+    reconcileConfirm: "¿Volver a leer la estructura actual, conservar los cambios deseados y reconciliar los pasos completados sin repetir el SQL anterior?",
+    editFullSource: "Editar fuente completa",
+    refreshDraft: "Recargar este disparador",
+    refreshDraftConfirm: "¿Recargar y descartar solo el borrador estructurado de este disparador? Se conservarán los demás borradores de la estructura de tabla.",
+    discardSourceConfirm: "¿Descartar los cambios sin guardar de este código fuente?",
+    scope: "Ámbito del disparador",
+    parentOwner: "Esquema de la tabla/vista",
+    parentName: "Tabla/vista asociada",
+    scopeOwner: "Esquema de los eventos",
+    obSchemaUnsupported: "Esta versión de OB no ofrece una plantilla de disparador de Schema: la plantilla probada fue rechazada.",
+    obDatabaseUnknown: "No se ha verificado la capacidad de disparadores DATABASE.",
+    nonAtomic: "Las sentencias DDL se confirman por separado. El disparador puede estar habilitado entre su creación y desactivación. Un fallo detiene los pasos posteriores; no hay reintentos automáticos.",
+    unknown: "Desconocido",
+    verifyReadOnly: "Verificar sin escribir",
+    reloadBaseline: "Conserve el borrador y vuelva a cargar el disparador completo antes de generar otra vista previa.",
+    runFullDefinition: "Esta pestaña solo puede ejecutar la definición completa de este disparador. Use una pestaña de consulta normal para otro SQL.",
+    executionSchema: "Esquema de ejecución",
+  },
   objectRelations: {
     title: "Relaciones",
     foreignKeys: "Claves externas",

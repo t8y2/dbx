@@ -7364,6 +7364,7 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
             valid: None,
             comment: None,
             created_at: None,
+            oracle_metadata: None,
             statement: Some(get_str_by_name(row, "ACTION_STATEMENT")).filter(|value| !value.is_empty()),
         })
         .collect())

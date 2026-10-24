@@ -9,6 +9,8 @@ public final class TriggerInfo {
     private String statement;
     private String condition;
     private Boolean enabled;
+    private Boolean valid;
+    private OracleTriggerMetadata oracle_metadata;
 
     public TriggerInfo() {
         this("", "", "");
@@ -76,6 +78,22 @@ public final class TriggerInfo {
         this.enabled = enabled;
     }
 
+    public Boolean getValid() {
+        return valid;
+    }
+
+    public void setValid(Boolean valid) {
+        this.valid = valid;
+    }
+
+    public OracleTriggerMetadata getOracle_metadata() {
+        return oracle_metadata;
+    }
+
+    public void setOracle_metadata(OracleTriggerMetadata metadata) {
+        this.oracle_metadata = metadata;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -86,12 +104,14 @@ public final class TriggerInfo {
             && Objects.equals(timing, that.timing)
             && Objects.equals(statement, that.statement)
             && Objects.equals(condition, that.condition)
-            && Objects.equals(enabled, that.enabled);
+            && Objects.equals(enabled, that.enabled)
+            && Objects.equals(valid, that.valid)
+            && Objects.equals(oracle_metadata, that.oracle_metadata);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, event, timing, statement, condition, enabled);
+        return Objects.hash(name, event, timing, statement, condition, enabled, valid, oracle_metadata);
     }
 
     @Override

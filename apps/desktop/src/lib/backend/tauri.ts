@@ -3383,8 +3383,8 @@ export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPre
   return invoke("preview_agent_offline_export");
 }
 
-export async function exportAgentsOffline(path: string, driverKeys: string[]): Promise<AgentOfflineExportResult> {
-  return invoke("export_agents_offline", { path, driverKeys });
+export async function exportAgentsOffline(path: string, driverKeys: string[], includeJres = true): Promise<AgentOfflineExportResult> {
+  return invoke("export_agents_offline", { path, driverKeys, includeJres });
 }
 
 export async function importAgentDriver(dbType: string, path: string | File): Promise<void> {

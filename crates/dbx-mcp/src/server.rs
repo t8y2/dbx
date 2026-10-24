@@ -874,14 +874,12 @@ impl DbxMcpServer {
     /// Same as [`with_plugin_tools_mode`], but reuses session and pending-write
     /// state that outlives this instance.
     ///
-    /// The Streamable HTTP transport drives a `Stateful` (protocol `< 2026-07-28`)
-    /// conversation through one long-lived service, but it calls the service
-    /// factory **per request** for every other mode: stateless `2026-07-28`
-    /// requests, tool-schema discovery, and session restoration. Tools that hand
-    /// state back to the model — `dbx_open_session` and the transaction tools,
-    /// `dbx_salesforce_prepare_write` and its confirmation — must therefore keep
-    /// that state in `Arc`s owned by the transport, not in the per-instance
-    /// defaults, or the next request would not find its own session.
+    /// The Streamable HTTP transport calls its service factory per request,
+    /// for both protocol generations and for tool-schema discovery. Tools that
+    /// return state to the model (`dbx_open_session`, transaction tools, and
+    /// Salesforce write confirmations) therefore keep that state in `Arc`s
+    /// owned by the authenticated principal partition. Per-instance defaults
+    /// would make the next request lose its own session.
     pub(crate) fn with_shared_state(
         backend: Arc<dyn DbxBackend>,
         scope: McpScope,
@@ -891,6 +889,16 @@ impl DbxMcpServer {
         pending_salesforce_writes: Arc<PendingSalesforceWrites>,
     ) -> Self {
         Self::build(backend, scope, web_mode, plugin_tools_mode, sessions, pending_salesforce_writes)
+    }
+
+    /// Keep the template's backend and tool routing while binding request state
+    /// to the authenticated principal's partition.
+    pub(crate) fn with_isolated_state(
+        &self,
+        sessions: Arc<McpSessionStore>,
+        pending_salesforce_writes: Arc<PendingSalesforceWrites>,
+    ) -> Self {
+        Self { sessions, pending_salesforce_writes, ..self.clone() }
     }
 
     fn build(
@@ -9578,6 +9586,50 @@ mod tests {
 
         let replayed =
             server.salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token })).await;
+        assert!(result_text(&replayed).contains("CONFIRM_TOKEN_INVALID"), "{replayed:?}");
+        assert_eq!(backend.recorded_arguments.lock().unwrap().len(), 1, "a replayed token must not write again");
+    }
+
+    #[tokio::test]
+    async fn salesforce_confirmation_tokens_are_isolated_and_survive_server_recreation() {
+        let backend = salesforce_server(salesforce_dml_policy(true, false), None);
+        let template =
+            DbxMcpServer::with_plugin_tools_mode(backend.clone(), McpScope::default(), false, PluginToolsMode::Flat);
+        let principal_a_sessions = McpSessionStore::new();
+        let principal_a_writes = PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL);
+        let principal_a = template.with_isolated_state(principal_a_sessions.clone(), principal_a_writes.clone());
+        let principal_b = template
+            .with_isolated_state(McpSessionStore::new(), PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL));
+        let prepared = principal_a
+            .salesforce_prepare_write(prepare_request("update", "Account", Some("001x"), Some(json!({"Name": "Acme"}))))
+            .await;
+        assert_ne!(prepared.is_error, Some(true), "{prepared:?}");
+        let token = confirm_token(&prepared);
+        let statement = prepared.structured_content.as_ref().unwrap()["statement"].as_str().unwrap().to_string();
+
+        // Another principal must neither execute nor consume this token.
+        let rejected = principal_b
+            .salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token.clone() }))
+            .await;
+        assert_eq!(rejected.is_error, Some(true));
+        assert!(result_text(&rejected).contains("CONFIRM_TOKEN_INVALID"), "{rejected:?}");
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+
+        // Stateless HTTP constructs another server for the next request while
+        // retaining the same authenticated principal's pending-write state.
+        let principal_a_next_request = template.with_isolated_state(principal_a_sessions, principal_a_writes);
+        let applied = principal_a_next_request
+            .salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token.clone() }))
+            .await;
+        assert_ne!(applied.is_error, Some(true), "{applied:?}");
+        let recorded = backend.recorded_arguments.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "exactly one write reached the backend: {recorded:?}");
+        assert_eq!(recorded[0].0, "execute_query");
+        assert_eq!(recorded[0].1["sql"].as_str(), Some(statement.as_str()));
+
+        let replayed =
+            principal_a.salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token })).await;
+        assert_eq!(replayed.is_error, Some(true));
         assert!(result_text(&replayed).contains("CONFIRM_TOKEN_INVALID"), "{replayed:?}");
         assert_eq!(backend.recorded_arguments.lock().unwrap().len(), 1, "a replayed token must not write again");
     }

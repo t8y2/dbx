@@ -776,3 +776,7 @@ dbx connections list --json
 ### License
 
 Apache-2.0
+
+### OAuth-protected Linux deployment
+
+For an owner-restricted Streamable HTTP resource server behind HTTPS with an existing OAuth 2.1 provider, see [the Linux deployment guide](../../deploy/mcp/README.md). Static bearer mode remains available and is distinct from OAuth login.

@@ -18,8 +18,16 @@ import { requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@
 import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { quoteTableIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/tableSelectSql";
-import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileFunctionSignatures, driverProfileRoutineSignatures, driverProfileSqlKeywords } from "@/lib/database/driverProfileExtensions";
-import { isCockroachDbDriverProfile } from "@/lib/database/cockroachdbProfile";
+import {
+  driverProfileCompletionObjects,
+  driverProfileCompletionTableMetadata,
+  driverProfileCompletionTables,
+  driverProfileContextKeywords,
+  driverProfileDataTypes,
+  driverProfileFunctionSignatures,
+  driverProfileRoutineSignatures,
+  driverProfileSqlKeywords,
+} from "@/lib/database/driverProfileExtensions";
 import { DORIS_FUNCTION_DOCS, DORIS_FUNCTION_SIGNATURES } from "@/lib/sql/doris/functions";
 import { DUCKDB_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/duckdb";
 import { HIVE_SPARK_FUNCTION_APPLY_TEMPLATES, HIVE_SPARK_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/hiveSpark";
@@ -376,6 +384,53 @@ const COMMON_SQL_KEYWORDS = [
   "BEGIN",
   "COMMIT",
   "ROLLBACK",
+  "TRANSACTION",
+  "START",
+  "TEMPORARY",
+  "SCHEMA",
+  "RENAME",
+  "CASCADE",
+  "RESTRICT",
+  "RETURNS",
+  "LANGUAGE",
+  "REVOKE",
+  "ROLE",
+  "COLLATE",
+  "FIRST",
+  "LAST",
+  "ROWS",
+  "LEVEL",
+  "DO",
+  "VARYING",
+  "NULLS",
+  "FETCH",
+  "ONLY",
+  "ROLLUP",
+  "CUBE",
+  "UNBOUNDED",
+  "PRECEDING",
+  "FOLLOWING",
+  "SAVEPOINT",
+  "RELEASE",
+  "PREPARE",
+  "EXECUTE",
+  "DEALLOCATE",
+  "ISOLATION",
+  "SERIALIZABLE",
+  "REPEATABLE",
+  "READ",
+  "COMMITTED",
+  "UNCOMMITTED",
+  "CALL",
+  "PROCEDURE",
+  "FUNCTION",
+  "TRIGGER",
+  "TYPE",
+  "ENUM",
+  "ALWAYS",
+  "PARTIAL",
+  "MAXVALUE",
+  "GROUPING",
   "TRUNCATE",
   "EXPLAIN",
   "ANALYZE",
@@ -409,6 +464,17 @@ const COMMON_SQL_KEYWORDS = [
 ];
 
 const POSTGRES_SQL_KEYWORDS = [
+  "SHOW",
+  "TEMP",
+  "SEQUENCE",
+  "INCREMENT",
+  "MINVALUE",
+  "CYCLE",
+  "OVERLAPS",
+  "INCLUDE",
+  "PUBLIC",
+  "WITHIN",
+  "WITHIN GROUP",
   "COMMENT",
   "BIGSERIAL",
   "JSON",
@@ -1019,10 +1085,6 @@ const DATA_TYPE_KEYWORDS = new Set([
   "JSON",
   "JSONB",
   "UUID",
-  "STRING",
-  "BYTES",
-  "VECTOR",
-  "BOX2D",
   "SERIAL",
   "BIGSERIAL",
   "SMALLSERIAL",
@@ -3700,9 +3762,7 @@ function preferredKeywordsForCompletion(
   if (updateInfo?.afterTarget) keywords.push("SET");
   if (updateInfo?.afterSetAssignments) keywords.push("WHERE");
   if (deleteInfo?.afterTarget) keywords.push("WHERE");
-  // `AS OF SYSTEM TIME` 只能跟在 FROM 之后；用户输入 `AS O` 时只替换 `O`，
-  // 因此补全 `OF SYSTEM TIME`，避免重复插入 `AS`。
-  if (isCockroachDbDriverProfile(driverProfile) && /\bas$/i.test(beforeToken.trimEnd()) && /\bfrom\b/i.test(beforeToken)) keywords.push("OF SYSTEM TIME");
+  keywords.push(...driverProfileContextKeywords(driverProfile, { beforeCursor, beforeToken, databaseType }));
   return keywords;
 }
 
@@ -6711,19 +6771,21 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
   // true there only reflects the `=` the predicate already used.
   const clauseKeywordExpected = !!prefix && !context.suggestTables && (!!context.afterTableReference || !!context.afterJoinCondition);
   const normalizedPrefix = prefix.toLowerCase();
+  const profileDataTypes = driverProfileDataTypes(driverProfile);
+  const dataTypeKeywords = profileDataTypes.length > 0 ? new Set([...DATA_TYPE_KEYWORDS, ...profileDataTypes]) : DATA_TYPE_KEYWORDS;
 
   return activeSqlKeywords(databaseType, driverProfile)
     .filter((keyword) => {
-      if (functionSignatures.has(keyword) && !DATA_TYPE_KEYWORDS.has(keyword) && !DUAL_ROLE_SQL_KEYWORDS.has(keyword)) return false;
+      if (functionSignatures.has(keyword) && !dataTypeKeywords.has(keyword) && !DUAL_ROLE_SQL_KEYWORDS.has(keyword)) return false;
       if (WINDOW_FUNCTIONS.has(keyword)) return false;
       if (!matchesPrefix(keyword, prefix)) return false;
-      if (!showDdl && isDml && (DDL_ONLY_KEYWORDS.has(keyword) || DATA_TYPE_KEYWORDS.has(keyword))) return false;
+      if (!showDdl && isDml && (DDL_ONLY_KEYWORDS.has(keyword) || dataTypeKeywords.has(keyword))) return false;
       if (context.followingKeyword && keyword.includes(" ") && keyword.toUpperCase().endsWith(` ${context.followingKeyword}`)) return false;
       return true;
     })
     .map((keyword) => {
       const base = computeBoost(keyword, prefix);
-      const isDataType = DATA_TYPE_KEYWORDS.has(keyword);
+      const isDataType = dataTypeKeywords.has(keyword);
       const freqBoost = !context.dataTypeContext && HIGH_FREQUENCY_KEYWORDS.has(keyword) ? 100 : 0;
       const typeBoost = context.dataTypeContext && isDataType ? 2500 : 0;
       const followingBoost = context.followingKeyword && isPairPrefixKeywordForFollowing(keyword, context.followingKeyword) ? 1300 : 0;

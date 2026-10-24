@@ -2855,6 +2855,13 @@ pub fn format_grid_sql_literal_with_identifier_quote(
             return literal;
         }
     }
+    if is_sqlserver_binary_literal_column(database_type, column_info) {
+        if let Some(literal) = format_sqlserver_binary_literal_text(&text) {
+            // SQL Server timestamp/rowversion values are binary counters, not
+            // Unicode strings. Keyless row predicates must compare their bytes.
+            return literal;
+        }
+    }
     if is_postgres_binary_literal_column(database_type, column_info) {
         if let Some(literal) = format_postgres_binary_literal_text(&text) {
             return literal;
@@ -3362,6 +3369,28 @@ fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
     let hex = trimmed.strip_prefix("0x")?;
     if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
         Some(if hex.is_empty() { "X''".to_string() } else { trimmed.to_string() })
+    } else {
+        None
+    }
+}
+
+fn is_sqlserver_binary_literal_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::SqlServer)
+        && column_info.is_some_and(|column| {
+            let normalized = column.data_type.trim().trim_matches('"').to_ascii_lowercase();
+            let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("");
+            matches!(base, "binary" | "varbinary" | "timestamp" | "rowversion")
+        })
+}
+
+fn format_sqlserver_binary_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if hex.len() % 2 == 0 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(format!("0x{hex}"))
     } else {
         None
     }
@@ -11212,6 +11241,82 @@ mod tests {
             result.statements,
             vec![format!(r#"UPDATE "DBX_TEST"."DBX9708_JSON" SET "VAL" = '{nested_json}' WHERE "ID" = 1;"#)]
         );
+    }
+
+    #[test]
+    fn sqlserver_binary_literals_preserve_prefixed_hex_values() {
+        for data_type in ["timestamp", "ROWVERSION", "binary(8)", "VARBINARY(MAX)"] {
+            let binary = column("version", data_type, true, None);
+            for (value, expected) in [
+                ("0x0000000000639f1c", "0x0000000000639f1c"),
+                ("0x00aBff", "0x00aBff"),
+                ("0X00aBff", "0x00aBff"),
+                ("0x", "0x"),
+            ] {
+                assert_eq!(
+                    format_grid_sql_literal(&json!(value), Some(DatabaseType::SqlServer), Some(&binary)),
+                    expected,
+                    "{data_type}: {value}"
+                );
+            }
+            assert_eq!(format_grid_sql_literal(&Value::Null, Some(DatabaseType::SqlServer), Some(&binary)), "NULL");
+        }
+    }
+
+    #[test]
+    fn sqlserver_binary_literals_keep_invalid_hex_and_text_columns_quoted() {
+        let binary = column("version", "timestamp", true, None);
+        for (value, expected) in [
+            ("0x0g", "N'0x0g'"),
+            ("0x123", "N'0x123'"),
+            ("0x你", "N'0x你'"),
+            ("0x00; DELETE FROM users", "N'0x00; DELETE FROM users'"),
+            ("0x00' OR 1=1--", "N'0x00'' OR 1=1--'"),
+        ] {
+            assert_eq!(format_grid_sql_literal(&json!(value), Some(DatabaseType::SqlServer), Some(&binary)), expected);
+        }
+        for data_type in ["nvarchar(50)", "datetime2", "timestamped", "notbinary"] {
+            let text = column("value", data_type, true, None);
+            assert_eq!(
+                format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::SqlServer), Some(&text)),
+                "N'0x00ab'"
+            );
+        }
+        assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::SqlServer), None), "N'0x00ab'");
+        for database_type in [DatabaseType::Postgres, DatabaseType::Mysql] {
+            assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(database_type), Some(&binary)), "'0x00ab'");
+        }
+    }
+
+    #[test]
+    fn sqlserver_keyless_save_uses_binary_rowversion_predicates() {
+        // Table metadata calls this timestamp/rowversion; TDS result metadata
+        // may instead report binary/varbinary. Both must preserve the bytes.
+        for data_type in ["timestamp", "rowversion", "binary(8)", "varbinary(8)"] {
+            let mut options = mysql_people_save_options(2);
+            options.database_type = Some(DatabaseType::SqlServer);
+            options.table_meta.schema = Some("dbo".into());
+            options.table_meta.primary_keys.clear();
+            options.table_meta.columns.as_mut().unwrap().push(column("version", data_type, false, None));
+            options.columns.push("version".into());
+            options.rows[0].push(json!("0x0000000000639f1c"));
+            options.rows[1].push(json!("0x0000000000639f1d"));
+            options.dirty_rows = vec![(0, vec![(1, json!("blocked"))])];
+            options.deleted_rows = vec![1];
+
+            let result = prepare_data_grid_save(options);
+            assert_eq!(result.validation_error, None);
+            assert_eq!(
+                result.statements,
+                vec![
+                    "UPDATE [dbo].[people] SET [status] = N'blocked' WHERE [id] = 1 AND [status] = N'active' AND [version] = 0x0000000000639f1c;",
+                    "DELETE FROM [dbo].[people] WHERE [id] = 2 AND [status] = N'active' AND [version] = 0x0000000000639f1d;",
+                ],
+                "{data_type}"
+            );
+            assert_eq!(result.keyless_guards.len(), 2);
+            assert_guards_cover_statement_predicates(&result);
+        }
     }
 
     #[test]

@@ -37,6 +37,19 @@ function Get-InstalledVersion([string]$Binary, [string]$Marker) {
     }
     return ''
 }
+function Clear-StaleArtifacts([string]$Directory) {
+    # An upgrade only rewrites dbx-mcp.exe, so anything else matching these patterns
+    # is debris: the working directory of a killed install, or a copy of the binary
+    # that an update left behind (issue #13009). Both are older than an hour, so a
+    # concurrent install's working directory is never removed.
+    $cutoff = (Get-Date).AddHours(-1)
+    Get-ChildItem -LiteralPath $Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.LastWriteTime -lt $cutoff -and
+            ($_.Name -like 'dbx-mcp.exe.*.TMP' -or ($_.PSIsContainer -and $_.Name -like '.dbx-mcp-install.*'))
+        } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
 function Move-Atomic([string]$Source, [string]$Destination) {
     if ([IO.File]::Exists($Destination)) { [IO.File]::Replace($Source, $Destination, [NullString]::Value) }
     else { [IO.File]::Move($Source, $Destination) }
@@ -91,6 +104,7 @@ function Install-DbxMcp {
     $platform = Get-McpPlatform
     $installDir = [IO.Path]::GetFullPath((Join-Path $HOME '.dbx\bin'))
     [IO.Directory]::CreateDirectory($installDir) | Out-Null
+    Clear-StaleArtifacts $installDir
     $binary = Join-Path $installDir 'dbx-mcp.exe'
     $marker = Join-Path $installDir '.dbx-mcp-version'
     $workDir = Join-Path $installDir ('.dbx-mcp-install.' + [Guid]::NewGuid().ToString('N'))

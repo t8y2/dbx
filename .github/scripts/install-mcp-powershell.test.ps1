@@ -104,6 +104,24 @@ try {
         Write-Output "PASS $sourceMode failure preserves installation"
     }
     New-Fixture 'win32-x64' 'npm'
+    $installDir = Split-Path $binary
+    [IO.Directory]::CreateDirectory($installDir) | Out-Null
+    $staleCopy = Join-Path $installDir 'dbx-mcp.exe.RF1A2B3C4D.TMP'
+    $staleWork = Join-Path $installDir '.dbx-mcp-install.0123456789abcdef'
+    $liveWork = Join-Path $installDir '.dbx-mcp-install.fedcba9876543210'
+    'stale' | Set-Content -LiteralPath $staleCopy
+    [IO.Directory]::CreateDirectory($staleWork) | Out-Null
+    [IO.Directory]::CreateDirectory($liveWork) | Out-Null
+    (Get-Item -LiteralPath $staleCopy).LastWriteTime = [datetime]::new(1985, 1, 1)
+    (Get-Item -LiteralPath $staleWork).LastWriteTime = [datetime]::new(1985, 1, 1)
+    Install-DbxMcp | Out-Null
+    Assert-True (!(Test-Path -LiteralPath $staleCopy)) 'Stale TMP copy survived the upgrade'
+    Assert-True (!(Test-Path -LiteralPath $staleWork)) 'Stale install directory survived the upgrade'
+    Assert-True (Test-Path -LiteralPath $liveWork) 'Cleanup removed a concurrent install directory'
+    Remove-Item -LiteralPath $liveWork -Recurse -Force
+    $script:count++
+    Write-Output 'PASS upgrade clears stale install debris only'
+    New-Fixture 'win32-x64' 'npm'
     Install-DbxMcp | Out-Null
     '0.4.97' | Set-Content -LiteralPath $marker
     $script:mode = 'mirror'

@@ -2300,7 +2300,7 @@ async function loadTemplateContext(allowView = false, node: TreeNode = activeNod
   }
 
   const identifierQuote = connectionStore.connectionIdentifierQuote(node.connectionId);
-  return { node, dbType, driverProfile: config?.driver_profile, identifierQuote, tableSchema, columns, tableType };
+  return { node, dbType, driverProfile: config?.driver_profile, identifierQuote, tableSchema, columns, tableType, defaultSchema: config?.default_schema };
 }
 
 type TableTemplateContext = NonNullable<Awaited<ReturnType<typeof loadTemplateContext>>>;
@@ -2335,6 +2335,7 @@ async function newSelectTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            defaultSchema: context.defaultSchema,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
             tableName: context.node.label,
@@ -2355,6 +2356,7 @@ async function newSelectTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      defaultSchema: context.defaultSchema,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       tableName: context.node.label,
@@ -2408,6 +2410,7 @@ function insertTemplateOptions(context: TableTemplateContext, rowCount: number) 
     database: context.node.database,
     schema: context.tableSchema,
     includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    defaultSchema: context.defaultSchema,
     quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     tableName: context.node.label,
     columns: context.columns,
@@ -2453,6 +2456,7 @@ async function newUpdateTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            defaultSchema: context.defaultSchema,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
@@ -2472,6 +2476,7 @@ async function newUpdateTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      defaultSchema: context.defaultSchema,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
@@ -2497,6 +2502,7 @@ async function newDeleteTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            defaultSchema: context.defaultSchema,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
@@ -2516,6 +2522,7 @@ async function newDeleteTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      defaultSchema: context.defaultSchema,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,

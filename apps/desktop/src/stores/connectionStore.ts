@@ -2171,6 +2171,8 @@ export const useConnectionStore = defineStore("connection", () => {
       if (vgroupResolved) {
         children = applyTableVGroupsToChildren(children, tableVGroupLayouts.value[vgroupResolved.scopeKey], vgroupResolved.scope);
       }
+    } else if (children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
+      children = stripTableVGroupsFromChildren(children);
     }
     parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
@@ -10467,7 +10469,14 @@ export const useConnectionStore = defineStore("connection", () => {
   function reprojectTableVGroupScope(scope: TableVGroupScope, scopeKey: string, tableName?: string, rowType?: string) {
     const container = findTableVGroupContainerNode(treeNodes.value, scope, tableName, rowType);
     if (!container?.children) return;
-    if (container.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) return;
+    if (container.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
+      container.children = stripTableVGroupsFromChildren(container.children);
+      return;
+    }
+    const parent = findParentNode(treeNodes.value, container.id);
+    if (parent?.children && parent.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
+      parent.children = stripTableVGroupsFromChildren(parent.children);
+    }
     container.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(container.children), tableVGroupLayouts.value[scopeKey], scope);
   }
 

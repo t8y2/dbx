@@ -7229,7 +7229,8 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canCreateTable.value) {
       items.push({ sidebarActionId: "contextMenu.createTable", label: t("contextMenu.createTable"), action: createTable, icon: Plus });
     }
-    if (canCreateTable.value && isTableVGroupContainerNode(node) && !node.children?.some(isGroupLabel)) {
+    const isSimpleDisplay = settingsStore.editorSettings.sidebarObjectDisplay === "simple";
+    if (canCreateTable.value && isSimpleDisplay && isTableVGroupContainerNode(node) && !node.children?.some(isGroupLabel)) {
       items.push({
         sidebarActionId: "contextMenu.createGroup",
         label: t("connectionGroup.createGroup"),

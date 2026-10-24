@@ -649,11 +649,26 @@ export function findTableVGroupContainerNode(nodes: TreeNode[], scope: TableVGro
   walk(nodes);
   if (!candidates.length) return null;
 
+  // 表容器优先级：同 scope 下若存在 group-tables（展开或折叠），绝不能回退给
+  // database/schema 泛容器挂载分组（issue #13030）；且已包含 group-tables 子节点的
+  // 库/模式节点处于分组展示模式，自身绝不是表行的直接挂载点。
+  const hasSpecificTableContainer = candidates.some((node) => node.type === "group-tables");
+  const validCandidates = candidates.filter((node) => {
+    if (hasSpecificTableContainer && (node.type === "database" || node.type === "schema" || node.type === "linked-server-schema")) {
+      return false;
+    }
+    if ((node.children ?? []).some((child) => child.type === "group-tables")) {
+      return false;
+    }
+    return true;
+  });
+  const candidatePool = validCandidates.length > 0 ? validCandidates : candidates;
+
   if (memberLabel) {
-    const holder = candidates.find((node) => (node.children ?? []).some((child) => memberRowTypes[child.type] && child.label === memberLabel));
+    const holder = candidatePool.find((node) => (node.children ?? []).some((child) => memberRowTypes[child.type] && child.label === memberLabel));
     if (holder) return holder;
   }
-  return candidates.find((node) => (node.children ?? []).some((child) => memberRowTypes[child.type] || child.type === "table-vgroup")) ?? candidates[0]!;
+  return candidatePool.find((node) => (node.children ?? []).some((child) => memberRowTypes[child.type] || child.type === "table-vgroup")) ?? candidatePool[0]!;
 }
 
 /**

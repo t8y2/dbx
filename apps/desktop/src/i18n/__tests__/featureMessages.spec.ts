@@ -157,6 +157,11 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     keys: under("settings", ["shortcutPreviousStatement", "shortcutNextStatement", "shortcutStatementStart"]),
     translated: true,
   },
+  {
+    feature: "editor line bookmarks",
+    keys: under("settings", ["shortcutToggleBookmark", "shortcutNextBookmark", "shortcutPreviousBookmark"]),
+    translated: true,
+  },
   { feature: "MCP history kind", keys: ["history.kinds.mcp"] },
   { feature: "editor selection to AI (#10058)", keys: under("ai", ["selectionChipLabel", "selectionChipDetail", "externalTargetUnavailable"]) },
   { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },

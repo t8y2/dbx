@@ -233,6 +233,22 @@ describe("shortcutRegistry editor actions", () => {
     }
   });
 
+  it("registers conflict-free line bookmark shortcuts", () => {
+    const toggle = SHORTCUT_DEFINITIONS.find((item) => item.id === "toggleBookmark");
+    const next = SHORTCUT_DEFINITIONS.find((item) => item.id === "nextBookmark");
+    const previous = SHORTCUT_DEFINITIONS.find((item) => item.id === "previousBookmark");
+
+    expect(toggle).toMatchObject({ labelKey: "settings.shortcutToggleBookmark", scope: "editor", defaultShortcut: "Mod+F2" });
+    expect(next).toMatchObject({ labelKey: "settings.shortcutNextBookmark", scope: "editor", defaultShortcut: "F2" });
+    expect(previous).toMatchObject({ labelKey: "settings.shortcutPreviousBookmark", scope: "editor", defaultShortcut: "Shift+F2" });
+
+    for (const id of ["toggleBookmark", "nextBookmark", "previousBookmark"] as const) {
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(SHORTCUT_DEFINITIONS.find((item) => item.id === id)?.defaultShortcut);
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS[id])).not.toBe("");
+      expect(findShortcutConflict(id, DEFAULT_SHORTCUT_SETTINGS[id], DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    }
+  });
+
   it("keeps current-view search and editor find contextual on Mod+F", () => {
     const focusSearch = SHORTCUT_DEFINITIONS.find((item) => item.id === "focusSearch");
     const find = SHORTCUT_DEFINITIONS.find((item) => item.id === "find");

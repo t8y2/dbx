@@ -423,8 +423,8 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     const crossBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-warning/30"]');
     const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
 
-    // 未搜索：全局口径（默认键位 6 组跨域同键），且默认无同作用域阻断冲突。
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=6");
+    // F2 also navigates editor bookmarks; cross-scope overlaps stay informational.
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
     expect(conflictBadge()).toBeNull();
 
     const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
@@ -447,7 +447,7 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     search.value = "";
     search.dispatchEvent(new Event("input", { bubbles: true }));
     await flushAsyncUpdates();
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=6");
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
   });
 
   it("scopes the red same-scope badge to the search results while the footer gate stays global", async () => {

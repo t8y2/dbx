@@ -7270,6 +7270,10 @@ export default withEnglishFallback({
     truncatedHint: "資料筆數超過單次比較上限的表只比較了前幾筆，超出部分的新增、修改與刪除不會被發現。建議加上篩選條件縮小範圍後分批比較。",
     truncatedTable: "{table}：來源 {source} 筆、目標 {target} 筆，僅比較前 {budget} 筆",
     truncatedBadge: "僅比較前 {budget} 筆",
+    exportDiff: "匯出差異 (XLSX)",
+    exportDiffKind: "差異類型",
+    exportChangedFields: "變更明細",
+    exportDiffSuccess: "差異匯出成功：{path}",
   },
   settings: {
     historyRetentionLimit: "查詢歷史保留筆數",

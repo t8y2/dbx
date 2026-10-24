@@ -8165,6 +8165,10 @@ export default withEnglishFallback({
     truncatedHint: "Tabele zawierające więcej wierszy niż pozwala pojedyncze porównanie zostały sprawdzone tylko w zakresie pierwszych wierszy; dodane, zmodyfikowane lub usunięte wiersze poza tym zakresem nie są raportowane. Zawęź zakres filtrem i porównuj partiami.",
     truncatedTable: "{table}: {source} wierszy źródłowych, {target} wierszy docelowych, porównano tylko pierwsze {budget} wierszy",
     truncatedBadge: "Porównano tylko pierwsze {budget} wierszy",
+    exportDiff: "Eksportuj różnice (XLSX)",
+    exportDiffKind: "Typ różnicy",
+    exportChangedFields: "Zmienione pola",
+    exportDiffSuccess: "Różnice wyeksportowane: {path}",
   },
   settings: {
     historyRetentionLimit: "Okres przechowywania historii zapytań",

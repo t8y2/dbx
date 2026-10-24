@@ -7952,6 +7952,10 @@ export default withEnglishFallback({
     truncatedHint: "1 回の比較で読み込める行数を超えたテーブルは先頭の行だけを比較しているため、それ以降の追加・変更・削除は検出されません。フィルターで範囲を絞り、分割して比較してください。",
     truncatedTable: "{table}：ソース {source} 行、ターゲット {target} 行、先頭 {budget} 行のみ比較",
     truncatedBadge: "先頭 {budget} 行のみ比較",
+    exportDiff: "差分をエクスポート (XLSX)",
+    exportDiffKind: "差分タイプ",
+    exportChangedFields: "変更フィールド",
+    exportDiffSuccess: "差分のエクスポートが完了しました：{path}",
   },
   settings: {
     historyRetentionLimit: "クエリ履歴の保持件数",

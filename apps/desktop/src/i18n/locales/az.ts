@@ -7354,6 +7354,10 @@ export default withEnglishFallback({
     truncatedHint: "Bir müqayisənin oxuya biləcəyindən çox sətri olan cədvəllər yalnız ilk sətirlər üzrə müqayisə edildi, ona görə də bu nöqtədən sonrakı əlavə, dəyişdirilmiş və ya silinmiş sətirlər aşkarlanmır. Aralığı filtr ilə daraldıb hissə-hissə müqayisə edin.",
     truncatedTable: "{table}: mənbə {source} sətir, hədəf {target} sətir; yalnız ilk {budget} sətir müqayisə edildi",
     truncatedBadge: "Yalnız ilk {budget} sətir müqayisə edildi",
+    exportDiff: "Fərqləri ixrac et (XLSX)",
+    exportDiffKind: "Fərq növü",
+    exportChangedFields: "Dəyişən sahələr",
+    exportDiffSuccess: "Fərqlər ixrac edildi: {path}",
   },
   settings: {
     historyRetentionLimit: "Sorğu tarixçəsinin saxlanma həddi",

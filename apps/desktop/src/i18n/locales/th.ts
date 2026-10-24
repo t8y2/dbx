@@ -9897,6 +9897,10 @@ export default withEnglishFallback({
     truncatedHint: "ตารางที่มีแถวมากกว่าที่การเปรียบเทียบครั้งเดียวอ่านได้จะถูกเปรียบเทียบเฉพาะแถวแรก จึงไม่รายงานแถวที่เพิ่ม แก้ไข หรือลบหลังจากนั้น จำกัดช่วงด้วยตัวกรองและเปรียบเทียบเป็นชุด",
     truncatedTable: "{table}: แถวต้นทาง {source} แถว แถวปลายทาง {target} แถว เปรียบเทียบเฉพาะ {budget} แถวแรก",
     truncatedBadge: "เปรียบเทียบเฉพาะ {budget} แถวแรก",
+    exportDiff: "ส่งออกความแตกต่าง (XLSX)",
+    exportDiffKind: "ประเภทความแตกต่าง",
+    exportChangedFields: "ฟิลด์ที่เปลี่ยนแปลง",
+    exportDiffSuccess: "ส่งออกความแตกต่างแล้ว: {path}",
   },
   settings: {
     historyRetentionLimit: "จำนวนรายการประวัติ Query สูงสุด",

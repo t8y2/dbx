@@ -7924,6 +7924,10 @@ export default withEnglishFallback({
     truncatedHint: "Le tabelle con più righe di quante ne possa leggere un singolo confronto sono state confrontate solo sulle prime righe, quindi le righe aggiunte, modificate o eliminate oltre quel punto non vengono rilevate. Restringi l'intervallo con un filtro e confronta a blocchi.",
     truncatedTable: "{table}: {source} righe nell'origine, {target} nella destinazione; confrontate solo le prime {budget} righe",
     truncatedBadge: "Confrontate solo le prime {budget} righe",
+    exportDiff: "Esporta differenze (XLSX)",
+    exportDiffKind: "Tipo di differenza",
+    exportChangedFields: "Campi modificati",
+    exportDiffSuccess: "Differenze esportate: {path}",
   },
   settings: {
     historyRetentionLimit: "Limite della cronologia query",

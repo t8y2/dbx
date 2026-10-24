@@ -8048,6 +8048,10 @@ export default withEnglishFallback({
     truncatedHint: "한 번의 비교로 읽을 수 있는 행 수를 초과한 테이블은 앞부분만 비교했기 때문에 그 이후의 추가·수정·삭제는 감지되지 않습니다. 필터로 범위를 좁혀 나누어 비교하세요.",
     truncatedTable: "{table}: 원본 {source}행, 대상 {target}행, 앞 {budget}행만 비교",
     truncatedBadge: "앞 {budget}행만 비교",
+    exportDiff: "차이 내보내기 (XLSX)",
+    exportDiffKind: "차이 유형",
+    exportChangedFields: "변경 필드",
+    exportDiffSuccess: "차이 내보내기 완료: {path}",
   },
   settings: {
     historyRetentionLimit: "쿼리 기록 보관 개수",

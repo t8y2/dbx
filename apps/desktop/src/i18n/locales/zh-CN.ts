@@ -9258,6 +9258,10 @@ export default withEnglishFallback({
     truncatedHint: "行数超过单次比较上限的表只检查了部分数据，未检查范围内的新增、修改和删除不会被发现，因此不会生成或执行同步 SQL。建议缩小范围后分批完整比较。",
     truncatedTable: "{table}：源 {source} 行、目标 {target} 行，仅比较前 {budget} 行",
     truncatedBadge: "仅检查部分数据（单侧上限 {budget} 行），同步已禁用",
+    exportDiff: "导出差异 (XLSX)",
+    exportDiffKind: "差异类型",
+    exportChangedFields: "变更明细",
+    exportDiffSuccess: "差异导出成功：{path}",
   },
   settings: {
     historyRetentionLimit: "查询历史保留条数",

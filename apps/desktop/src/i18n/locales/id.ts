@@ -8096,6 +8096,10 @@ export default withEnglishFallback({
       "Tabel dengan baris lebih banyak daripada yang dapat dibaca dalam satu kali perbandingan hanya dibandingkan sampai baris pertamanya, sehingga baris yang ditambahkan, diubah, atau dihapus setelah titik itu tidak dilaporkan. Persempit rentang dengan filter dan bandingkan secara bertahap.",
     truncatedTable: "{table}: {source} baris sumber, {target} baris target, hanya {budget} baris pertama yang dibandingkan",
     truncatedBadge: "Hanya {budget} baris pertama yang dibandingkan",
+    exportDiff: "Ekspor Perbedaan (XLSX)",
+    exportDiffKind: "Jenis Perbedaan",
+    exportChangedFields: "Kolom yang Berubah",
+    exportDiffSuccess: "Perbedaan diekspor: {path}",
   },
   settings: {
     historyRetentionLimit: "Retensi riwayat kueri",

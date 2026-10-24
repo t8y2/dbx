@@ -7234,6 +7234,10 @@ export default withEnglishFallback({
     truncatedHint: "Tek bir karşılaştırmanın okuyabileceğinden fazla satıra sahip tablolar yalnızca ilk satırları üzerinden karşılaştırıldı; bu noktadan sonraki eklenen, değişen veya silinen satırlar bildirilmez. Aralığı bir filtreyle daraltıp toplu olarak karşılaştırın.",
     truncatedTable: "{table}: kaynak {source} satır, hedef {target} satır; yalnızca ilk {budget} satır karşılaştırıldı",
     truncatedBadge: "Yalnızca ilk {budget} satır karşılaştırıldı",
+    exportDiff: "Farkları Dışa Aktar (XLSX)",
+    exportDiffKind: "Fark Türü",
+    exportChangedFields: "Değişen Alanlar",
+    exportDiffSuccess: "Farklar dışa aktarıldı: {path}",
   },
   settings: {
     historyRetentionLimit: "Sorgu geçmişi saklama sınırı",

@@ -9291,6 +9291,10 @@ export default {
     truncatedHint: "Tables above the single-compare limit were inspected only over a subset, so changes outside it are not reported. Synchronization SQL is disabled for these results; narrow the range and run complete comparisons in batches.",
     truncatedTable: "{table}: {source} source rows, {target} target rows, compared the first {budget} rows only",
     truncatedBadge: "Inspected a subset (up to {budget} rows per side); synchronization disabled",
+    exportDiff: "Export Diffs (XLSX)",
+    exportDiffKind: "Diff Type",
+    exportChangedFields: "Changed Fields",
+    exportDiffSuccess: "Diffs exported: {path}",
   },
   settings: {
     historyRetentionLimit: "Query history retention",

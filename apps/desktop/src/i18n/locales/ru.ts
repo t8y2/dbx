@@ -9499,6 +9499,10 @@ export default withEnglishFallback({
     truncatedHint: "Таблицы, в которых строк больше, чем может прочитать одно сравнение, сравнены только по первым строкам, поэтому добавленные, изменённые и удалённые строки после этого не обнаруживаются. Сузьте диапазон фильтром и сравнивайте по частям.",
     truncatedTable: "{table}: строк в источнике {source}, в приёмнике {target}; сравнены только первые {budget} строк",
     truncatedBadge: "Сравнены только первые {budget} строк",
+    exportDiff: "Экспорт различий (XLSX)",
+    exportDiffKind: "Тип различия",
+    exportChangedFields: "Изменённые поля",
+    exportDiffSuccess: "Различия экспортированы: {path}",
   },
   settings: {
     historyRetentionLimit: "Хранение истории запросов",

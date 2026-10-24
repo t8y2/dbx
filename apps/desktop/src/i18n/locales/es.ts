@@ -8145,6 +8145,10 @@ export default withEnglishFallback({
     truncatedHint: "Las tablas con más filas de las que puede leer una sola comparación solo se compararon en sus primeras filas, por lo que las filas añadidas, modificadas o eliminadas a partir de ahí no se detectan. Acota el rango con un filtro y compara por lotes.",
     truncatedTable: "{table}: {source} filas de origen, {target} de destino; solo se compararon las primeras {budget} filas",
     truncatedBadge: "Solo se compararon las primeras {budget} filas",
+    exportDiff: "Exportar diferencias (XLSX)",
+    exportDiffKind: "Tipo de diferencia",
+    exportChangedFields: "Campos modificados",
+    exportDiffSuccess: "Diferencias exportadas: {path}",
   },
   settings: {
     historyRetentionLimit: "Límite del historial de consultas",

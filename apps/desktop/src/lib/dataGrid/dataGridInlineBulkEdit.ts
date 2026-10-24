@@ -14,13 +14,13 @@ export function dataGridInlineBulkEditValue(event: DataGridInlineBulkEditKeyEven
 }
 
 /**
- * Bulk-edit dialog contract (placeholder "Value, or NULL"): empty input and the
- * bare keyword `NULL` stage SQL NULL. Every other input is kept as typed so a
+ * Bulk-edit dialog contract (placeholder "Value, or NULL"): the bare keyword
+ * `NULL` stages SQL NULL. Empty input is an empty string. Other input is kept as typed so a
  * text column can still receive the literal word via quoted/user-specific input
  * outside this dialog path.
  */
 export function bulkEditInputToSqlValue(input: string): string | null {
   const trimmed = input.trim();
-  if (trimmed === "" || trimmed.toUpperCase() === "NULL") return null;
+  if (trimmed.toUpperCase() === "NULL") return null;
   return input;
 }

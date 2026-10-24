@@ -1150,6 +1150,9 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     await flushUi();
     const valueInput = await waitForElement<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]');
     const callsBeforeEnter = backend.documentFindDocuments.mock.calls.length;
+    valueInput.value = "507f1f77bcf86cd799439011";
+    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
     valueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await flushUi();
     expect(backend.documentFindDocuments.mock.calls.length).toBeGreaterThan(callsBeforeEnter);

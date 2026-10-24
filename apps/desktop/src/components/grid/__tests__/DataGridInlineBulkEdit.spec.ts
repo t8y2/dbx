@@ -21,11 +21,11 @@ describe("DataGrid inline bulk editing", () => {
 });
 
 describe("bulkEditInputToSqlValue", () => {
-  it.each(["", "   ", "NULL", "null", "Null", "nUlL", " NULL "])("maps the NULL sentinel %j to SQL NULL", (input) => {
+  it.each(["NULL", "null", "Null", "nUlL", " NULL "])("maps the NULL sentinel %j to SQL NULL", (input) => {
     expect(bulkEditInputToSqlValue(input)).toBeNull();
   });
 
-  it.each(["0", "false", "NULLL", "NULLX", "'NULL'", "nulls", "NUL", " 1 "])("keeps non-sentinel input %j as typed", (input) => {
+  it.each(["", "   ", "0", "false", "NULLL", "NULLX", "'NULL'", "nulls", "NUL", " 1 "])("keeps non-sentinel input %j as typed", (input) => {
     expect(bulkEditInputToSqlValue(input)).toBe(input);
   });
 });

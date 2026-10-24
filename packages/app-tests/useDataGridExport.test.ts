@@ -1172,6 +1172,50 @@ test("all-results XLSX with SQL maps each result set to its source statement", a
   ]);
 });
 
+test("all-results merged XLSX stacks every result set into one worksheet with titles and blank separators", async () => {
+  const allExportResults = [
+    { sheetName: "Result 1", result: { columns: ["id", "name"], rows: [[1, "Ada"]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1" }, sql: "SELECT 1" },
+    { sheetName: "Result 2", result: { columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 2" }, sql: "SELECT 2 ORDER BY 1" },
+  ];
+  const { composable } = buildExportHarness({ allExportResults });
+
+  await composable.exportAllResultsMergedXlsx();
+
+  assert.equal(apiMock.exportQueryResultsXlsx.mock.calls.length, 1);
+  const worksheets = apiMock.exportQueryResultsXlsx.mock.calls[0][1];
+  // 每行单元格数由 columns.length 决定（Tauri/Rust 与 Web 构建路径一致），宽块 2 列
+  // 即合并表宽度；标题行 + 列头行 + 数据行 + 块间空行，窄块行 pad 到同一宽度。
+  assert.equal(worksheets.length, 1);
+  assert.equal(worksheets[0].autoFilter, false);
+  assert.deepEqual(worksheets[0].rows, [
+    ["1. Result 1", null],
+    ["id", "name"],
+    [1, "Ada"],
+    [null, null],
+    ["2. Result 2", null],
+    ["id", null],
+    [2, null],
+  ]);
+});
+
+test("all-results merged XLSX with SQL appends the SQL worksheet after the merged sheet", async () => {
+  const allExportResults = [
+    { sheetName: "Result 1", result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1" }, sql: "SELECT 1" },
+    { sheetName: "Result 2", result: { columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 2" }, sql: "SELECT 2 ORDER BY 1" },
+  ];
+  const { composable } = buildExportHarness({ allExportResults });
+
+  await composable.exportAllResultsMergedXlsxWithSql();
+
+  const worksheets = apiMock.exportQueryResultsXlsx.mock.calls[0][1];
+  assert.equal(worksheets.length, 2);
+  assert.equal(worksheets[1].sheetName, "SQL");
+  assert.deepEqual(worksheets[1].rows, [
+    ["Result 1", "SELECT 1"],
+    ["Result 2", "SELECT 2 ORDER BY 1"],
+  ]);
+});
+
 test("cancelled query result CSV export clears the cancel handler without using the in-memory path", async () => {
   const { composable, fullExportResult, exportProgressState, exportCancelHandler } = buildExportHarness();
   apiMock.startQueryResultExport.mockImplementationOnce(async (_request, onProgress) => {

@@ -274,7 +274,19 @@ fn write_extraction(
             // (#13305): only the separator is pinned and quoting stays off,
             // because TSV is split on the tab separator with no quote state
             // machine, so a value that merely contains a double quote must
-            // not be escaped.
+            // not be escaped. The plain Tsv id is also the implicit default of
+            // smart copy/cut, so it stays on the legacy shape (no header rows,
+            // no formula escaping, no number formatting) instead of inheriting
+            // options a user saved while configuring CSV/DSV; only the explicit
+            // TsvWithHeaders id honors them.
+            if extractor == DataGridExtractorId::Tsv {
+                options.header_position = DataGridHeaderPosition::Legacy;
+                options.header_format = DataGridHeaderFormat::Name;
+                options.header_case = DataGridHeaderCase::Preserve;
+                options.escape_formulas = false;
+                options.format_numbers = DataGridNumberFormat::Inherit;
+                options.line_feed_escape_string.clear();
+            }
             options.include_column_header = extractor == DataGridExtractorId::TsvWithHeaders
                 && options.header_position == DataGridHeaderPosition::Legacy;
             options.quote_numeric_strings = false;

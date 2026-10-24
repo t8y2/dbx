@@ -708,6 +708,25 @@ fn tsv_honors_the_null_text_option() {
 }
 
 #[test]
+fn plain_tsv_ignores_persisted_dsv_options_unlike_tsv_with_headers() {
+    // The plain Tsv id is the implicit default of smart copy/cut; a user who
+    // saved non-legacy options while configuring CSV must not get header rows
+    // or formula escaping in plain Ctrl+C output (#13305 review).
+    let mut request = request(DataGridExtractorId::Tsv);
+    request.columns = vec![column("amount", 0)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![Value::Number(serde_json::Number::from(1))]];
+    request.options.dsv.header_position = DataGridHeaderPosition::Top;
+    request.options.dsv.header_format = DataGridHeaderFormat::NameAndDescriptionTwoRows;
+    request.options.dsv.escape_formulas = true;
+
+    let result = extract_data_grid_selection(request).expect("TSV extraction");
+    // Legacy plain Tsv carries no header row and applies no formula escaping,
+    // even though persisted options ask for a two-row top header.
+    assert_eq!(result.text, "1");
+}
+
+#[test]
 fn tsv_and_pipe_emit_embedded_quotes_verbatim_while_csv_escapes_them() {
     // Reproduces #10087: a value that is itself wrapped in double quotes (e.g.
     // MySQL `SELECT CONCAT('"', id, '"')`) must copy out unchanged from the grid's

@@ -1,4 +1,5 @@
 pub mod exact_metadata;
+pub mod native_jobs;
 pub mod table_structure_sql;
 
 pub use dbx_drivers::metadata::sqlite_ddl;

@@ -23,7 +23,19 @@ This is separate from one-shot `execute_transaction`, which begins, runs a state
 
 `agentSessionId` identifies a logical database connection. Existing `sessionId` fields remain pagination cursor identifiers and must not be used as logical connection identifiers.
 
-`sessionRole` is `workload` by default. DBX sends `metadata` for object-tree, completion, and other read-only metadata sessions. New runtimes use this role to preserve metadata checkout capacity; older runtimes may ignore the field.
+`sessionRole` is `workload` by default. DBX sends `metadata` for object-tree, completion, and isolated background tasks, including an operation-owned native Job session. The role selects resource isolation, not database write authorization; Core checks write protection before native Job mutations. New runtimes use this role to preserve metadata checkout capacity; older runtimes may ignore the field.
+
+## Native Job physical sessions
+
+Drivers that opt in to `native_job_session_v1` may use `MultiSessionJsonRpcServer.withNativeJobSessions(YourAgent::new)` and implement `supportsNativeJobSessions()`. The default JDBC and legacy v1 handshakes do not advertise this capability.
+
+During confirmed apply, Core opens a private metadata logical session, then calls `open_native_job_session` with its `operationId`. The result contains the same `operationId`, an opaque `sessionToken`, and `phase: opened`. This reserves one non-pooled physical connection with automatic commit disabled. Existing runtime physical-connection limits and opening/closing watchdogs still apply. An editor transaction, pinned connection, cursor, or retained result prevents reservation without altering that existing state.
+
+All subsequent `execute_query` and `connection_info` requests on the reservation carry `nativeJobOperationId` and `nativeJobSessionToken`. Other operations, changed configuration, automatic reconnect, and foreign or stale tokens are rejected before SQL. Native procedures may commit internally without releasing or replacing this physical connection. Core continues to own SQL plans, job-configuration phases, cancellation of remaining steps, and dispatch deduplication.
+
+After the operation, Core calls `close_native_job_session` with `operationId` and `sessionToken` before retiring the metadata route. If the open response was lost, the exact operation may omit the token to close only its own connection; a replacement logical session cannot claim that ownership. Closing returns `phase: closed` only after the physical close is acknowledged. A failed close returns and retains `phase: unknown`, including on duplicate close and outer logical cleanup. Cleanup never submits a commit, native configuration commit, or activation. Closing the connection does not prove that already committed configuration changes were rolled back or that native configuration completed.
+
+The Generic JDBC plugin advertises the same capability through `jdbcSessionProtocol` and accepts both `openNativeJobSession` / `closeNativeJobSession` and the snake-case method names. It supports the private default process and existing logical sessions. The connection and selected driver remain immutable during ownership, and native SQL bypasses ordinary SQL trimming, rewriting, automatic-commit restoration, and result-query retries. Ordinary JDBC requests retain their existing behavior.
 
 ## Concurrency
 

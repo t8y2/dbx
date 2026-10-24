@@ -7,6 +7,7 @@ import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTy
 import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+import type { NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobRequest, NativeJobOperationStatus, NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest } from "@/lib/database/nativeJobs";
 import { functionDiffsToWire, functionInfoFromWire, schemaDiffPreparationFromWire, schemaDiffPreparationToWire, type FunctionInfoWire, type SchemaDiffPreparationWire } from "./functionInfoTransport";
 import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan, OracleRoutineReadOptions, OracleRoutineIdentity } from "@/types/schemaDiff";
 
@@ -1933,6 +1934,32 @@ export async function listSchemaInfos(connectionId: string, database: string): P
 export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
   return invoke("get_custom_type_details", { connectionId, database, schema, name });
 }
+
+export function nativeJobOpenContext(connectionId: string, database: string): Promise<NativeJobContext> {
+  return invokeBackend("native_job_open_context", { connectionId, database });
+}
+export function nativeJobList(request: NativeJobListRequest): Promise<NativeJobList> {
+  return invokeBackend("native_job_list", { request });
+}
+export function nativeJobReferences(request: NativeJobReferenceListRequest): Promise<NativeJobReferenceCatalog> {
+  return invokeBackend("native_job_references", { request });
+}
+export function nativeJobRead(target: NativeJobRef): Promise<NativeJobDetails> {
+  return invokeBackend("native_job_read", { target });
+}
+export function nativeJobPrepare(mutation: NativeJobRequest): Promise<NativeJobPreparedPlan> {
+  return invokeBackend("native_job_prepare", { mutation });
+}
+export function nativeJobApply(planId: string): Promise<NativeJobOperationStatus> {
+  return invokeBackend("native_job_apply", { planId });
+}
+export function nativeJobStatus(operationId: string, observe?: boolean): Promise<NativeJobOperationStatus> {
+  return invokeBackend("native_job_status", { operationId, ...(observe ? { observe: true } : {}) });
+}
+export function nativeJobCancel(operationId: string): Promise<NativeJobOperationStatus> {
+  return invokeBackend("native_job_cancel", { operationId });
+}
+
 export async function getOracleTypeManagementSnapshot(connectionId: string, database: string, owner: string, name: string, knownObjects: OracleTypeManagementObjectKey[] = []): Promise<OracleTypeManagementSnapshot> {
   return invoke("get_oracle_type_management_snapshot", { connectionId, database, owner, name, knownObjects });
 }

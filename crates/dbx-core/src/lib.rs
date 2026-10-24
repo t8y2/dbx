@@ -77,6 +77,7 @@ pub use dbx_sql::mysql_event_sql;
 pub use dbx_sql::object_source_sql;
 pub use dbx_sql::oracle_view_rename;
 pub use dbx_types::models;
+pub use dbx_types::native_jobs;
 pub use host::external;
 pub use persistence::history;
 pub use query::document_ops;

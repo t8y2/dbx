@@ -3567,7 +3567,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
         });
     }
 
+    @Override
+    public boolean supportsNativeJobSessions() { return true; }
+
     public static void main(String[] args) {
-        new MultiSessionJsonRpcServer(DamengAgent::new).withExactMetadataIdentity().run();
+        MultiSessionJsonRpcServer.withNativeJobSessions(DamengAgent::new).withExactMetadataIdentity().run();
     }
 }

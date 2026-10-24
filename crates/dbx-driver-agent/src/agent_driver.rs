@@ -1067,6 +1067,9 @@ pub enum AgentCapability {
     MongoBulkWrite,
     MongoRenameCollection,
     MongoFindCursor,
+    NativeJobLegacyV1,
+    NativeJobSessionV1,
+    NativeJobLegacyObV1,
     MultiSession,
     StructuredErrorV1,
 }
@@ -1149,7 +1152,7 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 33] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1176,16 +1179,22 @@ impl AgentCapability {
         Self::MongoBulkWrite,
         Self::MongoRenameCollection,
         Self::MongoFindCursor,
+        Self::NativeJobLegacyV1,
+        Self::NativeJobSessionV1,
         Self::ExactMetadataIdentityV1,
         Self::MultiSession,
         Self::StructuredErrorV1,
         Self::BlobBindStatementsV1,
+        Self::NativeJobLegacyObV1,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ExactMetadataIdentityV1 => "exact_metadata_identity_v1",
             Self::BlobBindStatementsV1 => "blob_bind_statements_v1",
+            Self::NativeJobLegacyV1 => "native_job_legacy_v1",
+            Self::NativeJobSessionV1 => "native_job_session_v1",
+            Self::NativeJobLegacyObV1 => "native_job_legacy_ob_v1",
             Self::Connect => "connect",
             Self::TestConnection => "test_connection",
             Self::Metadata => "metadata",
@@ -6055,8 +6064,11 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
         assert_eq!(AgentCapability::StructuredErrorV1.as_str(), "structured_error_v1");
         assert_eq!(AgentCapability::BlobBindStatementsV1.as_str(), "blob_bind_statements_v1");
+        assert_eq!(AgentCapability::NativeJobLegacyV1.as_str(), "native_job_legacy_v1");
+        assert_eq!(AgentCapability::NativeJobSessionV1.as_str(), "native_job_session_v1");
+        assert_eq!(AgentCapability::NativeJobLegacyObV1.as_str(), "native_job_legacy_ob_v1");
         assert_eq!(AgentCapability::ExactMetadataIdentityV1.as_str(), "exact_metadata_identity_v1");
-        assert_eq!(AgentCapability::ALL.len(), 30);
+        assert_eq!(AgentCapability::ALL.len(), 33);
     }
 
     #[test]

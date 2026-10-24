@@ -152,6 +152,7 @@ const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MyS
 const PostgresDashboard = defineAsyncComponent(() => import("@/components/admin/PostgresDashboard.vue"));
 const XuguServerDashboard = defineAsyncComponent(() => import("@/components/admin/XuguServerDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
+const DatabaseJobAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseJobAdmin.vue"));
 
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
@@ -3834,7 +3835,10 @@ defineExpose({
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-jobs' && activeConnection">
-      <DamengJobAdmin :key="activeTab.id" :connection="activeConnection" />
+      <DamengJobAdmin :key="activeTab.id" :connection="activeConnection" :initial-selection="activeTab.nativeJobAdmin" />
+    </template>
+    <template v-else-if="activeTab.mode === 'database-jobs' && activeConnection">
+      <DatabaseJobAdmin :key="activeTab.id" :connection="activeConnection" :initial-selection="activeTab.nativeJobAdmin" />
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-users' && activeConnection">

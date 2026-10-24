@@ -105,6 +105,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     public boolean supportsBlobBindStatements() { return true; }
 
     @Override
+    public boolean supportsNativeLegacyJobs() { return true; }
+
+    @Override
     public QueryResult executeBlobBoundStatements(List<String> previews, List<BlobBoundStatement> statements,
         String schema, int timeoutSecs, boolean transaction) {
         return BlobBoundExecutor.execute(requireConnected(), previews, statements, schema,
@@ -2468,6 +2471,6 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        MultiSessionJsonRpcServer.withBlobBindings(OceanBaseOracleAgent::new).withExactMetadataIdentity().run();
+        MultiSessionJsonRpcServer.withNativeLegacyJobs(OceanBaseOracleAgent::new, true).withExactMetadataIdentity().run();
     }
 }

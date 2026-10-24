@@ -6,6 +6,7 @@ import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/c
 import { ref, computed, watch, markRaw, reactive } from "vue";
 import { DEFAULT_QUERY_TIMEOUT_SECS, normalizeManualTransactionTimeoutSecs } from "@/lib/connection/timeoutLimits";
 import { gaussdbConnectionMode } from "@/lib/database/jdbcDialect";
+import { nativeJobAdminEngine } from "@/lib/database/nativeJobAdmin";
 import { supportsSchemaIndexManagement } from "@/lib/database/databaseObjectCapabilities";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import type {
@@ -1966,7 +1967,17 @@ export const useConnectionStore = defineStore("connection", () => {
     // as metadata children, withConnectionUtilityNodes would keep the old copies
     // AND append fresh ones on every useCachedChildren pass, duplicating the
     // 用户/角色 menus once per refresh cycle.
-    return node.type === "oracle-db-links" || node.type === "user-admin" || node.type === "xugu-user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "group-tablespaces" || node.type === "saved-sql-root";
+    return (
+      node.type === "oracle-db-links" ||
+      node.type === "user-admin" ||
+      node.type === "xugu-user-admin" ||
+      node.type === "dameng-users" ||
+      node.type === "dameng-roles" ||
+      node.type === "dameng-job-admin" ||
+      node.type === "database-job-admin" ||
+      node.type === "group-tablespaces" ||
+      node.type === "saved-sql-root"
+    );
   }
 
   function connectionMetadataChildren(children: TreeNode[] | undefined): TreeNode[] {
@@ -2283,7 +2294,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function buildDamengJobAdminNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
     const config = getConfig(connectionId);
-    if (effectiveDatabaseTypeForConnection(config) !== "dameng") return undefined;
+    if (nativeJobAdminEngine(config) !== "dameng") return undefined;
     const existing = existingConnectionNode?.children?.find((child) => child.type === "dameng-job-admin");
     return {
       id: `${connectionId}:__dameng_jobs`,
@@ -2293,6 +2304,13 @@ export const useConnectionStore = defineStore("connection", () => {
       database: "",
       isExpanded: existing?.isExpanded ?? false,
     };
+  }
+
+  function buildDatabaseJobAdminNode(connectionId: string): TreeNode | undefined {
+    const config = getConfig(connectionId);
+    const engine = nativeJobAdminEngine(config);
+    if (!engine || engine === "dameng") return;
+    return { id: `${connectionId}:__native_jobs`, label: "tree.nativeJobs", type: "database-job-admin", connectionId, database: "", isExpanded: false };
   }
 
   function buildXuguTablespacesNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
@@ -2367,7 +2385,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const damengRoleNode = buildDamengRoleNode(connectionId, existingConnectionNode);
     const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
     const xuguTablespacesNode = buildXuguTablespacesNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
+    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, buildDatabaseJobAdminNode(connectionId), xuguTablespacesNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -4596,7 +4614,8 @@ export const useConnectionStore = defineStore("connection", () => {
     return true;
   }
 
-  async function updateConnectionDatabaseInfo(connectionId: string, databaseInfo: DatabaseConnectionInfo, expectedConfigFingerprint?: string): Promise<void> {
+  async function updateConnectionDatabaseInfo(connectionId: string, databaseInfo: DatabaseConnectionInfo, expectedConfigFingerprint?: string, isCurrent?: () => boolean): Promise<void> {
+    if (isCurrent && !isCurrent()) return;
     const normalized = normalizeDatabaseConnectionInfo(databaseInfo);
     if (!normalized) return;
     const current = connections.value.find((connection) => connection.id === connectionId);
@@ -4604,14 +4623,22 @@ export const useConnectionStore = defineStore("connection", () => {
     if (expectedConfigFingerprint && connectionConfigFingerprint(current) !== expectedConfigFingerprint) return;
     if (JSON.stringify(current.database_info) === JSON.stringify(normalized)) return;
     const tableListSourceChanged = mysqlTableListSourceChanged(current, normalized);
+    const jobEngine = nativeJobAdminEngine(current);
 
     await api.saveConnectionDatabaseInfo(connectionId, normalized);
+    if (isCurrent && !isCurrent()) return;
     const index = connections.value.findIndex((connection) => connection.id === connectionId);
     if (index < 0) return;
     if (expectedConfigFingerprint && connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) return;
     const nextConnections = [...connections.value];
     nextConnections[index] = { ...nextConnections[index], database_info: normalized };
     connections.value = nextConnections;
+    const nextJobEngine = nativeJobAdminEngine(nextConnections[index]);
+    const jobNodeKind = (engine: typeof jobEngine) => (engine === "dameng" ? "dameng" : engine ? "native" : "none");
+    if (jobNodeKind(jobEngine) !== jobNodeKind(nextJobEngine)) {
+      const connectionNode = findConnectionNode(connectionId);
+      if (connectionNode) connectionNode.children = withConnectionUtilityNodes(connectionId, connectionNode.children ?? [], connectionNode);
+    }
     if (tableListSourceChanged) {
       // ShardingSphere switches table enumeration from information_schema to SHOW FULL TABLES.
       // Discard physical-table metadata that may have loaded before background version detection completed.
@@ -4633,16 +4660,18 @@ export const useConnectionStore = defineStore("connection", () => {
     // its loaded children after this background refresh completes.
   }
 
-  async function refreshConnectedDatabaseInfo(connectionId: string, config: ConnectionConfig): Promise<void> {
-    const expectedConfigFingerprint = connectionConfigFingerprint(config);
+  async function refreshConnectedDatabaseInfo(connectionId: string, config: ConnectionConfig, expectedConfigFingerprint: string, isCurrent: () => boolean): Promise<void> {
+    if (!isCurrent()) return;
     const current = getConfig(connectionId);
-    if (config.db_type === "kingbase" && current?.database_info && connectionConfigFingerprint(current) === expectedConfigFingerprint) {
+    if (!current || connectionConfigFingerprint(current) !== expectedConfigFingerprint) return;
+    if (config.db_type === "kingbase" && current.database_info) {
       current.database_info = { ...current.database_info, compatibilityMode: undefined };
     }
     try {
       const detected = await api.connectionDatabaseInfo(connectionId);
+      if (!isCurrent()) return;
       const normalized = normalizeDatabaseConnectionInfo(detected, configuredDatabaseProductName(config), config.database);
-      if (normalized) await updateConnectionDatabaseInfo(connectionId, normalized, expectedConfigFingerprint);
+      if (normalized) await updateConnectionDatabaseInfo(connectionId, normalized, expectedConfigFingerprint, isCurrent);
     } catch {
       // Database metadata is optional and must not turn a successful connection into a failure.
     }
@@ -5044,7 +5073,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean, expectedConfigFingerprint: string, localAttempt: number): Promise<void> {
+  async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean, expectedConfigFingerprint: string, localAttempt: number): Promise<string | undefined> {
     if (!rememberPassword || !isCurrentLocalConnectionAttempt(config.id, localAttempt)) return;
     const index = connections.value.findIndex((connection) => connection.id === config.id);
     if (index < 0) return;
@@ -5059,6 +5088,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     connections.value = nextConnections;
     rebuildTreeNodes();
+    return connectionConfigFingerprint(nextConnections[index]!);
   }
 
   async function connectDbWithPasswordRetry(config: ConnectionConfig, localAttempt: number): Promise<{ config: ConnectionConfig; id: string; rememberPassword: boolean }> {
@@ -5084,6 +5114,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     if (passwordChangeReconnectRequired.get(config.id) !== passwordChangeState) throw new Error(i18n.global.t("userAdmin.passwordChangedReconnect"));
     const localAttempt = beginLocalConnectionAttempt(config.id);
+    const metadataRevision = connectionStateRevision(config.id);
     try {
       let rememberPassword = false;
       if (passwordChangeState === "ready") {
@@ -5104,6 +5135,7 @@ export const useConnectionStore = defineStore("connection", () => {
       config = connection.config;
       rememberPassword ||= connection.rememberPassword;
       const id = connection.id;
+      const isCurrentMetadata = () => isCurrentConnectionStateRevision(config.id, metadataRevision) && (isCurrentLocalConnectionAttempt(config.id, localAttempt) || (successfulLocalConnectionAttempts.get(config.id) === localAttempt && connectedIds.value.has(id)));
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       await syncMongoLegacyDriverFallback(id, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
@@ -5111,7 +5143,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (config.db_type !== "plugin" && refreshMetadataBeforeReady) {
         // Kingbase parsing needs the live mode; DWS needs the current product version.
         // Metadata remains optional: refreshConnectedDatabaseInfo swallows failures.
-        await refreshConnectedDatabaseInfo(id, { ...config, id });
+        await refreshConnectedDatabaseInfo(id, { ...config, id }, expectedConfigFingerprint, isCurrentMetadata);
         await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       }
       passwordChangeReconnectRequired.delete(config.id);
@@ -5121,7 +5153,6 @@ export const useConnectionStore = defineStore("connection", () => {
       clearConnectionClosedByUser(config.id);
       clearConnectionClosedByUser(id);
       if (config.db_type !== "plugin") {
-        if (!refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(id, { ...config, id });
         await refreshConnectionIdentifierQuote(id, { ...config, id });
         ensureLocalConnectionAttemptActive(config.id, localAttempt);
         // Compatibility modes warm asynchronously; the QueryEditor watcher and the
@@ -5154,12 +5185,14 @@ export const useConnectionStore = defineStore("connection", () => {
           comment: config.note || null,
         });
       }
+      let metadataConfigFingerprint = expectedConfigFingerprint;
       try {
-        await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint, localAttempt);
+        metadataConfigFingerprint = (await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint, localAttempt)) ?? expectedConfigFingerprint;
       } catch (error) {
         if (isCurrentLocalConnectionAttempt(config.id, localAttempt)) setConnectionError(id, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
       }
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
+      if (config.db_type !== "plugin" && !refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(id, { ...config, id }, metadataConfigFingerprint, isCurrentMetadata);
       return id;
     } catch (e) {
       if (isCancelledLocalConnectionAttempt(config.id, localAttempt)) {
@@ -5559,6 +5592,7 @@ export const useConnectionStore = defineStore("connection", () => {
       return;
     }
     const localAttempt = beginLocalConnectionAttempt(connectionId);
+    const metadataRevision = connectionStateRevision(connectionId);
     const connectPromise = (async () => {
       let rememberPassword = false;
       // Fast-path the common case (password saved or no password needed) so the
@@ -5579,20 +5613,20 @@ export const useConnectionStore = defineStore("connection", () => {
       config = connection.config;
       rememberPassword ||= connection.rememberPassword;
       const id = connection.id;
+      const isCurrentMetadata = () => isCurrentConnectionStateRevision(connectionId, metadataRevision) && (isCurrentLocalConnectionAttempt(connectionId, localAttempt) || (successfulLocalConnectionAttempts.get(connectionId) === localAttempt && connectedIds.value.has(connectionId)));
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       await syncMongoLegacyDriverFallback(connectionId, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       const refreshMetadataBeforeReady = config.db_type === "kingbase" || (config.db_type === "gaussdb" && gaussdbConnectionMode(config) === "dws");
       if (config.db_type !== "plugin" && refreshMetadataBeforeReady) {
         // Refresh mode/version before reconnect completion, never infer mode from version.
-        await refreshConnectedDatabaseInfo(connectionId, config);
+        await refreshConnectedDatabaseInfo(connectionId, config, expectedConfigFingerprint, isCurrentMetadata);
         await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       }
       markConnectionConnected(connectionId);
       // 任何路径真的连上之后，"用户已关闭"标记就不能再拦后续的被动唤醒。
       clearConnectionClosedByUser(connectionId);
       if (config.db_type !== "plugin") {
-        if (!refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(connectionId, config);
         await refreshConnectionIdentifierQuote(connectionId, config);
         ensureLocalConnectionAttemptActive(connectionId, localAttempt);
         void refreshConnectionDatabaseModes(connectionId, config);
@@ -5600,12 +5634,14 @@ export const useConnectionStore = defineStore("connection", () => {
       markSuccessfulLocalConnectionAttempt(connectionId, localAttempt);
       markConnectionHealthChecked(connectionId);
       clearConnectionError(connectionId);
+      let metadataConfigFingerprint = expectedConfigFingerprint;
       try {
-        await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint, localAttempt);
+        metadataConfigFingerprint = (await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint, localAttempt)) ?? expectedConfigFingerprint;
       } catch (error) {
         if (isCurrentLocalConnectionAttempt(connectionId, localAttempt)) setConnectionError(connectionId, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
       }
       ensureLocalConnectionAttemptActive(connectionId, localAttempt);
+      if (config.db_type !== "plugin" && !refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(connectionId, config, metadataConfigFingerprint, isCurrentMetadata);
     })();
     connectInFlight.set(connectionId, connectPromise);
     try {

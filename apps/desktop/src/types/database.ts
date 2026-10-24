@@ -2096,6 +2096,7 @@ export type TreeNodeType =
   | "dameng-users"
   | "dameng-roles"
   | "dameng-job-admin"
+  | "database-job-admin"
   | "saved-sql-root"
   | "saved-sql-folder"
   | "saved-sql-file"
@@ -2652,6 +2653,7 @@ export interface QueryTab {
     | "dameng-users"
     | "dameng-roles"
     | "dameng-jobs"
+    | "database-jobs"
     | "processlist"
     | "sqlserver-trace"
     | "mysql-dashboard"
@@ -2678,6 +2680,8 @@ export interface QueryTab {
   };
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
+  /** Connection-level native Job selection; bodies and backend context IDs are not persisted. */
+  nativeJobAdmin?: { kind: "scheduler"; owner: string; name: string } | { kind: "legacy"; jobId: string } | { kind: "dameng-native"; jobId: string; name: string };
   mqTenant?: string;
   mqInitialTab?: "topics";
   mqttInitialTopic?: string;

@@ -16,6 +16,12 @@ public interface DatabaseAgent {
 
     default boolean supportsBlobBindStatements() { return false; }
 
+    /** Opt in to an operation-owned physical connection for native Job configuration. */
+    default boolean supportsNativeJobSessions() { return false; }
+
+    /** Opt in to OB's operation-owned Legacy SUBMIT/first-commit protocol. */
+    default boolean supportsNativeLegacyJobs() { return false; }
+
     /** Opt in only when dictionary-derived owner/name values are preserved without fallback. */
     default boolean supportsExactMetadataIdentity() { return false; }
 

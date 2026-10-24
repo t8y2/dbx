@@ -281,8 +281,9 @@ type response struct {
 }
 
 type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    *rpcErrorData `json:"data,omitempty"`
 }
 
 // oracleDriverPanicError keeps a third-party driver panic on the request path
@@ -634,6 +635,7 @@ type server struct {
 	// commit/rollback control across multiple execute_query RPCs.
 	manualConn             *sql.Conn
 	manualTx               *sql.Tx
+	legacyJob              *legacyJobSession
 	sessions               map[string]*querySession
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
@@ -723,19 +725,19 @@ func (r *runtimeServer) handleLine(line string) (resp response, shutdown bool) {
 	// error response instead of an end-of-stream failure.
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			resp = errorResponse(req.ID, fmt.Errorf("agent request panic: %v", recovered))
+			resp = errorResponse(req.ID, fmt.Errorf("agent request panic: %v", recovered), req.Method, stringParam(req.Params, "agentSessionId"))
 			shutdown = false
 		}
 	}()
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, err, "", ""), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
 	result, shouldShutdown, err := r.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, err, req.Method, stringParam(req.Params, "agentSessionId")), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shouldShutdown
 }
@@ -746,7 +748,7 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		return map[string]any{
 			"protocolVersion":      multiSessionProtocolVersion,
 			"agentProtocolVersion": multiSessionProtocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session", "exact_metadata_identity_v1"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session", "native_job_legacy_v1", "structured_error_v1", "exact_metadata_identity_v1"},
 		}, false, nil
 	case "open_session":
 		agentSessionID := stringParam(params, "agentSessionId")
@@ -909,14 +911,14 @@ func newServer() *server {
 func (s *server) handleLine(line string) (response, bool) {
 	var req request
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, err, "", ""), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
 	result, shutdown, err := s.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, err, req.Method, ""), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shutdown
 }
@@ -932,7 +934,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return map[string]any{
 			"protocolVersion":      protocolVersion,
 			"agentProtocolVersion": protocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "exact_metadata_identity_v1"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "native_job_legacy_v1", "exact_metadata_identity_v1"},
 		}, false, nil
 	case "connect":
 		var cp connectParams
@@ -1070,6 +1072,16 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return result, false, err
 	case "begin_manual_transaction":
 		return map[string]bool{"ok": true}, false, s.beginManualTransaction(stringParam(params, "schema"))
+	case "prepare_legacy_job":
+		var request legacyJobPrepareRequest
+		if err := decodeParams(params, &request); err != nil {
+			return legacyJobResult{Phase: "not_started", Reason: "native_job_request_invalid"}, false, nil
+		}
+		return s.prepareLegacyJob(request), false, nil
+	case "commit_legacy_job", "rollback_legacy_job":
+		return s.finishLegacyJob(stringParam(params, "operationId"), stringParam(params, "jobId"), method == "commit_legacy_job"), false, nil
+	case "legacy_job_status":
+		return s.legacyJobStatus(stringParam(params, "operationId")), false, nil
 	case "commit_manual_transaction":
 		return map[string]bool{"ok": true}, false, s.commitManualTransaction()
 	case "rollback_manual_transaction":
@@ -1258,12 +1270,16 @@ func withOracleLOBFetchPost(params connectParams) connectParams {
 func (s *server) disconnect() error {
 	s.closeAllQuerySessions()
 	_ = s.rollbackManualTransactionQuiet()
+	jobErr := s.closeLegacyJob()
 	s.legacyLOBFetchDeferred = false
 	if s.db == nil {
-		return nil
+		return jobErr
 	}
 	err := s.db.Close()
 	s.db = nil
+	if jobErr != nil {
+		return jobErr
+	}
 	return err
 }
 
@@ -5987,10 +6003,6 @@ func boolParam(params map[string]json.RawMessage, key string) bool {
 	var value bool
 	_ = json.Unmarshal(params[key], &value)
 	return value
-}
-
-func errorResponse(id json.RawMessage, err error) response {
-	return response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -1, Message: err.Error()}}
 }
 
 func parseURLParams(raw string) map[string]string {

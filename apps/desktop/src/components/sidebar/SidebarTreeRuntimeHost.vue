@@ -118,6 +118,7 @@ import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchF
 import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguSyntheticTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
 import { buildXuguSchedulerJobSql, type XuguSchedulerJobAction } from "@/lib/database/xuguSchedulerJobSql";
+import { nativeJobAdminSupported } from "@/lib/database/nativeJobAdmin";
 import { canViewDatabaseObjectDependencies, databaseDependencyProviderFor } from "@/lib/database/databaseObjectDependencies";
 import { oracleTarget } from "@/lib/database/oracleObjectDependencies";
 import type { ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
@@ -886,6 +887,10 @@ async function openDirectNavigationNode(node: TreeNode, requestId: number) {
     queryStore.createTab(node.connectionId, "", `${connectionName}:access-control`, "nacos-access-control");
   } else if (node.type === "meilisearch-system") {
     queryStore.createTab(node.connectionId, "default", t("meilisearch.systemManagement"), "meilisearch-system");
+  } else if (node.type === "dameng-job-admin") {
+    queryStore.openDamengJobAdmin(node.connectionId);
+  } else if (node.type === "database-job-admin") {
+    queryStore.openDatabaseJobAdmin(node.connectionId);
   }
 }
 
@@ -1149,9 +1154,6 @@ async function toggle(requestId = beginNavigationRequest()) {
     } else if (node.type === "dameng-roles" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openDamengRoles(node.connectionId);
-    } else if (node.type === "dameng-job-admin" && node.connectionId) {
-      await connectionStore.ensureConnected(node.connectionId);
-      queryStore.openDamengJobAdmin(node.connectionId);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await connectionStore.loadMongoCollections(node.connectionId, node.database);
     } else if (node.type === "vector-database" && node.connectionId && node.database) {
@@ -2206,6 +2208,18 @@ async function openDamengJobAdmin() {
   }
 }
 
+async function openDatabaseJobAdmin() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openDatabaseJobAdmin(node.connectionId);
+  } catch (error) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, error) }), 5000);
+  }
+}
+
 function scheduleOpenData(node: TreeNode) {
   emit("open-data", node, true, "default", openData);
 }
@@ -3072,6 +3086,11 @@ async function refreshDropTableChildObjectPreviewSql() {
 function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false, dependencyNode?: TreeNode) {
   const node = dependencyNode || activeNode.value;
   const initialSection = dependencyNode ? "dependencies" : undefined;
+  // JOB has native catalog identity, not GET_DDL source. Keep Xugu's existing source path.
+  if (node.type === "job" && node.connectionId && nativeJobAdminSupported(connectionStore.getConfig(node.connectionId))) {
+    queryStore.openDatabaseJobAdmin(node.connectionId, node.schema && currentDatabaseType() !== "dameng" ? { kind: "scheduler", owner: node.schema, name: node.objectName || node.label } : undefined);
+    return;
+  }
   if (!node.connectionId || !node.database) return;
   if (viewPackageBody && (node.type !== "package" || node.xuguPackageBodyAvailable !== true || currentDatabaseType() !== "xugu")) return;
   const sourceNode: TreeNode = viewPackageBody ? { ...node, type: "package-body" } : node;
@@ -6953,6 +6972,8 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       items.push({ sidebarActionId: "contextMenu.damengUsers", label: t("contextMenu.damengUsers"), action: openDamengUsers, icon: UsersRound });
       items.push({ sidebarActionId: "contextMenu.damengRoles", label: t("contextMenu.damengRoles"), action: openDamengRoles, icon: ShieldCheck });
       items.push({ sidebarActionId: "contextMenu.damengJobAdmin", label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
+    } else if (node.connectionId && nativeJobAdminSupported(connectionStore.getConfig(node.connectionId))) {
+      items.push({ sidebarActionId: "nativeJobs.title", label: t("nativeJobs.title"), action: openDatabaseJobAdmin, icon: CalendarClock });
     }
     if (canCopyFinalProxyPort.value) {
       items.push({ sidebarActionId: "contextMenu.copyFinalProxyPort", label: t("contextMenu.copyFinalProxyPort"), action: copyFinalProxyPort, icon: Network });
@@ -7442,6 +7463,10 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "dameng-job-admin") {
     items.push({ label: t("contextMenu.openDamengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
+    return true;
+  }
+  if (node.type === "database-job-admin") {
+    items.push({ label: t("nativeJobs.title"), action: openDatabaseJobAdmin, icon: CalendarClock });
     return true;
   }
 
@@ -7957,7 +7982,8 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   }
 
   if (node.type === "job") {
-    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    const nativeJobs = nativeJobAdminSupported(connectionStore.getConfig(node.connectionId || ""));
+    items.push({ label: t(nativeJobs ? "nativeJobs.title" : "contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: nativeJobs ? CalendarClock : Code2 });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     if (currentDatabaseType() === "xugu") {
       items.push({ label: "", separator: true });

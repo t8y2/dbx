@@ -12,6 +12,7 @@ import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { sanitizeTabPageUiState } from "@/lib/tabs/tabUiState";
+import { nativeJobAdminEngine, nativeJobAdminSelection, nativeJobAdminSupported, type NativeJobAdminSelection } from "@/lib/database/nativeJobAdmin";
 import type { DeletedConnectionTabKeepMode } from "@/lib/tabs/deletedConnectionTabs";
 import type {
   BatchSqlExecution,
@@ -4073,6 +4074,23 @@ export const useQueryStore = defineStore("query", () => {
       mode: "dameng-jobs",
     };
     return registerOpenTab(tab);
+  }
+
+  function openDatabaseJobAdmin(connectionId: string, selection?: NativeJobAdminSelection) {
+    const config = useConnectionStore().getConfig(connectionId);
+    if (!nativeJobAdminSupported(config)) return;
+    const existing = tabs.value.find((tab) => (tab.mode === "database-jobs" || tab.mode === "dameng-jobs") && tab.connectionId === connectionId);
+    if (existing) {
+      if (selection) existing.nativeJobAdmin = nativeJobAdminSelection(selection);
+      switchTab(existing.id);
+      return existing.id;
+    }
+    if (nativeJobAdminEngine(config) === "dameng") {
+      const id = openDamengJobAdmin(connectionId);
+      if (selection) tabs.value.find((tab) => tab.id === id)!.nativeJobAdmin = nativeJobAdminSelection(selection);
+      return id;
+    }
+    return registerOpenTab({ id: uuid(), title: t("nativeJobs.title"), connectionId, database: "", sql: "", isExecuting: false, isCancelling: false, isExplaining: false, mode: "database-jobs", ...(selection ? { nativeJobAdmin: nativeJobAdminSelection(selection) } : {}) });
   }
 
   function openDamengUsers(connectionId: string) {
@@ -11185,6 +11203,7 @@ export const useQueryStore = defineStore("query", () => {
     openDamengUsers,
     openDamengRoles,
     openDamengJobAdmin,
+    openDatabaseJobAdmin,
     openMqAdmin,
     openMqttAdmin,
     openNacosAdmin,

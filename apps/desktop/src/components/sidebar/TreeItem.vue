@@ -338,6 +338,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "dameng-roles":
       return { icon: ShieldCheck, colorClass: "text-primary" };
     case "dameng-job-admin":
+    case "database-job-admin":
       return { icon: CalendarClock, colorClass: "text-primary" };
     case "saved-sql-root":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-blue-500" };

@@ -10,7 +10,7 @@ use zip::write::SimpleFileOptions;
 
 use super::{PluginHost, PluginInstallPolicy, PluginPackageInstaller, PluginRegistry, PluginTrustStore};
 
-const ID: &str = "sample.lifecycle";
+pub(super) const ID: &str = "sample.lifecycle";
 
 fn package(version: &str) -> Vec<u8> {
     #[cfg(windows)]
@@ -27,6 +27,15 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             continue
         }
         $result = @{protocolVersion=1; capabilities=@(); plugin=@{id=$env:DBX_PLUGIN_ID; version=$env:DBX_PLUGIN_VERSION}}
+    } elseif ($r.method -eq 'closeJdbcSession') {
+        if ($env:DBX_JDBC_CLOSE_LOG) { [IO.File]::AppendAllText($env:DBX_JDBC_CLOSE_LOG, $r.params.jdbcSessionId + "`n") }
+        if ($r.params.jdbcSessionId -eq 'failed') {
+            [Console]::WriteLine((@{jsonrpc='2.0'; id=$r.id; error=@{message='native_job_session_dispose_unknown'}} | ConvertTo-Json -Depth 8 -Compress))
+            continue
+        }
+        $result = @{ok=$true}
+    } elseif ($r.method -eq 'close') {
+        $result = @{ok=($env:DBX_JDBC_ROOT_CLOSE -ne 'unconfirmed')}
     } elseif ($r.method -eq 'wait') {
         [IO.Directory]::CreateDirectory($env:DBX_PLUGIN_DATA_DIR) | Out-Null
         [IO.File]::WriteAllText((Join-Path $env:DBX_PLUGIN_DATA_DIR 'waiting'), 'ready')
@@ -46,6 +55,18 @@ while IFS= read -r request; do
     *plugin/initialize*)
       if [ "$DBX_LIFECYCLE_STALL" = 1 ]; then mkdir -p "$DBX_PLUGIN_DATA_DIR"; touch "$DBX_PLUGIN_DATA_DIR/waiting"; continue; fi
       printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":[],"plugin":{"id":"%s","version":"%s"}}}\n' "$id" "$DBX_PLUGIN_ID" "$DBX_PLUGIN_VERSION" ;;
+    *'"method":"closeJdbcSession"'*)
+      case "$request" in
+        *'"jdbcSessionId":"failed"'*)
+          [ -z "$DBX_JDBC_CLOSE_LOG" ] || printf 'failed\n' >> "$DBX_JDBC_CLOSE_LOG"
+          printf '{"jsonrpc":"2.0","id":%s,"error":{"message":"native_job_session_dispose_unknown"}}\n' "$id" ;;
+        *)
+          [ -z "$DBX_JDBC_CLOSE_LOG" ] || printf 'survivor\n' >> "$DBX_JDBC_CLOSE_LOG"
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"ok":true}}\n' "$id" ;;
+      esac ;;
+    *'"method":"close"'*)
+      if [ "$DBX_JDBC_ROOT_CLOSE" = unconfirmed ]; then ok=false; else ok=true; fi
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"ok":%s}}\n' "$id" "$ok" ;;
     *'"method":"wait"'*) mkdir -p "$DBX_PLUGIN_DATA_DIR"; touch "$DBX_PLUGIN_DATA_DIR/waiting" ;;
     *) printf '{"jsonrpc":"2.0","id":%s,"result":"%s"}\n' "$id" "$DBX_PLUGIN_VERSION" ;;
   esac
@@ -76,7 +97,7 @@ done
     zip.finish().unwrap().into_inner()
 }
 
-fn registry(root: &Path) -> PluginRegistry {
+pub(super) fn registry(root: &Path) -> PluginRegistry {
     PluginRegistry::new_with_app_version(root.to_path_buf(), "0.6.14")
 }
 
@@ -85,7 +106,7 @@ fn installer(root: &Path) -> PluginPackageInstaller {
         .with_lifecycle(registry(root).lifecycle())
 }
 
-fn install(root: &Path, version: &str) {
+pub(super) fn install(root: &Path, version: &str) {
     installer(root).install_bytes(&package(version), PluginInstallPolicy::LocalDevelopment).unwrap();
 }
 

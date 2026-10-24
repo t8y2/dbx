@@ -49,6 +49,12 @@ public final class AgentProtocol {
     public static final String METHOD_BEGIN_MANUAL_TRANSACTION = "begin_manual_transaction";
     public static final String METHOD_COMMIT_MANUAL_TRANSACTION = "commit_manual_transaction";
     public static final String METHOD_ROLLBACK_MANUAL_TRANSACTION = "rollback_manual_transaction";
+    public static final String METHOD_PREPARE_LEGACY_JOB = "prepare_legacy_job";
+    public static final String METHOD_COMMIT_LEGACY_JOB = "commit_legacy_job";
+    public static final String METHOD_ROLLBACK_LEGACY_JOB = "rollback_legacy_job";
+    public static final String METHOD_LEGACY_JOB_STATUS = "legacy_job_status";
+    public static final String METHOD_OPEN_NATIVE_JOB_SESSION = "open_native_job_session";
+    public static final String METHOD_CLOSE_NATIVE_JOB_SESSION = "close_native_job_session";
     public static final String METHOD_DISCONNECT = "disconnect";
     public static final String METHOD_SHUTDOWN = "shutdown";
 
@@ -144,6 +150,9 @@ public final class AgentProtocol {
     public static final String CAPABILITY_MULTI_SESSION = "multi_session";
     public static final String CAPABILITY_STRUCTURED_ERROR_V1 = "structured_error_v1";
     public static final String CAPABILITY_BLOB_BIND_STATEMENTS_V1 = "blob_bind_statements_v1";
+    public static final String CAPABILITY_NATIVE_JOB_LEGACY_V1 = "native_job_legacy_v1";
+    public static final String CAPABILITY_NATIVE_JOB_LEGACY_OB_V1 = "native_job_legacy_ob_v1";
+    public static final String CAPABILITY_NATIVE_JOB_SESSION_V1 = "native_job_session_v1";
     public static final String CAPABILITY_EXACT_METADATA_IDENTITY_V1 = "exact_metadata_identity_v1";
 
     public static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
@@ -183,6 +192,8 @@ public final class AgentProtocol {
         CAPABILITY_MONGO_BULK_WRITE,
         CAPABILITY_MONGO_RENAME_COLLECTION,
         CAPABILITY_MONGO_FIND_CURSOR,
+        CAPABILITY_NATIVE_JOB_LEGACY_V1,
+        CAPABILITY_NATIVE_JOB_SESSION_V1,
         CAPABILITY_EXACT_METADATA_IDENTITY_V1
     ));
 
@@ -236,6 +247,16 @@ public final class AgentProtocol {
     ));
 
     public static final List<String> MULTI_SESSION_METHODS;
+    public static final List<String> NATIVE_JOB_LEGACY_METHODS = Collections.unmodifiableList(Arrays.asList(
+        METHOD_PREPARE_LEGACY_JOB,
+        METHOD_COMMIT_LEGACY_JOB,
+        METHOD_ROLLBACK_LEGACY_JOB,
+        METHOD_LEGACY_JOB_STATUS
+    ));
+    public static final List<String> NATIVE_JOB_SESSION_METHODS = Collections.unmodifiableList(Arrays.asList(
+        METHOD_OPEN_NATIVE_JOB_SESSION,
+        METHOD_CLOSE_NATIVE_JOB_SESSION
+    ));
 
     static {
         List<String> capabilities = new java.util.ArrayList<>(CAPABILITIES);
@@ -275,6 +296,7 @@ public final class AgentProtocol {
         List<String> jdbcAllCapabilities = new java.util.ArrayList<>(MULTI_SESSION_ALL_CAPABILITIES);
         jdbcAllCapabilities.add(CAPABILITY_STRUCTURED_ERROR_V1);
         jdbcAllCapabilities.add(CAPABILITY_BLOB_BIND_STATEMENTS_V1);
+        jdbcAllCapabilities.add(CAPABILITY_NATIVE_JOB_LEGACY_OB_V1);
         MULTI_SESSION_JDBC_ALL_CAPABILITIES = Collections.unmodifiableList(jdbcAllCapabilities);
 
         List<String> methods = new java.util.ArrayList<>(COMMON_METHODS);
@@ -399,9 +421,19 @@ public final class AgentProtocol {
     }
 
     public static HandshakeResult multiSessionJdbcHandshakeResult(boolean blobBindStatements) {
-        if (!blobBindStatements) return multiSessionJdbcHandshakeResult();
+        return multiSessionJdbcHandshakeResult(blobBindStatements, false);
+    }
+
+    public static HandshakeResult multiSessionJdbcHandshakeResult(boolean blobBindStatements, boolean nativeJobSessions) {
+        return multiSessionJdbcHandshakeResult(blobBindStatements, nativeJobSessions, false);
+    }
+
+    public static HandshakeResult multiSessionJdbcHandshakeResult(boolean blobBindStatements, boolean nativeJobSessions, boolean nativeLegacyJobs) {
+        if (!blobBindStatements && !nativeJobSessions && !nativeLegacyJobs) return multiSessionJdbcHandshakeResult();
         java.util.ArrayList<String> capabilities = new java.util.ArrayList<>(MULTI_SESSION_JDBC_CAPABILITIES);
-        capabilities.add(CAPABILITY_BLOB_BIND_STATEMENTS_V1);
+        if (blobBindStatements) capabilities.add(CAPABILITY_BLOB_BIND_STATEMENTS_V1);
+        if (nativeJobSessions) capabilities.add(CAPABILITY_NATIVE_JOB_SESSION_V1);
+        if (nativeLegacyJobs) capabilities.add(CAPABILITY_NATIVE_JOB_LEGACY_OB_V1);
         return new HandshakeResult(MULTI_SESSION_PROTOCOL_VERSION, MULTI_SESSION_PROTOCOL_VERSION, capabilities);
     }
 

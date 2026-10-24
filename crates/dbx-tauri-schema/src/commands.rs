@@ -4,6 +4,77 @@ use tauri::State;
 
 use dbx_core::connection::AppState;
 use dbx_core::db;
+use dbx_core::native_jobs::{
+    NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobOperationStatus,
+    NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest, NativeJobRequest,
+};
+use dbx_core::schema::native_jobs as jobs;
+
+#[tauri::command]
+pub async fn native_job_open_context(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<NativeJobContext, String> {
+    jobs::native_job_open_context_core(&state, &connection_id, &database).await
+}
+
+#[tauri::command]
+pub async fn native_job_list(
+    state: State<'_, Arc<AppState>>,
+    request: NativeJobListRequest,
+) -> Result<NativeJobList, String> {
+    jobs::native_job_list_core(&state, &request).await
+}
+
+#[tauri::command]
+pub async fn native_job_references(
+    state: State<'_, Arc<AppState>>,
+    request: NativeJobReferenceListRequest,
+) -> Result<NativeJobReferenceCatalog, String> {
+    jobs::native_job_references_core(&state, &request).await
+}
+
+#[tauri::command]
+pub async fn native_job_read(
+    state: State<'_, Arc<AppState>>,
+    target: NativeJobRef,
+) -> Result<NativeJobDetails, String> {
+    jobs::native_job_read_core(&state, &target).await
+}
+
+#[tauri::command]
+pub async fn native_job_prepare(
+    state: State<'_, Arc<AppState>>,
+    mutation: NativeJobRequest,
+) -> Result<NativeJobPreparedPlan, String> {
+    jobs::native_job_prepare_core(&state, mutation).await
+}
+
+#[tauri::command]
+pub async fn native_job_apply(
+    state: State<'_, Arc<AppState>>,
+    plan_id: String,
+) -> Result<NativeJobOperationStatus, String> {
+    jobs::native_job_apply_core(state.inner().clone(), &plan_id)
+}
+
+#[tauri::command]
+pub async fn native_job_status(
+    state: State<'_, Arc<AppState>>,
+    operation_id: String,
+    observe: Option<bool>,
+) -> Result<NativeJobOperationStatus, String> {
+    Ok(jobs::native_job_status_observed_core(&state, &operation_id, observe.unwrap_or(false)).await)
+}
+
+#[tauri::command]
+pub async fn native_job_cancel(
+    state: State<'_, Arc<AppState>>,
+    operation_id: String,
+) -> Result<NativeJobOperationStatus, String> {
+    Ok(jobs::native_job_cancel(&state, &operation_id))
+}
 
 async fn run_cancellable<T, F>(state: &Arc<AppState>, execution_id: Option<String>, future: F) -> Result<T, String>
 where

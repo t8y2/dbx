@@ -444,6 +444,11 @@ const drawLinuxFloatingFrame = computed(() =>
   }),
 );
 watch(drawLinuxFloatingFrame, (enabled) => document.documentElement.classList.toggle("dbx-linux-floating", enabled), { immediate: true });
+watch(
+  () => settingsStore.editorSettings.fontSmoothing,
+  (enabled) => document.documentElement.classList.toggle("dbx-font-smoothing", enabled),
+  { immediate: true },
+);
 // Mirrors the template gate above the app shell. The backend liveness stream is registered
 // against it so the web runtime only opens an authenticated subscription.
 const appReady = computed(() => !setupRequired.value && (!needsAuth.value || authenticated.value));

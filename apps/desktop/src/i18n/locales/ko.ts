@@ -8304,6 +8304,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "오른쪽 사이드바 패널을 열면 다른 패널을 닫습니다. 여러 패널을 허용하려면 비활성화하세요.",
     uiScale: "UI 배율",
     uiScaleDescription: "고해상도 디스플레이를 위해 전체 데스크톱 UI를 확장합니다. 변경 사항은 즉시 적용되며 다음 실행 시 복원됩니다.",
+    fontSmoothing: "폰트 스무딩",
+    fontSmoothingDescription: "macOS 스타일 폰트 스무딩(안티에일리어싱)을 적용합니다. 일부 화면에서는 얇거나 흐릿하게 보일 수 있습니다.",
     theme: "테마",
     cornerStyle: "모서리 스타일",
     backgroundImage: "배경 이미지",

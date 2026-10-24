@@ -306,6 +306,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-theme", category: "appearance", titleKey: "settings.theme", targetId: "appearance" },
   { id: "appearance-color-theme", category: "appearance", titleKey: "settings.colorTheme", targetId: "appearance", keywordKeys: APP_CUSTOM_UI_COLOR_DEFS.map((item) => item.labelKey) },
   { id: "appearance-ui-scale", category: "appearance", titleKey: "settings.uiScale", descriptionKey: "settings.uiScaleDescription", targetId: "appearance" },
+  { id: "appearance-font-smoothing", category: "appearance", titleKey: "settings.fontSmoothing", descriptionKey: "settings.fontSmoothingDescription", targetId: "appearance" },
   { id: "appearance-ui-font", category: "appearance", titleKey: "settings.uiFontFamily", descriptionKey: "settings.uiFontFamilyDescription", targetId: "appearance" },
   { id: "appearance-grid-font", category: "appearance", titleKey: "settings.dataGridFontFamily", descriptionKey: "settings.dataGridFontFamilyDescription", targetId: "appearance" },
   { id: "appearance-corners", category: "appearance", titleKey: "settings.cornerStyle", targetId: "appearance" },

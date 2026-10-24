@@ -7598,6 +7598,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "Sağ yan paneldə bir panelin açılması digərlərini bağlayır. Bir neçə panelə icazə vermək üçün bunu deaktiv edin.",
     uiScale: "İnterfeys miqyası",
     uiScaleDescription: "Yüksək DPI ekranları üçün bütün masaüstü interfeysinin miqyasını dəyişin. Dəyişikliklər dərhal tətbiq olunur və növbəti işəsalmada bərpa edilir.",
+    fontSmoothing: "Şrift hamarlanması",
+    fontSmoothingDescription: "macOS tərzi şrift hamarlanması (antialiasing) tətbiq edir. Bəzi ekranlarda incə və ya bulanıq görünə bilər.",
     theme: "Tema",
     cornerStyle: "Künc üslubu",
     backgroundImage: "Fon şəkli",

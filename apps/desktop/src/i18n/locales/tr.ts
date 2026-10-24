@@ -7479,6 +7479,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "Bir sağ kenar paneli açıldığında diğerleri kapanır. Birden çok panele izin vermek için bunu kapatın.",
     uiScale: "Arayüz Ölçeği",
     uiScaleDescription: "Yüksek DPI ekranlar için tüm masaüstü arayüzünü ölçekleyin. Değişiklikler hemen uygulanır ve sonraki açılışta geri yüklenir.",
+    fontSmoothing: "Yazı tipi yumuşatma",
+    fontSmoothingDescription: "macOS tarzı yazı tipi yumuşatma (antialiasing) uygular. Bazı ekranlarda ince veya bulanık görünebilir.",
     theme: "Tema",
     cornerStyle: "Köşe biçemi",
     backgroundImage: "Arka plan resmi",

@@ -8169,6 +8169,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "Abrir um painel lateral direito fecha os demais. Desative para permitir vários painéis.",
     uiScale: "Escala da UI",
     uiScaleDescription: "Dimensione toda a UI do desktop para telas de alta resolução (high-DPI). As alterações são aplicadas imediatamente e restauradas na próxima inicialização.",
+    fontSmoothing: "Suavização de fontes",
+    fontSmoothingDescription: "Aplica suavização de fontes estilo macOS (antialiasing). Pode parecer fino ou borrado em algumas telas.",
     theme: "Tema",
     cornerStyle: "Estilo dos cantos",
     backgroundImage: "Imagem de fundo",

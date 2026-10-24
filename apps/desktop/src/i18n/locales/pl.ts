@@ -8410,6 +8410,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "Otwarcie prawego panelu bocznego zamyka pozostałe. Wyłącz, aby zezwolić na wiele paneli.",
     uiScale: "Skalowanie interfejsu",
     uiScaleDescription: "Skaluj cały interfejs aplikacji desktopowej dla ekranów o wysokiej gęstości pikseli (HiDPI). Zmiany wchodzą w życie natychmiast i są przywracane przy kolejnym uruchomieniu.",
+    fontSmoothing: "Wygładzanie czcionek",
+    fontSmoothingDescription: "Stosuje wygładzanie czcionek w stylu macOS (antyaliasing). Na niektórych ekranach może wyglądać cienko lub rozmycie.",
     theme: "Motyw",
     cornerStyle: "Styl narożników",
     backgroundImage: "Obraz tła",

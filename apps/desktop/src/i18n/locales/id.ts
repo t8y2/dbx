@@ -8339,6 +8339,8 @@ export default withEnglishFallback({
     exclusiveRightSidebarPanelsDescription: "Membuka panel bilah sisi kanan akan menutup panel lainnya. Nonaktifkan untuk mengizinkan beberapa panel sekaligus.",
     uiScale: "Skala UI",
     uiScaleDescription: "Skalakan seluruh UI desktop untuk layar high-DPI. Perubahan berlaku langsung dan dipulihkan pada peluncuran berikutnya.",
+    fontSmoothing: "Penghalusan font",
+    fontSmoothingDescription: "Menerapkan penghalusan font gaya macOS (antialiasing). Bisa tampak tipis atau buram di beberapa layar.",
     theme: "Tema",
     cornerStyle: "Gaya sudut",
     backgroundImage: "Gambar latar belakang",

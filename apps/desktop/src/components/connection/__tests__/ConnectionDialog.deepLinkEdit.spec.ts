@@ -186,7 +186,7 @@ async function settle() {
   for (let i = 0; i < 8; i++) await nextTick();
 }
 
-async function mountDialog(config: ConnectionConfig, url: string, initiallyOpen = true) {
+async function mountDialog(config: ConnectionConfig, url = "", initiallyOpen = true) {
   const props = reactive({ open: initiallyOpen, editConfig: config, updatePrefill: url ? parseConnectionDeepLinkUpdate(url) : null });
   store.getConfig.mockReturnValue(config);
   const container = document.createElement("div");
@@ -248,6 +248,50 @@ afterEach(() => {
   document.body.innerHTML = "";
   (actualStoreHolder.value as { $dispose?: () => void } | null)?.$dispose?.();
   actualStoreHolder.value = null;
+});
+
+describe.each([
+  { mode: "without edits", rename: false },
+  { mode: "after renaming", rename: true },
+])("ConnectionDialog saved connection settings $mode", ({ rename }) => {
+  it.each([
+    {
+      setting: "Redis database aliases",
+      config: savedConnection({ db_type: "redis", driver_profile: "redis", driver_label: "Redis", port: 6379, database: "0", redis_database_aliases: { "3": "orders", "7": "cache" } }),
+      expected: { redis_database_aliases: { "3": "orders", "7": "cache" } },
+    },
+    {
+      setting: "the default schema",
+      config: savedConnection({ db_type: "postgres", driver_profile: "postgres", driver_label: "PostgreSQL", port: 5432, default_schema: "archive" }),
+      expected: { default_schema: "archive" },
+    },
+  ])("preserves $setting when saving", async ({ config, expected }) => {
+    const originalName = config.name;
+    await mountDialog(config);
+    if (rename) {
+      const nameInput = [...document.querySelectorAll("input")].find((input) => input.value === originalName);
+      expect(nameInput).toBeTruthy();
+      nameInput!.value = "Renamed connection";
+      nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+      await settle();
+    }
+
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    expect(save).toBeTruthy();
+    save!.click();
+    await vi.waitFor(() => expect(store.updateConnection).toHaveBeenCalledOnce());
+
+    expect(store.updateConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...expected,
+        id: config.id,
+        name: rename ? "Renamed connection" : originalName,
+        password: config.password,
+      }),
+    );
+    expect(config).toEqual(expect.objectContaining({ ...expected, name: originalName }));
+    expect(store.addConnection).not.toHaveBeenCalled();
+  });
 });
 
 describe("ConnectionDialog deep-link edit confirmation", () => {
@@ -649,7 +693,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
   });
 
   it("hydrates a later-opened update without clearing omitted database or schema filters", async () => {
-    const saved = savedConnection({ db_type: "postgres", driver_profile: "postgres", driver_label: "PostgreSQL", url_params: "sslmode=require", visible_schemas: ["approved_schema"] });
+    const saved = savedConnection({ db_type: "postgres", driver_profile: "postgres", driver_label: "PostgreSQL", url_params: "sslmode=require", visible_schemas: ["approved_schema"], default_schema: "archive" });
     const props = await mountDialog(saved, "dbx://connection/new?id=saved-production&user=new-user&password=new-password", false);
     props.open = true;
     await settle();
@@ -672,6 +716,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         password: "new-password",
         visible_databases: ["orders"],
         visible_schemas: ["approved_schema"],
+        default_schema: "archive",
       }),
     );
     expect(store.addConnection).not.toHaveBeenCalled();

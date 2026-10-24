@@ -3211,6 +3211,7 @@ watch(
         // Show the index the backend actually connects with; legacy dirty values
         // (e.g. redis-cli flags in the field) are healed when the form is saved.
         database: config.db_type === "redis" ? normalizeRedisDatabaseValue(config.database) || "" : config.database,
+        default_schema: config.default_schema,
         color: config.color || "",
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
@@ -3237,6 +3238,7 @@ watch(
         redis_cluster_nodes: config.redis_cluster_nodes || "",
         redis_key_separator: config.redis_key_separator ?? ":",
         redis_scan_page_size: config.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT,
+        redis_database_aliases: config.redis_database_aliases ? { ...config.redis_database_aliases } : undefined,
         redis_key_templates: normalizeRedisKeyTemplates(config.redis_key_templates),
         redis_key_filter: config.redis_key_filter ?? "",
         redis_key_grouping: config.redis_key_grouping,

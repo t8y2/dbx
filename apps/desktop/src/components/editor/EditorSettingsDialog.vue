@@ -10032,7 +10032,7 @@ onUnmounted(() => {
                       {{ t("settings.showColumnCommentsInHeaderDescription") }}
                     </p>
                   </div>
-                  <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" :disabled="editDataGridColumnCommentsInInfoArea" />
+                  <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" />
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="min-w-0 space-y-1">

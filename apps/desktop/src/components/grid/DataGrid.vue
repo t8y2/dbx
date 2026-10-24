@@ -909,7 +909,9 @@ const dataGridTopbarOverflowActionCount = ref(0);
 const dataGridTopbarExpandedRequiredWidth = ref(0);
 const dataGridFilterExpandedRequiredWidth = ref(0);
 const columnCommentsInInfoArea = computed(() => settingsStore.editorSettings.dataGridColumnCommentsInInfoArea);
-const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader && !columnCommentsInInfoArea.value);
+// #13171: header comments and the selected column's info-area comment are
+// independent surfaces; enabling the info area no longer hides the header line.
+const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const showColumnHeaderTooltips = computed(() => settingsStore.editorSettings.showColumnHeaderTooltips !== false);
 const transposeMetadataInInfoColumn = computed(() => settingsStore.editorSettings.dataGridTransposeMetadataInInfoColumn);

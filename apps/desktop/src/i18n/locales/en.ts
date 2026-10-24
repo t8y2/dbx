@@ -9748,7 +9748,7 @@ export default {
     sqlFileUploadMaxMbSaved: "Web SQL file upload size saved.",
     showColumnCommentsInHeader: "Show column comments under names",
     dataGridColumnCommentsInInfoArea: "Show column comments in the information area",
-    dataGridColumnCommentsInInfoAreaDescription: "Show the selected column's comment in the bottom status bar instead of the grid header.",
+    dataGridColumnCommentsInInfoAreaDescription: "Additionally show the selected column's comment in the bottom status bar.",
     showColumnCommentsInHeaderDescription: "Display table column comments directly below grid column names.",
     showColumnTypesInHeader: "Show column types under names",
     showColumnTypesInHeaderDescription: "Display each column's data type directly below grid column names.",

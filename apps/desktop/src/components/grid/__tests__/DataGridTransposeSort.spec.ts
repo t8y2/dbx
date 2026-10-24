@@ -164,7 +164,8 @@ describe("DataGrid transpose sorting", () => {
     const { host, settingsStore } = mountGrid("results");
     settingsStore.updateEditorSettings({ dataGridColumnCommentsInInfoArea: true, dataGridShowTransposeFieldMetadata: true });
     await settle();
-    expect(host.querySelectorAll("[data-grid-header-comment-line]")).toHaveLength(0);
+    // #13171: the info-area comment is additive; the header line stays visible.
+    expect(host.querySelectorAll("[data-grid-header-comment-line]")).toHaveLength(2);
     await openTranspose(host);
     expect(host.querySelectorAll("[data-grid-transpose-column-info]")).toHaveLength(0);
     expect(host.querySelectorAll("[data-grid-transpose-comment-line]")).toHaveLength(2);
@@ -194,13 +195,14 @@ describe("DataGrid transpose sorting", () => {
     expect(host.querySelector("[data-grid-column-info]")?.textContent).not.toContain("undefined");
   });
 
-  it("shows selected column metadata in the status area and restores header comments when disabled", async () => {
+  it("shows selected column metadata in the status area while keeping header comments", async () => {
     const { host, settingsStore } = mountGrid();
     await settle();
     expect(host.querySelectorAll("[data-grid-header-comment-line]")).toHaveLength(2);
     settingsStore.updateEditorSettings({ dataGridColumnCommentsInInfoArea: true });
     await settle();
-    expect(host.querySelector("[data-grid-header-comment-line]")).toBeNull();
+    // #13171: both surfaces show at once.
+    expect(host.querySelectorAll("[data-grid-header-comment-line]")).toHaveLength(2);
     host.querySelector<HTMLElement>('[data-grid-column-index="0"]')!.click();
     await settle();
     expect(host.querySelector("[data-grid-column-info]")?.textContent).toContain("Display name with a long comment");

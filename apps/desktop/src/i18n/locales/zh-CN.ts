@@ -9715,7 +9715,7 @@ export default withEnglishFallback({
     sqlFileUploadMaxMbSaved: "Web SQL 文件上传大小已保存。",
     showColumnCommentsInHeader: "在字段名下方显示注释",
     dataGridColumnCommentsInInfoArea: "在信息区显示字段注释",
-    dataGridColumnCommentsInInfoAreaDescription: "将选中字段的注释移至底部状态栏，不再显示在表头中。",
+    dataGridColumnCommentsInInfoAreaDescription: "同时将选中字段的注释显示在底部状态栏。",
     showColumnCommentsInHeaderDescription: "把表字段注释直接显示在结果表头字段名下方。",
     showColumnTypesInHeader: "在字段名下方显示数据类型",
     showColumnTypesInHeaderDescription: "把每个字段的数据类型直接显示在结果表头字段名下方。",

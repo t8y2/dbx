@@ -10516,6 +10516,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "ไม่มี",
     sidebarAllowHorizontalScroll: "อนุญาตให้ Sidebar เลื่อนแนวนอน",
     sidebarAllowHorizontalScrollDescription: "แสดงชื่อตาราง View และ Collection แบบเต็ม โดยอนุญาตให้ Sidebar เลื่อนแนวนอน",
+    sidebarShowConnectionEndpoints: "แสดงเซิร์ฟเวอร์และบัญชีหลังชื่อการเชื่อมต่อ",
+    sidebarShowConnectionEndpointsDescription: "แสดง เซิร์ฟเวอร์:พอร์ต@บัญชี ต่อท้ายชื่อการเชื่อมต่อใน Sidebar เพื่อแยกแยะการเชื่อมต่อ",
     sidebarShowTooltips: "Tooltip เมื่อวางเหนือ Sidebar",
     sidebarShowTooltipsDescription: "แสดง Tooltip รายละเอียดเมื่อวางเหนือการเชื่อมต่อและออบเจ็กต์ฐานข้อมูลใน Sidebar ปิดเพื่อหยุด Popup",
     sidebarShowUserAdmin: "แสดงรายการผู้ใช้และสิทธิ์",

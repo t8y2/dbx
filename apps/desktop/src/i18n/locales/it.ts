@@ -8538,6 +8538,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "Nessuna",
     sidebarAllowHorizontalScroll: "Consenti scorrimento orizzontale barra laterale",
     sidebarAllowHorizontalScrollDescription: "Mostra i nomi lunghi di tabelle, viste e collezioni per intero consentendo lo scorrimento orizzontale della barra laterale.",
+    sidebarShowConnectionEndpoints: "Mostra server e account dopo il nome della connessione",
+    sidebarShowConnectionEndpointsDescription: "Aggiunge server:porta@account dopo ogni nome di connessione nella barra laterale per distinguerle.",
     sidebarShowTooltips: "Tooltip al passaggio del mouse nella barra laterale",
     sidebarShowTooltipsDescription: "Mostra tooltip con dettagli al passaggio del mouse su connessioni e oggetti del database nella barra laterale. Disattiva per nasconderli.",
     sidebarShowUserAdmin: "Mostra utenti e permessi",

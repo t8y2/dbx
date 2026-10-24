@@ -7847,6 +7847,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "Yok",
     sidebarAllowHorizontalScroll: "Kenar çubuğunda yatay kaydırmaya izin ver",
     sidebarAllowHorizontalScrollDescription: "Yatay kenar çubuğu kaydırmasına izin vererek uzun tablo, görünüm ve koleksiyon adlarını tam göster.",
+    sidebarShowConnectionEndpoints: "Bağlantı adından sonra sunucu ve hesabı göster",
+    sidebarShowConnectionEndpointsDescription: "Bağlantıları ayırt etmek için kenar çubuğundaki her bağlantı adından sonra sunucu:port@hesap gösterir.",
     sidebarShowTooltips: "Kenar çubuğu ipuçları",
     sidebarShowTooltipsDescription: "Kenar çubuğunda bağlantıların ve veritabanı nesnelerinin üzerine gelindiğinde ayrıntı ipuçlarını göster. Açılır ipuçlarını durdurmak için kapatın.",
     sidebarShowUserAdmin: "Kullanıcı ve izin girişlerini göster",

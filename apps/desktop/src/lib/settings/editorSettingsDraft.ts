@@ -144,6 +144,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "autoUpdatePlugins",
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
+  "sidebarShowConnectionEndpoints",
   "sidebarShowTooltips",
   "sidebarShowUserAdmin",
   "sidebarIndent",

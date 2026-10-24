@@ -8668,6 +8668,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "없음",
     sidebarAllowHorizontalScroll: "사이드바 가로 스크롤 허용",
     sidebarAllowHorizontalScrollDescription: "사이드바 가로 스크롤을 허용하여 긴 테이블, 뷰, 컬렉션 이름을 전체로 표시합니다.",
+    sidebarShowConnectionEndpoints: "연결 이름 뒤에 서버와 계정 표시",
+    sidebarShowConnectionEndpointsDescription: "사이드바의 연결 이름 뒤에 서버:포트@계정을 표시하여 연결을 구별하기 쉽게 합니다.",
     sidebarShowTooltips: "사이드바 호버 툴팁",
     sidebarShowTooltipsDescription: "사이드바에서 연결 및 데이터베이스 개체에 마우스를 올리면 상세 툴팁을 표시합니다. 끄면 표시되지 않습니다.",
     sidebarShowUserAdmin: "사용자 및 권한 항목 표시",

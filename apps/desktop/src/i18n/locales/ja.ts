@@ -8550,6 +8550,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "表示しない",
     sidebarAllowHorizontalScroll: "サイドバーの横スクロールを許可",
     sidebarAllowHorizontalScrollDescription: "サイドバーの横スクロールを許可して、長いテーブル、ビュー、コレクション名を完全に表示します。",
+    sidebarShowConnectionEndpoints: "接続名の後にサーバーとアカウントを表示",
+    sidebarShowConnectionEndpointsDescription: "サイドバーの接続名の後に サーバー:ポート@アカウント を表示し、接続を区別しやすくします。",
     sidebarShowTooltips: "サイドバーのホバーツールチップ",
     sidebarShowTooltipsDescription: "サイドバーで接続やデータベースオブジェクトにホバーしたときに詳細ツールチップを表示します。オフにすると表示されません。",
     sidebarShowUserAdmin: "ユーザーと権限の項目を表示",

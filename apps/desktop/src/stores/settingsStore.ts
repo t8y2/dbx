@@ -1216,6 +1216,7 @@ export interface EditorSettings {
   sidebarCopyTableNameIncludeSchema: boolean;
   sidebarObjectInfoMode: SidebarObjectInfoMode;
   sidebarShowConnectionNotes: boolean;
+  sidebarShowConnectionEndpoints: boolean;
   sidebarShowTooltips: boolean;
   sidebarShowUserAdmin: boolean;
   sidebarAllowHorizontalScroll: boolean;
@@ -1570,6 +1571,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarCopyTableNameIncludeSchema: false,
   sidebarObjectInfoMode: "comment-inline",
   sidebarShowConnectionNotes: false,
+  sidebarShowConnectionEndpoints: false,
   sidebarShowTooltips: true,
   sidebarShowUserAdmin: true,
   sidebarAllowHorizontalScroll: false,
@@ -2323,6 +2325,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       ).sidebarShowDatabaseSizes,
     ),
     sidebarShowConnectionNotes: settings.sidebarShowConnectionNotes === true,
+    sidebarShowConnectionEndpoints: settings.sidebarShowConnectionEndpoints === true,
     sidebarShowTooltips: settings.sidebarShowTooltips ?? DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips,
     sidebarShowUserAdmin: settings.sidebarShowUserAdmin ?? DEFAULT_EDITOR_SETTINGS.sidebarShowUserAdmin,
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
@@ -3227,6 +3230,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarCopyTableNameIncludeSchema !== undefined) editorSettings.value.sidebarCopyTableNameIncludeSchema = partial.sidebarCopyTableNameIncludeSchema === true;
     if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
     if (partial.sidebarShowConnectionNotes !== undefined) editorSettings.value.sidebarShowConnectionNotes = partial.sidebarShowConnectionNotes === true;
+    if (partial.sidebarShowConnectionEndpoints !== undefined) editorSettings.value.sidebarShowConnectionEndpoints = partial.sidebarShowConnectionEndpoints === true;
     if (partial.sidebarShowTooltips !== undefined) editorSettings.value.sidebarShowTooltips = partial.sidebarShowTooltips;
     if (partial.sidebarShowUserAdmin !== undefined) editorSettings.value.sidebarShowUserAdmin = partial.sidebarShowUserAdmin;
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;

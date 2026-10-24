@@ -8780,6 +8780,8 @@ export default withEnglishFallback({
     sidebarObjectInfoModeHidden: "Brak",
     sidebarAllowHorizontalScroll: "Zezwalaj na poziome przewijanie paska bocznego",
     sidebarAllowHorizontalScrollDescription: "Pokazuj długie nazwy tabel, widoków i kolekcji w całości, zezwalając na przewijanie w poziomie.",
+    sidebarShowConnectionEndpoints: "Pokazuj serwer i konto po nazwie połączenia",
+    sidebarShowConnectionEndpointsDescription: "Dodaje „serwer:port@konto” po każdej nazwie połączenia na pasku bocznym, aby łatwo je odróżniać.",
     sidebarShowTooltips: "Podpowiedzi na pasku bocznym",
     sidebarShowTooltipsDescription: "Pokazuj dymki ze szczegółami po najechaniu na połączenia i obiekty bazy danych na pasku bocznym. Wyłącz, aby zatrzymać wyskakujące podpowiedzi.",
     sidebarShowUserAdmin: "Pokaż użytkowników i uprawnienia",

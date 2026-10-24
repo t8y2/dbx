@@ -9931,6 +9931,8 @@ export default {
     sidebarObjectInfoModeHidden: "None",
     sidebarAllowHorizontalScroll: "Allow sidebar horizontal scroll",
     sidebarAllowHorizontalScrollDescription: "Show long table, view, and collection names in full by allowing horizontal sidebar scrolling.",
+    sidebarShowConnectionEndpoints: "Show server and account after connection names",
+    sidebarShowConnectionEndpointsDescription: "Append server:port@account after each connection name in the sidebar to tell connections apart.",
     sidebarShowTooltips: "Sidebar hover tooltips",
     sidebarShowTooltipsDescription: "Show detail tooltips when hovering connections and database objects in the sidebar. Turn off to stop hover popups.",
     sidebarShowUserAdmin: "Show users and permissions entries",

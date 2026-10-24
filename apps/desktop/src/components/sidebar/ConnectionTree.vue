@@ -95,6 +95,7 @@ import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDdlViewDialog, SidebarElasticsearchIndexMetadataDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
+import { connectionEndpointUserLabel } from "@/lib/connection/connectionPresentation";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { sidebarTreeDisplayLabel, sidebarTreeSecondaryValue } from "@/lib/sidebar/sidebarTreeLabel";
 import { canTreeNodePin, sidebarPinnedActionSlotWidthPx, alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
@@ -880,6 +881,9 @@ const sidebarTreeNaturalWidthItems = computed(() =>
     return {
       ...item,
       depth,
+      // 连接行的自然宽度需要涵盖 endpoint 文本与两字宽间隔（仅用于测量，渲染由 TreeItem 完成）。
+      // 全角空格近似 2em 间隔；endpoint 实际渲染字号更小（0.85em），测量按行字号略高估，安全。
+      label: node.type === "connection" && settingsStore.editorSettings.sidebarShowConnectionEndpoints ? [item.label, "　　", connectionEndpointUserLabel(config)].join("").trimEnd() : item.label,
       usesNaturalWidth: usesFullWidthTreeLabel(node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll),
       comment,
       rightAlignedComment: mode === "comment-right",

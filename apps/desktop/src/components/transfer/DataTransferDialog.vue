@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Button } from "@/components/ui/button";
 import { buildTransferObjectSelectionField, countTransferObjects } from "./transferSelections";
 import { createTaskLoadTracker } from "./taskLoadTracker";
+import { countSelectedTableFilters, selectedTableFilters, transferTableFilterSupported } from "./transferTableFilters";
 import { describeTransferStructureOperation, summarizeTransferStructureOperations } from "./structurePlanSummary";
 import {
   confirmTransferWithProductionSafety,
@@ -70,7 +71,7 @@ import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableLis
 import { useTransferTaskStore, TransferTaskNameConflictError, nextTransferTaskCopyName } from "@/stores/transferTaskStore";
 import { useToast } from "@/composables/useToast";
 import type { CatalogInfo } from "@/types/database";
-import { ArrowRightLeft, ArrowLeftRight, Loader2, X } from "@lucide/vue";
+import { ArrowRightLeft, ArrowLeftRight, ChevronDown, Filter, Info, Loader2, X } from "@lucide/vue";
 
 const { t } = useI18n();
 const { tasks, startDataTransferTask } = useExportTracker();
@@ -297,13 +298,15 @@ function connectionType(id: string): DatabaseType | undefined {
   return store.connections.find((c) => c.id === id)?.db_type;
 }
 
-// Keep in sync with `transfer_table_filter_supported` in dbx-core.
-const tableFilterSupported = computed(() => {
-  const type = connectionType(sourceConnectionId.value);
-  return type === "mysql" || type === "gbase" || type === "postgres" || type === "kingbase" || type === "gaussdb" || type === "opengauss" || type === "kwdb";
-});
+// Which sources accept a filter is backend knowledge: see transferTableFilters.ts.
+const tableFilterSupported = computed(() => transferTableFilterSupported(connectionType(sourceConnectionId.value)));
+// The filter bar is only useful where source rows are read at all.
+const tableFilterAvailable = computed(() => tableFilterSupported.value && transferContent.value !== "structureOnly" && selectedTableList.value.length > 0);
+// Explains why the bar is missing instead of leaving the feature undiscoverable.
+const tableFilterUnsupported = computed(() => !tableFilterSupported.value && transferContent.value !== "structureOnly" && selectedTableList.value.length > 0);
+const filterPanelOpen = ref(false);
 
-const activeTableFilterCount = computed(() => selectedTableList.value.filter((table) => (tableFilters.value[table] ?? "").trim().length > 0).length);
+const activeTableFilterCount = computed(() => countSelectedTableFilters(tableFilters.value, selectedTables.value));
 
 function openTableFilter(table: string) {
   filterEditingTable.value = table;
@@ -329,8 +332,8 @@ function saveTableFilter() {
 
 /** Filters for currently selected tables only; undefined when there are none. */
 function requestedTableFilters(): Record<string, string> | undefined {
-  const entries = Object.entries(tableFilters.value).filter(([table, value]) => selectedTables.value.has(table) && value.trim().length > 0);
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+  const selected = selectedTableFilters(tableFilters.value, selectedTables.value);
+  return Object.keys(selected).length > 0 ? selected : undefined;
 }
 
 const sourceTransferType = computed(() => transferDatabaseTypeForConnection(store.getConfig(sourceConnectionId.value)));
@@ -608,6 +611,9 @@ function applyPendingObjectSelection() {
       if (available.has(table) && value.trim().length > 0) nextFilters[table] = value;
     }
     tableFilters.value = nextFilters;
+    // A restored task with filters should show them, not hide them behind the
+    // collapsed header.
+    if (Object.keys(nextFilters).length > 0) filterPanelOpen.value = true;
     pendingTableFiltersPrefill.value = null;
   }
 }
@@ -1853,34 +1859,48 @@ async function saveConfigTask() {
                 </div>
               </div>
 
+              <!-- Per-table row filters. Kept above the object tree so the entry point
+                   is visible without scrolling: the issue that asked for WHERE support
+                   reported the transfer dialog as "whole table only". -->
+              <div v-if="tableFilterAvailable" class="shrink-0 overflow-hidden rounded-lg border border-border/60 bg-card/60">
+                <button type="button" class="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left hover:bg-muted/40" :aria-expanded="filterPanelOpen" @click="filterPanelOpen = !filterPanelOpen">
+                  <span class="flex min-w-0 items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                    <Filter class="h-3.5 w-3.5 shrink-0" />
+                    <span class="truncate">{{ t("transfer.tableFilterSection") }}</span>
+                    <span v-if="activeTableFilterCount" class="shrink-0 rounded bg-primary/10 px-1 text-[11px] text-primary">{{ activeTableFilterCount }}</span>
+                  </span>
+                  <span class="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground/70">
+                    <span class="truncate">{{ activeTableFilterCount ? t("transfer.tableFilterActiveHint") : t("transfer.tableFilterCta") }}</span>
+                    <ChevronDown class="h-3.5 w-3.5 shrink-0 transition-transform" :class="filterPanelOpen ? 'rotate-180' : ''" />
+                  </span>
+                </button>
+                <div v-if="filterPanelOpen" class="border-t border-border/60 p-1.5">
+                  <p class="px-1 pb-1 text-[11px] text-muted-foreground/70">{{ t("transfer.tableFilterHint") }}</p>
+                  <div class="max-h-24 space-y-0.5 overflow-auto">
+                    <div v-for="name in selectedTableList" :key="name" class="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs hover:bg-muted/60">
+                      <span class="min-w-0 flex-1 truncate" :title="name">{{ name }}</span>
+                      <span v-if="tableFilters[name]" class="max-w-[45%] truncate rounded bg-primary/10 px-1 text-[11px] text-primary" :title="tableFilters[name]">
+                        {{ tableFilters[name] }}
+                      </span>
+                      <Button variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-[11px]" @click="openTableFilter(name)">
+                        {{ tableFilters[name] ? t("transfer.tableFilterEdit") : t("transfer.tableFilterSet") }}
+                      </Button>
+                      <Button v-if="tableFilters[name]" variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('transfer.tableFilterClear')" :aria-label="t('transfer.tableFilterClear')" @click="clearTableFilter(name)">
+                        <X class="h-3 w-3" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-else-if="tableFilterUnsupported" class="flex items-start gap-1.5 rounded-lg border border-dashed border-border/60 px-2 py-1.5 text-[11px] text-muted-foreground">
+                <Info class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>{{ t("transfer.tableFilterUnsupported") }}</span>
+              </div>
+
               <div v-if="(!loadingObjects && !sourceConnectionId) || !sourceDatabase" class="text-xs text-muted-foreground py-4 text-center">
                 {{ t("transfer.selectSourceFirst") }}
               </div>
               <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" :qualifiers="objectQualifiers" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1" />
-              <!-- Per-table SQL filters (MySQL / PostgreSQL sources) -->
-              <div v-if="tableFilterSupported && transferContent !== 'structureOnly' && selectedTableList.length" class="shrink-0 rounded-lg border border-border/60 bg-card/60 p-1.5">
-                <div class="flex items-center justify-between gap-2 px-1 pb-1">
-                  <span class="text-xs font-medium text-muted-foreground">
-                    {{ t("transfer.tableFilterSection") }}
-                    <span v-if="activeTableFilterCount" class="text-primary">({{ activeTableFilterCount }})</span>
-                  </span>
-                  <span class="text-[11px] text-muted-foreground/70">{{ t("transfer.tableFilterSectionHint") }}</span>
-                </div>
-                <div class="max-h-24 space-y-0.5 overflow-auto">
-                  <div v-for="name in selectedTableList" :key="name" class="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs hover:bg-muted/60">
-                    <span class="min-w-0 flex-1 truncate" :title="name">{{ name }}</span>
-                    <span v-if="tableFilters[name]" class="max-w-[45%] truncate rounded bg-primary/10 px-1 text-[11px] text-primary" :title="tableFilters[name]">
-                      {{ tableFilters[name] }}
-                    </span>
-                    <Button variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-[11px]" @click="openTableFilter(name)">
-                      {{ tableFilters[name] ? t("transfer.tableFilterEdit") : t("transfer.tableFilterSet") }}
-                    </Button>
-                    <Button v-if="tableFilters[name]" variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('transfer.tableFilterClear')" :aria-label="t('transfer.tableFilterClear')" @click="clearTableFilter(name)">
-                      <X class="h-3 w-3" />
-                    </Button>
-                  </div>
-                </div>
-              </div>
               <div v-if="showCrossFamilyViewHint" class="mt-1.5 rounded-md border border-amber-300/40 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
                 {{ t("transfer.crossFamilyViewHint") }}
               </div>

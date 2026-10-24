@@ -7101,6 +7101,9 @@ export default withEnglishFallback({
       saveFailed: "저장 실패: {message}",
       deleteFailed: "삭제 실패: {message}",
     },
+    tableFilterCta: "대형 테이블은 WHERE 조건을 추가해 일부 데이터만 전송할 수 있습니다",
+    tableFilterActiveHint: "조건에 따라 필터링됨",
+    tableFilterUnsupported: "현재 소스 데이터베이스는 테이블 필터링을 지원하지 않습니다. 지원: MySQL, PostgreSQL, 达梦, Oracle, SQL Server, SQLite",
   },
   tableImport: {
     title: "테이블 데이터 가져오기",

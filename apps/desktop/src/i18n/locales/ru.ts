@@ -8531,6 +8531,9 @@ export default withEnglishFallback({
       saveFailed: "Не удалось сохранить: {message}",
       deleteFailed: "Не удалось удалить: {message}",
     },
+    tableFilterCta: "Для больших таблиц можно добавить условие WHERE, чтобы переносить только часть данных",
+    tableFilterActiveHint: "Отфильтровано по условию",
+    tableFilterUnsupported: "Текущая исходная БД не поддерживает фильтрацию таблиц; поддерживаются MySQL, PostgreSQL, 达梦, Oracle, SQL Server, SQLite",
   },
   tableImport: {
     title: "Импорт данных таблицы",

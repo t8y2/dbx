@@ -6396,6 +6396,9 @@ export default withEnglishFallback({
       saveFailed: "儲存失敗：{message}",
       deleteFailed: "刪除失敗：{message}",
     },
+    tableFilterCta: "大表可加 WHERE 條件只傳部分資料",
+    tableFilterActiveHint: "已依條件篩選",
+    tableFilterUnsupported: "目前來源資料庫不支援資料表篩選；支援 MySQL、PostgreSQL、達夢、Oracle、SQL Server、SQLite",
   },
   tableImport: {
     title: "匯入資料表資料",

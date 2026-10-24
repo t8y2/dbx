@@ -7068,6 +7068,9 @@ export default withEnglishFallback({
       saveFailed: "Salvataggio fallito: {message}",
       deleteFailed: "Eliminazione fallita: {message}",
     },
+    tableFilterCta: "Per le tabelle di grandi dimensioni è possibile aggiungere una condizione WHERE per trasferire solo una parte dei dati",
+    tableFilterActiveHint: "Filtrato in base alla condizione",
+    tableFilterUnsupported: "Il database di origine corrente non supporta il filtro delle tabelle; supporta MySQL, PostgreSQL, 达梦, Oracle, SQL Server e SQLite",
   },
   tableImport: {
     title: "Importa Dati Tabella",

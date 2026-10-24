@@ -178,10 +178,13 @@ describe("ddlFormatDialectFor", () => {
   });
 
   it("keeps case-sensitive quoted Oracle names quoted in the DDL view", () => {
-    const ddl = 'CREATE TABLE "SYSTEM"."TEST" ("id" VARCHAR2(32), "cName" VARCHAR2(100))';
+    // MYDB is reserved in no dialect: the old "SYSTEM" fixture schema is on the
+    // MySQL reserved list, so mysql-highlighted omitDdlIdentifierQuotes kept it
+    // quoted and broke the case-sensitivity expectation this test verifies.
+    const ddl = 'CREATE TABLE "MYDB"."TEST" ("id" VARCHAR2(32), "cName" VARCHAR2(100))';
     const highlightDialect = "mysql";
     const resolved = ddlFormatDialectFor({ databaseType: "oracle", highlightDialect });
-    expect(omitDdlIdentifierQuotes(ddl, highlightDialect)).toBe("CREATE TABLE SYSTEM.TEST (id VARCHAR2(32), cName VARCHAR2(100))");
-    expect(omitDdlIdentifierQuotes(ddl, resolved)).toBe('CREATE TABLE SYSTEM.TEST ("id" VARCHAR2(32), "cName" VARCHAR2(100))');
+    expect(omitDdlIdentifierQuotes(ddl, highlightDialect)).toBe("CREATE TABLE MYDB.TEST (id VARCHAR2(32), cName VARCHAR2(100))");
+    expect(omitDdlIdentifierQuotes(ddl, resolved)).toBe('CREATE TABLE MYDB.TEST ("id" VARCHAR2(32), "cName" VARCHAR2(100))');
   });
 });

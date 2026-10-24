@@ -122,6 +122,15 @@ pub fn is_unrecognized_pure_flag(message: &str) -> bool {
         && (lower.contains("unrecognized") || lower.contains("unknown") || lower.contains("unexpected"))
 }
 
+/// Older OpenCode V2 builds complain about the legacy `models` flags in either
+/// order, so a V1-detected CLI that is actually V2 must retry after `--pure` or
+/// `--verbose` is rejected.
+pub fn is_unrecognized_models_flag(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    (lower.contains("--pure") || lower.contains("--verbose"))
+        && (lower.contains("unrecognized") || lower.contains("unknown") || lower.contains("unexpected"))
+}
+
 struct OpenCodeIsolatedCwd {
     path: PathBuf,
 }
@@ -338,9 +347,12 @@ pub fn resolved_models_command_for_version(
     version: OpenCodeVersion,
 ) -> Result<OpenCodeCommandSpec, String> {
     let mut command = resolve_opencode_command(config)?;
-    command.args.extend(["models".to_string(), "--verbose".to_string()]);
+    command.args.push("models".to_string());
     if version == OpenCodeVersion::V1 {
-        command.args.push("--pure".to_string());
+        // OpenCode V2 removed both flags from `models`: V2 rejects --verbose
+        // (and --pure), so only V1 asks for the metadata output the parser
+        // pairs with each model id.
+        command.args.extend(["--verbose".to_string(), "--pure".to_string()]);
     }
     Ok(command)
 }
@@ -390,7 +402,7 @@ pub async fn list_opencode_models(config: &AiConfig) -> Result<Vec<AiModelInfo>,
 
     if !output.status.success() {
         let err_output = combined_output(&output.stderr, &output.stdout);
-        if version == OpenCodeVersion::V1 && is_unrecognized_pure_flag(&err_output) {
+        if version == OpenCodeVersion::V1 && is_unrecognized_models_flag(&err_output) {
             let program = opencode_program(config);
             record_opencode_version_v2(&program).await;
             version = OpenCodeVersion::V2;
@@ -427,7 +439,10 @@ pub async fn list_opencode_models(config: &AiConfig) -> Result<Vec<AiModelInfo>,
 fn parse_opencode_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
     let mut models = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut pending_id: Option<String> = None;
+    // OpenCode V1 --verbose prints `provider/model` followed by a JSON object;
+    // OpenCode V2 rejects that flag and prints only the model ids. Hold every
+    // plain line until a JSON block claims it so both output formats parse.
+    let mut pending_ids: Vec<String> = Vec::new();
     let mut json_buffer = String::new();
 
     for line in stdout.lines() {
@@ -437,7 +452,7 @@ fn parse_opencode_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
                 json_buffer.push_str(line);
                 json_buffer.push('\n');
             } else if !trimmed.is_empty() {
-                pending_id = Some(trimmed.to_string());
+                pending_ids.push(trimmed.to_string());
             }
         } else {
             json_buffer.push_str(line);
@@ -449,7 +464,7 @@ fn parse_opencode_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
         }
         match serde_json::from_str::<Value>(&json_buffer) {
             Ok(metadata) => {
-                if let Some(info) = opencode_model_info(pending_id.take(), &metadata) {
+                if let Some(info) = opencode_model_info(pending_ids.pop(), &metadata) {
                     if seen.insert(info.id.clone()) {
                         models.push(info);
                     }
@@ -459,7 +474,19 @@ fn parse_opencode_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
             Err(error) if error.is_eof() => {}
             Err(_) => {
                 json_buffer.clear();
-                pending_id = None;
+            }
+        }
+    }
+
+    // Remaining ids are V2's plain output (or an id whose metadata was not valid
+    // JSON). Keep the ones shaped like `provider/model`.
+    for id in pending_ids {
+        if id.chars().any(char::is_whitespace) {
+            continue;
+        }
+        if let Some(info) = opencode_model_info(Some(id), &Value::Null) {
+            if seen.insert(info.id.clone()) {
+                models.push(info);
             }
         }
     }
@@ -751,14 +778,47 @@ mod tests {
     }
 
     #[test]
-    fn models_command_omits_pure_flag_for_v2() {
+    fn models_command_uses_plain_models_for_v2() {
         let mut config = config("default");
         config.opencode_cli_version = Some("v2".to_string());
 
         let command = resolved_models_command(&config).unwrap();
 
         assert_eq!(command.program, "opencode");
-        assert_eq!(command.args, ["models", "--verbose"]);
+        // OpenCode V2 rejects both --verbose and --pure for `models`.
+        assert_eq!(command.args, ["models"]);
+    }
+
+    #[test]
+    fn parses_plain_v2_model_list() {
+        let stdout = concat!("openai/gpt-5.4\n", "anthropic/claude-sonnet-4\n", "not a model id\n", "openai/gpt-5.4\n");
+
+        let models = parse_opencode_models(stdout).unwrap();
+
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "openai/gpt-5.4", "anthropic/claude-sonnet-4"]
+        );
+        assert!(models[1].display_name.is_none());
+        assert!(models[1].effort_capability.is_none());
+    }
+
+    #[test]
+    fn parses_trailing_plain_ids_after_verbose_metadata() {
+        let stdout = concat!(
+            "openai/gpt-5.4\n",
+            "{\"id\":\"gpt-5.4\",\"providerID\":\"openai\",\"name\":\"GPT-5.4\",\"variants\":{}}\n",
+            "custom/plain-model\n"
+        );
+
+        let models = parse_opencode_models(stdout).unwrap();
+
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "openai/gpt-5.4", "custom/plain-model"]
+        );
+        assert_eq!(models[1].display_name.as_deref(), Some("GPT-5.4"));
+        assert!(models[2].display_name.is_none());
     }
 
     #[test]
@@ -790,6 +850,16 @@ mod tests {
         assert!(is_unrecognized_pure_flag("ERROR\n  Unrecognized flag: --pure"));
         assert!(!is_unrecognized_pure_flag("connection failed"));
         assert!(!is_unrecognized_pure_flag("unknown model"));
+    }
+
+    #[test]
+    fn detects_unrecognized_models_flag_error() {
+        assert!(is_unrecognized_models_flag("ERROR\n  Unrecognized flag: --verbose in command opencode models"));
+        assert!(is_unrecognized_models_flag("error: unknown flag: --pure"));
+        assert!(!is_unrecognized_models_flag("connection failed"));
+        // Only model discovery retries on --verbose; the run command keeps its
+        // narrower --pure detector.
+        assert!(!is_unrecognized_pure_flag("Unrecognized flag: --verbose"));
     }
 
     #[test]

@@ -23,6 +23,8 @@ export interface BuildTableSelectSqlOptions {
   tableType?: string;
   primaryKeys?: string[];
   columns?: string[];
+  /** Select only `columns` instead of the default `SELECT *` (foreign key info cards). */
+  projectColumns?: boolean;
   columnTypes?: string[];
   largeValuePreviewSize?: number;
   fallbackOrderColumns?: string[];

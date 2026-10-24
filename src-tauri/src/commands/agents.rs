@@ -263,10 +263,16 @@ pub async fn export_agents_offline(
     state: State<'_, Arc<AppState>>,
     path: String,
     driver_keys: Vec<String>,
+    include_jres: Option<bool>,
 ) -> Result<AgentOfflineExportResult, String> {
     let state = Arc::clone(state.inner());
     run_blocking_agent_task("Failed to run the offline Agent export task", move || {
-        export_agents_offline_core(&state.agent_manager, std::path::Path::new(&path), &driver_keys)
+        export_agents_offline_core(
+            &state.agent_manager,
+            std::path::Path::new(&path),
+            &driver_keys,
+            include_jres.unwrap_or(true),
+        )
     })
     .await
 }

@@ -657,7 +657,7 @@ async function openOfflineExportDialog() {
   }
 }
 
-async function exportOfflinePackage(driverKeys: string[]) {
+async function exportOfflinePackage(driverKeys: string[], includeJres = true) {
   if (isWeb || agentExportImportBlocked.value || driverKeys.length === 0) return;
   const platform = offlineExportPreview.value?.platform ?? "current-platform";
   await runAgentOfflineExportAction({
@@ -673,6 +673,7 @@ async function exportOfflinePackage(driverKeys: string[]) {
         filters: [{ name: "ZIP", extensions: ["zip"] }],
       });
     },
+    includeJres,
     exportPackage: api.exportAgentsOffline,
     onSuccess: ({ destination, result }) => {
       offlineExportDialogOpen.value = false;

@@ -56,7 +56,7 @@ function buttonTagsForClick(handler: string): string[] {
 describe("offline Agent export transport contract", () => {
   it("routes preview and export through the Tauri desktop backend", () => {
     expect(functionBody(tauri, "previewAgentOfflineExport")).toContain('invoke("preview_agent_offline_export")');
-    expect(functionBody(tauri, "exportAgentsOffline")).toContain('invoke("export_agents_offline", { path, driverKeys })');
+    expect(functionBody(tauri, "exportAgentsOffline")).toContain('invoke("export_agents_offline", { path, driverKeys, includeJres })');
     expect(tauriRegistry).toContain("commands::agents::preview_agent_offline_export,");
     expect(tauriRegistry).toContain("commands::agents::export_agents_offline,");
     expect(api).toContain('previewAgentOfflineExport = forward("previewAgentOfflineExport")');

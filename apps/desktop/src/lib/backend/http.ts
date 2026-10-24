@@ -1049,7 +1049,7 @@ export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPre
   throw new Error("Offline Agent package export is only available in the desktop app.");
 }
 
-export async function exportAgentsOffline(_path: string, _driverKeys: string[]): Promise<AgentOfflineExportResult> {
+export async function exportAgentsOffline(_path: string, _driverKeys: string[], _includeJres = true): Promise<AgentOfflineExportResult> {
   throw new Error("Offline Agent package export is only available in the desktop app.");
 }
 

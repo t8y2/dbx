@@ -3,6 +3,10 @@ import type { TreeNode, TreeNodeType } from "@/types/database";
 
 const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
 const tableSearchableChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "load-more"]);
+// Grouped views and materialized views get the same in-group search box as
+// tables (#12901): their index scope, local filter and remote search plumbing
+// are already object-type generic.
+const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views"]);
 
 export function isSidebarTableSearchControlNode(node: TreeNode): boolean {
   return node.type === "table-search-control";
@@ -21,7 +25,7 @@ function shouldInsertTableSearchControl(item: FlatTreeNode, sidebarObjectDisplay
   const node = item.node;
   if (!node.isExpanded) return false;
   if (sidebarObjectDisplay === "grouped") {
-    return node.type === "group-tables" && (parentHasSearchableTableList(node) || !!activeQueries[node.id]?.trim());
+    return searchableObjectGroupTypes.has(node.type) && (parentHasSearchableTableList(node) || !!activeQueries[node.id]?.trim());
   }
   if (!simpleObjectParentTypes.has(node.type)) return false;
   return parentHasSearchableTableList(node) || !!activeQueries[node.id]?.trim();

@@ -5,11 +5,11 @@ go 1.23.0
 require (
 	github.com/beltran/gosasl v1.0.0
 	github.com/go-zookeeper/zk v1.0.4
-	github.com/golang-auth/go-gssapi/v2 v2.0.0
+	github.com/golang-auth/go-gssapi/v2 v2.2.2
 	github.com/jcmturner/krb5test v0.0.0-20201230140143-102e4b78cdb8
 	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
 	github.com/t8y2/dbx/agents/go-common/gohive v0.0.0
-	software.sslmate.com/src/go-pkcs12 v0.7.3
+	software.sslmate.com/src/go-pkcs12 v0.7.4
 )
 
 require (

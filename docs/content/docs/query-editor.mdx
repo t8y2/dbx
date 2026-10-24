@@ -195,10 +195,25 @@ Parameters can be entered as strings, numbers, booleans, `NULL`, or raw SQL valu
 
 - **Format SQL** normalizes indentation, line breaks, and keyword style
 - **Compact SQL** removes unnecessary whitespace for copying or inspecting generated SQL
-- **Code folding** collapses long queries, subqueries, or routine blocks and has configurable shortcuts
+- **Code folding** collapses long queries, subqueries, routine blocks, or custom regions, with configurable shortcuts
 - See [SQL Formatting](/en/docs/sql-formatter) for formatter and variable-syntax settings
 
 Formatting and compacting only change editor text; they do not execute SQL.
+
+### Custom Folding Regions
+
+Group related statements in SQL queries with markers on their own lines:
+
+```sql
+-- region Shared queries
+SELECT * FROM aaa;
+SELECT * FROM bbb;
+-- endregion
+```
+
+Use the opening line's fold arrow or the existing folding menu and shortcuts to hide the contents and closing marker while keeping the title visible. Regions support nesting, indentation, and case-insensitive markers. Unmatched closing markers are ignored, and unclosed regions do not fold. Markers inside strings and block comments do not create regions.
+
+The editor also recognizes `--region` / `--endregion`, but does not rewrite executed SQL. For databases such as MySQL that require whitespace after `--`, use the spaced spelling shown above.
 
 ## Explain Plan
 

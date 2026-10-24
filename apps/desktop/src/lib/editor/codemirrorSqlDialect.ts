@@ -1,5 +1,6 @@
 import { styleTags, tags } from "@lezer/highlight";
 import type { SQLDialect } from "@codemirror/lang-sql";
+import { SQL_REGION_DOLLAR_QUOTES, SQL_REGION_IDENTIFIER_POLICIES, SQL_REGION_IDENTIFIER_SPECS, SQL_REGION_COMMENT_POLICIES, SQL_REGION_COMMENT_SPECS, SQL_REGION_STRING_POLICIES, SQL_REGION_STRING_SPECS, type SqlRegionDialectSpec } from "./sqlRegionDialectPolicy";
 import type { DatabaseType } from "@/types/database";
 import { driverProfileSqlBuiltinTerms } from "@/lib/database/driverProfileExtensions";
 
@@ -372,6 +373,37 @@ function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName
   return dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
 }
 
+// Kingbase keeps its physical connection type while its lexer follows the selected mode.
+function sqlPolicyDatabaseType(dialectName: CodeMirrorSqlDialectName, databaseType?: DatabaseType): DatabaseType | undefined {
+  if (databaseType !== "kingbase") return databaseType;
+  if (dialectName === "mysql" || dialectName === "sqlserver" || dialectName === "postgres") return dialectName;
+  return dialectName === "oracle" ? "gaussdb" : databaseType;
+}
+
+// Share the nesting decision between the syntax tree and custom region scanner.
+function sqlCommentDialectSpec(dialectName: CodeMirrorSqlDialectName, databaseType?: DatabaseType) {
+  const commentPolicy = databaseType ? SQL_REGION_COMMENT_POLICIES[databaseType] : "dialect";
+  const resolvedCommentPolicy = commentPolicy === "dialect" ? (dialectName === "mysql" ? "mysql" : dialectName === "clickhouse" ? "clickhouse" : dialectName === "soql" ? "excluded" : "nested") : commentPolicy;
+  return SQL_REGION_COMMENT_SPECS[resolvedCommentPolicy];
+}
+
+/** Preserve literal boundaries for regions even when highlighting parses routine bodies as SQL. */
+export function sqlRegionDialectSpec(dialect: SQLDialect, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType): SqlRegionDialectSpec {
+  databaseType = sqlPolicyDatabaseType(dialectName, databaseType);
+  const policy = databaseType ? SQL_REGION_DOLLAR_QUOTES[databaseType] : "dialect";
+  const regionDollarQuotes = policy === "dialect" ? (dialectName === "postgres" || dialectName === "clickhouse" ? "tagged" : "none") : policy;
+  return {
+    ...dialect.spec,
+    regionDollarQuotes: dialectName === "soql" ? "none" : regionDollarQuotes,
+    ...(databaseType ? SQL_REGION_STRING_SPECS[SQL_REGION_STRING_POLICIES[databaseType]] : {}),
+    // Generic PostgreSQL editors have no concrete database policy.
+    ...(!databaseType || databaseType === "jdbc" ? { regionEscapeStrings: dialectName === "postgres" } : {}),
+    ...((!databaseType || databaseType === "jdbc") && dialectName === "clickhouse" ? SQL_REGION_STRING_SPECS.clickhouse : {}),
+    ...sqlCommentDialectSpec(dialectName, databaseType),
+    ...(databaseType ? SQL_REGION_IDENTIFIER_SPECS[SQL_REGION_IDENTIFIER_POLICIES[databaseType]] : {}),
+  };
+}
+
 export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string): SQLDialect {
   // SOQL is its own language, not a SQL superset: define it from a precise keyword
   // set with no identifier quoting, single-quoted strings, and backslash escapes.
@@ -403,8 +435,18 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
   const commonKeywords = isClickHouse ? DBX_COMMON_SQL_KEYWORDS.toLowerCase() : DBX_COMMON_SQL_KEYWORDS;
   const baseBuiltin = isSqlServer ? sqlServerBuiltinSyntaxTerms(baseDialect.spec.builtin || "") : baseDialect.spec.builtin || "";
 
+  const policyDatabaseType = sqlPolicyDatabaseType(dialectName, databaseType);
+  const commentSpec = sqlCommentDialectSpec(dialectName, policyDatabaseType);
+  const identifierSpec = policyDatabaseType ? SQL_REGION_IDENTIFIER_SPECS[SQL_REGION_IDENTIFIER_POLICIES[policyDatabaseType]] : {};
   return langSql.SQLDialect.define({
     ...baseDialect.spec,
+    // Use the same supported delimiters and line comments as region scanning.
+    ...(identifierSpec.identifierQuotes !== undefined ? { identifierQuotes: identifierSpec.identifierQuotes } : {}),
+    ...(commentSpec.hashComments !== undefined ? { hashComments: commentSpec.hashComments } : {}),
+    ...(commentSpec.slashComments !== undefined ? { slashComments: commentSpec.slashComments } : {}),
+    clickHouseHashComments: commentSpec.regionClickHouseHashComments ?? false,
+    // The patched tokenizer defaults to nesting; flat dialects close at the first */.
+    nestedBlockComments: commentSpec.regionNestedBlockComments ?? true,
     keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
     builtin: [baseBuiltin, isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? `${POSTGRES_BUILTINS} ${POSTGRES_PLPGSQL_BUILTIN}` : "", isMysql ? MYSQL_BUILTINS : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,

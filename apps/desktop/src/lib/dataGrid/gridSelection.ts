@@ -200,7 +200,10 @@ function compareExactDecimal(left: ExactDecimal, right: ExactDecimal): number {
 
 /** Adds a cell to an exact running total; `resolved` is the number the cell counts as. */
 export function addExactSelectionValue(sum: ExactDecimal, value: GridCellValue, resolved: number): ExactDecimal {
-  const exact = exactSelectionValue(value, resolved);
+  return addExactDecimal(sum, exactSelectionValue(value, resolved));
+}
+
+function addExactDecimal(sum: ExactDecimal, exact: ExactDecimal): ExactDecimal {
   const scale = Math.max(sum.scale, exact.scale);
   return { coefficient: rescaleDecimal(sum, scale) + rescaleDecimal(exact, scale), scale };
 }
@@ -237,8 +240,8 @@ export function summarizeSelection(selection: SelectionData, options: SelectionS
       const resolved = numericValue(value);
       if (resolved === undefined || !Number.isFinite(resolved)) continue;
       numericCount += 1;
-      sum = addExactSelectionValue(sum, value, resolved);
       const exact = exactSelectionValue(value, resolved);
+      sum = addExactDecimal(sum, exact);
       if (min === null || compareExactDecimal(exact, min) < 0) min = exact;
       if (max === null || compareExactDecimal(exact, max) > 0) max = exact;
       distinctValues.add(exactDecimalText(exact));

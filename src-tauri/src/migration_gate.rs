@@ -37,6 +37,8 @@ pub fn allowed_command(command: &str) -> bool {
             | "migration_start"
             | "migration_retry"
             | "migration_cleanup_backups"
+            | "migration_prepare_credential_reset"
+            | "migration_reset_credentials"
             | "mark_frontend_ready"
             | "show_main_window"
             | "quit_app"
@@ -79,6 +81,8 @@ mod tests {
             assert!(!allowed_command(command));
         }
         assert!(allowed_command("migration_start"));
+        assert!(allowed_command("migration_prepare_credential_reset"));
+        assert!(allowed_command("migration_reset_credentials"));
         assert!(allowed_command("reveal_path_in_file_manager"));
     }
     #[test]

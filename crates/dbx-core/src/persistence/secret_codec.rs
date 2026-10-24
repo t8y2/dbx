@@ -71,6 +71,58 @@ pub struct SecretCodec {
 }
 
 impl SecretCodec {
+    /// Explicit, destructive-recovery provisioning only. Unlike the ordinary
+    /// first-write path, never accept another writer's key as our new key.
+    pub(crate) fn create_credential_recovery_key(
+        policy: SecretKeyPolicy,
+        data_dir: &std::path::Path,
+    ) -> Result<Self, String> {
+        if std::env::var_os("DBX_SECRET_KEY").is_some() || std::env::var_os("DBX_SECRET_KEY_FILE").is_some() {
+            return Err("CREDENTIAL_RESET_EXTERNAL_KEY".to_string());
+        }
+        match Self::resolve(policy, data_dir, false) {
+            Err(error) if matches!(error.as_str(), "MISSING_MANAGED_KEY" | "KEY_PROVIDER_UNAVAILABLE") => {}
+            _ => return Err("CREDENTIAL_RESET_KEY_CHANGED".to_string()),
+        }
+        let mut key = [0u8; 32];
+        OsRng.fill_bytes(&mut key);
+        let codec = Self::new(key);
+        match policy {
+            SecretKeyPolicy::ManagedDataDir => {
+                codec.persist_managed_data_dir_key(data_dir)?;
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            SecretKeyPolicy::TestDataDir => {
+                codec.persist_managed_data_dir_key(data_dir)?;
+            }
+            #[cfg(all(target_os = "windows", feature = "os-keyring"))]
+            SecretKeyPolicy::PlatformDefault => {
+                let _creation_lock = lock_platform_key_creation()?;
+                let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+                    .map_err(|_| "KEYRING_ACCESS_FAILED".to_string())?;
+                match entry.get_password() {
+                    Err(keyring::Error::NoEntry) => {}
+                    Ok(_) => return Err("CREDENTIAL_RESET_KEY_CHANGED".to_string()),
+                    Err(_) => return Err("KEYRING_ACCESS_FAILED".to_string()),
+                }
+                let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
+                entry.set_password(&encoded).map_err(|_| "KEYRING_WRITE_FAILED".to_string())?;
+            }
+            _ => return Err("CREDENTIAL_RESET_UNSUPPORTED".to_string()),
+        }
+        // Bypass all Storage caches: persistence and source precedence must be
+        // verified before the caller is allowed to commit credential removal.
+        let persisted = Self::resolve(policy, data_dir, false)?.codec;
+        if persisted.key != codec.key {
+            return Err("CREDENTIAL_RESET_KEY_CHANGED".to_string());
+        }
+        let probe = codec.encrypt("credential-reset", "verification", "readback")?;
+        if persisted.decrypt("credential-reset", "verification", &probe)? != "readback" {
+            return Err("CREDENTIAL_RESET_KEY_VERIFICATION_FAILED".to_string());
+        }
+        Ok(persisted)
+    }
+
     pub const fn new(key: [u8; 32]) -> Self {
         Self { key }
     }
@@ -326,6 +378,8 @@ impl SecretCodec {
 
 #[cfg(all(feature = "os-keyring", any(target_os = "macos", target_os = "windows")))]
 fn platform_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, String> {
+    #[cfg(target_os = "windows")]
+    let _creation_lock = if allow_create { Some(lock_platform_key_creation()?) } else { None };
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
         .map_err(|error| format!("keyring entry unavailable: {error}"))?;
     match entry.get_password() {
@@ -347,6 +401,26 @@ fn platform_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, Str
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
     entry.set_password(&encoded).map_err(|error| format!("KEYRING_WRITE_FAILED: {error}"))?;
     Ok(Some(SecretCodec::new(key)))
+}
+
+// The Windows credential API has no create-if-absent operation. Serialize DBX
+// provisioners across data directories before the NoEntry check and write.
+// Read-only probes never create or acquire this lock.
+#[cfg(all(target_os = "windows", feature = "os-keyring"))]
+fn lock_platform_key_creation() -> Result<std::fs::File, String> {
+    let path =
+        default_key_path().ok_or_else(|| "KEYRING_WRITE_FAILED".to_string())?.with_file_name(".dbx-key-provision.lock");
+    std::fs::create_dir_all(path.parent().ok_or("KEYRING_WRITE_FAILED")?)
+        .map_err(|_| "KEYRING_WRITE_FAILED".to_string())?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|_| "KEYRING_WRITE_FAILED".to_string())?;
+    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| "KEYRING_WRITE_FAILED".to_string())?;
+    Ok(file)
 }
 
 #[cfg(all(feature = "os-keyring", target_os = "linux"))]

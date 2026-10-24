@@ -10035,6 +10035,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "Если включено, база данных по умолчанию отображается в начале списка. Если отключено, она сортируется по алфавиту.",
     sidebarBrowseObjectsOnDatabaseActivation: "Просматривать объекты при активации базы данных",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "Если включено, активация узла базы данных или схемы выбранным режимом (один или двойной клик) также открывает вкладку «Просмотр объектов».",
+    sidebarExpandTreeOnConnect: "Разворачивать дерево объектов после подключения",
+    sidebarExpandTreeOnConnectDescription: "Если включено, после успешного подключения соединение и его база данных по умолчанию автоматически разворачиваются на боковой панели; если выключено, разворачивайте узлы вручную. Отключите для баз данных с большим числом схем.",
     openTabsRestoreMode: "Восстанавливать вкладки при запуске",
     openTabsRestoreModeDescription: "Выберите, как DBX восстанавливает вкладки, открытые в прошлый раз.",
     openTabsRestoreModeAll: "Сохранять все вкладки",

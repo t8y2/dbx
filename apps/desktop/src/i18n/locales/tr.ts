@@ -7769,6 +7769,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "Etkinleştirildiğinde, varsayılan veritabanı veritabanı listesinin en üstünde görüntülenir. Devre dışı bırakıldığında alfabetik olarak sıralanır.",
     sidebarBrowseObjectsOnDatabaseActivation: "Veritabanı etkinleştirilirken nesnelere gözat",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Etkinleştirildiğinde, seçili tek veya çift tıklama moduyla bir veritabanı ya da şema düğümünü etkinleştirmek "Nesnelere Gözat" sekmesini de açar.',
+    sidebarExpandTreeOnConnect: "Bağlandıktan sonra nesne ağacını genişlet",
+    sidebarExpandTreeOnConnectDescription: "Etkinleştirildiğinde başarılı bir bağlantı, kenar çubuğunda bağlantıyı ve varsayılan veritabanını otomatik olarak genişletir; devre dışı bırakıldığında düğümleri elle genişletirsiniz. Şeması çok olan veritabanları için kapatın.",
     openTabsRestoreMode: "Açılışta sekmeleri geri yükle",
     openTabsRestoreModeDescription: "DBX'in en son açık olan sekmeleri nasıl geri yükleyeceğini seçin.",
     openTabsRestoreModeAll: "Tüm sekmeleri koru",

@@ -8680,6 +8680,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "Cuando está habilitado, la base de datos predeterminada se muestra en la parte superior de la lista. Cuando está deshabilitado, se ordena alfabéticamente.",
     sidebarBrowseObjectsOnDatabaseActivation: "Explorar objetos al activar una base de datos",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Si está activado, al activar un nodo de base de datos o esquema con el modo seleccionado de uno o dos clics también se abre la pestaña "Explorar objetos".',
+    sidebarExpandTreeOnConnect: "Expandir el árbol de objetos al conectar",
+    sidebarExpandTreeOnConnectDescription: "Si está activado, una conexión correcta expande automáticamente la conexión y su base de datos predeterminada en la barra lateral; si está desactivado, expanda los nodos manualmente. Desactívelo en bases de datos con muchos esquemas.",
     openTabsRestoreMode: "Restaurar pestañas al iniciar",
     openTabsRestoreModeDescription: "Elige cómo DBX restaura las pestañas que estaban abiertas la última vez.",
     openTabsRestoreModeAll: "Conservar todas las pestañas",

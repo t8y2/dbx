@@ -1253,6 +1253,25 @@ describe("normalizeEditorSettings - sidebarPinDefaultDatabase", () => {
   });
 });
 
+// #13302：连接后是否自动展开对象树的开关。默认必须为 false——模式多的库
+// 全量自动展开是反馈的卡顿来源，升级后的老用户也走新默认。
+describe("normalizeEditorSettings - sidebarExpandTreeOnConnect", () => {
+  it("defaults sidebarExpandTreeOnConnect to false", () => {
+    expect(normalizeEditorSettings({}).sidebarExpandTreeOnConnect).toBe(false);
+  });
+
+  it("preserves explicit boolean values", () => {
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: true }).sidebarExpandTreeOnConnect).toBe(true);
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: false }).sidebarExpandTreeOnConnect).toBe(false);
+  });
+
+  it("falls back to default for non-boolean values", () => {
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: "true" } as any).sidebarExpandTreeOnConnect).toBe(false);
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: undefined } as any).sidebarExpandTreeOnConnect).toBe(false);
+    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: 1 } as any).sidebarExpandTreeOnConnect).toBe(false);
+  });
+});
+
 describe("normalizeEditorSettings - preferredExportPath", () => {
   it("defaults preferredExportPath to empty string", () => {
     expect(normalizeEditorSettings({}).preferredExportPath).toBe("");

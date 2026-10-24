@@ -276,6 +276,8 @@ describe("connectionStore database info", () => {
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");
+    // 用例依赖连接节点自动展开后的树结构；#13302 把默认改为关闭后需显式开启。
+    useSettingsStore().editorSettings.sidebarExpandTreeOnConnect = true;
     const store = useConnectionStore();
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     await store.addConnection(config);
@@ -331,6 +333,8 @@ describe("connectionStore database info", () => {
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");
+    // 用例依赖连接节点自动展开后的树结构；#13302 把默认改为关闭后需显式开启。
+    useSettingsStore().editorSettings.sidebarExpandTreeOnConnect = true;
     const store = useConnectionStore();
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     await store.addConnection(config);
@@ -386,6 +390,8 @@ describe("connectionStore database info", () => {
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");
+    // 用例依赖连接节点自动展开后的树结构；#13302 把默认改为关闭后需显式开启。
+    useSettingsStore().editorSettings.sidebarExpandTreeOnConnect = true;
     const store = useConnectionStore();
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     await store.addConnection(config);
@@ -448,6 +454,8 @@ describe("connectionStore database info", () => {
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");
+    // 用例依赖连接节点自动展开后的树结构；#13302 把默认改为关闭后需显式开启。
+    useSettingsStore().editorSettings.sidebarExpandTreeOnConnect = true;
     const store = useConnectionStore();
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     await store.addConnection(config);

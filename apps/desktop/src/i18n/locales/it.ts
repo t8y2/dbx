@@ -8459,6 +8459,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "Se abilitato, il database predefinito viene mostrato in cima all'elenco dei database. Se disabilitato, viene ordinato alfabeticamente.",
     sidebarBrowseObjectsOnDatabaseActivation: "Esplora oggetti all'attivazione di un database",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "Se abilitato, l'attivazione di un nodo database o schema con la modalità a clic singolo o doppio selezionata apre anche la scheda «Esplora oggetti».",
+    sidebarExpandTreeOnConnect: "Espandi l'albero degli oggetti dopo la connessione",
+    sidebarExpandTreeOnConnectDescription: "Se abilitato, una connessione riuscita espande automaticamente la connessione e il database predefinito nella barra laterale; se disabilitato, espandi i nodi manualmente. Disattivare per database con molti schemi.",
     openTabsRestoreMode: "Ripristina schede all'avvio",
     openTabsRestoreModeDescription: "Scegli come DBX ripristina le schede aperte l'ultima volta.",
     openTabsRestoreModeAll: "Mantieni tutte le schede",

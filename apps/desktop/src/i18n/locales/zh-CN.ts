@@ -9816,6 +9816,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "开启后，默认数据库在数据库列表中置顶显示；关闭后按字母正常排序。",
     sidebarBrowseObjectsOnDatabaseActivation: "激活数据库节点时浏览对象",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "开启后，按照所选的单击或双击激活方式操作数据库或模式节点时，会同时展开侧边栏并打开“浏览对象”标签页。",
+    sidebarExpandTreeOnConnect: "连接后自动展开对象树",
+    sidebarExpandTreeOnConnectDescription: "开启后，连接成功会自动展开侧边栏里的连接与默认数据库节点；关闭后需要手动逐层展开。模式较多的库建议关闭，避免全量展开造成卡顿。",
     openTabsRestoreMode: "启动时恢复标签页",
     openTabsRestoreModeDescription: "选择 DBX 启动时如何恢复上次打开的标签页。",
     openTabsRestoreModeAll: "保留所有标签",

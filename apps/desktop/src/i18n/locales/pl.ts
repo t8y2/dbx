@@ -8711,6 +8711,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "Gdy włączone, domyślna baza danych pojawia się na samej górze listy. Gdy wyłączone, jest sortowana alfabetycznie.",
     sidebarBrowseObjectsOnDatabaseActivation: "Przeglądaj obiekty po aktywacji bazy danych",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "Gdy włączone, aktywacja węzła bazy danych lub schematu wybranym trybem pojedynczego/podwójnego kliknięcia otwiera również kartę „Przeglądaj obiekty”.",
+    sidebarExpandTreeOnConnect: "Rozwijaj drzewo obiektów po połączeniu",
+    sidebarExpandTreeOnConnectDescription: "Gdy włączone, udane połączenie automatycznie rozwija połączenie i jego domyślną bazę danych na pasku bocznym; gdy wyłączone, rozwijaj węzły ręcznie. Wyłącz dla baz danych z wieloma schematami.",
     openTabsRestoreMode: "Przywracanie kart przy uruchomieniu",
     openTabsRestoreModeDescription: "Wybierz, w jaki sposób DBX przywraca karty otwarte podczas poprzedniej sesji.",
     openTabsRestoreModeAll: "Zachowaj wszystkie karty",

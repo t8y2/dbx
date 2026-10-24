@@ -10445,6 +10445,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "เมื่อเปิดใช้ ฐานข้อมูลเริ่มต้นจะแสดงด้านบนสุดของรายการฐานข้อมูล เมื่อปิดจะเรียงตามตัวอักษร",
     sidebarBrowseObjectsOnDatabaseActivation: "เรียกดูออบเจ็กต์เมื่อเปิดใช้ฐานข้อมูล",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "เมื่อเปิดใช้ การเปิดโหนดฐานข้อมูลหรือ Schema ด้วยโหมดคลิกเดียวหรือดับเบิลคลิกที่เลือก จะเปิดแท็บ Browse Objects ด้วย",
+    sidebarExpandTreeOnConnect: "ขยายแผนผังออบเจ็กต์หลังเชื่อมต่อ",
+    sidebarExpandTreeOnConnectDescription: "เมื่อเปิดใช้ การเชื่อมต่อสำเร็จจะขยายโหนดการเชื่อมต่อและฐานข้อมูลเริ่มต้นในแถบด้านข้างโดยอัตโนมัติ; เมื่อปิดใช้ ต้องขยายโหนดด้วยตนเอง แนะนำให้ปิดสำหรับฐานข้อมูลที่มี Schema จำนวนมาก",
     openTabsRestoreMode: "กู้คืนแท็บเมื่อเปิดแอป",
     openTabsRestoreModeDescription: "เลือกวิธีที่ DBX กู้คืนแท็บที่เปิดไว้ครั้งล่าสุด",
     openTabsRestoreModeAll: "เก็บแท็บทั้งหมด",

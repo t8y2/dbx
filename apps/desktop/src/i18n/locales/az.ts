@@ -7886,6 +7886,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "Aktiv olduqda, varsayılan verilənlər bazası siyahının yuxarısında göstərilir. Deaktiv olduqda, əlifba sırası ilə düzülür.",
     sidebarBrowseObjectsOnDatabaseActivation: "Verilənlər bazası aktivləşdirildikdə obyektlərə bax",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Aktiv olduqda, seçilmiş tək və ya ikiqat klik rejimi ilə verilənlər bazası və ya sxem düyününün aktivləşdirilməsi "Obyektlərə bax" vərəqini də açır.',
+    sidebarExpandTreeOnConnect: "Qoşulmadan sonra obyekt ağacını aç",
+    sidebarExpandTreeOnConnectDescription: "Aktiv olanda uğurlu qoşulma yan paneldə qoşulma və standart verilənlər bazası düyünlərini avtomatik açır; deaktiv olanda düyünləri əl ilə açırsınız. Çoxsaylı sxemli bazalar üçün söndürün.",
     openTabsRestoreMode: "Başladıqda vərəqləri bərpa et",
     openTabsRestoreModeDescription: "DBX-in sonuncu dəfə açıq olan vərəqləri necə bərpa edəcəyini seçin.",
     openTabsRestoreModeAll: "Bütün vərəqləri saxla",

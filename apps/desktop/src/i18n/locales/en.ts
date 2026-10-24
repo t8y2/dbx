@@ -9849,6 +9849,8 @@ export default {
     sidebarPinDefaultDatabaseDescription: "When enabled, the default database appears at the top of the database list. When disabled, it is sorted alphabetically.",
     sidebarBrowseObjectsOnDatabaseActivation: "Browse objects when activating a database",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'When enabled, activating a database or schema node using the selected single- or double-click mode also opens the "Browse Objects" tab.',
+    sidebarExpandTreeOnConnect: "Expand object tree after connecting",
+    sidebarExpandTreeOnConnectDescription: "When enabled, a successful connection automatically expands the connection and its default database in the sidebar; when disabled, expand nodes manually. Turn off for databases with many schemas to avoid the cost of expanding everything at once.",
     openTabsRestoreMode: "Restore tabs on launch",
     openTabsRestoreModeDescription: "Choose how DBX restores tabs that were open last time.",
     openTabsRestoreModeAll: "Keep all tabs",

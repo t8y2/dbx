@@ -8589,6 +8589,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "활성화하면 기본 데이터베이스가 데이터베이스 목록 상단에 고정 표시됩니다. 비활성화하면 알파벳순으로 정렬됩니다.",
     sidebarBrowseObjectsOnDatabaseActivation: "데이터베이스 노드 활성화 시 객체 탐색",
     sidebarBrowseObjectsOnDatabaseActivationDescription: '활성화하면 선택한 한 번 클릭 또는 두 번 클릭 방식으로 데이터베이스나 스키마 노드를 활성화할 때 사이드바를 펼치면서 "객체 탐색" 탭을 엽니다.',
+    sidebarExpandTreeOnConnect: "연결 후 객체 트리 펼치기",
+    sidebarExpandTreeOnConnectDescription: "활성화하면 연결 성공 후 사이드바에서 연결 노드와 기본 데이터베이스 노드를 자동으로 펼칩니다. 비활성화하면 수동으로 펼칩니다. 스키마가 많은 데이터베이스는 끄는 것을 권장합니다.",
     openTabsRestoreMode: "실행 시 탭 복원",
     openTabsRestoreModeDescription: "DBX가 지난번에 열려 있던 탭을 복원하는 방법을 선택하세요.",
     openTabsRestoreModeAll: "모든 탭 유지",

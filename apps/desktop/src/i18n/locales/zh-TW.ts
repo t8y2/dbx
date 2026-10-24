@@ -7804,6 +7804,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "開啟後，預設資料庫在資料庫清單中置頂顯示；關閉後依字母正常排序。",
     sidebarBrowseObjectsOnDatabaseActivation: "啟用資料庫節點時瀏覽物件",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "開啟後，依照所選的單擊或雙擊啟用方式操作資料庫或結構描述節點時，會同時展開側邊欄並開啟「瀏覽物件」分頁。",
+    sidebarExpandTreeOnConnect: "連線後自動展開物件樹",
+    sidebarExpandTreeOnConnectDescription: "開啟後，連線成功會自動展開側邊欄裡的連線與預設資料庫節點；關閉後需要手動逐層展開。結構描述較多的資料庫建議關閉，避免全量展開造成卡頓。",
     openTabsRestoreMode: "啟動時還原分頁",
     openTabsRestoreModeDescription: "選擇 DBX 啟動時如何還原上次開啟的分頁。",
     openTabsRestoreModeAll: "保留所有分頁",

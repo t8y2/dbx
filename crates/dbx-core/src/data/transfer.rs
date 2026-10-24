@@ -2018,7 +2018,7 @@ fn transfer_table_needs_inline_postgres_schema_ensure(
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
 ) -> bool {
-    is_postgres_transfer_dialect(target_db_type)
+    is_postgres_family_target(target_db_type)
         && !matches!((source_db_type, target_db_type), (DatabaseType::Postgres, DatabaseType::Postgres))
 }
 
@@ -2604,19 +2604,63 @@ async fn execute_transfer_write_statement(
     }
 }
 
+fn rewrite_postgres_search_path(input: &str, source_schema: &str, target_schema: &str) -> String {
+    let quoted_source = quote_identifier(source_schema, &DatabaseType::Postgres);
+    let quoted_target = quote_identifier(target_schema, &DatabaseType::Postgres);
+    let set_re = Regex::new(r#"(?i)(^|[\r\n;]\s*)(SET\s+search_path\s*(?:=|\bTO\b)\s*)([^;\r\n]+)(;?)"#)
+        .expect("valid search_path regex");
+
+    set_re
+        .replace_all(input, |captures: &regex::Captures| {
+            let prefix = &captures[1];
+            let set_clause = &captures[2];
+            let args = &captures[3];
+            let semicolon = &captures[4];
+
+            let mut replaced_any = false;
+            let parts: Vec<String> = args
+                .split(',')
+                .map(|part| {
+                    let trimmed = part.trim();
+                    if trimmed == source_schema
+                        || trimmed == quoted_source
+                        || trimmed.eq_ignore_ascii_case(source_schema)
+                        || trimmed.trim_matches('"') == source_schema
+                    {
+                        replaced_any = true;
+                        quoted_target.clone()
+                    } else {
+                        trimmed.to_string()
+                    }
+                })
+                .collect();
+
+            if replaced_any {
+                format!("{prefix}{set_clause}{}{semicolon}", parts.join(", "))
+            } else {
+                captures[0].to_string()
+            }
+        })
+        .into_owned()
+}
+
 fn rewrite_postgres_schema_qualified_references(input: &str, source_schema: &str, target_schema: &str) -> String {
-    if source_schema.trim().is_empty() || source_schema == target_schema {
+    let effective_source = if source_schema.trim().is_empty() { "public" } else { source_schema };
+    let effective_target = if target_schema.trim().is_empty() { "public" } else { target_schema };
+    if effective_source == effective_target {
         return input.to_string();
     }
 
-    let quoted_source = format!("{}.", quote_identifier(source_schema, &DatabaseType::Postgres));
-    let quoted_target = format!("{}.", quote_identifier(target_schema, &DatabaseType::Postgres));
+    let quoted_source = format!("{}.", quote_identifier(effective_source, &DatabaseType::Postgres));
+    let quoted_target = format!("{}.", quote_identifier(effective_target, &DatabaseType::Postgres));
     let rewritten = input.replace(&quoted_source, &quoted_target);
-    let unquoted_pattern =
-        Regex::new(&format!(r#"(^|[^"\w]){}\."#, regex::escape(source_schema))).expect("valid postgres schema regex");
-    unquoted_pattern
+    let unquoted_pattern = Regex::new(&format!(r#"(^|[^"\w]){}\."#, regex::escape(effective_source)))
+        .expect("valid postgres schema regex");
+    let rewritten = unquoted_pattern
         .replace_all(&rewritten, |captures: &regex::Captures| format!("{}{}", &captures[1], quoted_target))
-        .into_owned()
+        .into_owned();
+
+    rewrite_postgres_search_path(&rewritten, effective_source, effective_target)
 }
 
 fn postgres_column_type_sql(
@@ -2743,7 +2787,7 @@ fn supports_deferred_mysql_foreign_keys(target_db: &DatabaseType) -> bool {
 }
 
 /// QuestDB is not included. It only uses the PGWire protocol. SQL DDL syntax is not compatible.
-fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
+pub(crate) fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
     matches!(
         target_db,
         DatabaseType::Postgres
@@ -5112,7 +5156,10 @@ fn generate_create_table_ddl_with_column_quoting(
 /// PostgreSQL/Kingbase plus Oracle-compatible OceanBase and Dameng.
 fn supports_comment_on_transfer_ddl(target_db: &DatabaseType) -> bool {
     is_postgres_transfer_dialect(target_db)
-        || matches!(target_db, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+        || matches!(
+            target_db,
+            DatabaseType::Gaussdb | DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng
+        )
 }
 
 /// Generate COMMENT ON COLUMN / ALTER TABLE COMMENT COLUMN / COMMENT ON TABLE
@@ -9162,7 +9209,12 @@ pub async fn get_columns_for_transfer(
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
-            db::postgres::get_columns(&p, &schema, &table).await
+            let db_type = get_db_type(state, connection_id).await.ok();
+            if matches!(db_type, Some(DatabaseType::OpenGauss | DatabaseType::Gaussdb)) {
+                db::postgres::get_columns_compat_first(&p, &schema, &table).await
+            } else {
+                db::postgres::get_columns(&p, &schema, &table).await
+            }
         }
         PoolKind::Sqlite(p) => {
             let p = p.clone();
@@ -17117,6 +17169,11 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 &DatabaseType::Postgres,
                 &DatabaseType::Kingbase
             ));
+            assert!(transfer_table_needs_inline_postgres_schema_ensure(&DatabaseType::Gaussdb, &DatabaseType::Gaussdb));
+            assert!(transfer_table_needs_inline_postgres_schema_ensure(
+                &DatabaseType::Postgres,
+                &DatabaseType::Gaussdb
+            ));
         }
 
         #[test]
@@ -18686,6 +18743,105 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         let postgres_statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
         assert!(!postgres_statements.iter().any(|statement| statement.starts_with("CREATE INDEX")));
         assert!(!postgres_statements.iter().any(|statement| statement.starts_with("ALTER TABLE")));
+    }
+
+    #[test]
+    fn gaussdb_reused_ddl_rewrites_search_path_and_schema_qualifiers_for_target_schema() {
+        // Issue #13049: GaussDB's reused DDL includes `SET search_path = <source_schema>;`
+        // and schema qualifiers. When transferring across schemas, the search_path and
+        // table qualifiers must both be redirected to the target schema so that:
+        // 1. Cross-DB transfers don't fail with "ERROR: schema '<source_schema>' does not exist".
+        // 2. Same-DB transfers to a new empty schema don't set search_path to the old schema,
+        //    which would cause subsequent object resolution to collide with preexisting tables.
+        let ddl = "SET search_path = public;\n\
+                   CREATE TABLE \"public\".\"items\" (\"id\" integer);\n\
+                   COMMENT ON TABLE \"public\".\"items\" IS 'items';";
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "public",
+            "new_schema",
+            &DatabaseType::Gaussdb,
+            &DatabaseType::Gaussdb,
+            "items",
+            "items",
+        )
+        .expect("rewritten DDL");
+
+        assert!(rewritten.contains("SET search_path = \"new_schema\";"));
+        assert!(rewritten.contains("CREATE TABLE \"new_schema\".\"items\""));
+        assert!(rewritten.contains("COMMENT ON TABLE \"new_schema\".\"items\""));
+        assert!(!rewritten.contains("SET search_path = public;"));
+        assert!(!rewritten.contains("\"public\"."));
+
+        // Defaults empty source or target schema to "public"
+        let rewritten_from_empty = rewrite_transfer_source_table_ddl(
+            ddl,
+            "",
+            "new_schema",
+            &DatabaseType::Gaussdb,
+            &DatabaseType::Gaussdb,
+            "items",
+            "items",
+        )
+        .expect("rewritten DDL");
+        assert!(rewritten_from_empty.contains("SET search_path = \"new_schema\";"));
+        assert!(rewritten_from_empty.contains("CREATE TABLE \"new_schema\".\"items\""));
+
+        let statements = transfer_ddl_statements(&rewritten, &DatabaseType::Gaussdb);
+        assert_eq!(
+            statements,
+            vec![
+                "SET search_path = \"new_schema\"".to_string(),
+                "CREATE TABLE \"new_schema\".\"items\" (\"id\" integer)".to_string(),
+                "COMMENT ON TABLE \"new_schema\".\"items\" IS 'items'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rewrite_postgres_search_path_handles_quoted_unquoted_and_multiple_schemas() {
+        assert_eq!(
+            rewrite_postgres_search_path("SET search_path = public;", "public", "target"),
+            "SET search_path = \"target\";"
+        );
+        assert_eq!(
+            rewrite_postgres_search_path("SET search_path = \"public\";", "public", "target"),
+            "SET search_path = \"target\";"
+        );
+        assert_eq!(
+            rewrite_postgres_search_path("SET search_path TO public;", "public", "target"),
+            "SET search_path TO \"target\";"
+        );
+        assert_eq!(
+            rewrite_postgres_search_path("SET search_path = public, pg_catalog;", "public", "target"),
+            "SET search_path = \"target\", pg_catalog;"
+        );
+        assert_eq!(
+            rewrite_postgres_search_path("SET search_path = \"tenant's\";", "tenant's", "target"),
+            "SET search_path = \"target\";"
+        );
+        // Unrelated schemas are preserved
+        assert_eq!(
+            rewrite_postgres_search_path("SET search_path = other_schema;", "public", "target"),
+            "SET search_path = other_schema;"
+        );
+        // Comments and strings containing search_path are not corrupted
+        let comment = "-- SET search_path = public;\nSET search_path = public;";
+        assert_eq!(
+            rewrite_postgres_search_path(comment, "public", "target"),
+            "-- SET search_path = public;\nSET search_path = \"target\";"
+        );
+    }
+
+    #[test]
+    fn supports_comment_on_transfer_ddl_includes_gaussdb() {
+        assert!(supports_comment_on_transfer_ddl(&DatabaseType::Gaussdb));
+        assert!(supports_comment_on_transfer_ddl(&DatabaseType::Postgres));
+        assert!(supports_comment_on_transfer_ddl(&DatabaseType::Kingbase));
+        assert!(supports_comment_on_transfer_ddl(&DatabaseType::Oracle));
+        assert!(supports_comment_on_transfer_ddl(&DatabaseType::Dameng));
+        assert!(!supports_comment_on_transfer_ddl(&DatabaseType::Mysql));
     }
 
     #[test]

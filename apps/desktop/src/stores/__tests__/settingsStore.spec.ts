@@ -981,7 +981,18 @@ describe("normalizeMcpGlobalPolicy", () => {
       groupPolicies: [],
       configured: false,
       queryTimeoutSecs: null,
+      pluginToolsMode: "flat",
     });
+  });
+
+  it.each(["auto", "flat", "lazy"] as const)("preserves the saved %s plugin tool mode", (pluginToolsMode) => {
+    expect(normalizeMcpGlobalPolicy({ configured: true, pluginToolsMode }).pluginToolsMode).toBe(pluginToolsMode);
+  });
+
+  it("distinguishes a missing mode in legacy saved policies from a fresh configuration", () => {
+    expect(normalizeMcpGlobalPolicy({ configured: true }).pluginToolsMode).toBe("auto");
+    expect(normalizeMcpGlobalPolicy({ configured: false }).pluginToolsMode).toBe("flat");
+    expect(normalizeMcpGlobalPolicy(null).pluginToolsMode).toBe("flat");
   });
 
   it("normalizes and deduplicates an explicit connection allowlist", () => {
@@ -1003,6 +1014,7 @@ describe("normalizeMcpGlobalPolicy", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
+      pluginToolsMode: "auto",
     });
   });
 
@@ -1011,6 +1023,9 @@ describe("normalizeMcpGlobalPolicy", () => {
   });
 
   it("enables high-risk SQL prompts only when explicitly configured", () => {
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true, callConfirmation: "high_risk" })).toMatchObject({ promptHighRiskSql: false, callConfirmation: "high_risk" });
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true, callConfirmation: "off" }).promptHighRiskSql).toBe(false);
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: false, callConfirmation: "full" }).promptHighRiskSql).toBe(true);
     expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true }).promptHighRiskSql).toBe(true);
     expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: "true" } as any).promptHighRiskSql).toBe(false);
   });
@@ -1619,6 +1634,7 @@ describe("settingsStore MCP policy persistence", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
+      pluginToolsMode: "auto",
     };
     store.mcpGlobalPolicy = previous;
 
@@ -1637,6 +1653,7 @@ describe("settingsStore MCP policy persistence", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
+      pluginToolsMode: "auto",
     });
 
     rejectSave(new Error("save failed"));

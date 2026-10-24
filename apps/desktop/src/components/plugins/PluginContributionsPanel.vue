@@ -45,6 +45,7 @@ import { useToast } from "@/composables/useToast";
 import PluginShortcutSettings from "./PluginShortcutSettings.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginAiAccessSection from "@/components/plugins/PluginAiAccessSection.vue";
+import { installedPluginProvidesMcpTools, marketplacePluginProvidesMcpTools } from "@/lib/plugins/pluginMcpMark";
 import PluginGraphicsEngineSection from "@/components/plugins/PluginGraphicsEngineSection.vue";
 import * as api from "@/lib/backend/api";
 import { clearPluginIconCache } from "@/lib/plugins/pluginIconResolver";
@@ -209,7 +210,11 @@ const mutationRunning = computed(() => batchRunning.value || !!marketplaceInstal
 
 const registry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
 const pinnedPluginIds = ref<string[]>(loadPinnedPluginIds());
-const definitions = computed(() => sortPluginsPinnedFirst(registry.value.listPlugins(), pinnedPluginIds.value));
+// "MCP tools" filter: plugins carrying the provides-MCP-tools mark.
+const installedMcpOnly = ref(false);
+const allDefinitions = computed(() => sortPluginsPinnedFirst(registry.value.listPlugins(), pinnedPluginIds.value));
+const installedMcpCount = computed(() => allDefinitions.value.filter((definition) => installedPluginProvidesMcpTools(definition.plugin)).length);
+const definitions = computed(() => (installedMcpOnly.value ? allDefinitions.value.filter((definition) => installedPluginProvidesMcpTools(definition.plugin)) : allDefinitions.value));
 const isPluginPinned = (pluginId: string) => pinnedPluginIds.value.includes(pluginId);
 const togglePluginPinned = (pluginId: string) => {
   pinnedPluginIds.value = isPluginPinned(pluginId) ? pinnedPluginIds.value.filter((id) => id !== pluginId) : [...pinnedPluginIds.value, pluginId];
@@ -1541,7 +1546,12 @@ onBeforeUnmount(() => {
               <div class="flex min-w-0 items-start gap-3">
                 <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-10 shrink-0 rounded-lg border bg-background p-1.5" />
                 <div class="min-w-0 flex-1">
-                  <div class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</div>
+                  <div class="flex min-w-0 items-center gap-1.5">
+                    <div class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</div>
+                    <span v-if="marketplacePluginProvidesMcpTools(listing.plugin)" class="shrink-0 rounded border border-primary/40 px-1 text-[10px] font-medium leading-4 text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')" data-marketplace-mcp-badge>{{
+                      t("pluginPlatform.mcpToolsBadge")
+                    }}</span>
+                  </div>
                   <div class="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
                     <BadgeCheck v-if="listing.verified" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
                     <span class="min-w-0 truncate"
@@ -1674,6 +1684,9 @@ onBeforeUnmount(() => {
                 <div class="flex min-w-0 items-center gap-1">
                   <span class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</span>
                   <BadgeCheck v-if="listing.verified" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
+                  <span v-if="marketplacePluginProvidesMcpTools(listing.plugin)" class="shrink-0 rounded border border-primary/40 px-1 text-[10px] font-medium leading-4 text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')" data-marketplace-mcp-badge>{{
+                    t("pluginPlatform.mcpToolsBadge")
+                  }}</span>
                 </div>
                 <div class="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
                   <span class="min-w-0 truncate"
@@ -1806,6 +1819,10 @@ onBeforeUnmount(() => {
           </div>
           <div class="grid min-h-0 flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
             <div class="space-y-1 rounded-lg border bg-muted/10 p-2">
+              <label v-if="installedMcpCount || installedMcpOnly" class="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground" data-plugin-mcp-filter>
+                <input v-model="installedMcpOnly" type="checkbox" />
+                {{ t("pluginPlatform.mcpToolsFilter", { count: installedMcpCount }) }}
+              </label>
               <div
                 v-for="definition in definitions"
                 :key="definition.plugin.manifest.id"
@@ -1834,6 +1851,7 @@ onBeforeUnmount(() => {
                         <ArrowUp class="size-2.5" />v{{ installedUpdateEntryFor(definition.plugin.manifest.id)?.listing.plugin.latestVersion }}
                       </span>
                       <Badge :variant="definition.plugin.compatibility.compatible ? 'secondary' : 'destructive'" class="h-4 px-1.5 text-[10px]">{{ definition.plugin.compatibility.compatible ? t("pluginPlatform.compatible") : t("pluginPlatform.blocked") }}</Badge>
+                      <Badge v-if="installedPluginProvidesMcpTools(definition.plugin)" variant="outline" class="h-4 border-primary/40 px-1.5 text-[10px] text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')" data-plugin-mcp-badge>{{ t("pluginPlatform.mcpToolsBadge") }}</Badge>
                       <Badge v-if="catalogChecked && !catalogPartialFailure && !pluginInCatalog(definition.plugin.manifest.id)" variant="outline" class="h-4 border-dashed px-1.5 text-[10px] text-muted-foreground" :title="t('pluginPlatform.notInRepositoriesHint')">{{
                         t("pluginPlatform.notInRepositories")
                       }}</Badge>
@@ -2108,6 +2126,7 @@ onBeforeUnmount(() => {
                 </DialogTitle>
                 <DialogDescription class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
                   <BadgeCheck v-if="selectedMarketplaceListing.verified" class="size-3.5 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" />
+                  <span v-if="marketplacePluginProvidesMcpTools(selectedMarketplaceListing.plugin)" class="rounded border border-primary/40 px-1 text-[10px] font-medium leading-4 text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')">{{ t("pluginPlatform.mcpToolsBadge") }}</span>
                   <button type="button" class="rounded-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click.stop="filterByPublisher(selectedMarketplaceListing.plugin.publisher)">
                     {{ selectedMarketplaceListing.plugin.publisher }}
                   </button>

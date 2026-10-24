@@ -2,6 +2,7 @@
 import { blockingDesktopAiRunsForUpdate } from "@/lib/ai/desktopAiRunRegistry";
 import { setupUpdatePreparation, prepareUpdateWithDraftRecovery, isUpdatePreparationActive } from "@/lib/app/updatePreparation";
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, provide } from "vue";
+import { MCP_CALL_HISTORY_OPEN_EVENT, type McpCallHistoryRequest } from "@/lib/mcp/mcpCallHistory";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { checkStartupAuthentication, logoutWeb, type StartupAuthentication } from "@/lib/startup/startupAuthentication";
 import { markStartupPhase } from "@/lib/startup/startupTiming";
@@ -479,6 +480,24 @@ const showTabSwitcher = ref(false);
 const tabSwitcherIndex = ref(0);
 const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
+const mcpHistoryRequest = ref<McpCallHistoryRequest | null>(null);
+
+/** Settings → MCP asks for the call history: open the panel on its MCP view. */
+function openMcpCallHistory(event?: Event) {
+  // Keep the request across the async component's first load; nextTick alone
+  // does not wait for QueryHistory to mount and receive an event.
+  mcpHistoryRequest.value = { resource: event instanceof CustomEvent ? event.detail : undefined };
+  openRightSidebarPanel("history");
+}
+
+watch(
+  showHistory,
+  (open) => {
+    if (!open) mcpHistoryRequest.value = null;
+  },
+  // Also cancel a close/reopen in the same tick before the lazy panel mounts.
+  { flush: "sync" },
+);
 const showAiPanel = ref(safeLocalStorageGet("dbx-ai-panel-open") === "true");
 const isAiPanelMaximized = ref(false);
 const isHistoryPanelMaximized = ref(false);
@@ -5191,6 +5210,7 @@ onMounted(async () => {
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   window.addEventListener(COMPONENT_UPDATES_CHANGED_EVENT, handleComponentUpdatesChanged);
   window.addEventListener("dbx:activate-query-surface", activateQuerySurface);
+  window.addEventListener(MCP_CALL_HISTORY_OPEN_EVENT, openMcpCallHistory);
   window.addEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequestedObjectBrowserSearch);
   window.addEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
   window.addEventListener("dbx:ai-run-notify", handleAiRunNotify);
@@ -5289,6 +5309,7 @@ onUnmounted(() => {
   window.removeEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   window.removeEventListener(COMPONENT_UPDATES_CHANGED_EVENT, handleComponentUpdatesChanged);
   window.removeEventListener("dbx:activate-query-surface", activateQuerySurface);
+  window.removeEventListener(MCP_CALL_HISTORY_OPEN_EVENT, openMcpCallHistory);
   window.removeEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequestedObjectBrowserSearch);
   window.removeEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
   window.removeEventListener("dbx:ai-run-notify", handleAiRunNotify);
@@ -5722,6 +5743,8 @@ onUnmounted(() => {
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('history')">
               <div data-history-panel class="h-full min-h-0">
                 <QueryHistory
+                  :mcp-request="mcpHistoryRequest"
+                  @mcp-request-handled="mcpHistoryRequest = null"
                   :maximized="isHistoryPanelMaximized"
                   @toggle-maximize="isHistoryPanelMaximized = !isHistoryPanelMaximized"
                   :current-connection-id="activeTab?.connectionId"

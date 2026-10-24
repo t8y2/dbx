@@ -1,4 +1,9 @@
-use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+    time::Instant,
+};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -16,6 +21,7 @@ use uuid::Uuid;
 
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
+use crate::runtime::McpTransport;
 use crate::session::{McpSession, McpSessionStore};
 use crate::transaction::{TransactionFailure, TransactionResult, TransactionStatus};
 use dbx_core::{
@@ -30,6 +36,7 @@ use dbx_core::{
         self as docs_notes, SchemaNoteBudget, SCHEMA_NOTE_COLUMN_MAX_CHARS, SCHEMA_NOTE_TABLE_MAX_CHARS,
     },
     history::HistoryEntry,
+    mcp_access::{McpAccessLevel, McpCallDecision, McpConfirmPolicy},
     mcp_policy::connection_allows_salesforce_dml,
     models::connection::ConnectionConfig,
     models::connection::DatabaseType,
@@ -103,6 +110,220 @@ pub struct ConnectionSelector {
     #[schemars(description = "Name of the DBX connection")]
     #[schemars(extend("type" = "string"))]
     pub connection_name: Option<String>,
+}
+
+// ---------- Product providers: Nacos ----------
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosNamespacesRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosListConfigsRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Namespace id; omit for the connection's default namespace")]
+    pub namespace: Option<String>,
+    #[schemars(description = "Exact group name filter")]
+    pub group: Option<String>,
+    #[schemars(description = "dataId filter (supports * wildcards)")]
+    pub data_id: Option<String>,
+    #[schemars(description = "Free-text search over dataId and group")]
+    pub search: Option<String>,
+    #[schemars(description = "Page number, starting at 1")]
+    pub page_no: Option<u32>,
+    #[schemars(description = "Page size (default 20, max 100)")]
+    pub page_size: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosConfigKeyRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub namespace: Option<String>,
+    #[schemars(description = "Configuration dataId")]
+    pub data_id: String,
+    #[schemars(description = "Configuration group, e.g. DEFAULT_GROUP")]
+    pub group: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosPublishConfigRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub namespace: Option<String>,
+    pub data_id: String,
+    pub group: String,
+    #[schemars(description = "Full configuration content")]
+    pub content: String,
+    #[schemars(description = "Content type: text, json, yaml, properties, xml, html")]
+    pub config_type: Option<String>,
+    #[schemars(description = "Compare-and-set: the current content MD5; the publish fails when it changed")]
+    pub cas_md5: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosSearchConfigsRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub operation_id: String,
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    pub query: String,
+    pub group: Option<String>,
+    pub data_id: Option<String>,
+    pub max_results: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosRollbackConfigRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub namespace: Option<String>,
+    pub data_id: String,
+    pub group: String,
+    pub history_id: String,
+    pub nid: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosServicesRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub namespace: Option<String>,
+    pub group_name: Option<String>,
+    #[schemars(description = "Service name filter")]
+    pub service_name: Option<String>,
+    pub page_no: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosInstancesRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub namespace: Option<String>,
+    pub service_name: String,
+    pub group_name: Option<String>,
+    #[schemars(description = "Comma-separated cluster names")]
+    pub clusters: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosUpdateInstanceRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub namespace: Option<String>,
+    pub service_name: String,
+    pub group_name: Option<String>,
+    pub cluster_name: Option<String>,
+    pub ip: String,
+    pub port: u16,
+    #[schemars(description = "Bring the instance online (true) or take it offline (false)")]
+    pub enabled: Option<bool>,
+    #[schemars(description = "New load-balancing weight")]
+    pub weight: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosRegisterInstanceRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub namespace: Option<String>,
+    pub service_name: String,
+    pub ip: String,
+    pub port: u16,
+    pub group_name: Option<String>,
+    pub cluster_name: Option<String>,
+    pub weight: Option<f64>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NacosDeregisterInstanceRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub namespace: Option<String>,
+    pub service_name: String,
+    pub ip: String,
+    pub port: u16,
+    pub group_name: Option<String>,
+    pub cluster_name: Option<String>,
+    pub ephemeral: Option<bool>,
+}
+
+// ---------- Product providers: Consul ----------
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConsulKvListRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Key prefix; empty lists the root")]
+    pub prefix: Option<String>,
+    #[schemars(description = "Maximum keys to return (default 100, max 500)")]
+    pub limit: Option<usize>,
+    #[schemars(description = "Continuation token from a previous page")]
+    pub continuation: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConsulKvKeyRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub key: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConsulKvPutRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub key: String,
+    #[schemars(description = "Value; UTF-8 text unless base64 is true")]
+    pub value: String,
+    #[schemars(description = "The value is base64-encoded binary")]
+    pub base64: Option<bool>,
+    #[schemars(description = "Compare-and-set: the key's ModifyIndex; 0 creates only when absent")]
+    pub cas: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConsulKvDeleteRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub key: String,
+    #[schemars(description = "Compare-and-set: the key's ModifyIndex")]
+    pub cas: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConsulFilterRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Consul filter expression")]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConsulServiceHealthRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub service: String,
+    #[schemars(description = "Only instances whose checks pass")]
+    pub passing: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConsulMaintenanceRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Agent service id")]
+    pub service_id: String,
+    #[schemars(description = "true enters maintenance (takes the service out of rotation)")]
+    pub enable: bool,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -545,6 +766,29 @@ tokio::task_local! {
     static CALL_HISTORY: std::sync::Mutex<HistoryEntry>;
 }
 
+fn update_call_history_details<F>(update: F)
+where
+    F: FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+{
+    let _ = CALL_HISTORY.try_with(|current| {
+        let mut entry = current.lock().unwrap();
+        let mut details = entry
+            .details_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        update(&mut details);
+        entry.details_json = Some(serde_json::Value::Object(details).to_string());
+    });
+}
+
+fn mark_call_confirmation(status: &'static str) {
+    update_call_history_details(|details| {
+        details.insert("confirmation".into(), json!(status));
+    });
+}
+
 struct CallHistoryGuard {
     backend: Arc<dyn DbxBackend>,
     fallback: Option<HistoryEntry>,
@@ -697,29 +941,36 @@ pub struct DbxMcpServer {
     plugin_tools_mode: PluginToolsMode,
     sessions: Arc<McpSessionStore>,
     pending_salesforce_writes: Arc<PendingSalesforceWrites>,
+    transport: McpTransport,
     tool_router: ToolRouter<Self>,
 }
 
 /// How plugin tools appear on the external server (`DBX_MCP_PLUGIN_TOOLS`):
-/// `flat` lists every plugin tool in `tools/list` (default, compatible),
+/// `Auto` defers to the saved policy (new policies default to flat).
+/// `flat` lists every plugin tool in `tools/list`,
 /// `lazy` exposes only the `dbx_plugin_*` meta tools so schemas enter the
 /// context on demand, `both` advertises both views.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PluginToolsMode {
     #[default]
+    Auto,
     Flat,
     Lazy,
     Both,
 }
 
 impl PluginToolsMode {
-    pub fn from_env() -> Self {
+    pub fn from_env_override() -> Option<Self> {
         match std::env::var("DBX_MCP_PLUGIN_TOOLS").ok().as_deref().map(str::trim) {
-            Some(value) if value.eq_ignore_ascii_case("lazy") => Self::Lazy,
-            Some(value) if value.eq_ignore_ascii_case("both") => Self::Both,
-            Some(value) if value.eq_ignore_ascii_case("flat") => Self::Flat,
-            _ => Self::default(),
+            Some(value) if value.eq_ignore_ascii_case("lazy") => Some(Self::Lazy),
+            Some(value) if value.eq_ignore_ascii_case("both") => Some(Self::Both),
+            Some(value) if value.eq_ignore_ascii_case("flat") => Some(Self::Flat),
+            _ => None,
         }
+    }
+
+    pub fn from_env() -> Self {
+        Self::from_env_override().unwrap_or_default()
     }
 
     pub fn advertise_flat(&self) -> bool {
@@ -791,8 +1042,247 @@ impl McpScope {
 }
 
 impl DbxMcpServer {
-    /// A desktop confirmation can lift only the high-risk SQL tier for one
-    /// already-scoped operation. All other policy checks run before the prompt.
+    /// Shared gate for product-provider tools (design §5): tool allowlist,
+    /// connection resolution and product type, sub-scope admission and level
+    /// from the v2 policy, connection read-only and production protection for
+    /// writes, then the backend call. Results are returned as pretty JSON.
+    async fn run_product_tool(
+        &self,
+        tool: &'static str,
+        selector: &ConnectionSelector,
+        product: crate::products::Product,
+        operation: &'static str,
+        level: dbx_core::mcp_access::McpAccessLevel,
+        scope_value: Option<&str>,
+        mut args: serde_json::Value,
+    ) -> CallToolResult {
+        use dbx_core::mcp_access::McpAccessLevel;
+        if let Err(error) = self.ensure_tool_allowed(tool).await {
+            return error;
+        }
+        let resolved = match self.resolve_connection(selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let mut connection = resolved.connection.clone();
+        let expected = match product {
+            crate::products::Product::Nacos => DatabaseType::Nacos,
+            crate::products::Product::Consul => DatabaseType::Consul,
+        };
+        if connection.db_type != expected {
+            let available = dbx_core::mcp_catalog::TOOLS
+                .iter()
+                .filter(|descriptor| descriptor.coverage.database_types().contains(&connection.db_type))
+                .map(|descriptor| descriptor.name)
+                .collect::<Vec<_>>();
+            return tool_error(
+                "WRONG_CONNECTION_TYPE",
+                format!(
+                    "\"{}\" is not a {} connection. Available MCP tools for {} connections: {}.",
+                    connection.name,
+                    product.as_str(),
+                    connection.db_type.as_str(),
+                    if available.is_empty() { "none".to_string() } else { available.join(", ") }
+                ),
+            );
+        }
+        let scope_kind = product.scope_kind();
+        let access = match self.backend.load_mcp_access_policy().await {
+            Ok(access) => access,
+            Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+        };
+        // Nacos APIs default to the connection's configured namespace when
+        // the request omits it. A cross-namespace search is the exception:
+        // it must be evaluated as an aggregate request, then admitted only
+        // when the policy allows every namespace.
+        let all_namespaces_search = product == crate::products::Product::Nacos
+            && operation == "search_configs"
+            && args.get("scope").and_then(serde_json::Value::as_str) == Some("allNamespaces");
+        let scope_value =
+            if product == crate::products::Product::Nacos && operation != "list_namespaces" && !all_namespaces_search {
+                // Nacos treats the empty id and `public` as the same namespace.
+                // Use one policy identity, including the connection default.
+                let namespace =
+                    scope_value.unwrap_or_else(|| connection.database.as_deref().unwrap_or_default()).trim();
+                Some(if namespace.is_empty() { "public" } else { namespace }.to_owned())
+            } else {
+                scope_value.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
+            };
+        if let Some(namespace) = scope_value.as_deref() {
+            if product == crate::products::Product::Nacos {
+                let target = if operation == "update_instance" { args.get_mut("target") } else { Some(&mut args) };
+                if let Some(object) = target.and_then(serde_json::Value::as_object_mut) {
+                    object.insert("namespace".to_string(), serde_json::Value::String(namespace.to_string()));
+                }
+            }
+        }
+        let resolved_access =
+            access.resolve(&resolved.group_ids, &connection.id, scope_kind.zip(scope_value.as_deref()));
+        let effective_level = dbx_core::mcp_catalog::descriptor(tool)
+            .and_then(|descriptor| access.toolset_ceiling(&connection.id, descriptor.toolset))
+            .map_or(resolved_access.level, |ceiling| resolved_access.level.min(ceiling));
+        if !resolved_access.visible {
+            return tool_error(
+                "SCOPE_OUT_OF_POLICY",
+                format!(
+                    "{} \"{}\" is not allowed by DBX MCP settings for this connection.",
+                    scope_kind.unwrap_or("connection"),
+                    scope_value.as_deref().unwrap_or_default()
+                ),
+            );
+        }
+        if all_namespaces_search && !access.sub_scope_allows_all(&connection.id, "namespace") {
+            return tool_error(
+                "SCOPE_OUT_OF_POLICY",
+                "Searching all Nacos namespaces requires unrestricted namespace scope access.",
+            );
+        }
+        let required_level = if level == McpAccessLevel::Read { McpAccessLevel::Read } else { McpAccessLevel::Write };
+        if effective_level < required_level {
+            return tool_error(
+                "MCP_READ_ONLY",
+                format!(
+                    "The effective MCP permission for this {} is insufficient for this operation.",
+                    scope_kind.unwrap_or("connection")
+                ),
+            );
+        }
+        if level > McpAccessLevel::Read {
+            if connection.read_only {
+                return tool_error(
+                    "CONNECTION_READ_ONLY",
+                    format!("Connection \"{}\" has read-only protection enabled.", connection.name),
+                );
+            }
+            if is_production_database(&connection, scope_value.as_deref().unwrap_or_default()) {
+                return tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot change a production connection.");
+            }
+            let policy = match self.load_policy().await {
+                Ok(policy) => policy,
+                Err(error) => return error,
+            };
+            let decision = policy.confirmation_policy().decide(effective_level, level, level == McpAccessLevel::Full);
+            if decision == McpCallDecision::Deny {
+                return tool_error("TOOL_BLOCKED", format!("{tool} exceeds the effective MCP permission."));
+            }
+            if decision == McpCallDecision::Confirm {
+                let request = crate::approval::ToolApprovalRequest::new(
+                    crate::approval::ToolApprovalKind::ProductTool,
+                    tool,
+                    crate::approval::arguments_preview(&args),
+                )
+                .with_target(Some(&connection.id), scope_value.as_deref());
+                mark_call_confirmation("requested");
+                if let Err(error) = self.backend.approve_high_risk_tool(&request).await {
+                    mark_call_confirmation("denied");
+                    return tool_error("TOOL_BLOCKED", error);
+                }
+                mark_call_confirmation("confirmed");
+
+                // Authorization may change while the desktop dialog is open.
+                // Resolve the connection and both policy layers again before
+                // allowing the product request to reach its backend.
+                let refreshed = match self.resolve_connection(selector).await {
+                    Ok(refreshed) => refreshed,
+                    Err(error) => return error,
+                };
+                if refreshed.connection.db_type != expected {
+                    return tool_error(
+                        "WRONG_CONNECTION_TYPE",
+                        "The connection type changed while approval was pending.",
+                    );
+                }
+                let refreshed_policy = match self.load_policy().await {
+                    Ok(policy) => policy,
+                    Err(error) => return error,
+                };
+                if refreshed.connection != connection || !policy_allows_tool(&refreshed_policy, tool) {
+                    return tool_error("TOOL_BLOCKED", "Product-tool approval was revoked while the dialog was open.");
+                }
+                let refreshed_access = match self.backend.load_mcp_access_policy().await {
+                    Ok(access) => access,
+                    Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+                };
+                let refreshed_scope = refreshed_access.resolve(
+                    &refreshed.group_ids,
+                    &refreshed.connection.id,
+                    scope_kind.zip(scope_value.as_deref()),
+                );
+                let refreshed_level = dbx_core::mcp_catalog::descriptor(tool)
+                    .and_then(|descriptor| {
+                        refreshed_access.toolset_ceiling(&refreshed.connection.id, descriptor.toolset)
+                    })
+                    .map_or(refreshed_scope.level, |ceiling| refreshed_scope.level.min(ceiling));
+                if !refreshed_scope.visible
+                    || refreshed_policy.confirmation_policy() != policy.confirmation_policy()
+                    || refreshed_policy.confirmation_policy().decide(refreshed_level, level, true)
+                        != McpCallDecision::Confirm
+                {
+                    return tool_error(
+                        "SCOPE_OUT_OF_POLICY",
+                        "Product-tool approval was revoked while the dialog was open.",
+                    );
+                }
+                if refreshed.connection.read_only {
+                    return tool_error(
+                        "CONNECTION_READ_ONLY",
+                        "The connection became read-only while approval was pending.",
+                    );
+                }
+                if is_production_database(&refreshed.connection, scope_value.as_deref().unwrap_or_default()) {
+                    return tool_error(
+                        "PRODUCTION_WRITE_BLOCKED",
+                        "The connection became production while approval was pending.",
+                    );
+                }
+                connection = refreshed.connection;
+            }
+        }
+        let _ = CALL_HISTORY.try_with(|entry| {
+            let mut entry = entry.lock().unwrap();
+            entry.connection_id = connection.id.clone();
+            entry.connection_name = connection.name.clone();
+        });
+        let call = crate::products::ProductCall { product, operation, args };
+        match self.backend.product_call(&connection, &call).await {
+            Ok(value) if product == crate::products::Product::Nacos && operation == "list_namespaces" => {
+                let filtered = value
+                    .as_array()
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter(|item| {
+                                item.get("namespace").and_then(serde_json::Value::as_str).is_some_and(|namespace| {
+                                    access.sub_scope_visible(
+                                        &connection.id,
+                                        "namespace",
+                                        if namespace.trim().is_empty() { "public" } else { namespace.trim() },
+                                    )
+                                })
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                text(serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "[]".to_string()))
+            }
+            Ok(value) => text(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())),
+            Err(error) => backend_tool_error("DBX_TOOL_ERROR", error),
+        }
+    }
+
+    /// The built-in tool catalog for settings UIs, with each tool's advertised
+    /// description and parameters taken from this router so they cannot drift
+    /// from what MCP clients actually receive.
+    pub fn tool_catalog() -> dbx_core::mcp_catalog::McpToolCatalog {
+        let tools = Self::tool_router().list_all();
+        dbx_core::mcp_catalog::tool_catalog().with_router_details(tools.iter().map(|tool| {
+            (tool.name.as_ref(), tool.description.as_deref().unwrap_or_default(), tool.input_schema.as_ref())
+        }))
+    }
+
+    /// Authorize before prompting. Only the explicitly preserved legacy policy
+    /// may temporarily lift Write to Full; new confirmation never grants access.
     async fn approved_sql_policy(
         &self,
         connection: &ConnectionConfig,
@@ -800,21 +1290,36 @@ impl DbxMcpServer {
         database: &str,
         sql: &str,
         allow_database_switch: bool,
-        bridge_execution: bool,
+        defer_token_consumption: bool,
     ) -> Result<(McpGlobalPolicy, Option<String>), CallToolResult> {
         let high_risk = classify_sql_risk_for_database(sql, connection.db_type).is_ok_and(|risk| risk == SqlRisk::Ddl)
             || is_dangerous_sql_for_database(sql, connection.db_type);
-        if policy.allow_dangerous_sql || !policy.prompt_high_risk_sql || !high_risk {
+        if !high_risk {
+            return Ok((policy.clone(), None));
+        }
+        let decision = policy.confirmation_policy().decide(
+            McpAccessLevel::from_flags(policy.read_only, policy.allow_dangerous_sql),
+            McpAccessLevel::Full,
+            true,
+        );
+        if decision == McpCallDecision::Deny {
+            validate_sql_policy(connection, policy, database, sql, allow_database_switch)?;
+            return Err(tool_error("SQL_BLOCKED", "High-risk SQL exceeds the effective MCP permission."));
+        }
+        if decision == McpCallDecision::Allow {
             return Ok((policy.clone(), None));
         }
         let mut approved = policy.clone();
-        approved.allow_dangerous_sql = true;
+        if policy.confirmation_policy() == McpConfirmPolicy::Full {
+            approved.allow_dangerous_sql = true;
+        }
         validate_sql_policy(connection, &approved, database, sql, allow_database_switch)?;
-        let token = self
-            .backend
-            .approve_high_risk_sql(&connection.id, database, sql)
-            .await
-            .map_err(|error| tool_error("SQL_BLOCKED", error))?;
+        mark_call_confirmation("requested");
+        let token = self.backend.approve_high_risk_sql(&connection.id, database, sql).await.map_err(|error| {
+            mark_call_confirmation("denied");
+            tool_error("SQL_BLOCKED", error)
+        })?;
+        mark_call_confirmation("confirmed");
         // A user may change the scope, connection, or permissions while the dialog
         // is open. The approval is valid only for the original target and SQL.
         let refreshed = self
@@ -831,18 +1336,73 @@ impl DbxMcpServer {
         ensure_sql_database_execution_scope(&refreshed.policy, connection, database, sql)?;
         let mut current =
             effective_policy_for_database_with_groups(&refreshed.policy, &refreshed.group_ids, connection, database);
-        if !current.prompt_high_risk_sql || current.read_only {
+        if current.confirmation_policy() != policy.confirmation_policy()
+            || current.confirmation_policy().decide(
+                McpAccessLevel::from_flags(current.read_only, current.allow_dangerous_sql),
+                McpAccessLevel::Full,
+                true,
+            ) != McpCallDecision::Confirm
+        {
             return Err(tool_error("SQL_BLOCKED", "High-risk SQL approval was revoked."));
         }
-        current.allow_dangerous_sql = true;
+        if current.confirmation_policy() == McpConfirmPolicy::Full {
+            current.allow_dangerous_sql = true;
+        }
         validate_sql_policy(connection, &current, database, sql, allow_database_switch)?;
-        if !bridge_execution {
+        // The desktop bridge and queued transaction calls consume the token
+        // at their final execution gate, keeping it revocable until then.
+        if !defer_token_consumption {
             self.backend
                 .consume_high_risk_sql_approval(&token, &connection.id, database, sql)
                 .await
                 .map_err(|error| tool_error("SQL_BLOCKED", error))?;
         }
         Ok((current, Some(token)))
+    }
+
+    /// Recheck the approval after acquiring a transaction's execution lease.
+    /// A token from another confirmation mode must never grant permissions,
+    /// and an expired/revoked token must not survive time spent in the queue.
+    async fn queued_sql_permissions(
+        &self,
+        connection: &ConnectionConfig,
+        admitted_policy: &McpGlobalPolicy,
+        mut current: McpGlobalPolicy,
+        database: &str,
+        sql: &str,
+        token: Option<&str>,
+    ) -> Result<dbx_core::agent_tools::AgentSqlPermissions, CallToolResult> {
+        let high_risk = classify_sql_risk_for_database(sql, connection.db_type).is_ok_and(|risk| risk == SqlRisk::Ddl)
+            || is_dangerous_sql_for_database(sql, connection.db_type);
+        if high_risk {
+            if current.confirmation_policy() != admitted_policy.confirmation_policy() {
+                return Err(tool_error("SQL_BLOCKED", "SQL confirmation policy changed while queued. Retry the call."));
+            }
+            let decision = current.confirmation_policy().decide(
+                McpAccessLevel::from_flags(current.read_only, current.allow_dangerous_sql),
+                McpAccessLevel::Full,
+                true,
+            );
+            if decision == McpCallDecision::Confirm {
+                if token.is_none() {
+                    return Err(tool_error(
+                        "SQL_BLOCKED",
+                        "Queued high-risk SQL requires confirmation. Retry the call.",
+                    ));
+                }
+                if current.confirmation_policy() == McpConfirmPolicy::Full {
+                    current.allow_dangerous_sql = true;
+                }
+            }
+        }
+        let permissions = validate_sql_policy(connection, &current, database, sql, false)?;
+        if let Some(token) = token {
+            self.backend
+                .consume_high_risk_sql_approval(token, &connection.id, database, sql)
+                .await
+                .map_err(|error| tool_error("SQL_BLOCKED", error))?;
+        }
+        Ok(permissions)
     }
 
     pub fn new(backend: Arc<dyn DbxBackend>) -> Self {
@@ -893,6 +1453,13 @@ impl DbxMcpServer {
         Self::build(backend, scope, web_mode, plugin_tools_mode, sessions, pending_salesforce_writes)
     }
 
+    /// Overrides the transport label recorded in MCP call history. Embedded
+    /// HTTP servers use this after constructing a per-request server.
+    pub fn with_transport(mut self, transport: McpTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
     fn build(
         backend: Arc<dyn DbxBackend>,
         scope: McpScope,
@@ -921,15 +1488,27 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_send_message");
             tool_router.disable_route("dbx_peek_messages");
         }
-        // In `flat` mode plugin tools are merged directly into tools/list and
-        // the lazy meta tools would only duplicate them; in `lazy`/`both`
-        // they stay enabled so clients can discover on demand.
-        if !plugin_tools_mode.advertise_meta() {
+        // Explicit flat mode keeps the lazy meta routes out of the router.
+        // Auto retains them so saved mode changes can take effect; scoped
+        // sessions always use the flat, in-scope view.
+        if plugin_tools_mode == PluginToolsMode::Flat || scope.enabled() {
             tool_router.disable_route("dbx_plugin_list");
             tool_router.disable_route("dbx_plugin_tools");
             tool_router.disable_route("dbx_plugin_call");
         }
-        Self { backend, scope, plugin_tools_mode, sessions, pending_salesforce_writes, tool_router }
+        // Plugin routes remain registered for the lifetime of the server.
+        // The effective flat/lazy mode is read from the current policy for
+        // every listing and call, so settings changes take effect without a
+        // transport restart.
+        Self {
+            backend,
+            scope,
+            plugin_tools_mode,
+            sessions,
+            pending_salesforce_writes,
+            transport: McpTransport::Stdio,
+            tool_router,
+        }
     }
 
     fn spawn_session_cleanup(&self, session: McpSession) -> tokio::sync::oneshot::Receiver<SessionCleanupResult> {
@@ -1039,7 +1618,16 @@ impl DbxMcpServer {
             target: String::new(),
             affected_rows,
             rollback_sql: None,
-            details_json: Some(r#"{"source":"mcp"}"#.to_string()),
+            details_json: Some(
+                json!({
+                    "source": "mcp",
+                    "transport": "stdio",
+                    "accessLevel": "full",
+                    "accessMode": "classified",
+                    "confirmation": "not_required",
+                })
+                .to_string(),
+            ),
             source: "mcp".to_string(),
             mcp_tool_name: Some(tool_name.to_string()),
             mcp_request_json: None,
@@ -1070,12 +1658,496 @@ impl DbxMcpServer {
 #[tool_router]
 impl DbxMcpServer {
     #[tool(
+        name = "dbx_nacos_list_namespaces",
+        description = "List the namespaces of a Nacos connection that DBX can display. Use the namespace id in other dbx_nacos_* tools.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_list_namespaces(&self, Parameters(request): Parameters<NacosNamespacesRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        self.run_product_tool(
+            "dbx_nacos_list_namespaces",
+            &request.selector,
+            Nacos,
+            "list_namespaces",
+            Read,
+            None,
+            json!({}),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_list_configs",
+        description = "List Nacos configurations (dataId, group) in a namespace, with optional group / dataId / text filters and paging.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_list_configs(&self, Parameters(request): Parameters<NacosListConfigsRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        let args = json!({
+            "namespace": request.namespace, "group": request.group, "dataId": request.data_id, "search": request.search,
+            "pageNo": request.page_no, "pageSize": request.page_size.map(|size| size.clamp(1, 100)),
+        });
+        self.run_product_tool(
+            "dbx_nacos_list_configs",
+            &request.selector,
+            Nacos,
+            "list_configs",
+            Read,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_get_config",
+        description = "Read one Nacos configuration's content and metadata (type, md5) by namespace, dataId and group.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_get_config(&self, Parameters(request): Parameters<NacosConfigKeyRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        let args = json!({ "namespace": request.namespace, "dataId": request.data_id, "group": request.group });
+        self.run_product_tool(
+            "dbx_nacos_get_config",
+            &request.selector,
+            Nacos,
+            "get_config",
+            Read,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_config_history",
+        description = "List the publish history of one Nacos configuration.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_config_history(&self, Parameters(request): Parameters<NacosConfigKeyRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        let args = json!({ "namespace": request.namespace, "dataId": request.data_id, "group": request.group });
+        self.run_product_tool(
+            "dbx_nacos_config_history",
+            &request.selector,
+            Nacos,
+            "config_history",
+            Read,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_publish_config",
+        description = "Create or overwrite one Nacos configuration. Pass cas_md5 (from dbx_nacos_get_config) to avoid overwriting a concurrent change.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_publish_config(&self, Parameters(request): Parameters<NacosPublishConfigRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Write;
+        let args = json!({
+            "namespace": request.namespace, "dataId": request.data_id, "group": request.group, "content": request.content,
+            "configType": request.config_type, "casMd5": request.cas_md5,
+        });
+        self.run_product_tool(
+            "dbx_nacos_publish_config",
+            &request.selector,
+            Nacos,
+            "publish_config",
+            Write,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_search_configs",
+        description = "Search Nacos configuration content across the current namespace or all namespaces.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_search_configs(&self, Parameters(request): Parameters<NacosSearchConfigsRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        let args = json!({
+            "operationId": request.operation_id, "namespace": request.namespace,
+            "scope": request.scope.unwrap_or_else(|| "currentNamespace".into()),
+            "query": request.query, "group": request.group, "dataId": request.data_id, "maxResults": request.max_results,
+        });
+        self.run_product_tool(
+            "dbx_nacos_search_configs",
+            &request.selector,
+            Nacos,
+            "search_configs",
+            Read,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_rollback_config",
+        description = "Rollback a Nacos configuration to a selected history entry.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_rollback_config(
+        &self,
+        Parameters(request): Parameters<NacosRollbackConfigRequest>,
+    ) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Write;
+        let args = json!({ "namespace": request.namespace, "dataId": request.data_id, "group": request.group, "historyId": request.history_id, "nid": request.nid });
+        self.run_product_tool(
+            "dbx_nacos_rollback_config",
+            &request.selector,
+            Nacos,
+            "rollback_config",
+            Write,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_delete_config",
+        description = "Delete one Nacos configuration. High-risk: allowed under a high-risk permission, or after desktop confirmation when enabled.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_delete_config(&self, Parameters(request): Parameters<NacosConfigKeyRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Full;
+        let args = json!({ "namespace": request.namespace, "dataId": request.data_id, "group": request.group });
+        self.run_product_tool(
+            "dbx_nacos_delete_config",
+            &request.selector,
+            Nacos,
+            "delete_config",
+            Full,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_list_services",
+        description = "List Nacos services in a namespace, optionally filtered by group and service name.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_list_services(&self, Parameters(request): Parameters<NacosServicesRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        let args = json!({
+            "namespace": request.namespace, "groupName": request.group_name, "serviceName": request.service_name,
+            "pageNo": request.page_no, "pageSize": request.page_size.map(|size| size.clamp(1, 100)),
+        });
+        self.run_product_tool(
+            "dbx_nacos_list_services",
+            &request.selector,
+            Nacos,
+            "list_services",
+            Read,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_get_service",
+        description = "Get details for one Nacos service.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_get_service(&self, Parameters(request): Parameters<NacosServicesRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        let args = json!({ "namespace": request.namespace, "groupName": request.group_name, "serviceName": request.service_name, "pageNo": request.page_no, "pageSize": request.page_size });
+        self.run_product_tool(
+            "dbx_nacos_get_service",
+            &request.selector,
+            Nacos,
+            "get_service",
+            Read,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_list_instances",
+        description = "List the instances of one Nacos service with health, weight and enabled state.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_list_instances(&self, Parameters(request): Parameters<NacosInstancesRequest>) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        let args = json!({
+            "namespace": request.namespace, "serviceName": request.service_name, "groupName": request.group_name, "clusters": request.clusters,
+        });
+        self.run_product_tool(
+            "dbx_nacos_list_instances",
+            &request.selector,
+            Nacos,
+            "list_instances",
+            Read,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_update_instance",
+        description = "Bring a Nacos instance online/offline or change its weight.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_update_instance(
+        &self,
+        Parameters(request): Parameters<NacosUpdateInstanceRequest>,
+    ) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Write;
+        if request.enabled.is_none() && request.weight.is_none() {
+            return tool_error("INVALID_ARGUMENTS", "Pass enabled and/or weight.");
+        }
+        let args = json!({
+            "target": {
+                "namespace": request.namespace, "serviceName": request.service_name, "groupName": request.group_name,
+                "clusterName": request.cluster_name, "ip": request.ip, "port": request.port,
+            },
+            "patch": { "enabled": request.enabled, "weight": request.weight },
+        });
+        self.run_product_tool(
+            "dbx_nacos_update_instance",
+            &request.selector,
+            Nacos,
+            "update_instance",
+            Write,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_register_instance",
+        description = "Register a persistent Nacos service instance (ephemeral=false).",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_register_instance(
+        &self,
+        Parameters(request): Parameters<NacosRegisterInstanceRequest>,
+    ) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Write;
+        let args = json!({
+            "namespace": request.namespace, "serviceName": request.service_name, "ip": request.ip, "port": request.port,
+            "groupName": request.group_name, "clusterName": request.cluster_name, "weight": request.weight, "metadata": request.metadata,
+        });
+        self.run_product_tool(
+            "dbx_nacos_register_instance",
+            &request.selector,
+            Nacos,
+            "register_instance",
+            Write,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_nacos_deregister_instance",
+        description = "Deregister a Nacos service instance. Defaults to persistent (ephemeral=false), matching dbx_nacos_register_instance; pass ephemeral=true for an ephemeral instance.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn nacos_deregister_instance(
+        &self,
+        Parameters(request): Parameters<NacosDeregisterInstanceRequest>,
+    ) -> CallToolResult {
+        use crate::products::Product::Nacos;
+        use dbx_core::mcp_access::McpAccessLevel::Full;
+        let args = json!({
+            "namespace": request.namespace, "serviceName": request.service_name, "ip": request.ip, "port": request.port,
+            "groupName": request.group_name, "clusterName": request.cluster_name, "ephemeral": request.ephemeral,
+        });
+        self.run_product_tool(
+            "dbx_nacos_deregister_instance",
+            &request.selector,
+            Nacos,
+            "deregister_instance",
+            Full,
+            request.namespace.as_deref(),
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_consul_kv_list",
+        description = "List Consul KV keys under a prefix (one page; pass continuation for the next).",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn consul_kv_list(&self, Parameters(request): Parameters<ConsulKvListRequest>) -> CallToolResult {
+        use crate::products::Product::Consul;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        let args = json!({ "prefix": request.prefix.unwrap_or_default(), "limit": request.limit, "continuation": request.continuation });
+        self.run_product_tool("dbx_consul_kv_list", &request.selector, Consul, "kv_list", Read, None, args).await
+    }
+
+    #[tool(
+        name = "dbx_consul_kv_get",
+        description = "Read one Consul KV key: value and ModifyIndex (use it as cas for safe writes).",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn consul_kv_get(&self, Parameters(request): Parameters<ConsulKvKeyRequest>) -> CallToolResult {
+        use crate::products::Product::Consul;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        self.run_product_tool(
+            "dbx_consul_kv_get",
+            &request.selector,
+            Consul,
+            "kv_get",
+            Read,
+            None,
+            json!({ "key": request.key }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_consul_kv_put",
+        description = "Write one Consul KV key. cas is required: use 0 to create only when absent, or the ModifyIndex from dbx_consul_kv_get to update without overwriting a concurrent change.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn consul_kv_put(&self, Parameters(request): Parameters<ConsulKvPutRequest>) -> CallToolResult {
+        use crate::products::Product::Consul;
+        use dbx_core::mcp_access::McpAccessLevel::Write;
+        let args = json!({ "key": request.key, "value": request.value, "base64": request.base64.unwrap_or(false), "cas": request.cas });
+        self.run_product_tool("dbx_consul_kv_put", &request.selector, Consul, "kv_put", Write, None, args).await
+    }
+
+    #[tool(
+        name = "dbx_consul_kv_delete",
+        description = "Delete one Consul KV key. High-risk: allowed under a high-risk permission, or after desktop confirmation when enabled.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn consul_kv_delete(&self, Parameters(request): Parameters<ConsulKvDeleteRequest>) -> CallToolResult {
+        use crate::products::Product::Consul;
+        use dbx_core::mcp_access::McpAccessLevel::Full;
+        let args = json!({ "key": request.key, "cas": request.cas });
+        self.run_product_tool("dbx_consul_kv_delete", &request.selector, Consul, "kv_delete", Full, None, args).await
+    }
+
+    #[tool(
+        name = "dbx_consul_list_services",
+        description = "List Consul catalog services with their tags.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn consul_list_services(&self, Parameters(request): Parameters<ConsulFilterRequest>) -> CallToolResult {
+        use crate::products::Product::Consul;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        self.run_product_tool(
+            "dbx_consul_list_services",
+            &request.selector,
+            Consul,
+            "list_services",
+            Read,
+            None,
+            json!({ "filter": request.filter }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_consul_list_nodes",
+        description = "List Consul catalog nodes.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn consul_list_nodes(&self, Parameters(request): Parameters<ConsulFilterRequest>) -> CallToolResult {
+        use crate::products::Product::Consul;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        self.run_product_tool(
+            "dbx_consul_list_nodes",
+            &request.selector,
+            Consul,
+            "list_nodes",
+            Read,
+            None,
+            json!({ "filter": request.filter }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_consul_service_health",
+        description = "List the instances of one Consul service with their health checks.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn consul_service_health(
+        &self,
+        Parameters(request): Parameters<ConsulServiceHealthRequest>,
+    ) -> CallToolResult {
+        use crate::products::Product::Consul;
+        use dbx_core::mcp_access::McpAccessLevel::Read;
+        let args = json!({ "service": request.service, "passing": request.passing });
+        self.run_product_tool(
+            "dbx_consul_service_health",
+            &request.selector,
+            Consul,
+            "service_health",
+            Read,
+            None,
+            args,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_consul_set_maintenance",
+        description = "Put a Consul agent service into or out of maintenance mode.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn consul_set_maintenance(
+        &self,
+        Parameters(request): Parameters<ConsulMaintenanceRequest>,
+    ) -> CallToolResult {
+        use crate::products::Product::Consul;
+        use dbx_core::mcp_access::McpAccessLevel::Write;
+        let args = json!({ "serviceId": request.service_id, "enable": request.enable, "reason": request.reason });
+        self.run_product_tool(
+            "dbx_consul_set_maintenance",
+            &request.selector,
+            Consul,
+            "set_maintenance",
+            Write,
+            None,
+            args,
+        )
+        .await
+    }
+
+    #[tool(
         name = "dbx_plugin_list",
         description = "List DBX plugins that contribute MCP tools. Returns each plugin's id, name, tool count, and the number of connections available for its tools. Use dbx_plugin_tools with a plugin id to inspect its tools; call them through dbx_plugin_call.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn plugin_list(&self, Parameters(request): Parameters<PluginListRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_plugin_list").await {
+            return error;
+        }
+        if let Err(error) =
+            self.ensure_global_mcp_access(dbx_core::mcp_access::McpAccessLevel::Read, "dbx_plugin_list").await
+        {
             return error;
         }
         let (rows, note) = match self.plugin_tool_catalog().await {
@@ -1119,6 +2191,11 @@ impl DbxMcpServer {
         if let Err(error) = self.ensure_tool_allowed("dbx_plugin_tools").await {
             return error;
         }
+        if let Err(error) =
+            self.ensure_global_mcp_access(dbx_core::mcp_access::McpAccessLevel::Read, "dbx_plugin_tools").await
+        {
+            return error;
+        }
         let plugin_id = request.plugin_id.trim();
         if plugin_id.is_empty() {
             return tool_error("PLUGIN_ID_REQUIRED", "plugin_id is required; use dbx_plugin_list to find plugin ids.");
@@ -1132,7 +2209,7 @@ impl DbxMcpServer {
         // allowlist filters the listing just like `tools/list`, with a count
         // of hidden tools so the caller knows the view is narrowed.
         let policy = self.load_policy().await.ok();
-        let (owned, hidden) = {
+        let (mut owned, mut hidden) = {
             let owned: Vec<&crate::plugin_tools::PluginToolEntry> = entries
                 .iter()
                 .filter(|entry| {
@@ -1144,11 +2221,36 @@ impl DbxMcpServer {
             let hidden = total - owned.len();
             (owned, hidden)
         };
+        let allowed_connections = match self.allowed_plugin_connections_for(plugin_id).await {
+            Ok(allowed) => allowed,
+            Err(error) => return error,
+        };
+        if self.scope.enabled() && allowed_connections.is_empty() {
+            return tool_error(
+                "PLUGIN_OUT_OF_SCOPE",
+                format!("Plugin \"{plugin_id}\" has no connection inside the current DBX MCP session scope."),
+            );
+        }
+        let access = self.backend.load_mcp_access_policy().await.ok();
+        let group_paths = match (access.as_ref(), policy.as_ref()) {
+            (Some(_), Some(policy)) => self.load_group_paths_for_policy(policy).await.ok(),
+            _ => None,
+        };
+        let connection_hidden = owned
+            .iter()
+            .filter(|entry| {
+                !plugin_entry_has_allowed_connection(access.as_ref(), group_paths.as_ref(), entry, &allowed_connections)
+            })
+            .count();
+        hidden += connection_hidden;
+        owned.retain(|entry| {
+            plugin_entry_has_allowed_connection(access.as_ref(), group_paths.as_ref(), entry, &allowed_connections)
+        });
         if owned.is_empty() {
-            // An all-allowlist-hidden plugin and a nonexistent one answer
-            // identically, so this meta tool cannot fingerprint installed
-            // plugin ids. dbx_plugin_list stays the enumeration surface and
-            // only shows what the caller may see.
+            // An all-allowlist-hidden plugin, a plugin with no usable
+            // connection, and a nonexistent one answer identically, so this
+            // meta tool cannot fingerprint installed plugin ids. dbx_plugin_list
+            // stays the enumeration surface and only shows visible plugins.
             return tool_error(
                 "PLUGIN_NOT_FOUND",
                 format!(
@@ -1156,18 +2258,23 @@ impl DbxMcpServer {
                 ),
             );
         }
-        let allowed = match self.allowed_plugin_connections_for(plugin_id).await {
-            Ok(allowed) => allowed,
-            Err(error) => return error,
-        };
-        if self.scope.enabled() && allowed.is_empty() {
-            return tool_error(
-                "PLUGIN_OUT_OF_SCOPE",
-                format!("Plugin \"{plugin_id}\" has no connection inside the current DBX MCP session scope."),
-            );
-        }
         let mut lines = Vec::new();
         for entry in &owned {
+            let entry_connections = match (&access, &group_paths) {
+                (Some(access), Some(group_paths)) => allowed_connections
+                    .iter()
+                    .filter(|(connection_id, _)| {
+                        plugin_connection_level_allowed(
+                            access,
+                            group_paths.get(connection_id).map(|path| path.ids.as_slice()).unwrap_or(&[]),
+                            entry,
+                            connection_id,
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                _ => allowed_connections.clone(),
+            };
             let mut line = format!(
                 "### {}\n{}",
                 entry.tool.name,
@@ -1176,23 +2283,26 @@ impl DbxMcpServer {
             if entry.tool.read_only {
                 line.push_str("\nRead-only.");
             }
-            let schema = crate::plugin_tools::external_tool_parameters(&entry.tool.input_schema, &allowed);
+            let schema = crate::plugin_tools::external_tool_parameters(&entry.tool.input_schema, &entry_connections);
             line.push_str(&format!("\nArguments schema: {schema}"));
             if entry.injects_connection_id {
                 line.push_str("\nThe host injects the bound connection's id automatically.");
             }
             lines.push(line);
         }
-        let connection_note = match allowed.len() {
+        let connection_note = match allowed_connections.len() {
             0 => "No allowed connection is configured for this plugin; only connection-less tools can run.".to_string(),
-            1 => format!("Tools run on connection {} ({}); you may omit dbx_connection.", allowed[0].0, allowed[0].1),
+            1 => format!(
+                "Tools run on connection {} ({}); you may omit dbx_connection.",
+                allowed_connections[0].0, allowed_connections[0].1
+            ),
             _ => format!(
                 "Pass dbx_connection to choose among: {}",
-                allowed.iter().map(|(id, name)| format!("{id} = {name}")).collect::<Vec<_>>().join("; ")
+                allowed_connections.iter().map(|(id, name)| format!("{id} = {name}")).collect::<Vec<_>>().join("; ")
             ),
         };
         let hidden_note = (hidden > 0)
-            .then(|| format!("\n{} further tool(s) of this plugin are hidden by the DBX MCP tool allowlist.", hidden));
+            .then(|| format!("\n{} further tool(s) of this plugin are hidden by the DBX MCP settings.", hidden));
         text(format!(
             "{} tool(s) of plugin {plugin_id}:\n\n{}\n\n{connection_note}\nCall through dbx_plugin_call (plugin_id + tool + arguments).{}",
             owned.len(),
@@ -1247,6 +2357,11 @@ impl DbxMcpServer {
         Parameters(ListConnectionsRequest {}): Parameters<ListConnectionsRequest>,
     ) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_list_connections").await {
+            return error;
+        }
+        if let Err(error) =
+            self.ensure_global_mcp_access(dbx_core::mcp_access::McpAccessLevel::Read, "dbx_list_connections").await
+        {
             return error;
         }
         match self.load_scoped_connections().await {
@@ -1629,6 +2744,56 @@ impl DbxMcpServer {
                 Ok(command) => command,
                 Err(error) => return error,
             };
+            if policy.confirmation_policy() == McpConfirmPolicy::HighRisk
+                && (command.is_dangerous() || command.has_effectively_unbounded_filter())
+            {
+                // Mongo's authorization (including aggregate output scopes) was
+                // checked above. Confirmation cannot relax any of those checks.
+                let target_database = match &command {
+                    MongoCommand::InDatabase { database, .. } => database.as_str(),
+                    _ => &database,
+                };
+                let approval = crate::approval::ToolApprovalRequest::new(
+                    crate::approval::ToolApprovalKind::MongoCommand,
+                    "dbx_execute_query",
+                    &request.sql,
+                )
+                .with_target(Some(&connection.id), Some(target_database));
+                mark_call_confirmation("requested");
+                if let Err(error) = self.backend.approve_high_risk_tool(&approval).await {
+                    mark_call_confirmation("denied");
+                    return tool_error("TOOL_BLOCKED", error);
+                }
+                mark_call_confirmation("confirmed");
+                if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+                    return error;
+                }
+                let refreshed = match self
+                    .resolve_connection(&ConnectionSelector {
+                        connection_id: Some(connection.id.clone()),
+                        connection_name: None,
+                    })
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
+                if refreshed.connection != *connection
+                    || refreshed.policy.confirmation_policy() != McpConfirmPolicy::HighRisk
+                {
+                    return tool_error("TOOL_BLOCKED", "MongoDB call approval was revoked.");
+                }
+                if let Err(error) = validate_mongo_command_with_groups(
+                    &refreshed.connection,
+                    &refreshed.policy,
+                    &refreshed.group_ids,
+                    &refreshed.database_scope,
+                    &database,
+                    &request.sql,
+                ) {
+                    return error;
+                }
+            }
             return match self.backend.execute_mongo_command(connection, &database, &command).await {
                 Ok(result) => match explicit_cell_window {
                     Some(window) => match format_query_result_as_text(&result, 100, window) {
@@ -1656,12 +2821,24 @@ impl DbxMcpServer {
             }
         }
         let (policy, approval_token) = match self
-            .approved_sql_policy(connection, &policy, &database, &request.sql, allow_database_switch, false)
+            .approved_sql_policy(
+                connection,
+                &policy,
+                &database,
+                &request.sql,
+                allow_database_switch,
+                session.as_ref().is_some_and(|session| session.transaction_owner.is_some()),
+            )
             .await
         {
             Ok(approval) => approval,
             Err(error) => return error,
         };
+        if approval_token.is_some() {
+            if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+                return error;
+            }
+        }
         let permissions = match validate_sql_policy(connection, &policy, &database, &request.sql, allow_database_switch)
         {
             Ok(permissions) => permissions,
@@ -1722,22 +2899,23 @@ impl DbxMcpServer {
             ) {
                 return error;
             }
-            let mut refreshed_policy = effective_policy_for_database_with_groups(
+            let refreshed_policy = effective_policy_for_database_with_groups(
                 &refreshed.policy,
                 &refreshed.group_ids,
                 &refreshed.connection,
                 &session.database,
             );
-            if approval_token.is_some() && refreshed_policy.prompt_high_risk_sql && !refreshed_policy.read_only {
-                refreshed_policy.allow_dangerous_sql = true;
-            }
-            let refreshed_permissions = match validate_sql_policy(
-                &refreshed.connection,
-                &refreshed_policy,
-                &session.database,
-                &request.sql,
-                false,
-            ) {
+            let refreshed_permissions = match self
+                .queued_sql_permissions(
+                    &refreshed.connection,
+                    &policy,
+                    refreshed_policy,
+                    &session.database,
+                    &request.sql,
+                    approval_token.as_deref(),
+                )
+                .await
+            {
                 Ok(permissions) => permissions,
                 Err(error) => return error,
             };
@@ -1980,11 +3158,25 @@ impl DbxMcpServer {
         // Classify the whole script as a unit so a single write/DDL statement in
         // the batch fails closed under read-only / dangerous-SQL / production
         // policy, exactly as the Web /api/query/execute-multi route does.
-        let (policy, approval_token) =
-            match self.approved_sql_policy(connection, &policy, &database, sql, allow_database_switch, false).await {
-                Ok(approval) => approval,
-                Err(error) => return error,
-            };
+        let (policy, approval_token) = match self
+            .approved_sql_policy(
+                connection,
+                &policy,
+                &database,
+                sql,
+                allow_database_switch,
+                session.as_ref().is_some_and(|session| session.transaction_owner.is_some()),
+            )
+            .await
+        {
+            Ok(approval) => approval,
+            Err(error) => return error,
+        };
+        if approval_token.is_some() {
+            if let Err(error) = self.ensure_tool_allowed("dbx_execute_batch").await {
+                return error;
+            }
+        }
         let permissions = match validate_sql_policy(connection, &policy, &database, sql, allow_database_switch) {
             Ok(permissions) => permissions,
             Err(error) => return error,
@@ -2043,20 +3235,26 @@ impl DbxMcpServer {
             {
                 return error;
             }
-            let mut refreshed_policy = effective_policy_for_database_with_groups(
+            let refreshed_policy = effective_policy_for_database_with_groups(
                 &refreshed.policy,
                 &refreshed.group_ids,
                 &refreshed.connection,
                 &session.database,
             );
-            if approval_token.is_some() && refreshed_policy.prompt_high_risk_sql && !refreshed_policy.read_only {
-                refreshed_policy.allow_dangerous_sql = true;
-            }
-            let refreshed_permissions =
-                match validate_sql_policy(&refreshed.connection, &refreshed_policy, &session.database, sql, false) {
-                    Ok(permissions) => permissions,
-                    Err(error) => return error,
-                };
+            let refreshed_permissions = match self
+                .queued_sql_permissions(
+                    &refreshed.connection,
+                    &policy,
+                    refreshed_policy,
+                    &session.database,
+                    sql,
+                    approval_token.as_deref(),
+                )
+                .await
+            {
+                Ok(permissions) => permissions,
+                Err(error) => return error,
+            };
             if let Some(message) = confirmed_batch_sql_block_reason(
                 sql,
                 refreshed.connection.db_type,
@@ -2513,8 +3711,29 @@ impl DbxMcpServer {
             connection,
             &database.to_string(),
         );
-        let permissions = mcp_permissions(connection, &policy);
-        if safety != RedisCommandSafety::Allowed && policy.read_only {
+        let access = match self.backend.load_mcp_access_policy().await {
+            Ok(access) => access,
+            Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+        };
+        let scoped_access = redis_database_access(&access, &resolved.group_ids, &connection.id, database);
+        let effective_level = access
+            .toolset_ceiling(&connection.id, "redis")
+            .map_or(scoped_access.level, |ceiling| scoped_access.level.min(ceiling));
+        let required_level = if safety == RedisCommandSafety::Allowed {
+            dbx_core::mcp_access::McpAccessLevel::Read
+        } else {
+            dbx_core::mcp_access::McpAccessLevel::Write
+        };
+        if !scoped_access.visible {
+            return tool_error("SCOPE_OUT_OF_POLICY", "Redis database is not allowed by DBX MCP settings.");
+        }
+        if effective_level < required_level {
+            return tool_error("MCP_READ_ONLY", "The effective MCP permission for this Redis database is read-only.");
+        }
+        let mut effective_policy = policy.clone();
+        (effective_policy.read_only, effective_policy.allow_dangerous_sql) = effective_level.to_flags();
+        let permissions = mcp_permissions(connection, &effective_policy);
+        if safety != RedisCommandSafety::Allowed && effective_policy.read_only {
             return tool_error(
                 "MCP_READ_ONLY",
                 format!("MCP execution permission for Redis database {database} is read-only. Redis command blocked."),
@@ -2526,14 +3745,71 @@ impl DbxMcpServer {
                 format!("Connection \"{}\" has read-only protection enabled. Redis command blocked.", connection.name),
             );
         }
-        if safety == RedisCommandSafety::Blocked && !permissions.allow_dangerous {
+        let mut permissions = permissions;
+        let decision = policy.confirmation_policy().decide(
+            effective_level,
+            if safety == RedisCommandSafety::Blocked { McpAccessLevel::Full } else { required_level },
+            safety == RedisCommandSafety::Blocked,
+        );
+        if decision == McpCallDecision::Deny {
             return tool_error(
                 "REDIS_COMMAND_BLOCKED",
-                format!(
-                    "Dangerous Redis command \"{}\" is disabled in DBX MCP settings.",
-                    argv[0].to_ascii_uppercase()
-                ),
+                "Dangerous Redis command exceeds the effective MCP permission.",
             );
+        }
+        if safety != RedisCommandSafety::Allowed && is_production_database(connection, &database.to_string()) {
+            return tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot change a production database.");
+        }
+        if decision == McpCallDecision::Confirm {
+            let request = crate::approval::ToolApprovalRequest::new(
+                crate::approval::ToolApprovalKind::RedisCommand,
+                "dbx_execute_redis_command",
+                request.command.clone(),
+            )
+            .with_target(Some(&connection.id), Some(&database.to_string()));
+            mark_call_confirmation("requested");
+            if let Err(error) = self.backend.approve_high_risk_tool(&request).await {
+                mark_call_confirmation("denied");
+                return tool_error("REDIS_COMMAND_BLOCKED", error);
+            }
+            mark_call_confirmation("confirmed");
+            // Re-read the policy: a revocation during the dialog wins.
+            if let Err(error) = self.ensure_tool_allowed("dbx_execute_redis_command").await {
+                return error;
+            }
+            let refreshed = match self
+                .resolve_connection(&ConnectionSelector {
+                    connection_id: Some(connection.id.clone()),
+                    connection_name: None,
+                })
+                .await
+            {
+                Ok(refreshed) => refreshed,
+                Err(error) => return error,
+            };
+            let current = effective_policy_for_database_with_groups(
+                &refreshed.policy,
+                &refreshed.group_ids,
+                &refreshed.connection,
+                &database.to_string(),
+            );
+            let access = match self.backend.load_mcp_access_policy().await {
+                Ok(access) => access,
+                Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+            };
+            let scoped = redis_database_access(&access, &refreshed.group_ids, &connection.id, database);
+            let level = access
+                .toolset_ceiling(&connection.id, "redis")
+                .map_or(scoped.level, |ceiling| scoped.level.min(ceiling));
+            if refreshed.connection != *connection
+                || !scoped.visible
+                || current.confirmation_policy() != policy.confirmation_policy()
+                || current.confirmation_policy().decide(level, McpAccessLevel::Full, true) != McpCallDecision::Confirm
+                || self.resolve_redis_database(Some(database), &refreshed).is_err()
+            {
+                return tool_error("REDIS_COMMAND_BLOCKED", "High-risk Redis command approval was revoked.");
+            }
+            permissions.allow_dangerous = true;
         }
         if safety != RedisCommandSafety::Allowed && !permissions.allow_writes {
             return tool_error(
@@ -2661,6 +3937,26 @@ impl DbxMcpServer {
                 connection,
                 connection.database.as_deref().unwrap_or(""),
             );
+            let access = match self.backend.load_mcp_access_policy().await {
+                Ok(access) => access,
+                Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+            };
+            let connection_access = access.resolve(&resolved.group_ids, &connection.id, None);
+            let effective_level = access
+                .toolset_ceiling(&connection.id, "mq")
+                .map_or(connection_access.level, |ceiling| connection_access.level.min(ceiling));
+            if !connection_access.visible {
+                return tool_error(
+                    "SCOPE_OUT_OF_POLICY",
+                    "The message-queue connection is not allowed by DBX MCP settings.",
+                );
+            }
+            if effective_level < dbx_core::mcp_access::McpAccessLevel::Write {
+                return tool_error(
+                    "MCP_READ_ONLY",
+                    "The effective MCP permission for this message-queue connection is read-only.",
+                );
+            }
             if policy.read_only {
                 return tool_error(
                     "MCP_READ_ONLY",
@@ -2812,6 +4108,11 @@ impl DbxMcpServer {
         if let Err(error) = self.ensure_tool_allowed("dbx_add_connection").await {
             return error;
         }
+        if let Err(error) =
+            self.ensure_global_mcp_access(dbx_core::mcp_access::McpAccessLevel::Write, "dbx_add_connection").await
+        {
+            return error;
+        }
         let policy = match self.load_policy().await {
             Ok(policy) => policy,
             Err(error) => return error,
@@ -2868,6 +4169,11 @@ impl DbxMcpServer {
         Parameters(request): Parameters<DuplicateConnectionRequest>,
     ) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_duplicate_connection").await {
+            return error;
+        }
+        if let Err(error) =
+            self.ensure_global_mcp_access(dbx_core::mcp_access::McpAccessLevel::Write, "dbx_duplicate_connection").await
+        {
             return error;
         }
         let policy = match self.load_policy().await {
@@ -2989,6 +4295,44 @@ impl DbxMcpServer {
                 format!("Connection \"{}\" is not allowed by DBX MCP settings.", target.id),
             );
         }
+        if let Err(error) =
+            self.ensure_global_mcp_access(dbx_core::mcp_access::McpAccessLevel::Full, "dbx_remove_connection").await
+        {
+            return error;
+        }
+        if policy.confirmation_policy() == McpConfirmPolicy::HighRisk {
+            let approval = crate::approval::ToolApprovalRequest::new(
+                crate::approval::ToolApprovalKind::ConnectionManagement,
+                "dbx_remove_connection",
+                format!("Remove connection: {} ({})", target.name, target.id),
+            )
+            .with_target(Some(&target.id), None);
+            mark_call_confirmation("requested");
+            if let Err(error) = self.backend.approve_high_risk_tool(&approval).await {
+                mark_call_confirmation("denied");
+                return tool_error("TOOL_BLOCKED", error);
+            }
+            mark_call_confirmation("confirmed");
+            if let Err(error) = self.ensure_tool_allowed("dbx_remove_connection").await {
+                return error;
+            }
+            if let Err(error) = self.ensure_global_mcp_access(McpAccessLevel::Full, "dbx_remove_connection").await {
+                return error;
+            }
+            let refreshed = match self
+                .resolve_connection(&ConnectionSelector {
+                    connection_id: Some(target.id.clone()),
+                    connection_name: None,
+                })
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
+            if refreshed.connection != target || refreshed.policy.confirmation_policy() != McpConfirmPolicy::HighRisk {
+                return tool_error("TOOL_BLOCKED", "Connection removal approval was revoked.");
+            }
+        }
         match self.backend.remove_connection_for_mcp(&target.id).await {
             Ok(true) => text(format!("Connection \"{}\" (id: {}) removed.", target.name, target.id)),
             Ok(false) => tool_error("CONNECTION_NOT_FOUND", format!("Connection \"{}\" not found.", target.name)),
@@ -3079,6 +4423,11 @@ impl DbxMcpServer {
                 Err(error) => return error,
             }
         };
+        if approval_token.is_some() {
+            if let Err(error) = self.ensure_tool_allowed("dbx_execute_and_show").await {
+                return error;
+            }
+        }
         let permissions = if connection.db_type == DatabaseType::MongoDb {
             mcp_permissions(connection, &policy)
         } else {
@@ -3169,6 +4518,29 @@ impl DbxMcpServer {
         let connection = &resolved.connection;
         if connection.db_type != DatabaseType::Salesforce {
             return not_salesforce_error(connection);
+        }
+        if resolved.policy.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                "The effective MCP execution permission is read-only. Salesforce writes are blocked.",
+            );
+        }
+        let access = match self.backend.load_mcp_access_policy().await {
+            Ok(access) => access,
+            Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+        };
+        let resolved_access = access.resolve(&resolved.group_ids, &connection.id, None);
+        let effective_level = access
+            .toolset_ceiling(&connection.id, dbx_core::mcp_access::SALESFORCE_WRITE_TOOLSET)
+            .map_or(resolved_access.level, |ceiling| resolved_access.level.min(ceiling));
+        if !resolved_access.visible || effective_level < dbx_core::mcp_access::McpAccessLevel::Write {
+            return tool_error(
+                "SALESFORCE_DML_DISABLED",
+                format!(
+                    "Salesforce writes are above the effective MCP access level for connection \"{}\".",
+                    connection.name
+                ),
+            );
         }
         let database = match self.resolve_database(request.database, &resolved) {
             Ok(database) => database,
@@ -3276,6 +4648,29 @@ impl DbxMcpServer {
         if connection.db_type != DatabaseType::Salesforce {
             return not_salesforce_error(connection);
         }
+        if resolved.policy.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                "The effective MCP execution permission is read-only. Salesforce writes are blocked.",
+            );
+        }
+        let access = match self.backend.load_mcp_access_policy().await {
+            Ok(access) => access,
+            Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+        };
+        let resolved_access = access.resolve(&resolved.group_ids, &connection.id, None);
+        let effective_level = access
+            .toolset_ceiling(&connection.id, dbx_core::mcp_access::SALESFORCE_WRITE_TOOLSET)
+            .map_or(resolved_access.level, |ceiling| resolved_access.level.min(ceiling));
+        if !resolved_access.visible || effective_level < dbx_core::mcp_access::McpAccessLevel::Write {
+            return tool_error(
+                "SALESFORCE_DML_DISABLED",
+                format!(
+                    "Salesforce writes are above the effective MCP access level for connection \"{}\".",
+                    connection.name
+                ),
+            );
+        }
         if !connection_allows_salesforce_dml(&resolved.policy, &connection.id) {
             return tool_error(
                 "SALESFORCE_DML_DISABLED",
@@ -3353,11 +4748,17 @@ impl DbxMcpServer {
 
     async fn load_scoped_connections(&self) -> Result<Vec<dbx_core::models::connection::ConnectionConfig>, String> {
         let policy = self.backend.load_mcp_global_policy().await?;
+        let access = self.backend.load_mcp_access_policy().await?;
         let connections = self.backend.load_connections().await?;
         let group_paths = self.load_group_paths_for_policy(&policy).await?;
         Ok(connections
             .into_iter()
             .filter(|connection| policy_allows_connection(&policy, group_paths.get(&connection.id), connection))
+            .filter(|connection| {
+                let group_ids = group_paths.get(&connection.id).map(|path| path.ids.as_slice()).unwrap_or(&[]);
+                let resolved = access.resolve(group_ids, &connection.id, None);
+                resolved.visible && resolved.level >= dbx_core::mcp_access::McpAccessLevel::Read
+            })
             .filter(|connection| !self.scope.connection_scope_enabled() || self.scope.matches(connection))
             .collect())
     }
@@ -3435,44 +4836,223 @@ impl DbxMcpServer {
         }
     }
 
-    /// Scoped-session and read-only enforcement shared by both plugin-tool
-    /// call paths, closing the gap between what the flat `tools/list`
-    /// advertises and what the lazy/meta surface executes:
-    /// - under a read-only execution policy, only tools the plugin declares
-    ///   with `readOnlyHint` may run. The hint is the plugin author's claim,
-    ///   so the host defaults to deny for undeclared tools instead of
-    ///   letting an opaque write bypass the mode;
-    /// - with a scope active, only plugins owning at least one in-scope
-    ///   connection stay callable — a connection-less tool of an
-    ///   out-of-scope plugin must not become a side door.
+    #[allow(clippy::result_large_err)]
+    async fn ensure_global_mcp_access(
+        &self,
+        required: dbx_core::mcp_access::McpAccessLevel,
+        tool_name: &str,
+    ) -> Result<(), CallToolResult> {
+        let access = self
+            .backend
+            .load_mcp_access_policy()
+            .await
+            .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
+        if access.default_access >= required {
+            Ok(())
+        } else {
+            Err(tool_error(
+                "MCP_READ_ONLY",
+                format!("Tool \"{tool_name}\" is above the effective global DBX MCP access level."),
+            ))
+        }
+    }
+
+    /// Resolves the plugin exposure mode at call time. Environment variables
+    /// are an explicit override; otherwise the persisted v1/v2 setting wins.
+    async fn effective_plugin_tools_mode(&self, policy: Option<&McpGlobalPolicy>) -> PluginToolsMode {
+        // Scoped routers have no lazy meta routes. This takes precedence over
+        // both saved settings and environment overrides, for lists and calls.
+        if self.scope.enabled() {
+            return PluginToolsMode::Flat;
+        }
+        if let Some(mode) = PluginToolsMode::from_env_override() {
+            return mode;
+        }
+        if self.plugin_tools_mode != PluginToolsMode::Auto {
+            return self.plugin_tools_mode;
+        }
+        let configured = policy
+            .map(|policy| match policy.plugin_tools_mode {
+                dbx_core::mcp_access::McpPluginToolsMode::Auto => PluginToolsMode::Auto,
+                dbx_core::mcp_access::McpPluginToolsMode::Flat => PluginToolsMode::Flat,
+                dbx_core::mcp_access::McpPluginToolsMode::Lazy => PluginToolsMode::Lazy,
+            })
+            .unwrap_or(PluginToolsMode::Flat);
+        if configured != PluginToolsMode::Auto {
+            return configured;
+        }
+        let count = self
+            .backend
+            .list_plugin_mcp_tools()
+            .await
+            .map(|providers| crate::plugin_tools::build_catalog(&providers).len())
+            .unwrap_or(0);
+        if count <= 40 {
+            PluginToolsMode::Flat
+        } else {
+            PluginToolsMode::Lazy
+        }
+    }
+
+    /// Both plugin dispatch paths share the resolved resource level. A global
+    /// default must neither widen a connection ceiling nor defeat an override.
     #[allow(clippy::result_large_err)]
     async fn ensure_plugin_tool_policy(
         &self,
         entry: &crate::plugin_tools::PluginToolEntry,
+        connection_id: Option<&str>,
+        arguments: &mut serde_json::Value,
     ) -> Result<(), CallToolResult> {
-        let policy = self.load_policy().await?;
-        if policy.read_only && !entry.tool.read_only {
-            return Err(tool_error(
-                "MCP_READ_ONLY",
-                format!(
-                    "Plugin tool \"{}\" is not declared read-only, but the DBX MCP execution policy is read-only.",
-                    entry.exposed_name
-                ),
-            ));
+        // Policy values are trimmed when saved; forward the same canonical
+        // argument that is authorized, so sidecar trimming cannot change target.
+        if let Some((_, argument)) = &entry.scope {
+            if let Some(serde_json::Value::String(value)) = arguments.get_mut(argument) {
+                *value = value.trim().to_string();
+            }
         }
-        if self.scope.enabled() {
+        let level = self.check_plugin_scope(entry, connection_id, arguments).await?;
+        let policy = self.load_policy().await?;
+        let connection = if let Some(id) = connection_id {
             let allowed = self.allowed_plugin_connections().await?;
-            if !allowed.contains_key(&entry.plugin_id) {
+            if !allowed
+                .get(&entry.plugin_id)
+                .is_some_and(|connections| connections.iter().any(|(candidate, _)| candidate == id))
+            {
+                return Err(tool_error("PLUGIN_OUT_OF_SCOPE", "Plugin connection is no longer allowed."));
+            }
+            let connection = self
+                .backend
+                .load_connections()
+                .await
+                .map_err(|error| backend_tool_error("CONNECTION_LOAD_ERROR", error))?
+                .into_iter()
+                .find(|connection| connection.id == id && connection.plugin_id.as_deref() == Some(&entry.plugin_id))
+                .ok_or_else(|| tool_error("CONNECTION_NOT_FOUND", "Plugin connection changed."))?;
+            if !entry.tool.read_only {
+                if connection.read_only {
+                    return Err(tool_error(
+                        "CONNECTION_READ_ONLY",
+                        "Plugin connection has read-only protection enabled.",
+                    ));
+                }
+                if is_production_database(&connection, connection.database.as_deref().unwrap_or_default()) {
+                    return Err(tool_error(
+                        "PRODUCTION_WRITE_BLOCKED",
+                        "Plugin connection has production protection enabled.",
+                    ));
+                }
+            }
+            Some(connection)
+        } else {
+            if self.scope.enabled() && !self.allowed_plugin_connections().await?.contains_key(&entry.plugin_id) {
                 return Err(tool_error(
                     "PLUGIN_OUT_OF_SCOPE",
-                    format!(
-                        "Plugin \"{}\" has no connection inside the current DBX MCP session scope.",
-                        entry.plugin_id
-                    ),
+                    "Plugin has no connection inside the current MCP scope.",
                 ));
+            }
+            None
+        };
+        let high_risk = plugin_tool_is_destructive(&entry.tool);
+        let decision = policy.confirmation_policy().decide(
+            level,
+            if high_risk { McpAccessLevel::Full } else { plugin_tool_required_access(entry) },
+            high_risk,
+        );
+        if decision == McpCallDecision::Deny {
+            return Err(tool_error(
+                "TOOL_BLOCKED",
+                "The effective MCP permission does not allow this high-risk plugin tool.",
+            ));
+        }
+        if decision == McpCallDecision::Confirm {
+            let scope = entry
+                .scope
+                .as_ref()
+                .and_then(|(_, argument)| arguments.get(argument))
+                .and_then(serde_json::Value::as_str);
+            let request = crate::approval::ToolApprovalRequest::new(
+                crate::approval::ToolApprovalKind::PluginTool,
+                &entry.exposed_name,
+                crate::approval::arguments_preview(arguments),
+            )
+            .with_plugin(&entry.plugin_name)
+            .with_target(connection_id, scope);
+            mark_call_confirmation("requested");
+            self.backend.approve_high_risk_tool(&request).await.map_err(|error| {
+                mark_call_confirmation("denied");
+                tool_error("TOOL_BLOCKED", error)
+            })?;
+            mark_call_confirmation("confirmed");
+            self.ensure_tool_allowed(&entry.exposed_name).await?;
+            let current = self.load_policy().await?;
+            let level = self.check_plugin_scope(entry, connection_id, arguments).await?;
+            if current.confirmation_policy() != policy.confirmation_policy()
+                || current.confirmation_policy().decide(level, McpAccessLevel::Full, true) != McpCallDecision::Confirm
+            {
+                return Err(tool_error("TOOL_BLOCKED", "High-risk tool approval was revoked."));
+            }
+            if let Some(connection) = connection {
+                let allowed = self.allowed_plugin_connections().await?;
+                let refreshed = self
+                    .resolve_connection(&ConnectionSelector {
+                        connection_id: Some(connection.id.clone()),
+                        connection_name: None,
+                    })
+                    .await?;
+                if refreshed.connection != connection
+                    || !allowed
+                        .get(&entry.plugin_id)
+                        .is_some_and(|connections| connections.iter().any(|(id, _)| id == &connection.id))
+                {
+                    return Err(tool_error("TOOL_BLOCKED", "Plugin connection changed while the dialog was open."));
+                }
+            }
+            let current_entries = self
+                .backend
+                .list_plugin_mcp_tools()
+                .await
+                .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
+            let still_exposed = crate::plugin_tools::build_catalog(&current_entries).into_iter().any(|candidate| {
+                candidate.exposed_name == entry.exposed_name
+                    && candidate.plugin_id == entry.plugin_id
+                    && candidate.tool.name == entry.tool.name
+                    && candidate.tool.read_only == entry.tool.read_only
+                    && candidate.tool.annotations == entry.tool.annotations
+                    && candidate.scope == entry.scope
+                    && candidate.toolset == entry.toolset
+            });
+            if !still_exposed {
+                return Err(tool_error("TOOL_BLOCKED", "Plugin-tool authorization changed while the dialog was open."));
             }
         }
         Ok(())
+    }
+
+    /// Loads the v2 policy and group path, then applies [`ensure_plugin_scope`].
+    /// Only plugins that declare a scope pay for the extra loads.
+    #[allow(clippy::result_large_err)]
+    async fn check_plugin_scope(
+        &self,
+        entry: &crate::plugin_tools::PluginToolEntry,
+        connection_id: Option<&str>,
+        arguments: &serde_json::Value,
+    ) -> Result<dbx_core::mcp_access::McpAccessLevel, CallToolResult> {
+        let access = self
+            .backend
+            .load_mcp_access_policy()
+            .await
+            .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
+        if entry.scope.is_none() && connection_id.is_none() {
+            return ensure_plugin_scope(&access, entry, &[], None, arguments);
+        }
+        let policy = self.load_policy().await?;
+        let group_paths = self
+            .load_group_paths_for_policy(&policy)
+            .await
+            .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
+        let group_ids =
+            connection_id.and_then(|id| group_paths.get(id)).map(|path| path.ids.clone()).unwrap_or_default();
+        ensure_plugin_scope(&access, entry, &group_ids, connection_id, arguments)
     }
 
     /// The advertised `tools/list` view: router-enabled tools narrowed to the
@@ -3482,22 +5062,121 @@ impl DbxMcpServer {
     /// the plain router view rather than adding a new failure mode here.
     pub async fn policy_filtered_tools(&self) -> Vec<rmcp::model::Tool> {
         let policy = self.load_policy().await.ok();
+        let plugin_mode = self.effective_plugin_tools_mode(policy.as_ref()).await;
+        let visible_scoped_tools = self.visible_scoped_tools().await;
         let mut tools: Vec<rmcp::model::Tool> = match &policy {
             Some(policy) => self
                 .tool_router
                 .list_all()
                 .into_iter()
                 .filter(|tool| policy_allows_tool(policy, tool.name.as_ref()))
+                .filter(|tool| {
+                    let name = tool.name.as_ref();
+                    if matches!(name, "dbx_plugin_list" | "dbx_plugin_tools" | "dbx_plugin_call") {
+                        return plugin_mode.advertise_meta()
+                            && visible_scoped_tools.as_ref().is_none_or(|(_, global_access)| {
+                                dbx_core::mcp_catalog::descriptor(name)
+                                    .is_none_or(|descriptor| *global_access >= catalog_advertised_access(descriptor))
+                            });
+                    }
+                    visible_scoped_tools.as_ref().is_none_or(|(visible, global_access)| {
+                        dbx_core::mcp_catalog::descriptor(name).is_none_or(|descriptor| {
+                            (descriptor.coverage == dbx_core::mcp_catalog::McpCoverage::None
+                                && *global_access >= catalog_advertised_access(descriptor))
+                                || visible.contains(name)
+                        })
+                    })
+                })
                 .collect(),
-            None => self.tool_router.list_all(),
+            None => self
+                .tool_router
+                .list_all()
+                .into_iter()
+                .filter(|tool| {
+                    if matches!(tool.name.as_ref(), "dbx_plugin_list" | "dbx_plugin_tools" | "dbx_plugin_call") {
+                        plugin_mode.advertise_meta()
+                    } else {
+                        true
+                    }
+                })
+                .collect(),
         };
-        if self.plugin_tools_mode.advertise_flat() {
+        if plugin_mode.advertise_flat() {
             tools.extend(self.plugin_tools_view(policy.as_ref()).await);
         }
         for tool in &mut tools {
             normalize_tool_input_schema(tool);
         }
         tools
+    }
+
+    /// Tool-list convenience only. Calls still run the authoritative v1/v2
+    /// checks, and policy/connection loading failures deliberately keep the
+    /// full advertisement so a transient read cannot hide capabilities.
+    async fn visible_scoped_tools(&self) -> Option<(HashSet<&'static str>, dbx_core::mcp_access::McpAccessLevel)> {
+        let Ok(access) = self.backend.load_mcp_access_policy().await else { return None };
+        let Ok(connections) = self.backend.load_connections().await else { return None };
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(_) => return None,
+        };
+        let group_paths = match self.load_group_paths_for_policy(&policy).await {
+            Ok(paths) => paths,
+            Err(_) => return None,
+        };
+        let mut visible = HashSet::new();
+        for descriptor in dbx_core::mcp_catalog::TOOLS {
+            if descriptor.coverage == dbx_core::mcp_catalog::McpCoverage::None {
+                continue;
+            }
+            // Salesforce keeps its read-only identity tool in the public
+            // `salesforce` toolset, while DML has a narrower opt-in ceiling.
+            // Use that dedicated ceiling for both prepare and apply so the
+            // advertised surface matches their runtime gate.
+            let policy_toolset = match descriptor.name {
+                "dbx_salesforce_prepare_write" | "dbx_salesforce_apply_write" => {
+                    dbx_core::mcp_access::SALESFORCE_WRITE_TOOLSET
+                }
+                _ => descriptor.toolset,
+            };
+            let required = match descriptor.access_mode {
+                dbx_core::mcp_catalog::McpAccessMode::Classified => dbx_core::mcp_access::McpAccessLevel::Read,
+                dbx_core::mcp_catalog::McpAccessMode::Static => match descriptor.access {
+                    dbx_core::mcp_catalog::McpAccessLevel::Read => dbx_core::mcp_access::McpAccessLevel::Read,
+                    dbx_core::mcp_catalog::McpAccessLevel::Write => dbx_core::mcp_access::McpAccessLevel::Write,
+                    dbx_core::mcp_catalog::McpAccessLevel::Full => dbx_core::mcp_access::McpAccessLevel::Full,
+                },
+            };
+            let required = if required == dbx_core::mcp_access::McpAccessLevel::Full
+                && policy.confirmation_policy() == McpConfirmPolicy::Full
+                && (descriptor.toolset.starts_with("nacos.") || descriptor.toolset.starts_with("consul."))
+            {
+                dbx_core::mcp_access::McpAccessLevel::Write
+            } else {
+                required
+            };
+            let types = descriptor.coverage.database_types();
+            let scopes = dbx_core::mcp_catalog::TOOLSETS
+                .iter()
+                .find(|toolset| toolset.id == descriptor.toolset)
+                .map_or(&[][..], |toolset| toolset.scope_kinds);
+            let has_match = connections.iter().any(|connection| {
+                types.contains(&connection.db_type)
+                    && policy_allows_connection(&policy, group_paths.get(&connection.id), connection)
+                    && connection_has_tool_access(
+                        &access,
+                        group_paths.get(&connection.id).map(|path| path.ids.as_slice()).unwrap_or(&[]),
+                        &connection.id,
+                        policy_toolset,
+                        scopes,
+                        required,
+                    )
+            });
+            if has_match {
+                visible.insert(descriptor.name);
+            }
+        }
+        Some((visible, access.default_access))
     }
 
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
@@ -3578,12 +5257,34 @@ impl DbxMcpServer {
     #[allow(clippy::result_large_err)]
     async fn resolve_connection(&self, selector: &ConnectionSelector) -> Result<ResolvedConnection, CallToolResult> {
         let policy = self.load_policy().await?;
+        let access = self
+            .backend
+            .load_mcp_access_policy()
+            .await
+            .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
         let group_paths = self
             .load_group_paths_for_policy(&policy)
             .await
             .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
         let connections =
             self.backend.load_connections().await.map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
+        let ensure_access = |connection: &ConnectionConfig| -> Result<(), CallToolResult> {
+            let group_ids = group_paths.get(&connection.id).map(|path| path.ids.as_slice()).unwrap_or(&[]);
+            let resolved = access.resolve(group_ids, &connection.id, None);
+            if !resolved.visible {
+                return Err(tool_error(
+                    "CONNECTION_OUT_OF_SCOPE",
+                    format!("Connection \"{}\" is not allowed by DBX MCP settings.", connection.id),
+                ));
+            }
+            if resolved.level < dbx_core::mcp_access::McpAccessLevel::Read {
+                return Err(tool_error(
+                    "MCP_READ_ONLY",
+                    format!("Connection \"{}\" is above the effective DBX MCP access level.", connection.name),
+                ));
+            }
+            Ok(())
+        };
         if let Some(id) = selector.connection_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
             let connection = connections
                 .into_iter()
@@ -3601,6 +5302,7 @@ impl DbxMcpServer {
                     format!("Connection \"{id}\" is not allowed by DBX MCP settings."),
                 ));
             }
+            ensure_access(&connection)?;
             return Ok(resolved_connection(policy, connection, group_paths.get(id)));
         }
         if self.scope.connection_scope_enabled() {
@@ -3622,6 +5324,7 @@ impl DbxMcpServer {
                     "The DBX AI session scope is outside the global MCP connection allowlist.",
                 ));
             }
+            ensure_access(&connection)?;
             let path = group_paths.get(&connection.id);
             return Ok(resolved_connection(policy, connection, path));
         }
@@ -3643,7 +5346,10 @@ impl DbxMcpServer {
                 "CONNECTION_OUT_OF_SCOPE",
                 format!("Connection \"{name}\" is not allowed by DBX MCP settings."),
             )),
-            [connection] => Ok(resolved_connection(policy, connection.clone(), group_paths.get(&connection.id))),
+            [connection] => {
+                ensure_access(connection)?;
+                Ok(resolved_connection(policy, connection.clone(), group_paths.get(&connection.id)))
+            }
             _ => Err(tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &allowed))),
         }
     }
@@ -3697,13 +5403,38 @@ impl DbxMcpServer {
         let entries = crate::plugin_tools::build_catalog(&providers);
         // Tool calls fail closed on policy errors anyway; keep the view.
         let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
+        let access = self.backend.load_mcp_access_policy().await.ok();
+        let policy = policy.cloned();
+        let group_paths = match policy.as_ref() {
+            Some(policy) => self.load_group_paths_for_policy(policy).await.ok(),
+            None => None,
+        };
         entries
             .into_iter()
-            .filter(|entry| policy.is_none_or(|policy| policy_allows_tool(policy, &entry.exposed_name)))
-            .filter(|entry| !self.scope.enabled() || allowed.contains_key(&entry.plugin_id))
-            .map(|entry| {
+            .filter(|entry| policy.as_ref().is_none_or(|policy| policy_allows_tool(policy, &entry.exposed_name)))
+            .filter_map(|entry| {
+                if self.scope.enabled() && !allowed.contains_key(&entry.plugin_id) {
+                    return None;
+                }
                 let connections = allowed.get(&entry.plugin_id).cloned().unwrap_or_default();
-                crate::plugin_tools::to_rmcp_tool(&entry, &connections)
+                if !plugin_entry_has_allowed_connection(access.as_ref(), group_paths.as_ref(), &entry, &connections) {
+                    return None;
+                }
+                let connections = match (&access, &group_paths) {
+                    (Some(access), Some(group_paths)) => connections
+                        .into_iter()
+                        .filter(|(connection_id, _)| {
+                            plugin_connection_level_allowed(
+                                access,
+                                group_paths.get(connection_id).map(|path| path.ids.as_slice()).unwrap_or(&[]),
+                                &entry,
+                                connection_id,
+                            )
+                        })
+                        .collect(),
+                    _ => connections,
+                };
+                Some(crate::plugin_tools::to_rmcp_tool(&entry, &connections))
             })
             .collect()
     }
@@ -3718,6 +5449,12 @@ impl DbxMcpServer {
         name: &str,
         mut arguments: serde_json::Value,
     ) -> Result<CallToolResult, ErrorData> {
+        if !self.effective_plugin_tools_mode(self.load_policy().await.ok().as_ref()).await.advertise_flat() {
+            return Ok(tool_error(
+                "PLUGIN_TOOLS_MODE",
+                "Plugin MCP tools are exposed through lazy discovery; use dbx_plugin_call.",
+            ));
+        }
         if let Err(error) = self.ensure_tool_allowed(name).await {
             return Ok(error);
         }
@@ -3729,11 +5466,17 @@ impl DbxMcpServer {
         let Some(entry) = entry else {
             return Ok(tool_error("TOOL_NOT_FOUND", format!("Plugin tool \"{name}\" is not available.")));
         };
-        // Same policy stack as the flat surface: allowlist above, then
-        // read-only mode and session scope before the backend is reached.
-        if let Err(error) = self.ensure_plugin_tool_policy(&entry).await {
-            return Ok(error);
-        }
+        update_call_history_details(|details| {
+            let access = if entry.tool.read_only {
+                "read"
+            } else if plugin_tool_is_destructive(&entry.tool) {
+                "full"
+            } else {
+                "write"
+            };
+            details.insert("accessLevel".into(), json!(access));
+            details.insert("accessMode".into(), json!("declared"));
+        });
         let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
         if let Some(object) = arguments.as_object_mut() {
             for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
@@ -3748,12 +5491,23 @@ impl DbxMcpServer {
             Ok(bound) => bound.cloned(),
             Err(message) => return Ok(tool_error("CONNECTION_NOT_FOUND", message)),
         };
+        if entry.requires_connection() && bound.is_none() {
+            return Ok(tool_error(
+                "CONNECTION_NOT_FOUND",
+                format!("Plugin tool \"{}\" requires an allowed plugin connection.", entry.exposed_name),
+            ));
+        }
         if let Some((connection_id, connection_name)) = &bound {
             let _ = CALL_HISTORY.try_with(|history| {
                 let mut history = history.lock().unwrap();
                 history.connection_id.clone_from(connection_id);
                 history.connection_name.clone_from(connection_name);
             });
+        }
+        if let Err(error) =
+            self.ensure_plugin_tool_policy(&entry, bound.as_ref().map(|(id, _)| id.as_str()), &mut arguments).await
+        {
+            return Ok(error);
         }
         if entry.injects_connection_id {
             if let Some((connection_id, _)) = &bound {
@@ -3798,6 +5552,11 @@ impl DbxMcpServer {
         // `dbx_plugin_tools`/`dbx_plugin_call` still fail closed.
         let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
         let policy = self.load_policy().await.ok();
+        let access = self.backend.load_mcp_access_policy().await.ok();
+        let group_paths = match policy.as_ref() {
+            Some(policy) => self.load_group_paths_for_policy(policy).await.ok(),
+            None => None,
+        };
         let mut grouped: std::collections::BTreeMap<String, (String, usize, bool)> = Default::default();
         for entry in &entries {
             let record =
@@ -3809,7 +5568,7 @@ impl DbxMcpServer {
         }
         let mut rows = Vec::new();
         let mut hidden = 0usize;
-        for (plugin_id, (plugin_name, tool_count, any_allowed)) in grouped {
+        for (plugin_id, (plugin_name, _tool_count, any_allowed)) in grouped {
             // Mirror the flat tools/list scoping: with a scope active,
             // plugins without an in-scope connection are not enumerable
             // either. They are hidden by scope (not by the allowlist), so
@@ -3817,12 +5576,45 @@ impl DbxMcpServer {
             if self.scope.enabled() && !allowed.contains_key(&plugin_id) {
                 continue;
             }
-            if any_allowed {
-                let connections = allowed.get(&plugin_id).map_or(0, Vec::len);
-                rows.push((plugin_id, plugin_name, tool_count, connections));
-            } else {
+            if !any_allowed {
                 hidden += 1;
+                continue;
             }
+            let connections = allowed.get(&plugin_id).map_or(&[][..], Vec::as_slice);
+            let visible_entries = entries
+                .iter()
+                .filter(|entry| {
+                    entry.plugin_id == plugin_id
+                        && policy.as_ref().is_none_or(|policy| policy_allows_tool(policy, &entry.exposed_name))
+                        && plugin_entry_has_allowed_connection(
+                            access.as_ref(),
+                            group_paths.as_ref(),
+                            entry,
+                            connections,
+                        )
+                })
+                .collect::<Vec<_>>();
+            if visible_entries.is_empty() {
+                continue;
+            }
+            let connection_count = connections
+                .iter()
+                .filter(|(connection_id, _)| {
+                    visible_entries.iter().any(|entry| {
+                        entry.requires_connection()
+                            && match (access.as_ref(), group_paths.as_ref()) {
+                                (Some(access), Some(group_paths)) => plugin_connection_level_allowed(
+                                    access,
+                                    group_paths.get(connection_id).map(|path| path.ids.as_slice()).unwrap_or(&[]),
+                                    entry,
+                                    connection_id,
+                                ),
+                                _ => true,
+                            }
+                    })
+                })
+                .count();
+            rows.push((plugin_id, plugin_name, visible_entries.len(), connection_count));
         }
         let note = (hidden > 0).then(|| format!("{hidden} plugin(s) are hidden by the DBX MCP tool allowlist."));
         Ok((rows, note))
@@ -3865,7 +5657,6 @@ impl DbxMcpServer {
         // by addressing a tool through its plugin id instead. Read-only mode
         // and session scope gate the call through the same shared check.
         self.ensure_tool_allowed(&entry.exposed_name).await?;
-        self.ensure_plugin_tool_policy(&entry).await?;
         let selector = crate::plugin_tools::connection_selector_from(&arguments).map(str::to_string);
         if let Some(object) = arguments.as_object_mut() {
             for key in crate::plugin_tools::CONNECTION_SELECTOR_ARGUMENTS {
@@ -3880,6 +5671,12 @@ impl DbxMcpServer {
             Ok(bound) => bound.cloned(),
             Err(message) => return Err(tool_error("CONNECTION_NOT_FOUND", message)),
         };
+        if entry.requires_connection() && bound.is_none() {
+            return Err(tool_error(
+                "CONNECTION_NOT_FOUND",
+                format!("Plugin tool \"{}\" requires an allowed plugin connection.", entry.exposed_name),
+            ));
+        }
         if let Some((connection_id, connection_name)) = &bound {
             let _ = CALL_HISTORY.try_with(|history| {
                 let mut history = history.lock().unwrap();
@@ -3887,6 +5684,8 @@ impl DbxMcpServer {
                 history.connection_name.clone_from(connection_name);
             });
         }
+        self.ensure_plugin_tool_policy(&entry, bound.as_ref().map(|(id, _)| id.as_str()), &mut arguments).await?;
+        self.ensure_tool_allowed("dbx_plugin_call").await?;
         if entry.injects_connection_id {
             if let Some((connection_id, _)) = &bound {
                 if let Some(object) = arguments.as_object_mut() {
@@ -3942,6 +5741,21 @@ impl ServerHandler for DbxMcpServer {
         let started = Instant::now();
         let args = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
         let arg = |name: &str| args.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string();
+        // Which MCP client made the call (from `initialize`), for the call
+        // history. Informational only: it never takes part in a decision.
+        let client = context
+            .peer
+            .peer_info()
+            .map(|info| json!({ "name": info.client_info.name, "version": info.client_info.version }));
+        let descriptor = dbx_core::mcp_catalog::descriptor(request.name.as_ref());
+        let details = json!({
+            "source": "mcp",
+            "transport": match self.transport { McpTransport::Stdio => "stdio", McpTransport::StreamableHttp => "http" },
+            "client": client,
+            "accessLevel": descriptor.map(|item| item.access),
+            "accessMode": descriptor.map(|item| item.access_mode),
+            "confirmation": "not_required",
+        }).to_string();
         let entry = HistoryEntry {
             id: Uuid::new_v4().to_string(),
             connection_id: arg("connection_id"),
@@ -3957,7 +5771,7 @@ impl ServerHandler for DbxMcpServer {
             target: arg("table"),
             affected_rows: None,
             rollback_sql: None,
-            details_json: Some(r#"{"source":"mcp"}"#.into()),
+            details_json: Some(details),
             source: "mcp".into(),
             mcp_tool_name: Some(request.name.to_string()),
             mcp_request_json: Some(bounded_history_request(&args)),
@@ -4452,6 +6266,178 @@ fn policy_allows_connection(
     connection: &dbx_core::models::connection::ConnectionConfig,
 ) -> bool {
     dbx_core::mcp_policy::policy_allows_connection(policy, group_path, &connection.id)
+}
+
+fn catalog_advertised_access(
+    descriptor: &dbx_core::mcp_catalog::McpToolDescriptor,
+) -> dbx_core::mcp_access::McpAccessLevel {
+    match descriptor.access_mode {
+        dbx_core::mcp_catalog::McpAccessMode::Classified => dbx_core::mcp_access::McpAccessLevel::Read,
+        dbx_core::mcp_catalog::McpAccessMode::Static => catalog_access_level(descriptor.access),
+    }
+}
+
+fn catalog_access_level(level: dbx_core::mcp_catalog::McpAccessLevel) -> dbx_core::mcp_access::McpAccessLevel {
+    match level {
+        dbx_core::mcp_catalog::McpAccessLevel::Read => dbx_core::mcp_access::McpAccessLevel::Read,
+        dbx_core::mcp_catalog::McpAccessLevel::Write => dbx_core::mcp_access::McpAccessLevel::Write,
+        dbx_core::mcp_catalog::McpAccessLevel::Full => dbx_core::mcp_access::McpAccessLevel::Full,
+    }
+}
+
+/// Discovery must include tools usable through an admitted sub-scope override,
+/// even when the inherited connection level is lower. Actual calls still
+/// resolve and authorize their concrete scope independently.
+fn connection_has_tool_access(
+    access: &dbx_core::mcp_access::McpAccessPolicy,
+    group_ids: &[String],
+    connection_id: &str,
+    toolset: &str,
+    scope_kinds: &[&str],
+    required: dbx_core::mcp_access::McpAccessLevel,
+) -> bool {
+    let ceiling = access.toolset_ceiling(connection_id, toolset);
+    let allowed = |scope| {
+        let resolved = access.resolve(group_ids, connection_id, scope);
+        resolved.visible && ceiling.map_or(resolved.level, |ceiling| resolved.level.min(ceiling)) >= required
+    };
+    allowed(None)
+        || access.rules.keys().any(|target| match target {
+            dbx_core::mcp_access::McpRuleTarget::Scope { connection_id: id, scope, value }
+                if id == connection_id && scope_kinds.contains(&scope.as_str()) =>
+            {
+                allowed(Some((scope.as_str(), value.as_str())))
+            }
+            _ => false,
+        })
+}
+
+fn plugin_connection_level_allowed(
+    access: &dbx_core::mcp_access::McpAccessPolicy,
+    group_ids: &[String],
+    entry: &crate::plugin_tools::PluginToolEntry,
+    connection_id: &str,
+) -> bool {
+    let required = plugin_tool_required_access(entry);
+    let scopes = entry.scope.as_ref().map(|(kind, _)| [kind.as_str()]);
+    connection_has_tool_access(
+        access,
+        group_ids,
+        connection_id,
+        &entry.toolset,
+        scopes.as_ref().map_or(&[], |scopes| scopes.as_slice()),
+        required,
+    )
+}
+
+fn plugin_tool_required_access(entry: &crate::plugin_tools::PluginToolEntry) -> dbx_core::mcp_access::McpAccessLevel {
+    if entry.tool.read_only {
+        dbx_core::mcp_access::McpAccessLevel::Read
+    } else {
+        // Full-level tools still use the separate high-risk confirmation tier;
+        // ordinary write access is the minimum resource level before that
+        // confirmation can be considered.
+        dbx_core::mcp_access::McpAccessLevel::Write
+    }
+}
+
+fn plugin_entry_has_allowed_connection(
+    access: Option<&dbx_core::mcp_access::McpAccessPolicy>,
+    group_paths: Option<&HashMap<String, dbx_core::mcp_policy::McpConnectionGroupPath>>,
+    entry: &crate::plugin_tools::PluginToolEntry,
+    connections: &[(String, String)],
+) -> bool {
+    if !entry.requires_connection() {
+        return access.is_none_or(|access| access.default_access >= plugin_tool_required_access(entry));
+    }
+    if connections.is_empty() {
+        return false;
+    }
+    match (access, group_paths) {
+        (Some(access), Some(group_paths)) => connections.iter().any(|(connection_id, _)| {
+            plugin_connection_level_allowed(
+                access,
+                group_paths.get(connection_id).map(|path| path.ids.as_slice()).unwrap_or(&[]),
+                entry,
+                connection_id,
+            )
+        }),
+        _ => true,
+    }
+}
+
+/// Plugin connection and sub-scope check. The v2 access policy is authoritative
+/// for plugin calls just as it is for built-in product calls: connection
+/// visibility, connection access, selected/none sub-scope admission, and the
+/// connection's toolset ceiling are all evaluated before the sidecar runs.
+#[allow(clippy::result_large_err)] // Keep the MCP error response, as in the other scope guards.
+fn ensure_plugin_scope(
+    access: &dbx_core::mcp_access::McpAccessPolicy,
+    entry: &crate::plugin_tools::PluginToolEntry,
+    group_ids: &[String],
+    connection_id: Option<&str>,
+    arguments: &serde_json::Value,
+) -> Result<dbx_core::mcp_access::McpAccessLevel, CallToolResult> {
+    let Some(connection_id) = connection_id else {
+        if entry.scope.is_some() {
+            return Err(tool_error(
+                "SCOPE_OUT_OF_POLICY",
+                format!("Plugin tool \"{}\" requires a policy-bound connection.", entry.exposed_name),
+            ));
+        }
+        if access.default_access < plugin_tool_required_access(entry) {
+            return Err(tool_error(
+                "MCP_READ_ONLY",
+                format!("Plugin tool \"{}\" is above the effective DBX MCP access level.", entry.exposed_name),
+            ));
+        }
+        return Ok(access.default_access);
+    };
+
+    let needed = plugin_tool_required_access(entry);
+    let ceiling = access.toolset_ceiling(connection_id, &entry.toolset);
+    let cap = |level: dbx_core::mcp_access::McpAccessLevel| ceiling.map_or(level, |ceiling| level.min(ceiling));
+    let resolved = if let Some((kind, argument)) = entry.scope.as_ref() {
+        let value =
+            arguments.get(argument).and_then(serde_json::Value::as_str).filter(|value| !value.trim().is_empty());
+        match value {
+            Some(value) => access.resolve(group_ids, connection_id, Some((kind, value))),
+            None => {
+                let has_level_rules = access.rules.iter().any(|(target, rule)| {
+                    matches!(target, dbx_core::mcp_access::McpRuleTarget::Scope { connection_id: id, scope, .. } if id == connection_id && scope == kind)
+                        && (rule.access.is_some() || rule.ceiling.is_some())
+                });
+                if !access.sub_scope_allows_all(connection_id, kind) || has_level_rules {
+                    return Err(tool_error(
+                        "SCOPE_REQUIRED",
+                        format!("Plugin tool \"{}\" requires the scope argument {argument}.", entry.exposed_name),
+                    ));
+                }
+                access.resolve(group_ids, connection_id, None)
+            }
+        }
+    } else {
+        access.resolve(group_ids, connection_id, None)
+    };
+    if !resolved.visible {
+        return Err(tool_error(
+            "SCOPE_OUT_OF_POLICY",
+            format!("Connection \"{connection_id}\" is not allowed by DBX MCP settings."),
+        ));
+    }
+    if cap(resolved.level) < needed {
+        return Err(tool_error(
+            "MCP_READ_ONLY",
+            format!("Plugin tool \"{}\" is above the effective DBX MCP access level.", entry.exposed_name),
+        ));
+    }
+    Ok(cap(resolved.level))
+}
+
+/// The exposed tool is declared `full`: `exposed_tools` rewrites
+/// `destructiveHint` from the manifest level, so the hint is authoritative here.
+fn plugin_tool_is_destructive(tool: &dbx_core::ai::plugin_tools::RawPluginTool) -> bool {
+    tool.annotations.get("destructiveHint").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
 fn policy_allows_tool(policy: &McpGlobalPolicy, tool_name: &str) -> bool {
@@ -5341,6 +7327,39 @@ fn escape_cell(value: &str) -> String {
     value.replace('|', "\\|").replace('\n', " ")
 }
 
+/// Settings inherited from v1 store Redis logical databases under `database`,
+/// while native v2 providers can describe them as `dbIndex`. Resolve the kind
+/// actually present on this connection; if both exist, neither may widen the
+/// other. In particular a selected v1 database must not be checked against an
+/// empty dbIndex allowlist, nor may its per-database level be skipped.
+fn redis_database_access(
+    access: &dbx_core::mcp_access::McpAccessPolicy,
+    group_ids: &[String],
+    connection_id: &str,
+    database: u32,
+) -> dbx_core::mcp_access::McpResolvedAccess {
+    let has_kind = |kind: &str| {
+        access.rules.keys().any(|target| {
+            matches!(target, dbx_core::mcp_access::McpRuleTarget::Scope { connection_id: id, scope, .. }
+                if id == connection_id && scope == kind)
+        })
+    };
+    let has_database = has_kind("database");
+    let has_index = has_kind("dbIndex");
+    let value = database.to_string();
+    let mut resolved = access.resolve(
+        group_ids,
+        connection_id,
+        Some((if has_index && !has_database { "dbIndex" } else { "database" }, &value)),
+    );
+    if has_index && has_database {
+        let indexed = access.resolve(group_ids, connection_id, Some(("dbIndex", &value)));
+        resolved.visible &= indexed.visible;
+        resolved.level = resolved.level.min(indexed.level);
+    }
+    resolved
+}
+
 fn redis_database(connection: &dbx_core::models::connection::ConnectionConfig) -> Option<u32> {
     connection.database.as_deref().and_then(parse_redis_database)
 }
@@ -5650,9 +7669,20 @@ mod tests {
         salesforce_identity: Option<SalesforceCurrentUser>,
         approved_sql: std::sync::Mutex<Vec<String>>,
         consumed_sql: std::sync::Mutex<Vec<String>>,
+        sql_approval_revoked: std::sync::atomic::AtomicBool,
         revoke_on_approval: bool,
         plugin_providers: Vec<crate::plugin_tools::PluginToolProvider>,
         plugin_tool_calls: RecordedPluginToolCalls,
+        /// Answer for `approve_high_risk_tool`: `None` = backend has no desktop.
+        tool_approval_answer: Option<bool>,
+        /// v2 policy override for plugin sub-scope decisions.
+        access_policy: Option<dbx_core::mcp_access::McpAccessPolicy>,
+        access_policy_loads: AtomicUsize,
+        access_after_approval: Option<dbx_core::mcp_access::McpAccessPolicy>,
+        policy_after_approval: Option<McpGlobalPolicy>,
+        product_calls: std::sync::Mutex<Vec<crate::products::ProductCall>>,
+        tool_approvals: std::sync::Mutex<Vec<crate::approval::ToolApprovalRequest>>,
+        nacos_namespaces: Option<Vec<String>>,
     }
 
     impl Default for FakeBackend {
@@ -5677,9 +7707,18 @@ mod tests {
                 salesforce_identity: None,
                 approved_sql: std::sync::Mutex::new(Vec::new()),
                 consumed_sql: std::sync::Mutex::new(Vec::new()),
+                sql_approval_revoked: std::sync::atomic::AtomicBool::new(false),
                 revoke_on_approval: false,
                 plugin_providers: Vec::new(),
                 plugin_tool_calls: std::sync::Mutex::new(Vec::new()),
+                tool_approval_answer: None,
+                access_policy: None,
+                access_policy_loads: AtomicUsize::new(0),
+                access_after_approval: None,
+                policy_after_approval: None,
+                product_calls: std::sync::Mutex::new(Vec::new()),
+                tool_approvals: std::sync::Mutex::new(Vec::new()),
+                nacos_namespaces: None,
             }
         }
     }
@@ -5697,6 +7736,167 @@ mod tests {
             "ssl": false
         }))
         .unwrap()
+    }
+
+    fn call_safety_policy(full: bool) -> McpGlobalPolicy {
+        McpGlobalPolicy {
+            allow_dangerous_sql: full,
+            call_confirmation: Some(McpConfirmPolicy::HighRisk),
+            ..Default::default()
+        }
+    }
+
+    async fn call_safety_tool(server: &DbxMcpServer, kind: &str) -> CallToolResult {
+        match kind {
+            "plugin_flat" => {
+                server.call_plugin_tool_dispatch("dbx_ssh__ssh_exec", json!({"command":"test"})).await.unwrap()
+            }
+            "plugin_lazy" => {
+                server
+                    .plugin_call(Parameters(PluginCallRequest {
+                        plugin_id: "io.dbx.ssh".into(),
+                        tool: "ssh_exec".into(),
+                        arguments: Some(json!({"command":"test"})),
+                        dbx_connection: None,
+                    }))
+                    .await
+            }
+            "product" => {
+                server
+                    .consul_kv_delete(Parameters(ConsulKvDeleteRequest {
+                        selector: selector("consul"),
+                        key: "config/app".into(),
+                        cas: None,
+                    }))
+                    .await
+            }
+            "redis" => {
+                server
+                    .execute_redis_command(Parameters(ExecuteRedisCommandRequest {
+                        selector: selector("redis"),
+                        db: Some(0),
+                        command: "FLUSHALL".into(),
+                    }))
+                    .await
+            }
+            "mongo" => {
+                server
+                    .execute_query(Parameters(ExecuteQueryRequest {
+                        selector: selector("mongo"),
+                        database: Some("app".into()),
+                        sql: "db.items.drop()".into(),
+                        session_id: None,
+                        cell_char_offset: None,
+                        cell_char_limit: None,
+                        max_rows: None,
+                    }))
+                    .await
+            }
+            "connection" => {
+                server
+                    .remove_connection(Parameters(RemoveConnectionRequest {
+                        connection_id: Some("consul".into()),
+                        connection_name: None,
+                    }))
+                    .await
+            }
+            _ => panic!("unknown test tool"),
+        }
+    }
+
+    fn call_safety_backend(
+        policy: McpGlobalPolicy,
+        answer: Option<bool>,
+        revoked: Option<McpGlobalPolicy>,
+    ) -> Arc<FakeBackend> {
+        Arc::new(FakeBackend {
+            policy,
+            tool_approval_answer: answer,
+            policy_after_approval: revoked,
+            connections: vec![
+                connection("consul", "consul", "consul", ""),
+                connection("redis", "redis", "redis", "0"),
+                connection("mongo", "mongo", "mongodb", "app"),
+            ],
+            plugin_providers: vec![plugin_provider("io.dbx.ssh", "Terminal", destructive_plugin_listing())],
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn call_safety_applies_to_full_access_across_tool_families_and_plugin_routes() {
+        for kind in ["plugin_flat", "plugin_lazy", "product", "redis", "mongo", "connection"] {
+            for full in [false, true] {
+                for answer in [None, Some(false), Some(true)] {
+                    let backend = call_safety_backend(call_safety_policy(full), answer, None);
+                    let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+                    let result = call_safety_tool(&server, kind).await;
+                    assert_eq!(
+                        backend.tool_approvals.lock().unwrap().len(),
+                        usize::from(full),
+                        "{kind} full={full}: {}",
+                        result_text(&result)
+                    );
+                    if !full || answer != Some(true) {
+                        assert!(result.is_error.unwrap_or(false), "{kind}: {}", result_text(&result));
+                        assert!(backend.plugin_tool_calls.lock().unwrap().is_empty());
+                        assert!(backend.product_calls.lock().unwrap().is_empty());
+                    } else if kind != "redis" && kind != "mongo" {
+                        assert!(!result.is_error.unwrap_or(false), "{kind}: {}", result_text(&result));
+                    } else {
+                        // These fake drivers report unsupported only after the gate.
+                        assert!(!result_text(&result).contains("BLOCKED"), "{kind}: {}", result_text(&result));
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn call_safety_cannot_elevate_a_revoked_full_grant_after_confirmation() {
+        for kind in ["plugin_flat", "plugin_lazy", "product", "redis", "mongo", "connection"] {
+            for after in [
+                call_safety_policy(false),
+                McpGlobalPolicy { call_confirmation: Some(McpConfirmPolicy::Off), ..call_safety_policy(true) },
+            ] {
+                let backend = call_safety_backend(call_safety_policy(true), Some(true), Some(after));
+                let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+                let result = call_safety_tool(&server, kind).await;
+                assert!(result.is_error.unwrap_or(false), "{kind}: {}", result_text(&result));
+                assert_eq!(backend.tool_approvals.lock().unwrap().len(), 1, "{kind}");
+                assert!(backend.plugin_tool_calls.lock().unwrap().is_empty());
+                assert!(backend.product_calls.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn call_safety_sql_authorizes_full_then_confirms_and_rechecks() {
+        let conn = connection("mysql", "mysql", "mysql", "app");
+        for full in [false, true] {
+            for revoke in [false, true] {
+                let policy = call_safety_policy(full);
+                let backend = Arc::new(FakeBackend {
+                    connections: vec![conn.clone()],
+                    policy: policy.clone(),
+                    policy_after_approval: revoke.then_some(call_safety_policy(false)),
+                    ..Default::default()
+                });
+                let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+                let result = server.approved_sql_policy(&conn, &policy, "app", "DROP TABLE items", false, false).await;
+                assert_eq!(result.is_ok(), full && !revoke);
+                assert_eq!(backend.approved_sql.lock().unwrap().len(), usize::from(full));
+                assert_eq!(backend.consumed_sql.lock().unwrap().len(), usize::from(full && !revoke));
+            }
+        }
+        let policy = call_safety_policy(true);
+        let backend =
+            Arc::new(FakeBackend { connections: vec![conn.clone()], policy: policy.clone(), ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        for sql in ["SELECT 1", "UPDATE items SET value = 1 WHERE id = 1"] {
+            assert!(server.approved_sql_policy(&conn, &policy, "app", sql, false, false).await.unwrap().1.is_none());
+        }
+        assert!(backend.approved_sql.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -5734,6 +7934,30 @@ mod tests {
         production.is_production = true;
         let error = server.approved_sql_policy(&production, &policy, "app", sql, false, false).await.unwrap_err();
         assert!(result_text(&error).contains("PRODUCTION_WRITE_BLOCKED"));
+    }
+
+    #[tokio::test]
+    async fn sql_tool_revocation_while_awaiting_approval_prevents_execution() {
+        let policy = McpGlobalPolicy { prompt_high_risk_sql: true, ..Default::default() };
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "MySQL", "mysql", "app")],
+            policy: policy.clone(),
+            policy_after_approval: Some(McpGlobalPolicy { allowed_tool_names: Some(vec![]), ..policy }),
+            ..Default::default()
+        });
+        let result = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false)
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("mysql"),
+                database: None,
+                sql: "CREATE TABLE revoked (id INT)".into(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert!(result_text(&result).contains("TOOL_OUT_OF_SCOPE"), "{}", result_text(&result));
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -5813,6 +8037,9 @@ mod tests {
                 *self.policy_override.lock().unwrap() =
                     Some(McpGlobalPolicy { read_only: true, ..self.policy.clone() });
             }
+            if let Some(policy) = &self.policy_after_approval {
+                *self.policy_override.lock().unwrap() = Some(policy.clone());
+            }
             Ok("test-approval-token".to_string())
         }
 
@@ -5823,7 +8050,10 @@ mod tests {
             _database: &str,
             sql: &str,
         ) -> Result<(), String> {
-            if token != "test-approval-token" || self.consumed_sql.lock().unwrap().contains(&sql.to_string()) {
+            if self.sql_approval_revoked.load(std::sync::atomic::Ordering::SeqCst)
+                || token != "test-approval-token"
+                || self.consumed_sql.lock().unwrap().contains(&sql.to_string())
+            {
                 return Err("SQL_BLOCKED: Invalid or replayed approval".to_string());
             }
             self.consumed_sql.lock().unwrap().push(sql.to_string());
@@ -5838,12 +8068,60 @@ mod tests {
             Ok(self.policy_override.lock().unwrap().clone().unwrap_or_else(|| self.policy.clone()))
         }
 
+        async fn load_mcp_access_policy(&self) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+            self.access_policy_loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if !self.tool_approvals.lock().unwrap().is_empty() {
+                if let Some(access) = &self.access_after_approval {
+                    return Ok(access.clone());
+                }
+            }
+            match &self.access_policy {
+                Some(access) => Ok(access.clone()),
+                None => Ok(dbx_core::mcp_access::McpAccessPolicy::from_v1(&self.load_mcp_global_policy().await?)),
+            }
+        }
+
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
             Ok(self.connections.clone())
         }
 
         async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
             Ok(self.plugin_providers.clone())
+        }
+
+        async fn product_call(
+            &self,
+            _connection: &ConnectionConfig,
+            call: &crate::products::ProductCall,
+        ) -> Result<serde_json::Value, String> {
+            self.product_calls.lock().unwrap().push(call.clone());
+            if call.product == crate::products::Product::Nacos && call.operation == "list_namespaces" {
+                return Ok(serde_json::Value::Array(
+                    self.nacos_namespaces
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|namespace| json!({ "namespace": namespace }))
+                        .collect(),
+                ));
+            }
+            Ok(json!({ "ok": true, "operation": call.operation }))
+        }
+
+        async fn approve_high_risk_tool(&self, request: &crate::approval::ToolApprovalRequest) -> Result<(), String> {
+            self.tool_approvals.lock().unwrap().push(request.clone());
+            if self.revoke_on_approval {
+                *self.policy_override.lock().unwrap() =
+                    Some(McpGlobalPolicy { read_only: true, ..self.policy.clone() });
+            }
+            if let Some(policy) = &self.policy_after_approval {
+                *self.policy_override.lock().unwrap() = Some(policy.clone());
+            }
+            match self.tool_approval_answer {
+                Some(true) => Ok(()),
+                Some(false) => Err("TOOL_BLOCKED: MCP confirmation denied.".to_string()),
+                None => Err("TOOL_BLOCKED: Desktop confirmation is unavailable for this MCP backend.".to_string()),
+            }
         }
 
         async fn call_plugin_mcp_tool(
@@ -6111,6 +8389,9 @@ mod tests {
         tools: serde_json::Value,
     ) -> crate::plugin_tools::PluginToolProvider {
         crate::plugin_tools::PluginToolProvider {
+            scope: None,
+            scope_list_method: None,
+            toolsets: std::collections::BTreeMap::new(),
             plugin_id: plugin_id.to_string(),
             plugin_name: plugin_name.to_string(),
             tools: dbx_core::ai::plugin_tools::parse_tool_list(&tools),
@@ -6169,6 +8450,115 @@ mod tests {
         assert!(properties.get("connectionId").is_none(), "host-bound argument stays out of the advertised schema");
         let list = tools.iter().find(|tool| tool.name.as_ref() == "dbx_kafka__kafka_topics_list").unwrap();
         assert!(list.annotations.as_ref().and_then(|a| a.read_only_hint).expect("readOnlyHint passthrough"));
+    }
+
+    #[tokio::test]
+    async fn connection_bound_plugin_tools_require_an_allowed_connection() {
+        let backend = Arc::new(FakeBackend {
+            plugin_providers: vec![plugin_provider(
+                "io.dbx.plugins",
+                "Plugins",
+                json!({
+                    "tools": [
+                        {
+                            "name": "read_file",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": { "connectionId": { "type": "string" }, "path": { "type": "string" } },
+                                "required": ["connectionId", "path"]
+                            }
+                        },
+                        { "name": "version", "annotations": { "readOnlyHint": true } }
+                    ]
+                }),
+            )],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let names =
+            server.policy_filtered_tools().await.into_iter().map(|tool| tool.name.to_string()).collect::<Vec<_>>();
+        assert!(!names.iter().any(|name| name == "dbx_plugins__read_file"), "{names:?}");
+        assert!(names.iter().any(|name| name == "dbx_plugins__version"), "connection-less tools stay available");
+
+        let result =
+            server.call_plugin_tool_dispatch("dbx_plugins__read_file", json!({ "path": "/tmp/a" })).await.unwrap();
+        assert!(result_text(&result).contains("requires an allowed plugin connection"), "{}", result_text(&result));
+        assert!(backend.plugin_tool_calls.lock().unwrap().is_empty(), "the sidecar must not run without a binding");
+
+        let details = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.plugins".into() })).await;
+        assert_eq!(details.is_error, Some(false));
+        let details = result_text(&details);
+        assert!(!details.contains("read_file"), "connection-bound tools must stay out of lazy discovery: {details}");
+        assert!(details.contains("version"), "connection-less tools remain discoverable: {details}");
+
+        let mut access = dbx_core::mcp_access::McpAccessPolicy {
+            default_access: dbx_core::mcp_access::McpAccessLevel::Full,
+            ..Default::default()
+        };
+        access.rules.insert(
+            dbx_core::mcp_access::McpRuleTarget::Connection { id: "k1".into() },
+            dbx_core::mcp_access::McpAccessRule {
+                access: Some(dbx_core::mcp_access::McpAccessLevel::Read),
+                ..Default::default()
+            },
+        );
+        let restricted_backend = Arc::new(FakeBackend {
+            access_policy: Some(access),
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.plugins")],
+            plugin_providers: vec![plugin_provider(
+                "io.dbx.plugins",
+                "Plugins",
+                json!({
+                    "tools": [
+                        {
+                            "name": "read_file",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": { "connectionId": { "type": "string" }, "path": { "type": "string" } },
+                                "required": ["connectionId", "path"]
+                            }
+                        },
+                        { "name": "version", "annotations": { "readOnlyHint": true } }
+                    ]
+                }),
+            )],
+            ..Default::default()
+        });
+        let restricted_server = DbxMcpServer::with_runtime_options(restricted_backend, McpScope::default(), false);
+        let details =
+            restricted_server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.plugins".into() })).await;
+        let details = result_text(&details);
+        assert!(!details.contains("read_file"), "v2 read-only access must filter lazy write tools: {details}");
+        assert!(details.contains("version"), "v2 read-only access keeps lazy read tools: {details}");
+    }
+
+    #[tokio::test]
+    async fn connectionless_plugin_tools_honor_global_v2_access() {
+        let backend = Arc::new(FakeBackend {
+            access_policy: Some(dbx_core::mcp_access::McpAccessPolicy {
+                default_access: dbx_core::mcp_access::McpAccessLevel::None,
+                ..Default::default()
+            }),
+            plugin_providers: vec![plugin_provider(
+                "io.dbx.version",
+                "Version",
+                json!({ "tools": [{ "name": "version", "annotations": { "readOnlyHint": true } }] }),
+            )],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let names =
+            server.policy_filtered_tools().await.into_iter().map(|tool| tool.name.to_string()).collect::<HashSet<_>>();
+        assert!(!names.contains("dbx_version__version"), "{names:?}");
+
+        let listed = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        assert!(result_text(&listed).contains("MCP_READ_ONLY"), "{}", result_text(&listed));
+
+        let result = server.call_plugin_tool_dispatch("dbx_version__version", json!({})).await.unwrap();
+        assert!(result_text(&result).contains("MCP_READ_ONLY"), "{}", result_text(&result));
+        assert!(backend.plugin_tool_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -6238,6 +8628,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugin_list_counts_only_v2_visible_tools_and_connections() {
+        let mut access = dbx_core::mcp_access::McpAccessPolicy {
+            default_access: dbx_core::mcp_access::McpAccessLevel::Full,
+            ..Default::default()
+        };
+        access.rules.insert(
+            dbx_core::mcp_access::McpRuleTarget::Connection { id: "k1".into() },
+            dbx_core::mcp_access::McpAccessRule {
+                access: Some(dbx_core::mcp_access::McpAccessLevel::Read),
+                ..Default::default()
+            },
+        );
+        let backend = Arc::new(FakeBackend {
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            access_policy: Some(access),
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        let output = result_text(&list);
+        assert!(output.contains("1 tool(s)"), "{output}");
+        assert!(output.contains("1 allowed connection(s)"), "{output}");
+        assert!(!output.contains("2 tool(s)"), "{output}");
+
+        let tools = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.kafka".into() })).await;
+        let output = result_text(&tools);
+        assert!(output.contains("kafka_topics_list"), "{output}");
+        assert!(!output.contains("kafka_topics_delete"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn plugin_list_keeps_connectionless_tools_without_connections() {
+        let backend = Arc::new(FakeBackend {
+            plugin_providers: vec![plugin_provider(
+                "io.dbx.version",
+                "Version",
+                json!({
+                    "tools": [{
+                        "name": "version",
+                        "annotations": { "readOnlyHint": true }
+                    }]
+                }),
+            )],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        let output = result_text(&list);
+        assert!(output.contains("io.dbx.version"), "{output}");
+        assert!(output.contains("1 tool(s) · 0 allowed connection(s)"), "{output}");
+    }
+
+    #[tokio::test]
     async fn plugin_meta_tools_respect_mode_and_policy() {
         // flat 模式（默认构造走 env；此处直接构造 Lazy 验证过滤）——先验证 policy。
         let restricted = Arc::new(FakeBackend {
@@ -6278,6 +8724,7 @@ mod tests {
                 ]),
                 ..Default::default()
             },
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
             plugin_providers: vec![
                 plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing()),
                 plugin_provider(
@@ -6435,6 +8882,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugin_tools_honor_v2_connection_access_on_flat_and_lazy_paths() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Full, ..Default::default() };
+        access.rules.insert(
+            McpRuleTarget::Connection { id: "k1".into() },
+            McpAccessRule { access: Some(McpAccessLevel::Read), ..Default::default() },
+        );
+        let backend = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy { read_only: false, prompt_high_risk_sql: true, ..Default::default() },
+            access_policy: Some(access),
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            tool_approval_answer: Some(true),
+            ..Default::default()
+        });
+        let flat = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let flat =
+            flat.call_plugin_tool_dispatch("dbx_kafka__kafka_topics_delete", json!({ "topics": ["t"] })).await.unwrap();
+        assert!(result_text(&flat).contains("MCP_READ_ONLY"), "{}", result_text(&flat));
+
+        let lazy =
+            DbxMcpServer::with_plugin_tools_mode(backend.clone(), McpScope::default(), false, PluginToolsMode::Lazy);
+        let lazy = lazy
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_delete".into(),
+                arguments: Some(json!({ "topics": ["t"] })),
+                dbx_connection: None,
+            }))
+            .await;
+        assert!(result_text(&lazy).contains("MCP_READ_ONLY"), "{}", result_text(&lazy));
+        assert!(backend.plugin_tool_calls.lock().unwrap().is_empty(), "read-only connection must not reach plugin");
+
+        let listed = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false)
+            .policy_filtered_tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(!listed.iter().any(|name| name == "dbx_kafka__kafka_topics_delete"), "{listed:?}");
+        assert!(listed.iter().any(|name| name == "dbx_kafka__kafka_topics_list"), "{listed:?}");
+
+        let mut ceiling = McpAccessPolicy { default_access: McpAccessLevel::Full, ..Default::default() };
+        let mut rule = McpAccessRule::default();
+        rule.toolset_ceilings.insert("default".into(), McpAccessLevel::Read);
+        ceiling.rules.insert(McpRuleTarget::Connection { id: "k1".into() }, rule);
+        let ceiling_backend = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy { read_only: false, prompt_high_risk_sql: true, ..Default::default() },
+            access_policy: Some(ceiling),
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            tool_approval_answer: Some(true),
+            ..Default::default()
+        });
+        let denied = DbxMcpServer::with_runtime_options(ceiling_backend.clone(), McpScope::default(), false)
+            .call_plugin_tool_dispatch("dbx_kafka__kafka_topics_delete", json!({ "topics": ["t"] }))
+            .await
+            .unwrap();
+        assert!(result_text(&denied).contains("MCP_READ_ONLY"), "{}", result_text(&denied));
+        assert!(ceiling_backend.plugin_tool_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn plugin_confirmation_uses_resource_level_and_rechecks_revocations() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+        for lazy in [false, true] {
+            for revoked in [false, true] {
+                let mut access = McpAccessPolicy { default_access: McpAccessLevel::Full, ..Default::default() };
+                access.rules.insert(
+                    McpRuleTarget::Connection { id: "k1".into() },
+                    McpAccessRule { access: Some(McpAccessLevel::Write), ..Default::default() },
+                );
+                let mut after = access.clone();
+                after.rules.get_mut(&McpRuleTarget::Connection { id: "k1".into() }).unwrap().access =
+                    Some(McpAccessLevel::Read);
+                let backend = Arc::new(FakeBackend {
+                    policy: McpGlobalPolicy {
+                        read_only: false,
+                        allow_dangerous_sql: true,
+                        prompt_high_risk_sql: true,
+                        ..Default::default()
+                    },
+                    access_policy: Some(access),
+                    access_after_approval: revoked.then_some(after),
+                    connections: vec![plugin_connection("k1", "test", "io.dbx.ssh")],
+                    plugin_providers: vec![plugin_provider("io.dbx.ssh", "Terminal", destructive_plugin_listing())],
+                    tool_approval_answer: Some(true),
+                    ..Default::default()
+                });
+                let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+                let result = if lazy {
+                    server
+                        .plugin_call(Parameters(PluginCallRequest {
+                            plugin_id: "io.dbx.ssh".into(),
+                            tool: "ssh_exec".into(),
+                            arguments: Some(json!({"command": "test"})),
+                            dbx_connection: Some("k1".into()),
+                        }))
+                        .await
+                } else {
+                    server
+                        .call_plugin_tool_dispatch(
+                            "dbx_ssh__ssh_exec",
+                            json!({"dbx_connection": "k1", "command": "test"}),
+                        )
+                        .await
+                        .unwrap()
+                };
+                assert_eq!(
+                    backend.tool_approvals.lock().unwrap().len(),
+                    1,
+                    "resource write requires confirmation: {}",
+                    result_text(&result)
+                );
+                assert_eq!(result.is_error.unwrap_or(false), revoked, "{}", result_text(&result));
+                assert_eq!(backend.plugin_tool_calls.lock().unwrap().len(), usize::from(!revoked));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_resource_override_can_grant_write_under_global_read() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Read, ..Default::default() };
+        access.rules.insert(
+            McpRuleTarget::Connection { id: "k1".into() },
+            McpAccessRule { access: Some(McpAccessLevel::Full), ..Default::default() },
+        );
+        let backend = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy { read_only: true, ..Default::default() },
+            access_policy: Some(access),
+            connections: vec![plugin_connection("k1", "test", "io.dbx.ssh")],
+            plugin_providers: vec![plugin_provider("io.dbx.ssh", "Terminal", destructive_plugin_listing())],
+            ..Default::default()
+        });
+        let result = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false)
+            .call_plugin_tool_dispatch("dbx_ssh__ssh_exec", json!({"dbx_connection": "k1"}))
+            .await
+            .unwrap();
+        assert!(!result.is_error.unwrap_or(false), "{}", result_text(&result));
+        assert_eq!(backend.plugin_tool_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lazy_router_is_advertised_for_read_and_write_permissions() {
+        for read_only in [true, false] {
+            let backend = Arc::new(FakeBackend {
+                policy: McpGlobalPolicy { read_only, allow_dangerous_sql: false, ..Default::default() },
+                ..Default::default()
+            });
+            let server =
+                DbxMcpServer::with_plugin_tools_mode(backend, McpScope::default(), false, PluginToolsMode::Lazy);
+            assert!(server.policy_filtered_tools().await.iter().any(|tool| tool.name == "dbx_plugin_call"));
+        }
+    }
+
+    #[tokio::test]
     async fn plugin_tools_enforce_session_scope() {
         // A scoped session must not reach plugins whose connections are all
         // out of scope — including their connection-less tools, which the
@@ -6494,11 +9099,172 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn product_confirmation_uses_overrides_and_honors_scope_revocation() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+        for product in [crate::products::Product::Nacos, crate::products::Product::Consul] {
+            for revoked in [false, true] {
+                let id = product.as_str();
+                let mut access = McpAccessPolicy { default_access: McpAccessLevel::Read, ..Default::default() };
+                access.rules.insert(
+                    McpRuleTarget::Connection { id: id.into() },
+                    McpAccessRule { access: Some(McpAccessLevel::Write), ..Default::default() },
+                );
+                let mut after = access.clone();
+                after.rules.get_mut(&McpRuleTarget::Connection { id: id.into() }).unwrap().visible = Some(false);
+                let backend = Arc::new(FakeBackend {
+                    policy: McpGlobalPolicy { read_only: true, prompt_high_risk_sql: true, ..Default::default() },
+                    connections: vec![connection(id, id, id, "")],
+                    access_policy: Some(access),
+                    access_after_approval: revoked.then_some(after),
+                    tool_approval_answer: Some(true),
+                    ..Default::default()
+                });
+                let tool = if product == crate::products::Product::Nacos {
+                    "dbx_nacos_delete_config"
+                } else {
+                    "dbx_consul_kv_delete"
+                };
+                let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+                assert!(
+                    server.policy_filtered_tools().await.iter().any(|entry| entry.name == tool),
+                    "confirmable tool must be discoverable"
+                );
+                let result = server
+                    .run_product_tool(
+                        tool,
+                        &selector(id),
+                        product,
+                        "delete",
+                        McpAccessLevel::Full,
+                        Some("dev"),
+                        json!({}),
+                    )
+                    .await;
+                assert_eq!(result.is_error.unwrap_or(false), revoked, "{id}: {}", result_text(&result));
+                assert_eq!(backend.product_calls.lock().unwrap().len(), usize::from(!revoked));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nacos_public_alias_and_nested_target_share_the_authorized_namespace() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget, McpSubScopeMode};
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Write, ..Default::default() };
+        access.rules.insert(
+            McpRuleTarget::Connection { id: "nacos".into() },
+            McpAccessRule { sub_scope: Some(McpSubScopeMode::Selected), ..Default::default() },
+        );
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "nacos".into(), scope: "namespace".into(), value: "public".into() },
+            McpAccessRule { visible: Some(true), ..Default::default() },
+        );
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("nacos", "Nacos", "nacos", "")],
+            access_policy: Some(access),
+            nacos_namespaces: Some(vec!["".into(), "dev".into()]),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        for namespace in [None, Some(""), Some("public")] {
+            let result = server
+                .run_product_tool(
+                    "dbx_nacos_update_instance",
+                    &selector("nacos"),
+                    crate::products::Product::Nacos,
+                    "update_instance",
+                    McpAccessLevel::Write,
+                    namespace,
+                    json!({"target": {"namespace": namespace}, "patch": {"enabled": true}}),
+                )
+                .await;
+            assert!(!result.is_error.unwrap_or(false), "{}", result_text(&result));
+        }
+        assert!(backend.product_calls.lock().unwrap().iter().all(|call| call.args["target"]["namespace"] == "public"));
+        let list =
+            server.nacos_list_namespaces(Parameters(NacosNamespacesRequest { selector: selector("nacos") })).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(result_text(&list)).unwrap(), json!([{"namespace": ""}]));
+    }
+
+    #[tokio::test]
+    async fn nacos_namespace_listing_filters_selected_sub_scope() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget, McpSubScopeMode};
+
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Write, ..Default::default() };
+        access.rules.insert(
+            McpRuleTarget::Connection { id: "nacos".into() },
+            McpAccessRule { sub_scope: Some(McpSubScopeMode::Selected), ..Default::default() },
+        );
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "nacos".into(), scope: "namespace".into(), value: "dev".into() },
+            McpAccessRule { visible: Some(true), ..Default::default() },
+        );
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("nacos", "nacos", "nacos", "")],
+            access_policy: Some(access),
+            nacos_namespaces: Some(vec!["dev".into(), "staging".into(), "prod".into()]),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .nacos_list_namespaces(Parameters(NacosNamespacesRequest {
+                selector: ConnectionSelector { connection_id: Some("nacos".into()), connection_name: None },
+            }))
+            .await;
+        let values: serde_json::Value = serde_json::from_str(result_text(&result)).unwrap();
+        assert_eq!(values, json!([{ "namespace": "dev" }]));
+    }
+
+    #[test]
+    fn tool_catalog_describes_every_router_tool() {
+        // The settings UI renders the dbx-core catalog, so a router tool
+        // without a descriptor would be invisible there (and vice versa).
+        let routed = DbxMcpServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let described = dbx_core::mcp_catalog::TOOLS
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(routed, described);
+
+        // The settings catalog carries the advertised description and
+        // parameters of every tool.
+        let catalog = DbxMcpServer::tool_catalog();
+        let tools = catalog.toolsets.iter().flat_map(|toolset| toolset.tools.iter()).collect::<Vec<_>>();
+        assert!(tools.iter().all(|tool| !tool.description.is_empty()), "every tool has a description");
+        let query = tools.iter().find(|tool| tool.name == "dbx_execute_query").unwrap();
+        assert!(query.parameters.iter().any(|parameter| parameter.name == "sql" && parameter.required));
+        let peek = tools.iter().find(|tool| tool.name == "dbx_peek_messages").unwrap();
+        let start = peek.parameters.iter().find(|parameter| parameter.name == "start_position").unwrap();
+        assert_eq!(start.value_type, "latest | earliest | offset", "local $defs references resolve");
+
+        // Declared read-only tools must not claim a write level in the catalog.
+        for tool in DbxMcpServer::tool_router().list_all() {
+            let descriptor = dbx_core::mcp_catalog::descriptor(tool.name.as_ref()).unwrap();
+            if tool.annotations.as_ref().and_then(|annotations| annotations.read_only_hint) == Some(true) {
+                assert_eq!(
+                    descriptor.access,
+                    dbx_core::mcp_catalog::McpAccessLevel::Read,
+                    "{} is annotated read-only",
+                    tool.name
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn plugin_tools_mode_switches_advertised_views() {
-        // default（flat）：router 禁用 meta 路由。
+        // Auto keeps both capabilities available so a persisted lazy setting
+        // can take effect without recreating the transport; the advertised
+        // view still chooses flat when no plugin tools are present.
         let flat = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         let flat_router = &flat.tool_router;
-        assert!(flat_router.list_all().iter().all(|tool| !tool.name.as_ref().starts_with("dbx_plugin_")));
+        assert!(flat_router.list_all().iter().any(|tool| tool.name == "dbx_plugin_list"));
+        let advertised = flat.policy_filtered_tools().await;
+        assert!(advertised.iter().all(|tool| !tool.name.as_ref().starts_with("dbx_plugin_")));
         // lazy 模式：保留 meta 路由（mode 注入，避免并行测试间的环境变量竞态）。
         let lazy = DbxMcpServer::with_plugin_tools_mode(
             Arc::new(FakeBackend::default()),
@@ -6511,6 +9277,551 @@ mod tests {
         for expected in ["dbx_plugin_list", "dbx_plugin_tools", "dbx_plugin_call"] {
             assert!(names.contains(&expected), "{expected} missing in {names:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn scoped_plugin_modes_always_advertise_and_dispatch_flat_tools() {
+        use dbx_core::mcp_access::McpPluginToolsMode;
+        for mode in [McpPluginToolsMode::Lazy, McpPluginToolsMode::Auto, McpPluginToolsMode::Flat] {
+            let tools = (0..41)
+                .map(|i| json!({"name": format!("t{i}"), "annotations": {"readOnlyHint": true}}))
+                .collect::<Vec<_>>();
+            let backend = Arc::new(FakeBackend {
+                connections: vec![
+                    plugin_connection("only", "Allowed", "io.dbx.big"),
+                    plugin_connection("outside", "Outside", "io.dbx.big"),
+                ],
+                policy: McpGlobalPolicy { plugin_tools_mode: mode, ..Default::default() },
+                plugin_providers: vec![plugin_provider("io.dbx.big", "Big", json!({"tools": tools}))],
+                ..Default::default()
+            });
+            let server = DbxMcpServer::with_plugin_tools_mode(
+                backend,
+                McpScope { connection_ids: vec!["only".into()], ..Default::default() },
+                false,
+                PluginToolsMode::Auto,
+            );
+            let tools = server.policy_filtered_tools().await;
+            assert_eq!(tools.iter().filter(|tool| tool.name.starts_with("dbx_big__")).count(), 41);
+            assert!(!tools.iter().any(|tool| tool.name == "dbx_plugin_call"));
+            let result = server.call_plugin_tool_dispatch("dbx_big__t0", json!({})).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{}", result_text(&result));
+            let denied =
+                server.call_plugin_tool_dispatch("dbx_big__t0", json!({"connectionId": "outside"})).await.unwrap();
+            assert_eq!(denied.is_error, Some(true));
+        }
+        let server = DbxMcpServer::with_plugin_tools_mode(
+            Arc::new(FakeBackend::default()),
+            McpScope { database: Some("db".into()), ..Default::default() },
+            false,
+            PluginToolsMode::Lazy,
+        );
+        assert_eq!(server.effective_plugin_tools_mode(None).await, PluginToolsMode::Flat);
+    }
+
+    #[tokio::test]
+    async fn auto_mode_switches_to_lazy_discovery_beyond_the_flat_budget() {
+        // 41 read-only tools: auto must advertise the meta tools, keep them
+        // callable, and drop the flat plugin entries.
+        let tools = (0..41)
+            .map(|index| json!({ "name": format!("t{index}"), "annotations": { "readOnlyHint": true } }))
+            .collect::<Vec<_>>();
+        let backend = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy {
+                read_only: false,
+                plugin_tools_mode: dbx_core::mcp_access::McpPluginToolsMode::Auto,
+                ..Default::default()
+            },
+            plugin_providers: vec![plugin_provider("io.dbx.big", "Big", json!({ "tools": tools }))],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_plugin_tools_mode(backend, McpScope::default(), false, PluginToolsMode::Auto);
+        let names =
+            server.policy_filtered_tools().await.into_iter().map(|tool| tool.name.to_string()).collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "dbx_plugin_list"), "{names:?}");
+        assert!(!names.iter().any(|name| name.starts_with("dbx_big__")), "flat entries hidden in lazy mode");
+        let listed = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        assert_eq!(listed.is_error, Some(false), "{}", result_text(&listed));
+        assert!(result_text(&listed).contains("io.dbx.big"));
+    }
+
+    #[tokio::test]
+    async fn new_policy_lists_large_plugin_catalogs_directly_and_honors_saved_mode_changes() {
+        use dbx_core::mcp_access::McpPluginToolsMode;
+        let tools = (0..41)
+            .map(|index| json!({ "name": format!("t{index}"), "annotations": { "readOnlyHint": true } }))
+            .collect::<Vec<_>>();
+        let backend = Arc::new(FakeBackend {
+            plugin_providers: vec![plugin_provider("io.dbx.big", "Big", json!({ "tools": tools }))],
+            ..Default::default()
+        });
+        let server =
+            DbxMcpServer::with_plugin_tools_mode(backend.clone(), McpScope::default(), false, PluginToolsMode::Auto);
+        let initial = server.policy_filtered_tools().await;
+        assert_eq!(initial.iter().filter(|tool| tool.name.starts_with("dbx_big__")).count(), 41);
+        for mode in
+            [McpPluginToolsMode::Flat, McpPluginToolsMode::Lazy, McpPluginToolsMode::Auto, McpPluginToolsMode::Flat]
+        {
+            *backend.policy_override.lock().unwrap() =
+                Some(McpGlobalPolicy { plugin_tools_mode: mode, ..Default::default() });
+            let tools = server.policy_filtered_tools().await;
+            assert_eq!(
+                tools.iter().filter(|tool| tool.name.starts_with("dbx_big__")).count(),
+                if mode == McpPluginToolsMode::Flat { 41 } else { 0 }
+            );
+            assert_eq!(tools.iter().any(|tool| tool.name == "dbx_plugin_call"), mode != McpPluginToolsMode::Flat);
+        }
+    }
+
+    fn destructive_plugin_listing() -> serde_json::Value {
+        json!({
+            "tools": [
+                { "name": "ssh_exec", "description": "Run a command", "annotations": { "destructiveHint": true },
+                  "inputSchema": { "type": "object", "properties": { "command": { "type": "string" } } } },
+                { "name": "ssh_ping", "description": "Ping", "annotations": { "readOnlyHint": true } }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn destructive_plugin_tools_follow_the_high_risk_tier() {
+        let setup = |policy: McpGlobalPolicy, answer: Option<bool>, revoke: bool| {
+            let backend = Arc::new(FakeBackend {
+                policy,
+                plugin_providers: vec![plugin_provider("io.dbx.ssh", "Terminal", destructive_plugin_listing())],
+                tool_approval_answer: answer,
+                revoke_on_approval: revoke,
+                ..Default::default()
+            });
+            (DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false), backend)
+        };
+        let safe_write = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, ..Default::default() };
+        let confirm = McpGlobalPolicy { prompt_high_risk_sql: true, ..safe_write.clone() };
+        let call = |server: &DbxMcpServer| {
+            let server = server.clone();
+            async move { server.call_plugin_tool_dispatch("dbx_ssh__ssh_exec", json!({ "command": "rm x" })).await.unwrap() }
+        };
+
+        // Safe-write without the confirm switch refuses outright, without asking.
+        let (server, backend) = setup(safe_write.clone(), Some(true), false);
+        let refused = call(&server).await;
+        assert!(result_text(&refused).contains("TOOL_BLOCKED"), "{}", result_text(&refused));
+        assert!(backend.tool_approvals.lock().unwrap().is_empty());
+        assert!(backend.plugin_tool_calls.lock().unwrap().is_empty());
+
+        // With the switch on, a confirmed call runs and the dialog saw the arguments.
+        let (server, backend) = setup(confirm.clone(), Some(true), false);
+        let ok = call(&server).await;
+        assert_eq!(ok.is_error, Some(false), "{}", result_text(&ok));
+        {
+            let approvals = backend.tool_approvals.lock().unwrap();
+            assert_eq!(approvals.len(), 1);
+            assert_eq!(approvals[0].plugin.as_deref(), Some("Terminal"));
+            assert!(approvals[0].detail.contains("rm x"));
+        }
+        assert_eq!(backend.plugin_tool_calls.lock().unwrap().len(), 1);
+
+        // Denied, no desktop, or revoked while the dialog was open: never runs.
+        for (answer, revoke) in [(Some(false), false), (None, false), (Some(true), true)] {
+            let (server, backend) = setup(confirm.clone(), answer, revoke);
+            let blocked = call(&server).await;
+            assert_eq!(blocked.is_error, Some(true), "{answer:?}/{revoke}: {}", result_text(&blocked));
+            assert!(backend.plugin_tool_calls.lock().unwrap().is_empty(), "{answer:?}/{revoke}");
+        }
+
+        // A high-risk policy needs no confirmation; read tools never ask.
+        let (server, backend) = setup(McpGlobalPolicy { allow_dangerous_sql: true, ..safe_write.clone() }, None, false);
+        assert_eq!(call(&server).await.is_error, Some(false));
+        let ping = server.call_plugin_tool_dispatch("dbx_ssh__ssh_ping", json!({})).await.unwrap();
+        assert_eq!(ping.is_error, Some(false));
+        assert!(backend.tool_approvals.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn scoped_access_overrides_keep_builtin_and_plugin_tools_discoverable() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget, McpSubScopeMode};
+
+        for (visible, mode, ceiling, expected) in [
+            (true, McpSubScopeMode::Selected, None, true),
+            (false, McpSubScopeMode::Selected, None, false),
+            (true, McpSubScopeMode::None, None, false),
+            (true, McpSubScopeMode::Selected, Some(McpAccessLevel::Read), false),
+        ] {
+            let mut access = McpAccessPolicy::default();
+            for (id, kind, toolset) in [
+                ("nacos", "namespace", "nacos.config"),
+                ("mysql", "database", "sql.session"),
+                ("k1", "namespace", "default"),
+            ] {
+                access.rules.insert(
+                    McpRuleTarget::Connection { id: id.into() },
+                    McpAccessRule {
+                        sub_scope: Some(mode),
+                        toolset_ceilings: ceiling
+                            .map(|level| [(toolset.to_string(), level)].into())
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    },
+                );
+                access.rules.insert(
+                    McpRuleTarget::Scope { connection_id: id.into(), scope: kind.into(), value: "dev".into() },
+                    McpAccessRule { visible: Some(visible), access: Some(McpAccessLevel::Write), ..Default::default() },
+                );
+            }
+            let mut provider = plugin_provider(
+                "io.dbx.k8s",
+                "Kubernetes",
+                json!({ "tools": [
+                { "name": "scale", "annotations": { "readOnlyHint": false } }
+            ] }),
+            );
+            provider.scope = Some(("namespace".into(), "namespace".into()));
+            let backend = Arc::new(FakeBackend {
+                policy: access.to_v1(),
+                access_policy: Some(access),
+                connections: vec![
+                    connection("nacos", "Nacos", "nacos", "dev"),
+                    connection("mysql", "MySQL", "mysql", "dev"),
+                    plugin_connection("k1", "cluster", "io.dbx.k8s"),
+                ],
+                plugin_providers: vec![provider],
+                ..Default::default()
+            });
+            let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+            let names =
+                server.policy_filtered_tools().await.into_iter().map(|tool| tool.name.to_string()).collect::<Vec<_>>();
+            for name in ["dbx_nacos_publish_config", "dbx_begin_transaction", "dbx_k8s__scale"] {
+                assert_eq!(
+                    names.iter().any(|tool| tool == name),
+                    expected,
+                    "{name}: visible={visible}, mode={mode:?}, ceiling={ceiling:?}"
+                );
+            }
+            let lazy = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.k8s".into() })).await;
+            assert_eq!(lazy.is_error, Some(!expected), "{}", result_text(&lazy));
+            if expected {
+                let call =
+                    server.call_plugin_tool_dispatch("dbx_k8s__scale", json!({ "namespace": "dev" })).await.unwrap();
+                assert_eq!(call.is_error, Some(false), "{}", result_text(&call));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_scope_values_follow_the_access_policy() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget, McpSubScopeMode};
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Write, ..Default::default() };
+        access.rules.insert(
+            McpRuleTarget::Connection { id: "k1".into() },
+            McpAccessRule { sub_scope: Some(McpSubScopeMode::Selected), ..Default::default() },
+        );
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "k1".into(), scope: "namespace".into(), value: "dev".into() },
+            McpAccessRule { visible: Some(true), ..Default::default() },
+        );
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "k1".into(), scope: "namespace".into(), value: "staging".into() },
+            McpAccessRule { visible: Some(true), access: Some(McpAccessLevel::Read), ..Default::default() },
+        );
+        let mut provider = plugin_provider(
+            "io.dbx.k8s",
+            "Kubernetes",
+            json!({ "tools": [
+                { "name": "get_pods", "annotations": { "readOnlyHint": true } },
+                { "name": "scale", "annotations": { "readOnlyHint": false } }
+            ] }),
+        );
+        provider.scope = Some(("namespace".to_string(), "namespace".to_string()));
+        let backend = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy { read_only: false, ..Default::default() },
+            connections: vec![plugin_connection("k1", "cluster", "io.dbx.k8s")],
+            plugin_providers: vec![provider],
+            access_policy: Some(access),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let call = |tool: &'static str, namespace: Option<&'static str>| {
+            let server = server.clone();
+            async move {
+                let arguments = match namespace {
+                    Some(namespace) => json!({ "namespace": namespace }),
+                    None => json!({}),
+                };
+                server.call_plugin_tool_dispatch(tool, arguments).await.unwrap()
+            }
+        };
+        // Admitted namespace with write access: both tools run.
+        assert_eq!(call("dbx_k8s__scale", Some("dev")).await.is_error, Some(false));
+        // Namespace outside the selected set is refused before the plugin runs.
+        let outside = call("dbx_k8s__get_pods", Some("prod")).await;
+        assert!(result_text(&outside).contains("SCOPE_OUT_OF_POLICY"), "{}", result_text(&outside));
+        // The policy and sidecar must receive the same canonical scope.
+        assert_eq!(call("dbx_k8s__scale", Some(" dev ")).await.is_error, Some(false));
+        let padded = call("dbx_k8s__scale", Some(" prod ")).await;
+        assert!(result_text(&padded).contains("SCOPE_OUT_OF_POLICY"));
+        // Read-only namespace: reads pass, writes are refused.
+        assert_eq!(call("dbx_k8s__get_pods", Some("staging")).await.is_error, Some(false));
+        let write = call("dbx_k8s__scale", Some("staging")).await;
+        assert!(result_text(&write).contains("MCP_READ_ONLY"), "{}", result_text(&write));
+        // Selected sub-scope policies require an explicit scope argument;
+        // evaluating the call at the connection level would bypass the
+        // selected namespace set.
+        let missing = call("dbx_k8s__get_pods", None).await;
+        assert!(result_text(&missing).contains("SCOPE_REQUIRED"), "{}", result_text(&missing));
+        let calls = backend.plugin_tool_calls.lock().unwrap();
+        assert_eq!(calls.iter().map(|call| call.1.as_str()).collect::<Vec<_>>(), ["scale", "scale", "get_pods"]);
+        assert_eq!(calls[1].3["namespace"], "dev");
+    }
+
+    #[test]
+    fn plugin_implicit_scope_cannot_bypass_named_restrictions() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+        let mut provider = plugin_provider("io.dbx.k8s", "Kubernetes", json!({"tools": [{"name": "scale"}]}));
+        provider.scope = Some(("namespace".into(), "namespace".into()));
+        let entry = crate::plugin_tools::build_catalog(&[provider]).remove(0);
+        for rule in [
+            McpAccessRule { visible: Some(false), ..Default::default() },
+            McpAccessRule { access: Some(McpAccessLevel::Read), ..Default::default() },
+        ] {
+            let mut access = McpAccessPolicy { default_access: McpAccessLevel::Write, ..Default::default() };
+            access.rules.insert(
+                McpRuleTarget::Scope { connection_id: "k1".into(), scope: "namespace".into(), value: "prod".into() },
+                rule,
+            );
+            let error = ensure_plugin_scope(&access, &entry, &[], Some("k1"), &json!({})).unwrap_err();
+            assert!(result_text(&error).contains("SCOPE_REQUIRED"));
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_writes_honor_connection_hard_protections() {
+        for production in [false, true] {
+            let mut connection = plugin_connection("k1", "test", "io.dbx.ssh");
+            connection.read_only = !production;
+            connection.is_production = production;
+            let backend = Arc::new(FakeBackend {
+                connections: vec![connection],
+                policy: McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() },
+                plugin_providers: vec![plugin_provider("io.dbx.ssh", "Terminal", destructive_plugin_listing())],
+                ..Default::default()
+            });
+            let result = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false)
+                .call_plugin_tool_dispatch("dbx_ssh__ssh_exec", json!({}))
+                .await
+                .unwrap();
+            assert!(result_text(&result).contains(if production {
+                "PRODUCTION_WRITE_BLOCKED"
+            } else {
+                "CONNECTION_READ_ONLY"
+            }));
+            assert!(backend.plugin_tool_calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn product_tools_follow_scope_level_and_protections() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget, McpSubScopeMode};
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Write, ..Default::default() };
+        access.rules.insert(
+            McpRuleTarget::Connection { id: "nacos".into() },
+            McpAccessRule { sub_scope: Some(McpSubScopeMode::Selected), ..Default::default() },
+        );
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "nacos".into(), scope: "namespace".into(), value: "dev".into() },
+            McpAccessRule { visible: Some(true), ..Default::default() },
+        );
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "nacos".into(), scope: "namespace".into(), value: "staging".into() },
+            McpAccessRule { visible: Some(true), access: Some(McpAccessLevel::Read), ..Default::default() },
+        );
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "nacos".into(), scope: "namespace".into(), value: "blocked".into() },
+            McpAccessRule { visible: Some(true), access: Some(McpAccessLevel::None), ..Default::default() },
+        );
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("nacos", "nacos", "nacos", "prod"), connection("pg", "pg", "postgres", "app")],
+            policy: McpGlobalPolicy { read_only: false, ..Default::default() },
+            access_policy: Some(access),
+            tool_approval_answer: Some(true),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let selector = || ConnectionSelector { connection_id: Some("nacos".to_string()), connection_name: None };
+        let key = |namespace: &str| NacosConfigKeyRequest {
+            selector: selector(),
+            namespace: Some(namespace.to_string()),
+            data_id: "app.yaml".to_string(),
+            group: "DEFAULT_GROUP".to_string(),
+        };
+        let publish = |namespace: &str| NacosPublishConfigRequest {
+            selector: selector(),
+            namespace: Some(namespace.to_string()),
+            data_id: "app.yaml".to_string(),
+            group: "DEFAULT_GROUP".to_string(),
+            content: "a: 1".to_string(),
+            config_type: Some("yaml".to_string()),
+            cas_md5: None,
+        };
+
+        // Admitted namespace: read and write reach the backend with the args mapped.
+        assert_eq!(server.nacos_get_config(Parameters(key("dev"))).await.is_error, Some(false));
+        assert_eq!(server.nacos_publish_config(Parameters(publish("dev"))).await.is_error, Some(false));
+        {
+            let calls = backend.product_calls.lock().unwrap();
+            assert_eq!(calls.iter().map(|call| call.operation).collect::<Vec<_>>(), ["get_config", "publish_config"]);
+            assert_eq!(calls[1].args["dataId"], "app.yaml");
+            assert_eq!(calls[1].args["namespace"], "dev");
+        }
+        // Namespace outside the selected set.
+        let outside = server.nacos_get_config(Parameters(key("prod"))).await;
+        assert!(result_text(&outside).contains("SCOPE_OUT_OF_POLICY"), "{}", result_text(&outside));
+        // An explicitly denied scope must reject reads before the product
+        // backend is reached, just like a denied write.
+        let denied = server.nacos_get_config(Parameters(key("blocked"))).await;
+        assert!(result_text(&denied).contains("MCP_READ_ONLY"), "{}", result_text(&denied));
+        // Omitting namespace still resolves the connection's default (`prod`)
+        // before policy evaluation, so it cannot bypass the selected scope.
+        let omitted = server
+            .nacos_get_config(Parameters(NacosConfigKeyRequest {
+                selector: selector(),
+                namespace: None,
+                data_id: "app.yaml".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            }))
+            .await;
+        assert!(result_text(&omitted).contains("SCOPE_OUT_OF_POLICY"), "{}", result_text(&omitted));
+        // Read-only namespace refuses writes.
+        let read_only = server.nacos_publish_config(Parameters(publish("staging"))).await;
+        assert!(result_text(&read_only).contains("MCP_READ_ONLY"), "{}", result_text(&read_only));
+        // Full-level delete under a write level is refused without the confirm switch...
+        let delete = server.nacos_delete_config(Parameters(key("dev"))).await;
+        assert!(result_text(&delete).contains("TOOL_BLOCKED"), "{}", result_text(&delete));
+        assert!(backend.tool_approvals.lock().unwrap().is_empty());
+        // Wrong connection type.
+        let wrong = server
+            .consul_kv_get(Parameters(ConsulKvKeyRequest {
+                selector: ConnectionSelector { connection_id: Some("pg".to_string()), connection_name: None },
+                key: "a".to_string(),
+            }))
+            .await;
+        assert!(result_text(&wrong).contains("WRONG_CONNECTION_TYPE"), "{}", result_text(&wrong));
+        assert_eq!(backend.product_calls.lock().unwrap().len(), 2, "refused calls never reach the backend");
+    }
+
+    #[tokio::test]
+    async fn nacos_all_namespace_search_requires_unrestricted_scope_access() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget, McpSubScopeMode};
+
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Read, ..Default::default() };
+        access.rules.insert(
+            McpRuleTarget::Connection { id: "nacos".into() },
+            McpAccessRule { sub_scope: Some(McpSubScopeMode::Selected), ..Default::default() },
+        );
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "nacos".into(), scope: "namespace".into(), value: "dev".into() },
+            McpAccessRule { visible: Some(true), access: Some(McpAccessLevel::Read), ..Default::default() },
+        );
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("nacos", "nacos", "nacos", "dev")],
+            access_policy: Some(access),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .nacos_search_configs(Parameters(NacosSearchConfigsRequest {
+                selector: ConnectionSelector { connection_id: Some("nacos".into()), connection_name: None },
+                operation_id: "all-namespaces".into(),
+                namespace: None,
+                scope: Some("allNamespaces".into()),
+                query: "host".into(),
+                group: None,
+                data_id: None,
+                max_results: Some(10),
+            }))
+            .await;
+        assert!(result_text(&result).contains("SCOPE_OUT_OF_POLICY"), "{}", result_text(&result));
+        assert!(backend.product_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn product_toolset_ceilings_narrow_runtime_access_and_advertising() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Full, ..Default::default() };
+        let mut rule = McpAccessRule::default();
+        rule.toolset_ceilings.insert("nacos.config".into(), McpAccessLevel::Read);
+        access.rules.insert(McpRuleTarget::Connection { id: "nacos".into() }, rule);
+        let backend = Arc::new(FakeBackend {
+            policy: McpGlobalPolicy { read_only: false, ..Default::default() },
+            access_policy: Some(access),
+            connections: vec![connection("nacos", "nacos", "nacos", "dev")],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .nacos_publish_config(Parameters(NacosPublishConfigRequest {
+                selector: ConnectionSelector { connection_id: Some("nacos".into()), connection_name: None },
+                namespace: Some("dev".into()),
+                data_id: "app.yaml".into(),
+                group: "DEFAULT_GROUP".into(),
+                content: "a: 1".into(),
+                config_type: Some("yaml".into()),
+                cas_md5: None,
+            }))
+            .await;
+        assert!(result_text(&result).contains("MCP_READ_ONLY"), "{}", result_text(&result));
+        assert!(backend.product_calls.lock().unwrap().is_empty());
+
+        let names =
+            server.policy_filtered_tools().await.into_iter().map(|tool| tool.name.to_string()).collect::<Vec<_>>();
+        assert!(!names.iter().any(|name| name == "dbx_nacos_publish_config"), "{names:?}");
+        assert!(names.iter().any(|name| name == "dbx_nacos_get_config"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn product_delete_is_confirmed_when_the_switch_is_on() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("consul", "consul", "consul", "")],
+            policy: McpGlobalPolicy { read_only: false, prompt_high_risk_sql: true, ..Default::default() },
+            tool_approval_answer: Some(true),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .consul_kv_delete(Parameters(ConsulKvDeleteRequest {
+                selector: ConnectionSelector { connection_id: Some("consul".to_string()), connection_name: None },
+                key: "config/app".to_string(),
+                cas: Some(3),
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+        {
+            let approvals = backend.tool_approvals.lock().unwrap();
+            assert_eq!(approvals.len(), 1);
+            assert_eq!(approvals[0].kind, crate::approval::ToolApprovalKind::ProductTool);
+            assert!(approvals[0].detail.contains("config/app"));
+        }
+        assert_eq!(backend.product_calls.lock().unwrap()[0].args["cas"], 3);
+
+        // A policy change while the confirmation dialog is open wins over the
+        // earlier approval and prevents the product call.
+        let revoked = Arc::new(FakeBackend {
+            connections: vec![connection("consul", "consul", "consul", "")],
+            policy: McpGlobalPolicy { read_only: false, prompt_high_risk_sql: true, ..Default::default() },
+            tool_approval_answer: Some(true),
+            revoke_on_approval: true,
+            ..Default::default()
+        });
+        let revoked_server = DbxMcpServer::with_runtime_options(revoked.clone(), McpScope::default(), false);
+        let blocked = revoked_server
+            .consul_kv_delete(Parameters(ConsulKvDeleteRequest {
+                selector: ConnectionSelector { connection_id: Some("consul".to_string()), connection_name: None },
+                key: "config/app".to_string(),
+                cas: None,
+            }))
+            .await;
+        assert!(blocked.is_error == Some(true), "{}", result_text(&blocked));
+        assert!(revoked.product_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -6588,6 +9899,40 @@ mod tests {
         assert!(result_text(&blocked).contains("TOOL_OUT_OF_SCOPE"), "{}", result_text(&blocked));
         let tools = server.policy_filtered_tools().await;
         assert!(!tools.iter().any(|tool| tool.name.as_ref() == "dbx_kafka__kafka_topics_delete"));
+    }
+
+    #[tokio::test]
+    async fn plugin_dispatch_checks_scope_once_per_call() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            access_policy: Some(dbx_core::mcp_access::McpAccessPolicy::default()),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let result = server.call_plugin_tool_dispatch("dbx_kafka__kafka_topics_list", json!({})).await.unwrap();
+        assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+        assert_eq!(backend.access_policy_loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let backend = Arc::new(FakeBackend {
+            connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+            plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+            access_policy: Some(dbx_core::mcp_access::McpAccessPolicy::default()),
+            ..Default::default()
+        });
+        let server =
+            DbxMcpServer::with_plugin_tools_mode(backend.clone(), McpScope::default(), false, PluginToolsMode::Lazy);
+        let result = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_list".into(),
+                arguments: None,
+                dbx_connection: None,
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+        assert_eq!(backend.access_policy_loads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[cfg(feature = "mq-admin")]
@@ -6723,10 +10068,13 @@ mod tests {
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
+        // 22 product-provider tools (14 Nacos + 8 Consul), plus the three
+        // runtime-selectable plugin meta tools retained by auto mode.
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 50);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 48);
+        assert!(names.contains(&"dbx_nacos_get_config") && names.contains(&"dbx_consul_kv_get"));
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_peek_messages"));
         #[cfg(not(feature = "mq-admin"))]
@@ -6801,7 +10149,11 @@ mod tests {
             ..Default::default()
         };
         let server = DbxMcpServer::with_runtime_options(
-            Arc::new(FakeBackend { policy, ..Default::default() }),
+            Arc::new(FakeBackend {
+                policy,
+                connections: vec![connection("pg", "Postgres", "postgres", "app")],
+                ..Default::default()
+            }),
             McpScope::default(),
             false,
         );
@@ -6813,12 +10165,164 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_keeps_the_full_view_without_an_allowlist() {
+    async fn tools_list_keeps_connectionless_view_without_an_allowlist() {
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
 
         let tools = server.policy_filtered_tools().await;
 
-        assert_eq!(tools.len(), server.tool_router.list_all().len());
+        assert!(tools.iter().all(|tool| !tool.name.as_ref().starts_with("dbx_plugin_")));
+        let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<HashSet<_>>();
+        assert!(names.contains("dbx_list_connections"));
+        assert!(names.contains("dbx_add_connection"));
+        assert!(!names.contains("dbx_list_databases"));
+        assert!(!names.contains("dbx_execute_query"));
+        assert!(!names.contains("dbx_nacos_list_configs"));
+    }
+
+    #[tokio::test]
+    async fn tools_list_hides_connection_bound_tools_without_connections() {
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let names =
+            server.policy_filtered_tools().await.into_iter().map(|tool| tool.name.to_string()).collect::<HashSet<_>>();
+
+        for name in ["dbx_list_databases", "dbx_list_tables", "dbx_execute_query", "dbx_nacos_list_configs"] {
+            assert!(!names.contains(name), "{name} requires a visible connection");
+        }
+        for name in ["dbx_list_connections", "dbx_add_connection", "dbx_duplicate_connection"] {
+            assert!(names.contains(name), "{name} is connection-less");
+        }
+        assert!(!names.contains("dbx_remove_connection"), "full-level removal needs a full global grant");
+    }
+
+    #[tokio::test]
+    async fn tools_list_and_connection_discovery_honor_global_none_access() {
+        let backend = Arc::new(FakeBackend {
+            access_policy: Some(dbx_core::mcp_access::McpAccessPolicy {
+                default_access: dbx_core::mcp_access::McpAccessLevel::None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let names =
+            server.policy_filtered_tools().await.into_iter().map(|tool| tool.name.to_string()).collect::<HashSet<_>>();
+        assert!(!names.contains("dbx_list_connections"), "read-level discovery needs a global grant");
+        assert!(!names.contains("dbx_add_connection"), "write-level management needs a global grant");
+
+        let result = server.list_connections(Parameters(ListConnectionsRequest {})).await;
+        assert!(result_text(&result).contains("MCP_READ_ONLY"), "{}", result_text(&result));
+    }
+
+    #[tokio::test]
+    async fn tools_list_hides_static_writes_for_read_only_resources() {
+        let mut access = dbx_core::mcp_access::McpAccessPolicy {
+            default_access: dbx_core::mcp_access::McpAccessLevel::Read,
+            ..Default::default()
+        };
+        access.rules.insert(
+            dbx_core::mcp_access::McpRuleTarget::Connection { id: "pg".into() },
+            dbx_core::mcp_access::McpAccessRule {
+                access: Some(dbx_core::mcp_access::McpAccessLevel::Read),
+                ..Default::default()
+            },
+        );
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("pg", "Postgres", "postgres", "app")],
+            access_policy: Some(access),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let names = server
+            .policy_filtered_tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(names.contains("dbx_execute_batch"));
+        assert!(!names.contains("dbx_begin_transaction"));
+        assert!(!names.contains("dbx_remove_connection"));
+        assert!(names.contains("dbx_execute_query"));
+        assert!(names.contains("dbx_list_tables"));
+        assert!(!names.contains("dbx_nacos_search_configs"));
+        assert!(!names.contains("dbx_nacos_rollback_config"));
+        assert!(!names.contains("dbx_consul_kv_get"));
+        assert!(!names.contains("dbx_salesforce_current_user"));
+    }
+
+    #[tokio::test]
+    async fn nacos_extended_tools_use_product_gateway() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("nacos", "Nacos", "nacos", "public")],
+            access_policy: Some(dbx_core::mcp_access::McpAccessPolicy {
+                default_access: dbx_core::mcp_access::McpAccessLevel::Full,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let selector = || ConnectionSelector { connection_id: Some("nacos".into()), connection_name: None };
+        let _ = server
+            .nacos_search_configs(Parameters(NacosSearchConfigsRequest {
+                selector: selector(),
+                operation_id: "op-1".into(),
+                namespace: Some("public".into()),
+                scope: Some("currentNamespace".into()),
+                query: "host".into(),
+                group: None,
+                data_id: None,
+                max_results: Some(10),
+            }))
+            .await;
+        let _ = server
+            .nacos_rollback_config(Parameters(NacosRollbackConfigRequest {
+                selector: selector(),
+                namespace: Some("public".into()),
+                data_id: "app.yaml".into(),
+                group: "DEFAULT_GROUP".into(),
+                history_id: "h1".into(),
+                nid: Some(1),
+            }))
+            .await;
+        let _ = server
+            .nacos_get_service(Parameters(NacosServicesRequest {
+                selector: selector(),
+                namespace: Some("public".into()),
+                group_name: None,
+                service_name: Some("api".into()),
+                page_no: None,
+                page_size: None,
+            }))
+            .await;
+        let _ = server
+            .nacos_register_instance(Parameters(NacosRegisterInstanceRequest {
+                selector: selector(),
+                namespace: Some("public".into()),
+                service_name: "api".into(),
+                ip: "127.0.0.1".into(),
+                port: 8080,
+                group_name: None,
+                cluster_name: None,
+                weight: None,
+                metadata: None,
+            }))
+            .await;
+        let _ = server
+            .nacos_deregister_instance(Parameters(NacosDeregisterInstanceRequest {
+                selector: selector(),
+                namespace: Some("public".into()),
+                service_name: "api".into(),
+                ip: "127.0.0.1".into(),
+                port: 8080,
+                group_name: None,
+                cluster_name: None,
+                ephemeral: None,
+            }))
+            .await;
+        let operations = backend.product_calls.lock().unwrap().iter().map(|call| call.operation).collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            ["search_configs", "rollback_config", "get_service", "register_instance", "deregister_instance"]
+        );
     }
 
     #[test]
@@ -7095,10 +10599,11 @@ mod tests {
             false,
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+        // Product tools stay available: they are bound to in-scope connections.
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 42);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 40);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
@@ -7213,6 +10718,219 @@ mod tests {
         assert!(result_text(&result).contains("Set the db argument"));
     }
 
+    #[tokio::test]
+    async fn dangerous_redis_commands_are_confirmed_when_the_switch_is_on() {
+        let run = |policy: McpGlobalPolicy, answer: Option<bool>| async move {
+            let backend = Arc::new(FakeBackend {
+                connections: vec![connection("redis", "redis", "redis", "0")],
+                policy,
+                tool_approval_answer: answer,
+                ..Default::default()
+            });
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            let result = server
+                .execute_redis_command(Parameters(ExecuteRedisCommandRequest {
+                    selector: ConnectionSelector { connection_name: None, connection_id: Some("redis".to_string()) },
+                    db: Some(0),
+                    command: "FLUSHALL".to_string(),
+                }))
+                .await;
+            let asked = backend.tool_approvals.lock().unwrap().clone();
+            (result_text(&result).to_string(), asked)
+        };
+        let safe_write = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, ..Default::default() };
+
+        // Switch off: rejected without asking.
+        let (text, asked) = run(safe_write.clone(), Some(true)).await;
+        assert!(text.contains("REDIS_COMMAND_BLOCKED"), "{text}");
+        assert!(asked.is_empty());
+
+        // Switch on and confirmed: passes the gate and reaches the backend
+        // (the fake backend has no Redis, so it answers "not supported").
+        let confirm = McpGlobalPolicy { prompt_high_risk_sql: true, ..safe_write.clone() };
+        let (text, asked) = run(confirm.clone(), Some(true)).await;
+        assert!(!text.contains("REDIS_COMMAND_BLOCKED"), "{text}");
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].kind, crate::approval::ToolApprovalKind::RedisCommand);
+        assert_eq!(asked[0].detail, "FLUSHALL");
+
+        // Denied: blocked.
+        let (text, _) = run(confirm.clone(), Some(false)).await;
+        assert!(text.contains("REDIS_COMMAND_BLOCKED"), "{text}");
+
+        // Read-only policies never offer a confirmation.
+        let (text, asked) =
+            run(McpGlobalPolicy { read_only: true, prompt_high_risk_sql: true, ..Default::default() }, Some(true))
+                .await;
+        assert!(text.contains("MCP_READ_ONLY"), "{text}");
+        assert!(asked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn redis_confirmation_honors_v2_ceiling_and_rechecks_all_gates() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget, McpSubScopeMode};
+        for revocation in ["none", "tool", "scope", "ceiling"] {
+            let policy = McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: true,
+                prompt_high_risk_sql: true,
+                ..Default::default()
+            };
+            let mut access = McpAccessPolicy::from_v1(&policy);
+            access.rules.insert(
+                McpRuleTarget::Connection { id: "redis".into() },
+                McpAccessRule {
+                    toolset_ceilings: [("redis".into(), McpAccessLevel::Write)].into(),
+                    ..Default::default()
+                },
+            );
+            let mut after = access.clone();
+            let rule = after.rules.get_mut(&McpRuleTarget::Connection { id: "redis".into() }).unwrap();
+            if revocation == "scope" {
+                rule.sub_scope = Some(McpSubScopeMode::None);
+            }
+            if revocation == "ceiling" {
+                rule.toolset_ceilings.insert("redis".into(), McpAccessLevel::Read);
+            }
+            let backend = Arc::new(FakeBackend {
+                connections: vec![connection("redis", "redis", "redis", "0")],
+                policy: policy.clone(),
+                access_policy: Some(access),
+                access_after_approval: Some(after),
+                policy_after_approval: (revocation == "tool")
+                    .then_some(McpGlobalPolicy { allowed_tool_names: Some(vec![]), ..policy }),
+                tool_approval_answer: Some(true),
+                ..Default::default()
+            });
+            let result = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false)
+                .execute_redis_command(Parameters(ExecuteRedisCommandRequest {
+                    selector: selector("redis"),
+                    db: Some(0),
+                    command: "FLUSHALL".into(),
+                }))
+                .await;
+            assert_eq!(backend.tool_approvals.lock().unwrap().len(), 1, "write ceiling requires approval");
+            // The fake has no Redis adapter: reaching it yields REDIS_COMMAND_ERROR.
+            assert_eq!(
+                result_text(&result).contains("REDIS_COMMAND_ERROR"),
+                revocation == "none",
+                "{revocation}: {}",
+                result_text(&result)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn redis_database_permissions_follow_saved_settings_and_recheck_revocations() {
+        for (global_read, database_read, revoke) in
+            [(false, true, false), (false, false, false), (true, false, false), (false, false, true)]
+        {
+            let policy = McpGlobalPolicy {
+                read_only: global_read,
+                allow_dangerous_sql: !global_read,
+                prompt_high_risk_sql: true,
+                connection_policies: vec![serde_json::from_value(json!({
+                    "connectionId": "redis",
+                    "executionModeConfigured": false,
+                    "executionModePolicyVersion": 1,
+                    "databaseScope": "selected",
+                    "allowedDatabases": ["0"],
+                    "databasePolicies": [{
+                        "databaseName": "0", "readOnly": database_read, "allowDangerousSql": false
+                    }]
+                }))
+                .unwrap()],
+                ..Default::default()
+            };
+            let mut after = dbx_core::mcp_access::McpAccessPolicy::from_v1(&policy);
+            after
+                .rules
+                .get_mut(&dbx_core::mcp_access::McpRuleTarget::Scope {
+                    connection_id: "redis".into(),
+                    scope: "database".into(),
+                    value: "0".into(),
+                })
+                .unwrap()
+                .access = Some(dbx_core::mcp_access::McpAccessLevel::Read);
+            let backend = Arc::new(FakeBackend {
+                connections: vec![connection("redis", "redis", "redis", "0")],
+                policy,
+                access_after_approval: revoke.then_some(after),
+                tool_approval_answer: Some(true),
+                ..Default::default()
+            });
+            let result = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false)
+                .execute_redis_command(Parameters(ExecuteRedisCommandRequest {
+                    selector: selector("redis"),
+                    db: Some(0),
+                    command: if revoke { "FLUSHDB" } else { "SET key value" }.into(),
+                }))
+                .await;
+            let output = result_text(&result);
+            if database_read {
+                assert!(output.contains("MCP_READ_ONLY"), "{output}");
+            } else if revoke {
+                assert!(output.contains("approval was revoked"), "{output}");
+            } else {
+                // Reaching the fake Redis adapter proves the saved selected
+                // database and its explicit write override were admitted.
+                assert!(output.contains("REDIS_COMMAND_ERROR"), "{output}");
+            }
+            assert_eq!(backend.tool_approvals.lock().unwrap().len(), usize::from(revoke));
+        }
+    }
+
+    #[test]
+    fn redis_scope_aliases_preserve_selected_visibility_and_strictest_level() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget, McpSubScopeMode};
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Full, ..Default::default() };
+        access.rules.insert(
+            McpRuleTarget::Connection { id: "redis".into() },
+            McpAccessRule { sub_scope: Some(McpSubScopeMode::Selected), ..Default::default() },
+        );
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "redis".into(), scope: "dbIndex".into(), value: "0".into() },
+            McpAccessRule { visible: Some(true), access: Some(McpAccessLevel::Write), ..Default::default() },
+        );
+        assert!(redis_database_access(&access, &[], "redis", 0).visible);
+        assert!(!redis_database_access(&access, &[], "redis", 1).visible);
+        access.rules.insert(
+            McpRuleTarget::Scope { connection_id: "redis".into(), scope: "database".into(), value: "0".into() },
+            McpAccessRule { visible: Some(true), ceiling: Some(McpAccessLevel::Read), ..Default::default() },
+        );
+        let resolved = redis_database_access(&access, &[], "redis", 0);
+        assert!(resolved.visible);
+        assert_eq!(resolved.level, McpAccessLevel::Read);
+    }
+
+    #[tokio::test]
+    async fn redis_toolset_ceiling_blocks_write_commands() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Full, ..Default::default() };
+        let mut rule = McpAccessRule::default();
+        rule.toolset_ceilings.insert("redis".into(), McpAccessLevel::Read);
+        access.rules.insert(McpRuleTarget::Connection { id: "redis".into() }, rule);
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("redis", "redis", "redis", "0")],
+            policy: McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() },
+            access_policy: Some(access),
+            tool_approval_answer: Some(true),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .execute_redis_command(Parameters(ExecuteRedisCommandRequest {
+                selector: ConnectionSelector { connection_name: None, connection_id: Some("redis".into()) },
+                db: Some(0),
+                command: "SET key value".into(),
+            }))
+            .await;
+        assert!(result_text(&result).contains("MCP_READ_ONLY"), "{}", result_text(&result));
+        assert!(backend.tool_approvals.lock().unwrap().is_empty());
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn configured_database_allowlist_blocks_qualified_sql_references() {
         let connection = connection("sql", "sql", "mysql", "reporting");
@@ -7311,6 +11029,37 @@ mod tests {
         assert!(is_database_discovery_sql(" SHOW DATABASES; "));
         assert!(is_database_discovery_sql("show schemas"));
         assert!(!is_database_discovery_sql("show tables"));
+    }
+
+    #[tokio::test]
+    async fn v2_none_access_blocks_cached_connection_tools_and_connection_listing() {
+        let mut access = dbx_core::mcp_access::McpAccessPolicy {
+            default_access: dbx_core::mcp_access::McpAccessLevel::Read,
+            ..Default::default()
+        };
+        access.rules.insert(
+            dbx_core::mcp_access::McpRuleTarget::Connection { id: "sql".into() },
+            dbx_core::mcp_access::McpAccessRule {
+                access: Some(dbx_core::mcp_access::McpAccessLevel::None),
+                ..Default::default()
+            },
+        );
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("sql", "sql", "mysql", "app")],
+            access_policy: Some(access),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        // A client may retain a schema tool from an earlier tools/list response;
+        // connection resolution must still enforce the v2 access floor.
+        let databases = server.list_databases(Parameters(ListDatabasesRequest { selector: selector("sql") })).await;
+        assert!(result_text(&databases).contains("MCP_READ_ONLY"), "{}", result_text(&databases));
+
+        // Discovery must apply the same v2 floor, otherwise it would disclose
+        // connections that the policy has made inaccessible.
+        let connections = server.list_connections(Parameters(ListConnectionsRequest {})).await;
+        assert_eq!(result_text(&connections), "No connections configured in DBX.");
     }
 
     #[test]
@@ -7841,6 +11590,147 @@ mod tests {
             server.rollback_transaction(Parameters(TransactionSessionRequest { session_id })).await;
         assert!(result_text(&no_active_rollback).contains("TRANSACTION_NOT_ACTIVE"));
         assert_eq!(backend.transaction_owner_sql.lock().unwrap().as_slice(), ["START TRANSACTION", "ROLLBACK"]);
+    }
+
+    async fn check_queued_transaction_call(
+        batch: bool,
+        initial: McpGlobalPolicy,
+        current: McpGlobalPolicy,
+        revoke_token: bool,
+        expected_error: Option<&str>,
+    ) {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            policy: initial,
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        let session_id = opened_session_id(&opened);
+        let begun =
+            server.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        assert!(!begun.is_error.unwrap_or(false), "{}", result_text(&begun));
+        let (session, _) = server.sessions.resolve(&session_id).await.into_parts();
+        let owner = session.unwrap().transaction_owner.clone().unwrap();
+        let lease = owner.acquire().await.unwrap();
+        let sql = if batch { "DELETE FROM accounts; SELECT 1" } else { "DELETE FROM accounts" };
+        let queued = async {
+            if batch {
+                server
+                    .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        sql: sql.into(),
+                        session_id: Some(session_id.clone()),
+                        cell_window: CellWindowArgs::default(),
+                        continue_on_error: None,
+                        use_transaction: None,
+                    }))
+                    .await
+            } else {
+                server
+                    .execute_query(Parameters(ExecuteQueryRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        sql: sql.into(),
+                        session_id: Some(session_id.clone()),
+                        max_rows: None,
+                        cell_char_offset: None,
+                        cell_char_limit: None,
+                    }))
+                    .await
+            }
+        };
+        futures::pin_mut!(queued);
+        // Poll to the occupied lease, rather than relying on a sleep or task
+        // scheduling to put the request in the queue before changing policy.
+        assert!(futures::poll!(&mut queued).is_pending());
+        assert!(backend.consumed_sql.lock().unwrap().is_empty(), "approval must remain revocable while queued");
+        *backend.policy_override.lock().unwrap() = Some(current);
+        backend.sql_approval_revoked.store(revoke_token, std::sync::atomic::Ordering::SeqCst);
+        drop(lease);
+        let result = tokio::time::timeout(Duration::from_secs(2), queued).await.expect("queued call finishes");
+        if let Some(error) = expected_error {
+            assert_eq!(result.is_error, Some(true), "{}", result_text(&result));
+            assert!(result_text(&result).contains(error), "{}", result_text(&result));
+            assert_eq!(backend.transaction_owner_sql.lock().unwrap().as_slice(), ["START TRANSACTION"]);
+            assert!(backend.consumed_sql.lock().unwrap().is_empty());
+        } else {
+            assert!(!result.is_error.unwrap_or(false), "{}", result_text(&result));
+            let expected = if batch {
+                vec!["START TRANSACTION", "DELETE FROM accounts", "SELECT 1"]
+            } else {
+                vec!["START TRANSACTION", sql]
+            };
+            assert_eq!(*backend.transaction_owner_sql.lock().unwrap(), expected);
+            assert_eq!(backend.approved_sql.lock().unwrap().as_slice(), [sql]);
+            assert_eq!(backend.consumed_sql.lock().unwrap().as_slice(), [sql]);
+        }
+        server.close_session(Parameters(CloseSessionRequest { session_id: session_id.clone() })).await;
+    }
+
+    #[tokio::test]
+    async fn queued_transaction_calls_reject_confirmation_policy_changes() {
+        let off = McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() };
+        let high_risk = call_safety_policy(true);
+        let legacy = McpGlobalPolicy { prompt_high_risk_sql: true, ..Default::default() };
+        for batch in [false, true] {
+            for (before, after) in [
+                (off.clone(), high_risk.clone()),
+                (high_risk.clone(), off.clone()),
+                (high_risk.clone(), legacy.clone()),
+                (legacy.clone(), high_risk.clone()),
+            ] {
+                check_queued_transaction_call(batch, before, after, false, Some("confirmation policy changed")).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_transaction_calls_consume_valid_approval_only_after_lease() {
+        for batch in [false, true] {
+            for policy in
+                [call_safety_policy(true), McpGlobalPolicy { prompt_high_risk_sql: true, ..Default::default() }]
+            {
+                check_queued_transaction_call(batch, policy.clone(), policy, false, None).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_transaction_calls_reject_revoked_approvals_with_unchanged_policy() {
+        for batch in [false, true] {
+            for policy in
+                [call_safety_policy(true), McpGlobalPolicy { prompt_high_risk_sql: true, ..Default::default() }]
+            {
+                check_queued_transaction_call(
+                    batch,
+                    policy.clone(),
+                    policy,
+                    true,
+                    Some("Invalid or replayed approval"),
+                )
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_transaction_calls_cannot_use_confirmation_to_override_permission_downgrades() {
+        for batch in [false, true] {
+            for (after, error) in [
+                (call_safety_policy(false), "High-risk SQL is disabled"),
+                (McpGlobalPolicy { read_only: true, ..call_safety_policy(true) }, "MCP_READ_ONLY"),
+            ] {
+                check_queued_transaction_call(batch, call_safety_policy(true), after, false, Some(error)).await;
+            }
+        }
     }
 
     #[tokio::test]
@@ -8694,7 +12584,12 @@ mod tests {
         assert_eq!(history[0].database, "app");
         assert_eq!(history[0].sql, "SELECT 1");
         assert!(history[0].success);
-        assert_eq!(history[0].details_json.as_deref(), Some(r#"{"source":"mcp"}"#));
+        let details: serde_json::Value = serde_json::from_str(history[0].details_json.as_deref().unwrap()).unwrap();
+        assert_eq!(details["source"], "mcp");
+        assert_eq!(details["transport"], "stdio");
+        assert_eq!(details["accessLevel"], "full");
+        assert_eq!(details["accessMode"], "classified");
+        assert_eq!(details["confirmation"], "not_required");
         assert!(!history[1].success);
         assert!(history[1].error.as_deref().unwrap_or_default().contains("query failed"));
     }
@@ -9485,6 +13380,44 @@ mod tests {
             assert!(result_text(&prepared).contains("SALESFORCE_DML_DISABLED"), "{label}: {prepared:?}");
             assert!(backend.recorded_arguments.lock().unwrap().is_empty(), "{label} must not reach the org");
         }
+    }
+
+    #[tokio::test]
+    async fn salesforce_toolset_ceiling_blocks_dml_even_when_legacy_opt_in_is_on() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+
+        let mut access = McpAccessPolicy { default_access: McpAccessLevel::Full, ..Default::default() };
+        let mut rule = McpAccessRule::default();
+        rule.toolset_ceilings.insert(dbx_core::mcp_access::SALESFORCE_WRITE_TOOLSET.to_string(), McpAccessLevel::Read);
+        access.rules.insert(McpRuleTarget::Connection { id: "sfdc".into() }, rule);
+        let backend = Arc::new(FakeBackend {
+            connections: vec![salesforce_connection()],
+            policy: salesforce_dml_policy(true, false),
+            access_policy: Some(access),
+            salesforce_identity: Some(salesforce_identity(Some(true))),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .salesforce_prepare_write(prepare_request(
+                "update",
+                "Account",
+                Some("001x"),
+                Some(json!({ "Name": "Acme" })),
+            ))
+            .await;
+        assert!(result_text(&result).contains("SALESFORCE_DML_DISABLED"), "{}", result_text(&result));
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+
+        let names = server
+            .policy_filtered_tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(names.contains("dbx_salesforce_current_user"), "{names:?}");
+        assert!(!names.contains("dbx_salesforce_prepare_write"), "{names:?}");
+        assert!(!names.contains("dbx_salesforce_apply_write"), "{names:?}");
     }
 
     #[tokio::test]

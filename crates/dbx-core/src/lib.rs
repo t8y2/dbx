@@ -55,7 +55,10 @@ pub use admin::mq;
 #[cfg(feature = "mq-admin")]
 pub use admin::mqtt;
 pub use admin::nacos;
+pub use ai::mcp_access;
+pub use ai::mcp_catalog;
 pub use ai::mcp_policy;
+pub use ai::plugin_mcp;
 pub use ai::prompt_template;
 pub use connection::driver_runtime;
 pub use connection::jdbc;

@@ -5,6 +5,7 @@ import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRest
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
+import type { McpAccessPolicy, McpAccessRule, McpSubScopeMode, McpToolCatalog, PluginMcpGrant, PluginMcpView } from "@/types/mcpCatalog";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
 import type { PluginUiStorageItemRef, SqlFileFailureLogExportPayload, SqlFileFailureLogInfo, SqlFileFailureLogKey, SqlFileFailureLogTextPayload, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/tauri";
 import { FAILURE_LOG_TEXT_TOO_LARGE } from "@/lib/export/failureLogExport";
@@ -2483,6 +2484,50 @@ export async function saveDesktopSettings(settings: DesktopSettings): Promise<vo
 
 export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
   return get("/api/app-settings/mcp-policy");
+}
+
+export async function loadMcpToolCatalog(): Promise<McpToolCatalog> {
+  return get("/api/app-settings/mcp-tool-catalog");
+}
+
+export async function loadMcpAccessPolicy(): Promise<McpAccessPolicy> {
+  return get("/api/app-settings/mcp-access-policy");
+}
+
+export async function resetInvalidMcpAccessPolicy(): Promise<void> {
+  return post("/api/app-settings/mcp-access-policy/recover", {});
+}
+
+export async function setMcpPluginScopeRule(connectionId: string, kind: string, value: string | null, rule: McpAccessRule | null, subScope: McpSubScopeMode | null): Promise<McpAccessPolicy> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-access-policy/plugin-scope"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ connectionId, kind, value, rule, subScope }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
+export async function listPluginMcpViews(): Promise<PluginMcpView[]> {
+  return get("/api/app-settings/plugin-mcp");
+}
+
+export async function loadPluginMcpView(pluginId: string): Promise<PluginMcpView> {
+  return post("/api/app-settings/plugin-mcp/view", { pluginId });
+}
+
+export async function listMcpPluginScopes(pluginId: string, connectionId: string): Promise<{ values: string[] }> {
+  return post("/api/app-settings/plugin-mcp/scopes", { pluginId, connectionId });
+}
+
+export async function savePluginMcpGrant(pluginId: string, grant: PluginMcpGrant, approveCurrent: boolean): Promise<PluginMcpView> {
+  const res = await fetch(apiUrl("/api/app-settings/plugin-mcp/grant"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pluginId, grant, approveCurrent }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
 }
 
 export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {

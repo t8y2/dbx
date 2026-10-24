@@ -282,12 +282,24 @@ test("Rust build timings remain available after failures without waiting for can
 test("Linux Rust dependency installs bound apt mirror stalls", () => {
   for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust"]) {
     const content = job(name);
+    const configure = content.indexOf('sudo python3 "$GITHUB_WORKSPACE/.github/scripts/configure-ubuntu-apt.py" /etc/apt');
+    assert.ok(configure >= 0 && configure < content.indexOf("apt-get"), `${name}: configure the archive before apt update`);
     const deadlines = [...content.matchAll(/sudo timeout --kill-after=30s (\d+)m apt-get/g)].map((match) => Number(match[1]));
     assert.deepEqual(deadlines, [10, name === "agent-rust" ? 10 : 20]);
     for (const option of ["Acquire::Retries=3", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30"]) {
       assert.ok(content.includes(option));
     }
   }
+});
+
+test("desktop system dependencies remain available for application and workspace tests", () => {
+  const install = job("rust-test").match(/      - name: Install system dependencies\n([\s\S]*?)(?=\n      - name:)/)?.[1];
+  assert.ok(install, "missing system dependency install step");
+  const condition = install.match(/^        if: (.+)$/m)?.[1];
+  assert.ok(condition, "missing dependency install condition");
+  const shouldInstall = new Function("matrix", `return (${condition});`);
+  for (const group of ["application", "workspace"]) assert.equal(shouldInstall({ group }), true, group);
+  for (const group of ["foundation", "drivers"]) assert.equal(shouldInstall({ group }), false, group);
 });
 
 for (const name of ["rust-test", "agent-integration"]) {

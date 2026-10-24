@@ -64,6 +64,8 @@ const auditedNonLiteralLabels: Record<string, string> = {
   "t(`settings.${titleKey}`)": "Formatter rule titles derived from the SFC below",
   "t(`settings.${titleKey}`) t(`settings.sqlFormatterRule_${value}`)": "Formatter rule titles and enum labels derived from the SFC below",
   database: "User-owned database names must never enter the static search index",
+  name: "Discovered database names in McpDatabaseAccessDialog are user data",
+  value: "Discovered plugin scope values in McpPluginScopeEditor are user data",
   Authentication: "Static AI protocol alias tested below",
   Endpoint: "Static AI protocol alias tested below",
   API: "Static AI protocol alias tested below",
@@ -159,7 +161,14 @@ describe("settings search template coverage", () => {
   });
   it("follows nested settings forms, including backup and authorization fields", () => {
     expect([...controls.keys()]).toEqual(
-      expect.arrayContaining(["components/backup/DatabaseBackupConfigFields.vue", "components/connection/TunnelProfileManager.vue", "components/settings/McpAuthorizationTabs.vue", "components/editor/SqlFormatterSettingsPanel.vue", "components/grid/DataGridTypeColorSchemeDialog.vue"]),
+      expect.arrayContaining([
+        "components/backup/DatabaseBackupConfigFields.vue",
+        "components/connection/TunnelProfileManager.vue",
+        "components/settings/McpAccessTree.vue",
+        "components/settings/McpCapabilityBrowser.vue",
+        "components/editor/SqlFormatterSettingsPanel.vue",
+        "components/grid/DataGridTypeColorSchemeDialog.vue",
+      ]),
     );
   });
   for (const [file, keys] of controls) {
@@ -207,14 +216,14 @@ describe("settings search localization coverage", () => {
         const entries = resolveSettingsSearchEntries(definitions, { isWeb, visibleCategories: new Set(categories) }, (key) => String(messageAt(messages, key) ?? key), categoryLabels);
         for (const key of ["mcpResourceScopeTitle", "mcpScopeModeAll", "mcpResourceScopeModeCustom"]) {
           const results = searchSettings(entries, String(messageAt(messages, `settings.${key}`)), locale, Infinity);
-          expect(results).toEqual(expect.arrayContaining([expect.objectContaining({ targetId: "mcp-connections", route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "connections" } })]));
+          expect(results).toEqual(expect.arrayContaining([expect.objectContaining({ targetId: "mcp-connections", route: { mcpManagementTab: "permissions" } })]));
         }
         for (const key of ["mcpDatabaseScopeAriaLabel", "mcpDatabaseScopeAllTitle", "mcpDatabaseScopeSelectedTitle", "mcpDatabaseScopeNoneTitle"]) {
           const results = searchSettings(entries, String(messageAt(messages, `settings.${key}`)), locale, Infinity);
-          expect(results).toEqual(expect.arrayContaining([expect.objectContaining({ targetId: "mcp-databases", route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "databases" } })]));
+          expect(results).toEqual(expect.arrayContaining([expect.objectContaining({ targetId: "mcp-connections", route: { mcpManagementTab: "permissions" } })]));
         }
         for (const query of [locale === "zh-CN" ? "通配符" : "wildcard", "dbx_ssh__*"]) {
-          expect(searchSettings(entries, query, locale, Infinity)).toEqual(expect.arrayContaining([expect.objectContaining({ targetId: "mcp-capabilities", route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "capabilities" } })]));
+          expect(searchSettings(entries, query, locale, Infinity)).toEqual(expect.arrayContaining([expect.objectContaining({ targetId: "mcp-capabilities", route: { mcpManagementTab: "capabilities", mcpCapabilityTarget: { kind: "advanced" } } })]));
         }
       }
     });

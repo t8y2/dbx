@@ -208,6 +208,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/.github/scripts/configure-ubuntu-apt.py" /etc/apt
           sudo timeout --kill-after=30s 10m apt-get \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \
@@ -907,6 +908,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/.github/scripts/configure-ubuntu-apt.py" /etc/apt
           sudo timeout --kill-after=30s 10m apt-get \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \
@@ -1027,6 +1029,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/.github/scripts/configure-ubuntu-apt.py" /etc/apt
           sudo timeout --kill-after=30s 10m apt-get \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \
@@ -1037,7 +1040,8 @@ jobs:
             -o Acquire::http::Timeout=30 \
             -o Acquire::https::Timeout=30 \
             install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
-        if: matrix.group != 'foundation'
+        # Application and workspace tests need Tauri/WebKit; drivers bundle OpenSSL and SQLite.
+        if: matrix.group != 'foundation' && matrix.group != 'drivers'
 
       # Pin mold because runner image updates can change bundled C++ links.
       # See the packages job note for the pinned upstream build.
@@ -1514,6 +1518,7 @@ jobs:
       - name: Install system dependencies
         if: matrix.driver == 'duckdb'
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/.github/scripts/configure-ubuntu-apt.py" /etc/apt
           sudo timeout --kill-after=30s 10m apt-get \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \

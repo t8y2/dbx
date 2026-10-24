@@ -2,6 +2,7 @@ import { getPlatform } from "@/lib/backend/platform";
 import { SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS } from "@/lib/sql/sqlVariableSyntax";
 import { APP_CUSTOM_UI_COLOR_DEFS } from "@/lib/app/appTheme";
 import { MCP_TOOL_OPTIONS, MCP_EXECUTION_MODE_COLUMNS } from "@/lib/mcp/mcpPolicySelection";
+import type { McpCapabilityNavigationTarget } from "@/lib/mcp/mcpCapabilitySearch";
 
 export type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "backups" | "tunnels" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "updates" | "security" | "about";
 
@@ -56,9 +57,9 @@ export interface SettingsSearchEntry {
 
 export interface SettingsSearchRoute {
   syncMethodTab?: "webdav" | "snippet" | "local";
-  mcpManagementTab?: "access" | "permissions";
+  mcpManagementTab?: "access" | "permissions" | "capabilities";
   mcpTransportTab?: "stdio" | "http";
-  mcpAuthorizationTab?: "overrides" | "connections" | "databases" | "capabilities";
+  mcpCapabilityTarget?: McpCapabilityNavigationTarget;
   formatterMode?: "form" | "json";
 }
 
@@ -701,7 +702,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     titleKey: "settings.mcpExecutionMode",
     descriptionKey: "settings.mcpExecutionModeDescription",
     targetId: "mcp-overrides",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "overrides" },
+    route: { mcpManagementTab: "permissions" },
     keywordKeys: MCP_EXECUTION_MODE_COLUMNS.map((mode) => mode.labelKey),
   },
   { id: "mcp-config", category: "mcp", titleKey: "settings.mcpConfig", targetId: "mcp-client-config", route: { mcpManagementTab: "access", mcpTransportTab: "stdio" } },
@@ -852,18 +853,22 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   {
     id: "mcp-prompt-high-risk-sql",
     category: "mcp",
-    titleKey: "settings.mcpPromptHighRiskSql",
-    targetId: "mcp-overrides",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "overrides" },
-    keywordKeys: ["settings.mcpExecutionModeDescription", "settings.mcpPermissionGlobalDefaultHint", "settings.mcpCapabilityTitle", "settings.mcpCapabilityDescription", "settings.mcpCapabilityOperation", "settings.mcpCapabilityAlwaysEnforced"],
+    titleKey: "settings.mcpCallSafety",
+    targetId: "mcp-call-safety",
+    route: { mcpManagementTab: "permissions" },
+    keywordKeys: ["settings.mcpCallSafetyConfirm", "settings.mcpExecutionModeDescription", "settings.mcpPermissionGlobalDefaultHint", "settings.mcpCapabilityTitle", "settings.mcpCapabilityDescription", "settings.mcpCapabilityOperation", "settings.mcpCapabilityAlwaysEnforced"],
   },
   {
     id: "mcp-auth-tab-connections-title",
     category: "mcp",
     titleKey: "settings.mcpAuthTabConnectionsTitle",
     targetId: "mcp-connections",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "connections" },
+    route: { mcpManagementTab: "permissions" },
     keywordKeys: [
+      "settings.mcpAccessTreeScopeLabel",
+      "settings.mcpAccessTreeExceptionsOnly",
+      "settings.mcpAccessTreeColumnVisible",
+      "settings.mcpAccessTreeColumnSetting",
       "settings.mcpConnectionPolicyAllowSalesforceDml",
       "settings.mcpConnectionPolicyInherit",
       "settings.mcpConnectionPolicyReadOnly",
@@ -878,13 +883,18 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     id: "mcp-auth-tab-databases-title",
     category: "mcp",
     titleKey: "settings.mcpAuthTabDatabasesTitle",
-    targetId: "mcp-databases",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "databases" },
+    targetId: "mcp-connections",
+    route: { mcpManagementTab: "permissions" },
     keywordKeys: [
       "settings.mcpConnectionPolicyInherit",
       "settings.mcpConnectionPolicyReadOnly",
       "settings.mcpConnectionPolicySafeWrite",
       "settings.mcpConnectionPolicyHighRiskWrite",
+      "settings.mcpAccessTreeDatabases",
+      "settings.mcpDatabaseSearch",
+      "settings.mcpDatabaseSelectResults",
+      "settings.mcpDatabaseBatchLevel",
+      "settings.mcpAccessTreeManualDatabase",
       "settings.mcpDatabaseScopeTitle",
       "settings.mcpDatabaseScopeDescription",
       "settings.mcpDatabaseScopeAriaLabel",
@@ -901,13 +911,28 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     category: "mcp",
     titleKey: "settings.mcpToolPermissionsTitle",
     descriptionKey: "settings.mcpToolPermissionsDescription",
-    keywordKeys: ["settings.mcpToolCustomPlaceholder", "settings.mcpToolCustomHint"],
+    keywordKeys: ["settings.mcpBrowser.searchPlaceholder", "settings.mcpCapabilitiesOnlyEnabled", "settings.mcpBrowser.navigation", "settings.mcpCapabilitiesFilterLabel", "settings.mcpBrowser.builtin", "settings.mcpBrowser.plugins"],
     targetId: "mcp-capabilities",
-    route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "capabilities" },
+    route: { mcpManagementTab: "capabilities" },
   },
-  { id: "mcp-permission-preview-title", category: "mcp", titleKey: "settings.mcpPermissionPreviewTitle", targetId: "mcp-capabilities", route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "capabilities" } },
+  {
+    id: "mcp-custom-tool-entries",
+    category: "mcp",
+    titleKey: "settings.mcpPluginToolEntriesTitle",
+    keywordKeys: ["settings.mcpToolCustomPlaceholder", "settings.mcpToolCustomHint", "settings.mcpPluginToolEntriesHint"],
+    targetId: "mcp-capabilities",
+    route: { mcpManagementTab: "capabilities", mcpCapabilityTarget: { kind: "advanced" } },
+  },
+  { id: "mcp-permission-preview-title", category: "mcp", titleKey: "settings.mcpAccessTreeTitle", targetId: "mcp-connections", route: { mcpManagementTab: "permissions" } },
   { id: "backups-background-worker", category: "backups", titleKey: "databaseBackup.backgroundWorker", targetId: "backups", visible: desktopOnly },
-  ...MCP_TOOL_OPTIONS.map((tool): SettingsSearchDefinition => ({ id: `mcp-tool-${tool.name}`, category: "mcp", titleKey: tool.labelKey, targetId: "mcp-capabilities", route: { mcpManagementTab: "permissions", mcpAuthorizationTab: "capabilities" } })),
+  ...MCP_TOOL_OPTIONS.map((tool): SettingsSearchDefinition => ({
+    id: `mcp-tool-${tool.name}`,
+    category: "mcp",
+    titleKey: tool.labelKey,
+    keywordTexts: [tool.name],
+    targetId: "mcp-capabilities",
+    route: { mcpManagementTab: "capabilities", mcpCapabilityTarget: { kind: "tool", toolName: tool.name } },
+  })),
 ];
 
 export function resolveSettingsSearchEntries(definitions: readonly SettingsSearchDefinition[], context: SettingsSearchContext, translate: Translate, categoryLabels: Readonly<Record<SettingsCategory, string>>): SettingsSearchEntry[] {

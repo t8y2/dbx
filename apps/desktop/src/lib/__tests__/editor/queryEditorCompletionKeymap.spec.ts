@@ -69,6 +69,7 @@ function createHarness(options: {
   databaseType?: string;
   completionStatus: (state: MockState) => "active" | "pending" | null;
   selectedCompletion?: (state: MockState) => { type?: string } | null;
+  currentCompletions?: (state: MockState) => { type?: string }[];
   acceptCompletion?: (view: MockView) => boolean;
   selectedCompletionIndex?: (state: MockState) => number | null;
   selectFirstCompletion?: (view: MockView) => boolean;
@@ -117,6 +118,7 @@ function createHarness(options: {
   const factory = new Function(
     "codeMirrorCompletionStatus",
     "codeMirrorSelectedCompletion",
+    "codeMirrorCurrentCompletions",
     "isBatchColumnSelectionCompletionActive",
     "codeMirrorAcceptCompletion",
     "codeMirrorSelectedCompletionIndex",
@@ -139,6 +141,7 @@ function createHarness(options: {
   return factory(
     options.completionStatus,
     options.selectedCompletion ?? (() => ({ type: "column" })),
+    options.currentCompletions ?? (() => undefined),
     (status: "active" | "pending" | null) => status === "active",
     options.acceptCompletion ?? (() => false),
     options.selectedCompletionIndex ?? (() => 0),
@@ -656,6 +659,49 @@ describe("QueryEditor SQL Server completion Space keymap", () => {
     });
 
     expect(harness.acceptSqlServerCompletionOnSpace(createView())).toBe(false);
+    expect(acceptCompletion).not.toHaveBeenCalled();
+  });
+
+  it("accepts the first unselected keyword completion on Space", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const selectFirstCompletion = vi.fn(() => true);
+    const harness = createHarness({
+      databaseType: "sqlserver",
+      completionStatus: () => "active",
+      selectedCompletion: () => null,
+      currentCompletions: () => [{ type: "keyword" }],
+      selectedCompletionIndex: () => null,
+      selectFirstCompletion,
+      acceptCompletion,
+    });
+    const view = createView("select");
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(selectFirstCompletion).toHaveBeenCalledWith(view);
+    expect(acceptCompletion).toHaveBeenCalledWith(view);
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 6, insert: " " },
+      selection: { anchor: 7 },
+      scrollIntoView: true,
+    });
+  });
+
+  it("does not accept on Space when the first unselected completion is not a keyword/table/column", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const selectFirstCompletion = vi.fn(() => true);
+    const harness = createHarness({
+      databaseType: "sqlserver",
+      completionStatus: () => "active",
+      selectedCompletion: () => null,
+      currentCompletions: () => [{ type: "function" }],
+      selectedCompletionIndex: () => null,
+      selectFirstCompletion,
+      acceptCompletion,
+    });
+    const view = createView("count");
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(false);
+    expect(selectFirstCompletion).not.toHaveBeenCalled();
     expect(acceptCompletion).not.toHaveBeenCalled();
   });
 });

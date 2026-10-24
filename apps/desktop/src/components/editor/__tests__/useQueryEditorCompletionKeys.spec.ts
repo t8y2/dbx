@@ -200,6 +200,29 @@ describe("QueryEditor completion-key ownership", () => {
     expect(view.state.selection.main.head).toBe(6);
   });
 
+  it("accepts the first unselected keyword completion on Space in SQL Server", () => {
+    const { keys, view, runtime, status, accept } = createHarness({ modelValue: "select", databaseType: "sqlserver" });
+    view.dispatch({ selection: { anchor: 6 } });
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletion = () => null;
+    runtime.codeMirrorCurrentCompletions = () => [{ label: "SELECT", type: "keyword" }];
+    runtime.codeMirrorSelectFirstCompletion = vi.fn(() => {
+      runtime.codeMirrorSelectedCompletionIndex = () => 0;
+      runtime.codeMirrorSelectedCompletion = () => ({ label: "SELECT", type: "keyword" });
+      return true;
+    });
+    accept.mockImplementation((currentView: EditorView) => {
+      currentView.dispatch({ changes: { from: 0, to: 6, insert: "SELECT" }, selection: { anchor: 6 } });
+      return true;
+    });
+
+    expect(keys.handleSpace(view)).toBe(true);
+    expect(runtime.codeMirrorSelectFirstCompletion).toHaveBeenCalledOnce();
+    expect(accept).toHaveBeenCalledOnce();
+    expect(view.state.doc.toString()).toBe("SELECT ");
+    expect(view.state.selection.main.head).toBe(7);
+  });
+
   it("accepts snippet completion on Tab when snippetTriggerKey is tab or both", () => {
     const { keys, view, status, runtime, accept } = createHarness();
     status.mockReturnValue("active");

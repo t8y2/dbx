@@ -234,8 +234,10 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
         }
-        // openGauss descends from PostgreSQL 9.2 and has no FORMAT JSON output,
-        // so the plan is generated as plain `EXPLAIN <statement>` text (#13055).
+        // openGauss documents EXPLAIN (FORMAT TEXT|XML|JSON|YAML) but JSON output
+        // additionally depends on the session's explain_perf_mode; plain text avoids
+        // assuming that GUC, so the plan is generated as plain `EXPLAIN <statement>`
+        // text (#13055).
         DatabaseType::OpenGauss => {
             EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
         }

@@ -954,7 +954,10 @@ function parseOpenGaussExplain(result: QueryResult): ParsedExplainPlan {
       details: [text.trim()],
       children: [],
     };
-    while (stack.length > depth) stack.pop();
+    // Compare stored depths, not stack length: a row may jump more than one
+    // level past its parent (detail lines under a `->` node), which desyncs
+    // length from depth and chains same-indent siblings as parent-child.
+    while (stack.length > 0 && stack[stack.length - 1]!.depth >= depth) stack.pop();
     if (stack.length === 0) {
       nodes.push(node);
     } else {

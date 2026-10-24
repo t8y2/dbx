@@ -24,6 +24,19 @@ describe("openGauss explain plan (#13055)", () => {
     expect(root.children[1]!.title).toContain("Seq Scan on t");
   });
 
+  it("keeps consecutive same-indent detail lines as siblings under their node", () => {
+    // PG-style plans put a node's detail lines several levels under the `->` row;
+    // consecutive same-indent lines must stay siblings, not chain parent→child.
+    const result = parseExplainResult("opengauss", textPlanResult(["Nested Loop  (cost=0.00..1.00 rows=1 width=4)", "  ->  Seq Scan on a  (cost=0.00..1.00 rows=1 width=4)", "        Filter: (id = 1)", "        Rows Removed by Filter: 3"]));
+
+    const seqScan = result.nodes[0]!.children[0]!;
+    expect(seqScan.title).toContain("Seq Scan on a");
+    expect(seqScan.children).toHaveLength(2);
+    expect(seqScan.children[0]!.title).toBe("Filter: (id = 1)");
+    expect(seqScan.children[1]!.title).toBe("Rows Removed by Filter: 3");
+    expect(seqScan.children[0]!.children).toHaveLength(0);
+  });
+
   it("keeps top-level rows as siblings", () => {
     const result = parseExplainResult("opengauss", textPlanResult(["Seq Scan on a  (cost=0.00..1.00 rows=1 width=4)", "Seq Scan on b  (cost=0.00..2.00 rows=2 width=4)"]));
     expect(result.nodes).toHaveLength(2);

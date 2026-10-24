@@ -8982,6 +8982,9 @@ export default withEnglishFallback({
     batchRowsHint: "จำนวนแถวที่สร้างและ Insert ต่อการส่งคำขอและรับผลลัพธ์หนึ่งรอบ ระบบจะแบ่ง Batch ที่ใหญ่เกินไปโดยอัตโนมัติ",
     cancelInsert: "ยกเลิกการแทรก",
     cancelledLabel: "ยกเลิกแล้ว; แถวที่เขียนไปแล้วจะยังคงอยู่ในตาราง",
+    bitWidth: "ความกว้างบิต",
+    bitFixedWidth: "bit({width}) แบบความยาวคงที่",
+    bitVaryingWidth: "bit varying({width}) แบบความยาวแปรผัน 1..{width} บิต",
   },
   tableToolbox: {
     browserFiltered: "ดูตัวอย่างบนเว็บ (ผลลัพธ์ปัจจุบัน)",

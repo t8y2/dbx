@@ -8585,6 +8585,9 @@ export default withEnglishFallback({
     batchRowsHint: "Число строк, генерируемых и вставляемых за один проход; слишком большие пакеты разбиваются автоматически",
     cancelInsert: "Отменить вставку",
     cancelledLabel: "Отменено; уже записанные строки остаются в таблице",
+    bitWidth: "Разрядность",
+    bitFixedWidth: "bit({width}), фиксированная длина",
+    bitVaryingWidth: "bit varying({width}), 1..{width} бит",
   },
   tableToolbox: {
     browserFiltered: "Веб-просмотр (текущий результат)",

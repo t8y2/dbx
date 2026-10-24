@@ -633,6 +633,8 @@ make package
 
 The installer will be in `src-tauri/target/release/bundle/`.
 
+`pnpm build` explicitly removes the previous root `dist/` directory before running Vite, so desktop packaging starts with fresh frontend output.
+
 ## Tech Stack
 
 | Layer     | Technology                                                                                                                                                                                                       |

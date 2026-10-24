@@ -28,7 +28,7 @@
     "check:connection-types": "node scripts/sync-connection-types.mjs --check",
     "pretypecheck": "pnpm generate:connection-types",
     "typecheck": "vue-tsc --noEmit --project apps/desktop/tsconfig.json",
-    "build": "vite build --config apps/desktop/vite.config.ts",
+    "build": "node scripts/clean-desktop-dist.mjs && vite build --config apps/desktop/vite.config.ts",
     "build:docs-export": "vite build --config apps/desktop/vite.docs-export.config.ts",
     "build:checked": "pnpm typecheck && pnpm build",
     "check": "node scripts/run-check.mjs",

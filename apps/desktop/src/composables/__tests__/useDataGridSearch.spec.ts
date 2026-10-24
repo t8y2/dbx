@@ -166,6 +166,91 @@ describe("useDataGridSearch", () => {
     expect(search.matches.value).toEqual([]);
     expect(search.currentMatchIndex.value).toBe(-1);
   });
+
+  it("does not auto-navigate or reset match position when rows change without a query change (#13241)", async () => {
+    vi.useFakeTimers();
+    const rows = ref([
+      ["hit", "other1"],
+      ["hit", "other2"],
+    ]);
+    const onNavigate = vi.fn();
+    const search = useDataGridSearch({
+      columns: ["id", "extra"],
+      rows,
+      getCellSearchText: (row, column) => row[column],
+      onNavigate,
+    });
+    search.searchText.value = "hit";
+    await flushSearchDebounce();
+    expect(search.currentMatchIndex.value).toBe(0);
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(onNavigate).toHaveBeenLastCalledWith({ kind: "cell", displayRow: 0, col: 0 });
+
+    // User navigates to match 1
+    search.navigateMatch(1);
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(onNavigate).toHaveBeenCalledTimes(2);
+    expect(onNavigate).toHaveBeenLastCalledWith({ kind: "cell", displayRow: 1, col: 0 });
+
+    // User edits an unrelated column on row 1 (or sets it to NULL), updating rows
+    onNavigate.mockClear();
+    rows.value = [
+      ["hit", "other1"],
+      ["hit", "null"],
+    ];
+    await nextTick();
+    await nextTick();
+
+    // Match position must remain at index 1 and onNavigate must NOT be called
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(search.currentMatch.value).toEqual({ kind: "cell", displayRow: 1, col: 0 });
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("preserves match index without onNavigate when cell is set to null or rows reload after commit (#13241)", async () => {
+    vi.useFakeTimers();
+    const rows = ref<Array<[string, string | null]>>([
+      ["user-1", "val1"],
+      ["user-2", "val2"],
+    ]);
+    const onNavigate = vi.fn();
+    const search = useDataGridSearch({
+      columns: ["_id", "status"],
+      rows,
+      getCellSearchText: (row, column) => (row[column] ?? "").toLowerCase(),
+      onNavigate,
+    });
+    search.searchText.value = "user";
+    await flushSearchDebounce();
+    expect(search.currentMatchIndex.value).toBe(0);
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+
+    // Navigate to second document
+    search.navigateMatch(1);
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(onNavigate).toHaveBeenCalledTimes(2);
+
+    // Set field to null
+    onNavigate.mockClear();
+    rows.value = [
+      ["user-1", "val1"],
+      ["user-2", null],
+    ];
+    await nextTick();
+    await nextTick();
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    // Reload after commit with fresh objects but same data
+    rows.value = [
+      ["user-1", "val1"],
+      ["user-2", null],
+    ];
+    await nextTick();
+    await nextTick();
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
 });
 
 describe("useDataGridSearch persistence (#8524)", () => {

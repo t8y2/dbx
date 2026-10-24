@@ -1046,6 +1046,7 @@ async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot, execu
     mode: settingsStore.editorSettings.executeMode,
     cursorPos: snapshot?.cursorPos ?? (tab.id === activeTab.value?.id ? cursorPos.value : (selection?.head ?? 0)),
     databaseType: connection?.db_type,
+    mongoQueryLanguage: tab.mongoQueryLanguage,
   });
 }
 

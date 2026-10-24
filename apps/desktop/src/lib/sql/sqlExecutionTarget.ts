@@ -1,5 +1,6 @@
 import * as api from "@/lib/backend/api";
-import { mongoCommandRangeAtCursor } from "@/lib/sql/sqlStatementRanges";
+import { mongoCommandRangeAtCursor, statementRangeAtCursor } from "@/lib/sql/sqlStatementRanges";
+import type { MongoQueryLanguage } from "@/lib/mongo/mongoSql";
 import type { DatabaseType } from "@/types/database";
 
 export type ExecuteMode = "all" | "current";
@@ -60,9 +61,16 @@ export function resolveExecutableSql(fullSql: string, selectedSql: string, optio
   return fullSql;
 }
 
-export async function resolveExecutableSqlWithBackend(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number; databaseType?: DatabaseType }): Promise<string> {
+export async function resolveExecutableSqlWithBackend(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number; databaseType?: DatabaseType; mongoQueryLanguage?: MongoQueryLanguage }): Promise<string> {
   const trimmedSelection = selectedSql.trim();
   if (trimmedSelection) return trimmedSelection;
+
+  if (options?.databaseType === "mongodb" && options.mongoQueryLanguage === "sql") {
+    if (options.mode === "current" && options.cursorPos !== undefined) {
+      return statementRangeAtCursor(fullSql, options.cursorPos)?.sql ?? fullSql;
+    }
+    return fullSql;
+  }
 
   if (options?.databaseType === "mongodb") {
     if (options.mode === "current" && options.cursorPos !== undefined) {

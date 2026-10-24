@@ -726,6 +726,11 @@ export default withEnglishFallback({
     alwaysOnTop: "常に手前に表示",
     alwaysOnTopOff: "手前表示を解除",
     blockDangerousRedisCommands: "危険なコマンドをブロック",
+    mongoQueryLanguage: "MongoDB のクエリ言語",
+    mongoShellMode: "Shell",
+    mongoSqlMode: "SQL",
+    copyMongoShell: "生成した shell をコピー",
+    mongoShellCopied: "Mongo shell コマンドをコピーしました",
     multiDbExecute: "複数DB実行",
     executeAllSql: "すべての SQL を実行",
   },
@@ -2332,6 +2337,8 @@ export default withEnglishFallback({
   queryMessages: {
     empty: "メッセージなし",
     code: "コード: {code}",
+    mongoShell: "生成された mongo shell",
+    copyMongoShell: "shell をコピー",
   },
   chart: {
     title: "グラフ",

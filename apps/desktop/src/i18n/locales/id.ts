@@ -456,6 +456,11 @@ export default withEnglishFallback({
     alwaysOnTop: "Tetap di atas jendela lain",
     alwaysOnTopOff: "Jangan tetap di atas",
     blockDangerousRedisCommands: "Blokir perintah berbahaya",
+    mongoQueryLanguage: "Bahasa kueri MongoDB",
+    mongoShellMode: "Shell",
+    mongoSqlMode: "SQL",
+    copyMongoShell: "Salin shell yang dibuat",
+    mongoShellCopied: "Perintah mongo shell disalin",
     multiDbExecute: "Eksekusi multi-database",
   },
   multiDbExecute: {
@@ -2117,6 +2122,8 @@ export default withEnglishFallback({
   queryMessages: {
     empty: "Tidak ada pesan",
     code: "Kode: {code}",
+    mongoShell: "Shell mongo yang dibuat",
+    copyMongoShell: "Salin shell",
   },
   chart: {
     title: "Chart",

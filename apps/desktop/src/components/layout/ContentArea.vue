@@ -2164,6 +2164,7 @@ defineExpose({
                 :client-session-id="activeTab.id"
                 :completion-context-version="activeTab.completionContextVersion"
                 :database-type="activeEffectiveDatabaseType"
+                :mongo-query-language="activeTab.mongoQueryLanguage"
                 :dialect="editorDialect"
                 :syntax-dialect="editorSyntaxDialect"
                 :format-dialect="activeSqlFormatDialect"

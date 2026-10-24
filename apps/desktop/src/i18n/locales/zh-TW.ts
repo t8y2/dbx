@@ -730,6 +730,11 @@ export default withEnglishFallback({
     alwaysOnTop: "視窗置頂",
     alwaysOnTopOff: "取消置頂",
     blockDangerousRedisCommands: "攔截危險命令",
+    mongoQueryLanguage: "MongoDB 查詢語言",
+    mongoShellMode: "Shell",
+    mongoSqlMode: "SQL",
+    copyMongoShell: "複製產生的 shell",
+    mongoShellCopied: "已複製 Mongo shell 命令",
     multiDbExecute: "多庫執行",
     immediateSync: "立即同步",
   },
@@ -2311,6 +2316,8 @@ export default withEnglishFallback({
   queryMessages: {
     empty: "沒有訊息",
     code: "代碼：{code}",
+    mongoShell: "產生的 mongo shell",
+    copyMongoShell: "複製 shell",
   },
   chart: {
     title: "圖表",

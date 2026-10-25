@@ -102,6 +102,7 @@ const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-synonyms",
   "group-jobs",
   "group-packages",
+  "group-package-bodies",
   "group-types",
 ]);
 const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "package", "package-body", "type", "type-body"]);

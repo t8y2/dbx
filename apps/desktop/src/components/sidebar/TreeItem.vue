@@ -436,6 +436,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Clock, colorClass: "text-orange-400" };
     case "group-packages":
       return { icon: Package, colorClass: "text-cyan-500" };
+    case "group-package-bodies":
+      return { icon: Package, colorClass: "text-cyan-500" };
     case "group-types":
       return { icon: Braces, colorClass: "text-violet-500" };
     case "group-database-indexes":
@@ -1734,6 +1736,7 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-synonyms' ||
                   node.type === 'group-jobs' ||
                   node.type === 'group-packages' ||
+                  node.type === 'group-package-bodies' ||
                   node.type === 'group-types' ||
                   node.type === 'group-partitions' ||
                   node.type === 'type-attributes' ||

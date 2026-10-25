@@ -750,3 +750,36 @@ describe("tablePageRowAnchorKey", () => {
     expect(tablePageRowAnchorKey("p_2024", "app")).not.toBe(tablePageRowAnchorKey("p_2024", "app", "orders"));
   });
 });
+
+describe("package and package body groups (#13239)", () => {
+  function pkg(type: string, name: string): ObjectInfo {
+    return { name, object_type: type, schema: "app" } as ObjectInfo;
+  }
+
+  it("splits packages and package bodies into separate groups", () => {
+    const nodes = buildGroupedObjectTreeNodes({
+      ...context,
+      objects: [pkg("PACKAGE", "ledger"), pkg("PACKAGE_BODY", "ledger"), pkg("PACKAGE", "reports")],
+      databaseType: "oracle",
+    });
+    const packagesGroup = nodes.find((node) => node.type === "group-packages");
+    const bodiesGroup = nodes.find((node) => node.type === "group-package-bodies");
+    expect(bodiesGroup).toBeDefined();
+    const packageChildren = packagesGroup!.children!.map((node) => node.label);
+    expect(packageChildren).toEqual(["ledger", "reports"]);
+    expect(bodiesGroup!.children!.map((node) => node.label)).toEqual(["ledger"]);
+  });
+
+  it("keeps the body-only package visible inside the bodies group", () => {
+    const nodes = buildGroupedObjectTreeNodes({
+      ...context,
+      objects: [pkg("PACKAGE_BODY", "orphan")],
+      databaseType: "oracle",
+    });
+    const bodiesGroup = nodes.find((node) => node.type === "group-package-bodies");
+    expect(bodiesGroup!.children!.map((node) => node.label)).toEqual(["orphan"]);
+    // Empty groups may be omitted entirely rather than rendered with zero children.
+    const packagesGroup = nodes.find((node) => node.type === "group-packages");
+    expect(!packagesGroup || (packagesGroup.children ?? []).length === 0).toBe(true);
+  });
+});

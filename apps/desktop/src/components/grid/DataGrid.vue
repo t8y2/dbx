@@ -168,6 +168,7 @@ import {
   type TransposeScrollAlignment,
 } from "@/lib/dataGrid/dataGridTranspose";
 import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
+import { matchesResultClientFilter, type ResultClientFilter } from "@/lib/dataGrid/gridClientFilter";
 import { displayCellValue, firstLineCellDisplayValue, gridCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
 import { cellExternalUrl } from "@/lib/dataGrid/cellExternalUrl";
 import { getApplicablePreviewActions, type PreviewAction } from "@/lib/dataGrid/resultPreviewRegistry";
@@ -2340,6 +2341,12 @@ async function clearStructuredSortRules() {
 watch(filterEditorView, () => sortBuilder.setOpen(false));
 
 const rowStatusFilter = ref<RowStatusFilter>("all");
+
+// #13237: query-result grids cannot re-query the server, so their「筛选此值」
+// menu filters the loaded rows in memory. Only active outside table-data mode
+// (which keeps its server-side WHERE filtering).
+const resultClientFilter = ref<ResultClientFilter | null>(null);
+const canClientFilterResult = computed(() => !canUseWhereSearch.value);
 const gridRef = ref<HTMLDivElement>();
 const dataGridTopbarRef = ref<HTMLDivElement>();
 const headerRef = ref<HTMLDivElement>();
@@ -4860,6 +4867,12 @@ function closeSqlPreview() {
 }
 
 // Watch for edits — auto-refresh preview when panel is open
+watch(
+  () => props.result,
+  () => {
+    resultClientFilter.value = null;
+  },
+);
 watch([pendingChangeCount, pendingChangesVersion], () => {
   schedulePreviewRefresh();
 });
@@ -5562,7 +5575,11 @@ const displayRowRefs = computed<DisplayRowRef[]>(() => {
       const isDeleted = deletedRows.value.has(sourceIndex);
       const status: RowStatus = isDeleted ? "deleted" : dirty?.size ? "edited" : "clean";
       const isActiveEditingRow = quickEntryEnabled.value && editingCell.value?.rowId === sourceIndex;
-      if (matchesRowStatusFilter(status, rowStatusFilter.value) || isActiveEditingRow) {
+      const statusVisible = matchesRowStatusFilter(status, rowStatusFilter.value) || isActiveEditingRow;
+      if (statusVisible && canClientFilterResult.value && resultClientFilter.value && !matchesResultClientFilter(props.result.rows[sourceIndex] ?? [], resultClientFilter.value)) {
+        continue;
+      }
+      if (statusVisible) {
         refs.push({
           id: sourceIndex,
           displayIndex: refs.length,
@@ -7661,7 +7678,14 @@ async function contextFilterCondition(target: ContextFilterTarget, mode: FilterM
 }
 
 async function applyContextFilter(mode: FilterMode) {
-  if (!canUseWhereSearch.value) return;
+  if (!canUseWhereSearch.value) {
+    if (!canClientFilterResult.value) return;
+    const target = contextFilterTarget.value;
+    if (!target) return;
+    resultClientFilter.value = { colIndex: target.col, mode, value: String(target.sourceValue ?? "") };
+    contextFilterTarget.value = null;
+    return;
+  }
   const target = contextFilterTarget.value;
   if (!target) return;
   activeContextFilterActions.add(target.id);
@@ -7696,6 +7720,10 @@ async function openContextCustomFilter() {
 }
 
 async function clearContextFilter() {
+  if (canClientFilterResult.value) {
+    resultClientFilter.value = null;
+    return;
+  }
   await clearAllFilters();
 }
 
@@ -14029,6 +14057,7 @@ function filterSubmenu(): ContextMenuItem {
     apply: applyContextFilter,
     applyCustom: openContextCustomFilter,
     clear: clearContextFilter,
+    hideCustom: canClientFilterResult.value,
   });
 }
 
@@ -14380,7 +14409,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       canCopyAlterSql: canCopyAlterColumnSql.value,
       canCopyMetadata: true,
       canCopyComment: contextCopyableColumnComments.value.length > 0,
-      canFilter: canUseWhereSearch.value,
+      canFilter: canUseWhereSearch.value || canClientFilterResult.value,
       hasSort: !!sortCol.value,
       sortMode: localSortMode.value,
       databaseSortEnabled: props.databaseSortEnabled !== false && databaseSortSupportedForDatabase(resolvedDatabaseType.value),

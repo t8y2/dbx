@@ -397,7 +397,7 @@ jobs:
       SCCACHE_IDLE_TIMEOUT: "0"
       # Single source for the job's nightly pin: the toolchain step and the
       # prebuilt AWS-LC artifact name must move together.
-      WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-07-22
+      WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-10-25
     steps:
       - uses: actions/checkout@v7
 
@@ -1079,7 +1079,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
 
@@ -1547,7 +1547,7 @@ jobs:
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
       # mold -run wraps the whole process tree (see the packages job note);
@@ -1647,7 +1647,7 @@ jobs:
         if: matrix.driver == 'tdengine'
       - name: Install nextest
         if: matrix.driver == 'tdengine'
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
       - name: TDengine Rust cache

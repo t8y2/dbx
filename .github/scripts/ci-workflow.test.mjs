@@ -195,7 +195,7 @@ test("main and fork Rust jobs use the same rust-cache fingerprint", () => {
     const content = job(name);
     assert.match(content, stableCacheEnvironment);
     assert.match(content, /^      RUSTC_WRAPPER: sccache$/m);
-    assert.ok(content.includes('version: "v0.19.0"'));
+    assert.ok(content.includes('version: "v0.16.0"'));
     assert.doesNotMatch(content, /RUSTC_WRAPPER: ""|CC: ""|CXX: ""/);
   }
 });
@@ -403,7 +403,7 @@ test("DuckDB Windows builds persist Rust and C++ compiler results", () => {
   assert.ok(content.includes('CXX: "sccache cl.exe"'));
   assert.ok(content.includes("0b201ec74fa43914dc39ae48a89fd1d8cb592756"));
   assert.ok(content.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
-  assert.ok(content.includes('version: "v0.19.0"'));
+  assert.ok(content.includes('version: "v0.16.0"'));
 });
 
 test("Windows compatibility jobs cache Rust compilation without wrapping C or C++", () => {
@@ -413,7 +413,7 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.ok(standard.includes("SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}"));
   assert.ok(standard.includes("SCCACHE_GHA_VERSION: windows-standard-v1"));
   assert.ok(standard.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
-  assert.ok(standard.includes('version: "v0.19.0"'));
+  assert.ok(standard.includes('version: "v0.16.0"'));
   assert.ok(standard.includes("cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc"));
   assert.ok(standard.includes("sccache --show-stats"));
 
@@ -423,7 +423,7 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   for (const setting of ["RUSTC_WRAPPER: sccache", "SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}", "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "off"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"'])
     assert.ok(win7.includes(setting));
   assert.ok(win7.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
-  assert.ok(win7.includes('version: "v0.19.0"'));
+  assert.ok(win7.includes('version: "v0.16.0"'));
   assert.ok(win7.includes("sccache --show-stats"));
   for (const flag of ["-Z host-config", "-Z target-applies-to-host", "-Z build-std=std,panic_abort"]) assert.ok(win7.includes(flag));
   assert.ok(win7.includes("--config .github/fixtures/win7-host-repro-config.toml"));

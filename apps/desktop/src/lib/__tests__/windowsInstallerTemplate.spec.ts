@@ -150,7 +150,7 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
       expect(job).toContain("SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1");
       expect(job).toContain('SCCACHE_IDLE_TIMEOUT: "0"');
       expect(job).toContain("mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba");
-      expect(job).toContain('version: "v0.19.0"');
+      expect(job).toContain('version: "v0.16.0"');
       expect(job).not.toMatch(/^\s+(?:CC|CXX):/m);
     }
     expect(releaseWin7Job).not.toContain("CARGO_PROFILE_RELEASE_");

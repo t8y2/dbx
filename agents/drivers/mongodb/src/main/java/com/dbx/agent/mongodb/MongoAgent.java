@@ -60,8 +60,10 @@ import java.security.KeyFactory;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.SecureRandom;
+import java.security.Security;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -74,6 +76,7 @@ import java.util.Date;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
@@ -88,6 +91,7 @@ import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
 import org.bson.Document;
 import org.bson.json.JsonMode;
 import org.bson.json.JsonWriterSettings;
@@ -115,6 +119,15 @@ public final class MongoAgent {
     private static final int MAX_SESSIONS = 256;
     /** MongoDB error code 13 (Unauthorized), returned when the account may not run listDatabases. */
     private static final int LIST_DATABASES_UNAUTHORIZED_CODE = 13;
+    private static final int MAX_SERVER_SELECTION_TIMEOUT_SECS = 20;
+    private static final String TLS_DISABLED_ALGORITHMS_KEY = "jdk.tls.disabledAlgorithms";
+    // MongoDB 3.x servers built against older OpenSSL only offer static RSA key exchange
+    // (and the oldest only TLS 1.0), which current JREs disable by default.
+    private static final Set<String> LEGACY_TLS_ALGORITHMS_TO_ALLOW = Set.of(
+        "TLSV1",
+        "TLSV1.1",
+        "TLS_RSA_*",
+        "RSA_PKCS1_SHA1 USAGE HANDSHAKESIGNATURE");
     private static final ThreadLocal<MongoClient> CURRENT_CLIENT = new ThreadLocal<>();
     private static final ThreadLocal<Set<String>> CURRENT_FIND_CURSOR_OWNER = new ThreadLocal<>();
     private static final ConcurrentHashMap<String, MongoCursor<Document>> FIND_CURSORS = new ConcurrentHashMap<>();
@@ -152,9 +165,22 @@ public final class MongoAgent {
             throw new IllegalArgumentException("Client certificate and key must be provided together");
         }
 
-        MongoClientSettings.Builder builder = MongoClientSettings.builder();
+        Map<String, String> params = new LinkedHashMap<>();
         if (connectionString != null && !connectionString.isBlank()) {
-            ConnectionString cs = new ConnectionString(connectionString);
+            params.putAll(parseQueryParams(connectionString));
+        }
+        String urlParams = stringOrNull(connObj, "url_params");
+        if (urlParams != null && !urlParams.isBlank()) {
+            params.putAll(parseQueryParams(urlParams));
+        }
+
+        boolean allowInvalidCertificates = hasAllowInvalidCertificates(params);
+        boolean allowInvalidHostnames = allowInvalidCertificates || hasAllowInvalidHostnames(params);
+
+        MongoClientSettings.Builder builder = MongoClientSettings.builder();
+        ConnectionString cs = null;
+        if (connectionString != null && !connectionString.isBlank()) {
+            cs = new ConnectionString(connectionString);
             builder.applyConnectionString(cs);
             // Driver 3.12 predates the directConnection URI option (introduced in driver 4.x)
             // and silently ignores it. When directConnection=true is present in the query of a
@@ -173,8 +199,32 @@ public final class MongoAgent {
             }
         }
 
-        if (ssl) {
-            applyTlsSettings(builder, caCertPath, clientCertPath, clientKeyPath);
+        // Driver 3.12 has no tlsAllowInvalidCertificates option and form mode never parsed the URL
+        // params, so the "skip certificate verification" setting has to be applied here.
+        boolean enableTls = ssl
+            || (cs != null && Boolean.TRUE.equals(cs.getSslEnabled()))
+            || isTruthy(params.get("ssl"))
+            || isTruthy(params.get("tls"));
+        if (enableTls) {
+            applyTlsSettings(builder, caCertPath, clientCertPath, clientKeyPath,
+                allowInvalidCertificates, allowInvalidHostnames);
+        }
+
+        // The driver's default 30s server selection matches the agent's connect RPC timeout, which
+        // replaced the real failure (e.g. a TLS handshake error) with "Agent RPC call timed out".
+        int connectTimeoutSecs = connObj.has("connect_timeout_secs") && !connObj.get("connect_timeout_secs").isJsonNull()
+            ? connObj.get("connect_timeout_secs").getAsInt()
+            : 0;
+        if (connectTimeoutSecs > 0) {
+            if (cs == null || cs.getServerSelectionTimeout() == null) {
+                long serverSelectionMs = Math.min(connectTimeoutSecs, MAX_SERVER_SELECTION_TIMEOUT_SECS) * 1000L;
+                builder.applyToClusterSettings(
+                    s -> s.serverSelectionTimeout(serverSelectionMs, TimeUnit.MILLISECONDS));
+            }
+            if (cs == null || cs.getConnectTimeout() == null) {
+                int connectTimeoutMs = (int) Math.min(connectTimeoutSecs * 1000L, Integer.MAX_VALUE);
+                builder.applyToSocketSettings(s -> s.connectTimeout(connectTimeoutMs, TimeUnit.MILLISECONDS));
+            }
         }
 
         return builder;
@@ -220,6 +270,69 @@ public final class MongoAgent {
         }
     }
 
+    static Map<String, String> parseQueryParams(String query) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (query == null || query.isBlank()) {
+            return result;
+        }
+        int queryStart = query.indexOf('?');
+        int hashStart = query.indexOf('#');
+        int start = queryStart >= 0 ? queryStart + 1 : 0;
+        int end = hashStart >= 0 && hashStart >= start ? hashStart : query.length();
+        String cleanQuery = query.substring(start, end);
+        if (cleanQuery.isEmpty()) {
+            return result;
+        }
+        for (String param : cleanQuery.split("[&;]")) {
+            if (param.isEmpty()) {
+                continue;
+            }
+            int eq = param.indexOf('=');
+            String key = eq >= 0 ? param.substring(0, eq) : param;
+            String val = eq >= 0 ? param.substring(eq + 1) : "";
+            result.put(decodeUriComponent(key).trim().toLowerCase(Locale.ROOT), decodeUriComponent(val));
+        }
+        return result;
+    }
+
+    static boolean isTruthy(String value) {
+        if (value == null) {
+            return false;
+        }
+        String trimmed = value.trim();
+        return "true".equalsIgnoreCase(trimmed) || "1".equals(trimmed) || "yes".equalsIgnoreCase(trimmed);
+    }
+
+    static boolean hasAllowInvalidCertificates(Map<String, String> params) {
+        return isTruthy(params.get("tlsallowinvalidcertificates"))
+            || isTruthy(params.get("sslallowinvalidcertificates"))
+            || isTruthy(params.get("tlsinsecure"));
+    }
+
+    static boolean hasAllowInvalidHostnames(Map<String, String> params) {
+        return isTruthy(params.get("tlsallowinvalidhostnames"))
+            || isTruthy(params.get("sslallowinvalidhostnames"));
+    }
+
+    static TrustManager[] createTrustAllTrustManagers() {
+        return new TrustManager[] {
+            new X509TrustManager() {
+                @Override
+                public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                }
+
+                @Override
+                public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                }
+
+                @Override
+                public X509Certificate[] getAcceptedIssuers() {
+                    return new X509Certificate[0];
+                }
+            }
+        };
+    }
+
     private static MongoClient openClient(JsonObject params) {
         JsonObject connObj = params.has("connection") && params.get("connection").isJsonObject()
             ? params.getAsJsonObject("connection")
@@ -245,13 +358,19 @@ public final class MongoAgent {
     }
 
     private static void applyTlsSettings(MongoClientSettings.Builder builder,
-        String caCertPath, String clientCertPath, String clientKeyPath) {
+        String caCertPath, String clientCertPath, String clientKeyPath,
+        boolean allowInvalidCertificates, boolean allowInvalidHostnames) {
         builder.applyToSslSettings(sslBuilder -> {
             sslBuilder.enabled(true);
-            if (caCertPath != null && !caCertPath.isBlank()
-                || clientCertPath != null && !clientCertPath.isBlank()) {
+            if (allowInvalidHostnames) {
+                sslBuilder.invalidHostNameAllowed(true);
+            }
+            if (allowInvalidCertificates
+                || (caCertPath != null && !caCertPath.isBlank())
+                || (clientCertPath != null && !clientCertPath.isBlank())) {
                 try {
-                    sslBuilder.context(createTlsSslContext(caCertPath, clientCertPath, clientKeyPath));
+                    sslBuilder.context(createTlsSslContext(
+                        caCertPath, clientCertPath, clientKeyPath, allowInvalidCertificates));
                 } catch (Exception e) {
                     throw new RuntimeException("Failed to configure TLS: " + e.getMessage(), e);
                 }
@@ -261,9 +380,18 @@ public final class MongoAgent {
 
     static SSLContext createTlsSslContext(String caCertPath, String clientCertPath, String clientKeyPath)
         throws Exception {
-        TrustManager[] trustManagers = null;
-        if (caCertPath != null && !caCertPath.isBlank()) {
+        return createTlsSslContext(caCertPath, clientCertPath, clientKeyPath, false);
+    }
+
+    static SSLContext createTlsSslContext(String caCertPath, String clientCertPath, String clientKeyPath,
+        boolean allowInvalidCertificates) throws Exception {
+        TrustManager[] trustManagers;
+        if (allowInvalidCertificates) {
+            trustManagers = createTrustAllTrustManagers();
+        } else if (caCertPath != null && !caCertPath.isBlank()) {
             trustManagers = loadTrustManagersFromPem(caCertPath);
+        } else {
+            trustManagers = null;
         }
 
         KeyManager[] keyManagers = null;
@@ -2526,7 +2654,28 @@ public final class MongoAgent {
         }
     }
 
+    static String relaxedDisabledAlgorithms(String current) {
+        if (current == null || current.isBlank()) {
+            return "";
+        }
+        List<String> kept = new ArrayList<>();
+        for (String rawPart : current.split(",")) {
+            String part = rawPart.trim();
+            if (!part.isEmpty() && !LEGACY_TLS_ALGORITHMS_TO_ALLOW.contains(part.toUpperCase(Locale.ROOT))) {
+                kept.add(part);
+            }
+        }
+        return String.join(", ", kept);
+    }
+
+    // Must run before JSSE first reads the policy, i.e. before any TLS connection.
+    static void relaxLegacyTlsPolicy() {
+        Security.setProperty(TLS_DISABLED_ALGORITHMS_KEY,
+            relaxedDisabledAlgorithms(Security.getProperty(TLS_DISABLED_ALGORITHMS_KEY)));
+    }
+
     public static void main(String[] args) throws Exception {
+        relaxLegacyTlsPolicy();
         System.out.println("{\"ready\":true}");
         System.out.flush();
         new RuntimeServer().run();

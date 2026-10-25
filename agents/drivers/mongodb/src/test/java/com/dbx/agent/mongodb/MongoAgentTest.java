@@ -1,9 +1,12 @@
 package com.dbx.agent.mongodb;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -43,11 +46,14 @@ import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.WriteModel;
 import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
+import java.io.InputStream;
 import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
@@ -55,6 +61,8 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import org.bson.BsonDocument;
 import org.bson.BsonRegularExpression;
 import org.bson.Document;
@@ -1737,6 +1745,145 @@ class MongoAgentTest {
             caPemPath.toString(), clientPemPath.toString(), clientKeyPath.toString());
 
         assertNotNull(ctx);
+    }
+
+    // ─── TLS: URL params and timeouts (issue #10657) ───
+
+    @Test
+    void formModeWithTlsAllowInvalidCertificatesEnablesSslAndTrustsSelfSignedCert() throws Exception {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertTrue(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate selfSignedCert;
+        try (InputStream is = new FileInputStream(caPemPath.toFile())) {
+            selfSignedCert = (X509Certificate) cf.generateCertificate(is);
+        }
+        TrustManager[] trustManagers = MongoAgent.createTrustAllTrustManagers();
+        assertNotNull(trustManagers);
+        assertTrue(trustManagers.length > 0);
+        assertInstanceOf(X509TrustManager.class, trustManagers[0]);
+        X509TrustManager tm = (X509TrustManager) trustManagers[0];
+        assertDoesNotThrow(() -> tm.checkServerTrusted(new X509Certificate[] {selfSignedCert}, "RSA"));
+        assertDoesNotThrow(() -> tm.checkClientTrusted(new X509Certificate[] {selfSignedCert}, "RSA"));
+        assertEquals(0, tm.getAcceptedIssuers().length);
+    }
+
+    @Test
+    void formModeWithoutInvalidCertParamKeepsDefaultVerification() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertFalse(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void formModeWithTruthyUrlParamVariants() {
+        for (String param : List.of(
+            "tlsAllowInvalidCertificates=1",
+            "sslAllowInvalidCertificates=yes",
+            "tlsInsecure=true",
+            "TLSALLOWINVALIDCERTIFICATES=TRUE")) {
+            JsonObject connection = minimalConnection();
+            connection.addProperty("ssl", true);
+            connection.addProperty("url_params", "retryWrites=false&" + param);
+
+            MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+            assertTrue(settings.getSslSettings().isEnabled(), "Failed for " + param);
+            assertTrue(settings.getSslSettings().isInvalidHostNameAllowed(), "Failed for " + param);
+            assertNotNull(settings.getSslSettings().getContext(), "Failed for " + param);
+        }
+    }
+
+    @Test
+    void formModeWithInvalidHostnamesOnlyDoesNotTrustInvalidCertificates() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsAllowInvalidHostnames=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertTrue(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void uriModeHonoursTlsAllowInvalidCertificatesInConnectionString() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017/?ssl=true&tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertTrue(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void connectTimeoutSecsAppliedToServerSelectionTimeoutAndCapped() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("connect_timeout_secs", 10);
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(10_000L, settings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+        assertEquals(10_000, settings.getSocketSettings().getConnectTimeout(TimeUnit.MILLISECONDS));
+
+        JsonObject longTimeoutConn = minimalConnection();
+        longTimeoutConn.addProperty("connect_timeout_secs", 30);
+        MongoClientSettings cappedSettings = MongoAgent.configureBuilder(longTimeoutConn).build();
+
+        assertEquals(20_000L, cappedSettings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+        assertEquals(30_000, cappedSettings.getSocketSettings().getConnectTimeout(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    void explicitServerSelectionTimeoutMsInUriWinsOverConnectTimeoutSecs() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=5000");
+        connection.addProperty("connect_timeout_secs", 10);
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(5_000L, settings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+        assertEquals(10_000, settings.getSocketSettings().getConnectTimeout(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    void formModeWithoutSslIgnoresInvalidCertificateParam() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("url_params", "tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertFalse(settings.getSslSettings().isEnabled());
+    }
+
+    @Test
+    void relaxedDisabledAlgorithmsAllowsLegacyMongoTlsOnly() {
+        String current = "SSLv3, TLSv1, TLSv1.1, RC4, DES, 3DES_EDE_CBC, anon, NULL, TLS_RSA_*, "
+            + "rsa_pkcs1_sha1 usage HandshakeSignature, ecdsa_sha1 usage HandshakeSignature";
+
+        assertEquals(
+            "SSLv3, RC4, DES, 3DES_EDE_CBC, anon, NULL, ecdsa_sha1 usage HandshakeSignature",
+            MongoAgent.relaxedDisabledAlgorithms(current));
+        assertEquals("", MongoAgent.relaxedDisabledAlgorithms(null));
     }
 
     // ─── TLS: trust manager loading ───

@@ -26,7 +26,7 @@ dependencies {
             strictly '1.7.36'
         }
     }
-    implementation 'org.apache.commons:commons-lang3:3.18.0'
+    implementation 'org.apache.commons:commons-lang3:3.21.0'
 
     implementation "org.apache.maven.resolver:maven-resolver-api:${mavenResolverVersion}"
     implementation "org.apache.maven.resolver:maven-resolver-spi:${mavenResolverVersion}"

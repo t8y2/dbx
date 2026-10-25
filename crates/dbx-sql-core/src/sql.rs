@@ -1864,10 +1864,28 @@ fn find_sqlserver_statement_at_cursor(sql: &str, cursor_pos: usize) -> String {
 
 fn starts_with_sqlserver_control_flow_batch(sql: &str) -> bool {
     let tokens = first_sql_tokens(sql, 128);
-    tokens.first().is_some_and(|token| token.eq_ignore_ascii_case("IF"))
-        && tokens.iter().any(|token| token.eq_ignore_ascii_case("ELSE"))
-        && tokens.iter().any(|token| token.eq_ignore_ascii_case("BEGIN"))
-        && tokens.iter().any(|token| token.eq_ignore_ascii_case("END"))
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    if first.eq_ignore_ascii_case("IF") {
+        return tokens.iter().any(|token| token.eq_ignore_ascii_case("ELSE"))
+            && tokens.iter().any(|token| token.eq_ignore_ascii_case("BEGIN"))
+            && tokens.iter().any(|token| token.eq_ignore_ascii_case("END"));
+    }
+    if first.eq_ignore_ascii_case("WHILE") {
+        return tokens.iter().any(|token| token.eq_ignore_ascii_case("BEGIN"))
+            && tokens.iter().any(|token| token.eq_ignore_ascii_case("END"));
+    }
+    if first.eq_ignore_ascii_case("BEGIN") {
+        if let Some(second) = tokens.get(1) {
+            let non_block = ["TRANSACTION", "TRAN", "DISTRIBUTED", "DIALOG", "CONVERSATION"];
+            if non_block.iter().any(|kw| second.eq_ignore_ascii_case(kw)) {
+                return false;
+            }
+        }
+        return tokens.iter().any(|token| token.eq_ignore_ascii_case("END"));
+    }
+    false
 }
 
 pub fn starts_with_sqlserver_module_ddl(sql: &str) -> bool {
@@ -7089,6 +7107,25 @@ END";
 
         assert_eq!(super::find_statement_at_cursor_for_database(sql, update_cursor, DatabaseType::SqlServer), sql);
         assert_eq!(super::find_statement_at_cursor_for_database(sql, add_cursor, DatabaseType::SqlServer), sql);
+    }
+
+    #[test]
+    fn sqlserver_current_statement_keeps_try_catch_control_flow_batch() {
+        let sql = "\
+BEGIN TRY
+    BEGIN TRANSACTION;
+    UPDATE dbo.Documents SET Deleted = 0 WHERE Deleted = 1;
+    COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH";
+        let update_cursor = sql[..sql.find("UPDATE").unwrap()].encode_utf16().count();
+        let catch_cursor = sql[..sql.find("ROLLBACK").unwrap()].encode_utf16().count();
+
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, update_cursor, DatabaseType::SqlServer), sql);
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, catch_cursor, DatabaseType::SqlServer), sql);
     }
 
     #[test]

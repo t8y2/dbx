@@ -1028,11 +1028,10 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
       // Only the closure of the *carried* block is a statement boundary: a
       // block opened and closed inside this fragment (`IF ... BEGIN ... END`
       // in one piece) belongs to the statement that contains it. A closure
-      // followed by `ELSE` only continues the same IF, so a later closure in
-      // the same fragment (the ELSE branch's own `END`, reachable when the
-      // branch tail carries no semicolon) must still be able to replace it;
+      // followed by `ELSE` (or `CATCH` for `END TRY BEGIN CATCH`) continues the same block,
+      // so a later closure in the same fragment must still be able to replace it;
       // a closure followed by anything else is final.
-      if (initialOpenBlocks > 0 && openBlocks === 0 && (closedAt === null || wordAfterClose === "ELSE")) {
+      if (initialOpenBlocks > 0 && openBlocks === 0 && (closedAt === null || wordAfterClose === "ELSE" || wordAfterClose === "CATCH")) {
         closedAt = ends[index];
         wordAfterClose = next ?? "";
       }
@@ -1041,22 +1040,37 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
     if (word === "ELSE" && openBlocks === 0) {
       hasControlFlowElse = true;
     }
+    if (word === "CATCH" && openBlocks === 0) {
+      hasControlFlowElse = true;
+    }
   }
 
   return { openBlocks, closedAt, wordAfterClose, sawBlockBegin, hasControlFlowElse };
 }
 
+function isSqlServerControlFlowStart(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  const firstToken = nextSqlWordToken(sql, pos, databaseType, parameterOptions);
+  if (!firstToken) return false;
+  const firstWord = firstToken.word;
+  if (firstWord === "IF" || firstWord === "WHILE") return true;
+  if (firstWord === "BEGIN") {
+    const secondToken = nextSqlWordToken(sql, firstToken.end, databaseType, parameterOptions);
+    if (!secondToken) return true;
+    return !SQLSERVER_NON_BLOCK_BEGIN_KEYWORDS.has(secondToken.word);
+  }
+  return false;
+}
+
 /**
  * True when `statement` is a whole T-SQL control-flow batch: an `IF`/`WHILE`
  * whose body is a `BEGIN ... END` block or whose branches are plain statements
- * with an `ELSE`. Such a batch contains no independent statements, so it must
- * stay one execution range instead of being split at the line-oriented
- * `BEGIN`/`EXEC`/`END` tokens.
+ * with an `ELSE`, or a top-level `BEGIN ... END` / `BEGIN TRY ... END CATCH` block.
+ * Such a batch contains no independent statements, so it must stay one execution range
+ * instead of being split at the line-oriented `BEGIN`/`EXEC`/`END` tokens.
  */
 function isSqlServerControlFlowBatch(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
   if (databaseType !== "sqlserver") return false;
-  const firstWord = nextSqlWordToken(sql, statement.from, databaseType, parameterOptions)?.word;
-  if (firstWord !== "IF" && firstWord !== "WHILE") return false;
+  if (!isSqlServerControlFlowStart(sql, statement.from, databaseType, parameterOptions)) return false;
 
   const scan = scanSqlServerControlFlow(sql, statement.from, statement.to, databaseType, parameterOptions);
   return scan.hasControlFlowElse || (scan.sawBlockBegin && scan.openBlocks === 0);
@@ -1074,8 +1088,7 @@ function mergeSqlServerControlFlowBatches(sql: string, statements: RawStatement[
 
   while (pending.length > 0) {
     const first = pending.shift()!;
-    const firstWord = nextSqlWordToken(sql, first.from, databaseType, parameterOptions)?.word;
-    if (firstWord !== "IF" && firstWord !== "WHILE") {
+    if (!isSqlServerControlFlowStart(sql, first.from, databaseType, parameterOptions)) {
       merged.push(first);
       continue;
     }
@@ -1093,10 +1106,10 @@ function mergeSqlServerControlFlowBatches(sql: string, statements: RawStatement[
       const scan = scanSqlServerControlFlow(sql, fragment.from, fragment.to, databaseType, parameterOptions, openBlocks);
       openBlocks = scan.openBlocks;
       last = fragment;
-      // `END ELSE ...` continues the same IF, so only a closure that is *not*
-      // followed by ELSE ends the batch — and anything the fragment still holds
-      // after that point starts the next statement.
-      if (scan.closedAt !== null && scan.wordAfterClose !== "ELSE") {
+      // `END ELSE ...` continues the same IF, and `END TRY BEGIN CATCH ...` continues
+      // the TRY/CATCH structure, so only a closure that is *not* followed by ELSE or CATCH
+      // ends the batch — and anything the fragment still holds after that point starts the next statement.
+      if (scan.closedAt !== null && scan.wordAfterClose !== "ELSE" && scan.wordAfterClose !== "CATCH" && scan.wordAfterClose !== "TRY") {
         closedAt = scan.closedAt;
         break;
       }

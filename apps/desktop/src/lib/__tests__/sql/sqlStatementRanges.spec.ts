@@ -2558,6 +2558,45 @@ WHERE t2.product_name = '12345'
 
     expect(rangeSqlTexts(ranges)).toEqual([batch, "SELECT 999"]);
   });
+
+  it("keeps a SQL Server BEGIN TRY / BEGIN CATCH batch with transactions whole (#13051)", () => {
+    const tryCatchBatch = [
+      "BEGIN TRY",
+      "    BEGIN TRANSACTION;",
+      "",
+      "    UPDATE [dbo].[Documents]",
+      "    SET [Deleted] = 0",
+      "    WHERE [Deleted] = 1;",
+      "",
+      "    DECLARE @Updated int = @@ROWCOUNT;",
+      "",
+      "    IF EXISTS (SELECT 1 FROM [dbo].[Documents] WHERE [Deleted] = 1)",
+      "        THROW 50001, N'Rows with Deleted = 1 still exist.', 1;",
+      "",
+      "    COMMIT TRANSACTION;",
+      "",
+      "    SELECT N'OK' AS Result, @Updated AS RowsUpdated;",
+      "END TRY",
+      "BEGIN CATCH",
+      "    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;",
+      "    THROW;",
+      "END CATCH",
+    ].join("\n");
+    const sql = `SET XACT_ABORT ON;\n\n${tryCatchBatch};\n\nSELECT 999;`;
+    const ranges = executableStatementRanges(sql, "sqlserver");
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "THROW 50001"), "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["SET XACT_ABORT ON", tryCatchBatch, "SELECT 999"]);
+    expect(candidateSummaries(candidates)).toEqual([`cursor:${tryCatchBatch}`, `all:${sql}`]);
+  });
+
+  it("keeps a SQL Server top-level BEGIN ... END block whole", () => {
+    const block = ["BEGIN", "    SELECT 1;", "    SELECT 2;", "END"].join("\n");
+    const sql = `${block};\nSELECT 3;`;
+    const ranges = executableStatementRanges(sql, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([block, "SELECT 3"]);
+  });
 });
 
 describe("hasMultipleExecutionTargets", () => {

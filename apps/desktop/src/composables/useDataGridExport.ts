@@ -1640,6 +1640,80 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await exportResultSheetsXlsxResult(undefined, true);
   }
 
+  /**
+   * 把本次执行的全部结果集堆叠进同一个 XLSX worksheet（issue #13370）：每个结果
+   * 块输出「标题行 + 列头行 + 数据行」，块间以空行分隔，让数据来源一眼可见。
+   * 两条写入路径（Tauri/Rust 与 Web/本地构建）都按 columns.length 生成每行单元格，
+   * 因此标题/列头/数据行统一 pad 到最大列宽，columns 本身承载首个标题行。
+   * 合并表没有统一列语义，列头模式/自动筛选等 sheet 级选项不适用，故跳过
+   * 列头选项对话框，直接以纯行数据导出。
+   */
+  async function exportAllResultsMergedXlsxResult(includeSqlSheet: boolean) {
+    await runExclusiveExport(async () => {
+      try {
+        const sheets = (allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
+        if (sheets.length === 0) return;
+
+        let outputPath = exportFileName("query-results", "xlsx", { allResults: true });
+        if (isTauriRuntime()) {
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
+            filters: [{ name: "Excel", extensions: ["xlsx"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
+          });
+          if (!path) return;
+          outputPath = path;
+        }
+
+        const exportPattern = useSettingsStore().editorSettings.globalDateTimeExportFormat;
+        // 先按各结果集自身的列类型做时间格式化，再统一 pad 进合并表
+        const blocks: Array<{ title: string; header: string[]; rows: CellValue[][] }> = [];
+        for (const [index, sheet] of sheets.entries()) {
+          const sourceRows = sheet.result.rows;
+          const rows = await materializeExportSnapshot(sheet.result, () => sheet.result.rows === sourceRows && !!allExportResults?.value?.includes(sheet));
+          if (sheet.result.large_value_refs?.length || sheet.result.large_value_cells?.some((cell) => cell.value_ref)) assertSnapshotXlsxCellLengths(rows);
+          blocks.push({
+            title: `${index + 1}. ${sheet.sheetName}`,
+            header: [...sheet.result.columns],
+            rows: formatTemporalRowsForExport(rows, sheet.result.column_types ?? [], exportPattern),
+          });
+        }
+
+        const width = Math.max(...blocks.map((block) => Math.max(block.header.length, ...block.rows.map((row) => row.length))), 1);
+        // 列宽取所有块的最大列数；不足的行用 null 补齐成空单元格，
+        // 保证任一写入路径都不会把超宽行的尾部列截掉
+        const padRow = (row: CellValue[]): CellValue[] => (row.length >= width ? row : [...row, ...Array<null>(width - row.length).fill(null)]);
+        const mergedRows: CellValue[][] = [];
+        for (const [index, block] of blocks.entries()) {
+          if (index > 0) mergedRows.push(padRow([]));
+          mergedRows.push(padRow([block.title]));
+          mergedRows.push(padRow(block.header));
+          for (const row of block.rows) mergedRows.push(padRow([...row]));
+        }
+        const merged = {
+          sheetName: t("grid.exportAllResultsSingleSheetName"),
+          columns: [blocks[0]!.title, ...Array<string>(width - 1).fill("")],
+          rows: mergedRows,
+          autoFilter: false,
+        };
+
+        const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
+        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [merged, { ...sqlWorksheet, autoFilter: false }] : [merged], false, exportPattern || undefined);
+        notifyExportSuccess(outputPath);
+      } catch (e: any) {
+        toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
+      }
+    });
+  }
+
+  async function exportAllResultsMergedXlsx() {
+    await exportAllResultsMergedXlsxResult(false);
+  }
+
+  async function exportAllResultsMergedXlsxWithSql() {
+    await exportAllResultsMergedXlsxResult(true);
+  }
+
   /** SQL 文件导出与 SQL INSERT 复制共用同一主键处理模式。 */
   function sqlExportExcludedColumns(columnNames?: readonly string[]): string[] | undefined {
     const mode = extractorOptionsOption?.value?.sql.primaryKeyMode ?? "include";
@@ -2220,6 +2294,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportCurrentPageXlsxWithSql,
     exportAllResultsXlsx,
     exportAllResultsXlsxWithSql,
+    exportAllResultsMergedXlsx,
+    exportAllResultsMergedXlsxWithSql,
     exportResultSheetsXlsx: (sheets: Array<{ sheetName: string; result: QueryResult; sql?: string }>) => exportResultSheetsXlsxResult(sheets, false),
     exportSql,
     exportCurrentPageSql,

@@ -78,6 +78,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
@@ -121,11 +122,19 @@ public final class MongoAgent {
     private static final int LIST_DATABASES_UNAUTHORIZED_CODE = 13;
     private static final int MAX_SERVER_SELECTION_TIMEOUT_SECS = 20;
     private static final String TLS_DISABLED_ALGORITHMS_KEY = "jdk.tls.disabledAlgorithms";
+    private static final String TLS_LEGACY_ALGORITHMS_KEY = "jdk.tls.legacyAlgorithms";
     // MongoDB 3.x servers built against older OpenSSL only offer static RSA key exchange
     // (and the oldest only TLS 1.0), which current JREs disable by default.
     private static final Set<String> LEGACY_TLS_ALGORITHMS_TO_ALLOW = Set.of(
         "TLSV1",
         "TLSV1.1",
+        "TLS_RSA_*",
+        "RSA_PKCS1_SHA1 USAGE HANDSHAKESIGNATURE");
+    // The static-RSA entries are demoted into jdk.tls.legacyAlgorithms instead of silently
+    // vanishing. JSSE consults that property only when it picks cipher suites as a TLS
+    // server (sun.security.ssl.ServerHello), never on the client side and never for
+    // protocol versions, so TLSv1/TLSv1.1 can only leave the disabled list outright.
+    private static final Set<String> LEGACY_TLS_ALGORITHMS_TO_DEMOTE = Set.of(
         "TLS_RSA_*",
         "RSA_PKCS1_SHA1 USAGE HANDSHAKESIGNATURE");
     private static final ThreadLocal<MongoClient> CURRENT_CLIENT = new ThreadLocal<>();
@@ -175,7 +184,9 @@ public final class MongoAgent {
         }
 
         boolean allowInvalidCertificates = hasAllowInvalidCertificates(params);
-        boolean allowInvalidHostnames = allowInvalidCertificates || hasAllowInvalidHostnames(params);
+        // Per the connection-string spec only tlsInsecure relaxes both checks;
+        // tlsAllowInvalidCertificates on its own must keep hostname verification.
+        boolean allowInvalidHostnames = isTruthy(params.get("tlsinsecure")) || hasAllowInvalidHostnames(params);
 
         MongoClientSettings.Builder builder = MongoClientSettings.builder();
         ConnectionString cs = null;
@@ -206,6 +217,13 @@ public final class MongoAgent {
             || isTruthy(params.get("ssl"))
             || isTruthy(params.get("tls"));
         if (enableTls) {
+            // Old MongoDB TLS servers need policy entries that current JREs disable. The
+            // relaxation cannot be scoped per connection (JSSE caches the policy once
+            // initialized), so modern peers keep modern TLS unless this connection
+            // explicitly opts in with tlsAllowLegacyProtocols=true.
+            if (hasAllowLegacyProtocols(params)) {
+                relaxLegacyTlsPolicy();
+            }
             applyTlsSettings(builder, caCertPath, clientCertPath, clientKeyPath,
                 allowInvalidCertificates, allowInvalidHostnames);
         }
@@ -312,6 +330,11 @@ public final class MongoAgent {
     static boolean hasAllowInvalidHostnames(Map<String, String> params) {
         return isTruthy(params.get("tlsallowinvalidhostnames"))
             || isTruthy(params.get("sslallowinvalidhostnames"));
+    }
+
+    static boolean hasAllowLegacyProtocols(Map<String, String> params) {
+        return isTruthy(params.get("tlsallowlegacyprotocols"))
+            || isTruthy(params.get("sslallowlegacyprotocols"));
     }
 
     static TrustManager[] createTrustAllTrustManagers() {
@@ -2668,14 +2691,68 @@ public final class MongoAgent {
         return String.join(", ", kept);
     }
 
-    // Must run before JSSE first reads the policy, i.e. before any TLS connection.
-    static void relaxLegacyTlsPolicy() {
-        Security.setProperty(TLS_DISABLED_ALGORITHMS_KEY,
-            relaxedDisabledAlgorithms(Security.getProperty(TLS_DISABLED_ALGORITHMS_KEY)));
+    /** The disabled-list entries demoted into jdk.tls.legacyAlgorithms, in original casing. */
+    static List<String> demotedLegacyAlgorithms(String current) {
+        List<String> demoted = new ArrayList<>();
+        if (current == null) {
+            return demoted;
+        }
+        for (String rawPart : current.split(",")) {
+            String part = rawPart.trim();
+            if (!part.isEmpty() && LEGACY_TLS_ALGORITHMS_TO_DEMOTE.contains(part.toUpperCase(Locale.ROOT))) {
+                demoted.add(part);
+            }
+        }
+        return demoted;
+    }
+
+    // Mirrors DBeaver's launcher merge: jdk.tls.legacyAlgorithms keeps its existing
+    // entries and only gains the demoted ones, so they remain documented as fallbacks.
+    static String mergedLegacyAlgorithms(String current, List<String> additions) {
+        List<String> merged = new ArrayList<>();
+        if (current != null && !current.isBlank()) {
+            for (String rawPart : current.split(",")) {
+                String part = rawPart.trim();
+                if (!part.isEmpty()) {
+                    merged.add(part);
+                }
+            }
+        }
+        for (String addition : additions) {
+            boolean present = false;
+            for (String existing : merged) {
+                if (existing.equalsIgnoreCase(addition)) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                merged.add(addition);
+            }
+        }
+        return String.join(", ", merged);
+    }
+
+    // Must run before JSSE first reads the policy, i.e. before the first TLS connection
+    // of this process. JSSE caches jdk.tls.disabledAlgorithms when the sun.security.ssl
+    // classes initialize, so the relaxation is process-wide once applied; it therefore
+    // runs lazily and only for connections that explicitly request legacy TLS.
+    static synchronized void relaxLegacyTlsPolicy() {
+        String disabled = Security.getProperty(TLS_DISABLED_ALGORITHMS_KEY);
+        String legacy = Security.getProperty(TLS_LEGACY_ALGORITHMS_KEY);
+        String relaxed = relaxedDisabledAlgorithms(disabled);
+        String merged = mergedLegacyAlgorithms(legacy, demotedLegacyAlgorithms(disabled));
+        if (Objects.equals(disabled, relaxed) && Objects.equals(legacy, merged)) {
+            return;
+        }
+        Security.setProperty(TLS_DISABLED_ALGORITHMS_KEY, relaxed);
+        Security.setProperty(TLS_LEGACY_ALGORITHMS_KEY, merged);
+        System.err.println("INFO: relaxed jdk.tls.disabledAlgorithms (TLSv1, TLSv1.1, TLS_RSA_*, "
+            + "rsa_pkcs1_sha1) on request (tlsAllowLegacyProtocols); the legacy TLS policy "
+            + "is process-wide for this agent");
     }
 
     public static void main(String[] args) throws Exception {
-        relaxLegacyTlsPolicy();
         System.out.println("{\"ready\":true}");
         System.out.flush();
         new RuntimeServer().run();

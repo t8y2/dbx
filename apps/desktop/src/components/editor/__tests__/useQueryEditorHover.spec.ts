@@ -42,7 +42,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, semanticComple
   };
   const connectionStore = store as unknown as Options["connectionStore"];
   const metadata = useQueryEditorCompletionMetadata({ props, view: shallowRef<EditorView | null>(currentView), connectionStore, sqlBehaviorDialect: () => props.dialect, maxCompletionTables: 200, remoteLatencyBudgetMs: 40, onDemandMinPrefix: 2, semanticCompletionEnabled });
-  const settings = reactive({ editorSettings: { tableHoverLookupMode: "fallback", showTableDdlHoverPreview: true, generateSqlQuoteIdentifiers: true, generateSqlIncludeDatabaseName: false, excludeDdlStorage: false, sqlFormatter: {} } });
+  const settings = reactive({ editorSettings: { tableHoverLookupMode: "fallback", showTableDdlHoverPreview: true, generateSqlQuoteIdentifiers: true, generateSqlIncludeDatabaseName: false, includeDdlStorage: true, compactDdlSql: true, separateDdlIndexes: false, sqlFormatter: {} } });
   const contextMenuOpen = ref(false);
   const createHoverDom = vi.fn((_title: string, _detail: string, _sql?: string, _rows?: string[]) => ({ dom: document.createElement("div") }));
   const hover = useQueryEditorHover({ props, contextMenuOpen, settingsStore: settings as Options["settingsStore"], connectionStore, metadata, createHoverDom, maxCompletionTables: 200, semanticCompletionEnabled });
@@ -51,6 +51,49 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, semanticComple
 }
 
 describe("QueryEditor hover resolution", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps complete independent %s indexes and applies text preferences after hover formatting", async (type) => {
+    loadDdl.mockResolvedValueOnce({ ddl: `CREATE  TABLE "users" ("id" NUMBER) ${type === "oracle" ? "PCTFREE 0" : "PCTFREE=0"};\nCREATE  INDEX "ix" ON "users"("id");` });
+    const { store, settings, resolve, createHoverDom } = createHarness({ databaseType: type, dialect: "mysql" });
+    settings.editorSettings.includeDdlStorage = false;
+    settings.editorSettings.separateDdlIndexes = true;
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users", schema: "public" }]);
+    (await resolve())!.create();
+    expect(loadDdl).toHaveBeenCalledWith(expect.objectContaining({ separateIndexes: true, schema: "public", tableName: "users" }));
+    const result = createHoverDom.mock.calls[0][2]!;
+    expect(result).toContain('CREATE INDEX "ix"');
+    expect(result).not.toContain("PCTFREE");
+    expect(result).not.toContain("CREATE  ");
+  });
+
+  it("does not replace a failed full-index request with a simplified metadata reconstruction", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    loadDdl.mockRejectedValueOnce(new Error("index metadata unavailable"));
+    const { store, settings, resolve, createHoverDom } = createHarness({ databaseType: "oracle", dialect: "mysql" });
+    settings.editorSettings.separateDdlIndexes = true;
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users", schema: "public" }]);
+    (await resolve())!.create();
+    expect(createHoverDom.mock.calls[0][2]).toBeUndefined();
+    expect(createHoverDom.mock.calls[0][3]).toEqual(["[DBX] Failed to load table structure — check connection"]);
+    expect(getColumns).not.toHaveBeenCalled();
+    expect(listIndexes).not.toHaveBeenCalled();
+  });
+
+  it("drops a late hover result after its DDL preferences change", async () => {
+    let finish!: (result: { ddl: string }) => void;
+    loadDdl.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { store, settings, resolve } = createHarness({ databaseType: "oracle", dialect: "mysql" });
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "users", schema: "public" }]);
+    const pending = resolve();
+    await vi.waitFor(() => expect(loadDdl).toHaveBeenCalled());
+    settings.editorSettings.separateDdlIndexes = true;
+    finish({ ddl: "CREATE TABLE users (id NUMBER);" });
+    expect(await pending).toBeNull();
+  });
+
   it.each(["connection", "database", "menu"])("does no metadata work without an available %s context", async (missing) => {
     const harness = createHarness();
     if (missing === "connection") harness.props.connectionId = undefined;
@@ -83,6 +126,43 @@ describe("QueryEditor hover resolution", () => {
       [undefined, true],
     ]);
     expect(loadDdl).toHaveBeenCalledWith(expect.objectContaining({ schema: "archive" }));
+  });
+
+  it.each([
+    ["starrocks", "fallback"],
+    ["mysql", "fallback"],
+    ["starrocks", "always"],
+  ] as const)("loads %s DDL for a qualified table in another database than the selected tab database (%s mode)", async (type, mode) => {
+    // Issue #13243: database b right-clicked while tab database a is selected must
+    // fetch b's metadata and DDL instead of silently falling back to a.
+    const modelValue = "SELECT * FROM b.orders";
+    const { store, settings, metadata, resolve, createHoverDom } = createHarness({ databaseType: type, dialect: "mysql", database: "a", schema: undefined, modelValue });
+    settings.editorSettings.tableHoverLookupMode = mode;
+    store.lookupLocalCompletionTables.mockReturnValue([{ name: "orders", database: "b" }]);
+    store.listCompletionTables.mockResolvedValue([{ name: "orders", database: "b" }]);
+    const tooltip = await resolve(modelValue.indexOf("b.orders") + 2);
+    expect(tooltip, "tooltip").not.toBeNull();
+    tooltip!.create();
+    // The hovered database b is pulled with no schema filter; tab database a never leaks in.
+    expect(store.listCompletionTables.mock.calls.every((call) => call[1] === "b" && call[6] === undefined)).toBe(true);
+    expect(loadDdl).toHaveBeenCalledWith(expect.objectContaining({ database: "b", schema: "", tableName: "orders" }));
+    expect(metadata.cachedTables).toEqual([{ name: "orders", database: "b" }]);
+    expect(createHoverDom).toHaveBeenCalledWith("orders", expect.any(String), expect.any(String), undefined);
+  });
+
+  it("resolves cross-database column metadata through the qualified database as source", async () => {
+    const sql = "SELECT o.total FROM b.orders o";
+    const { store, metadata, resolve, createHoverDom } = createHarness({ databaseType: "starrocks", dialect: "mysql", database: "a", schema: undefined, modelValue: sql }, true);
+    store.listCompletionTables.mockResolvedValue([{ name: "orders", database: "b" }]);
+    store.listCompletionColumns.mockResolvedValue([{ name: "total", table: "orders", database: "b", dataType: "decimal" }]);
+    const tooltip = await resolve(9);
+    expect(tooltip, JSON.stringify(store.listCompletionTables.mock.calls.map((c) => [c[1], c[4]]))).not.toBeNull();
+    tooltip!.create();
+    // Column metadata must resolve against the qualified database b, not the tab database a.
+    expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "b", "orders", undefined, expect.objectContaining({ tableQuoted: false }), undefined);
+    expect(store.listCompletionColumns.mock.calls.some((call) => call[1] === "a")).toBe(false);
+    expect(metadata.cachedColumnsByTable.get("b.orders")).toHaveLength(1);
+    expect(createHoverDom).toHaveBeenCalledWith("total", "decimal", undefined, ["orders"]);
   });
 
   it("falls back to column metadata when DDL loading fails", async () => {

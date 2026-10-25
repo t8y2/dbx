@@ -463,6 +463,14 @@ export function middleEllipsis(value: string, maxLength = 24): string {
   return `${value.slice(0, startLength)}...${end}`;
 }
 
+// 无来源对象的结果（如外层 SELECT * FROM (...) 包装查询）页签 tooltip 会回退到 SQL 文本；
+// 整条语句会把浮层撑成遮挡工作区的巨块并拦截点击，这里折叠空白并限制长度 (#13266)
+export function sourceStatementTooltip(statement: string | undefined, maxLength = 160): string | undefined {
+  const singleLine = statement?.replace(/\s+/g, " ").trim();
+  if (!singleLine) return undefined;
+  return singleLine.length > maxLength ? `${singleLine.slice(0, maxLength)}…` : singleLine;
+}
+
 export function resultSqlForGrid(tab: Pick<QueryTab, "result" | "resultBaseSql" | "lastExecutedSql" | "sql">): string {
   return tab.result?.sourceStatement || tab.resultBaseSql || tab.lastExecutedSql || tab.sql;
 }
@@ -602,7 +610,7 @@ export function tabularResultItems(results: QueryResult[] | undefined, options: 
         label: displaySource,
         displayLabel,
         labelTruncated: !!displaySource && displayLabel !== displaySource,
-        title: item.result.sourceLabel || item.result.sourceStatement,
+        title: item.result.sourceLabel || sourceStatementTooltip(item.result.sourceStatement),
       };
     });
 }

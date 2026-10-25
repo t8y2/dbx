@@ -31,6 +31,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     private boolean leasePinnedAtRequestStart;
     private boolean sessionAffinity;
     private boolean pooledConnectionPoisoned;
+    private boolean nativeJobConnection;
 
     @Override
     public boolean supportsQueryTiming() { return true; }
@@ -53,6 +54,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             requestActive = false;
             leasePinnedAtRequestStart = false;
             pooledConnectionPoisoned = false;
+            nativeJobConnection = false;
             loadDriver(params);
             configuredDatabase = params.getDatabase();
             connectParams = params;
@@ -289,6 +291,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             requestActive = false;
             leasePinnedAtRequestStart = false;
             pooledConnectionPoisoned = false;
+            nativeJobConnection = false;
             identifierQuote = "";
         });
     }
@@ -347,6 +350,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         String identity;
         JdbcConnectionPoolRegistry registry;
         synchronized (this) {
+            if (nativeJobConnection) return;
             if (poolRegistry == null) {
                 return;
             }
@@ -395,6 +399,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         boolean endsSessionAffinity,
         boolean preservesSchemaContext
     ) {
+        if (nativeJobConnection) return;
         if (poolRegistry == null) {
             return;
         }
@@ -443,6 +448,53 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             return;
         }
         releasePooledConnection(!preparePooledConnectionForReturn());
+    }
+
+    final synchronized void requireIdleNativeJobSession(JdbcExecutor executor) throws Exception {
+        if (connectParams == null) throw new IllegalStateException("Not connected");
+        if (JdbcSessionRole.from(connectParams.getSessionRole()) != JdbcSessionRole.METADATA) {
+            throw new IllegalStateException("native_job_metadata_session_required");
+        }
+        if (nativeJobConnection || requestActive || pooledLease != null || sessionAffinity
+            || executor.hasOpenSessions() || executor.hasActiveStatements() || hasRetainedResultResources()
+            || (connection != null && !connection.getAutoCommit())) {
+            throw new IllegalStateException("native_job_session_busy");
+        }
+    }
+
+    final synchronized Connection openNativeJobConnection() throws Exception {
+        nativeJobConnection = true;
+        try {
+            ConnectParams params = connectParams;
+            if (connection == null) {
+                connection = poolRegistry == null ? openInitializedConnection(params)
+                    : poolRegistry.openDedicatedConnection(() -> openInitializedConnection(params));
+                afterConnect(params, connection);
+            }
+            connection.setAutoCommit(false);
+            return connection;
+        } catch (Exception | LinkageError error) {
+            try {
+                closeNativeJobConnection();
+            } catch (Exception | LinkageError closeError) {
+                error.addSuppressed(closeError);
+                throw AgentRpcError.resource("close",
+                    new JdbcConnectionPoolRegistry.PhysicalConnectionStateUnknownException(error));
+            }
+            if (!JdbcConnectionPoolRegistry.requiresRuntimeReplacement(error)) nativeJobConnection = false;
+            throw error;
+        }
+    }
+
+    final synchronized void closeNativeJobConnection() throws Exception {
+        if (!nativeJobConnection) return;
+        Connection owned = connection;
+        connection = null;
+        if (owned != null) owned.close();
+    }
+
+    final synchronized boolean hasNativeJobConnection() {
+        return nativeJobConnection;
     }
 
     private static String resolveIdentifierQuote(ConnectParams params, Connection connection) {

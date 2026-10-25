@@ -9,6 +9,8 @@ export interface ProductionSqlExecutionGuardOptions<T> {
   database?: string | null;
   sql: string;
   source?: string;
+  /** Allows the owning editor to cancel only its pending confirmation on close/switch. */
+  scopeId?: string;
   execute: () => Promise<T>;
   /** Offload large generated scripts while preserving the same safety assessment. */
   analyzeInBackground?: boolean;
@@ -29,6 +31,7 @@ export async function executeWithProductionSqlGuard<T>(options: ProductionSqlExe
       database: options.database ?? undefined,
       productionDatabases: assessment.databases,
       source: options.source,
+      scopeId: options.scopeId,
     });
     if (!confirmed) return undefined;
   }

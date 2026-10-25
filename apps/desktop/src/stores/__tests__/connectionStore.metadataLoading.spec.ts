@@ -176,6 +176,43 @@ describe("connectionStore metadata loading", () => {
     setActivePinia(createPinia());
   });
 
+  it.each([
+    ["oracle", "group-triggers"],
+    ["oceanbase-oracle", "group-triggers"],
+    ["dameng", "group-triggers"],
+    ["jdbc", "group-triggers"],
+    ["oracle", "schema"],
+    ["oceanbase-oracle", "schema"],
+    ["dameng", "schema"],
+    ["jdbc", "schema"],
+  ] as const)(
+    "keeps exact trigger identity in remote sidebar search (%s/%s)",
+    async (dbType, nodeType) => {
+      const owner = " Trigger.Owner ",
+        name = ' Tr"igger ';
+      const metadata = { contractVersion: 1, identityMode: "exact", engine: dbType === "dameng" ? "dm" : dbType === "jdbc" ? "oracle" : dbType, owner, name, objectId: "9007199254740993", scope: "SCHEMA", parent: null };
+      const row = { ...procedure(name), name, schema: owner, object_type: "TRIGGER", trigger: { name, oracle_metadata: metadata } } as ObjectInfo;
+      const listObjects = vi.fn().mockResolvedValue([row]);
+      vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+      vi.doMock("@/lib/backend/api", () => ({ listObjects, cancelQuery: vi.fn(), listInstalledAgents: vi.fn().mockResolvedValue([]) }));
+      const { MetadataResultCache } = await import("@/lib/metadata/metadataResultCache");
+      const cachedRead = vi.spyOn(MetadataResultCache.prototype, "get");
+      const { useConnectionStore } = await import("@/stores/connectionStore");
+      const store = useConnectionStore();
+      const connection = { ...postgresConnection(), id: "remote-trigger", db_type: dbType, ...(dbType === "jdbc" ? { database_info: { productName: "Oracle" } } : {}) } as ConnectionConfig;
+      store.connections = [connection];
+      store.connectedIds.add(connection.id);
+      const node: TreeNode = { id: "trigger-group", label: "Triggers", type: nodeType, connectionId: connection.id, database: "service", schema: owner, catalog: "catalog-a" };
+      const children = await store.searchSidebarObjects(node, "igger", new AbortController().signal);
+      expect(listObjects).toHaveBeenCalledWith(connection.id, "service", owner, expect.arrayContaining(["TRIGGER"]), "igger", expect.any(Number), 0, "catalog-a", undefined, expect.stringMatching(/^sidebar-search-/), { identityMode: "exact", catalog: "catalog-a" });
+      expect(children).toHaveLength(1);
+      expect(children[0]).toMatchObject({ objectName: name, schema: owner, catalog: "catalog-a", meta: { oracle_metadata: metadata } });
+      expect(cachedRead).toHaveBeenCalledWith(expect.objectContaining({ kind: "sidebar-object-search-page", extra: { catalog: "catalog-a", oracleTriggerContract: 1 } }), { allowStale: true });
+      cachedRead.mockRestore();
+    },
+    15_000,
+  );
+
   // Dynamic import of the merged connectionStore plus the scoped metadata
   // load can exceed Vitest's 5s default on slower CI runners; the assertion
   // is deterministic, so allow a wider timeout.
@@ -856,6 +893,7 @@ describe("connectionStore metadata loading", () => {
       ["schema", "DBX_TEST", "DBX_TEST", "DBX_TEST"],
       ["oracle-db-links", "tree.databaseLinks", "", undefined],
       ["user-admin", "tree.userAdmin", "", undefined],
+      ["database-job-admin", "tree.nativeJobs", "", undefined],
     ]);
 
     const linkRoot = connectionNode.children!.find((node) => node.type === "oracle-db-links")!;
@@ -911,6 +949,7 @@ describe("connectionStore metadata loading", () => {
     expect(connectionNode.children?.map((node) => [node.type, node.label])).toEqual([
       ["schema", "DBX_TEST"],
       ["user-admin", "tree.userAdmin"],
+      ["database-job-admin", "tree.nativeJobs"],
     ]);
   });
 
@@ -1271,7 +1310,7 @@ describe("connectionStore metadata loading", () => {
     expect(storedViewGroup?.type).toBe("group-views");
     await store.loadObjectGroupChildren(storedViewGroup!);
 
-    expect(loadSchemaCache).toHaveBeenCalledWith("oracle-1:XE:DIP:group-views:objects-v8");
+    expect(loadSchemaCache).toHaveBeenCalledWith("oracle-1:XE:DIP:group-views:objects-v8-oracle-trigger-exact-v1");
     expect(listTables).toHaveBeenCalledWith(connection.id, "XE", "DIP", undefined, 201, 0, ["VIEW"]);
     expect(storedViewGroup?.children?.map((node) => node.label)).toEqual(["V_ONE", "V_THREE", "V_TWO"]);
   });

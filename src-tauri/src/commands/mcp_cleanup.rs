@@ -51,14 +51,18 @@ pub(super) fn cleanup_directory(directory: &Path) -> io::Result<usize> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
     struct TestDirectory(PathBuf);
 
     impl TestDirectory {
         fn new() -> Self {
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-            let path = std::env::temp_dir().join(format!("dbx-mcp-cleanup-{}-{nonce}", std::process::id()));
+            let sequence = NEXT_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("dbx-mcp-cleanup-{}-{nonce}-{sequence}", std::process::id()));
             fs::create_dir(&path).unwrap();
             Self(path)
         }

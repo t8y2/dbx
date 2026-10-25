@@ -45,13 +45,15 @@ async function saveSchemaCacheSafe(cacheKey: string, payload: unknown): Promise<
 }
 
 export type ObjectMetadataFacet = "columns" | "indexes" | "foreign-keys" | "constraints" | "triggers" | "partitions" | "comment" | "owner";
+export type ObjectMetadataRequest = ObjectDdlRequest & { oracleTriggerContract?: 1 };
 
 function cacheSegment(value: string | undefined): string {
   return encodeURIComponent(value ?? "");
 }
 
-function facetKey(request: ObjectDdlRequest, facet: ObjectMetadataFacet): string {
-  return `${[OBJECT_METADATA_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.tableName), cacheSegment(request.catalog), cacheSegment(request.objectType ?? "TABLE"), ...(request.exactIdentity ? ["exact-v1"] : []), facet].join(":")}:`;
+function facetKey(request: ObjectMetadataRequest, facet: ObjectMetadataFacet): string {
+  const contract = facet === "triggers" && request.oracleTriggerContract === 1 ? ":oracle-trigger-exact-v1" : "";
+  return `${[OBJECT_METADATA_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.tableName), cacheSegment(request.catalog), cacheSegment(request.objectType ?? "TABLE"), ...(request.exactIdentity ? ["exact-v1"] : []), facet].join(":")}${contract}:`;
 }
 
 function invalidationPrefix(match: MetadataCacheInvalidation): string {
@@ -123,7 +125,7 @@ function invalidatePersistedPrefix(prefix: string): Promise<void> {
   return deletion;
 }
 
-export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, facet: ObjectMetadataFacet, loader: () => Promise<T>, options?: { force?: boolean }): Promise<{ value: T; cacheStatus: "memory" | "disk" | "remote" }> {
+export async function loadObjectMetadataFacet<T>(request: ObjectMetadataRequest, facet: ObjectMetadataFacet, loader: () => Promise<T>, options?: { force?: boolean }): Promise<{ value: T; cacheStatus: "memory" | "disk" | "remote" }> {
   const token = activeLoads.begin(facetKey(request, facet));
   try {
     return await waitForMetadata(loadObjectMetadataFacetInternal(request, facet, loader, token.controller.signal, options), metadataLoadBudgetMs(request.queryTimeoutSecs), token.controller.signal);
@@ -135,7 +137,7 @@ export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, face
   }
 }
 
-async function loadObjectMetadataFacetInternal<T>(request: ObjectDdlRequest, facet: ObjectMetadataFacet, loader: () => Promise<T>, signal: AbortSignal, options?: { force?: boolean }): Promise<{ value: T; cacheStatus: "memory" | "disk" | "remote" }> {
+async function loadObjectMetadataFacetInternal<T>(request: ObjectMetadataRequest, facet: ObjectMetadataFacet, loader: () => Promise<T>, signal: AbortSignal, options?: { force?: boolean }): Promise<{ value: T; cacheStatus: "memory" | "disk" | "remote" }> {
   const cacheKey = facetKey(request, facet);
   if (options?.force) {
     const existing = inFlightLoads.get(cacheKey);
@@ -216,6 +218,17 @@ async function loadObjectMetadataFacetInternal<T>(request: ObjectDdlRequest, fac
 
 export async function invalidateObjectMetadataCache(match: MetadataCacheInvalidation, options?: ObjectCacheInvalidationOptions): Promise<void> {
   const prefix = invalidationPrefix(match);
+  return invalidateFacetPrefix(prefix, options);
+}
+
+/** One physical object/facet, including legacy and exact variants of that facet. */
+export async function invalidateObjectMetadataFacet(request: ObjectMetadataRequest, facet: ObjectMetadataFacet, options?: ObjectCacheInvalidationOptions): Promise<void> {
+  const prefixes = [false, true].map((exactIdentity) => facetKey({ ...request, exactIdentity, oracleTriggerContract: undefined }, facet));
+  for (const prefix of prefixes) activeLoads.cancelPrefix(prefix);
+  await Promise.all(prefixes.map((prefix) => invalidateFacetPrefix(prefix, options)));
+}
+
+async function invalidateFacetPrefix(prefix: string, options?: ObjectCacheInvalidationOptions): Promise<void> {
   activeCacheReads.invalidatePrefix(prefix);
   for (const cacheKey of [...inFlightLoads.keys()]) if (cacheKey.startsWith(prefix)) invalidateInFlightLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(prefix);

@@ -45,6 +45,8 @@ const queryStore = {
   updateSql: vi.fn(),
   setTableMeta: vi.fn(),
   openNacosAdmin: vi.fn(),
+  openDamengJobAdmin: vi.fn(),
+  openDatabaseJobAdmin: vi.fn(),
   openObjectBrowser: vi.fn(() => "object-browser-tab"),
 };
 
@@ -108,6 +110,24 @@ afterEach(() => {
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
+  it.each(["dameng-job-admin", "database-job-admin"] as const)("opens %s through the direct-navigation production path", async (type) => {
+    const node: TreeNode = { id: `c:${type}`, label: "Jobs", type, connectionId: "c", database: "" };
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+    host.value?.handleRowClick(node, 1);
+    host.value?.handleRowClick(node, 2);
+    host.value?.handleRowDoubleClick(node, new MouseEvent("dblclick"));
+    const open = type === "dameng-job-admin" ? queryStore.openDamengJobAdmin : queryStore.openDatabaseJobAdmin;
+    await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith("c"));
+    expect(connectionStore.loadObjectGroupChildren).not.toHaveBeenCalled();
+    expect(node.children).toBeUndefined();
+  });
+
   it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("lazy-loads unknown TYPE members for %s on row activation", async (dbType) => {
     const typeNode: TreeNode = { id: `${dbType}:demo:APP:TYPE_OBJ`, label: "TYPE_OBJ", type: "type", connectionId: dbType, database: "demo", schema: "APP", objectName: "TYPE_OBJ", hasMembers: undefined };
     connectionStore.getConfig.mockReturnValue({ db_type: dbType });

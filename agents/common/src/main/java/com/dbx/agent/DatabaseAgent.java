@@ -16,6 +16,12 @@ public interface DatabaseAgent {
 
     default boolean supportsBlobBindStatements() { return false; }
 
+    /** Opt in to an operation-owned physical connection for native Job configuration. */
+    default boolean supportsNativeJobSessions() { return false; }
+
+    /** Opt in to OB's operation-owned Legacy SUBMIT/first-commit protocol. */
+    default boolean supportsNativeLegacyJobs() { return false; }
+
     /** Opt in only when dictionary-derived owner/name values are preserved without fallback. */
     default boolean supportsExactMetadataIdentity() { return false; }
 
@@ -86,6 +92,10 @@ public interface DatabaseAgent {
         return MetadataListConstraints.orNone(constraints).filterObjects(listObjects(schema));
     }
 
+    default List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints, MetadataReadOptions options) {
+        return listObjects(schema, constraints);
+    }
+
     default List<String> listDataTypes() {
         return Collections.emptyList();
     }
@@ -102,6 +112,10 @@ public interface DatabaseAgent {
 
     default ObjectSource getObjectSource(String schema, String name, String objectType) {
         throw new UnsupportedOperationException("Object source is not supported");
+    }
+
+    default ObjectSource getObjectSource(String schema, String name, String objectType, MetadataReadOptions options) {
+        return getObjectSource(schema, name, objectType);
     }
 
     default ObjectSource getObjectSourceWithOrigin(String schema, String name, String objectType) {
@@ -183,6 +197,10 @@ public interface DatabaseAgent {
     }
 
     List<TriggerInfo> listTriggers(String schema, String table);
+
+    default List<TriggerInfo> listTriggers(String schema, String table, MetadataReadOptions options) {
+        return listTriggers(schema, table);
+    }
 
     default List<PartitionInfo> listPartitions(String schema, String table) {
         return Collections.emptyList();

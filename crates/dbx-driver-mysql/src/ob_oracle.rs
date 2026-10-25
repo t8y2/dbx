@@ -364,6 +364,7 @@ pub async fn list_triggers(pool: &mysql_async::Pool, schema: &str, table: &str) 
                 valid: None,
                 comment: None,
                 created_at: None,
+                oracle_metadata: None,
                 statement: None,
             }
         })

@@ -176,6 +176,20 @@ describe("qualifiedTableName — SQL Server linked servers", () => {
   });
 });
 
+describe("qualifiedTableName — PostgreSQL family schema qualifier (#13235)", () => {
+  it("qualifies a table outside the connection's default schema even with includeDatabaseName off", () => {
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "analytics", tableName: "users", includeDatabaseName: false, defaultSchema: "public" })).toBe("analytics.users");
+    expect(qualifiedTableName({ databaseType: "opengauss", identifierQuote: '"', schema: "public", tableName: "t", includeDatabaseName: false, defaultSchema: "$user" })).toBe("public.t");
+    expect(qualifiedTableName({ databaseType: "kingbase", identifierQuote: '"', schema: "audit", tableName: "events", includeDatabaseName: false, defaultSchema: "public" })).toBe('"audit"."events"');
+  });
+
+  it("keeps the bare name for the default schema and when the default schema is unknown (#9110)", () => {
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "public", tableName: "users", includeDatabaseName: false, defaultSchema: "public" })).toBe("users");
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "analytics", tableName: "users", includeDatabaseName: false })).toBe("users");
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', tableName: "users", includeDatabaseName: false, defaultSchema: "public" })).toBe("users");
+  });
+});
+
 describe("qualifiedTableName — schema-aware JDBC profiles", () => {
   it("qualifies Phoenix tables without forcing identifier quotes", () => {
     expect(qualifiedTableName({ databaseType: "jdbc", driverProfile: "phoenix", schema: "DEMO", tableName: "STUDENT" })).toBe("DEMO.STUDENT");

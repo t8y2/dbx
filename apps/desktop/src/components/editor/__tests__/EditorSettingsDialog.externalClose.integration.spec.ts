@@ -123,6 +123,32 @@ describe("settings page external close request", () => {
     expect(host.querySelector<HTMLButtonElement>("#column-comments-in-info-area")!.getAttribute("aria-checked")).toBe("false");
   });
 
+  it("keeps the header and info-area comment switches independent (#13171)", async () => {
+    const { page, open, store } = await mountPage("data");
+    const headerSwitch = () => host.querySelector<HTMLButtonElement>("#show-column-comments-in-header")!;
+    const infoSwitch = () => host.querySelector<HTMLButtonElement>("#column-comments-in-info-area")!;
+    expect(headerSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(infoSwitch().getAttribute("aria-checked")).toBe("false");
+
+    infoSwitch().click();
+    await settle();
+    // The header switch stays enabled and keeps its own value.
+    expect(headerSwitch().disabled).toBe(false);
+    expect(headerSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(infoSwitch().getAttribute("aria-checked")).toBe("true");
+
+    clickText("settings.apply");
+    await settle();
+    expect(store.editorSettings).toMatchObject({ showColumnCommentsInHeader: true, dataGridColumnCommentsInInfoArea: true });
+
+    page.value!.requestClose();
+    await settle();
+    open.value = true;
+    await settle();
+    expect(headerSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(infoSwitch().getAttribute("aria-checked")).toBe("true");
+  });
+
   it("keeps a dirty draft when continuing, and closes without saving only after discarding", async () => {
     const { page, open, store, changeFontSize } = await mountPage();
     const originalFontSize = store.editorSettings.fontSize;

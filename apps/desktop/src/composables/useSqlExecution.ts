@@ -32,6 +32,7 @@ import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore
 import type { ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
 import { effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
+import { oracleTriggerReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
 import { MULTI_SOURCE_MAX_ROWS_PER_SOURCE } from "@/lib/query/multiSourceResult";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -331,6 +332,13 @@ export function useSqlExecution(deps: {
       deps.onMissingDatabase?.(context.tabId);
       cancelEditorViewportRequest(editorViewportRequestId);
       return notStarted("missing-database", context.tabId);
+    }
+    if (tab.objectSource?.objectType === "TRIGGER" && oracleTriggerReadOptions(effectiveDatabaseTypeForConnection(context.connection))) {
+      const previousResult = queryStore.oracleTriggerSourceState(tab.id)?.result;
+      const ok = await queryStore.runOracleTriggerSourceAction(tab.id, "replace", sql);
+      cancelEditorViewportRequest(editorViewportRequestId);
+      const state = queryStore.oracleTriggerSourceState(tab.id);
+      return ok || (state?.result !== previousResult && state?.result?.steps.some((step) => step.receipt !== undefined)) ? { status: "started", ok, tabId: tab.id, errorMessage: state?.error } : notStarted("blocked", tab.id);
     }
     if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, executionOptions)) {
       return deferred("parameters", context.tabId);

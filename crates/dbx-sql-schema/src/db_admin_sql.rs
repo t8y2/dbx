@@ -15,6 +15,7 @@ pub enum DatabaseObjectType {
     Procedure,
     Function,
     Event,
+    Trigger,
     Type,
     TypeBody,
 }
@@ -1034,6 +1035,9 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
 }
 
 pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: DatabaseObjectType) -> bool {
+    if object_type == DatabaseObjectType::Trigger {
+        return false;
+    }
     let Some(database_type) = database_type else {
         return false;
     };
@@ -1365,6 +1369,7 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
         DatabaseObjectType::Procedure => "PROCEDURE",
         DatabaseObjectType::Function => "FUNCTION",
         DatabaseObjectType::Event => "EVENT",
+        DatabaseObjectType::Trigger => "TRIGGER",
         DatabaseObjectType::Type => "TYPE",
         DatabaseObjectType::TypeBody => "TYPE BODY",
     }
@@ -2289,6 +2294,27 @@ mod tests {
                 value: "1".to_string(),
             })
             .is_err());
+        }
+    }
+
+    #[test]
+    fn trigger_drop_transport_preserves_exact_identity_without_enabling_rename() {
+        for database_type in ["oracle", "oceanbase-oracle", "dameng"] {
+            let options: DropObjectSqlOptions = serde_json::from_value(serde_json::json!({
+                "databaseType": database_type,
+                "objectType": "TRIGGER",
+                "schema": " Owner ",
+                "name": " Tr\"igger ",
+                "signature": "must_not_be_appended"
+            }))
+            .unwrap();
+            let object_type = options.object_type;
+            assert_eq!(build_drop_object_sql(options), "DROP TRIGGER \" Owner \".\" Tr\"\"igger \";");
+            for rename_database in
+                [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng, DatabaseType::SqlServer]
+            {
+                assert!(!supports_object_rename(Some(rename_database), object_type));
+            }
         }
     }
 

@@ -179,9 +179,10 @@ describe("settings search", () => {
     expect(withSqlServer.map((entry) => entry.id)).toContain("editor-sqlserver-space-completion");
   });
 
-  it("does not index connection or query timeout under editor settings", () => {
-    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-connect-timeout");
-    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-query-timeout");
+  it("indexes the global connection/query timeouts under editor settings (#13233)", () => {
+    // 全局超时现已在设置页展示（issue #13233），设置搜索需要索引这两个控件。
+    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).toContain("editor-global-connect-timeout");
+    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).toContain("editor-global-query-timeout");
   });
 
   it("indexes the multi-statement default view and its settings control", () => {

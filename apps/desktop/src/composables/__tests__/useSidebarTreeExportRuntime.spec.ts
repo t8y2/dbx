@@ -38,7 +38,7 @@ vi.mock("vue-i18n", () => ({
 
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
-import { isLoadingStructurePreview, showStructurePreviewDialog, structurePreviewDefaultFileName, structurePreviewError, structurePreviewSql, structurePreviewTitle } from "@/components/sidebar/sidebarTreeDialogState";
+import { isLoadingStructurePreview, showStructurePreviewDialog, structurePreviewDdlStorageType, structurePreviewDefaultFileName, structurePreviewError, structurePreviewSql, structurePreviewTitle } from "@/components/sidebar/sidebarTreeDialogState";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -74,15 +74,15 @@ function exportSettings() {
   };
 }
 
-function structureRuntimeFixture(databaseType: "mysql" | "oceanbase-oracle" = "mysql") {
+function structureRuntimeFixture(databaseType: "mysql" | "oracle" | "oceanbase-oracle" = "mysql") {
   const scope = effectScope();
   const firstNode = { id: "first-table", type: "table", label: "A", connectionId: "conn-1", database: "db", schema: "app" } as TreeNode;
   const secondNode = { ...firstNode, id: "second-table", label: "B" } as TreeNode;
   const activeNode = shallowRef(firstNode);
-  const settingsStore = reactive({ editorSettings: { excludeDdlStorage: true } });
-  const connectionStore = { ensureConnected: vi.fn(), getConfig: () => ({ db_type: databaseType }), treeNodes: [firstNode, secondNode], selectedTreeNodeIds: [] };
+  const settingsStore = reactive({ editorSettings: { includeDdlStorage: false, compactDdlSql: true, separateDdlIndexes: false } });
+  const connectionStore = { ensureConnected: vi.fn(), getConfig: () => ({ db_type: databaseType }), treeNodes: [firstNode, secondNode], selectedTreeNodeIds: [] as string[] };
   const runtime = scope.run(() => useSidebarTreeExportRuntime({ activeNode, connectionStore: connectionStore as never, settingsStore: settingsStore as never, acceptedSelectionIds: () => null }))!;
-  return { scope, activeNode, secondNode, settingsStore, runtime };
+  return { scope, activeNode, secondNode, settingsStore, runtime, connectionStore };
 }
 
 describe("useSidebarTreeExportRuntime", () => {
@@ -91,17 +91,17 @@ describe("useSidebarTreeExportRuntime", () => {
     const ddl = 'CREATE TABLE "T" ("ID" NUMBER) REPLICA_NUM=1 PCTFREE=0 PARTITION BY HASH("ID") PARTITIONS 2';
     apiMock.getTableDdl.mockResolvedValue(ddl);
     const node = { id: "ob-table", type: "table", label: "T", connectionId: "ob", database: "SYS", schema: "APP" } as TreeNode;
-    const settingsStore = reactive({ editorSettings: { excludeDdlStorage: true } });
+    const settingsStore = reactive({ editorSettings: { includeDdlStorage: false, compactDdlSql: true, separateDdlIndexes: false } });
     const connectionStore = { ensureConnected: vi.fn(), getConfig: () => ({ db_type: "oceanbase-oracle" }), treeNodes: [node], selectedTreeNodeIds: [] };
     const runtime = scope.run(() => useSidebarTreeExportRuntime({ activeNode: shallowRef(node), connectionStore: connectionStore as never, settingsStore: settingsStore as never, acceptedSelectionIds: () => null }))!;
     try {
       await runtime.exportStructure();
       expect(structurePreviewSql.value).not.toContain("REPLICA_NUM");
       expect(structurePreviewSql.value).toContain('PARTITION BY HASH("ID") PARTITIONS 2');
-      settingsStore.editorSettings.excludeDdlStorage = false;
+      settingsStore.editorSettings.includeDdlStorage = !false;
       await nextTick();
       expect(structurePreviewSql.value).toBe(ddl + ";\n");
-      settingsStore.editorSettings.excludeDdlStorage = true;
+      settingsStore.editorSettings.includeDdlStorage = !true;
       await nextTick();
       expect(structurePreviewSql.value).not.toContain("PCTFREE");
       expect(apiMock.getTableDdl).toHaveBeenCalledOnce();
@@ -125,6 +125,108 @@ describe("useSidebarTreeExportRuntime", () => {
     showStructurePreviewDialog.value = false;
     structurePreviewSql.value = "";
     structurePreviewTitle.value = "";
+  });
+
+  it.each(["oracle", "oceanbase-oracle"])("reloads the captured %s export target when independent indexes change", async (databaseType) => {
+    const { scope, activeNode, secondNode, settingsStore, runtime } = structureRuntimeFixture(databaseType);
+    apiMock.getTableDdl.mockResolvedValueOnce("CREATE TABLE A(id INT)").mockResolvedValueOnce("CREATE TABLE A(id INT);\nCREATE INDEX ix ON A(id)");
+    try {
+      await runtime.exportStructure();
+      activeNode.value = secondNode;
+      settingsStore.editorSettings.separateDdlIndexes = true;
+      await vi.waitFor(() => expect(apiMock.getTableDdl).toHaveBeenCalledTimes(2));
+      expect(apiMock.getTableDdl.mock.calls[1]).toEqual(["conn-1", "db", "app", "A", undefined, undefined, true, undefined, true]);
+      await vi.waitFor(() => expect(isLoadingStructurePreview.value).toBe(false));
+      expect(structurePreviewSql.value).toContain("CREATE INDEX ix");
+      expect(structurePreviewDefaultFileName.value).toBe("A.sql");
+    } finally {
+      scope.stop();
+    }
+  });
+
+  it("retains the Oracle option context after an index read fails so disabling it can recover", async () => {
+    const { scope, settingsStore, runtime } = structureRuntimeFixture("oracle");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    settingsStore.editorSettings.separateDdlIndexes = true;
+    apiMock.getTableDdl.mockRejectedValueOnce(new Error("index metadata unavailable")).mockResolvedValueOnce("CREATE TABLE A(id INT)");
+    try {
+      await runtime.exportStructure();
+      expect(structurePreviewError.value).toBe("index metadata unavailable");
+      expect(structurePreviewDdlStorageType.value).toBe("oracle");
+      expect(structurePreviewSql.value).toBe("");
+      settingsStore.editorSettings.separateDdlIndexes = false;
+      await vi.waitFor(() => expect(structurePreviewSql.value).toContain("CREATE TABLE A"));
+      expect(structurePreviewError.value).toBe("");
+    } finally {
+      errorLog.mockRestore();
+      scope.stop();
+    }
+  });
+
+  it("retains the same object's preview when independent-index regeneration fails", async () => {
+    const { scope, settingsStore, runtime } = structureRuntimeFixture("oceanbase-oracle");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.getTableDdl.mockResolvedValueOnce("CREATE TABLE A(id INT)").mockRejectedValueOnce(new Error("index metadata unavailable"));
+    try {
+      await runtime.exportStructure();
+      const original = structurePreviewSql.value;
+      settingsStore.editorSettings.separateDdlIndexes = true;
+      await vi.waitFor(() => expect(structurePreviewError.value).toBe("index metadata unavailable"));
+      expect(structurePreviewSql.value).toBe(original);
+    } finally {
+      errorLog.mockRestore();
+      scope.stop();
+    }
+  });
+
+  it("does not retain another object's preview when loading the new object fails", async () => {
+    const { scope, activeNode, secondNode, runtime } = structureRuntimeFixture();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.getTableDdl.mockResolvedValueOnce("CREATE TABLE A(id INT)").mockRejectedValueOnce(new Error("B unavailable"));
+    try {
+      await runtime.exportStructure();
+      activeNode.value = secondNode;
+      await runtime.exportStructure();
+      expect(structurePreviewError.value).toBe("B unavailable");
+      expect(structurePreviewSql.value).toBe("");
+    } finally {
+      errorLog.mockRestore();
+      scope.stop();
+    }
+  });
+
+  it("preserves the successfully read objects when a later structure export fails", async () => {
+    const { scope, activeNode, secondNode, connectionStore, runtime } = structureRuntimeFixture();
+    connectionStore.selectedTreeNodeIds = [activeNode.value.id, secondNode.id];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.getTableDdl.mockResolvedValueOnce("CREATE TABLE A(id INT)").mockRejectedValueOnce(new Error("B unavailable"));
+    try {
+      await runtime.exportStructure();
+      expect(apiMock.getTableDdl).toHaveBeenCalledTimes(2);
+      expect(structurePreviewSql.value).toContain("CREATE TABLE A");
+      expect(structurePreviewError.value).toBe("B unavailable");
+    } finally {
+      errorLog.mockRestore();
+      scope.stop();
+    }
+  });
+
+  it("does not let a pending old export replace the independent-index preview", async () => {
+    const { scope, settingsStore, runtime } = structureRuntimeFixture("oracle");
+    const old = deferred<string>();
+    apiMock.getTableDdl.mockReturnValueOnce(old.promise).mockResolvedValueOnce("CREATE INDEX current_index ON A(id)");
+    const first = runtime.exportStructure();
+    await vi.waitFor(() => expect(apiMock.getTableDdl).toHaveBeenCalledOnce());
+    settingsStore.editorSettings.separateDdlIndexes = true;
+    try {
+      await vi.waitFor(() => expect(structurePreviewSql.value).toContain("current_index"));
+      old.resolve("STALE");
+      await first;
+      expect(structurePreviewSql.value).toContain("current_index");
+      expect(structurePreviewSql.value).not.toContain("STALE");
+    } finally {
+      scope.stop();
+    }
   });
 
   it.each(["older-first", "newer-first"])("isolates overlapping structure requests completed %s", async (order) => {
@@ -208,12 +310,12 @@ describe("useSidebarTreeExportRuntime", () => {
     apiMock.getTableDdl.mockReturnValueOnce(pendingDdl.promise);
     const pendingRequest = runtime.exportStructure();
     await vi.waitFor(() => expect(apiMock.getTableDdl).toHaveBeenCalledOnce());
-    settingsStore.editorSettings.excludeDdlStorage = false;
+    settingsStore.editorSettings.includeDdlStorage = !false;
     pendingDdl.resolve(ddl);
     try {
       await pendingRequest;
       expect(structurePreviewSql.value).toBe(ddl + ";\n");
-      settingsStore.editorSettings.excludeDdlStorage = true;
+      settingsStore.editorSettings.includeDdlStorage = !true;
       await nextTick();
       expect(structurePreviewSql.value).not.toContain("PCTFREE");
       expect(apiMock.getTableDdl).toHaveBeenCalledOnce();

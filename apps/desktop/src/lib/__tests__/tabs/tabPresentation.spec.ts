@@ -188,6 +188,38 @@ describe("query result labels", () => {
     expect(item?.title).toBe("SELECT 1");
   });
 
+  it("bounds the SQL fallback tooltip for results without a source object", () => {
+    const longSql = `SELECT * FROM (${Array.from({ length: 40 }, (_, i) => `SELECT ${i + 1} AS value`).join(" UNION ALL ")}) AS combined`;
+    const [item] = tabularResultItems([
+      {
+        columns: ["value"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceStatement: longSql,
+      },
+    ]);
+
+    const expected = `${longSql.replace(/\s+/g, " ").trim().slice(0, 160)}…`;
+    expect(item?.label).toBeUndefined();
+    expect(item?.title).toBe(expected);
+    expect(item?.title!.length).toBe(161);
+  });
+
+  it("collapses multiline SQL fallback tooltips onto a single line", () => {
+    const [item] = tabularResultItems([
+      {
+        columns: ["id"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceStatement: "SELECT *\n  FROM (SELECT id\n          FROM users)",
+      },
+    ]);
+
+    expect(item?.title).toBe("SELECT * FROM (SELECT id FROM users)");
+  });
+
   it("shows only the object name when result set names exclude the database", () => {
     const results = [
       {

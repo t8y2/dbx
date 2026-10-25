@@ -17,6 +17,10 @@ const props = withDefaults(
     selectionSummary: { cellCount: number; rowCount: number } | null;
     selectionSummarySumText: string;
     selectionSummaryAverageText: string;
+    selectionSummaryMinText: string;
+    selectionSummaryMaxText: string;
+    selectionSummaryCount?: number;
+    selectionSummaryDistinctCount?: number;
     // 拖拽选区期间聚合值只是占位符，父组件把该状态传下来，值不可复制
     selectionSummaryPending?: boolean;
     loading: boolean;
@@ -111,7 +115,15 @@ function handlePageInputKeydown(event: KeyboardEvent) {
       <button type="button" class="shrink-0 text-left" :class="selectionSummaryValueClass" :title="selectionSummaryPending ? undefined : t('grid.copyValue')" :disabled="selectionSummaryPending" data-selection-summary-average @click="copySelectionSummaryValue(selectionSummaryAverageText)">
         <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>{{ t("grid.selectionAverage", { value: selectionSummaryAverageText }) }}
       </button>
+      <button type="button" class="shrink-0 text-left" :class="selectionSummaryValueClass" :title="selectionSummaryPending ? undefined : t('grid.copyValue')" :disabled="selectionSummaryPending" data-selection-summary-min @click="copySelectionSummaryValue(selectionSummaryMinText)">
+        <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>{{ t("grid.selectionMin", { value: selectionSummaryMinText }) }}
+      </button>
+      <button type="button" class="shrink-0 text-left" :class="selectionSummaryValueClass" :title="selectionSummaryPending ? undefined : t('grid.copyValue')" :disabled="selectionSummaryPending" data-selection-summary-max @click="copySelectionSummaryValue(selectionSummaryMaxText)">
+        <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>{{ t("grid.selectionMax", { value: selectionSummaryMaxText }) }}
+      </button>
       <div class="flex shrink-0 items-center gap-1">
+        <span v-if="selectionSummaryCount" class="shrink-0">{{ t("grid.selectionCount", { count: selectionSummaryCount }) }}</span>
+        <span v-if="selectionSummaryDistinctCount" class="shrink-0">{{ t("grid.selectionDistinct", { count: selectionSummaryDistinctCount }) }}</span>
         <span class="shrink-0">{{ t("grid.selectionCells", { count: selectionSummary.cellCount }) }}</span>
         <span class="shrink-0">{{ t("grid.rows", { count: selectionSummary.rowCount }) }}</span>
       </div>

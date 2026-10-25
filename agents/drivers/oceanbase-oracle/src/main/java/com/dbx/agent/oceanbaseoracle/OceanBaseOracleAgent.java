@@ -23,9 +23,11 @@ import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataReadOptions;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.OracleObjectPrivilege;
+import com.dbx.agent.OracleTriggerReader;
 import com.dbx.agent.PartitionInfo;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
@@ -103,6 +105,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     @Override
     public boolean supportsBlobBindStatements() { return true; }
+
+    @Override
+    public boolean supportsNativeLegacyJobs() { return true; }
 
     @Override
     public QueryResult executeBlobBoundStatements(List<String> previews, List<BlobBoundStatement> statements,
@@ -678,10 +683,20 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return queryObjects(schema, MetadataListConstraints.orNone(constraints));
     }
 
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints, MetadataReadOptions options) {
+        return queryObjects(schema, MetadataListConstraints.orNone(constraints), options != null && options.exact());
+    }
+
     private List<ObjectInfo> queryObjects(String schema, MetadataListConstraints constraints) {
+        return queryObjects(schema, constraints, false);
+    }
+
+    private List<ObjectInfo> queryObjects(String schema, MetadataListConstraints constraints, boolean exact) {
         return unchecked(() -> {
-            String owner = normalizeSchema(schema);
-            List<String> objectTypes = oceanBaseObjectTypes(constraints);
+            if (exact && (schema == null || schema.isEmpty())) throw new IllegalArgumentException("Exact metadata requires an owner");
+            String owner = exact ? schema : normalizeSchema(schema);
+            List<String> objectTypes = oceanBaseObjectTypes(constraints, exact);
             if (objectTypes.isEmpty()) {
                 return List.of();
             }
@@ -732,7 +747,11 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     }
                 }
             }
-            return constraints.withoutPaging().filterObjects(result);
+            List<ObjectInfo> objects = constraints.withoutPaging().filterObjects(result);
+            if (exact && objects.stream().anyMatch(object -> "TRIGGER".equals(object.getObject_type()))) {
+                new OracleTriggerReader(requireConnection(), "oceanbase-oracle").enrichObjects(objects, owner);
+            }
+            return objects;
         });
     }
 
@@ -1302,8 +1321,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return result;
     }
 
-    private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints) {
-        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY", "INDEX");
+    private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints, boolean exact) {
+        List<String> supported = new ArrayList<>(List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY", "INDEX"));
+        if (exact) supported.add("TRIGGER");
         if (!constraints.hasObjectTypes()) {
             return supported;
         }
@@ -1361,6 +1381,14 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             }
             return new ObjectSource(objectName, normalizedType, owner, source == null ? "" : source);
         });
+    }
+
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType, MetadataReadOptions options) {
+        if (options == null || !options.exact() || !"TRIGGER".equals(normalizeObjectSourceType(objectType))) {
+            return getObjectSource(schema, name, objectType);
+        }
+        return unchecked(() -> new OracleTriggerReader(requireConnection(), "oceanbase-oracle").getObjectSource(schema, name));
     }
 
     private ObjectSource getDictionaryFirstObjectSource(String owner, String name, String objectType, boolean exactMetadataKind) throws SQLException {
@@ -2325,6 +2353,12 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public List<TriggerInfo> listTriggers(String schema, String table, MetadataReadOptions options) {
+        if (options == null || !options.exact()) return listTriggers(schema, table);
+        return unchecked(() -> new OracleTriggerReader(requireConnection(), "oceanbase-oracle").listTriggers(schema, table));
+    }
+
+    @Override
     public String setSchemaSQL(String schema) {
         if (schema == null || schema.isBlank()) {
             return "";
@@ -2468,6 +2502,6 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        MultiSessionJsonRpcServer.withBlobBindings(OceanBaseOracleAgent::new).withExactMetadataIdentity().run();
+        MultiSessionJsonRpcServer.withNativeLegacyJobs(OceanBaseOracleAgent::new, true).withExactMetadataIdentity().run();
     }
 }

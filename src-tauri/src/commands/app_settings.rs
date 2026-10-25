@@ -165,6 +165,10 @@ pub async fn complete_app_close(app: AppHandle, window: Window, action: String) 
                 // Take the whole app off-screen first so WKWebView teardown during
                 // process exit cannot flash the window red on macOS 12. `AppHandle::hide`
                 // is macOS-only, so this block is compiled per-platform.
+                // Hiding can blank the frame, and the window-state plugin saves
+                // at exit; keep the geometry `request_app_close` captured while
+                // the window was still visible (issue #13168).
+                crate::window_state_guard::remember_main_window_geometry(&app);
                 let _ = window.hide();
                 let _ = app.hide();
                 tokio::time::sleep(std::time::Duration::from_millis(crate::EXIT_HIDE_GRACE_MS)).await;

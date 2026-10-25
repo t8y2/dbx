@@ -9,6 +9,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildKafkaMessageSearchText, kafkaMessageSearchTextMatches, normalizeKafkaMessageSearchQuery } from "@/lib/mq/kafkaMessageSearch";
 import { sortKafkaMessagesByPublishTime, type KafkaMessageDisplayOrder } from "@/lib/mq/kafkaMessageSort";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
+import { formatMqMessagePayload } from "@/lib/mq/thriftBinary";
 import { useToast } from "@/composables/useToast";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -142,7 +143,9 @@ function invalidateMessageRequest() {
 }
 
 function messagePayload(message: PeekedMessage): string {
-  return message.payloadText ?? message.payloadBase64;
+  // Raw-struct thrift sniffing is opt-in per MQ kind: only RabbitMQ's payload
+  // contract is thrift, so Kafka/RocketMQ keep the base64/text fallback.
+  return formatMqMessagePayload(message, { allowRawStructSniff: props.mqSystemKind === "rabbitmq" });
 }
 
 async function copyMessagePayload(message: PeekedMessage) {

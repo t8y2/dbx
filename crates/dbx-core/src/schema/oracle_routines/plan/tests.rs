@@ -265,7 +265,7 @@ pub(super) fn draft(name: &str, action: RoutinePlanAction) -> RoutinePlanDraft {
     }
 }
 fn input(source: &Catalog, target: &Catalog, drafts: Vec<RoutinePlanDraft>) -> OracleRoutinePlanInput {
-    OracleRoutinePlanInput { source: snapshot(source), target: snapshot(target), drafts }
+    OracleRoutinePlanInput { source: snapshot(source), target: snapshot(target), drafts, compact_sql: false }
 }
 async fn build(source: &Catalog, target: &Catalog, input: &OracleRoutinePlanInput) -> BuiltPlan {
     build_plan(
@@ -309,6 +309,7 @@ fn snapshot_lookup_distinguishes_package_kinds_but_retains_shared_namespace_conf
 fn public_plan_selection_allows_exact_package_kinds_without_expanding_cross_product_or_other_kind_selection() {
     let catalog = Catalog::new("OWNER", Vec::new());
     let mut input = OracleRoutinePlanInput {
+        compact_sql: false,
         source: snapshot(&catalog),
         target: snapshot(&catalog),
         drafts: vec![RoutinePlanDraft {
@@ -393,6 +394,24 @@ async fn initial_plan_preserves_raw_text_and_creates_without_replace_in_server_d
     assert_eq!(result.plan.steps[0].source_original, source.objects[0].source);
     assert!(result.plan.steps[0].target_original.is_none());
     assert_eq!(result.plan.steps[0].recovery_sql.as_deref(), Some("DROP FUNCTION \"OWNER\".\"Caller\";"));
+}
+
+#[tokio::test]
+async fn compact_generated_plan_preserves_snapshots_recovery_and_manual_drafts() {
+    let source = Catalog::new("SOURCE", vec![object("SOURCE", "F", "1")]);
+    let target = Catalog::new("OWNER", Vec::new());
+    let mut input = input(&source, &target, vec![draft("F", RoutinePlanAction::Create)]);
+    let original = build(&source, &target, &input).await;
+    input.compact_sql = true;
+    let compact = build(&source, &target, &input).await;
+    assert!(compact.plan.ready, "{:?}", compact.plan.steps);
+    assert!(compact.plan.steps[0].sql.starts_with("CREATE FUNCTION"));
+    assert_eq!(compact.plan.steps[0].source_original, original.plan.steps[0].source_original);
+    assert_eq!(compact.plan.steps[0].recovery_sql, original.plan.steps[0].recovery_sql);
+    input.drafts[0].sql = Some("CREATE FUNCTION \"OWNER\".\"F\" RETURN   NUMBER AS BEGIN RETURN 1; END;".into());
+    let manual = build(&source, &target, &input).await;
+    assert!(manual.plan.ready, "{:?}", manual.plan.steps);
+    assert!(manual.plan.steps[0].sql.contains("RETURN   NUMBER"));
 }
 
 #[tokio::test]

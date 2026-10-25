@@ -799,6 +799,14 @@ async fn serve() -> Result<(), String> {
         .route("/schema/object-source", get(routes::schema::get_object_source))
         .route("/schema/event-info", get(routes::schema::get_event_info))
         .route("/schema/custom-type-details", get(routes::schema::get_custom_type_details))
+        .route("/schema/native-jobs/context", post(routes::native_jobs::open_context))
+        .route("/schema/native-jobs/list", post(routes::native_jobs::list))
+        .route("/schema/native-jobs/references", post(routes::native_jobs::references))
+        .route("/schema/native-jobs/read", post(routes::native_jobs::read))
+        .route("/schema/native-jobs/prepare", post(routes::native_jobs::prepare))
+        .route("/schema/native-jobs/apply", post(routes::native_jobs::apply))
+        .route("/schema/native-jobs/status", post(routes::native_jobs::status))
+        .route("/schema/native-jobs/cancel", post(routes::native_jobs::cancel))
         .route("/schema/oracle-type-data", post(routes::schema::verify_oracle_type_data))
         .route("/schema/oracle-type-evolution", post(routes::schema::prepare_oracle_type_evolution))
         .route(
@@ -916,6 +924,7 @@ async fn serve() -> Result<(), String> {
             "/query/validate-oracle-executable-object-source",
             post(routes::query::validate_oracle_executable_object_source),
         )
+        .route("/query/prepare-oracle-trigger-sql", post(routes::query::prepare_oracle_trigger_sql))
         .route(
             "/query/fingerprint-oracle-routine-object-source",
             post(routes::query::fingerprint_oracle_routine_object_source),

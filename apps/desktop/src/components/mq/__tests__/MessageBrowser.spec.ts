@@ -189,6 +189,24 @@ describe("MessageBrowser", () => {
     expect(clipboard.copyToClipboard).toHaveBeenCalledWith("AAE=");
   });
 
+  it("decodes thrift.TBinaryProtocol payloads when browsing RabbitMQ messages", async () => {
+    // Raw TSerializer struct: field 1 (string) = "hello", STOP -> base64 "CwABAAAABWhlbGxvAA=="
+    backend.mqPeekMessages.mockResolvedValueOnce([
+      {
+        position: 1,
+        messageId: "thrift-1",
+        payloadBase64: "CwABAAAABWhlbGxvAA==",
+        payloadText: "\u000b\u0000\u0001\u0000\u0000\u0000\u0005hello\u0000",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    const browser = await mountBrowser("rabbitmq");
+
+    await loadMessages(browser);
+    expect(displayedPayloads(browser)).toEqual(['{\n  "1": "hello"\n}']);
+  });
+
   it("copies message headers as formatted JSON", async () => {
     backend.mqPeekMessages.mockResolvedValueOnce([
       {

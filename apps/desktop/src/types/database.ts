@@ -1152,6 +1152,7 @@ export interface ObjectSource {
   editable?: boolean;
   /** Optional structured metadata exposed by generic JDBC sidecars. */
   routine_parameters?: RoutineParameterMetadata[];
+  trigger?: TriggerInfo | null;
 }
 
 export interface MysqlEventInfo {
@@ -1579,6 +1580,43 @@ export interface TriggerInfo {
   comment?: string | null;
   created_at?: string | null;
   statement?: string | null;
+  oracle_metadata?: OracleTriggerMetadata | null;
+}
+
+/** Missing metadata means a provider has not established exact identity. */
+export interface MetadataReadOptions {
+  identityMode?: "exact";
+  catalog?: string;
+}
+
+export interface OracleTriggerParent {
+  owner: string;
+  name: string;
+  objectType: "TABLE" | "VIEW";
+  objectId?: string | null;
+}
+
+export interface OracleTriggerReadState {
+  state: "available" | "empty" | "denied" | "unavailable" | "unsupported" | "error" | "incomplete";
+  message?: string | null;
+}
+
+export interface OracleTriggerMetadata {
+  contractVersion: 1;
+  identityMode: "exact";
+  engine: "oracle" | "oceanbase-oracle" | "dm";
+  engineVersion?: string | null;
+  owner: string;
+  name: string;
+  scope: "TABLE" | "VIEW" | "SCHEMA" | "DATABASE" | "TIMER" | "OTHER" | "UNKNOWN";
+  scopeType?: string | null;
+  scopeOwner?: string | null;
+  parent?: OracleTriggerParent | null;
+  objectId?: string | null;
+  lastDdlTime?: string | null;
+  definition?: { origin: string; format: "ddl" | "declaration" | "body"; complete: boolean } | null;
+  errors?: { sequence: number; line: number; position: number; text: string; severity?: string | null }[] | null;
+  reads: Partial<Record<"identity" | "scope" | "parent" | "enabled" | "validity" | "definition" | "errors", OracleTriggerReadState>>;
 }
 
 export interface ConstraintInfo {
@@ -2096,6 +2134,7 @@ export type TreeNodeType =
   | "dameng-users"
   | "dameng-roles"
   | "dameng-job-admin"
+  | "database-job-admin"
   | "saved-sql-root"
   | "saved-sql-folder"
   | "saved-sql-file"
@@ -2312,6 +2351,9 @@ export interface TableStructureEditorDraft {
   /** Original DDL and display preference retained so restoring a draft cannot change its baseline. */
   rawDdlContent?: string;
   excludeDdlStorage?: boolean;
+  includeDdlStorage?: boolean;
+  compactDdlSql?: boolean;
+  separateDdlIndexes?: boolean;
   /** Edited DDL script, or null/undefined when the DDL tab was left untouched. */
   ddlDraft?: string | null;
   newTableName: string;
@@ -2343,6 +2385,11 @@ export interface TableStructureEditorDraft {
     details: string;
     remaining: import("@/lib/table/tableStructureEditorSql").OracleForeignKeyDefinition[];
     uncertainSteps: string[];
+  };
+  oracleTriggerStructureRecovery?: {
+    target: import("@/lib/database/oracleTriggerStructurePlan").OracleTriggerStructureTarget;
+    steps: import("@/lib/database/oracleTriggerPlan").OracleTriggerStructureStepResult[];
+    details: string;
   };
   constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
@@ -2649,6 +2696,7 @@ export interface QueryTab {
     | "dameng-users"
     | "dameng-roles"
     | "dameng-jobs"
+    | "database-jobs"
     | "processlist"
     | "sqlserver-trace"
     | "mysql-dashboard"
@@ -2675,6 +2723,8 @@ export interface QueryTab {
   };
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
+  /** Connection-level native Job selection; bodies and backend context IDs are not persisted. */
+  nativeJobAdmin?: { kind: "scheduler"; owner: string; name: string } | { kind: "legacy"; jobId: string } | { kind: "dameng-native"; jobId: string; name: string };
   mqTenant?: string;
   mqInitialTab?: "topics";
   mqttInitialTopic?: string;
@@ -2741,6 +2791,8 @@ export interface QueryTab {
     tableName: string;
     objectType?: ObjectSourceKind;
     formatDialect?: SqlFormatDialect;
+    displaySource?: string;
+    separateIndexes?: boolean;
   };
   /**
    * 「先出 tab 再加载」的中间态：DDL 新标签已经可见，但 DDL 还在路上

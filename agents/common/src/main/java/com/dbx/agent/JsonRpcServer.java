@@ -39,6 +39,8 @@ public final class JsonRpcServer {
         .create();
     private ConnectParams lastConnectParams;
     private long lastConnectionValidationTimeMillis;
+    private NativeJobSession nativeJobSession;
+    private NativeLegacyJobSession nativeLegacyJobSession;
 
     public JsonRpcServer(DatabaseAgent agent) {
         this.agent = agent;
@@ -110,6 +112,7 @@ public final class JsonRpcServer {
 
     private Object dispatchWithConnection(String method, JsonObject params) throws Exception {
         return AgentExecutionContext.withJdbcExecutor(jdbcExecutor, () -> {
+            authorizeNativeJobRequest(method, params);
             AbstractJdbcAgent jdbcAgent = pooledJdbcAgent();
             if (AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)
                 && jdbcAgent != null
@@ -182,6 +185,28 @@ public final class JsonRpcServer {
     }
 
     private Object dispatch(String method, JsonObject params) throws Exception {
+        authorizeNativeJobRequest(method, params);
+        if (NativeLegacyJobSession.isControl(method)) return legacyJob(method, params);
+        if (AgentProtocol.METHOD_OPEN_NATIVE_JOB_SESSION.equals(method)) {
+            String operationId = NativeJobSession.operationId(params);
+            if (nativeJobSession != null) return nativeJobSession.openedFor(operationId);
+            if (!(agent instanceof AbstractJdbcAgent jdbcAgent) || !agent.supportsNativeJobSessions()) {
+                throw new UnsupportedOperationException("native_job_session_not_supported");
+            }
+            jdbcAgent.requireIdleNativeJobSession(jdbcExecutor);
+            nativeJobSession = new NativeJobSession(jdbcAgent, operationId);
+            try {
+                nativeJobSession.open();
+                return nativeJobSession.openedFor(operationId);
+            } catch (Exception | LinkageError error) {
+                if (!nativeJobSession.openOutcomeUnknown()) nativeJobSession = null;
+                throw error;
+            }
+        }
+        if (AgentProtocol.METHOD_CLOSE_NATIVE_JOB_SESSION.equals(method)) {
+            if (nativeJobSession == null) throw new IllegalStateException("native_job_session_unavailable");
+            return nativeJobSession.close(params);
+        }
         if (agent instanceof AbstractJdbcAgent observingAgent) {
             observingAgent.beforeAgentMethod(method, stringOrNull(params, "sessionId"));
         }
@@ -253,6 +278,8 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_LIST_OBJECTS.equals(method)) {
             switchCatalog(params);
+            MetadataReadOptions options = metadataReadOptions(params);
+            if (options.exact()) return agent.listObjects(params.get("schema").getAsString(), metadataListConstraints(params), options);
             return agent.listObjects(params.get("schema").getAsString(), metadataListConstraints(params));
         }
         if (AgentProtocol.METHOD_LIST_DATA_TYPES.equals(method)) {
@@ -265,13 +292,16 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_GET_OBJECT_SOURCE.equals(method)) {
             switchCatalog(params);
+            MetadataReadOptions options = metadataReadOptions(params);
             boolean includeOrigin = params.has("include_source_origin") && params.get("include_source_origin").getAsBoolean();
             String schema = params.get("schema").getAsString();
             String name = params.get("name").getAsString();
             String objectType = params.get("object_type").getAsString();
-            ObjectSource source = includeOrigin
-                ? agent.getObjectSourceWithOrigin(schema, name, objectType)
-                : agent.getObjectSource(schema, name, objectType);
+            ObjectSource source = options.exact()
+                ? agent.getObjectSource(schema, name, objectType, options)
+                : includeOrigin
+                    ? agent.getObjectSourceWithOrigin(schema, name, objectType)
+                    : agent.getObjectSource(schema, name, objectType);
             if (includeOrigin) {
                 JsonObject result = gson.toJsonTree(source).getAsJsonObject();
                 if (source.getSourceOrigin() != null) {
@@ -303,6 +333,8 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_LIST_TRIGGERS.equals(method)) {
             switchCatalog(params);
+            MetadataReadOptions options = metadataReadOptions(params);
+            if (options.exact()) return agent.listTriggers(params.get("schema").getAsString(), params.get("table").getAsString(), options);
             return agent.listTriggers(params.get("schema").getAsString(), params.get("table").getAsString());
         }
         if (AgentProtocol.METHOD_LIST_CONSTRAINTS.equals(method)) {
@@ -424,20 +456,75 @@ public final class JsonRpcServer {
                 () -> agent.executeBatch(statements, stringOrNull(params, "schema")));
         }
         if (AgentProtocol.METHOD_DISCONNECT.equals(method)) {
-            jdbcExecutor.closeAllQuerySessions();
-            jdbcExecutor.closeAllTableReadSessions();
-            agent.disconnect();
-            lastConnectParams = null;
+            disconnect();
             return Collections.singletonMap("ok", true);
         }
         if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {
-            jdbcExecutor.closeAllQuerySessions();
-            jdbcExecutor.closeAllTableReadSessions();
-            agent.disconnect();
-            lastConnectParams = null;
+            disconnect();
             return Collections.singletonMap("ok", true);
         }
         throw new IllegalArgumentException("Unknown method: " + method);
+    }
+
+    private void authorizeNativeJobRequest(String method, JsonObject params) throws Exception {
+        if (AgentProtocol.METHOD_HANDSHAKE.equals(method)
+            || AgentProtocol.METHOD_DISCONNECT.equals(method) || AgentProtocol.METHOD_SHUTDOWN.equals(method)) return;
+        if (nativeLegacyJobSession != null && !NativeLegacyJobSession.isControl(method)) {
+            throw new IllegalStateException("native_job_session_reserved");
+        }
+        if (NativeLegacyJobSession.isControl(method)) {
+            if (nativeJobSession != null) throw new IllegalStateException("native_job_session_reserved");
+            return;
+        }
+        if (NativeJobSession.isControl(method)) return;
+        if (nativeJobSession != null) {
+            nativeJobSession.authorize(method, params);
+        } else if (params.has("nativeJobSessionToken") || params.has("nativeJobOperationId")) {
+            // A replacement logical session must not borrow a connection for an old lease token.
+            throw new IllegalStateException("native_job_session_unavailable");
+        }
+    }
+
+    private void disconnect() {
+        jdbcExecutor.closeAllQuerySessions();
+        jdbcExecutor.closeAllTableReadSessions();
+        JsonObject nativeClose = nativeJobSession == null ? null : nativeJobSession.dispose();
+        JsonObject legacyClose = nativeLegacyJobSession == null ? null : nativeLegacyJobSession.dispose();
+        agent.disconnect();
+        lastConnectParams = null;
+        if ((nativeClose != null && !"closed".equals(nativeClose.get("phase").getAsString()))
+            || (legacyClose != null && (!legacyClose.has("disposalConfirmed") || !legacyClose.get("disposalConfirmed").getAsBoolean()))) {
+            throw AgentRpcError.resource("close", new JdbcConnectionPoolRegistry.PhysicalConnectionStateUnknownException(
+                new IllegalStateException("native_job_session_dispose_unknown")));
+        }
+    }
+
+    private JsonObject legacyJob(String method, JsonObject params) throws Exception {
+        String operationId = NativeJobSession.operationId(params);
+        if (AgentProtocol.METHOD_PREPARE_LEGACY_JOB.equals(method)) {
+            if (!(agent instanceof AbstractJdbcAgent jdbcAgent) || !agent.supportsNativeLegacyJobs()) {
+                throw new UnsupportedOperationException("native_job_legacy_protocol_unavailable");
+            }
+            NativeLegacyJobSession candidate;
+            try { candidate = new NativeLegacyJobSession(jdbcAgent, params); }
+            catch (IllegalArgumentException invalid) {
+                return NativeLegacyJobSession.failure(operationId, "not_started", invalid.getMessage());
+            }
+            if (nativeLegacyJobSession != null) {
+                return nativeLegacyJobSession.sameRequest(candidate) ? nativeLegacyJobSession.status(operationId)
+                    : NativeLegacyJobSession.failure(operationId, "unknown", "native_job_operation_mismatch");
+            }
+            jdbcAgent.requireIdleNativeJobSession(jdbcExecutor);
+            nativeLegacyJobSession = candidate;
+            candidate.prepare();
+            return candidate.status(operationId);
+        }
+        if (nativeLegacyJobSession == null) {
+            return NativeLegacyJobSession.failure(operationId, "unknown", "native_job_legacy_session_unavailable");
+        }
+        if (AgentProtocol.METHOD_LEGACY_JOB_STATUS.equals(method)) return nativeLegacyJobSession.status(operationId);
+        return nativeLegacyJobSession.finish(operationId, stringOrNull(params, "jobId") == null ? "" : stringOrNull(params, "jobId"),
+            AgentProtocol.METHOD_COMMIT_LEGACY_JOB.equals(method));
     }
 
     private QueryResult executeStatementsWithTimeout(int timeoutSecs, DatabaseAgent.ThrowingSupplier<QueryResult> execute) throws Exception {
@@ -504,6 +591,7 @@ public final class JsonRpcServer {
     }
 
     private void ensureLiveConnection(String method) {
+        if (agent instanceof AbstractJdbcAgent jdbcAgent && jdbcAgent.hasNativeJobConnection()) return;
         if (!agent.permitsAutomaticReconnect()) return;
         if (lastConnectParams == null || !shouldValidateConnection(method)) {
             return;
@@ -547,6 +635,8 @@ public final class JsonRpcServer {
         return !AgentProtocol.METHOD_HANDSHAKE.equals(method)
             && !AgentProtocol.METHOD_CONNECT.equals(method)
             && !AgentProtocol.METHOD_TEST_CONNECTION.equals(method)
+            && !NativeJobSession.isControl(method)
+            && !NativeLegacyJobSession.isControl(method)
             && !AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)
             && !AgentProtocol.METHOD_FETCH_QUERY_PAGE.equals(method)
             && !AgentProtocol.METHOD_CLOSE_QUERY_SESSION.equals(method)
@@ -567,6 +657,8 @@ public final class JsonRpcServer {
         return !AgentProtocol.METHOD_HANDSHAKE.equals(method)
             && !AgentProtocol.METHOD_CONNECT.equals(method)
             && !AgentProtocol.METHOD_TEST_CONNECTION.equals(method)
+            && !NativeJobSession.isControl(method)
+            && !NativeLegacyJobSession.isControl(method)
             && !AgentProtocol.METHOD_DISCONNECT.equals(method)
             && !AgentProtocol.METHOD_SHUTDOWN.equals(method);
     }
@@ -667,6 +759,15 @@ public final class JsonRpcServer {
             stringListOrNull(params, "object_types"),
             booleanOrDefault(params, "exact_identity", false)
         );
+    }
+
+    private static MetadataReadOptions metadataReadOptions(JsonObject params) {
+        String mode = stringOrNull(params, "identity_mode");
+        String alias = stringOrNull(params, "identityMode");
+        if (mode != null && alias != null && !mode.equals(alias)) {
+            throw new IllegalArgumentException("Conflicting metadata identity modes");
+        }
+        return MetadataReadOptions.fromIdentityMode(mode != null ? mode : alias);
     }
 
     private static int intOrDefault(JsonObject object, String key, int defaultValue) {

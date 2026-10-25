@@ -369,6 +369,8 @@ export interface SchemaSyncSqlPlan {
   rollbackSyncSql?: string;
   rollbackCompleteness: RollbackCompleteness;
   missingRollbackObjects: MissingRollbackObject[];
+  forwardCompleteness?: RollbackCompleteness;
+  generationIssues?: Array<{ direction: "forward" | "rollback"; kind: string; name: string; table?: string; reason: string }>;
 }
 
 export interface GenerateSchemaSyncPlanOptions {
@@ -385,6 +387,12 @@ export interface GenerateSchemaSyncPlanOptions {
    * targets only and returns every other engine's script unchanged.
    */
   ignoreForeignKeyChecks?: boolean;
+  oracleDdl?: {
+    separateIndexes: boolean;
+    source?: { connectionId: string; database: string; schema: string };
+    target?: { connectionId: string; database: string; schema: string };
+    tableMappings?: SchemaDiffTableMapping[];
+  };
 }
 
 const MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "sundb", "databend", "gbase"]);

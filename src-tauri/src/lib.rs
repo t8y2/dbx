@@ -23,6 +23,7 @@ mod webview2_legacy_css;
 mod webview2_preflight;
 #[cfg(any(target_os = "windows", test))]
 mod webview2_recovery;
+mod window_geometry;
 mod window_state_guard;
 #[cfg(target_os = "windows")]
 mod windows_appcompat;
@@ -770,6 +771,11 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
         return;
     }
     show_main_window(app);
+    // The prompt only resolves to a quit after the user answers, by which
+    // point the window may already be hidden. Record its visible frame now;
+    // `complete_app_close` and the dock/menu quit keep this capture unless the
+    // window has meanwhile moved.
+    window_state_guard::remember_main_window_geometry(app);
     let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
 }
 
@@ -1939,6 +1945,9 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
+                // The main window's geometry is restored by `window_state_guard`
+                // in logical units; the plugin's physical restore is the bug in
+                // issue #13168.
                 .skip_initial_state("main")
                 .build(),
         );
@@ -2579,6 +2588,7 @@ pub fn run() {
             commands::query::build_copy_table_data_sql,
             commands::query::build_executable_object_source_statements,
             commands::query::validate_oracle_executable_object_source,
+            commands::query::prepare_oracle_trigger_sql,
             commands::query::fingerprint_oracle_routine_object_source,
             commands::query::build_executable_object_source_sql,
             commands::query::build_editable_object_source,
@@ -3165,6 +3175,7 @@ pub fn run() {
                     // shutdown below gives WindowServer time to remove it.
                     if should_hide_window_before_exit(std::env::consts::OS) {
                         if let Some(window) = app_handle.get_webview_window("main") {
+                            window_state_guard::remember_main_window_geometry(app_handle);
                             let _ = window.hide();
                         }
                     }

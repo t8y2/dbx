@@ -58,7 +58,7 @@ const SQLSERVER_LEGACY_DRIVER_INSTALL_HINT: &str =
     "Install the SQL Server legacy compatibility component from Driver Manager, or open the connection settings and enable SQL Server legacy compatibility mode again.";
 const DEFAULT_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const ACCESS_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
-const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
+pub(crate) const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
 const HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Upper bound for the "is this checked-out connection still alive" query that
 /// follows a successful health checkout. Windows keeps retransmitting on a
@@ -461,6 +461,7 @@ pub struct AppState {
     pub session_credentials: SessionCredentialStore,
     /// In-memory, never-persisted 1/5 minute write overrides for read-only connections.
     pub write_unlock_windows: crate::write_unlock::WriteUnlockWindows,
+    pub native_jobs: crate::schema::native_jobs::NativeJobRegistry,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     /// Backend-confirmed liveness losses plus resync requests (#4339). The keepalive task
     /// publishes here once a connection has no pools left; each shell relays it to its own
@@ -1952,6 +1953,7 @@ impl AppState {
             sqlserver_transaction_ends: Arc::new(std::sync::Mutex::new(Default::default())),
             session_credentials: SessionCredentialStore::new(),
             write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
+            native_jobs: crate::schema::native_jobs::NativeJobRegistry::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
             // Bounded so a shell that stops draining cannot grow memory without bound. A
             // lagged receiver re-syncs from the read-only status check on its next use, so

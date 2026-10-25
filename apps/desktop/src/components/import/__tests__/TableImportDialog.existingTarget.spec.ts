@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     { name: "id", data_type: "INTEGER", nullable: false, is_primary_key: true },
     { name: "name", data_type: "TEXT", nullable: true, is_primary_key: false },
   ]),
+  listIndexes: vi.fn().mockResolvedValue([]),
   listDataTypes: vi.fn().mockResolvedValue(["INTEGER", "TEXT"]),
   previewTableImportFile: vi.fn().mockResolvedValue({
     fileName: "rows.xlsx",
@@ -55,6 +56,7 @@ vi.mock("@/lib/backend/api", () => ({
   listSchemas: mocks.listSchemas,
   listTables: mocks.listTables,
   getColumns: mocks.getColumns,
+  listIndexes: mocks.listIndexes,
   listDataTypes: mocks.listDataTypes,
   previewTableImportFile: mocks.previewTableImportFile,
   releaseTableImportSource: mocks.releaseTableImportSource,
@@ -520,6 +522,69 @@ describe("TableImportDialog existing targets", () => {
     );
   });
 
+  it("recognizes Doris multi-column composite unique keys from indexes for update-existing", async () => {
+    mocks.getColumns.mockResolvedValueOnce([
+      { name: "id", data_type: "BIGINT", nullable: true, is_primary_key: false, is_unique: false },
+      { name: "data_type", data_type: "VARCHAR", nullable: true, is_primary_key: false, is_unique: false },
+      { name: "name", data_type: "VARCHAR", nullable: true, is_primary_key: false, is_unique: false },
+    ]);
+    mocks.listIndexes.mockResolvedValueOnce([
+      {
+        name: "UNIQUE KEY",
+        columns: ["id", "data_type"],
+        is_unique: true,
+        is_primary: false,
+        index_type: "UNIQUE KEY",
+      },
+    ]);
+    mocks.previewTableImportFile.mockResolvedValue({
+      fileName: "multi.xlsx",
+      filePath: "/tmp/multi.xlsx",
+      fileType: "excel",
+      sizeBytes: 24,
+      columns: ["id", "data_type", "name"],
+      rows: [[1, "user", "Alice"]],
+      totalRows: 1,
+      sourceFingerprint: "multi-xlsx",
+      sheets: ["Data"],
+    });
+    i18n.global.locale.value = "en";
+    await mountDialog({ connectionId: "doris-1", database: "analytics" });
+    await selectWorkbook();
+    await vi.waitFor(() => expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1]).toMatchObject({ parseOptions: { sheetName: "Data" } }));
+    await flushAsyncUpdates();
+    buttonContaining("Existing table")?.click();
+    await flushAsyncUpdates();
+    await selectExistingTarget("existing_target");
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+
+    const policySelect = document.body.querySelector<HTMLSelectElement>('[data-testid="table-import-conflict-policy"]');
+    expect(policySelect).toBeTruthy();
+    const updateOption = policySelect?.querySelector<HTMLOptionElement>('option[value="updateExisting"]');
+    await vi.waitFor(() => expect(updateOption?.disabled, document.body.textContent || "").toBe(false));
+    if (policySelect) {
+      policySelect.value = "updateExisting";
+      policySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await flushAsyncUpdates();
+
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Start Import")?.click();
+    await flushAsyncUpdates();
+
+    expect(mocks.importTableFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: "doris-1",
+        conflictPolicy: "updateExisting",
+        skipDuplicateRows: false,
+      }),
+      expect.any(Function),
+    );
+  });
+
   it("allows selecting update-existing on options step when target has keys even if preview columns are initially unmapped, and guards mapping step", async () => {
     mocks.previewTableImportFile.mockResolvedValue({
       fileName: "unmapped.xlsx",
@@ -535,6 +600,8 @@ describe("TableImportDialog existing targets", () => {
     i18n.global.locale.value = "en";
     await mountDialog({ connectionId: "doris-1", database: "analytics" });
     await selectWorkbook();
+    await vi.waitFor(() => expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1]).toMatchObject({ parseOptions: { sheetName: "Data" } }));
+    await flushAsyncUpdates();
     buttonContaining("Existing table")?.click();
     await flushAsyncUpdates();
     await selectExistingTarget("existing_target");

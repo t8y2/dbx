@@ -186,7 +186,7 @@ FROM ALL_OBJECTS o
 LEFT JOIN ALL_INDEXES i
   ON o.OBJECT_TYPE = 'INDEX' AND i.OWNER = o.OWNER AND i.INDEX_NAME = o.OBJECT_NAME
 WHERE o.OWNER = :2
-  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'INDEX')
+  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'INDEX')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
@@ -225,7 +225,7 @@ SELECT o.OBJECT_NAME,
        i.TABLE_NAME AS PARENT_NAME
 FROM USER_OBJECTS o
 LEFT JOIN USER_INDEXES i ON o.OBJECT_TYPE = 'INDEX' AND i.INDEX_NAME = o.OBJECT_NAME
-WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY')
+WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
@@ -281,8 +281,9 @@ type response struct {
 }
 
 type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    *rpcErrorData `json:"data,omitempty"`
 }
 
 // oracleDriverPanicError keeps a third-party driver panic on the request path
@@ -483,16 +484,19 @@ type metadataListConstraints struct {
 	Limit         int
 	Offset        int
 	ObjectTypes   []string
+	Exact         bool
 	ExactIdentity bool
 }
 
 type objectInfo struct {
-	Name         string  `json:"name"`
-	ObjectType   string  `json:"object_type"`
-	Schema       string  `json:"schema"`
-	Comment      *string `json:"comment"`
-	ParentSchema *string `json:"parent_schema,omitempty"`
-	ParentName   *string `json:"parent_name,omitempty"`
+	Name         string       `json:"name"`
+	ObjectType   string       `json:"object_type"`
+	Schema       string       `json:"schema"`
+	Comment      *string      `json:"comment"`
+	Valid        *bool        `json:"valid,omitempty"`
+	ParentSchema *string      `json:"parent_schema,omitempty"`
+	ParentName   *string      `json:"parent_name,omitempty"`
+	Trigger      *triggerInfo `json:"trigger,omitempty"`
 }
 
 type columnInfo struct {
@@ -554,11 +558,14 @@ type foreignKeyInfo struct {
 }
 
 type triggerInfo struct {
-	Name      string  `json:"name"`
-	Event     string  `json:"event"`
-	Timing    string  `json:"timing"`
-	Statement *string `json:"statement,omitempty"`
-	Enabled   *bool   `json:"enabled,omitempty"`
+	Name           string                 `json:"name"`
+	Event          string                 `json:"event"`
+	Timing         string                 `json:"timing"`
+	Statement      *string                `json:"statement,omitempty"`
+	Enabled        *bool                  `json:"enabled,omitempty"`
+	Valid          *bool                  `json:"valid,omitempty"`
+	Condition      *string                `json:"condition,omitempty"`
+	OracleMetadata *oracleTriggerMetadata `json:"oracle_metadata,omitempty"`
 }
 
 // constraintInfo represents primary key, unique, and check constraints for a
@@ -634,6 +641,7 @@ type server struct {
 	// commit/rollback control across multiple execute_query RPCs.
 	manualConn             *sql.Conn
 	manualTx               *sql.Tx
+	legacyJob              *legacyJobSession
 	sessions               map[string]*querySession
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
@@ -723,19 +731,19 @@ func (r *runtimeServer) handleLine(line string) (resp response, shutdown bool) {
 	// error response instead of an end-of-stream failure.
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			resp = errorResponse(req.ID, fmt.Errorf("agent request panic: %v", recovered))
+			resp = errorResponse(req.ID, fmt.Errorf("agent request panic: %v", recovered), req.Method, stringParam(req.Params, "agentSessionId"))
 			shutdown = false
 		}
 	}()
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, err, "", ""), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
 	result, shouldShutdown, err := r.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, err, req.Method, stringParam(req.Params, "agentSessionId")), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shouldShutdown
 }
@@ -746,7 +754,7 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		return map[string]any{
 			"protocolVersion":      multiSessionProtocolVersion,
 			"agentProtocolVersion": multiSessionProtocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session", "exact_metadata_identity_v1"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session", "native_job_legacy_v1", "structured_error_v1", "exact_metadata_identity_v1"},
 		}, false, nil
 	case "open_session":
 		agentSessionID := stringParam(params, "agentSessionId")
@@ -909,14 +917,14 @@ func newServer() *server {
 func (s *server) handleLine(line string) (response, bool) {
 	var req request
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, err, "", ""), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
 	result, shutdown, err := s.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, err, req.Method, ""), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shutdown
 }
@@ -932,7 +940,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return map[string]any{
 			"protocolVersion":      protocolVersion,
 			"agentProtocolVersion": protocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "exact_metadata_identity_v1"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "native_job_legacy_v1", "exact_metadata_identity_v1"},
 		}, false, nil
 	case "connect":
 		var cp connectParams
@@ -968,7 +976,13 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return result, false, err
 	case "list_objects":
 		schema := stringParam(params, "schema")
-		result, err := s.listObjects(schema, metadataListConstraintsFromParams(params))
+		exact, err := exactMetadataReadParam(params)
+		if err != nil {
+			return nil, false, err
+		}
+		constraints := metadataListConstraintsFromParams(params)
+		constraints.Exact = exact
+		result, err := s.listObjects(schema, constraints)
 		return result, false, err
 	case "completion_assistant_search_v1":
 		var request completionAssistantRequest
@@ -991,6 +1005,14 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		schema := stringParam(params, "schema")
 		name := stringParam(params, "name")
 		objectType := stringParam(params, "object_type")
+		exact, err := exactMetadataReadParam(params)
+		if err != nil {
+			return nil, false, err
+		}
+		if exact && strings.EqualFold(objectType, "TRIGGER") {
+			source, err := s.getExactTriggerSource(schema, name)
+			return source, false, err
+		}
 		source, err := s.getObjectSource(schema, name, objectType)
 		if err == nil && boolParam(params, "include_source_origin") {
 			switch strings.ToUpper(objectType) {
@@ -1054,6 +1076,14 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "list_triggers":
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
+		exact, err := exactMetadataReadParam(params)
+		if err != nil {
+			return nil, false, err
+		}
+		if exact {
+			result, err := s.listExactTriggers(schema, table)
+			return result, false, err
+		}
 		result, err := s.listTriggersWithIdentity(schema, table, boolParam(params, "exact_identity"))
 		return result, false, err
 	case "get_explain_info":
@@ -1070,6 +1100,16 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return result, false, err
 	case "begin_manual_transaction":
 		return map[string]bool{"ok": true}, false, s.beginManualTransaction(stringParam(params, "schema"))
+	case "prepare_legacy_job":
+		var request legacyJobPrepareRequest
+		if err := decodeParams(params, &request); err != nil {
+			return legacyJobResult{Phase: "not_started", Reason: "native_job_request_invalid"}, false, nil
+		}
+		return s.prepareLegacyJob(request), false, nil
+	case "commit_legacy_job", "rollback_legacy_job":
+		return s.finishLegacyJob(stringParam(params, "operationId"), stringParam(params, "jobId"), method == "commit_legacy_job"), false, nil
+	case "legacy_job_status":
+		return s.legacyJobStatus(stringParam(params, "operationId")), false, nil
 	case "commit_manual_transaction":
 		return map[string]bool{"ok": true}, false, s.commitManualTransaction()
 	case "rollback_manual_transaction":
@@ -1258,12 +1298,16 @@ func withOracleLOBFetchPost(params connectParams) connectParams {
 func (s *server) disconnect() error {
 	s.closeAllQuerySessions()
 	_ = s.rollbackManualTransactionQuiet()
+	jobErr := s.closeLegacyJob()
 	s.legacyLOBFetchDeferred = false
 	if s.db == nil {
-		return nil
+		return jobErr
 	}
 	err := s.db.Close()
 	s.db = nil
+	if jobErr != nil {
+		return jobErr
+	}
 	return err
 }
 
@@ -1912,6 +1956,9 @@ SELECT o.OBJECT_NAME,
        CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :4 AND o.OBJECT_TYPE IN ('TYPE', 'TYPE BODY')`
+	if constraints.Exact {
+		baseSQL = strings.Replace(baseSQL, "'PACKAGE BODY', 'INDEX')", "'PACKAGE BODY', 'INDEX', 'TRIGGER')", 1)
+	}
 	return oracleConstrainedMetadataListQuery(
 		baseSQL,
 		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME",
@@ -1923,8 +1970,12 @@ WHERE o.OWNER = :4 AND o.OBJECT_TYPE IN ('TYPE', 'TYPE BODY')`
 }
 
 func oracleListSessionUserObjectsQuery(constraints metadataListConstraints) oracleMetadataListQuery {
+	baseSQL := oracleListObjectsSessionUserBaseSQL
+	if constraints.Exact {
+		baseSQL = strings.Replace(baseSQL, "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY')", "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY', 'TRIGGER')", 1)
+	}
 	return oracleConstrainedMetadataListQuery(
-		oracleListObjectsSessionUserBaseSQL,
+		baseSQL,
 		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME",
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
@@ -2047,7 +2098,7 @@ func (s *server) listTables(schema string, constraints metadataListConstraints) 
 
 func (s *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
 	rawTypeOwner := schema
-	schema, err := s.metadataSchema(schema, constraints.ExactIdentity)
+	schema, err := s.metadataSchema(schema, constraints.Exact || constraints.ExactIdentity)
 	if err != nil {
 		return nil, err
 	}
@@ -2055,13 +2106,13 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		rawTypeOwner = schema
 	}
 	query := oracleListObjectsQueryWithTypeOwner(schema, rawTypeOwner, constraints)
-	useSessionUser := rawTypeOwner == schema && s.metadataSchemaIsSessionUser(schema, constraints.ExactIdentity)
+	useSessionUser := !constraints.Exact && rawTypeOwner == schema && s.metadataSchemaIsSessionUser(schema, constraints.ExactIdentity)
 	if useSessionUser {
 		query = oracleListSessionUserObjectsQuery(constraints)
 	}
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
-		if isOraclePGALimitError(err) && !constraints.ExactIdentity && !metadataIncludesIndexes(constraints.ObjectTypes) {
+		if isOraclePGALimitError(err) && !constraints.Exact && !constraints.ExactIdentity && !metadataIncludesIndexes(constraints.ObjectTypes) {
 			return []objectInfo{}, nil
 		}
 		return nil, err
@@ -2079,7 +2130,14 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		}
 		result = append(result, item)
 	}
-	return emptyIfNil(result), rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.closeRows(rows)
+	if constraints.Exact {
+		s.enrichExactTriggerObjects(result, schema)
+	}
+	return emptyIfNil(result), nil
 }
 
 func metadataIncludesIndexes(objectTypes []string) bool {
@@ -5987,10 +6045,6 @@ func boolParam(params map[string]json.RawMessage, key string) bool {
 	var value bool
 	_ = json.Unmarshal(params[key], &value)
 	return value
-}
-
-func errorResponse(id json.RawMessage, err error) response {
-	return response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -1, Message: err.Error()}}
 }
 
 func parseURLParams(raw string) map[string]string {

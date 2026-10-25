@@ -9,7 +9,7 @@ import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementReq
 
 interface ObjectSourceTabSaveContext {
   connection?: ConnectionConfig;
-  queryStore: Pick<ReturnType<typeof useQueryStore>, "tabs" | "getObjectSourceIdentitySnapshot" | "markTabClean">;
+  queryStore: Pick<ReturnType<typeof useQueryStore>, "tabs" | "getObjectSourceIdentitySnapshot" | "markTabClean" | "runOracleTriggerSourceAction">;
   t: (key: string, values?: Record<string, unknown>) => string;
   toast: (message: string, duration?: number) => void;
 }
@@ -43,6 +43,7 @@ export async function saveObjectSourceTab(tab: QueryTab, { connection, queryStor
     const { connectionId, database } = tab;
     const schema = source.schema || tab.schema || database;
     const sql = tab.sql;
+    if (source.objectType === "TRIGGER" && ["oracle", "oceanbase-oracle", "dameng"].includes(databaseType)) return await queryStore.runOracleTriggerSourceAction(tab.id);
     const statements = await buildExecutableObjectSourceStatements({ databaseType, objectType: source.objectType, schema, name: source.name, source: sql });
     save = await prepareObjectSourceSave(connectionId, database, databaseType, statements, schema, { objectType: source.objectType, name: source.name });
     const preparedSave = save;

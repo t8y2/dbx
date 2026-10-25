@@ -2562,11 +2562,11 @@ fn crc16_xmodem(bytes: &[u8]) -> u16 {
     crc
 }
 
-pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
+pub fn parse_command_argv(command_text: &str) -> Result<Vec<Vec<u8>>, String> {
     // Strip trailing semicolons so commands like "HGETALL aaa;" work naturally
     let command_text = command_text.trim_end().trim_end_matches(';');
-    let mut argv = Vec::new();
-    let mut current = String::new();
+    let mut argv: Vec<Vec<u8>> = Vec::new();
+    let mut current: Vec<u8> = Vec::new();
     let mut chars = command_text.chars().peekable();
     let mut quote: Option<char> = None;
     let mut escaping = false;
@@ -2575,12 +2575,46 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
     while let Some(ch) = chars.next() {
         if escaping {
             token_started = true;
-            current.push(match ch {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => other,
-            });
+            if ch == 'x' {
+                let hex1 = chars.peek().copied();
+                if let Some(h1) = hex1 {
+                    if h1.is_ascii_hexdigit() {
+                        chars.next();
+                        let hex2 = chars.peek().copied();
+                        if let Some(h2) = hex2 {
+                            if h2.is_ascii_hexdigit() {
+                                chars.next();
+                                let byte = u8::from_str_radix(&format!("{h1}{h2}"), 16).unwrap();
+                                current.push(byte);
+                                escaping = false;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                current.push(b'x');
+            } else {
+                let byte = match ch {
+                    'n' => b'\n',
+                    'r' => b'\r',
+                    't' => b'\t',
+                    'a' => b'\x07',
+                    'b' => b'\x08',
+                    'f' => b'\x0c',
+                    'v' => b'\x0b',
+                    '\\' => b'\\',
+                    '"' => b'"',
+                    '\'' => b'\'',
+                    other => {
+                        let mut buf = [0u8; 4];
+                        let s = other.encode_utf8(&mut buf);
+                        current.extend_from_slice(s.as_bytes());
+                        escaping = false;
+                        continue;
+                    }
+                };
+                current.push(byte);
+            }
             escaping = false;
             continue;
         }
@@ -2595,7 +2629,9 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
             if ch == q {
                 quote = None;
             } else {
-                current.push(ch);
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                current.extend_from_slice(s.as_bytes());
             }
             continue;
         }
@@ -2618,11 +2654,13 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
         }
 
         token_started = true;
-        current.push(ch);
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        current.extend_from_slice(s.as_bytes());
     }
 
     if escaping {
-        current.push('\\');
+        current.push(b'\\');
     }
     if quote.is_some() {
         return Err("Redis command has an unterminated quote".to_string());
@@ -2630,10 +2668,19 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
     if token_started {
         argv.push(current);
     }
-    if argv.first().is_none_or(String::is_empty) {
+    if argv.first().is_none_or(Vec::is_empty) {
         return Err("Redis command is empty".to_string());
     }
     Ok(argv)
+}
+
+pub fn parse_command_raw_argv(command_text: &str) -> Result<Vec<Vec<u8>>, String> {
+    parse_command_argv(command_text)
+}
+
+pub fn parse_command_argv_strings(command_text: &str) -> Result<Vec<String>, String> {
+    let raw = parse_command_argv(command_text)?;
+    Ok(raw.into_iter().map(|b| String::from_utf8_lossy(&b).into_owned()).collect())
 }
 
 pub fn classify_command(command: &str) -> RedisCommandSafety {
@@ -3017,7 +3064,7 @@ where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     let argv = parse_command_argv(command_text)?;
-    let command = argv[0].to_ascii_uppercase();
+    let command = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     if command == "MONITOR" {
         return Err(
             "MONITOR requires a dedicated streaming connection; run MONITOR alone in the query editor".to_string()
@@ -3028,9 +3075,9 @@ where
         return Err(format!("Redis command is blocked for safety: {command}"));
     }
 
-    let mut cmd = redis::cmd(&argv[0]);
+    let mut cmd = redis::cmd(&command);
     for arg in argv.iter().skip(1) {
-        cmd.arg(arg);
+        cmd.arg(arg.as_slice());
     }
     let raw: RedisRawValue = cmd.query_async(con).await.map_err(|e| e.to_string())?;
 
@@ -11286,22 +11333,30 @@ mod tests {
     #[test]
     fn parses_command_text_with_quotes_and_escapes() {
         let argv = parse_command_argv(r#"SET "user:1" "Ada \"Lovelace\"""#).unwrap();
+        assert_eq!(argv, vec![b"SET".to_vec(), b"user:1".to_vec(), b"Ada \"Lovelace\"".to_vec()]);
 
-        assert_eq!(argv, vec!["SET", "user:1", "Ada \"Lovelace\""]);
+        let argv = parse_command_argv(r#"DEL "cache\\session""#).unwrap();
+        assert_eq!(argv, vec![b"DEL".to_vec(), b"cache\\session".to_vec()]);
+
+        let argv = parse_command_argv(r#"DEL "bin\x00key\xff""#).unwrap();
+        assert_eq!(argv, vec![b"DEL".to_vec(), b"bin\0key\xff".to_vec()]);
+        // Note: raw byte 0xff is preserved as a single byte 0xff, NOT UTF-8 encoded U+00FF (0xc3, 0xbf)
+        assert_eq!(argv[1], vec![b'b', b'i', b'n', 0x00, b'k', b'e', b'y', 0xff]);
     }
 
     #[test]
     fn parses_empty_quoted_arguments() {
         let argv = parse_command_argv(r#"SET "" """#).unwrap();
 
-        assert_eq!(argv, vec!["SET", "", ""]);
+        assert_eq!(argv, vec![b"SET".to_vec(), b"".to_vec(), b"".to_vec()]);
     }
 
     #[test]
     fn parses_quoted_and_escaped_command_names_before_classification() {
         for command_text in [r#""JSON.SET" user:1 $ {}"#, r#"JSON\.SET user:1 $ {}"#] {
             let argv = parse_command_argv(command_text).unwrap();
-            assert_eq!(classify_command(&argv[0]), RedisCommandSafety::Write);
+            let cmd = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
+            assert_eq!(classify_command(&cmd), RedisCommandSafety::Write);
         }
     }
 
@@ -11310,6 +11365,125 @@ mod tests {
         for command_text in ["   ", "\"\""] {
             assert_eq!(parse_command_argv(command_text).unwrap_err(), "Redis command is empty");
         }
+    }
+
+    #[tokio::test]
+    async fn raw_command_execution_preserves_binary_bytes_and_isolates_similar_text_keys() {
+        use std::collections::HashSet;
+
+        struct TargetIsolatingConnection {
+            keys: HashSet<Vec<u8>>,
+            captured_commands: Vec<Vec<u8>>,
+        }
+
+        impl ConnectionLike for TargetIsolatingConnection {
+            fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, RedisRawValue> {
+                let packed = cmd.get_packed_command();
+                self.captured_commands.push(packed.clone());
+                // Parse RESP array: *<count>\r\n$<len>\r\n<arg>\r\n...
+                if packed.starts_with(b"*") {
+                    let mut pos = 0;
+                    if let Some(crlf) = packed[pos..].windows(2).position(|w| w == b"\r\n") {
+                        pos += crlf + 2;
+                        let mut args = Vec::new();
+                        while pos < packed.len() {
+                            if packed[pos] == b'$' {
+                                if let Some(len_end) = packed[pos..].windows(2).position(|w| w == b"\r\n") {
+                                    let len_str = std::str::from_utf8(&packed[pos + 1..pos + len_end]).unwrap();
+                                    let arg_len: usize = len_str.parse().unwrap();
+                                    let start = pos + len_end + 2;
+                                    let end = start + arg_len;
+                                    args.push(packed[start..end].to_vec());
+                                    pos = end + 2;
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if args.first().is_some_and(|c| c.eq_ignore_ascii_case(b"DEL")) {
+                            for k in &args[1..] {
+                                self.keys.remove(k);
+                            }
+                        }
+                    }
+                }
+                Box::pin(async move { Ok(RedisRawValue::Int(1)) })
+            }
+
+            fn req_packed_commands<'a>(
+                &'a mut self,
+                cmd: &'a Pipeline,
+                _offset: usize,
+                count: usize,
+            ) -> RedisFuture<'a, Vec<RedisRawValue>> {
+                self.captured_commands.push(cmd.get_packed_pipeline());
+                Box::pin(async move { Ok(vec![RedisRawValue::Int(1); count]) })
+            }
+
+            fn get_db(&self) -> i64 {
+                0
+            }
+        }
+
+        let key_ff = vec![0xff];
+        let key_utf8_y_diaeresis = "ÿ".as_bytes().to_vec(); // [0xc3, 0xbf]
+        let key_80 = vec![0x80];
+        let key_c2_80 = vec![0xc2, 0x80]; // U+0080 in UTF-8
+        let key_nul = b"bin\x00key".to_vec();
+        let key_zero = b"bin0key".to_vec();
+        let key_zhong_n = vec![0xe4, 0xb8, 0xad, 0x5c, 0x6e]; // "中\n" in bytes
+        let key_zhong_nl = vec![0xe4, 0xb8, 0xad, 0x0a]; // "中<newline>" in bytes
+
+        let mut con = TargetIsolatingConnection {
+            keys: HashSet::from([
+                key_ff.clone(),
+                key_utf8_y_diaeresis.clone(),
+                key_80.clone(),
+                key_c2_80.clone(),
+                key_nul.clone(),
+                key_zero.clone(),
+                key_zhong_n.clone(),
+                key_zhong_nl.clone(),
+            ]),
+            captured_commands: Vec::new(),
+        };
+
+        // 1. Delete binary 0xff key: DEL "\xff"
+        super::execute_command(&mut con, r#"DEL "\xff""#, true).await.unwrap();
+        // Verify wire bytes: bulk string length must be $1, containing single byte 0xff
+        let last_cmd = con.captured_commands.last().unwrap();
+        assert!(last_cmd.ends_with(b"$1\r\n\xff\r\n"), "must send raw byte 0xff with length 1");
+        assert!(!con.keys.contains(&key_ff), "0xff key must be deleted");
+        assert!(con.keys.contains(&key_utf8_y_diaeresis), "UTF-8 'ÿ' key [0xc3, 0xbf] must NOT be deleted");
+
+        // 2. Delete UTF-8 'ÿ' key: DEL "ÿ"
+        super::execute_command(&mut con, r#"DEL "ÿ""#, true).await.unwrap();
+        let last_cmd = con.captured_commands.last().unwrap();
+        assert!(last_cmd.ends_with(b"$2\r\n\xc3\xbf\r\n"), "must send UTF-8 bytes for 'ÿ' with length 2");
+        assert!(!con.keys.contains(&key_utf8_y_diaeresis), "UTF-8 'ÿ' key must now be deleted");
+
+        // 3. Delete binary 0x80 key: DEL "\x80"
+        super::execute_command(&mut con, r#"DEL "\x80""#, true).await.unwrap();
+        let last_cmd = con.captured_commands.last().unwrap();
+        assert!(last_cmd.ends_with(b"$1\r\n\x80\r\n"), "must send raw byte 0x80 with length 1");
+        assert!(!con.keys.contains(&key_80), "0x80 key must be deleted");
+        assert!(con.keys.contains(&key_c2_80), "[0xc2, 0x80] key must NOT be deleted");
+
+        // 4. Delete binary NUL key: DEL "bin\x00key"
+        super::execute_command(&mut con, r#"DEL "bin\x00key""#, true).await.unwrap();
+        let last_cmd = con.captured_commands.last().unwrap();
+        assert!(last_cmd.ends_with(b"$7\r\nbin\x00key\r\n"), "must send raw NUL byte inside key");
+        assert!(!con.keys.contains(&key_nul), "NUL key must be deleted");
+        assert!(con.keys.contains(&key_zero), "bin0key must NOT be deleted");
+
+        // 5. Delete "中\n" (bytes: e4 b8 ad 5c 6e): DEL "中\\n"
+        super::execute_command(&mut con, r#"DEL "中\\n""#, true).await.unwrap();
+        let last_cmd = con.captured_commands.last().unwrap();
+        assert!(last_cmd.ends_with(b"$5\r\n\xe4\xb8\xad\\n\r\n"), "must send exact bytes for 中\\n");
+        assert!(!con.keys.contains(&key_zhong_n), "中\\n key must be deleted");
+        assert!(con.keys.contains(&key_zhong_nl), "中<newline> key must NOT be deleted");
     }
 
     #[tokio::test]

@@ -132,6 +132,7 @@ export interface OracleRoutinePlanInput {
   source: OracleRoutineSnapshot;
   target: OracleRoutineSnapshot;
   drafts: OracleRoutinePlanDraft[];
+  compactSql?: boolean;
 }
 
 export interface OracleRoutinePlanStep {

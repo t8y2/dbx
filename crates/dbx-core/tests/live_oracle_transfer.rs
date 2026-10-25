@@ -92,6 +92,31 @@ async fn live_oracle_transfer_creates_table_with_index_comment_and_trigger() {
         source(sql).await.expect("source setup");
     }
 
+    // Match the transfer dialog: selections must come from list_objects, rather
+    // than supplying known trigger names and bypassing metadata discovery.
+    let mut selections = Vec::new();
+    for (kind, object_type, expected_name) in
+        [(TransferObjectKind::Sequence, "SEQUENCE", &sequence), (TransferObjectKind::Trigger, "TRIGGER", &trigger)]
+    {
+        let objects = dbx_core::schema::list_objects_core(
+            &state,
+            &source_id,
+            &service,
+            &source_schema,
+            None,
+            None,
+            None,
+            Some(&[object_type.to_string()]),
+            None,
+        )
+        .await
+        .expect("discover transferable objects");
+        let names: Vec<_> =
+            objects.into_iter().filter(|object| &object.name == expected_name).map(|object| object.name).collect();
+        assert_eq!(names, vec![expected_name.clone()], "missing {object_type} in transfer selection");
+        selections.push(TransferObjectSelection { object_type: kind, names });
+    }
+
     let request = TransferRequest {
         table_filters: Default::default(),
         transfer_id: format!("live-oracle-transfer-{suffix}"),
@@ -109,10 +134,7 @@ async fn live_oracle_transfer_creates_table_with_index_comment_and_trigger() {
         drop_target_confirmed: false,
         oracle_packages: None,
         content: TransferContent::StructureAndData,
-        objects: Some(vec![
-            TransferObjectSelection { object_type: TransferObjectKind::Sequence, names: vec![sequence.clone()] },
-            TransferObjectSelection { object_type: TransferObjectKind::Trigger, names: vec![trigger.clone()] },
-        ]),
+        objects: Some(selections),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
         target_column_name_case: TransferColumnNameCase::Preserve,

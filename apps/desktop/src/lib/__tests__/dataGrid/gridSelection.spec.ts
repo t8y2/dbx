@@ -9,6 +9,9 @@ describe("gridSelection", () => {
       numericCount: 0,
       sum: "0",
       average: null,
+      min: null,
+      max: null,
+      distinctCount: 0,
     });
   });
 
@@ -27,6 +30,9 @@ describe("gridSelection", () => {
       numericCount: 4,
       sum: "10",
       average: "2.5",
+      min: "1",
+      max: "4",
+      distinctCount: 4,
     });
   });
 
@@ -45,6 +51,9 @@ describe("gridSelection", () => {
       numericCount: 3,
       sum: "105.5",
       average: "35.166666666667",
+      min: "2.5",
+      max: "100",
+      distinctCount: 3,
     });
   });
 
@@ -60,6 +69,9 @@ describe("gridSelection", () => {
       numericCount: 0,
       sum: "0",
       average: null,
+      min: null,
+      max: null,
+      distinctCount: 0,
     });
   });
 
@@ -151,6 +163,9 @@ describe("gridSelection", () => {
       numericCount: 0,
       sum: "0",
       average: null,
+      min: null,
+      max: null,
+      distinctCount: 0,
     });
     expect(formatSelectionAggregate(-0, "en-US")).toBe("0");
     expect(formatSelectionAggregate(1 / 3, "en-US")).toBe("0.333333333333");
@@ -178,6 +193,23 @@ describe("gridSelection", () => {
     expect(plainSelectionNumericValue('NumberLong("-6")')).toBeUndefined();
     expect(plainSelectionNumericValue(true)).toBeUndefined();
     expect(plainSelectionNumericValue(null)).toBeUndefined();
+  });
+
+  it("reports min and max as exact decimal text over the same participation as sum (#13286)", () => {
+    expect(summarizeSelection({ columns: ["v"], rows: [["0.10"], ["0.2"], ["-3"]] })).toMatchObject({ min: "-3", max: "0.2" });
+    // 0.1 text versus 0.10 text are the same value; the exact scale keeps digits intact.
+    expect(summarizeSelection({ columns: ["v"], rows: [["1762018465054523393"], ["2041776918834970625"]] })).toMatchObject({
+      min: "1762018465054523393",
+      max: "2041776918834970625",
+    });
+    // No participating values leaves min/max empty even when cells are selected.
+    expect(summarizeSelection({ columns: ["v"], rows: [[null], ["x"]] })).toMatchObject({ numericCount: 0, min: null, max: null });
+  });
+
+  it("counts distinct participating values by their exact decimal text (#13286)", () => {
+    expect(summarizeSelection({ columns: ["v"], rows: [[2], [2], ["2.0"], [3]] })).toMatchObject({ numericCount: 4, distinctCount: 2 });
+    expect(summarizeSelection({ columns: ["v"], rows: [["0.1"], ["0.10"]] })).toMatchObject({ distinctCount: 1 });
+    expect(summarizeSelection({ columns: ["v"], rows: [[null], [true]] })).toMatchObject({ distinctCount: 0 });
   });
 
   it("dedupeColumnIndexes preserves the first visible occurrence instead of sorting", () => {

@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -1276,8 +1275,8 @@ func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery
 	if !delivery.Timestamp.IsZero() {
 		message["timestamp"] = delivery.Timestamp.UnixMilli()
 	}
-	if utf8.Valid(delivery.Body) {
-		message["payloadText"] = string(delivery.Body)
+	if text, ok := decodeDeliveryPayloadText(delivery.Body); ok {
+		message["payloadText"] = text
 	}
 	return message
 }

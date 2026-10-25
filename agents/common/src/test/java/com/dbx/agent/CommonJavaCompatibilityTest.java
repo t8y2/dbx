@@ -88,6 +88,8 @@ class CommonJavaCompatibilityTest {
         assertEquals(AgentProtocol.CAPABILITIES, strings(contract.getAsJsonArray("capabilities")));
         assertEquals(AgentProtocol.CAPABILITIES, strings(contract.getAsJsonArray("defaultSqlCapabilities")));
         assertEquals(AgentProtocol.COMMON_METHODS, strings(contract.getAsJsonArray("commonMethods")));
+        assertEquals(AgentProtocol.NATIVE_JOB_LEGACY_METHODS, strings(contract.getAsJsonArray("nativeJobLegacyMethods")));
+        assertEquals(AgentProtocol.NATIVE_JOB_SESSION_METHODS, strings(contract.getAsJsonArray("nativeJobSessionMethods")));
         assertEquals(AgentProtocol.MONGO_LEGACY_METHODS, strings(contract.getAsJsonArray("mongoLegacyMethods")));
         assertEquals(AgentProtocol.KV_METHODS, strings(contract.getAsJsonArray("kvMethods")));
     }
@@ -115,6 +117,8 @@ class CommonJavaCompatibilityTest {
             strings(contract.getAsJsonArray("defaultSqlCapabilities"))
         );
         assertEquals(AgentProtocol.MULTI_SESSION_METHODS, strings(contract.getAsJsonArray("commonMethods")));
+        assertEquals(AgentProtocol.NATIVE_JOB_LEGACY_METHODS, strings(contract.getAsJsonArray("nativeJobLegacyMethods")));
+        assertEquals(AgentProtocol.NATIVE_JOB_SESSION_METHODS, strings(contract.getAsJsonArray("nativeJobSessionMethods")));
         assertEquals(AgentProtocol.MONGO_LEGACY_METHODS, strings(contract.getAsJsonArray("mongoLegacyMethods")));
         assertEquals(AgentProtocol.KV_METHODS, strings(contract.getAsJsonArray("kvMethods")));
     }

@@ -8,6 +8,7 @@ import RocketMqConsumerGroupDialogs, { type RocketMqConsumerGroupDialogKind } fr
 import MqTypeFilterBar from "./shared/MqTypeFilterBar.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { DEFAULT_ROCKETMQ_CONSUMER_GROUP_TYPE_FILTERS, matchesRocketMqConsumerGroupTypeFilters, resolveRocketMqConsumerGroupMessageModel, resolveRocketMqConsumerGroupType, ROCKETMQ_CONSUMER_GROUP_TYPES, type RocketMqConsumerGroupType } from "@/lib/mq/rocketmqConsumerGroupTypes";
+import { formatMqMessagePayload } from "@/lib/mq/thriftBinary";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
@@ -789,7 +790,7 @@ onBeforeUnmount(() => {
               <div v-if="Object.keys(message.properties).length" class="peek-properties">
                 <span v-for="(value, key) in message.properties" :key="key">{{ key }}={{ value }}</span>
               </div>
-              <pre class="peek-payload">{{ message.payloadText ?? message.payloadBase64 }}</pre>
+              <pre class="peek-payload">{{ formatMqMessagePayload(message, { allowRawStructSniff: props.mqSystemKind === "rabbitmq" }) }}</pre>
             </div>
           </div>
         </div>

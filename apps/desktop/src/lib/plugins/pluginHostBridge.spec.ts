@@ -1838,6 +1838,13 @@ describe("plugin SDK source", () => {
         setTitle: (title: string | null) => Promise<unknown>;
         getTitle: () => Promise<unknown>;
       };
+      fileTransfer: {
+        onDragState: (listener: (active: boolean, position?: { x: number; y: number }) => void) => () => void;
+        onDrop: (listener: (files: unknown[], drop: unknown) => void) => () => void;
+      };
+    };
+    document: {
+      dispatchEvent: ReturnType<typeof vi.fn>;
     };
     receiveHostMessage: (message: unknown) => void;
   }
@@ -1851,6 +1858,7 @@ describe("plugin SDK source", () => {
       },
       dispatchEvent: vi.fn(),
     } as unknown as Document;
+    sandbox.document = document as unknown as SdkWindow["document"];
     let onMessage: ((event: MessageEvent) => void) | undefined;
     const parent = { postMessage: (message: unknown) => posted.push(message) };
     const addEventListener = (type: string, listener: (event: MessageEvent) => void) => {
@@ -2067,11 +2075,95 @@ describe("plugin SDK source", () => {
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
     const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
 
-    bridge.forwardDragState(true);
-    bridge.forwardFileDrop([{ handleId: "t1", name: "a.txt", size: 1, contentType: "text/plain" }]);
+    bridge.forwardDragState(true, { x: 15, y: 25 });
+    bridge.forwardFileDrop([{ handleId: "t1", name: "a.txt", size: 1, contentType: "text/plain" }], { dropId: "d1", truncated: false, position: { x: 15, y: 25 } });
 
-    expect(messages[0]).toMatchObject({ source: "dbx-host", version: 1, type: "dragstate", active: true });
-    expect(messages[1]).toMatchObject({ source: "dbx-host", version: 1, type: "filedrop", files: [{ handleId: "t1", name: "a.txt" }] });
+    expect(messages[0]).toMatchObject({ source: "dbx-host", version: 1, type: "dragstate", active: true, position: { x: 15, y: 25 } });
+    expect(messages[1]).toMatchObject({ source: "dbx-host", version: 1, type: "filedrop", files: [{ handleId: "t1", name: "a.txt" }], position: { x: 15, y: 25 } });
+  });
+
+  it("sdk delivers drag coordinates and drop position to listeners while keeping dbx-plugin-dragstate boolean", () => {
+    const posted: unknown[] = [];
+    const sdkWindow = loadSdk(posted);
+    const { dbxPlugin } = sdkWindow;
+    expect(dbxPlugin).toBeDefined();
+
+    const dragEvents: Array<{ active: boolean; position?: { x: number; y: number } }> = [];
+    const dropEvents: Array<{ files: unknown[]; drop: unknown }> = [];
+
+    dbxPlugin!.fileTransfer.onDragState((active, position) => {
+      dragEvents.push({ active, position });
+    });
+    dbxPlugin!.fileTransfer.onDrop((files, drop) => {
+      dropEvents.push({ files, drop });
+    });
+
+    // 1. Drag enter with position
+    sdkWindow.receiveHostMessage({
+      source: "dbx-host",
+      version: 1,
+      type: "dragstate",
+      active: true,
+      position: { x: 100, y: 200 },
+    });
+    expect(dragEvents).toEqual([{ active: true, position: { x: 100, y: 200 } }]);
+    expect(sdkWindow.document.dispatchEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "dbx-plugin-dragstate",
+        detail: true,
+      }),
+    );
+
+    // 2. Drag over with updated position
+    sdkWindow.receiveHostMessage({
+      source: "dbx-host",
+      version: 1,
+      type: "dragstate",
+      active: true,
+      position: { x: 150, y: 250 },
+    });
+    expect(dragEvents[1]).toEqual({ active: true, position: { x: 150, y: 250 } });
+
+    // 3. Drop with position
+    sdkWindow.receiveHostMessage({
+      source: "dbx-host",
+      version: 1,
+      type: "filedrop",
+      files: [{ handleId: "h1", name: "test.txt", size: 10 }],
+      dropId: "drop-1",
+      truncated: false,
+      position: { x: 150, y: 250 },
+    });
+    expect(dropEvents).toEqual([
+      {
+        files: [{ handleId: "h1", name: "test.txt", size: 10 }],
+        drop: { dropId: "drop-1", truncated: false, position: { x: 150, y: 250 } },
+      },
+    ]);
+    expect(sdkWindow.document.dispatchEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "dbx-plugin-filedrop",
+        detail: {
+          files: [{ handleId: "h1", name: "test.txt", size: 10 }],
+          drop: { dropId: "drop-1", truncated: false, position: { x: 150, y: 250 } },
+        },
+      }),
+    );
+
+    // 4. Drag leave without position
+    sdkWindow.receiveHostMessage({
+      source: "dbx-host",
+      version: 1,
+      type: "dragstate",
+      active: false,
+    });
+    expect(dragEvents[2]).toEqual({ active: false, position: undefined });
+    expect(sdkWindow.document.dispatchEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "dbx-plugin-dragstate",
+        detail: false,
+      }),
+    );
   });
 
   it("sdk exposes the fileTransfer namespace and drop listeners", () => {

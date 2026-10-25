@@ -6,5 +6,7 @@ pub mod models;
 #[cfg(feature = "mq-admin")]
 pub mod mqtt;
 pub mod mysql_event;
+pub mod native_jobs;
+pub mod oracle_trigger;
 pub mod sql_file;
 pub mod types;

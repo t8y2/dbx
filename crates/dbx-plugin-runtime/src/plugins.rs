@@ -556,6 +556,34 @@ impl PluginDriverSession {
         self.sidecar.shutdown().await
     }
 
+    /// Confirm JDBC cleanup for an owned native-operation scope. Ordinary shutdown remains best effort.
+    pub async fn shutdown_confirmed(&self) -> Result<(), String> {
+        if let Some(logical) = &self.logical {
+            return logical.close_confirmed().await;
+        }
+        if self.driver_id == "jdbc" {
+            let closed: Result<serde_json::Value, _> = self
+                .sidecar
+                .invoke_with_timeout(
+                    "close",
+                    serde_json::json!({}),
+                    Some(&self.driver_id),
+                    Some(Duration::from_secs(3)),
+                )
+                .await;
+            let acknowledged = closed.and_then(|value| {
+                if value["ok"] == true {
+                    Ok(())
+                } else {
+                    Err("JDBC session cleanup was not confirmed".to_string())
+                }
+            });
+            let stopped = self.sidecar.shutdown().await;
+            return acknowledged.and(stopped);
+        }
+        self.sidecar.shutdown().await
+    }
+
     pub fn is_available(&self) -> bool {
         self.logical.as_ref().is_none_or(|logical| logical.is_available())
     }

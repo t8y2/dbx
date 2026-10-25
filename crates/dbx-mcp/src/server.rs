@@ -2500,13 +2500,14 @@ impl DbxMcpServer {
             Ok(argv) => argv,
             Err(error) => return tool_error("REDIS_COMMAND_BLOCKED", error),
         };
-        if argv[0].eq_ignore_ascii_case("SELECT") {
+        let cmd_name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
+        if cmd_name == "SELECT" {
             return tool_error(
                 "REDIS_DATABASE_SELECTION_REQUIRED",
                 "Redis SELECT is not available through MCP. Set the db argument to the logical database number instead; when db is omitted, DBX uses the current scoped database.",
             );
         }
-        let safety = classify_command(&argv[0]);
+        let safety = classify_command(&cmd_name);
         let policy = effective_policy_for_database_with_groups(
             &resolved.policy,
             &resolved.group_ids,
@@ -2529,7 +2530,7 @@ impl DbxMcpServer {
         if safety == RedisCommandSafety::Blocked && !permissions.allow_dangerous {
             return tool_error(
                 "REDIS_COMMAND_BLOCKED",
-                format!("Dangerous Redis command \"{}\" is disabled in DBX MCP settings.", argv[0].to_ascii_uppercase()),
+                format!("Dangerous Redis command \"{}\" is disabled in DBX MCP settings.", cmd_name),
             );
         }
         if safety != RedisCommandSafety::Allowed && !permissions.allow_writes {

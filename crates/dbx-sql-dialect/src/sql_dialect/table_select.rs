@@ -379,7 +379,13 @@ pub fn build_table_data_select_sql_with_database(
     let include_postgres_ctid = options.include_row_id
         && uses_postgres_ctid(database_type)
         && is_postgres_base_table_type(options.table_type.as_deref())
-        && options.primary_keys.is_empty();
+        && options.primary_keys.is_empty()
+        // Greenplum connects as plain PostgreSQL and reports itself through
+        // version(); its segments reject system-column references like
+        // `tableoid`/`ctid`/`xmin` with "cannot retrieve a system column in
+        // this context" (#13227). Cloudberry's version also carries the
+        // Greenplum lineage, so one substring covers both.
+        && !is_greenplum_server(options.server_version.as_deref());
     let offset = options.offset.unwrap_or(0);
     // Oracle previews ride the ROWNUM inline view: the truncated projections
     // and marker columns live in the inner SELECT, and the outer page SELECT
@@ -1020,6 +1026,17 @@ pub(super) fn build_db2_table_select_page_sql(
     format!(
         "SELECT {columns_sql} FROM (SELECT {inner_columns}, ROW_NUMBER() OVER ({order}) AS {row_number} FROM {table} dbx_t{where_clause}) dbx_page WHERE {row_number} > {offset} AND {row_number} <= {end} ORDER BY {row_number}"
     )
+}
+
+/// Whether a plain-PostgreSQL connection's reported server version identifies
+/// a Greenplum-lineage engine whose segments cannot retrieve system columns.
+/// Covers both Greenplum and its Cloudberry fork, whose `version()` reports
+/// `PostgreSQL 14.4 (Cloudberry Database ...)` without the "greenplum" word.
+fn is_greenplum_server(server_version: Option<&str>) -> bool {
+    server_version.is_some_and(|version| {
+        let version = version.to_ascii_lowercase();
+        version.contains("greenplum") || version.contains("cloudberry")
+    })
 }
 
 /// Neo4j 5.0 replaced `id()` with `elementId()`, and servers before that only know `id()`, so the

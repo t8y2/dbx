@@ -1,6 +1,7 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 import { getStarRocksCapabilities, STARROCKS_DATA_TYPES } from "@/lib/table/starrocksCapabilities";
+import { exactOracleTriggerMetadata, oracleTriggerIdentityKey } from "@/lib/database/oracleTriggerIdentity";
 
 export interface CopySourceColumnDetails {
   /** Column default as shown in the copy-fields dialog, or null when there is none. */
@@ -1357,7 +1358,7 @@ export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[], databaseTy
 
 export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureTrigger[] {
   return triggers.map((trigger) => ({
-    id: `existing:${trigger.name}`,
+    id: exactOracleTriggerMetadata(trigger) ? `existing:exact:${oracleTriggerIdentityKey(exactOracleTriggerMetadata(trigger)!)}` : `existing:${trigger.name}`,
     name: trigger.name,
     timing: trigger.timing,
     event: trigger.event,
@@ -1375,7 +1376,8 @@ export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undef
   // REFERENCING, FOLLOWS, ...) that the timing/event/body form would drop on CREATE OR REPLACE.
   // Dameng reports a plain body plus a separate `WHEN` clause, so the same guard applies: the
   // structured form can only rebuild triggers that have neither of those extra clauses.
-  if (databaseType !== "oracle" && databaseType !== "dameng") return true;
+  if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && databaseType !== "dameng") return true;
+  if (exactOracleTriggerMetadata(trigger.original) && trigger.loadedOracleStructured !== true) return false;
   return isStructuredOracleTriggerSource(trigger.original.statement) && !trigger.original.condition?.trim();
 }
 

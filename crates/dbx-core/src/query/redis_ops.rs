@@ -1242,7 +1242,7 @@ pub async fn redis_execute_command_core(
                 let argv = cluster_console_argv(command)?;
                 redis_driver::ensure_cluster_database(cluster, db).await?;
                 let mut con = if command_may_target_first_key(&argv) {
-                    redis_driver::cluster_key_connection_in_db(cluster, argv[1].as_bytes(), db).await?
+                    redis_driver::cluster_key_connection_in_db(cluster, &argv[1], db).await?
                 } else {
                     redis_driver::cluster_any_connection_in_db(cluster, db).await?
                 };
@@ -1253,9 +1253,9 @@ pub async fn redis_execute_command_core(
     }
 }
 
-fn cluster_console_argv(command: &str) -> Result<Vec<String>, String> {
+fn cluster_console_argv(command: &str) -> Result<Vec<Vec<u8>>, String> {
     let argv = redis_driver::parse_command_argv(command)?;
-    if argv.first().is_some_and(|name| name.eq_ignore_ascii_case("SELECT")) {
+    if argv.first().is_some_and(|name| name.eq_ignore_ascii_case(b"SELECT")) {
         return Err(
             "SELECT is not available on a shared cluster connection; switch databases using the database picker"
                 .to_string(),
@@ -1264,12 +1264,13 @@ fn cluster_console_argv(command: &str) -> Result<Vec<String>, String> {
     Ok(argv)
 }
 
-fn command_may_target_first_key(argv: &[String]) -> bool {
+fn command_may_target_first_key(argv: &[Vec<u8>]) -> bool {
     if argv.len() < 2 {
         return false;
     }
+    let cmd = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     !matches!(
-        argv[0].to_ascii_uppercase().as_str(),
+        cmd.as_str(),
         "PING" | "INFO" | "DBSIZE" | "TIME" | "ROLE" | "CLUSTER" | "CLIENT" | "COMMAND" | "HELLO" | "AUTH" | "QUIT"
     )
 }
@@ -1445,7 +1446,7 @@ mod cluster_database_tests {
             assert!(error.contains("database picker"), "{command}: {error}");
             assert!(!error.contains("only supports db0"));
         }
-        assert_eq!(super::cluster_console_argv("GET key").unwrap(), ["GET", "key"]);
+        assert_eq!(super::cluster_console_argv("GET key").unwrap(), [b"GET".to_vec(), b"key".to_vec()]);
         assert!(super::cluster_console_argv("\"").is_err());
     }
 }

@@ -44,6 +44,10 @@ pub fn validate_blob_bound_statements(previews: &[String], bound: &[BlobBoundSta
 }
 
 pub use crate::mysql_event::MysqlEventInfo;
+pub use crate::oracle_trigger::{
+    MetadataIdentityMode, MetadataReadOptions, OracleTriggerDefinition, OracleTriggerError, OracleTriggerMetadata,
+    OracleTriggerParent, OracleTriggerReadState,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DatabaseInfo {
@@ -306,6 +310,8 @@ pub struct ObjectSource {
     pub editable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_parameters: Option<Vec<RoutineParameterMetadata>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerInfo>,
 }
 
 /// Provenance for structured metadata fields that are optional in [`ColumnInfo`].
@@ -955,6 +961,8 @@ pub struct TriggerInfo {
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_metadata: Option<OracleTriggerMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

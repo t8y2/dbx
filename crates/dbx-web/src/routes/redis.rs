@@ -926,7 +926,7 @@ pub async fn execute_command(
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
     let argv = dbx_core::db::redis_driver::parse_command_argv(&req.command)
         .map_err(|error| AppError::from(format!("Invalid Redis command: {error}")))?;
-    let cmd_name = argv[0].to_ascii_uppercase();
+    let cmd_name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     let safety = dbx_core::db::redis_driver::classify_command(&cmd_name);
     let is_mcp_request = super::mcp_policy::is_mcp_request(&headers);
     let centrally_approved_high_risk =

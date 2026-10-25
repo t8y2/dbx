@@ -224,10 +224,33 @@ pub struct EditableStructureTrigger {
     pub statement: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Explicit exact workflow; absence preserves the legacy structured SQL contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_exact: Option<OracleStructureTriggerContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<TriggerInfo>,
     #[serde(default)]
     pub marked_for_drop: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleStructureTriggerContext {
+    pub owner: String,
+    pub parent_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTriggerStructureOperation {
+    pub draft_id: String,
+    pub action: String,
+    pub owner: String,
+    pub name: String,
+    pub statement_index: usize,
+    pub statement_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -542,6 +565,23 @@ pub enum TablePartitionBoundDraft {
 pub struct TableStructureSqlResult {
     pub statements: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableStructureSqlPlan {
+    #[serde(flatten)]
+    pub sql: TableStructureSqlResult,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_operations: Vec<OracleTriggerStructureOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_trigger_contract: Option<u8>,
+}
+
+impl From<TableStructureSqlResult> for TableStructureSqlPlan {
+    fn from(sql: TableStructureSqlResult) -> Self {
+        Self { sql, trigger_operations: Vec::new(), oracle_trigger_contract: None }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -18,6 +18,21 @@ import { clearMetadataRuntimeCache } from "@/lib/metadata/metadataRuntimeCache";
 const request = { connectionId: "c1", database: "app", schema: "public", tableName: "users", catalog: "analytics" } as const;
 
 describe("objectDdlCache", () => {
+  it("keeps independent-index DDL separate from the original cached source", async () => {
+    mocks.getTableDisplayDdl.mockResolvedValueOnce("original").mockResolvedValueOnce("independent");
+    const separate = { ...request, separateIndexes: true };
+    expect(objectDdlCacheKey(separate)).not.toBe(objectDdlCacheKey(request));
+    await expect(loadObjectDdl(request)).resolves.toMatchObject({ ddl: "original", cacheStatus: "remote" });
+    await expect(loadObjectDdl(separate)).resolves.toMatchObject({ ddl: "independent", cacheStatus: "remote" });
+    expect(mocks.getTableDisplayDdl.mock.calls[1]).toEqual(["c1", "app", "public", "users", undefined, "analytics", true]);
+    await expect(loadObjectDdl(request)).resolves.toMatchObject({ ddl: "original", cacheStatus: "memory" });
+    await invalidateObjectDdlCache({ connectionId: "c1", database: "app", schema: "public", tableName: "users" });
+    mocks.getTableDisplayDdl.mockRejectedValueOnce(new Error("supporting index unavailable"));
+    await expect(loadObjectDdl(separate)).rejects.toThrow("supporting index unavailable");
+    mocks.getTableDisplayDdl.mockResolvedValueOnce("fresh original");
+    await expect(loadObjectDdl(request)).resolves.toMatchObject({ ddl: "fresh original", cacheStatus: "remote" });
+  });
+
   it.each(["remote", "disk"])("settles local waiting when cancellation retires a never-returning %s read", async (phase) => {
     if (phase === "disk") mocks.loadSchemaCache.mockReturnValueOnce(new Promise(() => undefined));
     mocks.getTableDisplayDdl.mockReturnValueOnce(new Promise(() => undefined));

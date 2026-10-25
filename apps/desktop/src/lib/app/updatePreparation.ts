@@ -29,11 +29,31 @@ export function assertUpdateSafe(): void {
   }
 }
 
+// While the barrier is up the installer/relauncher may kill the process, so only
+// the updater handoff and the durable-draft writes issued by the preparation
+// persist() callback are allowed. Everything else is rejected fail-closed.
+const PREPARATION_ALLOWED_COMMANDS = new Set([
+  "save_open_tabs_state",
+  "save_detached_tab_handoff",
+  "load_detached_tab_handoff",
+  "save_tab_result_snapshot",
+  // Draft flush: default-query content, its optional directory mirror, and the
+  // saved-SQL editor positions queued by the same persist pass.
+  "save_default_query_content",
+  "save_saved_sql_editor_positions",
+  "sync_saved_sql_directory",
+  "load_saved_sql_files_for_sync",
+  "get_downloaded_update",
+  "install_downloaded_update",
+  "discard_downloaded_update",
+  // The macOS/Linux restart is a frontend command invoked after preparation
+  // succeeds, while the barrier is intentionally still held.
+  "relaunch_app",
+]);
+
 export function assertUpdateAllowsCommand(command: string): void {
   if (!barrierDepth) return;
-  // During the short install barrier only updater and durable-draft I/O are allowed.
-  const allowed = new Set(["save_open_tabs_state", "save_detached_tab_handoff", "load_detached_tab_handoff", "save_tab_result_snapshot", "get_downloaded_update", "install_downloaded_update", "discard_downloaded_update"]);
-  if (!allowed.has(command)) throw new Error("Update preparation is in progress. Please wait.");
+  if (!PREPARATION_ALLOWED_COMMANDS.has(command)) throw new Error("Update preparation is in progress. Please wait.");
 }
 
 export function isUpdatePreparationActive(): boolean {

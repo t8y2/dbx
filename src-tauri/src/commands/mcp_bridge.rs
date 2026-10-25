@@ -2694,7 +2694,7 @@ async fn handle_redis_execute_command_data(state: &Arc<AppState>, body: &str, st
             return;
         }
     };
-    let cmd_name = argv[0].to_ascii_uppercase();
+    let cmd_name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     let safety = dbx_core::db::redis_driver::classify_command(&cmd_name);
     let centrally_approved_high_risk = safety == dbx_core::db::redis_driver::RedisCommandSafety::Blocked;
     if safety != dbx_core::db::redis_driver::RedisCommandSafety::Allowed {

@@ -23,6 +23,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   loadSchemaCache: vi.fn().mockResolvedValue(null),
   deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
   checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+  saveConnectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
   listSchemas: vi.fn().mockResolvedValue(["APP"]),
   listDatabases: vi.fn().mockResolvedValue(["APP"]),
   listObjects: vi.fn().mockResolvedValue([{ name: "SOURCE", object_type: "TABLE", schema: "APP" }]),

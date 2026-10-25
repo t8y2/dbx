@@ -46,6 +46,8 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
     private ScheduledExecutorService maintenance;
     private boolean blobBindStatements;
+    private boolean nativeJobSessions;
+    private boolean nativeLegacyJobs;
     private boolean exactMetadataIdentity;
 
     public MultiSessionJsonRpcServer(Supplier<? extends DatabaseAgent> agentFactory) {
@@ -96,6 +98,19 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
     public static MultiSessionJsonRpcServer withBlobBindings(Supplier<? extends DatabaseAgent> agentFactory) {
         MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(agentFactory);
         server.blobBindStatements = true;
+        return server;
+    }
+
+    public static MultiSessionJsonRpcServer withNativeJobSessions(Supplier<? extends DatabaseAgent> agentFactory) {
+        MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(agentFactory);
+        server.nativeJobSessions = true;
+        return server;
+    }
+
+    public static MultiSessionJsonRpcServer withNativeLegacyJobs(Supplier<? extends DatabaseAgent> agentFactory, boolean blobBindings) {
+        MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(agentFactory);
+        server.nativeLegacyJobs = true;
+        server.blobBindStatements = blobBindings;
         return server;
     }
 
@@ -152,7 +167,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             Object result;
             if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
                 result = sessionHandlerFactory == null
-                    ? AgentProtocol.withExactMetadataIdentity(AgentProtocol.multiSessionJdbcHandshakeResult(blobBindStatements), exactMetadataIdentity)
+                    ? AgentProtocol.withExactMetadataIdentity(AgentProtocol.multiSessionJdbcHandshakeResult(blobBindStatements, nativeJobSessions, nativeLegacyJobs), exactMetadataIdentity)
                     : customHandshake();
             } else if (AgentProtocol.METHOD_OPEN_SESSION.equals(method)) {
                 result = openSession(requiredSessionId(params), params);

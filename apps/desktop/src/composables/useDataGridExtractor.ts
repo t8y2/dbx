@@ -295,7 +295,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const effectiveValueFormat = descriptor.category === "sql" ? "native" : extractorOptions.valueFormat === "default" ? (extractor === "dbunit" || extractor === "php" ? "native" : "legacy") : extractorOptions.valueFormat;
     const rows = rawRows.map((row) =>
       row.map((value, index) => {
-        const formatNumbers = ["csv", "csv-with-headers", "dsv"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit";
+        const formatNumbers = ["csv", "csv-with-headers", "dsv", "tsv", "tsv-with-headers"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit";
         const cellFormat = formatNumbers !== "inherit" && isNumericColumnType(columnTypes[index]) ? formatNumbers : effectiveValueFormat;
         return extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index, requiredSourceIndexes[index], cellFormat);
       }),
@@ -347,7 +347,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       keepUnsafeJsonText,
       presentBinaryText,
       valueFormat: effectiveValueFormat,
-      formatNumbers: ["csv", "csv-with-headers", "dsv"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit",
+      formatNumbers: ["csv", "csv-with-headers", "dsv", "tsv", "tsv-with-headers"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit",
       rawRows,
     });
     return request;

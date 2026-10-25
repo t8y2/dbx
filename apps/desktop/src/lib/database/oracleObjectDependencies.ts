@@ -1,5 +1,6 @@
 import type { TreeNodeType } from "@/types/database";
 import type { DatabaseDependencyProvider, DependencyTreeNode } from "@/lib/database/databaseObjectDependencies";
+import { exactOracleTriggerNodeMetadata } from "@/lib/database/oracleTriggerIdentity";
 
 export type OracleDependencyObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TYPE" | "TYPE_BODY" | "SEQUENCE" | "SYNONYM" | "TRIGGER" | "INDEX";
 export type ObjectRelationKind = "dependencies" | "foreignKeys" | "ownership";
@@ -52,6 +53,10 @@ ORDER BY 1, 5, 6, 7`;
 }
 
 export function oracleTarget(node: DependencyTreeNode): { schema: string; name: string; type: OracleDependencyObjectType; packaged: boolean } | null {
+  if (node.type === "trigger") {
+    const metadata = exactOracleTriggerNodeMetadata(node);
+    return metadata ? { schema: metadata.owner, name: metadata.name, type: "TRIGGER", packaged: false } : null;
+  }
   const member = node.parentType === "package" && (node.type === "procedure" || node.type === "function");
   const type = member || node.type === "package" ? "PACKAGE" : oracleTypeForTreeNode(node.type);
   const schema = member ? node.parentSchema : node.schema;
@@ -132,6 +137,20 @@ export const oracleDependencyProvider: DatabaseDependencyProvider = {
   targetLabel(node) {
     const target = oracleTarget(node);
     return target ? { name: `${target.schema}.${target.name}`, packageScope: target.packaged } : null;
+  },
+};
+
+export const dmTriggerDependencyProvider: DatabaseDependencyProvider = {
+  databaseType: "dameng",
+  supports(node) {
+    const metadata = exactOracleTriggerNodeMetadata(node);
+    return metadata?.engine === "dm" && /(?:^|\D)8\./.test(metadata.engineVersion ?? "");
+  },
+  buildQuery(node) {
+    return dmTriggerDependencyProvider.supports(node) ? oracleDependencyProvider.buildQuery(node) : null;
+  },
+  targetLabel(node) {
+    return dmTriggerDependencyProvider.supports(node) ? oracleDependencyProvider.targetLabel!(node) : null;
   },
 };
 

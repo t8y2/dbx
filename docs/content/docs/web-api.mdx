@@ -217,6 +217,60 @@ GET /api/schema/columns?connection_id=CONNECTION_ID&database=app&schema=&table=u
 Cookie: dbx_session=...
 ```
 
+### Read Oracle-Family Triggers
+
+To find triggers without knowing their owning table, use the object list with a
+trigger type filter. Search and type filters are applied before paging in the
+exact metadata adapters.
+
+```http
+GET /api/schema/objects?connection_id=CONNECTION_ID&database=demo&schema=APP&object_types=TRIGGER&filter=audit&limit=100&offset=0&identity_mode=exact
+Cookie: dbx_session=...
+```
+
+Use the owning object's schema and name to list its triggers. The returned
+trigger owner can differ from that schema.
+
+```http
+GET /api/schema/triggers?connection_id=CONNECTION_ID&database=demo&schema=DATA&table=ORDERS&identity_mode=exact
+Cookie: dbx_session=...
+```
+
+Fetch the full definition using the **trigger's** owner and name. On this route,
+`table` is the source object name, not its parent table.
+
+```http
+GET /api/schema/object-source?connection_id=CONNECTION_ID&database=demo&schema=APP&table=AUDIT_ORDERS&object_type=TRIGGER&identity_mode=exact
+Cookie: dbx_session=...
+```
+
+These three routes accept optional `identity_mode=exact` and `catalog` query
+parameters. Omitting `identity_mode` retains the existing metadata behavior.
+Exact reads preserve raw owner/name values; URL-encode spaces, quotes, and other
+reserved characters rather than trimming or changing their case. `catalog` is
+forwarded to the selected metadata provider; it does not replace `schema`.
+
+Trigger summaries and source responses may contain `trigger.oracle_metadata`
+(`oracle_metadata` directly on entries returned by `/schema/triggers`). Version
+1 includes the verified engine, exact owner/name, scope, independent parent,
+string-valued object ID, and per-field `reads` states. `enabled` is the trigger
+state; `valid` is the independently read object validity. Schema/database scopes
+do not have an invented table parent.
+
+An exact source lookup that succeeds with no visible matching trigger returns
+`reads.identity.state="empty"` with the verified engine and raw target. It means
+empty within current visibility, not global absence. Query failures and legacy
+providers cannot supply that proof; creation still uses CREATE without REPLACE.
+
+Source metadata additionally reports definition origin/format/completeness and
+compilation errors with line/position. A null or absent error list is unknown,
+not an empty successful read. Failed or incomplete reads cannot supply a write
+baseline; keep the draft, restore dictionary access or update the provider, and
+read again. Old Agents/plugins that omit the metadata contract remain usable in
+their original mode but do not prove exact identity. The source text can include
+a same-target state appendix from `DBMS_METADATA`; it is export text, not an
+arbitrary multi-statement save payload.
+
 Other schema routes include:
 
 - `/api/schema/databases`
@@ -257,6 +311,31 @@ Related routes:
 | `/api/query/execute-batch` | Execute a list of statements |
 | `/api/query/cancel` | Cancel a running query |
 | `/api/query/build-table-select-sql` | Build a table browse query |
+
+### Prepare One Oracle-Family Trigger Definition
+
+`POST /api/query/prepare-oracle-trigger-sql` accepts `{ "input": ... }` with
+`databaseType` (`oracle`, `oceanbase-oracle`, or `dameng`), raw `owner`/`name`,
+`source`, and `purpose` (`inspect`, `create`, or `replace`). It returns a single
+normalized `definition`, the parsed `header`, and independent inline/export
+enabled states. This route only prepares SQL; execute through the normal query
+route after checking the current object, privileges, and concurrent changes.
+
+`comparisonSource` is for readback comparison only. It canonicalizes the known
+declaration wrapper while preserving the remaining header, body, comments, and
+literal newlines. Execute `definition`, not this comparison form.
+
+`structuredEditable` reports whether the complete definition's header can be represented without loss by the timing/event/body form. A false or absent value requires the complete-source editor for structural changes; a plain `TRIGGER_BODY` alone does not establish this capability.
+
+For create/replace, supply `binding` with the verified `scope`
+(`TABLE`, `VIEW`, `SCHEMA`, `DATABASE`, or `TIMER`), parent `owner`/`name` where
+applicable, and `pluggable` for a verified Oracle container scope. Omitted ON
+qualifiers are filled only from that binding. Replace also requires the current
+desired `enabled` state. Create produces CREATE without OR REPLACE. Oracle and
+verified OceanBase preserve state in the definition; DM's
+`requiresStateRestore` indicates a separate native state step to preview and
+verify. `allowExportAppendix` is only for inspecting trusted metadata exports;
+write purposes reject it and any extra SQL.
 
 ## Redis APIs
 

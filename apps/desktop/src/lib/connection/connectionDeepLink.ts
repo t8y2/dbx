@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import type { DeepLinkConnectionConfirmMode } from "@/stores/settingsStore";
 import { connectionProfileForScheme, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 
 export type ConnectionDeepLinkServiceConfig =
@@ -332,6 +333,32 @@ export function parseConnectionDeepLink(value: string): ConnectionDeepLinkDraft 
     ...(oneTime !== undefined ? { oneTime } : {}),
     ...(serviceConfig ? { serviceConfig } : {}),
   };
+}
+
+/**
+ * 连接深链免确认的两种形态：新建连接、以及带 `id` 的更新链接。
+ */
+export type ConnectionDeepLinkKind = "create" | "update";
+
+/**
+ * 当前设置下，该形态的连接深链是否可以跳过确认直接保存。
+ *
+ * 只对新建连接生效的老布尔开关已由 {@link DeepLinkConnectionConfirmMode} 取代：
+ * `create` 对应老的「开启」，`all` 额外覆盖带 `id` 的更新链接。
+ */
+export function shouldAutoConfirmConnectionDeepLink(kind: ConnectionDeepLinkKind, mode: DeepLinkConnectionConfirmMode): boolean {
+  if (mode === "all") return true;
+  return mode === kind;
+}
+
+/**
+ * 深链预填完成后是否应当跳过确认、直接创建连接。
+ *
+ * `one_time` 临时连接从来就是自动提交的；其余新建连接取决于设置项
+ * `deepLinkConnectionConfirmMode`（默认 `always`，保持「先在弹窗里确认」的老行为）。
+ */
+export function shouldAutoConfirmConnectionPrefill(draft: Pick<ConnectionDeepLinkDraft, "oneTime">, mode: DeepLinkConnectionConfirmMode): boolean {
+  return draft.oneTime === true || shouldAutoConfirmConnectionDeepLink("create", mode);
 }
 
 export function parseServiceConnectionUrl(value: string): ConnectionDeepLinkDraft | null {

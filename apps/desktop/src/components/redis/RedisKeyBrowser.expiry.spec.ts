@@ -292,13 +292,14 @@ vi.mock("@/components/editor/DangerConfirmDialog.vue", async () => {
   const { defineComponent, h } = await import("vue");
   return {
     default: defineComponent({
-      props: { open: Boolean, loading: Boolean, details: String },
+      props: { open: Boolean, loading: Boolean, details: String, detailsText: String, sql: String },
       emits: ["confirm"],
       setup(props, { emit }) {
         return () =>
           props.open
             ? h("div", { "data-test-danger-dialog": "" }, [
-                h("div", { "data-test-danger-details": "" }, props.details),
+                h("div", { "data-test-danger-details": "" }, props.detailsText ?? props.details),
+                h("div", { "data-test-danger-sql": "" }, props.sql),
                 h(
                   "button",
                   {
@@ -1600,6 +1601,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
     expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("session:current");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toBe("DEL session:current");
     requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
     await settle();
 
@@ -1625,6 +1627,9 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
     expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("MCP");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toContain("python3");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toContain("SCAN COUNT 500");
+    expect(requiredElement<HTMLElement>("[data-test-danger-sql]").textContent).toContain("MCP:*");
     requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
     await settle();
 

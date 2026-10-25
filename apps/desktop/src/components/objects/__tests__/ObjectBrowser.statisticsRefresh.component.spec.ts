@@ -3,7 +3,7 @@
 import { createApp, defineComponent, h, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
-import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
+import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -111,10 +111,10 @@ afterEach(() => {
   invalidateObjectBrowserRowsCache({});
 });
 
-async function mountBrowser() {
+async function mountBrowser(schema = ref("public")) {
   const host = document.createElement("div");
   document.body.append(host);
-  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: "pgdemo", schema: "public" }) });
+  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: "pgdemo", schema: schema.value }) });
   mountedApps.push({ app, host });
   app.mount(host);
   return host;
@@ -125,6 +125,36 @@ function primeRowsCache(cachedAt: number) {
 }
 
 describe("ObjectBrowser table statistics on a cached scaffold (#10461)", () => {
+  it("ignores late statistics from the previous schema", async () => {
+    let resolveOld!: (value: unknown[]) => void;
+    const oldStatistics = new Promise<unknown[]>((resolve) => {
+      resolveOld = resolve;
+    });
+    mocks.listSchemas.mockResolvedValue(["public", "other"]);
+    mocks.listObjectStatistics.mockImplementation((_id, _database, schema) => (schema === "public" ? oldStatistics : Promise.resolve([{ name: "orders", schema: "other", estimated_rows: 22, total_bytes: 2048 }])));
+    primeRowsCache(Date.now() - 31_000);
+    const schema = ref("public");
+    const host = await mountBrowser(schema);
+    await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledWith(connection.id, "pgdemo", "public"));
+    schema.value = "other";
+    await vi.waitFor(() => expect(getCachedObjectBrowserRows({ ...scope, schema: "other" })?.[0]).toMatchObject({ estimatedRows: 22, totalBytes: 2048 }));
+    resolveOld([{ name: "orders", schema: "public", estimated_rows: 999999, total_bytes: 999999 }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(getCachedObjectBrowserRows({ ...scope, schema: "other" })?.[0]).toMatchObject({ estimatedRows: 22, totalBytes: 2048 });
+    expect(host.textContent).not.toContain("999,999");
+  });
+
+  it.each([null, 0])("replaces stale statistics with %s without confusing unknown and zero", async (value) => {
+    mocks.listObjectStatistics.mockResolvedValue([{ name: "orders", schema: "public", estimated_rows: value, total_bytes: value }]);
+    primeRowsCache(Date.now() - 31_000);
+    const host = await mountBrowser();
+    await vi.waitFor(() => {
+      expect(getCachedObjectBrowserRows(scope)?.[0]).toMatchObject({ estimatedRows: value, totalBytes: value });
+    });
+    expect(host.textContent).not.toContain("24 KB");
+    if (value === 0) expect(host.textContent).toContain("0 B");
+  });
+
   it("backfills row/size statistics when the restored scaffold is stale", async () => {
     primeRowsCache(Date.now() - 31_000);
 

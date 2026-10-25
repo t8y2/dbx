@@ -1126,6 +1126,8 @@ fn peeked_message_from_json(idx: usize, m: &serde_json::Value) -> PeekedMessage 
         .and_then(|v| v.as_object())
         .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
         .unwrap_or_default();
+    let payload_base64 = m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let payload_text = resolve_rabbitmq_payload_text(m.get("payloadText").and_then(|v| v.as_str()), &payload_base64);
     PeekedMessage {
         position: (idx + 1) as u32,
         message_id: m
@@ -1148,9 +1150,292 @@ fn peeked_message_from_json(idx: usize, m: &serde_json::Value) -> PeekedMessage 
             .and_then(|v| v.as_object())
             .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
             .unwrap_or_default(),
-        payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-        payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
+        payload_base64,
+        payload_text,
     }
+}
+
+fn is_printable_text(text: &str) -> bool {
+    text.chars().all(|c| (c >= ' ' || matches!(c, '\t' | '\n' | '\r')) && c != '\u{7f}')
+}
+
+fn resolve_rabbitmq_payload_text(raw_text: Option<&str>, payload_base64: &str) -> Option<String> {
+    if let Some(text) = raw_text {
+        if !text.is_empty() && is_printable_text(text) {
+            return Some(text.to_string());
+        }
+    }
+    if !payload_base64.is_empty() {
+        use base64::Engine as _;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload_base64.trim()) {
+            if let Some(decoded) = decode_thrift_binary_json(&bytes) {
+                return Some(decoded);
+            }
+        }
+    }
+    if let Some(text) = raw_text {
+        if let Some(decoded) = decode_thrift_binary_json(text.as_bytes()) {
+            return Some(decoded);
+        }
+    }
+    raw_text.map(String::from)
+}
+
+const THRIFT_VERSION_MASK: u32 = 0xffff_0000;
+const THRIFT_VERSION_1: u32 = 0x8001_0000;
+const THRIFT_MAX_DEPTH: usize = 32;
+const THRIFT_MAX_ITEMS: usize = 10_000;
+const THRIFT_MAX_METHOD_LEN: usize = 256;
+
+struct ThriftCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ThriftCursor<'a> {
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos >= self.data.len()
+    }
+
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(len)?;
+        if end > self.data.len() {
+            return None;
+        }
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
+        Some(slice)
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+
+    fn i16(&mut self) -> Option<i16> {
+        Some(i16::from_be_bytes(self.take(2)?.try_into().ok()?))
+    }
+
+    fn i32(&mut self) -> Option<i32> {
+        Some(i32::from_be_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_be_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn i64(&mut self) -> Option<i64> {
+        Some(i64::from_be_bytes(self.take(8)?.try_into().ok()?))
+    }
+
+    fn f64(&mut self) -> Option<f64> {
+        let val = f64::from_be_bytes(self.take(8)?.try_into().ok()?);
+        val.is_finite().then_some(val)
+    }
+}
+
+fn thrift_message_type(code: u8) -> Option<&'static str> {
+    match code {
+        1 => Some("CALL"),
+        2 => Some("REPLY"),
+        3 => Some("EXCEPTION"),
+        4 => Some("ONEWAY"),
+        _ => None,
+    }
+}
+
+fn is_valid_thrift_method(name: &str) -> bool {
+    !name.is_empty() && name.len() <= THRIFT_MAX_METHOD_LEN && name.bytes().all(|b| (0x21..0x7f).contains(&b))
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
+}
+
+fn read_thrift_value(cur: &mut ThriftCursor<'_>, field_type: u8, depth: usize) -> Option<serde_json::Value> {
+    if depth > THRIFT_MAX_DEPTH {
+        return None;
+    }
+    match field_type {
+        1 => Some(serde_json::Value::Null),
+        2 => match cur.u8()? {
+            0 => Some(serde_json::Value::Bool(false)),
+            1 => Some(serde_json::Value::Bool(true)),
+            _ => None,
+        },
+        3 => Some(serde_json::json!(cur.u8()? as i8)),
+        4 => Some(serde_json::json!(cur.f64()?)),
+        6 => Some(serde_json::json!(cur.i16()?)),
+        8 => Some(serde_json::json!(cur.i32()?)),
+        10 => Some(serde_json::json!(cur.i64()?)),
+        11 => {
+            let len = usize::try_from(cur.i32()?).ok()?;
+            let raw = cur.take(len)?;
+            if raw.is_empty() {
+                return Some(serde_json::Value::String(String::new()));
+            }
+            if let Ok(text) = std::str::from_utf8(raw) {
+                if is_printable_text(text) {
+                    return Some(serde_json::Value::String(text.to_string()));
+                }
+            }
+            if depth < THRIFT_MAX_DEPTH {
+                if let Some(nested) = decode_thrift_raw_struct(raw, depth + 1) {
+                    return Some(nested);
+                }
+            }
+            Some(serde_json::json!({ "$bytes": bytes_to_hex(raw) }))
+        }
+        12 => Some(serde_json::Value::Object(read_thrift_struct(cur, depth + 1)?)),
+        13 => {
+            let key_type = cur.u8()?;
+            let val_type = cur.u8()?;
+            let size = usize::try_from(cur.i32()?).ok()?;
+            if size > THRIFT_MAX_ITEMS || size > cur.remaining() {
+                return None;
+            }
+            let mut map = serde_json::Map::with_capacity(size);
+            for _ in 0..size {
+                let k = read_thrift_value(cur, key_type, depth + 1)?;
+                let v = read_thrift_value(cur, val_type, depth + 1)?;
+                let key_str = match k {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                };
+                map.insert(key_str, v);
+            }
+            Some(serde_json::Value::Object(map))
+        }
+        14 | 15 => {
+            let elem_type = cur.u8()?;
+            let size = usize::try_from(cur.i32()?).ok()?;
+            if size > THRIFT_MAX_ITEMS || size > cur.remaining() {
+                return None;
+            }
+            let mut items = Vec::with_capacity(size);
+            for _ in 0..size {
+                items.push(read_thrift_value(cur, elem_type, depth + 1)?);
+            }
+            Some(serde_json::Value::Array(items))
+        }
+        16 => {
+            let hex = bytes_to_hex(cur.take(16)?);
+            Some(serde_json::Value::String(format!(
+                "{}-{}-{}-{}-{}",
+                &hex[0..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..32]
+            )))
+        }
+        _ => None,
+    }
+}
+
+fn read_thrift_struct(cur: &mut ThriftCursor<'_>, depth: usize) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if depth > THRIFT_MAX_DEPTH {
+        return None;
+    }
+    let mut fields = serde_json::Map::new();
+    loop {
+        let field_type = cur.u8()?;
+        if field_type == 0 {
+            break;
+        }
+        let field_id = cur.i16()?;
+        if field_id < 0 {
+            return None;
+        }
+        let key = field_id.to_string();
+        if fields.contains_key(&key) {
+            return None;
+        }
+        let val = read_thrift_value(cur, field_type, depth)?;
+        fields.insert(key, val);
+    }
+    Some(fields)
+}
+
+fn decode_thrift_strict_message(bytes: &[u8]) -> Option<serde_json::Value> {
+    let mut cur = ThriftCursor { data: bytes, pos: 0 };
+    let version_and_type = cur.u32()?;
+    if (version_and_type & THRIFT_VERSION_MASK) != THRIFT_VERSION_1 || (version_and_type & 0x0000_ff00) != 0 {
+        return None;
+    }
+    let msg_type = thrift_message_type((version_and_type & 0xff) as u8)?;
+    let name_len = usize::try_from(cur.i32()?).ok()?;
+    let method = std::str::from_utf8(cur.take(name_len)?).ok()?;
+    if !is_valid_thrift_method(method) {
+        return None;
+    }
+    let seq_id = cur.i32()?;
+    let fields = read_thrift_struct(&mut cur, 0)?;
+    cur.at_end().then(|| {
+        serde_json::json!({
+            "method": method,
+            "type": msg_type,
+            "seqId": seq_id,
+            "fields": fields,
+        })
+    })
+}
+
+fn decode_thrift_non_strict_message(bytes: &[u8]) -> Option<serde_json::Value> {
+    let mut cur = ThriftCursor { data: bytes, pos: 0 };
+    let name_len = usize::try_from(cur.i32()?).ok()?;
+    let method = std::str::from_utf8(cur.take(name_len)?).ok()?;
+    if !is_valid_thrift_method(method) {
+        return None;
+    }
+    let msg_type = thrift_message_type(cur.u8()?)?;
+    let seq_id = cur.i32()?;
+    let fields = read_thrift_struct(&mut cur, 0)?;
+    cur.at_end().then(|| {
+        serde_json::json!({
+            "method": method,
+            "type": msg_type,
+            "seqId": seq_id,
+            "fields": fields,
+        })
+    })
+}
+
+fn decode_thrift_raw_struct(bytes: &[u8], depth: usize) -> Option<serde_json::Value> {
+    let mut cur = ThriftCursor { data: bytes, pos: 0 };
+    let fields = read_thrift_struct(&mut cur, depth)?;
+    (cur.at_end() && !fields.is_empty()).then_some(serde_json::Value::Object(fields))
+}
+
+fn decode_thrift_unframed(bytes: &[u8]) -> Option<serde_json::Value> {
+    if bytes.len() >= 4 && (u32::from_be_bytes(bytes[..4].try_into().ok()?) & THRIFT_VERSION_MASK) == THRIFT_VERSION_1 {
+        return decode_thrift_strict_message(bytes);
+    }
+    decode_thrift_non_strict_message(bytes).or_else(|| decode_thrift_raw_struct(bytes, 0))
+}
+
+fn decode_thrift_binary_json(bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let value = decode_thrift_unframed(bytes).or_else(|| {
+        if bytes.len() > 4 {
+            let frame_len = u32::from_be_bytes(bytes[..4].try_into().ok()?) as usize;
+            if frame_len > 0 && frame_len == bytes.len() - 4 {
+                return decode_thrift_unframed(&bytes[4..]);
+            }
+        }
+        None
+    })?;
+    serde_json::to_string_pretty(&value).ok()
 }
 
 /// Map an `mq_get_topic_stats` agent payload onto the UI-friendly TopicStats.
@@ -1570,6 +1855,27 @@ mod tests {
 
         assert_eq!(peeked.message_id.as_deref(), Some("7"));
         assert!(peeked.publish_time.is_none());
+    }
+
+    #[test]
+    fn peeked_message_decodes_thrift_binary_protocol() {
+        use base64::Engine as _;
+        let strict_call = [
+            0x80u8, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, b'p', b'i', b'n', b'g', 0x00, 0x00, 0x00, 0x07, 0x0b,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x02, b'o', b'k', 0x08, 0x00, 0x02, 0x00, 0x00, 0x00, 0x2a, 0x00,
+        ];
+        let msg = serde_json::json!({
+            "deliveryTag": 9,
+            "payloadBase64": base64::engine::general_purpose::STANDARD.encode(strict_call),
+        });
+        let peeked = peeked_message_from_json(0, &msg);
+        let decoded: serde_json::Value =
+            serde_json::from_str(peeked.payload_text.as_deref().expect("decoded thrift")).expect("valid json");
+        assert_eq!(decoded["method"], "ping");
+        assert_eq!(decoded["type"], "CALL");
+        assert_eq!(decoded["seqId"], 7);
+        assert_eq!(decoded["fields"]["1"], "ok");
+        assert_eq!(decoded["fields"]["2"], 42);
     }
 
     #[test]

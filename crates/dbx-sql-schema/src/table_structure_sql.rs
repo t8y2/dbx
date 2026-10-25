@@ -21,6 +21,7 @@ mod starrocks_layout;
 mod starrocks_partition;
 mod transwarp;
 mod triggers;
+pub(crate) use triggers::oracle_snapshot_trigger_source;
 mod types;
 mod util;
 mod validation;
@@ -31,7 +32,8 @@ mod tests;
 pub use column_alter::build_single_column_alter_sql;
 pub use create_options::*;
 pub use create_table::{
-    build_create_table_sql, build_create_table_sql_for_version, build_create_table_sql_with_dialect_options,
+    build_create_table_sql, build_create_table_sql_for_version, build_create_table_sql_plan_with_dialect_options,
+    build_create_table_sql_with_dialect_options,
 };
 pub use mysql_table_charset::{build_mysql_table_charset_change_sql, MysqlTableCharsetChange};
 pub use owner::build_table_owner_change_sql;
@@ -52,7 +54,7 @@ use comments::build_table_comment_sql;
 use foreign_keys::build_foreign_key_sql;
 use indexes::build_index_sql;
 use mysql_engine::{build_mysql_engine_change_sql, validate_mysql_engine};
-use triggers::build_trigger_sql;
+use triggers::{build_trigger_sql, build_trigger_sql_with_operations};
 use validation::validate_concurrent_index_scope;
 pub use validation::validate_draft;
 
@@ -61,24 +63,31 @@ pub fn build_table_structure_change_sql(options: TableStructureSqlOptions) -> Ta
 }
 
 pub fn build_table_structure_change_sql_with_context(
-    mut options: TableStructureSqlOptions,
+    options: TableStructureSqlOptions,
     starrocks: Option<StarRocksAlterOptions>,
 ) -> TableStructureSqlResult {
+    build_table_structure_change_sql_plan(options, starrocks).sql
+}
+
+pub fn build_table_structure_change_sql_plan(
+    mut options: TableStructureSqlOptions,
+    starrocks: Option<StarRocksAlterOptions>,
+) -> TableStructureSqlPlan {
     if options.oracle_constraint_changes.is_some() {
-        return oracle_constraints::build_changes(options);
+        return oracle_constraints::build_changes(options).into();
     }
     if options.oracle_foreign_key_changes.is_some() {
-        return oracle_foreign_keys::build_changes(options);
+        return oracle_foreign_keys::build_changes(options).into();
     }
     if options.primary_key_change.is_some() {
-        return existing_primary_key::build_existing_primary_key_change(options);
+        return existing_primary_key::build_existing_primary_key_change(options).into();
     }
     if alter_dialect::is_starrocks(&options) {
-        return alter_dialect::build(&options, starrocks);
+        return alter_dialect::build(&options, starrocks).into();
     }
     let mysql_engine_errors = validate_mysql_engine(&options);
     if !mysql_engine_errors.is_empty() {
-        return TableStructureSqlResult { statements: Vec::new(), warnings: mysql_engine_errors };
+        return TableStructureSqlResult { statements: Vec::new(), warnings: mysql_engine_errors }.into();
     }
     // GaussDB M-mode uses MySQL-compatible SQL dialect with backtick quoting.
     // Map to StructureDialect::Mysql so DDL is generated correctly.
@@ -88,23 +97,40 @@ pub fn build_table_structure_change_sql_with_context(
     strip_inherited_mysql_column_charsets(&mut options);
     let primary_key_errors = validate_primary_key_change_scope(&options);
     if !primary_key_errors.is_empty() {
-        return TableStructureSqlResult { statements: Vec::new(), warnings: primary_key_errors };
+        return TableStructureSqlResult { statements: Vec::new(), warnings: primary_key_errors }.into();
     }
     // Fail closed: an unsupported concurrent-index request (existing index, or
     // partitioned parent table) must never degrade into blocking index DDL
     // behind the caller's back, so the whole plan is refused up front.
     let concurrent_errors = validate_concurrent_index_scope(&options);
     if !concurrent_errors.is_empty() {
-        return TableStructureSqlResult { statements: Vec::new(), warnings: concurrent_errors };
+        return TableStructureSqlResult { statements: Vec::new(), warnings: concurrent_errors }.into();
     }
     let mut warnings = validate_draft(&options);
     let mut statements = build_column_sql(&options, &mut warnings);
     statements.extend(build_index_sql(&options, &mut warnings));
     statements.extend(build_foreign_key_sql(&options, &mut warnings));
-    statements.extend(build_trigger_sql(&options, &mut warnings));
+    let mut trigger_operations = Vec::new();
+    let oracle_trigger_contract = options.triggers.iter().any(|trigger| trigger.oracle_exact.is_some()).then_some(1);
+    let trigger_sql = if oracle_trigger_contract.is_some() {
+        build_trigger_sql_with_operations(
+            &options,
+            &mut warnings,
+            false,
+            statements.len(),
+            Some(&mut trigger_operations),
+        )
+    } else {
+        build_trigger_sql(&options, &mut warnings)
+    };
+    statements.extend(trigger_sql);
     statements.extend(build_table_comment_sql(&options, &mut warnings));
     statements.extend(build_mysql_engine_change_sql(&options));
-    TableStructureSqlResult { statements, warnings }
+    TableStructureSqlPlan {
+        sql: TableStructureSqlResult { statements, warnings },
+        trigger_operations,
+        oracle_trigger_contract,
+    }
 }
 
 /// Whether this engine's structure editor can generate `COMMENT ON`/inline

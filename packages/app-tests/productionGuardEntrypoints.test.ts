@@ -72,7 +72,7 @@ test("secondary write entrypoints use the shared production SQL guard", () => {
       sourceKey: "production.sourceAdmin",
     },
     {
-      path: "apps/desktop/src/components/admin/DamengJobAdmin.vue",
+      path: "apps/desktop/src/components/admin/DatabaseJobAdmin.vue",
       executor: "api.executeMulti",
       sourceKey: "production.sourceAdmin",
     },

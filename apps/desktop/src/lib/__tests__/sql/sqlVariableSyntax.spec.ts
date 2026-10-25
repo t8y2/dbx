@@ -146,6 +146,7 @@ describe("resolveSqlVariableSyntaxToggles", () => {
       positional: true,
       named: true,
       shell: true,
+      bracketedShell: true,
       mybatis: true,
       sqlserver: false,
       substitution: false,
@@ -165,6 +166,7 @@ describe("resolveSqlVariableSyntaxToggles", () => {
       positional: false,
       named: false,
       shell: false,
+      bracketedShell: false,
       mybatis: false,
       sqlserver: false,
       substitution: false,
@@ -174,6 +176,7 @@ describe("resolveSqlVariableSyntaxToggles", () => {
       positional: false,
       named: false,
       shell: false,
+      bracketedShell: false,
       mybatis: false,
       sqlserver: false,
       substitution: false,
@@ -190,6 +193,7 @@ describe("resolveSqlVariableSyntaxToggles", () => {
       positional: true,
       named: true,
       shell: false,
+      bracketedShell: true,
       mybatis: true,
       sqlserver: true,
       substitution: false,
@@ -197,24 +201,29 @@ describe("resolveSqlVariableSyntaxToggles", () => {
     });
     expect(overrides).toEqual({ mysql: { shell: false, atSet: false } });
   });
+
+  it("honors the bracketedShell override per database type", () => {
+    expect(resolveSqlVariableSyntaxToggles({ mysql: { bracketedShell: false } }, "mysql").bracketedShell).toBe(false);
+    expect(resolveSqlVariableSyntaxToggles({ mysql: { bracketedShell: false } }, "postgres").bracketedShell).toBe(true);
+  });
 });
 
 describe("enabledSqlParameterSyntaxes", () => {
-  it("returns the five default placeholder syntaxes for generic databases and never atSet", () => {
-    expect(enabledSqlParameterSyntaxes(DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES)).toEqual(["positional", "named", "shell", "mybatis", "sqlserver"]);
+  it("returns the six default placeholder syntaxes for generic databases and never atSet", () => {
+    expect(enabledSqlParameterSyntaxes(DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES)).toEqual(["positional", "named", "shell", "bracketed-shell", "mybatis", "sqlserver"]);
   });
 
-  it("returns all six placeholder syntaxes when substitution is enabled", () => {
-    expect(enabledSqlParameterSyntaxes({ ...DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, substitution: true })).toEqual(["positional", "named", "shell", "mybatis", "sqlserver", "substitution"]);
+  it("returns all seven placeholder syntaxes when substitution is enabled", () => {
+    expect(enabledSqlParameterSyntaxes({ ...DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, substitution: true })).toEqual(["positional", "named", "shell", "bracketed-shell", "mybatis", "sqlserver", "substitution"]);
   });
 
   it("filters out disabled placeholder syntaxes", () => {
-    expect(enabledSqlParameterSyntaxes({ positional: false, named: true, shell: false, mybatis: true, sqlserver: false, substitution: true, atSet: true })).toEqual(["named", "mybatis", "substitution"]);
+    expect(enabledSqlParameterSyntaxes({ positional: false, named: true, shell: false, bracketedShell: true, mybatis: true, sqlserver: false, substitution: true, atSet: true })).toEqual(["named", "bracketed-shell", "mybatis", "substitution"]);
   });
 
   it("ignores the atSet toggle entirely", () => {
-    expect(enabledSqlParameterSyntaxes({ positional: true, named: true, shell: true, mybatis: true, sqlserver: true, substitution: true, atSet: false })).toEqual(["positional", "named", "shell", "mybatis", "sqlserver", "substitution"]);
-    expect(enabledSqlParameterSyntaxes({ positional: false, named: false, shell: false, mybatis: false, sqlserver: false, substitution: false, atSet: true })).toEqual([]);
+    expect(enabledSqlParameterSyntaxes({ positional: true, named: true, shell: true, bracketedShell: true, mybatis: true, sqlserver: true, substitution: true, atSet: false })).toEqual(["positional", "named", "shell", "bracketed-shell", "mybatis", "sqlserver", "substitution"]);
+    expect(enabledSqlParameterSyntaxes({ positional: false, named: false, shell: false, bracketedShell: false, mybatis: false, sqlserver: false, substitution: false, atSet: true })).toEqual([]);
   });
 });
 
@@ -229,15 +238,21 @@ describe("normalizeSqlVariableSyntaxOverrides", () => {
   it("keeps only syntaxes that deviate from defaults", () => {
     expect(
       normalizeSqlVariableSyntaxOverrides({
-        mysql: { positional: true, shell: false, substitution: false, atSet: false },
+        mysql: { positional: true, shell: false, bracketedShell: false, substitution: false, atSet: false },
         postgres: { substitution: true },
         oracle: { substitution: false, shell: true },
       }),
     ).toEqual({
-      mysql: { shell: false, atSet: false },
+      mysql: { shell: false, bracketedShell: false, atSet: false },
       postgres: { substitution: true },
       oracle: { substitution: false },
     });
+  });
+
+  it("round-trips a bracketedShell override through normalization", () => {
+    const normalized = normalizeSqlVariableSyntaxOverrides({ mysql: { bracketedShell: false } });
+    expect(normalized).toEqual({ mysql: { bracketedShell: false } });
+    expect(normalizeSqlVariableSyntaxOverrides(normalized)).toEqual(normalized);
   });
 
   it("drops entries with no deviating syntaxes", () => {

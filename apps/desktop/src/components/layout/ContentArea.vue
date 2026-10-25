@@ -82,7 +82,10 @@ import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
-import { objectDependencyTarget, isObjectDependencySection, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
+import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
+import type { OracleTriggerSnapshot, OracleTriggerTarget, OracleTriggerExecutionResult } from "@/lib/database/oracleTriggerPlan";
+const OracleInvalidObjectsDialog = defineAsyncComponent(() => import("@/components/objects/OracleInvalidObjectsDialog.vue"));
+import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import DataGridFreezeFirstColumnControl from "@/components/grid/DataGridFreezeFirstColumnControl.vue";
 import DataGridStatusSqlControl from "@/components/grid/DataGridStatusSqlControl.vue";
 import type { DataGridSqlPreview } from "@/components/grid/dataGridSqlPreview";
@@ -152,6 +155,7 @@ const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MyS
 const PostgresDashboard = defineAsyncComponent(() => import("@/components/admin/PostgresDashboard.vue"));
 const XuguServerDashboard = defineAsyncComponent(() => import("@/components/admin/XuguServerDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
+const DatabaseJobAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseJobAdmin.vue"));
 
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
@@ -165,6 +169,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps } from "@/components/layout/querySurfaces";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridRowNumberMode, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
+import { applySqlKeywordCase, loadSqlKeywordSpans } from "@/lib/sql/sqlKeywordCase";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey, shouldShowCancelAction } from "@/lib/sql/queryExecutionState";
@@ -210,13 +215,13 @@ import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
+import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import { analyzeEditableQuery } from "@/lib/sql/sqlAnalysis";
 import { loadQueryResultTransferSourceDdl } from "@/components/transfer/queryResultTransferSource";
-import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
 import { sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
-import type { QueryMessage, QueryResult, QueryTab, RedisResultViewMode, TableInfoTab, TabOutputView, TreeNode, VectorCollectionMeta } from "@/types/database";
+import type { QueryMessage, QueryResult, QueryTab, RedisResultViewMode, TableInfoTab, TableStructureEditorDraft, TabOutputView, TreeNode, VectorCollectionMeta } from "@/types/database";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -292,6 +297,10 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
+function updateStructureDraft(draft: TableStructureEditorDraft | undefined, originTabId?: string) {
+  const tab = originTabId === undefined ? props.activeTab : queryStore.tabs.find((item) => item.id === originTabId);
+  if (tab?.mode === "structure") tab.structureDraft = draft;
+}
 /** Clear a consumed editor reveal request so a later normal tab re-visit doesn't re-jump. */
 function clearEditorRevealRequest(tab: { editorRevealRequest?: unknown }): void {
   if (tab.editorRevealRequest !== undefined) {
@@ -328,6 +337,7 @@ const setColorizeDataGridCellTypes = (value: boolean) => settingsStore.updateEdi
 const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
 const ddlRefreshInProgress = ref(false);
+let ddlRefreshGeneration = 0;
 
 onMounted(() => {
   // The watcher below warms the grid for query/data tabs. Keep source-only
@@ -446,12 +456,48 @@ const activeObjectDependencyTarget = computed(() => {
   const tab = props.activeTab;
   const details = tab.objectDetails;
   if (!details || details.connectionId !== tab.connectionId || details.database !== tab.database || details.schema !== (tab.schema || tab.database) || (details.catalog || "") !== (tab.catalog || "")) return undefined;
-  return objectDependencyTarget(details, effectiveDatabaseTypeForConnection(connectionStore.getConfig(details.connectionId)));
+  return objectDependencyTarget(details, effectiveDatabaseTypeForConnection(connectionStore.getConfig(details.connectionId)), queryStore.oracleTriggerSourceState(tab.id)?.profile);
 });
 const activeObjectSection = computed<ObjectDetailsSection>(() => (activeObjectDependencyTarget.value ? props.activeTab.objectDetails?.section || "source" : "source"));
-const sourceSectionActive = computed(() => !isObjectDependencySection(props.activeTab));
+const sourceSectionActive = computed(() => activeObjectSection.value === "source");
+const retainTriggerSourceEditor = computed(() => props.activeTab.objectSource?.objectType === "TRIGGER" && !!queryStore.oracleTriggerSourceState(props.activeTab.id));
+const triggerDiagnosticOpen = ref(false);
+const triggerDiagnosticContext = ref<{ target: Readonly<OracleTriggerTarget>; expectedObjectId?: string; originTabId: string; originRevision?: number }>();
+const triggerDiagnosticConnection = computed(() => (triggerDiagnosticContext.value ? connectionStore.getConfig(triggerDiagnosticContext.value.target.connectionId) : undefined));
+watch(
+  () => props.activeTab.id,
+  () => {
+    triggerDiagnosticOpen.value = false;
+  },
+);
+function openTriggerSourceDiagnostics() {
+  const snapshot = queryStore.oracleTriggerSourceState(props.activeTab.id)?.baseline;
+  if (!snapshot?.exists) return;
+  triggerDiagnosticContext.value = { target: snapshot.target, expectedObjectId: snapshot.metadata.objectId ?? undefined, originTabId: props.activeTab.id, originRevision: queryStore.oracleTriggerSourceState(props.activeTab.id)?.readVersion };
+  triggerDiagnosticOpen.value = true;
+}
+function returnFromTriggerSourceDiagnostics(object: { owner: string; name: string; objectId?: string }, location?: { line: number; position: number }) {
+  const context = triggerDiagnosticContext.value;
+  if (!context || context.originTabId !== props.activeTab.id || context.target.owner !== object.owner || context.target.name !== object.name) return;
+  triggerDiagnosticOpen.value = false;
+  setObjectSection("source");
+  if (location && !queryStore.revealOracleTriggerSourceError(context.originTabId, location, object.objectId)) toast(t("oracleTrigger.errorPositionUnavailable"), 3000);
+}
+function acceptTriggerSourceDiagnosticResult(_target: Readonly<OracleTriggerTarget>, result: OracleTriggerExecutionResult, before: OracleTriggerSnapshot, originTabId?: string, originRevision?: number) {
+  if (originTabId) queryStore.acceptOracleTriggerDiagnosticResult(originTabId, result, before, originRevision);
+}
 function setObjectSection(section: ObjectDetailsSection) {
   if (props.activeTab.objectDetails) props.activeTab.objectDetails.section = section;
+}
+function openTriggerSourceParent() {
+  const snapshot = queryStore.oracleTriggerSourceState(props.activeTab.id)?.baseline;
+  const parent = snapshot?.metadata.parent;
+  if (!snapshot || !parent) return;
+  emit(
+    "openDependencyObject",
+    { connectionId: snapshot.target.connectionId, database: snapshot.target.database, schema: snapshot.target.owner, catalog: snapshot.target.catalog, name: snapshot.target.name, objectType: "TRIGGER" },
+    { name: parent.name, schema: parent.owner, type: parent.objectType === "VIEW" ? "view" : "table", nameQuoted: true, schemaQuoted: true },
+  );
 }
 function viewObjectDependencySql(context: ObjectDependencyTarget, sql: string) {
   queryStore.createTab(context.connectionId, context.database, t("objectDependencies.viewSql"), "query", context.schema, sql, context.catalog, { forceNew: true });
@@ -482,11 +528,20 @@ function viewTableSql(preview: DataGridSqlPreview) {
   };
 }
 
-function openTableSqlInNewQuery(sql: string) {
+async function openTableSqlInNewQuery(sql: string) {
   const snapshot = tableSqlPreview.value;
   if (!snapshot?.connectionId || !sql.trim()) return;
   tableSqlPreview.value = null;
-  queryStore.createTab(snapshot.connectionId, snapshot.database, undefined, "query", snapshot.schema, sql, snapshot.catalog, { forceNew: true, schemaQualifiesSql: true });
+  // The grid's preview SQL is generated uppercase; a query tab opened from it
+  // should still honor the formatter's keyword case setting (issue #13235).
+  const keywordCase = settingsStore.editorSettings.sqlFormatter.keywordCase;
+  let sqlForTab = sql;
+  if (keywordCase === "lower" || keywordCase === "upper") {
+    const dialect = sqlFormatDialectForDbType(activeEffectiveDatabaseType.value);
+    const spans = await loadSqlKeywordSpans(sql, dialect);
+    if (spans) sqlForTab = applySqlKeywordCase(sql, { from: 0, to: sql.length }, keywordCase, spans);
+  }
+  queryStore.createTab(snapshot.connectionId, snapshot.database, undefined, "query", snapshot.schema, sqlForTab, snapshot.catalog, { forceNew: true, schemaQualifiesSql: true });
 }
 
 watch(
@@ -1436,52 +1491,51 @@ function onHandleStructureViewData() {
  */
 async function loadActiveDdlViewer(force: boolean) {
   const tab = props.activeTab;
-  const ddlViewer = tab.ddlViewer;
-  if (!ddlViewer || ddlRefreshInProgress.value) return;
+  if (!tab.ddlViewer) return;
+  const generation = ++ddlRefreshGeneration;
   ddlRefreshInProgress.value = true;
   const pendingLoad = !!tab.ddlLoad;
-  if (pendingLoad) tab.ddlLoad = { startedAt: Date.now() };
+  tab.ddlLoad = { startedAt: Date.now() };
   try {
-    const { ddl } = await loadObjectDdl(
-      {
-        connectionId: tab.connectionId,
-        database: tab.database,
-        schema: ddlViewer.schema || tab.database,
-        queryTimeoutSecs: (connectionStore.getConfig(tab.connectionId) ?? props.activeConnection)?.query_timeout_secs,
-        tableName: ddlViewer.tableName,
-        objectType: ddlViewer.objectType,
-        catalog: tab.catalog,
-      },
-      { force },
-    );
-    const dialect = ddlViewer.formatDialect ?? activeSqlFormatDialect.value;
-    const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId) ?? props.activeConnection);
-    const displayed = await formatDdlForDisplay(
-      ddl,
-      {
-        dialect,
-        databaseType,
-        database: tab.database,
-        catalog: tab.catalog,
-        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-        quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
-        excludeDdlStorage: settingsStore.editorSettings.excludeDdlStorage,
-      },
-      settingsStore.editorSettings.sqlFormatter,
-    );
-    queryStore.updateSql(tab.id, displayed);
-    tab.originalSql = displayed;
-    if (pendingLoad) tab.ddlLoad = undefined;
-  } catch (error: any) {
-    if (pendingLoad) {
-      tab.ddlLoad = { startedAt: Date.now(), error: error?.message || String(error) };
-    } else {
-      toast(t("contextMenu.ddlRefreshFailed", { message: error?.message || String(error) }), 5000);
+    await queryStore.loadDdlViewerTab(tab.id, force);
+    if (generation === ddlRefreshGeneration && !pendingLoad && tab.ddlLoad?.error) {
+      toast(t("contextMenu.ddlRefreshFailed", { message: tab.ddlLoad.error }), 5000);
+      tab.ddlLoad = undefined;
     }
   } finally {
-    ddlRefreshInProgress.value = false;
+    if (generation === ddlRefreshGeneration) ddlRefreshInProgress.value = false;
   }
 }
+
+watch(
+  [() => props.activeTab.id, () => settingsStore.editorSettings.includeDdlStorage, () => settingsStore.editorSettings.compactDdlSql, () => settingsStore.editorSettings.separateDdlIndexes],
+  (current, previous) => {
+    if (previous && current[0] !== previous[0]) {
+      ddlRefreshGeneration++;
+      ddlRefreshInProgress.value = false;
+    }
+    const tab = props.activeTab;
+    const viewer = tab.ddlViewer;
+    const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId) ?? props.activeConnection);
+    if (!viewer || (databaseType !== "oracle" && databaseType !== "oceanbase-oracle")) return;
+    const indexChanged = previous && current[0] === previous[0] && current[3] !== previous[3];
+    if (tab.ddlLoad && !tab.ddlLoad.error && !indexChanged) return;
+    if (viewer.displaySource !== undefined && viewer.separateIndexes === settingsStore.editorSettings.separateDdlIndexes && !tab.ddlLoad?.error) {
+      if (indexChanged) {
+        tab.ddlLoad = undefined;
+        ddlRefreshGeneration++;
+        ddlRefreshInProgress.value = false;
+      }
+      const displayed = applyDdlTextPreferences(viewer.displaySource, databaseType, settingsStore.editorSettings);
+      queryStore.updateSql(tab.id, displayed);
+      tab.originalSql = displayed;
+      return;
+    }
+    tab.ddlLoad = { startedAt: Date.now() };
+    void loadActiveDdlViewer(false);
+  },
+  { immediate: true },
+);
 
 function refreshDdlViewer() {
   void loadActiveDdlViewer(true);
@@ -2091,6 +2145,17 @@ defineExpose({
 
 <template>
   <div class="production-session-shell flex flex-col min-h-0" :class="[resultOnly ? 'h-full' : 'flex-1', { 'production-session-shell--active': activeProductionContext.active }]">
+    <OracleInvalidObjectsDialog
+      v-if="!resultOnly && triggerDiagnosticContext && triggerDiagnosticConnection"
+      :open="triggerDiagnosticOpen && triggerDiagnosticContext.originRevision === queryStore.oracleTriggerSourceState(triggerDiagnosticContext.originTabId)?.readVersion"
+      :connection="triggerDiagnosticConnection"
+      :database="triggerDiagnosticContext.target.database"
+      :schema="triggerDiagnosticContext.target.owner"
+      :trigger-context="triggerDiagnosticContext"
+      @update:open="triggerDiagnosticOpen = $event"
+      @open-source="returnFromTriggerSourceDiagnostics"
+      @trigger-result="acceptTriggerSourceDiagnosticResult"
+    />
     <div v-if="activeProductionContext.active" class="production-session-strip flex h-7 shrink-0 items-center gap-2 border-b border-red-500/35 bg-red-500/10 px-3 text-xs font-semibold text-red-800 shadow-[inset_0_1px_0_rgb(239_68_68_/_0.28)] dark:text-red-200">
       <ShieldAlert class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
       <span class="font-mono uppercase tracking-normal">{{ t("production.title") }}</span>
@@ -2101,7 +2166,8 @@ defineExpose({
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resize="onResultsSplitResize" @resized="onResultsResized">
         <Pane v-if="!resultOnly" class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
-            <div v-if="activeTab.ddlViewer" class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
+            <div v-if="activeTab.ddlViewer" class="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1">
+              <DdlStorageToggle :database-type="activeEffectiveDatabaseType" class="mr-auto" />
               <Button variant="outline" size="sm" :disabled="ddlRefreshInProgress" @click="refreshDdlViewer">
                 <RefreshCcw class="h-4 w-4" :class="ddlRefreshInProgress ? 'animate-spin' : ''" />
                 {{ t("structureEditor.refresh") }}
@@ -2120,11 +2186,27 @@ defineExpose({
             </div>
             <ProductionWatermark v-if="activeProductionContext.active" />
             <ObjectDependenciesPanel :target="activeObjectDependencyTarget" :section="activeObjectSection" @update:section="setObjectSection" @view-sql="viewObjectDependencySql" @open-object="(context, target) => emit('openDependencyObject', context, target)">
+              <OracleTriggerStatus
+                v-if="queryStore.oracleTriggerSourceState(activeTab.id)"
+                :snapshot="queryStore.oracleTriggerSourceState(activeTab.id)?.baseline"
+                :result="queryStore.oracleTriggerSourceState(activeTab.id)?.result"
+                :source-issue="queryStore.oracleTriggerSourceState(activeTab.id)?.error"
+                :busy="queryStore.oracleTriggerSourceState(activeTab.id)?.busy"
+                @action="queryStore.runOracleTriggerSourceAction(activeTab.id, $event)"
+                @refresh="queryStore.refreshObjectSourceTab(activeTab.id)"
+                @parent="openTriggerSourceParent"
+                @diagnostics="openTriggerSourceDiagnostics"
+              />
               <!-- issue #9035：源码 tab 先出现再加载。pending 期间不挂载编辑器
                  （还没有内容可编辑，也省下一次 Monaco 初始化），失败则就地重试。
                  issue #9387：DDL 新标签同样先出 tab 再加载，失败就地显示错误。 -->
-              <QueryLoadingState v-if="activeTab.sourceLoad && !activeTab.sourceLoad.error" class="relative z-0 flex-1" :elapsed-seconds="sourceLoadElapsedSeconds" />
-              <div v-else-if="activeTab.sourceLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-object-source-load-error>
+              <div v-if="retainTriggerSourceEditor && activeTab.sourceLoad" class="flex shrink-0 items-center gap-2 px-3 py-2 text-sm" data-object-source-refresh-state>
+                <Loader2 v-if="!activeTab.sourceLoad.error" class="h-4 w-4 animate-spin" />
+                <p v-if="activeTab.sourceLoad.error" class="min-w-0 flex-1 break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
+                <Button v-if="activeTab.sourceLoad.error" variant="outline" size="sm" @click="queryStore.retryObjectSourceTab(activeTab.id)">{{ t("common.retry") }}</Button>
+              </div>
+              <QueryLoadingState v-if="activeTab.sourceLoad && !activeTab.sourceLoad.error && !retainTriggerSourceEditor" class="relative z-0 flex-1" :elapsed-seconds="sourceLoadElapsedSeconds" />
+              <div v-else-if="activeTab.sourceLoad?.error && !retainTriggerSourceEditor" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-object-source-load-error>
                 <p class="max-w-[80%] text-center break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
                 <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryObjectSourceTab(activeTab.id)">
                   <RotateCcw class="h-4 w-4" />
@@ -2865,6 +2947,7 @@ defineExpose({
                 :cache-key="activeResultGridCacheKey"
                 :column-width-cache-key="activeResultGridColumnWidthCacheKey"
                 :pending-state-key="activeResultGridInstanceKey"
+                :tab-id="activeTab.id"
                 :view-generation="activeTab.resultViewGeneration"
                 class="flex-1 min-h-0"
                 :result="activeGridResult!"
@@ -3426,6 +3509,7 @@ defineExpose({
           :busy-started-at="activeTab.isExecuting ? activeTab.queryExecutionStartedAt : undefined"
           :editable="!activeTab.tableMetaPending && (isTableDataEditable(activeEffectiveDatabaseType, activeTableMeta?.primaryKeys ?? [], activeTableMeta?.tableType) || !!influxDbV1DeleteSaveHandler)"
           :custom-save-handler="influxDbV1DeleteSaveHandler"
+          :tab-id="activeTab.id"
           context="table-data"
           @view-sql="viewTableSql"
           :initial-where-input="activeTab.whereInput"
@@ -3730,8 +3814,8 @@ defineExpose({
               if (activeTab.objectPropertiesRequest?.requestId === id) activeTab.objectPropertiesRequest = undefined;
             }
           "
-          @open-dependency-object="(context, target) => emit('openDependencyObject', context, target)"
           @open-table="emit('openObjectTable', activeTab.id, $event)"
+          @open-dependency-object="(context, target) => emit('openDependencyObject', context, target)"
           @locate-table="onLocateObjectTable"
           @schema-change="emit('objectSchemaChange', activeTab.id, $event)"
           @viewport-change="emit('objectBrowserViewportChange', activeTab.id, $event)"
@@ -3753,14 +3837,15 @@ defineExpose({
           :catalog="activeTab.catalog"
           :schema="activeTab.schema"
           :table-name="activeTab.structureTableName || ''"
+          :origin-tab-id="activeTab.id"
           :table-type="activeTab.structureTableType"
           :exact-identity="activeTab.structureExactIdentity"
           :initial-tab="activeTab.structureInitialTab"
           :initial-tab-request-id="activeTab.structureInitialTabRequestId"
           :initial-target="activeTab.structureInitialTarget"
           :draft="activeTab.structureDraft"
-          @update:draft="(draft) => (activeTab.structureDraft = draft)"
-          @saved="(commentChanged, createdTableName) => emit('structureEditorSaved', activeTab.id, commentChanged, createdTableName)"
+          @update:draft="updateStructureDraft"
+          @saved="(commentChanged, createdTableName, originTabId) => emit('structureEditorSaved', originTabId || activeTab.id, commentChanged, createdTableName)"
           @close="emit('structureEditorClose', activeTab.id)"
           @open-settings="(initialTab, initialSection) => emit('openSettings', initialTab, initialSection)"
           @view-data="onHandleStructureViewData"
@@ -3821,7 +3906,10 @@ defineExpose({
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-jobs' && activeConnection">
-      <DamengJobAdmin :key="activeTab.id" :connection="activeConnection" />
+      <DamengJobAdmin :key="activeTab.id" :connection="activeConnection" :initial-selection="activeTab.nativeJobAdmin" />
+    </template>
+    <template v-else-if="activeTab.mode === 'database-jobs' && activeConnection">
+      <DatabaseJobAdmin :key="activeTab.id" :connection="activeConnection" :initial-selection="activeTab.nativeJobAdmin" />
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-users' && activeConnection">

@@ -126,7 +126,7 @@ const routineHistory = computed(() => {
   const records = props.routineDeployment?.records.filter((record) => routineDraft.value && routineIdentityKey(record.identity) === routineIdentityKey(routineDraft.value.identity)) ?? [];
   return routineRecord.value && !records.some((record) => record.operationId === routineRecord.value?.operationId) ? [...records, routineRecord.value] : records;
 });
-const editorReadOnly = computed(() => !!props.routineDeployment && (props.executing || !!props.routineDeployment.recoveryPlan || (!!routineDraft.value?.operation && oracleRoutineOperationVerified(routineDraft.value.operation))));
+const editorReadOnly = computed(() => props.executing || (!!props.routineDeployment && (!!props.routineDeployment.recoveryPlan || (!!routineDraft.value?.operation && oracleRoutineOperationVerified(routineDraft.value.operation)))));
 
 function routineStatus(record?: OracleRoutineOperation | null, compact = false): string {
   if (!record) return t("diff.routineNeedsValidation");
@@ -624,8 +624,8 @@ function getObjectIconColor(kind: DiffObjectKind): string {
       <div class="flex items-center gap-2">
         <!-- SQL mode toggle -->
         <div v-if="props.rollbackSql" class="flex items-center gap-1 mr-2 border rounded">
-          <button class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'forward' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'forward')">{{ t("diff.deployMode") }}</button>
-          <button class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'rollback' ? 'bg-destructive text-destructive-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'rollback')">{{ t("diff.rollbackMode") }}</button>
+          <button :disabled="executing" class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'forward' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'forward')">{{ t("diff.deployMode") }}</button>
+          <button :disabled="executing" class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'rollback' ? 'bg-destructive text-destructive-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'rollback')">{{ t("diff.rollbackMode") }}</button>
         </div>
         <Button variant="outline" size="sm" class="h-7 text-xs gap-1" @click="handleCopy">
           <Copy class="w-3.5 h-3.5" />

@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -180,7 +180,7 @@ vi.mock("@/stores/connectionStore", () => ({
 vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({ requestConfirmation: vi.fn() }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRefreshVersion: () => 0 }) }));
 vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
-const settings = reactive({ editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [], theme: "default", fontSize: 13, fontFamily: "monospace", generateSqlQuoteIdentifiers: true, excludeDdlStorage: true } });
+const settings = reactive({ editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [], theme: "default", fontSize: 13, fontFamily: "monospace", generateSqlQuoteIdentifiers: true, includeDdlStorage: false, compactDdlSql: true, separateDdlIndexes: false } });
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({ ...settings, updateEditorSettings: (patch: object) => Object.assign(settings.editorSettings, patch) }),
 }));
@@ -237,7 +237,7 @@ function selectTab(button: HTMLButtonElement) {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.connection.db_type = "postgres";
-  settings.editorSettings.excludeDdlStorage = true;
+  settings.editorSettings.includeDdlStorage = !true;
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.executeQuery.mockResolvedValue({ columns: [], rows: [] });
   mocks.listDataTypes.mockResolvedValue([]);
@@ -259,6 +259,91 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor DDL tab lifecycle", () => {
+  it.each(["oracle", "oceanbase-oracle"])("reloads %s DDL for independent indexes and freezes an edited draft", async (type) => {
+    mocks.connection.db_type = type;
+    mocks.loadObjectDdl.mockResolvedValueOnce({ ddl: 'CREATE TABLE "T" ("ID" NUMBER);', cacheStatus: "remote" }).mockResolvedValueOnce({ ddl: 'CREATE TABLE "T" ("ID" NUMBER);\nCREATE INDEX "DETACHED" ON "T"("ID");', cacheStatus: "remote" });
+    const root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(TableStructureEditor, { connectionId: mocks.connection.id, database: "service", schema: "Exact Owner", tableName: "T", initialTab: "ddl" });
+    app.mount(root);
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain('"ID"'));
+    const option = () => root.querySelector<HTMLButtonElement>('[id$="-separateDdlIndexes"]')!;
+    option().click();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain("DETACHED"));
+    expect(mocks.loadObjectDdl.mock.calls[1][0]).toMatchObject({ connectionId: mocks.connection.id, database: "service", schema: "Exact Owner", tableName: "T", separateIndexes: true });
+    const { EditorView } = await import("@codemirror/view");
+    const view = EditorView.findFromDOM(root.querySelector(".cm-content")!)!;
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\n-- preserved draft" } });
+    await vi.waitFor(() => expect(option().disabled).toBe(true));
+    settings.editorSettings.separateDdlIndexes = false;
+    await nextTick();
+    expect(root.querySelector(".cm-content")?.textContent).toContain("-- preserved draft");
+    expect(option().getAttribute("aria-checked")).toBe("true");
+    expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps failed index metadata out of the editable SQL and permits switching the option off", async () => {
+    mocks.connection.db_type = "oracle";
+    mocks.loadObjectDdl.mockResolvedValueOnce({ ddl: 'CREATE TABLE "T" ("ID" NUMBER);', cacheStatus: "remote" }).mockRejectedValueOnce(new Error("index metadata unavailable")).mockResolvedValueOnce({ ddl: 'CREATE TABLE "T" ("ID" NUMBER);', cacheStatus: "remote" });
+    const root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(TableStructureEditor, { connectionId: mocks.connection.id, database: "APP", schema: "APP", tableName: "T", initialTab: "ddl" });
+    app.mount(root);
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain('"ID"'));
+    const option = () => root.querySelector<HTMLButtonElement>('[id$="-separateDdlIndexes"]')!;
+    option().click();
+    await vi.waitFor(() => expect(root.querySelector('[role="alert"]')?.textContent).toBe("index metadata unavailable"));
+    expect(root.querySelector(".structure-ddl-editor")).toBeNull();
+    expect(buttonWithText(root, "grid.copyDdl").disabled).toBe(true);
+    expect(option().disabled).toBe(false);
+    option().click();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain('"ID"'));
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+    expect(mocks.loadObjectDdl.mock.calls[2][0].separateIndexes).toBe(false);
+  });
+
+  it("restores a legacy edited DDL baseline without adopting new display defaults", async () => {
+    mocks.connection.db_type = "oceanbase-oracle";
+    const original = 'CREATE   TABLE "T" (\n\n  "ID"   NUMBER) PCTFREE=0;';
+    mocks.loadObjectDdl.mockResolvedValue({ ddl: original, cacheStatus: "remote" });
+    const root = document.createElement("div");
+    document.body.append(root);
+    let saved: any;
+    app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "APP",
+      schema: "APP",
+      tableName: "T",
+      initialTab: "ddl",
+      "onUpdate:draft": (draft: unknown) => {
+        saved = draft;
+      },
+    });
+    app.mount(root);
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain('"ID"'));
+    const { EditorView } = await import("@codemirror/view");
+    const view = EditorView.findFromDOM(root.querySelector(".cm-content")!)!;
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\n-- draft" } });
+    await vi.waitFor(() => expect(saved?.ddlDraft).toContain("-- draft"));
+    const legacy = { ...saved, rawDdlContent: original, ddlContent: original, ddlDraft: original + "\n-- draft" };
+    delete legacy.includeDdlStorage;
+    delete legacy.excludeDdlStorage;
+    delete legacy.compactDdlSql;
+    delete legacy.separateDdlIndexes;
+    app.unmount();
+    root.replaceChildren();
+    app = createApp(TableStructureEditor, { connectionId: mocks.connection.id, database: "APP", schema: "APP", tableName: "T", initialTab: "ddl", draft: legacy });
+    app.mount(root);
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain("-- draft"));
+    expect(root.querySelector(".cm-content")?.textContent).toContain("PCTFREE=0");
+    expect(root.querySelector(".cm-content")?.textContent).toContain("CREATE   TABLE");
+    expect(root.querySelector<HTMLButtonElement>('[role="switch"][id$="-includeDdlStorage"]')?.disabled).toBe(true);
+    expect(root.querySelector('[role="switch"][id$="-includeDdlStorage"]')?.getAttribute("aria-checked")).toBe("true");
+    expect(root.querySelector('[role="switch"][id$="-compactDdlSql"]')?.getAttribute("aria-checked")).toBe("false");
+    buttonWithText(root, "structureEditor.resetDdl").click();
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).not.toContain("PCTFREE"));
+  });
+
   it("toggles OceanBase storage, copies the displayed DDL and protects an edited draft", async () => {
     mocks.connection.db_type = "oceanbase-oracle";
     const ddl = 'CREATE TABLE "T" ("ID" NUMBER) PCTFREE=0 PARTITION BY HASH("ID") PARTITIONS 2;';
@@ -268,7 +353,7 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     app = createApp(TableStructureEditor, { connectionId: mocks.connection.id, database: "APP", schema: "APP", tableName: "T", initialTab: "ddl" });
     app.mount(root);
     const content = () => root.querySelector(".cm-content")?.textContent ?? "";
-    const toggle = () => root.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    const toggle = () => root.querySelector<HTMLButtonElement>('[role="switch"][id$="-includeDdlStorage"]')!;
     await vi.waitFor(
       () => {
         expect(content()).toMatch(/PARTITION BY\s+HASH/);
@@ -277,7 +362,7 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
       { timeout: 5000 },
     );
     expect(content()).not.toContain("PCTFREE");
-    expect(toggle().getAttribute("aria-checked")).toBe("true");
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
     toggle().click();
     await vi.waitFor(() => expect(content()).toContain("PCTFREE"), { timeout: 5000 });
     buttonWithText(root, "grid.copyDdl").click();
@@ -287,7 +372,7 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
     view.dispatch({ changes: { from: view.state.doc.length, insert: "\n-- local edit" } });
     await nextTick();
     expect(toggle().disabled).toBe(true);
-    settings.editorSettings.excludeDdlStorage = true;
+    settings.editorSettings.includeDdlStorage = !true;
     await nextTick();
     expect(content()).toContain("PCTFREE");
     expect(content()).toContain("-- local edit");

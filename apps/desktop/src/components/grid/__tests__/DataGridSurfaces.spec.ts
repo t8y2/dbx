@@ -224,6 +224,34 @@ describe("DataGridPagination", () => {
     expect(summaryText).toContain("grid.rows");
   });
 
+  it("shows min, max, count and distinct beside sum and average when numbers are selected (#13286)", () => {
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "10",
+      selectionSummaryAverageText: "2.5",
+      selectionSummaryMinText: "1",
+      selectionSummaryMaxText: "4",
+      selectionSummaryCount: 4,
+      selectionSummaryDistinctCount: 3,
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+    });
+
+    const summaryText = hostText(mounted.root);
+    expect(summaryText).toContain("grid.selectionMin");
+    expect(summaryText).toContain("grid.selectionMax");
+    expect(summaryText).toContain("grid.selectionCount");
+    expect(summaryText).toContain("grid.selectionDistinct");
+  });
+
   it("keeps the loading icon mounted with a constant footprint and only animates while loading", async () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: null,

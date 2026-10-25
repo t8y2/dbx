@@ -12,8 +12,10 @@ export interface OracleRoutineDeployDraft extends OracleRoutinePlanDraft {
   included: boolean;
   operation?: OracleRoutineOperation;
   packageBodyDrafts?: Partial<Record<"source" | "target", string>>;
+  packageBodyGeneratedSql?: Partial<Record<"source" | "target", string>>;
   companionFor?: string;
   reviewedTargetDraft?: boolean;
+  generatedSql?: string;
 }
 
 /** Owned by the existing comparison session, not the mounted dialog. */
@@ -35,6 +37,7 @@ export interface OracleRoutineDeployment {
   retainedOperationIds: string[];
   attemptedOperationIds: string[];
   disposed: boolean;
+  ddlPreferences?: { includeDdlStorage: boolean; compactDdlSql: boolean; separateDdlIndexes: boolean };
 }
 
 export function routineIdentityKey(identity: OracleRoutineIdentity): string {
@@ -149,6 +152,7 @@ export function includeOraclePackageCompanion(state: OracleRoutineDeployment, ob
   if (draft.action !== action) {
     draft.action = action;
     draft.sql = undefined;
+    draft.generatedSql = undefined;
     draft.reviewedTargetDraft = false;
   }
   draft.included = true;
@@ -169,6 +173,7 @@ export function editOracleRoutineDraft(state: OracleRoutineDeployment, objectId:
   if (!draft || draft.sql === sql || state.executing || (draft.operation && oracleRoutineOperationVerified(draft.operation))) return;
   draft.sql = sql;
   draft.reviewedTargetDraft = true;
+  draft.generatedSql = undefined;
   if (draft.identity.kind === "PACKAGE" || draft.identity.kind === "PACKAGE_BODY") {
     for (const peer of state.drafts) if (peer.identity.owner === draft.identity.owner && peer.identity.name === draft.identity.name) peer.confirmPackagePair = false;
   }
@@ -185,7 +190,10 @@ export function editOraclePackageOptions(state: OracleRoutineDeployment, objectI
   if (next.packageBodySource === draft.packageBodySource && next.packageContract === draft.packageContract && next.confirmPackagePair === draft.confirmPackagePair) return;
   if (next.packageBodySource !== draft.packageBodySource) {
     draft.packageBodyDrafts = { ...draft.packageBodyDrafts, [draft.packageBodySource ?? "source"]: draft.sql };
+    draft.packageBodyGeneratedSql = { ...draft.packageBodyGeneratedSql, [draft.packageBodySource ?? "source"]: draft.sql === draft.generatedSql ? draft.generatedSql : undefined };
     draft.sql = draft.packageBodyDrafts[next.packageBodySource ?? "source"];
+    const generated = draft.packageBodyGeneratedSql[next.packageBodySource ?? "source"];
+    draft.generatedSql = draft.sql === generated ? generated : undefined;
     draft.reviewedTargetDraft = false;
   }
   if (next.packageBodySource !== draft.packageBodySource || next.packageContract !== draft.packageContract) {
@@ -202,6 +210,7 @@ export function reviewOraclePackageTargetDraft(state: OracleRoutineDeployment, o
   const draft = state.drafts.find((draft) => draft.objectId === objectId && draft.included);
   if (state.disposed || state.executing || !draft || !draft.sql?.trim() || draft.reviewedTargetDraft || (draft.operation && oracleRoutineOperationVerified(draft.operation)) || (draft.identity.kind !== "PACKAGE" && draft.identity.kind !== "PACKAGE_BODY")) return;
   draft.reviewedTargetDraft = true;
+  draft.generatedSql = undefined;
   state.revision++;
   state.plan = null;
   state.recoveryPlan = null;
@@ -448,11 +457,25 @@ export async function observeOracleRoutineDeployment(state: OracleRoutineDeploym
   }
 }
 
+export function canRegenerateOracleRoutineDeployment(state: OracleRoutineDeployment): boolean {
+  if (state.disposed || state.validating || state.executing || state.recoveryPlan || state.pendingOperationId || state.attemptedOperationIds.length || state.records.some((record) => record.dispatched || record.lifecycle === "running" || record.lifecycle === "unproven")) return false;
+  const included = state.drafts.filter((draft) => draft.included);
+  return included.length > 0 && included.every((draft) => !draft.reviewedTargetDraft && draft.generatedSql !== undefined && draft.sql === draft.generatedSql);
+}
+
 /** Final text + exact identities are sent to Core; old database dependencies are
  * not reused as proof of a manually edited draft. */
-export async function validateOracleRoutineDeployment(state: OracleRoutineDeployment, prepare: (input: OracleRoutinePlanInput) => Promise<OracleRoutinePlan> = api.prepareOracleRoutinePlan): Promise<void> {
+export async function validateOracleRoutineDeployment(state: OracleRoutineDeployment, prepare: (input: OracleRoutinePlanInput) => Promise<OracleRoutinePlan> = api.prepareOracleRoutinePlan, options: { compactSql?: boolean; regenerateGenerated?: boolean } = {}): Promise<void> {
+  const { compactSql = false, regenerateGenerated = false } = options;
   if (state.disposed || state.validating || state.executing) return;
+  if (regenerateGenerated && !canRegenerateOracleRoutineDeployment(state)) return;
   const previousPlan = state.plan;
+  if (regenerateGenerated) {
+    state.revision++;
+    if (previousPlan) previousPlan.ready = false;
+    state.plan = null;
+  }
+  const generated = new Set(state.drafts.filter((draft) => !draft.reviewedTargetDraft && (draft.sql === undefined || (draft.generatedSql !== undefined && draft.sql === draft.generatedSql))).map((draft) => draft.objectId));
   let replacementPrepared = false;
   state.validating = true;
   state.error = null;
@@ -477,7 +500,7 @@ export async function validateOracleRoutineDeployment(state: OracleRoutineDeploy
         identity: { ...draft.identity },
         action,
         sourceName: draft.sourceName,
-        sql: state.source.endpoint.databaseType === state.target.endpoint.databaseType || draft.reviewedTargetDraft ? draft.sql : undefined,
+        sql: draft.reviewedTargetDraft ? draft.sql : generated.has(draft.objectId) || state.source.endpoint.databaseType !== state.target.endpoint.databaseType ? undefined : draft.sql,
         baselineOperationId: baseline?.operationId,
         supersedesOperationId: previous?.lifecycle === "prepared" ? previous.operationId : undefined,
         ...(draft.packageBodySource === undefined ? {} : { packageBodySource: draft.packageBodySource }),
@@ -489,7 +512,7 @@ export async function validateOracleRoutineDeployment(state: OracleRoutineDeploy
       state.plan = null;
       return;
     }
-    const plan = await prepare({ source: state.source, target: state.target, drafts });
+    const plan = await prepare({ source: state.source, target: state.target, drafts, compactSql });
     const ids = planOperationIds(plan);
     replacementPrepared = plan.ready && ids.length > 0;
     try {
@@ -506,10 +529,23 @@ export async function validateOracleRoutineDeployment(state: OracleRoutineDeploy
     }
     state.retainedOperationIds = [...new Set([...state.retainedOperationIds, ...ids])];
     state.plan = plan;
+    const reviewOnly =
+      !plan.ready &&
+      drafts.length > 0 &&
+      plan.steps.length === drafts.length &&
+      new Set(drafts.map((draft) => routineIdentityKey(draft.identity))).size === drafts.length &&
+      new Set(plan.steps.map((step) => routineIdentityKey(step.identity))).size === drafts.length &&
+      plan.steps.every((step) => {
+        const expected = drafts.find((draft) => routineIdentityKey(draft.identity) === routineIdentityKey(step.identity));
+        const draft = state.drafts.find((draft) => routineIdentityKey(draft.identity) === routineIdentityKey(step.identity));
+        return expected && draft && generated.has(draft.objectId) && expected.action === step.action && !!step.sql.trim() && !step.operation && step.issues.length > 0 && step.issues.every((issue) => issue.code === "target-draft-review");
+      });
+    if (regenerateGenerated && !plan.ready && !reviewOnly) return;
     for (const step of plan.steps) {
       const draft = state.drafts.find((draft) => routineIdentityKey(draft.identity) === routineIdentityKey(step.identity));
       if (!draft) throw new Error("Routine plan returned an unselected object");
       draft.sql = step.sql;
+      if (generated.has(draft.objectId)) draft.generatedSql = step.sql;
       if (step.operation) {
         draft.operation = step.operation;
         remember(state, step.operation);

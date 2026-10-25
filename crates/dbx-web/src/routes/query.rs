@@ -297,6 +297,12 @@ pub struct ValidateOracleExecutableObjectSourceRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PrepareOracleTriggerSqlRequest {
+    pub input: dbx_core::object_source_sql::OracleTriggerSqlInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildRoutineRenameObjectSourceRequest {
     pub input: dbx_core::object_source_sql::RoutineRenameObjectSourceInput,
 }
@@ -1374,6 +1380,12 @@ pub async fn validate_oracle_executable_object_source(
         .map_err(AppError::from)
 }
 
+pub async fn prepare_oracle_trigger_sql(
+    Json(req): Json<PrepareOracleTriggerSqlRequest>,
+) -> Result<Json<dbx_core::object_source_sql::PreparedOracleTriggerSql>, AppError> {
+    dbx_core::object_source_sql::prepare_oracle_trigger_sql(req.input).map(Json).map_err(AppError::from)
+}
+
 pub async fn fingerprint_oracle_routine_object_source(
     Json(req): Json<BuildExecutableObjectSourceRequest>,
 ) -> Result<Json<String>, AppError> {
@@ -1432,15 +1444,14 @@ pub async fn review_oracle_view_rename_source(
 
 pub async fn build_table_structure_change_sql(
     Json(req): Json<BuildTableStructureSqlRequest>,
-) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
+) -> Json<dbx_core::table_structure_sql::TableStructureSqlPlan> {
     let mysql_table_charset = req
         .mysql_table_charset
         .map(|change| dbx_core::table_structure_sql::build_mysql_table_charset_change_sql(&req.options, change));
-    let mut result =
-        dbx_core::table_structure_sql::build_table_structure_change_sql_with_context(req.options, req.starrocks);
+    let mut result = dbx_core::table_structure_sql::build_table_structure_change_sql_plan(req.options, req.starrocks);
     if let Some(extra) = mysql_table_charset {
-        result.statements.extend(extra.statements);
-        result.warnings.extend(extra.warnings);
+        result.sql.statements.extend(extra.statements);
+        result.sql.warnings.extend(extra.warnings);
     }
     Json(result)
 }
@@ -1496,8 +1507,8 @@ pub async fn apply_sqlite_table_structure_change(
 
 pub async fn build_create_table_sql(
     Json(req): Json<BuildTableStructureSqlRequest>,
-) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
-    Json(dbx_core::table_structure_sql::build_create_table_sql_with_dialect_options(
+) -> Json<dbx_core::table_structure_sql::TableStructureSqlPlan> {
+    Json(dbx_core::table_structure_sql::build_create_table_sql_plan_with_dialect_options(
         req.options,
         req.server_version.as_deref(),
         req.dialect_options.unwrap_or_default(),

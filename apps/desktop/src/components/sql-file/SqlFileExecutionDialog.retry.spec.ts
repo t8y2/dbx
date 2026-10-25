@@ -1272,3 +1272,77 @@ describe("SqlFileExecutionDialog closeOnSuccess option (#12891)", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 });
+
+describe("SqlFileExecutionDialog progress visibility", () => {
+  // The scrollable body has no layout in happy-dom, so its metrics are
+  // stubbed to observe the scroll position the dialog keeps the progress
+  // area at.
+  function stubScrollBody() {
+    const element = root!.querySelector<HTMLElement>('[data-testid="sql-file-scroll-body"]');
+    expect(element).not.toBeNull();
+    const scrollTopValues: number[] = [];
+    let currentScrollTop = 0;
+    Object.defineProperty(element!, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(element!, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(element!, "scrollTop", {
+      configurable: true,
+      get: () => currentScrollTop,
+      set: (value: number) => {
+        currentScrollTop = value;
+        scrollTopValues.push(value);
+      },
+    });
+    return { element: element!, scrollTopValues };
+  }
+
+  it("scrolls the progress area into view when an execution starts", async () => {
+    await mountReadyDialog();
+    const { scrollTopValues } = stubScrollBody();
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running"));
+    });
+    findButton("sqlFile.execute").click();
+
+    await vi.waitFor(() => expect(scrollTopValues.length).toBeGreaterThan(0));
+    expect(scrollTopValues[scrollTopValues.length - 1]).toBe(1000);
+  });
+
+  it("keeps the progress area in view while the execution reports progress", async () => {
+    await mountReadyDialog();
+    const { scrollTopValues } = stubScrollBody();
+
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(() => gate.promise);
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(scrollTopValues.length).toBeGreaterThan(0));
+    const afterStart = scrollTopValues.length;
+
+    mocks.progressHandler?.(progress("run-1", "statementDone", { statementIndex: 1, successCount: 1 }));
+    await vi.waitFor(() => expect(scrollTopValues.length).toBeGreaterThan(afterStart));
+
+    expect(scrollTopValues[scrollTopValues.length - 1]).toBe(1000);
+    gate.resolve();
+  });
+
+  it("leaves the scroll position to the user once they scroll up", async () => {
+    await mountReadyDialog();
+    const { element, scrollTopValues } = stubScrollBody();
+
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(() => gate.promise);
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(scrollTopValues.length).toBeGreaterThan(0));
+
+    element.scrollTop = 120;
+    element.dispatchEvent(new Event("scroll"));
+    const afterUserScroll = scrollTopValues.length;
+
+    mocks.progressHandler?.(progress("run-1", "statementDone", { statementIndex: 1, successCount: 1 }));
+    await nextTick();
+    await nextTick();
+
+    expect(scrollTopValues.length).toBe(afterUserScroll);
+    gate.resolve();
+  });
+});

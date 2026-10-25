@@ -4,6 +4,7 @@ import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { compactDdlSql } from "@/lib/sql/ddlCompact";
 import { formatStarRocksDdlForDisplay } from "@/lib/sql/starrocksDdlDisplay";
 import { dropsSchemaQualifier, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import type { DatabaseType } from "@/types/database";
@@ -561,6 +562,7 @@ export interface DdlDisplayFormatOptions {
    * reloading the DDL.
    */
   excludeDdlStorage?: boolean;
+  compactDdlSql?: boolean;
 }
 
 /**
@@ -573,7 +575,8 @@ export function applyDdlDisplayPreferences(sql: string, options: DdlDisplayForma
   const qualified = applyDdlDatabaseQualifier(sql, options.dialect, options.databaseType, options.includeDatabaseName, options.database, options.catalog);
   const quoted = options.quoteIdentifiers ? qualified : omitDdlIdentifierQuotes(qualified, options.dialect);
   const aligned = options.databaseType === "starrocks" ? formatStarRocksDdlForDisplay(quoted) : alignDdlColumnDefinitions(uppercaseDdlColumnTypes(quoted, options.dialect), options.dialect);
-  return options.excludeDdlStorage ? applyDdlStoragePreference(aligned, options.databaseType) : aligned;
+  const filtered = options.excludeDdlStorage ? applyDdlStoragePreference(aligned, options.databaseType) : aligned;
+  return options.compactDdlSql ? compactDdlSql(filtered, options.databaseType) : filtered;
 }
 
 /**

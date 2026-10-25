@@ -5,19 +5,35 @@ import { getStarRocksCapabilities } from "@/lib/table/starrocksCapabilities";
 import { starRocksAlterOptionsFromDdl, starRocksColumnDefinitionLocked, type StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import { getColumnDefaultValuePresets } from "@/lib/table/columnDefaultPresets";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { compactDdlSql } from "@/lib/sql/ddlCompact";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
+import { exactOracleTriggerMetadata, oracleTriggerReadOptions } from "@/lib/database/oracleTriggerIdentity";
+import { executeOracleTriggerStructurePlan, readOracleTriggerSource, verifyOracleTriggerDeletion, type OracleTriggerExecutionResult, type OracleTriggerSnapshot, type OracleTriggerTarget } from "@/lib/database/oracleTriggerPlan";
+import { prepareOracleTriggerStructurePlan, reconcileOracleTriggerStructureDraft, type OracleTriggerStructurePlan } from "@/lib/database/oracleTriggerStructurePlan";
+import { inspectExactOracleTriggerSource } from "@/lib/table/objectSourceLoad";
 import StructureIndexColumnPicker from "./StructureIndexColumnPicker.vue";
 import TableColumnPasteDialog from "./TableColumnPasteDialog.vue";
 import { createPastedColumnDrafts, parseTableColumnDefinitions } from "@/lib/table/tableColumnDefinitionPaste";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { executeOceanbasePrimaryKeyPlan, readOceanbasePrimaryKeySnapshot, prepareOraclePrimaryKeyChange, OceanbasePrimaryKeyValidationError, type ExistingPrimaryKeyChange, type OceanbasePrimaryKeyPlan, type PrimaryKeyTarget } from "@/lib/database/oceanbasePrimaryKey";
-import { executeOracleForeignKeyCreatePlan, executeOracleForeignKeyPlan, prepareOracleForeignKeyCreatePlan, prepareOracleForeignKeyPlan, readOracleForeignKeyDefinitions, type OracleForeignKeyCreatePlan, type OracleForeignKeyPlan } from "@/lib/database/oracleForeignKeys";
+import {
+  executeOracleForeignKeyCreatePlan,
+  executeOracleForeignKeyPlan,
+  preflightOracleForeignKeyCreatePlan,
+  prepareOracleForeignKeyCreatePlan,
+  prepareOracleForeignKeyPlan,
+  readOracleForeignKeyCreateResult,
+  readOracleForeignKeyDefinitions,
+  type OracleForeignKeyCreatePlan,
+  type OracleForeignKeyCreateExecutionResult,
+  type OracleForeignKeyPlan,
+} from "@/lib/database/oracleForeignKeys";
 import { executeOracleConstraintPlan, oracleConstraintDefinitionFromInfo, prepareOracleConstraintPlan, type OracleConstraintPlan, type OracleConstraintTarget } from "@/lib/database/oracleConstraints";
 import { executeOracleIndexPlan, mergeOracleIndexDraftsAfterRefresh, oracleIndexSnapshotMatchesLoaded, oracleIndexSnapshotMatchesLoadedColumns, prepareOracleIndexPlan, type OracleIndexDefinition, type OracleIndexLoadBaseline, type OracleIndexPlan } from "@/lib/database/oracleIndexes";
 import { readOracleIndexSnapshot } from "@/lib/database/oracleConstraints";
 
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -74,6 +90,7 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
+import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
@@ -134,7 +151,7 @@ import { sortStructureIndexesByColumns, type StructureIndexColumnSort } from "@/
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
-import { codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
 import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
@@ -202,6 +219,7 @@ import type { CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabas
 import * as api from "@/lib/backend/api";
 import { EditorView } from "@codemirror/view";
 
+const ObjectSourceDialog = defineAsyncComponent(() => import("@/components/objects/ObjectSourceDialog.vue"));
 const { t } = useI18n();
 const { isDark, themePalette } = useTheme();
 const store = useConnectionStore();
@@ -252,6 +270,8 @@ const previewSqlText = computed(() => joinSqlStatementsForScript(pendingStatemen
 
 const props = defineProps<{
   connectionId: string;
+  /** Result/draft ownership when a dispatched sequence outlives the visible tab. */
+  originTabId?: string;
   database: string;
   catalog?: string;
   schema?: string;
@@ -266,8 +286,8 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "update:draft": [draft: TableStructureEditorDraft | undefined];
-  saved: [commentChanged: boolean, createdTableName?: string];
+  "update:draft": [draft: TableStructureEditorDraft | undefined, originTabId?: string];
+  saved: [commentChanged: boolean, createdTableName?: string, originTabId?: string];
   close: [];
   openSettings: [initialTab?: string, initialSection?: string];
   /** Jump from the DDL view to the table's data tab (issue #6724). */
@@ -303,9 +323,15 @@ const foreignKeysLoading = ref(false);
 const constraintsLoading = ref(false);
 const triggersLoading = ref(false);
 const rawDdlContent = ref("");
-const ddlStorageExcluded = ref(settingsStore.editorSettings.excludeDdlStorage);
-const ddlContent = computed(() => applyDdlStoragePreference(rawDdlContent.value, databaseType.value, ddlStorageExcluded.value));
+const ddlStorageIncluded = ref(settingsStore.editorSettings.includeDdlStorage);
+const ddlCompacted = ref(settingsStore.editorSettings.compactDdlSql);
+const ddlIndexesSeparated = ref(settingsStore.editorSettings.separateDdlIndexes);
+const ddlContent = computed(() => {
+  const sql = applyDdlStoragePreference(rawDdlContent.value, databaseType.value, !ddlStorageIncluded.value);
+  return ddlCompacted.value ? compactDdlSql(sql, databaseType.value) : sql;
+});
 const ddlLoading = ref(false);
+const ddlLoadError = ref("");
 let ddlLoadRequestId = 0;
 const ddlEditorContainer = ref<HTMLDivElement>();
 const ddlSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
@@ -326,12 +352,23 @@ const ddlDraft = ref<string | null>(null);
  * create-table flow has no DDL tab, and an empty baseline only renders the
  * "no records" placeholder, which must never become executable text.
  */
-const ddlEditingEnabled = computed(() => !isCreateMode.value && !!ddlContent.value.trim());
+const ddlEditingEnabled = computed(() => !isCreateMode.value && !ddlLoading.value && !ddlLoadError.value && !!ddlContent.value.trim());
 const ddlDirty = computed(() => ddlDraft.value !== null && ddlDraft.value.trim() !== ddlContent.value.trim());
-watch([() => settingsStore.editorSettings.excludeDdlStorage, ddlDirty], ([exclude, dirty]) => {
-  if (!dirty && ddlStorageExcluded.value !== exclude) {
+watch([() => settingsStore.editorSettings.includeDdlStorage, () => settingsStore.editorSettings.compactDdlSql, () => settingsStore.editorSettings.separateDdlIndexes, ddlDirty], ([include, compact, separate, dirty]) => {
+  if (!dirty && (ddlStorageIncluded.value !== include || ddlCompacted.value !== compact || ddlIndexesSeparated.value !== separate)) {
+    const indexesChanged = ddlIndexesSeparated.value !== separate;
     ddlDraft.value = null;
-    ddlStorageExcluded.value = exclude;
+    ddlStorageIncluded.value = include;
+    ddlCompacted.value = compact;
+    ddlIndexesSeparated.value = separate;
+    if (indexesChanged && (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle")) {
+      destroyDdlEditor();
+      ddlLoadRequestId++;
+      ddlLoading.value = false;
+      ddlLoadError.value = "";
+      ddlFetched.value = false;
+      if (structureEditorReady && activeTab.value === "ddl") void fetchDdl();
+    }
   }
 });
 
@@ -547,21 +584,29 @@ async function fetchDdl(force = false) {
   if (!props.connectionId || !props.database || !props.tableName || (!force && ddlFetched.value) || !tableMetadataCapabilities.value.ddl) return;
   if (force) destroyDdlEditor();
   const request = ddlRequest();
+  const separateIndexes = (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle") && ddlIndexesSeparated.value;
   const requestId = ++ddlLoadRequestId;
   const revision = store.connectionStateRevision(request.connectionId);
   const fingerprint = connection.value ? connectionConfigFingerprint(connection.value) : "";
-  const current = () => !primaryKeyUnmounted && requestId === ddlLoadRequestId && JSON.stringify(request) === JSON.stringify(ddlRequest()) && store.connectionStateRevision(request.connectionId) === revision && (connection.value ? connectionConfigFingerprint(connection.value) : "") === fingerprint;
+  const current = () =>
+    !primaryKeyUnmounted &&
+    requestId === ddlLoadRequestId &&
+    JSON.stringify(request) === JSON.stringify(ddlRequest()) &&
+    separateIndexes === ((databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle") && ddlIndexesSeparated.value) &&
+    store.connectionStateRevision(request.connectionId) === revision &&
+    (connection.value ? connectionConfigFingerprint(connection.value) : "") === fingerprint;
   ddlLoading.value = true;
+  ddlLoadError.value = "";
   try {
-    const { ddl } = await loadObjectDdl(request, { force });
+    const { ddl } = await loadObjectDdl({ ...request, separateIndexes }, { force });
     const formatted = await formatStructureDdl(ddl);
     if (!current()) return;
     rawDdlContent.value = formatted;
     ddlFetched.value = true;
   } catch (e: any) {
     if (!current()) return;
-    rawDdlContent.value = `-- Error: ${e?.message || e}`;
-    ddlFetched.value = true;
+    ddlLoadError.value = String(e?.message || e);
+    ddlFetched.value = false;
   } finally {
     if (current()) ddlLoading.value = false;
   }
@@ -971,6 +1016,107 @@ const triggersLoaded = ref(false);
 // selected trigger's editors render in the detail pane below (#8822).
 const selectedTriggerId = ref<string | null>(null);
 const selectedTrigger = computed(() => triggers.value.find((trigger) => trigger.id === selectedTriggerId.value) ?? null);
+const triggerSourceOpen = ref(false);
+const triggerSourceDialog = ref<InstanceType<typeof ObjectSourceDialog>>();
+const triggerSourceTarget = shallowRef<{ draftId: string; loadedDraft: string; dirtyAtOpen: boolean; didWrite: boolean; tableKey: string; target: OracleTriggerTarget }>();
+const triggerSourceRefreshRequired = ref(new Set<string>());
+const triggerStructurePlan = shallowRef<OracleTriggerStructurePlan>();
+const triggerStructureRecovery = ref<TableStructureEditorDraft["oracleTriggerStructureRecovery"]>();
+let triggerStructureFingerprint = "";
+const triggerStructureActive = ref(true);
+let triggerStructureConfirmationScope: string | undefined;
+function cancelTriggerStructureConfirmation() {
+  if (!triggerStructureConfirmationScope) return;
+  useSqlExecutionDangerStore().cancelScope(triggerStructureConfirmationScope);
+  productionSafetyStore.cancelScope(triggerStructureConfirmationScope);
+}
+const triggerStructureKey = () => JSON.stringify([props.connectionId, props.database, props.catalog, props.schema, props.tableName]);
+const triggerSourceKey = (target: Readonly<OracleTriggerTarget>) => JSON.stringify([target.connectionId, target.database, target.catalog, target.owner, target.name, target.executionSchema]);
+let triggerBaselineRequest = 0;
+watch(
+  () => [triggerStructureKey(), selectedTrigger.value?.original] as const,
+  async () => {
+    const request = ++triggerBaselineRequest;
+    const trigger = selectedTrigger.value;
+    const metadata = exactOracleTriggerMetadata(trigger?.original);
+    if (!trigger || !metadata || trigger.loadedOracleSource !== undefined) return;
+    const key = triggerStructureKey();
+    try {
+      const loaded = await readOracleTriggerSource({ connectionId: props.connectionId, database: props.database, catalog: props.catalog, owner: metadata.owner, name: metadata.name, executionSchema: props.schema || metadataSchema.value! });
+      if (request !== triggerBaselineRequest || key !== triggerStructureKey() || !triggers.value.includes(trigger)) return;
+      if (!loaded.snapshot?.exists || loaded.snapshot.metadata.objectId !== metadata.objectId) throw new Error(t("oracleTrigger.reloadBaseline"));
+      if (triggerChanged(trigger) && (trigger.name !== trigger.original!.name || trigger.statement !== trigger.original!.statement || trigger.timing !== trigger.original!.timing || trigger.event !== trigger.original!.event)) throw new Error(t("oracleTrigger.reloadBaseline"));
+      const inspected = await inspectExactOracleTriggerSource(loaded.snapshot.raw, metadata.owner, metadata.name);
+      if (request !== triggerBaselineRequest || key !== triggerStructureKey() || !triggers.value.includes(trigger)) return;
+      trigger.loadedOracleSource = loaded.snapshot.raw.source;
+      trigger.loadedOracleStructured = inspected.triggerSource.complete && inspected.triggerSource.prepared?.structuredEditable === true;
+      syncDraftToParent();
+    } catch (error) {
+      if (request === triggerBaselineRequest && key === triggerStructureKey()) errorMessage.value = error instanceof Error ? error.message : String(error);
+    }
+  },
+);
+watch(triggerStructureKey, () => {
+  triggerSourceOpen.value = false;
+  triggerSourceRefreshRequired.value.clear();
+});
+
+function openTriggerFullSource(trigger: EditableStructureTrigger) {
+  const metadata = exactOracleTriggerMetadata(trigger.original);
+  if (!metadata || !oracleTriggerReadOptions(databaseType.value)) return;
+  const next = { connectionId: props.connectionId, database: props.database, catalog: props.catalog, owner: metadata.owner, name: metadata.name, executionSchema: props.schema || metadataSchema.value };
+  if (triggerSourceTarget.value && triggerSourceKey(triggerSourceTarget.value.target) !== triggerSourceKey(next) && triggerSourceDialog.value?.hasUnsavedDraft() && !window.confirm(t("objects.refreshDiscardConfirm"))) return;
+  triggerSourceTarget.value = { draftId: trigger.id, loadedDraft: JSON.stringify(trigger), dirtyAtOpen: triggerChanged(trigger), didWrite: false, tableKey: triggerStructureKey(), target: next };
+  triggerSourceOpen.value = true;
+}
+
+function mergeTriggerSourceSnapshot(snapshot: OracleTriggerSnapshot) {
+  const context = triggerSourceTarget.value;
+  if (!context || !context.didWrite || context.tableKey !== triggerStructureKey() || triggerSourceKey(snapshot.target) !== triggerSourceKey(context.target)) return;
+  const index = triggers.value.findIndex((trigger) => trigger.id === context.draftId);
+  if (index < 0) return;
+  if (!snapshot.exists || !snapshot.raw.trigger || context.dirtyAtOpen || JSON.stringify(triggers.value[index]) !== context.loadedDraft) {
+    triggerSourceRefreshRequired.value.add(context.draftId);
+    errorMessage.value = `${context.target.owner}.${context.target.name}: ${t("oracleTrigger.reloadBaseline")}`;
+    return;
+  }
+  const updated = { ...createTriggerDrafts([snapshot.raw.trigger])[0]!, id: context.draftId };
+  triggers.value.splice(index, 1, updated);
+  context.loadedDraft = JSON.stringify(updated);
+  triggerSourceRefreshRequired.value.delete(context.draftId);
+  scheduleSqlPreviewRefresh();
+}
+
+function recordTriggerSourceResult(target: Readonly<OracleTriggerTarget>, result: OracleTriggerExecutionResult) {
+  const context = triggerSourceTarget.value;
+  if (!context || context.tableKey !== triggerStructureKey() || triggerSourceKey(target) !== triggerSourceKey(context.target) || result.cancelled || !result.steps.some((step) => step.state !== "notExecuted")) return;
+  context.didWrite = true;
+  if (result.snapshot) mergeTriggerSourceSnapshot(result.snapshot);
+  else {
+    triggerSourceRefreshRequired.value.add(context.draftId);
+    errorMessage.value = `${target.owner}.${target.name}: ${t("oracleTrigger.reloadBaseline")}`;
+  }
+}
+
+async function reloadTriggerDraftAfterSource(trigger: EditableStructureTrigger) {
+  const metadata = exactOracleTriggerMetadata(trigger.original);
+  if (!metadata || (triggerChanged(trigger) && !window.confirm(t("oracleTrigger.refreshDraftConfirm")))) return;
+  const key = triggerStructureKey();
+  const previous = JSON.stringify(trigger);
+  try {
+    const loaded = await readOracleTriggerSource({ connectionId: props.connectionId, database: props.database, catalog: props.catalog, owner: metadata.owner, name: metadata.name, executionSchema: props.schema || metadataSchema.value });
+    if (key !== triggerStructureKey()) return;
+    const index = triggers.value.findIndex((item) => item.id === trigger.id);
+    if (index < 0 || JSON.stringify(triggers.value[index]) !== previous) return;
+    if (!loaded.snapshot?.exists || !loaded.snapshot.raw.trigger) throw new Error(loaded.identityError || t("oracleTrigger.reloadBaseline"));
+    triggers.value.splice(index, 1, { ...createTriggerDrafts([loaded.snapshot.raw.trigger])[0]!, id: trigger.id });
+    triggerSourceRefreshRequired.value.delete(trigger.id);
+    errorMessage.value = "";
+    scheduleSqlPreviewRefresh();
+  } catch (error) {
+    if (key === triggerStructureKey()) errorMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
 // Inline rename state: the list row itself stays a click-to-select target;
 // the pencil button flips the name cell into an input (#8822 feedback).
 const renamingTriggerId = ref<string | null>(null);
@@ -2196,6 +2342,7 @@ const primaryKeyConfirmationScope = `structure-primary-key:${uuid()}`;
 const oracleForeignKeyConfirmationScope = `structure-oracle-foreign-key:${uuid()}`;
 onBeforeUnmount(() => {
   primaryKeyUnmounted = true;
+  cancelTriggerStructureConfirmation();
   if (primaryKeyBusy.value) productionSafetyStore.cancelScope(primaryKeyConfirmationScope);
   if (saving.value) productionSafetyStore.cancelScope(oracleForeignKeyConfirmationScope);
   if (saving.value) productionSafetyStore.cancelScope(oracleConstraintConfirmationScope);
@@ -2794,14 +2941,16 @@ function onStructureContentScroll(tab: TableInfoTab, event: Event) {
 
 function createCurrentDraft(initialized = true): TableStructureEditorDraft {
   return {
-    dirty: hasPendingStructureChanges() || ddlDirty.value,
+    dirty: !!triggerStructureRecovery.value || hasPendingStructureChanges() || ddlDirty.value,
     activeTab: activeTab.value as TableStructureEditorDraft["activeTab"],
     ddlDraft: ddlDraft.value,
     // Only carried alongside an actual edit: without a draft the baseline is
     // refetched, and copying every table's DDL into every draft is pure weight.
     ddlContent: ddlDraft.value === null ? undefined : ddlContent.value,
     rawDdlContent: ddlDraft.value === null ? undefined : rawDdlContent.value,
-    excludeDdlStorage: ddlStorageExcluded.value,
+    includeDdlStorage: ddlStorageIncluded.value,
+    compactDdlSql: ddlCompacted.value,
+    separateDdlIndexes: ddlIndexesSeparated.value,
     newTableName: newTableName.value,
     tableComment: tableComment.value,
     originalTableComment: originalTableComment.value,
@@ -2825,6 +2974,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     existingPrimaryKey: existingPrimaryKeyDraft.value ? cloneDraftValue(existingPrimaryKeyDraft.value) : undefined,
     oracleConstraintChange: oracleConstraintDraft.value ? cloneDraftValue(oracleConstraintDraft.value) : undefined,
     oracleForeignKeyCreateRecovery: oracleForeignKeyCreateRecovery.value ? cloneDraftValue(oracleForeignKeyCreateRecovery.value) : undefined,
+    oracleTriggerStructureRecovery: triggerStructureRecovery.value ? cloneDraftValue(triggerStructureRecovery.value) : undefined,
     constraintsLoaded: constraintsLoaded.value,
     triggers: cloneDraftValue(triggers.value),
     triggersLoaded: triggersLoaded.value,
@@ -2842,9 +2992,9 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
   };
 }
 
-function emitDraftToParent(draft: TableStructureEditorDraft | undefined) {
-  lastSyncedDraft = draft;
-  emit("update:draft", draft);
+function emitDraftToParent(draft: TableStructureEditorDraft | undefined, originTabId?: string) {
+  if (originTabId === undefined || originTabId === props.originTabId) lastSyncedDraft = draft;
+  emit("update:draft", draft, originTabId);
 }
 
 function syncStructureScrollDraftToParent() {
@@ -2890,7 +3040,9 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   // would read as dirty (or clean) against the wrong reference text.
   if (draft.ddlContent) {
     rawDdlContent.value = draft.rawDdlContent ?? draft.ddlContent;
-    ddlStorageExcluded.value = draft.excludeDdlStorage ?? false;
+    ddlStorageIncluded.value = draft.includeDdlStorage ?? !(draft.excludeDdlStorage ?? false);
+    ddlCompacted.value = draft.compactDdlSql ?? false;
+    ddlIndexesSeparated.value = draft.separateDdlIndexes ?? false;
     ddlFetched.value = true;
   }
   ddlDraft.value = draft.ddlDraft ?? null;
@@ -2933,6 +3085,7 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   existingPrimaryKeyDraft.value = draft.existingPrimaryKey ? cloneDraftValue(draft.existingPrimaryKey) : undefined;
   oracleConstraintDraft.value = draft.oracleConstraintChange ? cloneDraftValue(draft.oracleConstraintChange) : undefined;
   oracleForeignKeyCreateRecovery.value = draft.oracleForeignKeyCreateRecovery ? cloneDraftValue(draft.oracleForeignKeyCreateRecovery) : undefined;
+  triggerStructureRecovery.value = draft.oracleTriggerStructureRecovery ? cloneDraftValue(draft.oracleTriggerStructureRecovery) : undefined;
   if (oracleForeignKeyCreateRecovery.value) {
     primaryKeyResultTitle.value = "oracleForeignKey.resultTitle";
     primaryKeyResultMessage.value = `${metadataSchema.value}.${oracleForeignKeyCreateRecovery.value.tableName}: ${t("oracleForeignKey.createdTablePartial")}`;
@@ -3277,7 +3430,16 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     }),
     indexes: sanitizeStructureIndexesForCapabilities(indexes.value, structureCapabilities.value),
     foreignKeys: foreignKeys.value,
-    triggers: triggers.value,
+    triggers: triggers.value.map((trigger) => {
+      const metadata = exactOracleTriggerMetadata(trigger.original);
+      const oracleExact =
+        metadata?.parent && (metadata.scope === "TABLE" || metadata.scope === "VIEW")
+          ? { owner: metadata.owner, parentType: metadata.scope }
+          : !trigger.original && oracleTriggerReadOptions(databaseType.value) && metadataSchema.value
+            ? (trigger.oracleExact ?? { owner: metadataSchema.value, parentType: props.tableType === "view" ? ("VIEW" as const) : ("TABLE" as const) })
+            : undefined;
+      return { ...trigger, oracleExact };
+    }),
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
     mysqlAutoIncrementValue: isCreateMode.value && canEditMysqlAutoIncrement.value ? mysqlAutoIncrementValue.value || undefined : undefined,
@@ -3309,6 +3471,7 @@ function partitionSqlOptions(): TablePartitionSqlOptions {
 
 async function refreshSqlPreview() {
   const requestId = ++sqlPreviewRequestId;
+  triggerStructurePlan.value = undefined;
   existingPrimaryKeyPlan.value = undefined;
   existingPrimaryKeySession.value = undefined;
   oracleConstraintPlan.value = undefined;
@@ -3465,6 +3628,28 @@ async function refreshSqlPreview() {
       if (requestId !== sqlPreviewRequestId || JSON.stringify(target) !== JSON.stringify({ ...primaryKeyTarget(), schema: metadataSchema.value, tableName: newTableName.value.trim(), databaseType: target.databaseType })) return;
       const currentConfig = store.getConfig(target.connectionId);
       if (store.connectionStateRevision(target.connectionId) !== connectionRevision || (currentConfig ? connectionConfigFingerprint(currentConfig) : "") !== configFingerprint) throw new Error(t("oracleForeignKey.refreshRequired"));
+      if (options.triggers?.some((trigger) => trigger.oracleExact && triggerChanged(trigger)) && !plan.triggerOperations?.length) throw new Error("Update the trigger SQL provider before saving this table");
+      if (plan.triggerOperations?.length) {
+        const triggerPlan = await prepareOracleTriggerStructurePlan({
+          target: {
+            connectionId: target.connectionId,
+            database: target.database,
+            catalog: target.catalog,
+            owner: target.schema,
+            tableName: foldCreatedTableName(target.tableName, target.databaseType),
+            executionSchema: props.schema || target.schema,
+            parentType: "TABLE",
+            databaseType: target.databaseType,
+            newTable: true,
+          },
+          statements: plan.statements,
+          operations: plan.triggerOperations,
+          triggers: options.triggers!,
+        });
+        if (requestId !== sqlPreviewRequestId || !connectionCurrent()) return;
+        triggerStructurePlan.value = triggerPlan;
+        triggerStructureFingerprint = JSON.stringify(structureChangeOptions());
+      }
       newOracleForeignKeyPlan.value = plan;
       newOracleForeignKeySession.value = { revision: connectionRevision, configFingerprint, draftFingerprint: JSON.stringify({ options: plan.options, changes: plan.changes, partitioning: plan.partitioning }) };
       pendingStatements.value = [...plan.statements];
@@ -3586,7 +3771,33 @@ async function refreshSqlPreview() {
     if (requestId !== sqlPreviewRequestId) return;
     const statements = [...result.statements, ...ownerResult.statements, ...(mysqlAutoIncrementStatement ? [mysqlAutoIncrementStatement] : []), ...partitionResult.statements];
     // SQLite type-change apply regenerates this revision-checked plan, so its preview must stay byte-for-byte aligned.
-    pendingStatements.value = hasSqliteTypeChange.value ? statements : statements.map((statement) => applyDdlGenerationPreferences(statement, sqlFormatDialectForDbType(databaseType.value)));
+    const triggerOperations = "triggerOperations" in result ? result.triggerOperations : undefined;
+    const exactChanges = options.triggers?.some((trigger) => trigger.oracleExact && triggerChanged(trigger));
+    if (exactChanges && !result.warnings.length && !("oracleTriggerContract" in result && result.oracleTriggerContract === 1) && !triggerOperations?.length) throw new Error("Update the trigger SQL provider and regenerate the table preview; exact trigger operations are missing");
+    const exactStatement = (index: number) => triggerOperations?.some((operation) => index >= operation.statementIndex && index < operation.statementIndex + operation.statementCount);
+    const actualStatements = hasSqliteTypeChange.value ? statements : statements.map((statement, index) => (exactStatement(index) ? statement : applyDdlGenerationPreferences(statement, sqlFormatDialectForDbType(databaseType.value))));
+    if (triggerOperations?.length && !result.warnings.length) {
+      const plan = await prepareOracleTriggerStructurePlan({
+        target: {
+          connectionId: props.connectionId,
+          database: props.database,
+          catalog: props.catalog,
+          owner: metadataSchema.value!,
+          tableName: isCreateMode.value ? foldCreatedTableName(newTableName.value, databaseType.value) : props.tableName!,
+          executionSchema: props.schema || metadataSchema.value!,
+          parentType: props.tableType === "view" ? "VIEW" : "TABLE",
+          databaseType: databaseType.value as "oracle" | "oceanbase-oracle" | "dameng",
+          newTable: isCreateMode.value,
+        },
+        statements: actualStatements,
+        operations: triggerOperations,
+        triggers: options.triggers!,
+      });
+      if (requestId !== sqlPreviewRequestId) return;
+      triggerStructurePlan.value = plan;
+      triggerStructureFingerprint = JSON.stringify(structureChangeOptions());
+    }
+    pendingStatements.value = actualStatements;
     warnings.value = [...result.warnings, ...ownerResult.warnings, ...partitionResult.warnings];
     sqliteSchemaRevision.value = "schemaRevision" in result && typeof result.schemaRevision === "string" ? result.schemaRevision : undefined;
   } catch (e: any) {
@@ -3616,6 +3827,7 @@ const canApply = computed(
     !mysqlTableEngineLoading.value &&
     !sqlPreviewLoading.value &&
     !sqlPreviewPending.value &&
+    !triggerStructureRecovery.value &&
     (ddlDirty.value || (!hydratingRestoredDraft.value && !needsColumnDraftMetadataHydration() && !draftHydrationError.value)) &&
     pendingStatements.value.length > 0 &&
     warnings.value.length === 0 &&
@@ -3632,6 +3844,8 @@ function clearDraft() {
 }
 
 function resetState() {
+  triggerStructurePlan.value = undefined;
+  triggerStructureRecovery.value = undefined;
   invalidateDraftHydration();
   restoredDraftTarget = "";
   draftHydrationError.value = "";
@@ -4051,7 +4265,14 @@ async function loadStructure(
       : Promise.resolve(undefined);
     const triggersPromise = effectiveScope.triggers
       ? tableMetadataCapabilities.value.triggers
-        ? loadObjectMetadataFacet(metadataRequest, "triggers", () => api.listTriggers(connectionId, database, schema, tableName, catalog, ...(metadataRequest.exactIdentity ? ([true] as const) : [])), { force: forceMetadata }).then((result) => result.value)
+        ? loadObjectMetadataFacet(
+            { ...metadataRequest, ...(oracleTriggerReadOptions(databaseType.value) ? { oracleTriggerContract: 1 as const } : {}) },
+            "triggers",
+            () => api.listTriggers(connectionId, database, schema, tableName, catalog, oracleTriggerReadOptions(databaseType.value, catalog) ?? (metadataRequest.exactIdentity || undefined)),
+            {
+              force: forceMetadata,
+            },
+          ).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     // Partition metadata is a live catalog read (not persisted), so it is
@@ -6147,13 +6368,13 @@ function toggleDropTrigger(trigger: EditableStructureTrigger) {
 }
 
 function canEditTriggerDraft(trigger: EditableStructureTrigger): boolean {
-  return canToggleTriggerEnabled(trigger) && canEditStructuredTriggerDraft(databaseType.value, trigger);
+  return canToggleTriggerEnabled(trigger) && (!exactOracleTriggerMetadata(trigger.original) || trigger.loadedOracleSource !== undefined) && canEditStructuredTriggerDraft(databaseType.value, trigger);
 }
 
 // ALTER TRIGGER ... ENABLE/DISABLE leaves the source untouched, so it stays available for
 // triggers whose source the structured form cannot rebuild.
 function canToggleTriggerEnabled(trigger: EditableStructureTrigger): boolean {
-  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop;
+  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop && !triggerSourceRefreshRequired.value.has(trigger.id);
 }
 
 function primarySqlOperation(sql: string): string {
@@ -6210,6 +6431,7 @@ async function copyPreviewSql() {
 }
 
 async function copyDdlContent() {
+  if (ddlLoading.value || ddlLoadError.value) return;
   // Copy what the editor actually shows, so an edited script is not silently
   // replaced by the database's original DDL.
   const ddl = ddlDraft.value ?? ddlContent.value;
@@ -6798,6 +7020,16 @@ async function applyOracleForeignKeyCreatePlan(): Promise<boolean> {
   const canStart = () => sameTarget() && changes === JSON.stringify(oracleForeignKeyChanges()) && JSON.stringify({ options: currentOptions(), changes: oracleForeignKeyChanges(), partitioning: currentPartitioning() }) === plannedSession.draftFingerprint && isCreateMode.value;
   const stillCurrent = () => canStart() && connectionCurrent();
   if (!stillCurrent()) return false;
+  if (triggerStructurePlan.value)
+    return applyTriggerStructure({
+      preflight: async () => {
+        if (!(await preflightOracleForeignKeyCreatePlan(plan, canStart, connectionCurrent))) throw new Error(t("oracleForeignKey.refreshRequired"));
+      },
+      readback: async (steps) => {
+        const read = await readOracleForeignKeyCreateResult(plan, steps, connectionCurrent);
+        if (read.readbackError) throw new Error(read.readbackError);
+      },
+    });
   oracleForeignKeyBusy.value = true;
   saving.value = true;
   const startedAt = Date.now();
@@ -6973,6 +7205,206 @@ async function applyOracleForeignKeyCreatePlan(): Promise<boolean> {
   }
 }
 
+async function reconcileTriggerStructure(): Promise<void> {
+  const recovery = triggerStructureRecovery.value;
+  if (!recovery || saving.value || !window.confirm(t("oracleTrigger.reconcileConfirm"))) return;
+  const key = triggerStructureKey();
+  const draft = createCurrentDraft();
+  const fingerprint = JSON.stringify(structureChangeOptions());
+  const target = recovery.target;
+  const config = store.getConfig(target.connectionId);
+  const revision = store.connectionStateRevision(target.connectionId);
+  const configFingerprint = config ? connectionConfigFingerprint(config) : "";
+  const current = () =>
+    key === triggerStructureKey() &&
+    !primaryKeyUnmounted &&
+    fingerprint === JSON.stringify(structureChangeOptions()) &&
+    store.isCurrentConnectionStateRevision(target.connectionId, revision) &&
+    store.connectionStateRevision(target.connectionId) === revision &&
+    (store.getConfig(target.connectionId) ? connectionConfigFingerprint(store.getConfig(target.connectionId)!) : "") === configFingerprint;
+  const changed = {
+    columns: new Set(columns.value.filter(columnChanged).map((item) => item.id)),
+    indexes: new Set(indexes.value.filter(indexChanged).map((item) => item.id)),
+    foreignKeys: new Set(foreignKeys.value.filter(foreignKeyChanged).map((item) => item.id)),
+    triggers: new Set(triggers.value.filter(triggerChanged).map((item) => item.id)),
+  };
+  saving.value = true;
+  try {
+    const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
+    const identity = await api.executeQuery(
+      target.connectionId,
+      target.database,
+      `SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, TO_CHAR(OBJECT_ID) AS OBJECT_ID FROM ALL_OBJECTS WHERE OWNER = ${literal(target.owner)} AND OBJECT_NAME = ${literal(target.tableName)} AND OBJECT_TYPE = ${literal(target.parentType)}`,
+      target.executionSchema,
+      undefined,
+      { catalog: target.catalog, maxRows: 2 },
+    );
+    if (identity.execution_error || identity.truncated || identity.has_more || identity.rows.length > 1) throw new Error(identity.error?.detail || t("oracleTrigger.reloadBaseline"));
+    if (!identity.rows.length && target.newTable) {
+      // A newly confirmed plain CREATE can be prepared again only after this explicit read.
+      if (!current()) return;
+      triggerStructureRecovery.value = undefined;
+      syncDraftToParent();
+      scheduleSqlPreviewRefresh();
+      return;
+    }
+    const row = identity.rows[0];
+    if (row?.length !== 4 || row[0] !== target.owner || row[1] !== target.tableName || row[2] !== target.parentType || typeof row[3] !== "string" || !row[3]) throw new Error(t("oracleTrigger.reloadBaseline"));
+    const [nextColumns, nextIndexes, nextKeys, nextTriggers, nextConstraints, nextComment] = await Promise.all([
+      changed.columns.size || target.newTable ? api.getColumns(target.connectionId, target.database, target.owner, target.tableName, target.catalog) : Promise.resolve(draft.columns.flatMap((item) => (item.original ? [item.original] : []))),
+      changed.indexes.size || (target.newTable && draft.indexes.length) ? api.listIndexes(target.connectionId, target.database, target.owner, target.tableName, target.catalog) : Promise.resolve(draft.indexes.flatMap((item) => (item.original ? [item.original] : []))),
+      changed.foreignKeys.size || (target.newTable && draft.foreignKeys.length) ? api.listForeignKeys(target.connectionId, target.database, target.owner, target.tableName, target.catalog) : Promise.resolve(draft.foreignKeys.flatMap((item) => (item.original ? [item.original] : []))),
+      api.listTriggers(target.connectionId, target.database, target.owner, target.tableName, target.catalog, { identityMode: "exact" }),
+      changed.columns.size && draft.constraintsLoaded ? api.listConstraints(target.connectionId, target.database, target.owner, target.tableName, target.catalog) : Promise.resolve(draft.constraints ?? []),
+      target.newTable || draft.tableComment !== draft.originalTableComment ? api.getTableComment(target.connectionId, target.database, target.owner, target.tableName, target.catalog) : Promise.resolve(draft.originalTableComment),
+    ]);
+    if (nextTriggers.some((trigger) => !exactOracleTriggerMetadata(trigger))) throw new Error(t("oracleTrigger.reloadBaseline"));
+    for (const trigger of draft.triggers.filter((item) => item.markedForDrop && item.original && !nextTriggers.some((next) => next.oracle_metadata?.owner === item.original!.oracle_metadata?.owner && next.name === item.original!.name))) {
+      const metadata = exactOracleTriggerMetadata(trigger.original);
+      if (metadata) await verifyOracleTriggerDeletion({ connectionId: target.connectionId, database: target.database, catalog: target.catalog, owner: metadata.owner, name: metadata.name, executionSchema: target.executionSchema });
+    }
+    if (!current()) return;
+    const next = reconcileOracleTriggerStructureDraft(draft, { columns: nextColumns, indexes: nextIndexes, foreignKeys: nextKeys, triggers: nextTriggers, constraints: nextConstraints, comment: nextComment ?? "" }, changed, target.databaseType);
+    for (const trigger of next.triggers.filter((item) => changed.triggers.has(item.id) && item.original)) {
+      const metadata = exactOracleTriggerMetadata(trigger.original);
+      if (!metadata) throw new Error(t("oracleTrigger.reloadBaseline"));
+      const loaded = await readOracleTriggerSource({ connectionId: target.connectionId, database: target.database, catalog: target.catalog, owner: metadata.owner, name: metadata.name, executionSchema: target.executionSchema });
+      if (!loaded.snapshot?.exists || loaded.snapshot.metadata.objectId !== metadata.objectId || loaded.snapshot.raw.trigger?.statement !== trigger.original!.statement || loaded.snapshot.raw.trigger?.enabled !== trigger.original!.enabled) throw new Error(t("oracleTrigger.reloadBaseline"));
+      const inspected = await inspectExactOracleTriggerSource(loaded.snapshot.raw, metadata.owner, metadata.name);
+      trigger.loadedOracleSource = loaded.snapshot.raw.source;
+      trigger.loadedOracleStructured = inspected.triggerSource.complete && inspected.triggerSource.prepared?.structuredEditable === true;
+    }
+    if (!current()) return;
+    restoreDraft(next);
+    triggerSourceRefreshRequired.value.clear();
+    errorMessage.value = "";
+    syncDraftToParent();
+    if (target.newTable) {
+      emitDraftToParent({ ...next, newTableName: "" });
+      emit("saved", false, target.tableName);
+    } else scheduleSqlPreviewRefresh();
+  } catch (error) {
+    if (key === triggerStructureKey()) errorMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function applyTriggerStructure(validation?: { preflight: () => Promise<void>; readback: (steps: OracleForeignKeyCreateExecutionResult["steps"]) => Promise<void> }): Promise<boolean> {
+  const plan = triggerStructurePlan.value;
+  if (!plan || triggerStructureRecovery.value) return false;
+  const targetKey = triggerStructureKey();
+  const originTabId = props.originTabId;
+  const fingerprint = triggerStructureFingerprint;
+  const current = () => !primaryKeyUnmounted && triggerStructureActive.value && targetKey === triggerStructureKey() && fingerprint === JSON.stringify(structureChangeOptions());
+  const danger = useSqlExecutionDangerStore();
+  const scopeId = `structure-trigger:${uuid()}`;
+  triggerStructureConfirmationScope = scopeId;
+  const stop = watch(
+    current,
+    (value) => {
+      if (!value) cancelTriggerStructureConfirmation();
+    },
+    { flush: "sync" },
+  );
+  const started = Date.now();
+  const submittedDraft = createCurrentDraft();
+  const refreshScope = captureStructureRefreshScope();
+  saving.value = true;
+  try {
+    const confirmed =
+      current() &&
+      (await danger.requestConfirmation({
+        sql: plan.statements.join("\n\n"),
+        kind: "sql",
+        scopeId,
+        connectionName: connection.value?.name,
+        database: plan.target.database,
+        databaseType: plan.target.databaseType,
+        targets: [
+          `${plan.target.owner}.${plan.target.tableName}`,
+          ...plan.groups.map((group) => `TRIGGER ${group.operation.owner}.${group.operation.name}`),
+          `${t("oracleTrigger.executionSchema")}: ${plan.target.executionSchema}`,
+          ...(plan.statements.length > 1 ? [t("oracleTrigger.nonAtomic")] : []),
+        ],
+      }));
+    const result = await executeOracleTriggerStructurePlan(plan, {
+      confirmed,
+      confirmationScope: scopeId,
+      isCurrent: current,
+      timeoutSecs: queryTimeoutSecsForConnection(store.getConfig(plan.target.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs),
+      preflight: validation?.preflight,
+    });
+    if (result.cancelled) return false;
+    let complete = result.steps.every((step) => step.state === "committed" && step.trigger?.verification !== "invalid");
+    let details = result.steps.map((step) => `${step.statementIndex + 1}. ${step.state}: ${step.sql}${step.error ? `\n${step.error}` : ""}`).join("\n\n");
+    // Preserve the submitted draft and attempted indexes before any refresh or UI navigation.
+    if (result.steps.some((step) => step.state !== "notExecuted")) {
+      const recovery = { target: { ...plan.target }, steps: cloneDraftValue(result.steps), details };
+      if (targetKey === triggerStructureKey()) triggerStructureRecovery.value = recovery;
+      emitDraftToParent({ ...(targetKey === triggerStructureKey() ? createCurrentDraft() : submittedDraft), dirty: true, oracleTriggerStructureRecovery: recovery }, originTabId);
+      if (targetKey !== triggerStructureKey()) toast(`${plan.target.owner}.${plan.target.tableName}\n${details}`, 10000);
+    }
+    if (complete && validation) {
+      try {
+        await validation.readback(result.steps);
+      } catch (error) {
+        complete = false;
+        details += `\n\n${error instanceof Error ? error.message : String(error)}`;
+        if (targetKey === triggerStructureKey() && triggerStructureRecovery.value) {
+          triggerStructureRecovery.value.details = details;
+          syncDraftToParent();
+        }
+      }
+    }
+    await recordStructureHistory(plan.statements.join("\n\n"), started, complete, undefined, complete ? undefined : details);
+    if (targetKey !== triggerStructureKey()) return false;
+    if (!complete || !current()) {
+      errorMessage.value = t("oracleTrigger.reloadBaseline");
+      primaryKeyResultDetails.value = details;
+      primaryKeyResultTitle.value = "oracleStructureResult.resultTitle";
+      primaryKeyResultMessage.value = `${plan.target.owner}.${plan.target.tableName}: ${t("oracleTrigger.reloadBaseline")}`;
+      primaryKeyResultOpen.value = true;
+      return false;
+    }
+    if (plan.target.newTable) {
+      triggerStructureRecovery.value = undefined;
+      clearDraft();
+      emit("saved", tableComment.value !== originalTableComment.value, plan.target.tableName, originTabId);
+    } else {
+      const metadataMatch = { connectionId: plan.target.connectionId, database: plan.target.database, catalog: plan.target.catalog, schema: plan.target.owner, tableName: plan.target.tableName };
+      invalidateTableMetadataCache(metadataMatch);
+      await invalidateObjectMetadataCache(metadataMatch);
+      await invalidateObjectDdl(metadataMatch);
+      saving.value = false;
+      postSaveRefreshing.value = true;
+      skipNextRefreshVersion = true;
+      emit("saved", tableComment.value !== originalTableComment.value, undefined, originTabId);
+      const refresh = await loadStructure(true, refreshScope, false, { blockSecondaryMetadata: true });
+      postSaveRefreshing.value = false;
+      if (refresh?.error) {
+        const recovery = triggerStructureRecovery.value;
+        restoreDraft({ ...submittedDraft, dirty: true, oracleTriggerStructureRecovery: recovery });
+        errorMessage.value = refresh.error;
+        return false;
+      }
+      triggerStructureRecovery.value = undefined;
+      syncDraftToParent();
+    }
+    toast(t(plan.target.newTable ? "structureEditor.created" : "structureEditor.saved"), 4000);
+    return true;
+  } catch (error) {
+    if (targetKey === triggerStructureKey()) errorMessage.value = error instanceof Error ? error.message : String(error);
+    return false;
+  } finally {
+    stop();
+    danger.cancelScope(scopeId);
+    productionSafetyStore.cancelScope(scopeId);
+    if (triggerStructureConfirmationScope === scopeId) triggerStructureConfirmationScope = undefined;
+    saving.value = false;
+  }
+}
+
 async function applyChanges() {
   const indexWriteWarning = schemaIndexWriteWarning();
   if (indexWriteWarning) {
@@ -6994,6 +7426,10 @@ async function applyChanges() {
   if (oracleIndexMutation) return applyOracleIndexPlan();
   if (newOracleForeignKeyPlan.value) return applyOracleForeignKeyCreatePlan();
   if (existingOracleForeignKeyPlan.value) return applyOracleForeignKeyPlan();
+  if (triggerSourceRefreshRequired.value.size) {
+    errorMessage.value = t("oracleTrigger.reloadBaseline");
+    return false;
+  }
   // Layer B runtime guard: a stale `concurrently: true` whose availability is
   // no longer enabled must never be executed — reject the save with an
   // explicit error even if normalization was skipped (race / non-UI caller).
@@ -7002,6 +7438,11 @@ async function applyChanges() {
     errorMessage.value = blockingConcurrentWarning;
     return false;
   }
+  if (triggerStructureRecovery.value) {
+    errorMessage.value = t("oracleTrigger.reloadBaseline");
+    return false;
+  }
+  if (triggerStructurePlan.value) return applyTriggerStructure();
   const sql = previewSqlText.value;
   const submittedStarRocksTarget = starrocksStatusTarget.value;
   const connection = store.getConfig(props.connectionId);
@@ -7368,6 +7809,7 @@ onMounted(() => {
 });
 
 onActivated(() => {
+  triggerStructureActive.value = true;
   registerStructureEditorShortcuts();
   observeStructureToolbar();
   observeStructureHorizontalScroller();
@@ -7389,6 +7831,8 @@ onActivated(() => {
   if (activeTab.value === "ddl") scheduleDdlEditorInit();
 });
 onDeactivated(() => {
+  triggerStructureActive.value = false;
+  cancelTriggerStructureConfirmation();
   stopStructureToolbarObserver();
   copyColumnsDialogOpen.value = false;
   pasteColumnsDialogOpen.value = false;
@@ -7743,6 +8187,26 @@ watch(
 
 <template>
   <div ref="rootRef" class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]" :data-structure-density="localStructureDensity" :style="structureDensityStyle">
+    <ObjectSourceDialog
+      v-if="triggerSourceTarget"
+      :key="JSON.stringify(triggerSourceTarget.target)"
+      ref="triggerSourceDialog"
+      v-model:open="triggerSourceOpen"
+      :connection-id="triggerSourceTarget.target.connectionId"
+      :database="triggerSourceTarget.target.database"
+      :catalog="triggerSourceTarget.target.catalog"
+      :schema="triggerSourceTarget.target.owner"
+      :execution-schema="triggerSourceTarget.target.executionSchema"
+      :name="triggerSourceTarget.target.name"
+      object-type="TRIGGER"
+      trigger-identity-mode="exact"
+      :database-type="databaseType"
+      :dialect="codeMirrorSqlDialect(databaseType)"
+      :format-dialect="sqlFormatDialectForDbType(databaseType)"
+      initial-editing
+      @trigger-read="mergeTriggerSourceSnapshot"
+      @trigger-result="recordTriggerSourceResult"
+    />
     <DangerConfirmDialog v-model:open="primaryKeyResultOpen" :title="t(primaryKeyResultTitle)" :message="primaryKeyResultMessage" :confirm-label="t('common.close')">
       <template #options>
         <details class="rounded border p-2 text-xs">
@@ -9168,6 +9632,7 @@ watch(
                   :class="[trigger.id === selectedTriggerId ? 'bg-accent text-accent-foreground' : '', trigger.markedForDrop ? 'bg-destructive/5 opacity-60' : '']"
                   @click="selectTrigger(trigger)"
                 >
+                  <span v-if="exactOracleTriggerMetadata(trigger.original)" class="max-w-[35%] truncate whitespace-pre font-mono text-muted-foreground" :title="trigger.original?.oracle_metadata?.owner">{{ trigger.original?.oracle_metadata?.owner }}.</span>
                   <template v-if="renamingTriggerId === trigger.id">
                     <Input
                       v-model="trigger.name"
@@ -9231,7 +9696,13 @@ watch(
               <!-- Statement editor (detail): title + SQL sized to its content -->
               <div v-if="selectedTrigger" class="flex min-h-0 flex-1 flex-col rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="selectedTrigger.markedForDrop ? 'bg-destructive/5 opacity-60' : ''">
                 <div class="flex min-w-0 items-center gap-1.5 font-mono font-medium" :title="selectedTrigger.name">
+                  <span v-if="exactOracleTriggerMetadata(selectedTrigger.original)" class="max-w-[35%] truncate whitespace-pre text-muted-foreground" :title="selectedTrigger.original?.oracle_metadata?.owner">{{ selectedTrigger.original?.oracle_metadata?.owner }}.</span>
                   <span class="truncate">{{ selectedTrigger.name || t("structureEditor.triggerName") }}</span>
+                  <span v-if="exactOracleTriggerMetadata(selectedTrigger.original)" class="text-sm font-normal">{{
+                    selectedTrigger.original?.oracle_metadata?.reads.validity?.state === "available" && typeof selectedTrigger.original?.valid === "boolean" ? (selectedTrigger.original.valid ? "VALID" : "INVALID") : t("oracleTrigger.unknown")
+                  }}</span>
+                  <Button v-if="exactOracleTriggerMetadata(selectedTrigger.original)" variant="outline" size="sm" class="ml-auto shrink-0 font-sans" :disabled="saving || triggersLoading" @click="openTriggerFullSource(selectedTrigger)">{{ t("oracleTrigger.editFullSource") }}</Button>
+                  <Button v-if="triggerSourceRefreshRequired.has(selectedTrigger.id)" variant="outline" size="sm" class="shrink-0 font-sans" :disabled="saving || triggersLoading" @click="reloadTriggerDraftAfterSource(selectedTrigger)">{{ t("oracleTrigger.refreshDraft") }}</Button>
                 </div>
                 <textarea
                   v-model="selectedTrigger.statement"
@@ -9399,19 +9870,20 @@ watch(
               {{ t("common.loading") }}
             </div>
             <template v-else>
-              <div v-if="ddlContent && !ddlSearchOpen" class="absolute right-3 top-3 z-10 flex items-center gap-1.5">
-                <DdlStorageToggle :database-type="databaseType" :disabled="ddlDirty" />
+              <div v-if="(ddlContent || ddlLoadError) && !ddlSearchOpen" class="absolute right-3 top-3 z-10 flex items-center gap-1.5">
+                <DdlStorageToggle :database-type="databaseType" :disabled="ddlDirty" :preferences="{ includeDdlStorage: ddlStorageIncluded, compactDdlSql: ddlCompacted, separateDdlIndexes: ddlIndexesSeparated }" />
                 <Button v-if="ddlDirty" variant="outline" size="sm" class="h-7 gap-1 px-2" :title="t('structureEditor.resetDdl')" @click="resetDdlDraft">
                   <RotateCcw class="h-3.5 w-3.5" />
                   {{ t("structureEditor.resetDdl") }}
                 </Button>
-                <Button variant="outline" size="sm" class="h-7 gap-1 px-2" :title="t('grid.copyDdl')" @click="copyDdlContent">
+                <Button variant="outline" size="sm" class="h-7 gap-1 px-2" :disabled="!!ddlLoadError" :title="t('grid.copyDdl')" @click="copyDdlContent">
                   <Copy class="h-3.5 w-3.5" />
                   {{ t("grid.copyDdl") }}
                 </Button>
               </div>
-              <div ref="ddlEditorContainer" class="structure-ddl-editor h-full min-h-full min-w-0 w-full"></div>
-              <EditorSearchPanel v-if="ddlEditorView" ref="ddlSearchPanelRef" :view="ddlEditorView" @open="ddlSearchOpen = true" @close="ddlSearchOpen = false" />
+              <p v-if="ddlLoadError" role="alert" class="pt-10 text-sm text-destructive">{{ ddlLoadError }}</p>
+              <div v-else ref="ddlEditorContainer" class="structure-ddl-editor h-full min-h-full min-w-0 w-full"></div>
+              <EditorSearchPanel v-if="ddlEditorView && !ddlLoadError" ref="ddlSearchPanelRef" :view="ddlEditorView" @open="ddlSearchOpen = true" @close="ddlSearchOpen = false" />
             </template>
           </TabsContent>
         </Tabs>
@@ -9488,6 +9960,11 @@ watch(
     </div>
     <div v-if="errorMessage || draftHydrationError" class="shrink-0 rounded-md border border-destructive/30 bg-destructive/10 px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] text-destructive">
       {{ errorMessage || draftHydrationError }}
+    </div>
+
+    <div v-if="triggerStructureRecovery" class="flex shrink-0 items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-sm" role="status">
+      <span class="min-w-0 flex-1">{{ t("oracleTrigger.reloadBaseline") }}</span>
+      <Button variant="outline" size="sm" :disabled="saving || loading" @click="reconcileTriggerStructure">{{ t("oracleTrigger.reconcileStructure") }}</Button>
     </div>
 
     <div class="flex shrink-0 items-center justify-end gap-2">

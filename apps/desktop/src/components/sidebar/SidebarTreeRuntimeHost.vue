@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { uuid } from "@/lib/common/utils";
 import { computed, defineAsyncComponent, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
@@ -15,6 +16,8 @@ import { canDropDatabaseNode, notifyDatabaseBrowserMutation } from "@/lib/databa
 import { canDropDatabaseTables, canEmptyDatabaseTables, useDatabaseTableEmpty } from "@/composables/useDatabaseTableEmpty";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { normalizeBackendError } from "@/lib/backend/errorUtils";
+import { isConnectionTimeoutErrorMessage } from "@/lib/sql/queryError";
 import {
   Ban,
   BarChart3,
@@ -116,8 +119,25 @@ import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchF
 import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguSyntheticTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
 import { buildXuguSchedulerJobSql, type XuguSchedulerJobAction } from "@/lib/database/xuguSchedulerJobSql";
+import { nativeJobAdminSupported } from "@/lib/database/nativeJobAdmin";
 import { canViewDatabaseObjectDependencies, databaseDependencyProviderFor } from "@/lib/database/databaseObjectDependencies";
 import { oracleTarget } from "@/lib/database/oracleObjectDependencies";
+import { exactOracleTriggerNodeMetadata, oracleTriggerReadOptions } from "@/lib/database/oracleTriggerIdentity";
+import type { OracleTriggerSqlBinding } from "@/lib/database/oracleTriggerSql";
+import {
+  prepareOracleTriggerPlan,
+  prepareOracleTriggerDropBatchPlan,
+  executeOracleTriggerDropBatchPlan,
+  readOracleTriggerSnapshot,
+  verifyOracleTriggerDeletion,
+  type OracleTriggerAction,
+  type OracleTriggerPlan,
+  type OracleTriggerDropBatchPlan,
+  type OracleTriggerExecutionResult,
+} from "@/lib/database/oracleTriggerPlan";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { confirmOracleTriggerPlan } from "@/lib/database/oracleTriggerActions";
+import { oracleCompileUnsupportedReason } from "@/lib/database/oracleInvalidObjects";
 import type { ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
 import { sidebarObjectTemplateForGroup } from "@/lib/sidebar/databaseObjectTemplates";
@@ -204,6 +224,7 @@ import { executeOceanbaseTableClone, executeOceanbaseTableCloneData, oceanbaseCl
 import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
 import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { redisFlushDbPreview } from "@/lib/redis/redisCommandPreview";
 import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
 import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
 import { prepareOracleRoutineRename, executeOracleRoutineRename, OracleRoutineRenameFailure, type OracleRoutineRenamePlan } from "@/lib/table/oracleRoutineRename";
@@ -265,7 +286,7 @@ import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { buildTriggerToggleSql, supportsTriggerToggle } from "@/lib/database/triggerToggleSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
-import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { createSidebarActionRequest, createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionRequest, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
 import { createSidebarMenuContext, normalizeSidebarMenuDescriptors } from "@/lib/sidebar/sidebarTreeMenuDescriptors";
 import { driverProfileDatabaseWorkspace } from "@/lib/database/driverProfileExtensions";
@@ -545,9 +566,10 @@ const emit = defineEmits<{
   "context-menu": [event: MouseEvent, node: TreeNode, items: ContextMenuItem[]];
   "open-ddl": [node: TreeNode];
   "open-elasticsearch-index-metadata": [node: TreeNode, kind: ElasticsearchIndexMetadataKind];
-  "open-object-source": [node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection];
+  "open-object-source": [node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection, createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding>];
   "open-procedure": [node: TreeNode];
   "open-settings": [initialTab: string];
+  "open-connection-settings": [connectionId: string];
   "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
   "open-visible-databases": [node: TreeNode];
   "open-visible-schemas": [node: TreeNode];
@@ -758,9 +780,9 @@ function claimTreeItemDialogOwnership() {
   sidebarTreeDialogOwner.value = treeItemDialogOwner;
 }
 
-function routeTreeItemDialogController() {
+function routeTreeItemDialogController(node = activeNode.value) {
   const controller = getTreeItemDialogController();
-  const target = createSidebarActionTarget(activeNode.value);
+  const target = createSidebarActionTarget(node);
   sidebarFormTarget.value = target;
   const routedController = createRoutedSidebarDialogController(controller, {
     node: target,
@@ -882,6 +904,10 @@ async function openDirectNavigationNode(node: TreeNode, requestId: number) {
     queryStore.createTab(node.connectionId, "", `${connectionName}:access-control`, "nacos-access-control");
   } else if (node.type === "meilisearch-system") {
     queryStore.createTab(node.connectionId, "default", t("meilisearch.systemManagement"), "meilisearch-system");
+  } else if (node.type === "dameng-job-admin") {
+    queryStore.openDamengJobAdmin(node.connectionId);
+  } else if (node.type === "database-job-admin") {
+    queryStore.openDatabaseJobAdmin(node.connectionId);
   }
 }
 
@@ -901,7 +927,7 @@ async function toggle(requestId = beginNavigationRequest()) {
       if (!isCurrentNavigationRequest(requestId)) return;
       const errMsg = e?.message || String(e);
       if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-      toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+      toastConnectFailed(node.connectionId, e);
       openDriverStoreForInstallError(errMsg, node);
     }
     return;
@@ -1043,7 +1069,7 @@ async function toggle(requestId = beginNavigationRequest()) {
       }
       const errMsg = e?.message || String(e);
       if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-      toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+      toastConnectFailed(node.connectionId, e);
       openDriverStoreForInstallError(errMsg);
     }
     return;
@@ -1145,9 +1171,6 @@ async function toggle(requestId = beginNavigationRequest()) {
     } else if (node.type === "dameng-roles" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openDamengRoles(node.connectionId);
-    } else if (node.type === "dameng-job-admin" && node.connectionId) {
-      await connectionStore.ensureConnected(node.connectionId);
-      queryStore.openDamengJobAdmin(node.connectionId);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await connectionStore.loadMongoCollections(node.connectionId, node.database);
     } else if (node.type === "vector-database" && node.connectionId && node.database) {
@@ -1236,7 +1259,7 @@ async function toggle(requestId = beginNavigationRequest()) {
     if (!wasExpanded) node.isExpanded = false;
     const errMsg = e?.message || String(e);
     if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(errMsg);
   }
 }
@@ -1322,13 +1345,22 @@ function openDriverStoreForInstallError(errMsg: string, node: TreeNode = activeN
   if (focus) window.dispatchEvent(new CustomEvent("dbx-open-driver-store", { detail: focus }));
 }
 
+// 连接/取数失败的统一 toast（issue #13233）：命中「连接超时」类错误时附带「修改超时时间」
+// 动作，点击后经 open-connection-settings 事件链打开该连接的编辑对话框高级页（与查询结果
+// 错误区的同名入口一致）。非超时错误保持原有纯提示行为，不带动作。
+function toastConnectFailed(connectionId: string | undefined, error: unknown) {
+  const rawMessage = (error as { message?: string } | undefined)?.message || String(error);
+  const action = connectionId && isConnectionTimeoutErrorMessage(rawMessage, normalizeBackendError(error) ?? undefined) ? { label: t("editor.changeConnectionTimeout"), onClick: () => emit("open-connection-settings", connectionId) } : undefined;
+  toast(t("connection.connectFailed", { message: translateBackendError(t, error) }), 5000, action);
+}
+
 async function loadMoreObjectGroupChildren() {
   const node = activeNode.value;
   const searchFilter = node.loadMore?.parentId ? connectionStore.sidebarTableSearchQueries[node.loadMore.parentId]?.trim() || "" : "";
   try {
     await connectionStore.loadMoreObjectGroupChildren(node, { searchFilter });
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -1337,7 +1369,7 @@ async function loadAllObjectGroupChildren() {
   try {
     await connectionStore.loadAllObjectGroupChildren(node);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -1985,7 +2017,7 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
       await toggle();
     }
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(e?.message || String(e));
   }
 }
@@ -2047,7 +2079,7 @@ async function openDatabaseBrowser() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openDatabaseBrowser(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(e?.message || String(e));
   }
 }
@@ -2064,7 +2096,7 @@ async function openProfileDatabaseWorkspace() {
     const target = workspace.resolveTarget?.(node.database, "database") ?? { database: node.database };
     queryStore.openDriverProfileWorkspace(node.connectionId, target.database, t(workspace.tabTitleKey), workspace.mode, workspace.tabScope, target.branch);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2083,7 +2115,7 @@ async function openProfileConnectionWorkspace() {
     const target = workspace.resolveTarget?.(database, "connection") ?? { database };
     queryStore.openDriverProfileWorkspace(node.connectionId, target.database, t(workspace.tabTitleKey), workspace.mode, workspace.tabScope, target.branch);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2095,7 +2127,7 @@ async function openUserAdmin() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openUserAdmin(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2107,7 +2139,7 @@ async function openXuguUserPermissions() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openXuguUserAdmin(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toastConnectFailed(node.connectionId, e?.message || String(e));
   }
 }
 
@@ -2119,7 +2151,7 @@ async function openProcessList() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openProcessList(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2131,7 +2163,7 @@ async function openSqlServerActivityTrace() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openSqlServerActivityTrace(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2153,7 +2185,7 @@ async function openServerDashboard() {
       queryStore.openMysqlDashboard(node.connectionId);
     }
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2165,7 +2197,7 @@ async function openDamengUsers() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openDamengUsers(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2177,7 +2209,7 @@ async function openDamengRoles() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openDamengRoles(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2189,7 +2221,19 @@ async function openDamengJobAdmin() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openDamengJobAdmin(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
+  }
+}
+
+async function openDatabaseJobAdmin() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openDatabaseJobAdmin(node.connectionId);
+  } catch (error) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, error) }), 5000);
   }
 }
 
@@ -2232,6 +2276,7 @@ async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
           database: node.database,
           schema: node.schema,
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          defaultSchema: config?.default_schema,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           tableName: node.label,
@@ -2251,7 +2296,7 @@ async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
     if (openDefault) await queryStore.openDefaultQuery({ connectionId: node.connectionId, database });
     else queryStore.createTab(node.connectionId, database, undefined, "query", connection.default_schema);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(e?.message || String(e));
   }
 }
@@ -2299,7 +2344,7 @@ async function loadTemplateContext(allowView = false, node: TreeNode = activeNod
   }
 
   const identifierQuote = connectionStore.connectionIdentifierQuote(node.connectionId);
-  return { node, dbType, driverProfile: config?.driver_profile, identifierQuote, tableSchema, columns, tableType };
+  return { node, dbType, driverProfile: config?.driver_profile, identifierQuote, tableSchema, columns, tableType, defaultSchema: config?.default_schema };
 }
 
 type TableTemplateContext = NonNullable<Awaited<ReturnType<typeof loadTemplateContext>>>;
@@ -2334,6 +2379,7 @@ async function newSelectTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            defaultSchema: context.defaultSchema,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
             tableName: context.node.label,
@@ -2354,6 +2400,7 @@ async function newSelectTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      defaultSchema: context.defaultSchema,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       tableName: context.node.label,
@@ -2361,7 +2408,7 @@ async function newSelectTemplate() {
     });
     openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
@@ -2407,6 +2454,7 @@ function insertTemplateOptions(context: TableTemplateContext, rowCount: number) 
     database: context.node.database,
     schema: context.tableSchema,
     includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    defaultSchema: context.defaultSchema,
     quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     tableName: context.node.label,
     columns: context.columns,
@@ -2433,7 +2481,7 @@ async function runInsertTemplate(rowCount: number, prefetchedContexts?: TableTem
     const title = contexts.length === 1 ? undefined : `INSERT - ${contexts.map((context) => context.node.label).join(", ")}`;
     openSqlTemplateTab(tabTarget.connectionId!, tabTarget.database!, tabTarget.schema, tabTarget.catalog, sql, title);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
@@ -2452,6 +2500,7 @@ async function newUpdateTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            defaultSchema: context.defaultSchema,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
@@ -2471,13 +2520,14 @@ async function newUpdateTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      defaultSchema: context.defaultSchema,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
     openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
@@ -2496,6 +2546,7 @@ async function newDeleteTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            defaultSchema: context.defaultSchema,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
@@ -2515,13 +2566,14 @@ async function newDeleteTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      defaultSchema: context.defaultSchema,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
     openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
@@ -2689,7 +2741,7 @@ async function refresh() {
         toast(t("connection.objectCacheRefreshFailed", { message: translateBackendError(t, e) }), 5000);
         return;
       }
-      toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+      toastConnectFailed(node.connectionId, e);
       openDriverStoreForInstallError(e?.message || String(e), node);
     }
     return;
@@ -2697,7 +2749,7 @@ async function refresh() {
   try {
     await connectionStore.refreshTreeNode(node);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(e?.message || String(e), node);
   }
 }
@@ -3051,6 +3103,11 @@ async function refreshDropTableChildObjectPreviewSql() {
 function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false, dependencyNode?: TreeNode) {
   const node = dependencyNode || activeNode.value;
   const initialSection = dependencyNode ? "dependencies" : undefined;
+  // JOB has native catalog identity, not GET_DDL source. Keep Xugu's existing source path.
+  if (node.type === "job" && node.connectionId && nativeJobAdminSupported(connectionStore.getConfig(node.connectionId))) {
+    queryStore.openDatabaseJobAdmin(node.connectionId, node.schema && currentDatabaseType() !== "dameng" ? { kind: "scheduler", owner: node.schema, name: node.objectName || node.label } : undefined);
+    return;
+  }
   if (!node.connectionId || !node.database) return;
   if (viewPackageBody && (node.type !== "package" || node.xuguPackageBodyAvailable !== true || currentDatabaseType() !== "xugu")) return;
   const sourceNode: TreeNode = viewPackageBody ? { ...node, type: "package-body" } : node;
@@ -3091,7 +3148,7 @@ async function openDatabaseObjectDependencies() {
   const node = activeNode.value;
   const provider = databaseDependencyProviderFor(currentDatabaseType());
   if (!provider || !node.connectionId || !node.database || !provider.supports(node)) return;
-  if (currentDatabaseType() === "oracle" || currentDatabaseType() === "oceanbase-oracle") {
+  if (currentDatabaseType() === "oracle" || currentDatabaseType() === "oceanbase-oracle" || (currentDatabaseType() === "dameng" && node.type === "trigger")) {
     const target = oracleTarget(node);
     if (!target) return;
     const connection = connectionStore.getConfig(node.connectionId);
@@ -3107,7 +3164,7 @@ async function openDatabaseObjectDependencies() {
         queryStore.openObjectProperties({ connectionId: node.connectionId, database: propertyDatabase, catalog: node.catalog, schema: node.parentSchema, name: node.parentName, objectType: "TABLE", initialTab: "relations", focusObject: { owner: target.schema, name: target.name, type: "INDEX" } });
       return;
     }
-    openObjectSourceDialog(false, false, { ...node, type: target.type.toLowerCase() as "procedure" | "function" | "package", schema: target.schema, objectName: target.name, label: target.name, parentType: undefined, parentName: undefined, parentSchema: undefined });
+    openObjectSourceDialog(false, false, { ...node, type: target.type.toLowerCase() as "procedure" | "function" | "package" | "trigger", schema: target.schema, objectName: target.name, label: target.name, parentType: undefined, parentName: undefined, parentSchema: undefined });
     return;
   }
   const sql = provider.buildQuery(node);
@@ -3204,6 +3261,10 @@ function findTreeNodeById(nodes: readonly TreeNode[], id: string): TreeNode | nu
 }
 
 async function toggleTriggerState(node: TreeNode, enabled: boolean) {
+  if (exactOracleTriggerNodeMetadata(node)) {
+    await runExactTriggerNodeAction(node, enabled ? "enable" : "disable");
+    return;
+  }
   if (!node.connectionId || !node.database) return;
   const databaseType = databaseTypeForNode(node);
   const triggerName = node.meta && "name" in node.meta ? (node.meta as TriggerInfo).name : node.objectName || node.label.replace(/\s+\(.+\)$/, "");
@@ -3242,8 +3303,138 @@ async function toggleTriggerState(node: TreeNode, enabled: boolean) {
   }
 }
 
+const triggerActionBusy = new Set<string>();
+const triggerActionHostActive = ref(true);
+const triggerActionFeedback = shallowRef<{ node: TreeNode; plan: OracleTriggerPlan; message: string }>();
+const triggerRecoveryBusy = ref(false);
+const hasTriggerActionFeedback = computed(() => !!triggerActionFeedback.value && sidebarTreeDialogOwner.value === treeItemDialogOwner && compileErrorMessage.value === triggerActionFeedback.value.message);
+watch(showCompileErrorDialog, (open) => {
+  if (!open) triggerActionFeedback.value = undefined;
+});
+
+function removeVerifiedTriggerNode(node: TreeNode, plan: OracleTriggerPlan) {
+  const live = findSidebarActionTarget(visibleTreeNodes(), createSidebarActionTarget(node));
+  if (!live || exactOracleTriggerNodeMetadata(live)?.objectId !== plan.before.metadata.objectId) return;
+  closeDroppedTableObjectTabsForNode(live);
+  connectionStore.removeTreeNode(live.id);
+  sidebarTreeContext?.removeVerifiedTriggerNode?.(live);
+  releaseActiveNodeReference([live.id]);
+}
+
+async function refreshTriggerActionFeedback() {
+  const feedback = triggerActionFeedback.value;
+  if (!feedback || !hasTriggerActionFeedback.value || triggerRecoveryBusy.value) return;
+  const current = () => triggerActionHostActive.value && showCompileErrorDialog.value && triggerActionFeedback.value === feedback && hasTriggerActionFeedback.value;
+  triggerRecoveryBusy.value = true;
+  try {
+    let detail: string;
+    if (feedback.plan.action === "delete") {
+      await verifyOracleTriggerDeletion(feedback.plan.target, feedback.plan);
+      if (!current()) return;
+      removeVerifiedTriggerNode(feedback.node, feedback.plan);
+      detail = t("processList.oracleInvalidObjects.batchStatus.deleted");
+    } else {
+      const snapshot = await readOracleTriggerSnapshot(feedback.plan.target);
+      if (!current()) return;
+      if (!snapshot.exists || snapshot.metadata.objectId !== feedback.plan.before.metadata.objectId) throw new Error(t("oracleTrigger.reloadBaseline"));
+      const live = findSidebarActionTarget(visibleTreeNodes(), createSidebarActionTarget(feedback.node));
+      const trigger = snapshot.raw.trigger;
+      if (live && trigger && exactOracleTriggerNodeMetadata(live)?.objectId === feedback.plan.before.metadata.objectId) live.meta = trigger;
+      detail = `${t("eventTrigger.enabled")}: ${snapshot.metadata.reads.enabled?.state === "available" && typeof trigger?.enabled === "boolean" ? t(trigger.enabled ? "objects.enabled" : "objects.disabled") : t("oracleTrigger.unknown")}\n${t("objects.validity")}: ${snapshot.metadata.reads.validity?.state === "available" && typeof trigger?.valid === "boolean" ? (trigger.valid ? "VALID" : "INVALID") : t("oracleTrigger.unknown")}\n${snapshot.metadata.errors?.map((error) => `${error.line ?? "?"}:${error.position ?? "?"} ${error.text}`).join("\n") ?? ""}`;
+    }
+    feedback.message += `\n\n${t("oracleTrigger.verifyReadOnly")}\n${detail}`;
+    compileErrorMessage.value = feedback.message;
+  } catch (error) {
+    if (current()) {
+      feedback.message += `\n\n${error instanceof Error ? error.message : String(error)}`;
+      compileErrorMessage.value = feedback.message;
+    }
+  } finally {
+    triggerRecoveryBusy.value = false;
+  }
+}
+
+function viewTriggerActionSource() {
+  const feedback = triggerActionFeedback.value;
+  if (!feedback || !hasTriggerActionFeedback.value) return;
+  showCompileErrorDialog.value = false;
+  activateActionTarget(feedback.node);
+  openObjectSourceDialog(false);
+}
+
+function reportExactTriggerResult(node: TreeNode, plan: OracleTriggerPlan, result: OracleTriggerExecutionResult) {
+  if (result.cancelled || !triggerActionHostActive.value) return;
+  const successful = result.steps.every((step) => step.state === "committed") && !result.steps.some((step) => step.verification === "invalid");
+  const snapshot = result.snapshot;
+  if (snapshot?.exists && snapshot.raw.trigger && snapshot.metadata.objectId === plan.before.metadata.objectId) {
+    const live = findSidebarActionTarget(visibleTreeNodes(), createSidebarActionTarget(node));
+    if (live && exactOracleTriggerNodeMetadata(live)?.objectId === plan.before.metadata.objectId) live.meta = snapshot.raw.trigger;
+  }
+  if (successful && !result.refreshError) {
+    toast(
+      plan.action === "delete"
+        ? t("contextMenu.dropTableChildObjectSuccess", { name: plan.target.name })
+        : plan.action === "compile"
+          ? t("contextMenu.compileObjectSuccess", { name: plan.target.name })
+          : plan.action === "enable" || plan.action === "disable"
+            ? t(plan.action === "enable" ? "contextMenu.enableTriggerSuccess" : "contextMenu.disableTriggerSuccess", { name: plan.target.name })
+            : t("objects.sourceSaved"),
+      2500,
+    );
+    return;
+  }
+  // The existing operation-error dialog retains the fixed target, SQL, native
+  // errors and per-step outcomes instead of reducing unknown to a success toast.
+  compileErrorTitle.value = t("oracleStructureResult.resultTitle");
+  compileErrorMessage.value = `${plan.target.owner}.${plan.target.name}\n\n${result.steps.map((step) => `${t(`oceanbasePrimaryKey.${step.state}`)} · ${step.verification}\n${step.sql}\n${[step.error, step.readbackError].filter(Boolean).join("\n")}`).join("\n\n")}\n${result.refreshError ?? ""}\n${snapshot?.metadata.errors?.map((error) => `${error.line ?? "?"}:${error.position ?? "?"} ${error.text}`).join("\n") ?? ""}`;
+  triggerActionFeedback.value = { node: createSidebarActionTarget(node), plan, message: compileErrorMessage.value };
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController(node);
+  showCompileErrorDialog.value = true;
+}
+
+async function prepareExactTriggerNodePlan(node: TreeNode, action: OracleTriggerAction): Promise<OracleTriggerPlan> {
+  const exact = exactOracleTriggerNodeMetadata(node);
+  if (!exact || !node.connectionId || !node.database) throw new Error(t("oracleTrigger.reloadBaseline"));
+  const target = { connectionId: node.connectionId, database: node.database, catalog: node.catalog, owner: exact.owner, name: exact.name, executionSchema: node.schema || exact.owner };
+  const expectedObjectId = exact.objectId ?? undefined;
+  await connectionStore.ensureConnected(target.connectionId);
+  return prepareOracleTriggerPlan({ target, action, expectedObjectId });
+}
+
+async function runExactTriggerNodeAction(node: TreeNode, action: OracleTriggerAction) {
+  if (triggerActionBusy.has(node.id)) return;
+  triggerActionBusy.add(node.id);
+  const selection = JSON.stringify([connectionStore.selectedTreeNodeId, connectionStore.selectedTreeNodeIds]);
+  const target = createSidebarActionTarget(node);
+  const expectedObjectId = exactOracleTriggerNodeMetadata(node)?.objectId;
+  const current = () => {
+    const live = findSidebarActionTarget(visibleTreeNodes(), target);
+    return triggerActionHostActive.value && !!live && JSON.stringify([connectionStore.selectedTreeNodeId, connectionStore.selectedTreeNodeIds]) === selection && exactOracleTriggerNodeMetadata(live)?.objectId === expectedObjectId;
+  };
+  try {
+    const plan = await prepareExactTriggerNodePlan(node, action);
+    if (!current()) return;
+    const result = await confirmOracleTriggerPlan(plan, { isCurrent: current });
+    if (action !== "delete" && triggerActionHostActive.value && result.snapshot?.metadata.objectId === plan.before.metadata.objectId && !result.cancelled && result.steps.every((step) => step.state === "committed")) {
+      try {
+        await connectionStore.refreshTreeNode(node, { skipObjectCacheInvalidation: true });
+      } catch (error) {
+        result.refreshError = [result.refreshError, error instanceof Error ? error.message : String(error)].filter(Boolean).join("\n");
+      }
+    }
+    if (action === "delete" && result.steps.some((step) => step.state === "committed" && step.verification === "deleted")) removeVerifiedTriggerNode(node, plan);
+    reportExactTriggerResult(node, plan, result);
+  } catch (error) {
+    if (triggerActionHostActive.value) toast(t("contextMenu.tableOperationFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    triggerActionBusy.delete(node.id);
+  }
+}
+
 function triggerToggleMenuItems(node: TreeNode): ContextMenuItem[] {
-  const dbType = databaseTypeForNode(node);
+  const exact = exactOracleTriggerNodeMetadata(node);
+  const dbType = exact ? (exact.engine === "dm" ? "dameng" : exact.engine) : databaseTypeForNode(node);
   if (!supportsTriggerToggle(dbType)) return [];
   const triggerName = node.meta && "name" in node.meta ? (node.meta as TriggerInfo).name : node.objectName || node.label.replace(/\s+\(.+\)$/, "");
   if (!triggerName) return [];
@@ -3342,6 +3533,7 @@ function requestDropTableChildObject() {
 }
 
 function canDropTreeNode(node: TreeNode): boolean {
+  if (exactOracleTriggerNodeMetadata(node)) return !!node.connectionId && !!node.database;
   if (["neo4j", "nebula"].includes(databaseTypeForNode(node) || "")) return false;
   if (isSqlServerLinkedNode(node)) return false;
   if (isManagedTypeNode(node)) return !!node.connectionId && !!node.database;
@@ -3524,8 +3716,56 @@ async function emptySqlForTreeNode(node: TreeNode): Promise<string | null> {
   });
 }
 
+const exactBatchDropPreview = shallowRef<{ targets: TreeNode[]; selection: string; entries: { node: TreeNode; sql: string; trigger?: OracleTriggerPlan }[]; plan: OracleTriggerDropBatchPlan }>();
+const exactBatchDropLoading = ref(false);
+const exactBatchDropError = ref("");
+const exactBatchDropExecuting = ref(false);
+let exactBatchDropSerial = 0;
+
+function isExactBatchDropPreviewCurrent(preview: NonNullable<typeof exactBatchDropPreview.value>): boolean {
+  return (
+    triggerActionHostActive.value &&
+    sidebarTreeDialogOwner.value === treeItemDialogOwner &&
+    exactBatchDropPreview.value === preview &&
+    preview.targets === batchDropTargets.value &&
+    JSON.stringify([connectionStore.selectedTreeNodeId, connectionStore.selectedTreeNodeIds]) === preview.selection &&
+    preview.entries.every(({ node, trigger }) => {
+      const live = findSidebarActionTarget(visibleTreeNodes(), createSidebarActionTarget(node));
+      return !!live && (!trigger || exactOracleTriggerNodeMetadata(live)?.objectId === trigger.before.metadata.objectId);
+    })
+  );
+}
 async function refreshBatchDropPreviewSql() {
   const targets = batchDropTargets.value;
+  const serial = ++exactBatchDropSerial;
+  exactBatchDropPreview.value = undefined;
+  exactBatchDropError.value = "";
+  if (targets.some((target) => !!exactOracleTriggerNodeMetadata(target))) {
+    exactBatchDropLoading.value = true;
+    batchDropPreviewSql.value = "";
+    const selection = JSON.stringify([connectionStore.selectedTreeNodeId, connectionStore.selectedTreeNodeIds]);
+    try {
+      const entries: { node: TreeNode; sql: string; trigger?: OracleTriggerPlan }[] = [];
+      for (const node of targets) {
+        const trigger = exactOracleTriggerNodeMetadata(node) ? await prepareExactTriggerNodePlan(node, "delete") : undefined;
+        const sql = trigger?.steps[0]?.sql ?? (await dropSqlForTreeNode(node, { cascade: canBatchDropCascade.value && batchDropCascade.value }));
+        if (!sql) throw new Error("Drop SQL preview is unavailable");
+        entries.push({ node, sql, trigger });
+      }
+      if (serial !== exactBatchDropSerial || targets !== batchDropTargets.value) return;
+      const first = entries.find((entry) => entry.trigger)!.trigger!;
+      if (entries.some(({ node }) => node.connectionId !== first.target.connectionId || node.database !== first.target.database || node.catalog !== first.target.catalog)) throw new Error("Select trigger deletions within the same connection, database and catalog");
+      const plan = prepareOracleTriggerDropBatchPlan({ target: first.target, engine: first.before.metadata.engine, entries: entries.map(({ node, sql, trigger }) => ({ id: node.id, sql, ...(trigger ? { triggerPlan: trigger } : { executionSchema: node.schema }) })) });
+      exactBatchDropPreview.value = { targets, selection, entries, plan };
+      batchDropPreviewSql.value = entries.map((entry) => entry.sql).join("\n\n");
+    } catch (error) {
+      if (serial === exactBatchDropSerial) exactBatchDropError.value = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (serial === exactBatchDropSerial) exactBatchDropLoading.value = false;
+    }
+    return;
+  }
+  exactBatchDropLoading.value = false;
   const mongoIndexTargets = targets.filter(canDropMongoIndexNode);
   if (mongoIndexTargets.length) {
     batchDropPreviewSql.value = mongoIndexTargets.map((target) => mongoIndexDropPreview(target, mongoIndexNameForNode(target))).join("\n");
@@ -3565,8 +3805,9 @@ function requestBatchDrop() {
     explainIndividualIndexEditing();
     return;
   }
-  const targets = selectedBatchDropTargets();
-  if (!targets.length) return;
+  const selected = selectedBatchDropTargets();
+  if (!selected.length) return;
+  const targets = selected.some((target) => !!exactOracleTriggerNodeMetadata(target)) ? selected.map(createSidebarActionTarget) : selected.slice();
   const managed = targets.filter(isManagedTypeNode);
   if (managed.length) {
     void (async () => {
@@ -3712,6 +3953,10 @@ function requestDropSelectedNodes(): boolean {
 }
 
 function requestDropSelectedNode(): boolean {
+  if (exactOracleTriggerNodeMetadata(activeNode.value)) {
+    void runExactTriggerNodeAction(createSidebarActionTarget(activeNode.value), "delete");
+    return true;
+  }
   if (isSchemaIndexNode(activeNode.value)) return requestSchemaIndexDelete(activeNode.value);
   if (["neo4j", "nebula"].includes(currentDatabaseType() || "")) return false;
   if (activeNode.value.type === "table") {
@@ -4444,6 +4689,10 @@ async function confirmBatchDrop() {
     explainIndividualIndexEditing();
     return;
   }
+  if (targets.some((target) => !!exactOracleTriggerNodeMetadata(target))) {
+    await confirmExactBatchTriggerDrop();
+    return;
+  }
   try {
     const mongoIndexTargets = targets.filter(canDropMongoIndexNode);
     if (mongoIndexTargets.length) {
@@ -4597,6 +4846,93 @@ async function confirmBatchDrop() {
     }
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function confirmExactBatchTriggerDrop() {
+  const preview = exactBatchDropPreview.value;
+  if (!preview || exactBatchDropExecuting.value || exactBatchDropLoading.value || exactBatchDropError.value || !isExactBatchDropPreviewCurrent(preview)) return false;
+  const scope = `oracle-trigger-tree-drop:${uuid()}`;
+  const production = useProductionSafetyStore();
+  const current = () => isExactBatchDropPreviewCurrent(preview);
+  const ownsView = () => triggerActionHostActive.value && sidebarTreeDialogOwner.value === treeItemDialogOwner && exactBatchDropPreview.value === preview;
+  const stop = watch(
+    current,
+    (fresh) => {
+      if (!fresh) production.cancelScope(scope);
+    },
+    { flush: "sync" },
+  );
+  exactBatchDropExecuting.value = true;
+  batchDropProgress.value = { completed: 0, total: preview.entries.length };
+  let retirePreview = false;
+  try {
+    const result = await executeOracleTriggerDropBatchPlan(preview.plan, {
+      confirmed: true,
+      confirmationScope: scope,
+      isCurrent: current,
+      timeoutSecs: queryTimeoutSecsForConnection(connectionStore.getConfig(preview.plan.target.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs),
+      onProgress: (completed) => {
+        if (ownsView()) batchDropProgress.value = { completed, total: preview.entries.length };
+      },
+    });
+    if (!triggerActionHostActive.value) return false;
+    if (result.cancelled && result.steps.every((step) => step.state === "notExecuted")) return false;
+    retirePreview = true;
+    for (const [index, step] of result.steps.entries()) {
+      const entry = preview.entries[index];
+      if (step.state !== "committed") continue;
+      if (entry.trigger) {
+        if (step.trigger?.verification === "deleted") removeVerifiedTriggerNode(entry.node, entry.trigger);
+      } else {
+        const live = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(entry.node));
+        if (live) {
+          closeDroppedTableObjectTabsForNode(live);
+          connectionStore.removeTreeNode(live.id);
+          releaseActiveNodeReference([live.id]);
+        }
+        await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+          connectionId: entry.node.connectionId!,
+          connectionName: connectionStore.getConfig(entry.node.connectionId!)?.name,
+          database: entry.node.database!,
+          sql: entry.sql,
+          elapsedMs: step.elapsedMs!,
+          success: true,
+          target: entry.node.label,
+        }).catch(() => undefined);
+      }
+    }
+    if (!ownsView()) return false;
+    const attention = result.triggerResults.some((outcome) => !!outcome.result.refreshError);
+    if (result.steps.every((step) => step.state === "committed") && !attention) {
+      toast(t("contextMenu.batchDropSuccess", { count: result.steps.length }), 3000);
+      showBatchDropConfirm.value = false;
+      return true;
+    }
+    const message = result.steps
+      .map((step, index) => {
+        const entry = preview.entries[index];
+        const native = result.triggerResults.find((outcome) => outcome.draftId === entry.node.id)?.result;
+        return `${t(`oceanbasePrimaryKey.${step.state}`)} · ${entry.node.schema ?? ""}.${entry.node.objectName || entry.node.label}\n${step.sql}\n${[step.trigger?.verification, step.error, native?.refreshError, step.state !== "committed" ? entry.trigger?.before.raw.source : undefined].filter(Boolean).join("\n")}`;
+      })
+      .join("\n\n");
+    const failure = preview.entries.find((entry, index) => entry.trigger && result.steps[index].state !== "committed");
+    compileErrorTitle.value = t("oracleStructureResult.resultTitle");
+    compileErrorMessage.value = message;
+    triggerActionFeedback.value = failure?.trigger ? { node: failure.node, plan: failure.trigger, message } : undefined;
+    claimTreeItemDialogOwnership();
+    routeTreeItemDialogController(failure?.node);
+    showCompileErrorDialog.value = true;
+    showBatchDropConfirm.value = false;
+    return false;
+  } catch (error) {
+    if (ownsView()) exactBatchDropError.value = error instanceof Error ? error.message : String(error);
+    return false;
+  } finally {
+    stop();
+    production.cancelScope(scope);
+    exactBatchDropExecuting.value = false;
+    if (retirePreview && exactBatchDropPreview.value === preview) exactBatchDropPreview.value = undefined;
   }
 }
 
@@ -5914,6 +6250,30 @@ function createSidebarObjectTemplate() {
   queryStore.updateSql(tabId, template.sql);
 }
 
+function canCreateOracleTriggerAt(node: TreeNode): boolean {
+  return !!node.connectionId && !!node.database && !!oracleTriggerReadOptions(databaseTypeForNode(node)) && ["schema", "group-triggers", "table", "view"].includes(node.type) && !!(node.schema || (node.type === "schema" && node.label));
+}
+
+function createOracleTrigger() {
+  const node = activeNode.value;
+  if (!canCreateOracleTriggerAt(node)) return;
+  const parent =
+    node.type === "group-triggers" && node.tableName
+      ? flattenTree(connectionStore.treeNodes)
+          .map((item) => item.node)
+          .find((item) => item.children?.some((child) => child.id === node.id))
+      : node;
+  const relation = parent && (parent.type === "table" || parent.type === "view") ? parent : undefined;
+  const selection: OracleTriggerSqlBinding = relation ? { scope: relation.type === "view" ? "VIEW" : "TABLE", owner: relation.schema, name: relation.objectName || relation.label } : { scope: "TABLE", ...(node.tableName ? { owner: node.schema, name: node.tableName } : {}) };
+  emit(
+    "open-object-source",
+    { ...node, id: `${node.id}:new-trigger`, type: "trigger", schema: node.schema || node.label, label: "TRG_NEW", objectName: "TRG_NEW", tableName: relation?.objectName || relation?.label || node.tableName, children: undefined, meta: undefined },
+    true,
+    undefined,
+    createSidebarActionRequest(node, connectionStore.selectedTreeNodeIds, selection),
+  );
+}
+
 const canExpand = computed(() => {
   if (activeNode.value.type === "type" && customTypeCapabilities(currentDatabaseType()).details) {
     return activeNode.value.hasMembers === true || (activeNode.value.hasMembers === undefined && supportsOracleTypeAttributeExpansion(currentDatabaseType()));
@@ -6281,6 +6641,21 @@ routeDangerDialog(showBatchDropConfirm, () =>
     get sql() {
       return batchDropPreviewSql.value;
     },
+    get confirmDisabled() {
+      return batchDropTargets.value.some((node) => !!exactOracleTriggerNodeMetadata(node)) && (exactBatchDropExecuting.value || exactBatchDropLoading.value || !exactBatchDropPreview.value || !isExactBatchDropPreviewCurrent(exactBatchDropPreview.value) || !!exactBatchDropError.value);
+    },
+    get detailsText() {
+      return (
+        exactBatchDropError.value ||
+        exactBatchDropPreview.value?.entries
+          .map(({ node, trigger }) =>
+            trigger
+              ? `${trigger.target.owner}.${trigger.target.name}\n${t("oracleTrigger.executionSchema")}: ${trigger.target.executionSchema}\nON ${trigger.before.metadata.parent ? `${trigger.before.metadata.parent.owner}.${trigger.before.metadata.parent.name} · ${trigger.before.metadata.parent.objectType}` : trigger.before.metadata.scope}`
+              : `${node.schema ?? ""}.${node.objectName || node.label}`,
+          )
+          .join("\n\n")
+      );
+    },
     confirmLabel: batchDropMenuLabel(),
     get progress() {
       return batchDropProgress.value.total > 0 ? batchDropProgress.value : undefined;
@@ -6440,15 +6815,19 @@ routeDangerDialog(showClearElasticsearchIndexConfirm, () => {
   });
 });
 
-routeDangerDialog(showFlushRedisDbConfirm, () =>
-  dangerRequest({
+routeDangerDialog(showFlushRedisDbConfirm, () => {
+  const node = sidebarDangerTarget.value ?? activeNode.value;
+  const connectionId = node.connectionId ?? activeNode.value.connectionId;
+  const isCluster = connectionId ? connectionStore.getConfig(connectionId)?.redis_connection_mode === "cluster" : false;
+  return dangerRequest({
     title: t("redis.flushDb"),
     message: t("redis.flushDbMessage"),
-    details: t("redis.flushDbDetails", { db: activeNode.value.database }),
+    detailsText: t("redis.flushDbDetails", { db: node.database ?? "" }),
+    sql: redisFlushDbPreview(node.database, isCluster),
     confirmLabel: t("redis.flushDbConfirm"),
     confirm: confirmFlushRedisDb,
-  }),
-);
+  });
+});
 
 routeDangerDialog(showDropSchemaConfirm, () =>
   dangerRequest({
@@ -6677,6 +7056,10 @@ function databaseSpecificDialogCapabilities() {
     showCompileErrorDialog,
     compileErrorTitle,
     compileErrorMessage,
+    hasTriggerActionFeedback,
+    triggerRecoveryBusy,
+    refreshTriggerActionFeedback,
+    viewTriggerActionSource,
     schemaCommentText,
     schemaCommentLoading,
     schemaCommentPreviewSql,
@@ -6701,6 +7084,7 @@ function getTreeItemDialogController(): Record<string, any> {
 const availableGroups = computed(() => connectionGroupDestinationRows(connectionStore.sidebarLayout));
 
 onBeforeUnmount(() => {
+  triggerActionHostActive.value = false;
   stopDangerDialogRouting?.();
 });
 
@@ -6928,6 +7312,8 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       items.push({ sidebarActionId: "contextMenu.damengUsers", label: t("contextMenu.damengUsers"), action: openDamengUsers, icon: UsersRound });
       items.push({ sidebarActionId: "contextMenu.damengRoles", label: t("contextMenu.damengRoles"), action: openDamengRoles, icon: ShieldCheck });
       items.push({ sidebarActionId: "contextMenu.damengJobAdmin", label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
+    } else if (node.connectionId && nativeJobAdminSupported(connectionStore.getConfig(node.connectionId))) {
+      items.push({ sidebarActionId: "nativeJobs.title", label: t("nativeJobs.title"), action: openDatabaseJobAdmin, icon: CalendarClock });
     }
     if (canCopyFinalProxyPort.value) {
       items.push({ sidebarActionId: "contextMenu.copyFinalProxyPort", label: t("contextMenu.copyFinalProxyPort"), action: copyFinalProxyPort, icon: Network });
@@ -7162,6 +7548,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canOpenObjectBrowser.value) {
       items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
     }
+    if (canCreateOracleTriggerAt(node)) items.push({ sidebarActionId: "contextMenu.createTrigger", label: t("contextMenu.createTrigger"), action: createOracleTrigger, icon: Plus });
     if (supportsConnectionQueryActions(currentDatabaseType())) {
       items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       items.push({ sidebarActionId: "savedSql.openDefaultQuery", label: t("savedSql.openDefaultQuery"), action: () => newQuery({ reuseQueryTabByScope: true }), icon: TerminalSquare });
@@ -7419,6 +7806,10 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: t("contextMenu.openDamengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
     return true;
   }
+  if (node.type === "database-job-admin") {
+    items.push({ label: t("nativeJobs.title"), action: openDatabaseJobAdmin, icon: CalendarClock });
+    return true;
+  }
 
   if (node.type === "redis-db" || node.type === "mongo-db" || node.type === "vector-database") {
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
@@ -7667,6 +8058,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canOpenStructureEditor.value) {
       items.push({ sidebarActionId: "contextMenu.editStructure", label: t("contextMenu.editStructure"), action: openStructureEditor, icon: PencilRuler });
     }
+    if (canCreateOracleTriggerAt(node)) items.push({ sidebarActionId: "contextMenu.createTrigger", label: t("contextMenu.createTrigger"), action: createOracleTrigger, icon: Plus });
     if (canRenameObject.value) {
       items.push({
         sidebarActionId: "contextMenu.renameObject",
@@ -7804,6 +8196,44 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
+  const exactTrigger = exactOracleTriggerNodeMetadata(node);
+  if (exactTrigger) {
+    items.push(copyNameMenuItem());
+    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
+    items.push(...triggerToggleMenuItems(node));
+    if (!oracleCompileUnsupportedReason(exactTrigger.engine === "dm" ? "dameng" : exactTrigger.engine, "TRIGGER", { triggerProfile: exactTrigger })) items.push({ label: t("processList.oracleInvalidObjects.compile"), action: () => runExactTriggerNodeAction(node, "compile"), icon: Wrench });
+    if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
+    if (exactTrigger.parent)
+      items.push({
+        label: `${t("contextMenu.viewObject")} · ${exactTrigger.parent.owner}.${exactTrigger.parent.name}`,
+        action: () => {
+          const parent = exactTrigger.parent!;
+          openDataInNewTabImmediately({
+            ...node,
+            id: JSON.stringify([node.connectionId, node.database, node.catalog, parent.owner, parent.name, parent.objectType]),
+            type: parent.objectType === "VIEW" ? "view" : "table",
+            label: parent.name,
+            objectName: parent.name,
+            schema: parent.owner,
+            tableName: undefined,
+            meta: undefined,
+          });
+        },
+        icon: TableProperties,
+      });
+    items.push({
+      label: deleteMenuLabel(t("contextMenu.dropTrigger")),
+      action: deleteMenuAction(() => {
+        void runExactTriggerNodeAction(node, "delete");
+      }),
+      icon: Trash2,
+      shortcut: shortcutDelete,
+      variant: "destructive" as const,
+    });
+    items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+    return true;
+  }
   if (isSchemaIndexNode(node)) {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     if (!schemaIndexNodeIdentity(node)) items.push({ label: t("schemaIndex.parentUnavailable"), disabled: true });
@@ -7932,7 +8362,8 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   }
 
   if (node.type === "job") {
-    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    const nativeJobs = nativeJobAdminSupported(connectionStore.getConfig(node.connectionId || ""));
+    items.push({ label: t(nativeJobs ? "nativeJobs.title" : "contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: nativeJobs ? CalendarClock : Code2 });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     if (currentDatabaseType() === "xugu") {
       items.push({ label: "", separator: true });
@@ -8034,8 +8465,9 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
     const canCreateGroupView = node.type === "group-views" && !!node.connectionId && !!node.database && !["neo4j", "nebula"].includes(currentDatabaseType() || "");
     const canCreateTableGroup = isTableVGroupContainerNode(node);
+    const canCreateTrigger = canCreateOracleTriggerAt(node);
     const canCreateSchemaIndex = node.type === "group-database-indexes" && supportsSchemaIndexManagement(currentDatabaseType()) && !connectionIsEffectivelyReadOnly(connectionStore.getConfig(node.connectionId || ""));
-    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateTableGroup || canCreateGroupView || !!objectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction || canCreateSchemaIndex;
+    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateTableGroup || canCreateGroupView || canCreateTrigger || !!objectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction || canCreateSchemaIndex;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -8052,6 +8484,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     if (objectTemplate) {
       items.push({ label: t(objectTemplate.titleKey), action: createSidebarObjectTemplate, icon: Plus });
     }
+    if (canCreateTrigger) items.push({ sidebarActionId: "contextMenu.createTrigger", label: t("contextMenu.createTrigger"), action: createOracleTrigger, icon: Plus });
     if (canCreateTableGroup) {
       items.push({
         sidebarActionId: "contextMenu.createGroup",

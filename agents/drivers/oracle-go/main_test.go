@@ -2365,6 +2365,9 @@ func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	if !strings.Contains(sqlText, "'SEQUENCE'") {
 		t.Fatalf("object listing should include sequences, got: %s", query.SQL)
 	}
+	if !strings.Contains(sqlText, "'TRIGGER'") {
+		t.Fatalf("object listing must expose triggers for data transfer selection, got: %s", query.SQL)
+	}
 	if !strings.Contains(sqlText, "'TYPE BODY'") || !strings.Contains(sqlText, "TYPE_BODY") || !strings.Contains(sqlText, "'TYPE'") {
 		t.Fatalf("object listing should include TYPE and normalize TYPE BODY, got: %s", query.SQL)
 	}
@@ -2462,10 +2465,13 @@ func TestExactTableDDLDoesNotBuildAnotherTargetAfterMetadataFailure(t *testing.T
 	}
 }
 
-func TestListSessionUserObjectsSQLIncludesSequences(t *testing.T) {
+func TestListSessionUserObjectsSQLIncludesSequencesAndTriggers(t *testing.T) {
 	sqlText := strings.ToUpper(oracleListObjectsSessionUserBaseSQL)
 	if !strings.Contains(sqlText, "FROM USER_OBJECTS") || !strings.Contains(sqlText, "'SEQUENCE'") || !strings.Contains(sqlText, "'TYPE BODY'") || !strings.Contains(sqlText, "'TYPE'") {
 		t.Fatalf("session-user object listing should include sequences, got: %s", oracleListObjectsSessionUserBaseSQL)
+	}
+	if !strings.Contains(sqlText, "'TRIGGER'") {
+		t.Fatalf("session-user object listing must expose triggers for data transfer selection, got: %s", oracleListObjectsSessionUserBaseSQL)
 	}
 }
 
@@ -3870,6 +3876,7 @@ type oracleViewSourceQueryStep struct {
 	nextPanicText    string
 	columnsPanicText string
 	columnsPanicCall int
+	nextError        error
 }
 
 type oracleViewSourceDriver struct {
@@ -3937,6 +3944,7 @@ func (c *oracleViewSourceConn) QueryContext(
 		nextPanicText:    step.nextPanicText,
 		columnsPanicText: step.columnsPanicText,
 		columnsPanicCall: step.columnsPanicCall,
+		nextError:        step.nextError,
 	}, nil
 }
 
@@ -3975,6 +3983,7 @@ type oracleViewSourceRows struct {
 	columnsPanicText string
 	columnsPanicCall int
 	columnsCalls     int
+	nextError        error
 }
 
 func (r *oracleViewSourceRows) Columns() []string {
@@ -3997,6 +4006,9 @@ func (r *oracleViewSourceRows) Next(dest []driver.Value) error {
 		return r.nextErr
 	}
 	if r.next >= len(r.values) {
+		if r.nextError != nil {
+			return r.nextError
+		}
 		return io.EOF
 	}
 	copy(dest, r.values[r.next])

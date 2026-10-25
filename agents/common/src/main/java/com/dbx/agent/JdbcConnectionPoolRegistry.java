@@ -121,6 +121,29 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
         return pools.size();
     }
 
+    /** Uses the existing physical budget and watchdogs, but never enters a reusable pool. */
+    Connection openDedicatedConnection(ConnectionFactory connectionFactory) throws SQLException {
+        if (closed.get()) throw new IllegalStateException("JDBC connection pool registry is closed");
+        SQLException failure = runtimeFailure.get();
+        if (failure != null) throw AgentRpcError.resource("connect", failure);
+        ConnectionFactoryDataSource source = new ConnectionFactoryDataSource(connectionFactory,
+            physicalConnectionBudget, physicalConnectionOpener, physicalConnectionCloser,
+            settings.connectionTimeoutMillis);
+        OperationDeadline deadline = new OperationDeadline(settings.connectionTimeoutMillis);
+        try (ConnectionFactoryDataSource.DeadlineRegistration ignored = source.registerCheckout(deadline)) {
+            Connection opened = source.getConnection();
+            // No Hikari setup follows on this path: the initialized physical connection is ready.
+            ((HikariSetupTrackedConnection) opened).completeHikariSetup();
+            return opened;
+        } catch (SQLException error) {
+            if (contains(error, PhysicalConnectionLimitException.class)) {
+                throw AgentRpcError.backpressure("connect", error);
+            }
+            if (requiresRuntimeReplacement(error)) throw AgentRpcError.resource("connect", error);
+            throw error;
+        }
+    }
+
     boolean isEnabled() {
         return settings.enabled;
     }

@@ -28,12 +28,12 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 10.34.7
+          version: 10.34.8
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -77,12 +77,12 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 10.34.7
+          version: 10.34.8
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -110,12 +110,12 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 10.34.7
+          version: 10.34.8
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -156,7 +156,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
 
       - name: GitHub script tests
         env:
@@ -211,12 +211,12 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 10.34.7
+          version: 10.34.8
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install system dependencies
@@ -238,14 +238,14 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b # v2.68.13
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure sccache
         shell: bash
@@ -342,7 +342,7 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -404,12 +404,12 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 10.34.7
+          version: 10.34.8
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -423,7 +423,7 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -842,7 +842,7 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-25
           components: rust-src
 
       - name: Setup MSVC
@@ -852,11 +852,11 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.15"
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -917,7 +917,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure sccache
         shell: bash
@@ -1032,7 +1032,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure sccache
         shell: bash
@@ -1407,7 +1407,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
       - name: CI planner and gate tests
         run: node --test .github/scripts/ci-*.test.mjs
       - name: Core architecture contracts
@@ -1417,7 +1417,7 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         uses: pnpm/action-setup@v6
         with:
-          version: 10.34.7
+          version: 10.34.8
       - name: Install generator dependencies
         if: needs.changes.outputs.rust == 'true'
         run: pnpm --filter dbx... install --frozen-lockfile --ignore-scripts
@@ -1443,7 +1443,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
       - name: Install packaging tools
         run: sudo python3 ../.github/scripts/ci-install-system-deps.py --group packaging
       - name: Agent script tests
@@ -1504,7 +1504,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
       - name: Configure sccache
         shell: bash
         env:
@@ -1590,7 +1590,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.25.x
+          go-version: 1.27.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
       - name: Native Go tests and target builds
         env:
@@ -1639,7 +1639,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.25.x
+          go-version: 1.27.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
         if: matrix.driver != 'tdengine'
       - name: Setup Rust

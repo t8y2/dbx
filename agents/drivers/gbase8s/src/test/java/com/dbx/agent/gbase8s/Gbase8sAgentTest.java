@@ -426,7 +426,8 @@ class Gbase8sAgentTest {
         Assertions.assertTrue(sql.get(0).contains("t.owner = ?"), sql.get(0));
         Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaults"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("d.default AS column_default"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("d.seqno = c.coldefault"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("d.class = 'T'"), sql.get(1));
+        Assertions.assertFalse(sql.get(1).contains("seqno"), sql.get(1));
         Assertions.assertTrue(sql.get(2).contains("JOIN sysdefaultsexpr"), sql.get(2));
         Assertions.assertTrue(sql.get(2).contains("e.default AS column_default"), sql.get(2));
         Assertions.assertTrue(sql.get(3).contains("FROM syscolumns"), sql.get(3));
@@ -634,7 +635,7 @@ class Gbase8sAgentTest {
     }
 
     @Test
-    void getColumnsLoadsLiteralDefaultsFromSysdefaultsCatalog() throws Exception {
+    void getColumnsLoadsDefaultsFromSysdefaultsTypeMarkers() throws Exception {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();
         Connection connection = preparedConnection(
@@ -670,7 +671,8 @@ class Gbase8sAgentTest {
         Assertions.assertEquals(4, sql.size());
         Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaults"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("d.default AS column_default"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("d.seqno = c.coldefault"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("d.class = 'T'"), sql.get(1));
+        Assertions.assertFalse(sql.get(1).contains("seqno"), sql.get(1));
         Assertions.assertNull(columns.get(0).getColumn_default());
         Assertions.assertEquals("'active'", columns.get(1).getColumn_default());
         Assertions.assertEquals("USER", columns.get(2).getColumn_default());

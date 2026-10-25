@@ -615,6 +615,12 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         // defaults, which is why tables whose defaults are plain literals came
         // back empty before (issue #13220). Query both and keep the first value
         // per column; either source failing leaves the other usable.
+        //
+        // sysdefaults layout (GBase 8s SQL Reference / IBM SYSDEFAULTS): the
+        // key is tabid+colno+class, there is no seqno column, `class` marks the
+        // column category (T = table column), and `type` holds the DEFAULT
+        // clause marker (C=Current, L=Literal, N=NULL, S=Dbservername, T=Today,
+        // U=User) with the literal itself in `default`.
         Map<String, String> defaults = new LinkedHashMap<>();
         loadColumnDefaultsFromSource(
             defaults,
@@ -623,11 +629,11 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             table,
             mysqlCompatMode,
             """
-                SELECT c.colname, %s AS column_default, d.class AS default_class
+                SELECT c.colname, %s AS column_default, d.type AS default_class
                 FROM systables t
                 JOIN syscolumns c ON t.tabid = c.tabid
-                JOIN sysdefaults d ON d.tabid = c.tabid AND d.colno = c.colno AND d.seqno = c.coldefault
-                WHERE t.tabname = ? AND d.type = 'T'
+                JOIN sysdefaults d ON d.tabid = c.tabid AND d.colno = c.colno
+                WHERE t.tabname = ? AND d.class = 'T'
                 """.formatted(mysqlCompatMode ? "d.`default`" : "d.default").stripIndent().trim(),
             true
         );
@@ -688,7 +694,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         }
     }
 
-    /** The Informix DEFAULT clause keyword a sysdefaults.class marker stands for. */
+    /** The Informix DEFAULT clause keyword a sysdefaults.type marker stands for. */
     static String defaultClassKeyword(String defaultClass) {
         if (defaultClass == null) {
             return null;

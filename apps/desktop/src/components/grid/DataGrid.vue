@@ -7680,9 +7680,23 @@ async function contextFilterCondition(target: ContextFilterTarget, mode: FilterM
 async function applyContextFilter(mode: FilterMode) {
   if (!canUseWhereSearch.value) {
     if (!canClientFilterResult.value) return;
+    // The client filter mirrors the server submenu minus "custom", which is a
+    // SQL condition with no in-memory semantics.
+    const clientMode: Partial<Record<FilterMode, ResultClientFilterMode>> = {
+      equals: "equals",
+      "not-equals": "not-equals",
+      like: "like",
+      "not-like": "not-like",
+      "less-than": "less-than",
+      "greater-than": "greater-than",
+      "is-null": "is-null",
+      "is-not-null": "is-not-null",
+    };
+    const mapped = clientMode[mode];
+    if (!mapped) return;
     const target = contextFilterTarget.value;
     if (!target) return;
-    resultClientFilter.value = { colIndex: target.col, mode, value: String(target.sourceValue ?? "") };
+    resultClientFilter.value = { colIndex: target.col, mode: mapped, value: String(target.sourceValue ?? "") };
     contextFilterTarget.value = null;
     return;
   }

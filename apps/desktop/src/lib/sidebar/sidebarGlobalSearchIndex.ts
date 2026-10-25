@@ -2,7 +2,7 @@ import type { TableInfo, TreeNode, TreeNodeType } from "@/types/database";
 import { nodeMatchesRegexScopeIdentity, type SidebarRegexIndexScope } from "@/lib/sidebar/sidebarSearchTree";
 import { isSidebarSearchPrunedDatabaseNode } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 
-export const sidebarIndexedObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views"]);
+export const sidebarIndexedObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-package-bodies", "group-materialized-views"]);
 const containerTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "doris-catalog"]);
 const linkedContainerTypes = new Set<TreeNodeType>(["linked-server-root", "linked-server", "linked-server-catalog"]);
 

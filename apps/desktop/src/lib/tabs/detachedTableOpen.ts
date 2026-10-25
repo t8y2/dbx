@@ -9,6 +9,9 @@ export interface DetachTabRequestDetail {
   tabId: string;
 }
 
+/** Terminal/intermediate states of the settle check the watcher observes. */
+type DetachSettleState = "gone" | "settled" | "loading";
+
 /**
  * Schedules a detach for a table opened from the sidebar while the
  * "open tables in a detached window" setting is on (#13308). The tab's result
@@ -25,27 +28,27 @@ export function requestDetachedTableOpen(
   // Detached windows are desktop-only; the settings dialog also renders on
   // web, so the dispatch itself must be gated, not just the window opener.
   if (!isTauriRuntime()) return;
-  const settled = () => {
+  // Tri-state, not boolean: a getter-watcher only re-runs its callback when the
+  // value changes, so "loading" and "gone" must differ, or a load that ends
+  // without a result followed by the tab closing would never stop the watcher.
+  const settleState = (): DetachSettleState => {
     const tab = getTab();
-    return !!tab && !tab.isExecuting && !tab.isCancelling && tab.result !== undefined;
+    if (!tab) return "gone";
+    if (!tab.isExecuting && !tab.isCancelling && tab.result !== undefined) return "settled";
+    return "loading";
   };
-  if (settled()) {
+  if (settleState() === "settled") {
     dispatch({ tabId: getTab()!.id });
     return;
   }
   const stop = watch(
-    settled,
-    (done) => {
-      // A load that errors or a tab that closes before settling must not
-      // leave the watcher alive forever.
-      const tab = getTab();
-      if (!tab) {
-        stop();
-        return;
-      }
-      if (!done) return;
+    settleState,
+    (state) => {
+      // A load that errors without a result or a tab that closes before
+      // settling must not leave the watcher alive forever.
+      if (state === "loading") return;
       stop();
-      dispatch({ tabId: tab.id });
+      if (state === "settled") dispatch({ tabId: getTab()!.id });
     },
     { flush: "post" },
   );

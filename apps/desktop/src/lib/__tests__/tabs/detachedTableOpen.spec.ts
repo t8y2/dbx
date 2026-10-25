@@ -58,4 +58,39 @@ describe("requestDetachedTableOpen (#13308)", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(dispatch).not.toHaveBeenCalled();
   });
+
+  // A load can end without publishing a result (superseded navigation or a
+  // cancelled execution leaves `result` undefined), which keeps the settle
+  // check at "loading". The watcher must still stop once the tab is removed.
+  // The tab lives in reactive state so the getter can observe the removal, the
+  // way `queryStore.tabs` does in the app.
+  it("stops the watcher when a load ends without a result and the tab is then removed", async () => {
+    const dispatch = vi.fn();
+    const holder = reactive<{ tab?: QueryTab }>({ tab: makeTab({ isExecuting: true }) });
+    requestDetachedTableOpen(() => holder.tab, dispatch);
+    holder.tab!.isExecuting = false;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatch).not.toHaveBeenCalled();
+    holder.tab = undefined;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatch).not.toHaveBeenCalled();
+    // Watcher-stopped proof: if the watcher were still alive, a tab reappearing
+    // through the getter as settled would trigger a late dispatch.
+    holder.tab = makeTab({ result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("stops the watcher when the tab closes before the load settles", async () => {
+    const dispatch = vi.fn();
+    const holder = reactive<{ tab?: QueryTab }>({ tab: makeTab({ isExecuting: true }) });
+    requestDetachedTableOpen(() => holder.tab, dispatch);
+    holder.tab = undefined;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatch).not.toHaveBeenCalled();
+    // Watcher-stopped proof: a resurrected settled tab must not dispatch late.
+    holder.tab = makeTab({ result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatch).not.toHaveBeenCalled();
+  });
 });

@@ -140,6 +140,10 @@ export function tableVGroupKindOfContainerNode(node: Pick<TreeNode, "type" | "ta
     case "group-jobs":
       return "jobs";
     case "group-packages":
+    // Bodies live in their own sidebar group but share the packages virtual
+    // group: a v-group key must be unique per package name, and bodies pair
+    // with their spec by name.
+    case "group-package-bodies":
       return "packages";
     case "group-types":
       return "types";

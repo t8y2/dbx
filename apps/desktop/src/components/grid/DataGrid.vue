@@ -168,7 +168,7 @@ import {
   type TransposeScrollAlignment,
 } from "@/lib/dataGrid/dataGridTranspose";
 import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
-import { matchesResultClientFilter, type ResultClientFilter } from "@/lib/dataGrid/gridClientFilter";
+import { matchesResultClientFilter, type ResultClientFilter, type ResultClientFilterMode } from "@/lib/dataGrid/gridClientFilter";
 import { displayCellValue, firstLineCellDisplayValue, gridCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
 import { cellExternalUrl } from "@/lib/dataGrid/cellExternalUrl";
 import { getApplicablePreviewActions, type PreviewAction } from "@/lib/dataGrid/resultPreviewRegistry";

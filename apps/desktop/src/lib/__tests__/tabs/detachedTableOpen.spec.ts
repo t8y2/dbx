@@ -3,6 +3,9 @@ import { reactive } from "vue";
 import { requestDetachedTableOpen } from "@/lib/tabs/detachedTableOpen";
 import type { QueryTab } from "@/types/database";
 
+const tauriRuntime = vi.hoisted(() => ({ value: true }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => tauriRuntime.value }));
+
 function makeTab(overrides: Partial<QueryTab> = {}): QueryTab {
   return reactive({
     id: "tab-1",
@@ -18,6 +21,14 @@ function makeTab(overrides: Partial<QueryTab> = {}): QueryTab {
 }
 
 describe("requestDetachedTableOpen (#13308)", () => {
+  it("does nothing outside the Tauri runtime (web gate)", () => {
+    tauriRuntime.value = false;
+    const dispatch = vi.fn();
+    const tab = makeTab({ result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } });
+    requestDetachedTableOpen(() => tab, dispatch);
+    expect(dispatch).not.toHaveBeenCalled();
+    tauriRuntime.value = true;
+  });
   it("dispatches immediately when the tab already settled", () => {
     const dispatch = vi.fn();
     const tab = makeTab({ result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } });

@@ -1,4 +1,5 @@
 import { watch } from "vue";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { QueryTab } from "@/types/database";
 
 /** Window event asking the main window to detach a freshly opened table tab. */
@@ -21,6 +22,9 @@ export function requestDetachedTableOpen(
     window.dispatchEvent(new CustomEvent<DetachTabRequestDetail>(DETACH_TAB_REQUEST_EVENT, { detail }));
   },
 ): void {
+  // Detached windows are desktop-only; the settings dialog also renders on
+  // web, so the dispatch itself must be gated, not just the window opener.
+  if (!isTauriRuntime()) return;
   const settled = () => {
     const tab = getTab();
     return !!tab && !tab.isExecuting && !tab.isCancelling && tab.result !== undefined;
@@ -31,11 +35,17 @@ export function requestDetachedTableOpen(
   }
   const stop = watch(
     settled,
-    (done) => {
+    (done, onCleanup) => {
+      // A load that errors or a tab that closes before settling must not
+      // leave the watcher alive forever.
+      const tab = getTab();
+      if (!tab) {
+        stop();
+        return;
+      }
       if (!done) return;
       stop();
-      const tab = getTab();
-      if (tab) dispatch({ tabId: tab.id });
+      dispatch({ tabId: tab.id });
     },
     { flush: "post" },
   );

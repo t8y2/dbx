@@ -35,7 +35,7 @@ export function requestDetachedTableOpen(
   }
   const stop = watch(
     settled,
-    (done, onCleanup) => {
+    (done) => {
       // A load that errors or a tab that closes before settling must not
       // leave the watcher alive forever.
       const tab = getTab();

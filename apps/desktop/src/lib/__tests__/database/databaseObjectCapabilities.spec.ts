@@ -60,7 +60,7 @@ describe("databaseObjectCapabilities", () => {
         schema: "APP",
         objectTypes: oceanBaseObjects,
       }).map((node) => node.type),
-    ).toEqual(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-database-indexes", "group-synonyms", "group-packages", "group-types"]);
+    ).toEqual(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-database-indexes", "group-synonyms", "group-packages", "group-package-bodies", "group-types"]);
   });
 
   it("exposes Oracle sequences through the existing grouped object path", () => {

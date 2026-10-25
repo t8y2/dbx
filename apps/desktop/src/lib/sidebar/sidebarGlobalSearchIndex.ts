@@ -2,7 +2,10 @@ import type { TableInfo, TreeNode, TreeNodeType } from "@/types/database";
 import { nodeMatchesRegexScopeIdentity, type SidebarRegexIndexScope } from "@/lib/sidebar/sidebarSearchTree";
 import { isSidebarSearchPrunedDatabaseNode } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 
-export const sidebarIndexedObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-package-bodies", "group-materialized-views"]);
+// Only table-ish groups: the indexed builder emits table/view/materialized_view
+// rows, so indexing package bodies would turn them into tables (wrong icon, table
+// structure on open). Bodies are covered by remote object-group search instead.
+export const sidebarIndexedObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views"]);
 const containerTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "doris-catalog"]);
 const linkedContainerTypes = new Set<TreeNodeType>(["linked-server-root", "linked-server", "linked-server-catalog"]);
 

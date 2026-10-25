@@ -3160,7 +3160,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const connectionId = node.connectionId;
     if (!query.trim() || !connectionId || node.database == null || !connectedIds.value.has(connectionId) || signal.aborted) return [];
     const config = getConfig(connectionId);
-    const groupTypes = objectTypesForGroupNode(node.type);
+    const groupTypes = objectTypesForGroupNode(node.type, effectiveDatabaseTypeForConnection(config));
     const objectTypes = (groupTypes ?? sidebarObjectTypesForScope(config, node.database, node.schema)).filter((type) => type !== "TABLE" && type !== "VIEW" && type !== "MATERIALIZED_VIEW");
     if (!objectTypes.length) return [];
     const querySchema = connectionObjectTreeQuerySchema(config, node.database, node.schema);
@@ -7366,7 +7366,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
 
     const configForScope = node.connectionId ? getConfig(node.connectionId) : undefined;
-    const objectTypesForScope = objectTypesForGroupNode(node.type);
+    const objectTypesForScope = objectTypesForGroupNode(node.type, effectiveDatabaseTypeForConnection(configForScope));
     const pageSizeForScope = sidebarObjectGroupPageSize();
     const searchFilter = activeTreeLoadSearchFilter(options);
     const querySchemaForScope = connectionObjectTreeQuerySchema(configForScope, node.database || "", node.schema);
@@ -7410,7 +7410,7 @@ export const useConnectionStore = defineStore("connection", () => {
             forgetFilteredObjectGroupChildren(node.id);
             return;
           }
-          const objectTypes = objectTypesForGroupNode(node.type);
+          const objectTypes = objectTypesForGroupNode(node.type, effectiveDatabaseTypeForConnection(getConfig(node.connectionId)));
           const parentNodeId = objectGroupRefreshParentId(node);
           if (!objectTypes || !parentNodeId) return;
 
@@ -7596,7 +7596,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!parent?.connectionId || !hasTreeNodeDatabaseContext(parent)) return;
     const parentConnectionId = parent.connectionId;
     const configForScope = getConfig(parentConnectionId);
-    const objectTypesForScope = loadMore.objectType === "INDEX" ? (["INDEX"] as DatabaseObjectTreeKind[]) : objectTypesForGroupNode(parent.type);
+    const objectTypesForScope = loadMore.objectType === "INDEX" ? (["INDEX"] as DatabaseObjectTreeKind[]) : objectTypesForGroupNode(parent.type, effectiveDatabaseTypeForConnection(configForScope));
     const searchFilter = loadMore.searchFilter ?? options?.searchFilter;
     const globalSearchQuery = sidebarSearchQuery.value || "";
     const scopedSearchQuery = sidebarTableSearchQueries.value[parent.id]?.trim() || "";
@@ -7684,7 +7684,7 @@ export const useConnectionStore = defineStore("connection", () => {
             if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
             return;
           }
-          const objectTypes = objectTypesForGroupNode(parent.type);
+          const objectTypes = objectTypesForGroupNode(parent.type, effectiveDatabaseTypeForConnection(getConfig(parentConnectionId)));
           const parentNodeId = objectGroupRefreshParentId(parent);
           if (!objectTypes || !parentNodeId) return;
 

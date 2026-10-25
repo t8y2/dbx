@@ -1280,6 +1280,24 @@ type FilterMode = DataGridContextFilterMode;
 type StructuredFilterRule = DataGridStructuredFilterRule;
 
 const localColumnFilters = ref<Record<number, Set<string>>>(restoreDataGridLocalColumnFilters(props.result.local_column_filters, props.result.columns.length, props.result.columns, props.localColumnFilterColumns));
+// #13237: query-result grids cannot re-query the server, so their「筛选此值」
+// menu filters the loaded rows in memory. Only active outside table-data mode
+// (which keeps its server-side WHERE filtering). Keyed by column index so a
+// filter on a second column AND-composes with the first instead of replacing it.
+const resultClientFilters = ref<Record<number, ResultClientFilter>>({});
+const canClientFilterResult = computed(() => !canUseWhereSearch.value);
+/** True while at least one in-memory cell filter actually narrows the rows. */
+const hasResultClientFilters = computed(() => canClientFilterResult.value && Object.keys(resultClientFilters.value).length > 0);
+function clearResultClientFilters(columnIndex?: number) {
+  if (columnIndex === undefined) {
+    resultClientFilters.value = {};
+    return;
+  }
+  if (!resultClientFilters.value[columnIndex]) return;
+  const next = { ...resultClientFilters.value };
+  delete next[columnIndex];
+  resultClientFilters.value = next;
+}
 const localFilterOpenColumn = ref<number | null>(null);
 const headerActionMenuOpenColumn = ref<number | null>(null);
 const headerSortMenuOpenColumn = ref<number | null>(null);
@@ -1564,6 +1582,11 @@ const localColumnFilterRuntime = useDataGridColumnFilters({
   getConnectionConfig: () => (props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined),
   getIdentifierQuote: () => connectionStore.connectionIdentifierQuote?.(props.connectionId),
   getGlobalQueryTimeoutSecs: () => settingsStore.editorSettings.globalQueryTimeoutSecs,
+  // Let the shared local-filter chip, funnel and clear path cover the
+  // in-memory result-cell filters too (#13419).
+  getClientColumnFilterActive: (columnIndex) => canClientFilterResult.value && !!resultClientFilters.value[columnIndex],
+  getClientFilterCount: () => (canClientFilterResult.value ? Object.keys(resultClientFilters.value).length : 0),
+  clearClientFilters: clearResultClientFilters,
   getDistinctWhereInput: (columnIndex) => {
     const current = serverColumnFilters.value[columnIndex]?.condition;
     const manualWhere = current ? removeColumnValueFilterCondition(whereFilterInput.value, current) : whereFilterInput.value;
@@ -2342,11 +2365,6 @@ watch(filterEditorView, () => sortBuilder.setOpen(false));
 
 const rowStatusFilter = ref<RowStatusFilter>("all");
 
-// #13237: query-result grids cannot re-query the server, so their「筛选此值」
-// menu filters the loaded rows in memory. Only active outside table-data mode
-// (which keeps its server-side WHERE filtering).
-const resultClientFilter = ref<ResultClientFilter | null>(null);
-const canClientFilterResult = computed(() => !canUseWhereSearch.value);
 const gridRef = ref<HTMLDivElement>();
 const dataGridTopbarRef = ref<HTMLDivElement>();
 const headerRef = ref<HTMLDivElement>();
@@ -4866,13 +4884,16 @@ function closeSqlPreview() {
   }
 }
 
-// Watch for edits — auto-refresh preview when panel is open
+// #13237: the in-memory cell filter belongs to the logical result, not to the
+// result object. Load-more appends publish a new object with the same
+// generation, so keying the reset on the object dropped the filter (#13419).
 watch(
-  () => props.result,
+  () => props.viewGeneration,
   () => {
-    resultClientFilter.value = null;
+    resultClientFilters.value = {};
   },
 );
+// Watch for edits — auto-refresh preview when panel is open
 watch([pendingChangeCount, pendingChangesVersion], () => {
   schedulePreviewRefresh();
 });
@@ -5531,8 +5552,21 @@ const rollbackToolbarCapability = computed<DataGridToolbarActionCapability>(() =
   onTrigger: useTransaction.value ? onToolbarRollback : discardChanges,
 }));
 
+// #13237: run the in-memory result-cell filters inside the existing client
+// filter pipeline, so empty states, the funnel, the local-filter chip and the
+// Ctrl+F row filter all observe the same narrowed row set (#13419).
+const clientFilteredRows = computed(() => {
+  if (!hasResultClientFilters.value) return localFilteredRows.value;
+  const filters = Object.values(resultClientFilters.value);
+  const rows = props.result.rows;
+  return localFilteredRows.value.filter((sourceIndex) => {
+    const row = rows[sourceIndex];
+    return filters.every((filter) => matchesResultClientFilter(row ?? [], filter, allColumnTypes.value[filter.colIndex]));
+  });
+});
+
 const sortedRows = computed(() => {
-  let indices = localFilteredRows.value;
+  let indices = clientFilteredRows.value;
   const q = deferredClientSearchText.value;
   if (q && dataGridSearchMode.value === "filter" && !replaceOpen.value) {
     // Preserve the legacy Ctrl+F behavior when the user chooses row filtering.
@@ -5576,9 +5610,6 @@ const displayRowRefs = computed<DisplayRowRef[]>(() => {
       const status: RowStatus = isDeleted ? "deleted" : dirty?.size ? "edited" : "clean";
       const isActiveEditingRow = quickEntryEnabled.value && editingCell.value?.rowId === sourceIndex;
       const statusVisible = matchesRowStatusFilter(status, rowStatusFilter.value) || isActiveEditingRow;
-      if (statusVisible && canClientFilterResult.value && resultClientFilter.value && !matchesResultClientFilter(props.result.rows[sourceIndex] ?? [], resultClientFilter.value)) {
-        continue;
-      }
       if (statusVisible) {
         refs.push({
           id: sourceIndex,
@@ -7696,7 +7727,9 @@ async function applyContextFilter(mode: FilterMode) {
     if (!mapped) return;
     const target = contextFilterTarget.value;
     if (!target) return;
-    resultClientFilter.value = { colIndex: target.col, mode: mapped, value: String(target.sourceValue ?? "") };
+    // Keep the raw value so NULL stays NULL and text is never stringified
+    // into a numeric comparison (#13419). Per-column keying AND-composes.
+    resultClientFilters.value = { ...resultClientFilters.value, [target.col]: { colIndex: target.col, mode: mapped, value: target.sourceValue ?? null } };
     contextFilterTarget.value = null;
     return;
   }
@@ -7735,7 +7768,7 @@ async function openContextCustomFilter() {
 
 async function clearContextFilter() {
   if (canClientFilterResult.value) {
-    resultClientFilter.value = null;
+    clearResultClientFilters();
     return;
   }
   await clearAllFilters();

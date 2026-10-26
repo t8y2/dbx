@@ -245,7 +245,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure sccache
         shell: bash
@@ -342,7 +342,7 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -426,7 +426,7 @@ jobs:
       # this pin without a green Windows 7 run.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -845,7 +845,7 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-10-25
+          toolchain: nightly-2026-10-26
           components: rust-src
 
       - name: Setup MSVC
@@ -859,7 +859,7 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -920,7 +920,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure sccache
         shell: bash
@@ -1035,7 +1035,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
 
       - name: Configure sccache
         shell: bash
@@ -1507,7 +1507,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.16.0"
+          version: "v0.19.0"
       - name: Configure sccache
         shell: bash
         env:

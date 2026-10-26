@@ -975,6 +975,8 @@ export default withEnglishFallback({
     searchScopeTable: "테이블",
     searchScopeView: "뷰",
     searchTablesInCurrentScope: "이 데이터베이스에서 테이블 검색...",
+    searchViewsInCurrentScope: "이 데이터베이스에서 뷰 검색...",
+    searchMaterializedViewsInCurrentScope: "이 데이터베이스에서 구체화된 뷰 검색...",
     clearTableSearch: "테이블 검색 지우기",
     localTableSearch: "로컬 검색",
     localTableSearchTooltip: "원격 요청 없이 로컬 테이블 인덱스를 검색합니다. 원격으로 검색하려면 끄세요. 인덱스를 생성하거나 업데이트하려면 새로 고침을 사용하세요.",

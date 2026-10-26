@@ -969,6 +969,8 @@ export default withEnglishFallback({
     searchScopeTable: "テーブル",
     searchScopeView: "ビュー",
     searchTablesInCurrentScope: "このデータベースのテーブルを検索...",
+    searchViewsInCurrentScope: "このデータベースのビューを検索...",
+    searchMaterializedViewsInCurrentScope: "このデータベースのマテリアライズドビューを検索...",
     clearTableSearch: "テーブル検索をクリア",
     localTableSearch: "ローカル検索",
     localTableSearchTooltip: "リモート要求を行わずにローカルのテーブルインデックスを検索します。リモート検索するにはオフにしてください。更新でインデックスを作成または更新します。",

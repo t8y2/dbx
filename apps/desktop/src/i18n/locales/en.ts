@@ -1129,6 +1129,8 @@ export default {
     searchScopeTable: "Table",
     searchScopeView: "View",
     searchTablesInCurrentScope: "Search tables in this database...",
+    searchViewsInCurrentScope: "Search views in this database...",
+    searchMaterializedViewsInCurrentScope: "Search materialized views in this database...",
     clearTableSearch: "Clear table search",
     localTableSearch: "Local search",
     localTableSearchTooltip: "Search the local table index without remote requests. Turn off to search remotely. Use refresh to build or update the index.",

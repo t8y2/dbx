@@ -979,6 +979,8 @@ export default withEnglishFallback({
     searchScopeTable: "Tabla",
     searchScopeView: "Vista",
     searchTablesInCurrentScope: "Buscar tablas en esta base de datos...",
+    searchViewsInCurrentScope: "Buscar vistas en esta base de datos...",
+    searchMaterializedViewsInCurrentScope: "Buscar vistas materializadas en esta base de datos...",
     clearTableSearch: "Limpiar búsqueda de tablas",
     localTableSearch: "Búsqueda local",
     localTableSearchTooltip: "Busca en el índice local de tablas sin solicitudes remotas. Desactívalo para buscar de forma remota. Usa actualizar para crear o actualizar el índice.",

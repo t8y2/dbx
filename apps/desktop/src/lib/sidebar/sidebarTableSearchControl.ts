@@ -8,6 +8,10 @@ const tableSearchableChildTypes = new Set<TreeNodeType>(["table", "view", "mater
 // are already object-type generic.
 const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views"]);
 
+export function sidebarSearchableObjectGroupTypes(): ReadonlySet<TreeNodeType> {
+  return searchableObjectGroupTypes;
+}
+
 export function isSidebarTableSearchControlNode(node: TreeNode): boolean {
   return node.type === "table-search-control";
 }
@@ -31,10 +35,15 @@ function shouldInsertTableSearchControl(item: FlatTreeNode, sidebarObjectDisplay
   return parentHasSearchableTableList(node) || !!activeQueries[node.id]?.trim();
 }
 
+const tableSearchControlLabels: Partial<Record<TreeNodeType, string>> = {
+  "group-views": "sidebar.searchViewsInCurrentScope",
+  "group-materialized-views": "sidebar.searchMaterializedViewsInCurrentScope",
+};
+
 function buildTableSearchControlNode(parent: TreeNode): TreeNode {
   return {
     id: tableSearchControlId(parent.id),
-    label: "sidebar.searchTablesInCurrentScope",
+    label: tableSearchControlLabels[parent.type] ?? "sidebar.searchTablesInCurrentScope",
     type: "table-search-control",
     connectionId: parent.connectionId,
     database: parent.database,

@@ -494,6 +494,8 @@ export default withEnglishFallback({
     searchScopeTable: "Cədvəl",
     searchScopeView: "Görünüş",
     searchTablesInCurrentScope: "Bu verilənlər bazasında cədvəl axtarışı...",
+    searchViewsInCurrentScope: "Bu verilənlər bazasında görünüş axtarışı...",
+    searchMaterializedViewsInCurrentScope: "Bu verilənlər bazasında materiallaşdırılmış görünüş axtarışı...",
     clearTableSearch: "Cədvəl axtarışını təmizlə",
     localTableSearch: "Yerli axtarış",
     localTableSearchTooltip: "Uzaq sorğular göndərmədən yerli cədvəl indeksində axtarın. Uzaqdan axtarmaq üçün deaktiv edin. İndeksi yaratmaq və ya yeniləmək üçün yeniləmə əməliyyatından istifadə edin.",

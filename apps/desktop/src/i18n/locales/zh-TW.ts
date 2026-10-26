@@ -973,6 +973,8 @@ export default withEnglishFallback({
     searchScopeTable: "資料表",
     searchScopeView: "檢視",
     searchTablesInCurrentScope: "搜尋目前資料庫的資料表...",
+    searchViewsInCurrentScope: "搜尋目前資料庫的檢視表...",
+    searchMaterializedViewsInCurrentScope: "搜尋目前資料庫的具體化檢視表...",
     clearTableSearch: "清除資料表搜尋",
     localTableSearch: "本機搜尋",
     localTableSearchTooltip: "使用本機資料表索引搜尋，不會發出遠端請求。關閉後改用遠端搜尋；使用重新整理建立或更新索引。",

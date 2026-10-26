@@ -949,6 +949,8 @@ export default withEnglishFallback({
     searchScopeTable: "Таблица",
     searchScopeView: "Представление",
     searchTablesInCurrentScope: "Поиск таблиц в этой базе данных...",
+    searchViewsInCurrentScope: "Поиск представлений в этой базе данных...",
+    searchMaterializedViewsInCurrentScope: "Поиск материализованных представлений в этой базе данных...",
     clearTableSearch: "Очистить поиск таблиц",
     localTableSearch: "Локальный поиск",
     localTableSearchTooltip: "Поиск по локальному индексу таблиц без удалённых запросов. Отключите для удалённого поиска. Используйте обновление для построения или обновления индекса.",

@@ -1065,6 +1065,8 @@ export default withEnglishFallback({
     searchScopeTable: "表",
     searchScopeView: "视图",
     searchTablesInCurrentScope: "搜索当前库的表...",
+    searchViewsInCurrentScope: "搜索当前库的视图...",
+    searchMaterializedViewsInCurrentScope: "搜索当前库的物化视图...",
     clearTableSearch: "清除表搜索",
     localTableSearch: "本地搜索",
     localTableSearchTooltip: "开启后搜索本地表索引，不发送远程请求；关闭后使用远程搜索。请使用刷新按钮构建或更新索引。",

@@ -62,7 +62,7 @@ import { createFlatTreeIndex, flatTreeRowsChanged, getSidebarTreeRowHeight, SIDE
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHostInstance } from "@/lib/sidebar/sidebarTreeRuntime";
 import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHandlerRegistry";
-import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
+import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode, sidebarSearchableObjectGroupTypes } from "@/lib/sidebar/sidebarTableSearchControl";
 import { createSidebarTableSearchDebouncer, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
 import TreeItem from "./TreeItem.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
@@ -1543,11 +1543,11 @@ provide(sidebarTreeContextKey, {
     };
     void (async () => {
       const parent = findNode(store.treeNodes);
-      if (parent?.connectionId && parent.database && (parent.type === "database" || parent.type === "schema" || parent.type === "linked-server-schema" || parent.type === "group-tables")) {
-        // Refresh only the tables group. Refreshing the database/schema node
-        // also reloads views, routines, triggers, etc., causing a visible
-        // redraw of the whole sidebar for a table-only operation.
-        if (parent.type === "group-tables") {
+      if (parent?.connectionId && parent.database && (parent.type === "database" || parent.type === "schema" || parent.type === "linked-server-schema" || sidebarSearchableObjectGroupTypes().has(parent.type))) {
+        // Refresh only the searched object group. Refreshing the database/schema
+        // node also reloads views, routines, triggers, etc., causing a visible
+        // redraw of the whole sidebar for a single-group operation.
+        if (sidebarSearchableObjectGroupTypes().has(parent.type)) {
           await store.loadObjectGroupChildren(parent, { force: true });
         } else if (localTableSearchParentTypes.has(parent.type)) {
           await store.loadTables(parent.connectionId, parent.database, parent.schema, { force: true });

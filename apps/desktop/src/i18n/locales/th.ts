@@ -1059,6 +1059,8 @@ export default withEnglishFallback({
     searchScopeTable: "ตาราง",
     searchScopeView: "View",
     searchTablesInCurrentScope: "ค้นหาตารางในฐานข้อมูลนี้...",
+    searchViewsInCurrentScope: "ค้นหามุมมองในฐานข้อมูลนี้...",
+    searchMaterializedViewsInCurrentScope: "ค้นหามุมมองที่ถูกทำให้เป็นรูปธรรมในฐานข้อมูลนี้...",
     clearTableSearch: "ล้างการค้นหาตาราง",
     localTableSearch: "การค้นหาในเครื่อง",
     localTableSearchTooltip: "ค้นหา Index ตารางในเครื่องโดยไม่ส่ง Request ระยะไกล ปิดเพื่อค้นหาระยะไกล ใช้รีเฟรชเพื่อสร้างหรืออัปเดต Index",

@@ -763,6 +763,8 @@ export default withEnglishFallback({
     searchScopeTable: "Tabela",
     searchScopeView: "Widok",
     searchTablesInCurrentScope: "Szukaj tabel w tej bazie danych...",
+    searchViewsInCurrentScope: "Szukaj widoków w tej bazie danych...",
+    searchMaterializedViewsInCurrentScope: "Szukaj widoków zmaterializowanych w tej bazie danych...",
     clearTableSearch: "Wyczyść wyszukiwanie tabel",
     localTableSearch: "Wyszukiwanie lokalne",
     localTableSearchTooltip: "Przeszukuj lokalny indeks tabel bez zapytań sieciowych. Wyłącz tę opcję, aby szukać zdalnie. Użyj odświeżania, aby utworzyć lub zaktualizować indeks.",

@@ -968,6 +968,8 @@ export default withEnglishFallback({
     searchScopeTable: "Tabella",
     searchScopeView: "Vista",
     searchTablesInCurrentScope: "Cerca tabelle in questo database...",
+    searchViewsInCurrentScope: "Cerca viste in questo database...",
+    searchMaterializedViewsInCurrentScope: "Cerca viste materializzate in questo database...",
     clearTableSearch: "Cancella ricerca tabelle",
     localTableSearch: "Ricerca locale",
     localTableSearchTooltip: "Cerca nell'indice locale delle tabelle senza richieste remote. Disattiva per cercare in remoto. Usa aggiorna per creare o aggiornare l'indice.",

@@ -494,6 +494,8 @@ export default withEnglishFallback({
     searchScopeTable: "Tablo",
     searchScopeView: "Görünüm",
     searchTablesInCurrentScope: "Bu veritabanındaki tabloları ara...",
+    searchViewsInCurrentScope: "Bu veritabanındaki görünümleri ara...",
+    searchMaterializedViewsInCurrentScope: "Bu veritabanındaki somutlaştırılmış görünümleri ara...",
     clearTableSearch: "Tablo aramasını temizle",
     localTableSearch: "Yerel arama",
     localTableSearchTooltip: "Uzak istek olmadan yerel tablo dizinini arayın. Uzaktan aramak için kapatın. Dizini oluşturmak veya güncellemek için yenile düğmesini kullanın.",

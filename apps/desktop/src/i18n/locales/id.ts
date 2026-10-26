@@ -699,6 +699,8 @@ export default withEnglishFallback({
     searchScopeTable: "Tabel",
     searchScopeView: "Tampilan",
     searchTablesInCurrentScope: "Cari tabel di database ini...",
+    searchViewsInCurrentScope: "Cari tampilan di database ini...",
+    searchMaterializedViewsInCurrentScope: "Cari tampilan termaterialisasi di database ini...",
     clearTableSearch: "Bersihkan pencarian tabel",
     localTableSearch: "Pencarian lokal",
     localTableSearchTooltip: "Cari indeks tabel lokal tanpa permintaan jarak jauh. Nonaktifkan untuk mencari secara jarak jauh. Gunakan segarkan untuk membangun atau memperbarui indeks.",

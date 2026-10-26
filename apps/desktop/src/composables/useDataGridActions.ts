@@ -245,7 +245,10 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
             columns: metadata.columns,
             primaryKeys: metadata.primaryKeys,
             ...(metadata.virtualPrimaryKeys?.length ? { virtualPrimaryKeys: metadata.virtualPrimaryKeys } : {}),
-            rowIdentityResolved: metadata.rowIdentityResolved !== false,
+            // A failed index load leaves rowIdentityResolved false (and uncached), but keys the
+            // columns already declare still identify rows; only a keyless table needs the
+            // unique-index fallback. Otherwise the tab stays read-only after Refresh (#13473).
+            rowIdentityResolved: metadata.rowIdentityResolved !== false || metadata.primaryKeys.length > 0,
           };
         })();
     const columns = loaded.columns;

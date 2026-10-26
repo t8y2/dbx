@@ -231,6 +231,27 @@ describe("useDataGridActions", () => {
     await vi.waitFor(() => expect(tab.tableMetaPending).toBe(false));
   });
 
+  it("keeps a table editable after manual refresh when index metadata fails but its columns declare the key (#13473)", async () => {
+    mocks.getConfig.mockReturnValue({ id: "kingbase-1", db_type: "kingbase" });
+    const idColumn = { name: "TitleId", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null };
+    const tab = tableDataTab({
+      connectionId: "kingbase-1",
+      tableMeta: { schema: "dbo", tableName: "Title", tableType: "TABLE", columns: [idColumn], primaryKeys: ["TitleId"] },
+    });
+    mocks.tabs.push(tab);
+    mocks.getColumns.mockResolvedValue([idColumn]);
+    mocks.listIndexes.mockRejectedValue(new Error("index catalog unavailable"));
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
+    // The background index refresh runs after the reload returns; let it settle first.
+    await vi.waitFor(() => expect(mocks.listIndexes).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(tab.tableMeta?.primaryKeys).toEqual(["TitleId"]);
+    expect(tab.tableMetaPending).toBe(false);
+  });
+
   it.each([true, false])("keeps a surviving old key read-only until index discovery settles (success=%s)", async (success) => {
     const tab = reactive(tableDataTab());
     mocks.tabs.push(tab);

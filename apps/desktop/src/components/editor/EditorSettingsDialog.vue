@@ -2725,7 +2725,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editUiFontFamily.value = DEFAULT_EDITOR_SETTINGS.uiFontFamily;
     editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
     editFontSmoothing.value = DEFAULT_EDITOR_SETTINGS.fontSmoothing;
-    editFontSmoothing.value = DEFAULT_EDITOR_SETTINGS.fontSmoothing;
     editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
     editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
     editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;

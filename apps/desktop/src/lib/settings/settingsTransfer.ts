@@ -370,6 +370,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "autoAliasTables",
   "functionCompletionIncludeParams",
   "sequenceCompletionEnabled",
+  "fontSmoothing",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
   "showColumnCommentsInHeader",

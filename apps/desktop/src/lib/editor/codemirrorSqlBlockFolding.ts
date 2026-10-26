@@ -2,6 +2,8 @@ import { foldService, syntaxTree } from "@codemirror/language";
 import type { EditorState } from "@codemirror/state";
 import { elasticsearchRestRequestRanges } from "@/lib/sql/sqlStatementRanges";
 import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
+import { sqlRegionFoldRanges } from "./sqlRegionFoldRanges";
+import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 
 // `@lezer/common` is only a transitive dependency here (see sqlSyntaxTreeWindow.ts's comment on
 // the same pattern), so derive the node types structurally instead of importing them.
@@ -242,13 +244,17 @@ export function computeBlockFoldRanges(state: EditorState, databaseType?: Databa
 
   addQueryStructureFoldRanges(state, tree, byOpenerLine);
 
+  if (!databaseType || (supportsDatabaseFeature(databaseType, "sqlFileExecution") && databaseType !== "neo4j" && databaseType !== "nebula")) {
+    for (const [line, range] of sqlRegionFoldRanges(state)) byOpenerLine.set(line, range);
+  }
+
   const nextCacheByDatabaseType = cacheByDatabaseType ?? new Map<string, Map<number, FoldRange>>();
   nextCacheByDatabaseType.set(cacheKey, byOpenerLine);
   rangeCache.set(tree, nextCacheByDatabaseType);
   return byOpenerLine;
 }
 
-/** Creates folding for REST requests, procedural blocks, query parentheses, and UNION branches. */
+/** Creates folding for REST requests, SQL regions, procedural blocks, query parentheses, and UNION branches. */
 export function createSqlBlockFoldService(databaseType?: DatabaseType | (() => DatabaseType | undefined), cachedRange?: (state: EditorState, lineStart: number) => FoldRange | null | undefined) {
   return foldService.of((state, lineStart) => {
     const cached = cachedRange?.(state, lineStart);

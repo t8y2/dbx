@@ -1344,6 +1344,7 @@ jobs:
               - 'packages/**/package.json'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
+              - 'patches/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'crates/**/Cargo.toml'

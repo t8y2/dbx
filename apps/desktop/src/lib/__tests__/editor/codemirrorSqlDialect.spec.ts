@@ -1,6 +1,9 @@
+import { EditorState } from "@codemirror/state";
+import { sqlRegionDialect, sqlRegionFoldRanges } from "@/lib/editor/sqlRegionFoldRanges";
+import { analyzeSqlStatements } from "@/lib/sql/sqlStatementAnalysis";
 import { describe, expect, it } from "vitest";
 import * as langSql from "@codemirror/lang-sql";
-import { createDbxCodeMirrorSqlDialect, postgresKeywordSyntaxTerms, sqlServerBuiltinSyntaxTerms } from "@/lib/editor/codemirrorSqlDialect";
+import { createDbxCodeMirrorSqlDialect, sqlRegionDialectSpec, postgresKeywordSyntaxTerms, sqlServerBuiltinSyntaxTerms } from "@/lib/editor/codemirrorSqlDialect";
 import type { DatabaseType } from "@/types/database";
 
 function nodeNameAt(dialect: langSql.SQLDialect, statement: string, word: string): string | undefined {
@@ -21,6 +24,21 @@ describe("codemirrorSqlDialect", () => {
     ["sqlserver", "SELECT GETDATE() FROM #temp", "#temp", "SpecialVar"],
   ] as const)("uses the %s lexer for Kingbase without replacing its physical type", (mode, sql, token, expected) => {
     expect(nodeNameAt(createDbxCodeMirrorSqlDialect(langSql, mode, "kingbase"), sql, token)).toBe(expected);
+  });
+
+  it.each([
+    ["mysql", "`", "`"],
+    ["sqlserver", "[", "]"],
+    ["postgres", '"', '"'],
+    ["oracle", '"', '"'],
+  ] as const)("keeps region markers inside Kingbase %s identifiers out of foreground and background folds", (mode, open, close) => {
+    const sql = [`SELECT ${open}name`, "-- region hidden", "value", "-- endregion", `${close};`, "-- region visible", "SELECT 1;", "-- endregion"].join("\n");
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, mode, "kingbase");
+    const state = EditorState.create({ doc: sql, extensions: [langSql.sql({ dialect }), sqlRegionDialect.of(sqlRegionDialectSpec(dialect, mode, "kingbase"))] });
+    expect([...sqlRegionFoldRanges(state).keys()]).toEqual([6]);
+    const background = analyzeSqlStatements({ sql, databaseType: "kingbase", syntaxDialect: mode, includeFolds: true });
+    expect(background.folds?.has(2)).toBe(false);
+    expect(background.folds?.get(6)).toEqual(sqlRegionFoldRanges(state).get(6));
   });
 
   it("keeps common PostgreSQL identifier names out of keyword highlighting", () => {

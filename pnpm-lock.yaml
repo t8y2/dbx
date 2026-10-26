@@ -8,6 +8,11 @@ overrides:
   happy-dom: ~20.10.6
   '@codemirror/view': 6.43.0
 
+patchedDependencies:
+  '@codemirror/lang-sql@6.10.0':
+    hash: 4e50e9daa17fb62aea661ed41d8846dc3a8d246edf244dc51f65754d348bd08b
+    path: patches/codemirror-lang-sql-6.10.0.patch
+
 importers:
 
   .:
@@ -28,8 +33,8 @@ importers:
         specifier: ^6.0.2
         version: 6.0.2
       '@codemirror/lang-sql':
-        specifier: ^6.10.0
-        version: 6.10.0
+        specifier: 6.10.0
+        version: 6.10.0(patch_hash=4e50e9daa17fb62aea661ed41d8846dc3a8d246edf244dc51f65754d348bd08b)
       '@codemirror/lang-xml':
         specifier: ^6.1.0
         version: 6.1.0
@@ -4436,7 +4441,7 @@ snapshots:
       '@codemirror/language': 6.13.1
       '@lezer/json': 1.0.3
 
-  '@codemirror/lang-sql@6.10.0':
+  '@codemirror/lang-sql@6.10.0(patch_hash=4e50e9daa17fb62aea661ed41d8846dc3a8d246edf244dc51f65754d348bd08b)':
     dependencies:
       '@codemirror/autocomplete': 6.20.3
       '@codemirror/language': 6.13.1

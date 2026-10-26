@@ -412,6 +412,8 @@ async function load(options: { silent?: boolean } = {}) {
     truncated.value = result.truncated === true;
   } catch (error: any) {
     if (isCurrent()) {
+      autoRefresh.value = false;
+      stopTimer();
       if (activeDriver.mode === "transaction") {
         // A failed refresh must not leave stale kill targets on screen. A
         // connection failure is not evidence that there are no transactions.

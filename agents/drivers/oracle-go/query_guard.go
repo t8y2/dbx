@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"fmt"
 )
@@ -57,6 +58,17 @@ func (c *oracleQueryConnection) QueryContext(ctx context.Context, query string, 
 		}
 	}()
 	return c.oracleThinConnection.QueryContext(ctx, query, args)
+}
+
+// oracleConnPoisoned reports whether a driver panic already made conn unusable.
+func oracleConnPoisoned(conn *sql.Conn) bool {
+	poisoned := false
+	_ = conn.Raw(func(driverConn any) error {
+		guarded, ok := driverConn.(*oracleQueryConnection)
+		poisoned = ok && guarded.failed != nil
+		return nil
+	})
+	return poisoned
 }
 
 // Invalidate via Validator, not ErrBadConn: ErrBadConn would tell database/sql

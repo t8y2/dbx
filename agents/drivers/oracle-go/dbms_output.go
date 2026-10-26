@@ -550,6 +550,9 @@ func (s *server) withStatementDBMSOutput(sqlText string, run func() error) []que
 	s.statementConn = conn
 	defer func() {
 		s.statementConn = previous
+		if repinned := s.takeRepinnedStatementConn(); repinned != nil {
+			_ = repinned.Close()
+		}
 		_ = conn.Close()
 	}()
 	session := s.statementDBMSOutputSession(conn)
@@ -604,6 +607,9 @@ func (s *server) withPagedStatementDBMSOutput(sqlText string, run func() error) 
 			// so this function owns it. The statement's own cleanup has already closed
 			// its rows (runPagedOracleSelect defers that), which is what lets the close
 			// below return instead of waiting for a cursor that no one will close.
+			if repinned := s.takeRepinnedStatementConn(); repinned != nil {
+				_ = repinned.Close()
+			}
 			_ = conn.Close()
 			panic(recovered)
 		}
@@ -612,6 +618,12 @@ func (s *server) withPagedStatementDBMSOutput(sqlText string, run func() error) 
 	capture := s.ensureDBMSOutput(ctx, session)
 	_ = run()
 	messages := s.finishStatementDBMSOutput(ctx, session, capture, sqlText)
+	if repinned := s.takeRepinnedStatementConn(); repinned != nil {
+		// A driver panic poisoned the pinned connection and the statement's
+		// fallback ran on a replacement, so the page's cursor lives there.
+		_ = conn.Close()
+		conn = repinned
+	}
 	return conn, messages
 }
 

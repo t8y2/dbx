@@ -4329,6 +4329,134 @@ func TestOracleQueryRowsKeepsSTAsTextErrorWhenPlaceholderAlsoFails(t *testing.T)
 	}
 }
 
+// oracleViewSourceTxConn lets the scripted driver open the manual transaction
+// the query guard wraps.
+type oracleViewSourceTxConn struct{ *oracleViewSourceConn }
+
+func (c oracleViewSourceTxConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return oracleViewSourceTx{}, nil
+}
+
+type oracleViewSourceTx struct{}
+
+func (oracleViewSourceTx) Commit() error   { return nil }
+func (oracleViewSourceTx) Rollback() error { return nil }
+
+type oracleViewSourceTxDriver struct{ scripted *oracleViewSourceDriver }
+
+func (d oracleViewSourceTxDriver) Open(string) (driver.Conn, error) {
+	return oracleViewSourceTxConn{&oracleViewSourceConn{driver: d.scripted}}, nil
+}
+
+func openGuardedOracleViewSourceTestDB(t *testing.T, steps []oracleViewSourceQueryStep) (*sql.DB, *oracleViewSourceDriver) {
+	t.Helper()
+	scripted := &oracleViewSourceDriver{steps: steps}
+	db := sql.OpenDB(oracleQueryConnector{oracleGuardTestConnector{oracleViewSourceTxDriver{scripted}}})
+	t.Cleanup(func() { _ = db.Close() })
+	return db, scripted
+}
+
+func udtPanicFallbackSteps(rows [][]driver.Value) []oracleViewSourceQueryStep {
+	return []oracleViewSourceQueryStep{
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: "SELECT ID, G FROM T_UDT", args: []driver.Value{}, panicText: "simulated go-ora panic on object column"},
+		// The poisoned pinned connection is replaced and gets the editor schema back.
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: "CURRENT_SCHEMA", args: []driver.Value{}, columns: []string{"SCHEMA"}, rows: [][]driver.Value{{"DBXT"}}},
+		{
+			queryContains: "ALL_TAB_COLUMNS",
+			args:          []driver.Value{"DBXT", "T_UDT"},
+			columns:       []string{"COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_OWNER"},
+			rows:          [][]driver.Value{{"ID", "NUMBER", nil}, {"G", "GEOM_T", "DBXT"}},
+		},
+		{queryContains: "'<GEOM_T>'", args: []driver.Value{}, columns: []string{"ID", "G"}, rows: rows},
+	}
+}
+
+func TestExecuteQueryRetriesObjectColumnPanicOnFreshPinnedConnection(t *testing.T) {
+	steps := udtPanicFallbackSteps([][]driver.Value{{int64(1), "<GEOM_T>"}})
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	result, err := s.executeQuery(queryOptions{SQL: "SELECT ID, G FROM T_UDT", Schema: "DBXT", MaxRows: 10})
+	if err != nil {
+		t.Fatalf("expected the placeholder fallback to recover the panic, got %v", err)
+	}
+	if !reflect.DeepEqual(result.Rows, [][]any{{int64(1), "<GEOM_T>"}}) {
+		t.Fatalf("unexpected rows: %#v", result.Rows)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	if s.statementConn != nil || s.repinnedStatementConn != nil || s.statementSchema != "" || db.Stats().InUse != 0 {
+		t.Fatalf("statement leaked its pinned connections: %+v", db.Stats())
+	}
+}
+
+func TestExecuteQueryPageKeepsCursorOnReplacementPinnedConnection(t *testing.T) {
+	steps := udtPanicFallbackSteps([][]driver.Value{{int64(1), "<GEOM_T>"}, {int64(2), "<GEOM_T>"}})
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	result, err := s.executeQueryPage(queryOptions{SQL: "SELECT ID, G FROM T_UDT", Schema: "DBXT", MaxRows: 10}, 1)
+	if err != nil {
+		t.Fatalf("expected the placeholder fallback to recover the panic, got %v", err)
+	}
+	if !result.HasMore || result.SessionID == nil || !reflect.DeepEqual(result.Rows, [][]any{{int64(1), "<GEOM_T>"}}) {
+		t.Fatalf("unexpected first page: %+v", result)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	next, err := s.fetchQueryPage(*result.SessionID, 1)
+	if err != nil || !reflect.DeepEqual(next.Rows, [][]any{{int64(2), "<GEOM_T>"}}) {
+		t.Fatalf("unexpected second page: %+v, %v", next, err)
+	}
+	s.closeQuerySession(*result.SessionID)
+	if s.statementConn != nil || s.repinnedStatementConn != nil || db.Stats().InUse != 0 {
+		t.Fatalf("paging session leaked its pinned connections: %+v", db.Stats())
+	}
+}
+
+func TestManualTransactionRewritesObjectColumnsBeforeTheFirstAttempt(t *testing.T) {
+	steps := []oracleViewSourceQueryStep{
+		{exec: true, queryContains: `ALTER SESSION SET CURRENT_SCHEMA = "DBXT"`},
+		{queryContains: "CURRENT_SCHEMA", args: []driver.Value{}, columns: []string{"SCHEMA"}, rows: [][]driver.Value{{"DBXT"}}},
+		{
+			queryContains: "ALL_TAB_COLUMNS",
+			args:          []driver.Value{"DBXT", "T_UDT"},
+			columns:       []string{"COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_OWNER"},
+			rows:          [][]driver.Value{{"ID", "NUMBER", nil}, {"G", "GEOM_T", "DBXT"}},
+		},
+		{queryContains: "'<GEOM_T>'", args: []driver.Value{}, columns: []string{"ID", "G"}, rows: [][]driver.Value{{int64(1), "<GEOM_T>"}}},
+		{queryContains: "SELECT 1 FROM DUAL", args: []driver.Value{}, columns: []string{"1"}, rows: [][]driver.Value{{int64(1)}}},
+	}
+	db, scripted := openGuardedOracleViewSourceTestDB(t, steps)
+	s := newServer()
+	s.db = db
+	if err := s.beginManualTransaction("DBXT"); err != nil {
+		t.Fatal(err)
+	}
+	// The raw statement would panic and take the transaction down with it, so it
+	// must never reach the driver.
+	result, err := s.executeQuery(queryOptions{SQL: "SELECT ID, G FROM T_UDT", MaxRows: 10})
+	if err != nil {
+		t.Fatalf("expected the rewritten projection, got %v", err)
+	}
+	if !reflect.DeepEqual(result.Rows, [][]any{{int64(1), "<GEOM_T>"}}) {
+		t.Fatalf("unexpected rows: %#v", result.Rows)
+	}
+	if _, err := s.executeQuery(queryOptions{SQL: "SELECT 1 FROM DUAL", MaxRows: 10}); err != nil {
+		t.Fatalf("manual transaction became unusable: %v", err)
+	}
+	if scripted.next != len(steps) {
+		t.Fatalf("expected all %d scripted steps, ran %d", len(steps), scripted.next)
+	}
+	if err := s.rollbackManualTransaction(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReadQuerySessionPageConvertsPanicToError(t *testing.T) {
 	// A nil *sql.Rows makes rows.Next() panic with a nil pointer dereference,
 	// which stands in for go-ora panicking while decoding an unknown type.

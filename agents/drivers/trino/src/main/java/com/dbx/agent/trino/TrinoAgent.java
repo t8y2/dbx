@@ -27,6 +27,8 @@ public final class TrinoAgent extends AbstractJdbcAgent {
     private static final Pattern NUMERIC_PRECISION_PATTERN = Pattern.compile("(?i)^(decimal|numeric)\\((\\d+)(?:,\\s*\\d+)?\\)");
     private static final Pattern NUMERIC_SCALE_PATTERN = Pattern.compile("(?i)^(decimal|numeric)\\(\\d+,\\s*(\\d+)\\)");
     private static final Pattern CHARACTER_LENGTH_PATTERN = Pattern.compile("(?i)^(char|varchar)\\((\\d+)\\)");
+    // Custom "GMT+08:00" IDs reported by the JVM when the OS zone has no IANA mapping.
+    private static final Pattern GMT_OFFSET_ZONE_PATTERN = Pattern.compile("GMT(?<sign>[+-])(?<hours>\\d{1,2})(?::(?<minutes>\\d{2}))?", Pattern.CASE_INSENSITIVE);
 
     @Override
     protected String driverClass() {
@@ -395,7 +397,27 @@ public final class TrinoAgent extends AbstractJdbcAgent {
         return value == null ? "" : value;
     }
 
+    /**
+     * Trino derives the session time zone from the JVM default, but servers built on
+     * Joda-Time reject the custom "GMT+08:00" IDs the JVM reports when the OS zone has
+     * no IANA mapping (#13451). Rewriting whole-hour offsets to the equivalent IANA
+     * {@code Etc/GMT±N} form (note the inverted sign) keeps the same instant while
+     * staying accepted everywhere; java.util.TimeZone would normalize any bare-offset
+     * ID back to the rejected "GMT+08:00" spelling. Fractional offsets have no Etc
+     * equivalent and are left untouched.
+     */
+    static void normalizeDefaultTimeZone() {
+        Matcher customOffset = GMT_OFFSET_ZONE_PATTERN.matcher(java.util.TimeZone.getDefault().getID());
+        boolean wholeHourOnly = customOffset.matches() && (customOffset.group("minutes") == null || customOffset.group("minutes").equals("00"));
+        if (wholeHourOnly) {
+            // POSIX sign inversion: IANA's Etc/GMT-8 means UTC+8.
+            String etcZone = "Etc/GMT" + (customOffset.group("sign").equals("+") ? "-" : "+") + Integer.parseInt(customOffset.group("hours"));
+            java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone(java.time.ZoneId.of(etcZone)));
+        }
+    }
+
     public static void main(String[] args) {
+        normalizeDefaultTimeZone();
         new MultiSessionJsonRpcServer(TrinoAgent::new).run();
     }
 }

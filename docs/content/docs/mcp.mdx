@@ -205,6 +205,33 @@ Resource discovery and reads reuse the corresponding Tool allowlist plus connect
 
 This is a bounded snapshot, not a continuous consumer or a topic-wide text search. Other message queue types are rejected.
 
+## Redis Value Decoding
+
+`dbx_execute_redis_command` accepts optional `decode` and `decompress` arguments:
+
+```json
+{
+  "connection_name": "Local Redis",
+  "db": 0,
+  "command": "GET cache-key",
+  "decode": "msgpack",
+  "decompress": "gzip"
+}
+```
+
+| Argument | Modes | Behavior |
+| --- | --- | --- |
+| `decode` | `auto`, `java-serialized`, `msgpack`, `pickle`, `php-serialize`, `protobuf` | Return the decoded value as structured JSON. |
+| `decompress` | `auto`, `gzip`, `zlib`, `deflate` | Decompress alone, or before the selected value codec. |
+
+- Omit both arguments to preserve existing command output. Successful values become `{ "codec": "msgpack", "compression": "gzip", "value": ... }` inside the command/safety result; metadata is included only for the operations performed. Compound replies such as `MGET` decode each string value independently.
+- `decode: "auto"` recognizes complete Java streams, Pickle protocol 2–5 headers, PHP serialization and MessagePack containers. MessagePack scalars and Pickle protocols 0/1 require an explicit codec. Protobuf is never auto-detected: field numbers and wire types alone do not reliably identify a message.
+- A decode request automatically checks for verified gzip/zlib framing before parsing the value. Raw DEFLATE has no reliable signature and requires `decompress: "deflate"`. Decompression validates complete streams and checksums where framing provides them; gzip concatenated members are supported.
+- Decompression alone returns UTF-8 text, or `{ "$bytes": "<base64>" }` for binary payloads. A compressed payload without a detected codec uses the same representation in auto mode. Protobuf remains schema-less: fields use numeric keys, varints are unsigned, fixed32/fixed64 remain raw hex, and length-delimited data is interpreted as nested messages, readable UTF-8 or hex bytes. It does not infer zigzag, floats or packed arrays.
+- Java retains `$class`, `$id`, `$ref`, `$extends`, annotations and collection conventions. Pickle supports protocols 0–5 as data only; callable/class names remain inert metadata. PHP objects preserve `$class` and serialized properties. Unsafe integers remain exact decimal strings; Java `long` always remains a decimal string.
+- Unrecognized, malformed, unsupported or over-budget values keep their original escaped text. Examples of unsupported constructs include MessagePack extensions/timestamps, PHP references/custom serialization/non-finite doubles, and Pickle persistent IDs, extension registry entries, out-of-band buffers or unsupported timezone reductions. Omit the options to retrieve raw text after a successful decode.
+- Each input and decompressed payload is limited to 1 MiB. Parsing is bounded by depth 64, 32,768 nodes, a 4 MiB work allowance across each value pipeline, and a shared 16 MiB work allowance across the reply. Inflate stops while producing output when its limit is reached. Existing connection scope, read-only and production protection apply before execution.
+
 ## Batch SQL Execution
 
 `dbx_execute_batch` runs a SQL script containing multiple statements in a single call. In auto-commit mode (the default) it returns one result per statement, so callers see exactly which statement failed, how many rows each affected, and what each returned. With `use_transaction` and a script containing multiple statements it returns a single merged transaction outcome instead.

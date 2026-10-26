@@ -1581,7 +1581,10 @@ dependencies = [
 name = "dbx-formats"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
+ "flate2",
+ "num-bigint 0.4.8",
  "serde",
  "serde_json",
  "zip 4.6.1",

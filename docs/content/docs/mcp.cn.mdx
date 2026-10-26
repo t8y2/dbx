@@ -205,6 +205,33 @@ Resource 的发现和读取会复用对应 Tool 的白名单，以及连接、�
 
 该工具读取有限条消息快照，不提供持续订阅或全 Topic 文本搜索。其他消息队列类型会被拒绝。
 
+## Redis 值解码
+
+`dbx_execute_redis_command` 支持可选的 `decode` 和 `decompress` 参数：
+
+```json
+{
+  "connection_name": "Local Redis",
+  "db": 0,
+  "command": "GET cache-key",
+  "decode": "msgpack",
+  "decompress": "gzip"
+}
+```
+
+| 参数 | 可选模式 | 行为 |
+| --- | --- | --- |
+| `decode` | `auto`、`java-serialized`、`msgpack`、`pickle`、`php-serialize`、`protobuf` | 将值解码为结构化 JSON。 |
+| `decompress` | `auto`、`gzip`、`zlib`、`deflate` | 单独解压，或先解压再按所选 codec 解码。 |
+
+- 两个参数都省略时保持现有命令输出。成功值显示为 `{ "codec": "msgpack", "compression": "gzip", "value": ... }`，只包含实际执行操作的元数据，并保留命令与安全等级信息。`MGET` 等复合回复逐个处理字符串值。
+- `decode: "auto"` 识别完整 Java 流、Pickle 2–5 协议头、PHP 序列化和 MessagePack 容器。MessagePack 标量及 Pickle 0/1 需要显式指定 codec。Protobuf 的字段编号和 wire type 不足以可靠识别格式，因此不会自动识别。
+- 请求解码时会先检查并验证 gzip/zlib 包装。原始 DEFLATE 缺少可靠特征，必须指定 `decompress: "deflate"`。解压会检查完整输入以及格式提供的校验和，gzip 支持拼接成员。
+- 单独解压返回 UTF-8 文本，二进制载荷则返回 `{ "$bytes": "<base64>" }`；auto 模式下已解压但未识别 codec 的载荷也采用此表示。Protobuf 按无 schema 模式输出数字字段名、无符号 varint、fixed32/fixed64 原始十六进制，并尝试将长度字段解释为嵌套消息、可读 UTF-8 或十六进制字节；不会推断 zigzag、浮点或 packed 数组。
+- Java 保留 `$class`、`$id`、`$ref`、`$extends`、注解和集合结构。Pickle 支持 0–5 协议的数据解析，函数和类名仅作为元数据，不会执行。PHP 对象保留 `$class` 和序列化属性。超出安全整数范围的值保留精确十进制字符串，Java `long` 始终保留为字符串。
+- 未识别、损坏、不支持或超限的值保留原始转义文本。例如 MessagePack 扩展/时间戳、PHP 引用/自定义序列化/非有限浮点数，以及 Pickle 持久 ID/扩展注册表/带外缓冲区/不支持的时区规约均回退原文。成功解码后若要查看原始值，省略这些参数再次读取。
+- 每个原始值和解压结果最多 1 MiB，限制深度 64、节点数 32,768；每个值的完整处理链最多使用 4 MiB 工作预算，整个回复共享 16 MiB 工作预算。解压在产生输出时检查上限。原有连接范围、只读和生产保护在执行前生效。
+
 ## 批量 SQL 执行
 
 `dbx_execute_batch` 在单次调用内执行包含多条语句的 SQL 脚本。默认（自动提交）模式下按语句返回结果，因此调用方可以清楚看到哪条失败、每条影响多少行、各自返回什么；使用 `use_transaction` 且脚本包含多条语句时，只返回一个合并的事务结果。

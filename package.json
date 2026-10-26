@@ -154,7 +154,7 @@
   "engines": {
     "node": ">=22.13.0"
   },
-  "packageManager": "pnpm@10.34.9",
+  "packageManager": "pnpm@10.34.7",
   "pnpm": {
     "overrides": {
       "happy-dom": "~20.10.6",

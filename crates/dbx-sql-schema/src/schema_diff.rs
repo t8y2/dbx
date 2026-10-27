@@ -3860,7 +3860,7 @@ fn normalized_foreign_key_action(action: Option<&str>) -> Option<String> {
 /// - "NO ACTION: ... For InnoDB, this is equivalent to RESTRICT".
 /// - "Specifying RESTRICT (or NO ACTION) is the same as omitting the ON DELETE or ON UPDATE clause."
 /// - "For an ON DELETE or ON UPDATE that is not specified, the default action is always NO ACTION."
-/// MariaDB KB "Foreign Keys" likewise documents `NO ACTION` as a "Synonym for RESTRICT".
+///   MariaDB KB "Foreign Keys" likewise documents `NO ACTION` as a "Synonym for RESTRICT".
 ///
 /// Only the comparison is normalized; generated DDL keeps the source's original action text.
 /// Known caveat: on MySQL NDB Cluster `NO ACTION` is a deferred check, but schema metadata does

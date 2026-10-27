@@ -713,6 +713,9 @@ impl MessageQueueAdmin for RabbitMqAdmin {
             "payloadBase64": req.payload_base64,
             "headers": req.headers,
         });
+        if let Some(properties) = req.properties {
+            params["properties"] = serde_json::json!(properties);
+        }
         if let Some(exchange) = req.exchange.as_deref().filter(|e| !e.is_empty()) {
             params["exchange"] = serde_json::json!(exchange);
         }
@@ -1507,6 +1510,52 @@ mod tests {
     use super::*;
     use crate::mq::auth::MqAuth;
     use crate::mq::types::MqSystemKind;
+
+    #[tokio::test]
+    async fn send_message_forwards_properties_without_changing_headers_or_legacy_requests() {
+        let directory = tempfile::tempdir().expect("create fake RabbitMQ agent directory");
+        let script = directory.path().join("agent.py");
+        let calls = directory.path().join("calls.jsonl");
+        std::fs::write(
+            &script,
+            r#"import json
+import sys
+
+print(json.dumps({"ready": True}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["method"] == "mq_send_message":
+        with open(sys.argv[1], "a") as calls:
+            calls.write(json.dumps(request["params"]) + "\n")
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {"ok": True}}), flush=True)
+"#,
+        )
+        .expect("write fake RabbitMQ agent");
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let launch = AgentLaunchSpec::new(python)
+            .with_args([script.to_string_lossy().to_string(), calls.to_string_lossy().to_string()]);
+        let config = rabbitmq_config(serde_json::json!({ "addresses": "broker:5672" }), MqAuth::None, false);
+        let admin = RabbitMqAdmin::new(config, launch).await.expect("connect fake RabbitMQ agent");
+        let properties = serde_json::json!({ "content_type": "application/json", "priority": "0" });
+        for expected in [None, Some(properties)] {
+            let mut value = serde_json::json!({
+                "topic": "orders", "payloadBase64": "e30=",
+                "headers": { "content_type": "custom-header" },
+                "exchange": "events", "routingKey": "orders.created", "namespace": "orders-vhost"
+            });
+            if let Some(properties) = expected.as_ref() {
+                value["properties"] = properties.clone();
+            }
+            admin.send_message(serde_json::from_value(value).unwrap()).await.expect("send message");
+            let calls = std::fs::read_to_string(&calls).expect("read agent calls");
+            let actual: serde_json::Value = serde_json::from_str(calls.lines().last().unwrap()).unwrap();
+            assert_eq!(actual.get("properties"), expected.as_ref());
+            assert_eq!(actual["headers"], serde_json::json!({ "content_type": "custom-header" }));
+            assert_eq!(actual["exchange"], "events");
+            assert_eq!(actual["routingKey"], "orders.created");
+            assert_eq!(actual["virtual_host"], "orders-vhost");
+        }
+    }
 
     fn rabbitmq_config(extra: serde_json::Value, auth: MqAuth, tls_skip_verify: bool) -> MqAdminConfig {
         MqAdminConfig {

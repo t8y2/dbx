@@ -1036,6 +1036,7 @@ mod tests {
                 payload_base64: "eA==".into(),
                 payload_text: Some("x".into()),
                 headers: Default::default(),
+                properties: None,
                 partition: None,
                 exchange: None,
                 routing_key: None,

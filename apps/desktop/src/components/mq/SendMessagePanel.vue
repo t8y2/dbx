@@ -35,6 +35,9 @@ const exchangeName = ref("");
 const routingKey = ref("");
 const messageValue = ref("");
 const headersText = ref("");
+const rabbitMqProperties = ref<Record<string, string>>({});
+const rabbitMqPropertyNames = ["content_type", "content_encoding", "delivery_mode", "priority", "correlation_id", "reply_to", "expiration", "message_id", "timestamp", "type", "user_id", "app_id"];
+const numericRabbitMqProperties = new Set(["priority", "expiration", "timestamp"]);
 const loading = ref(false);
 const error = ref<string>();
 const success = ref<SendMessageResponse>();
@@ -42,6 +45,14 @@ const availableTopics = ref<TopicInfo[]>([]);
 const topicsLoading = ref(false);
 const rocketMqTopicSelectRef = ref<InstanceType<typeof RocketMqTopicSelect>>();
 const headersExpanded = ref(false);
+const propertiesExpanded = ref(false);
+const populatedRabbitMqProperties = computed(() =>
+  Object.fromEntries(
+    Object.entries(rabbitMqProperties.value)
+      .map(([key, value]) => [key, value.trim()])
+      .filter(([, value]) => value !== ""),
+  ),
+);
 
 let successTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -185,6 +196,9 @@ async function sendMessage() {
     // namespace).
     const exchange = exchangeName.value.trim();
     if (isRabbitMqCluster.value) {
+      if (Object.keys(populatedRabbitMqProperties.value).length) {
+        req.properties = populatedRabbitMqProperties.value;
+      }
       if (exchange) {
         req.exchange = exchange;
         req.routingKey = routingKey.value.trim() || undefined;
@@ -220,6 +234,7 @@ function clearForm() {
   routingKey.value = "";
   messageValue.value = "";
   headersText.value = "";
+  rabbitMqProperties.value = {};
   error.value = undefined;
   success.value = undefined;
 }
@@ -326,6 +341,52 @@ watch(
         </button>
         <div v-if="headersExpanded" class="collapse-body">
           <textarea v-model="headersText" :disabled="readOnly" :placeholder="t('mqMessages.headersPlaceholder')" rows="3" class="headers-textarea" />
+        </div>
+      </div>
+
+      <div v-if="isRabbitMqCluster" class="form-group">
+        <button type="button" class="collapse-toggle" :aria-expanded="propertiesExpanded" @click="propertiesExpanded = !propertiesExpanded">
+          <span class="collapse-arrow" :class="{ expanded: propertiesExpanded }">▶</span>
+          <span>{{ t("mqMessages.messageProperties") }}</span>
+          <span v-if="Object.keys(populatedRabbitMqProperties).length && !propertiesExpanded" class="collapse-badge">·</span>
+        </button>
+        <div v-if="propertiesExpanded" class="collapse-body properties-grid">
+          <div v-for="property in rabbitMqPropertyNames" :key="property" class="form-group">
+            <div class="label-row">
+              <label :for="`${connectionId}-property-${property}`">
+                {{ property }}
+                <span v-if="property === 'expiration'">({{ t("mqMessages.milliseconds") }})</span>
+                <span v-if="property === 'timestamp'">({{ t("mqMessages.unixSeconds") }})</span>
+              </label>
+              <button v-if="property === 'content_type'" type="button" class="btn-sm" :disabled="readOnly" @click="rabbitMqProperties.content_type = 'application/json'">application/json</button>
+            </div>
+            <select
+              v-if="property === 'delivery_mode'"
+              :id="`${connectionId}-property-${property}`"
+              :value="rabbitMqProperties[property] ?? ''"
+              :data-rabbitmq-property="property"
+              :disabled="readOnly"
+              class="property-select"
+              @change="rabbitMqProperties[property] = ($event.target as HTMLSelectElement).value"
+            >
+              <option value="">{{ t("mqMessages.optional") }}</option>
+              <option value="1">1 — {{ t("mqMessages.nonPersistent") }}</option>
+              <option value="2">2 — {{ t("mqMessages.persistent") }}</option>
+            </select>
+            <input
+              v-else
+              :id="`${connectionId}-property-${property}`"
+              :value="rabbitMqProperties[property] ?? ''"
+              :data-rabbitmq-property="property"
+              :type="numericRabbitMqProperties.has(property) ? 'number' : 'text'"
+              :min="numericRabbitMqProperties.has(property) ? 0 : undefined"
+              :max="property === 'priority' ? 255 : undefined"
+              :step="numericRabbitMqProperties.has(property) ? 1 : undefined"
+              :disabled="readOnly"
+              :placeholder="t('mqMessages.optional')"
+              @input="rabbitMqProperties[property] = ($event.target as HTMLInputElement).value"
+            />
+          </div>
         </div>
       </div>
 
@@ -438,6 +499,25 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.properties-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 12px;
+}
+
+.properties-grid input {
+  min-width: 0;
+}
+
+.property-select {
+  padding: 7px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  color: var(--color-text);
+  font-size: 13px;
 }
 
 .label-row {

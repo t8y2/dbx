@@ -79,6 +79,19 @@ export function isUpdateIgnored(info: api.UpdateInfo | null, ignoredVersion: str
   return compareParsedUpdateVersions(parsedLatest, parsedIgnored) <= 0;
 }
 
+/**
+ * The update info as the UI should see it. An ignored version is hidden here
+ * rather than in each consumer: the dialog renders from `updateInfo` directly
+ * and only the toolbar badge consulted `isUpdateIgnored`, so "Ignore this
+ * version" cleared the badge but left the dialog still offering the release
+ * (#13626). A downloaded or prepared package is never hidden — the user
+ * already has it and the install action must stay reachable.
+ */
+export function effectiveUpdateInfo(info: api.UpdateInfo | null, ignoredVersion: string | undefined, hasPreparedUpdate: boolean): api.UpdateInfo | null {
+  if (!info || hasPreparedUpdate || !isUpdateIgnored(info, ignoredVersion)) return info;
+  return { ...info, update_available: false };
+}
+
 export function isNewerRemoteVersion(latest: string, cached: string): boolean {
   const parsedLatest = parseUpdateVersion(latest);
   const parsedCached = parseUpdateVersion(cached);
@@ -154,6 +167,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   // explicit "Check for updates" action in settings keeps working.
   const updateEntryVisible = computed(() => settingsStore.editorSettings.toolbarItems?.checkUpdates !== false);
   const hasUpdateAvailable = computed(() => (updateDownloaded.value || updateReady.value || updateInfo.value?.update_available === true) && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion));
+  /** What the update dialog renders: an ignored release stops offering itself. */
+  const visibleUpdateInfo = computed(() => effectiveUpdateInfo(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion, updateDownloaded.value || updateReady.value));
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
   let generation = 0;
   let activeDownload: Promise<void> | undefined;
@@ -525,6 +540,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     phase,
     checkingUpdates,
     updateInfo,
+    visibleUpdateInfo,
     updateCheckMessage,
     updateCheckFailed,
     showUpdateDialog,
